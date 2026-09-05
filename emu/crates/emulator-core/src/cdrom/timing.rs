@@ -9,7 +9,7 @@
 //! GPL-2.0-or-later in part to honor this derivation; see `LICENSE` and
 //! `docs/license-audit.md`.
 
-/// Canonical cycle delays for command responses. The long-operation values
+/// Cycle delays for command responses. The long-operation values
 /// below retain their Redux provenance, while first-response acknowledgement
 /// timing is calibrated from real controller measurements.
 ///
