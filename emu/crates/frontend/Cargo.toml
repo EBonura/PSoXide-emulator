@@ -7,13 +7,8 @@ repository.workspace = true
 publish = false
 
 [features]
-# `editor` (default) compiles the full host editor workspace into the
-# frontend: the embedded 3D preview, the in-editor Play viewport, and the
-# project/disc authoring CLI. Building with `--no-default-features` drops the
-# psxed-* dependencies and every editor reference, leaving an emulator-only
-# binary (the target for a future web/wasm build).
-default = ["editor"]
-editor = ["dep:psxed-ui", "dep:psxed-project"]
+# The standalone frontend has no editor dependency.
+default = []
 # `mcp` (native-only) embeds a live MCP debug server (official `rmcp` SDK over
 # streamable HTTP) inside the running GUI, so an agent can drive the emulator:
 # screenshot, read/write RAM+VRAM, step/run frames, toggle wireframe, save/load
@@ -21,27 +16,17 @@ editor = ["dep:psxed-ui", "dep:psxed-project"]
 # below and never enter the wasm dep graph; the module is additionally
 # `#[cfg(not(target_arch = "wasm32"))]`.
 mcp = ["dep:rmcp", "dep:tokio", "dep:axum", "dep:schemars", "dep:serde", "dep:base64"]
-# Opt-in allocation instrumentation for the ignored, full-project editor
-# preview benchmark. Keeping it off normal test binaries avoids an atomic
-# counter on every allocation in the frontend suite.
-editor-preview-benchmark = []
-
 [dependencies]
 emulator-core    = { workspace = true }
 psx-hw           = { workspace = true }
 psoxide-settings = { workspace = true }
 psoxide-validation = { workspace = true }
-psx-asset        = { workspace = true }
-psx-bsp          = { workspace = true }
-psx-engine       = { workspace = true }
 psx-gpu          = { workspace = true }
 psx-gpu-render   = { workspace = true }
 psx-gte          = { workspace = true }
 psx-vram         = { workspace = true }
 psx-iso          = { workspace = true }
 psx-trace        = { workspace = true }
-psxed-project    = { workspace = true, optional = true }
-psxed-ui         = { workspace = true, optional = true }
 
 clap       = { workspace = true }
 winit      = { workspace = true }

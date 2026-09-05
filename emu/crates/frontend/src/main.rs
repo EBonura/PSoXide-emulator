@@ -27,21 +27,13 @@ mod web_stream;
 #[cfg(not(target_arch = "wasm32"))]
 mod cli;
 mod disasm;
-#[cfg(feature = "editor")]
-mod editor_assets;
-#[cfg(feature = "editor")]
-mod editor_preview;
-#[cfg(feature = "editor")]
-mod editor_textures;
-#[cfg(feature = "editor")]
-mod embedded_playtest;
+
 mod gfx;
 mod icons;
 mod input;
 #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
 mod mcp;
-#[cfg(feature = "editor")]
-mod playtest_disc;
+
 mod playtest_input;
 mod theme;
 mod ui;
@@ -71,8 +63,7 @@ use crate::ui::{menu::MenuInput, MenuOutcome};
 
 use emulator_core::button;
 // `counter` / `task` telemetry IDs feed the editor's Play metrics overlay only.
-#[cfg(feature = "editor")]
-use emulator_core::telemetry::{counter, task};
+
 use psoxide_settings::settings::{InputBinding, PortBindings, StickBindings};
 
 /// Default window size when not running fullscreen. Chosen big
@@ -90,9 +81,7 @@ const MIN_HEIGHT: u32 = 700;
 /// overproduces SPU samples until the host queue has to discard them.
 const PSX_MASTER_CLOCK_HZ: f32 = 33_868_800.0;
 const FALLBACK_FRAME_DT: f32 = 1.0 / 60.0;
-/// Used only by the editor's Play metrics overlay (cycles -> milliseconds).
-#[cfg(feature = "editor")]
-const PSX_CYCLES_PER_MS: f32 = 33_868_800.0 / 1000.0;
+
 /// Don't try to catch up an arbitrarily long stall in one redraw;
 /// cap the burst so a debugger stop or window drag doesn't spend
 /// seconds chewing through delayed emu frames.
@@ -166,32 +155,11 @@ fn main() {
     let fullscreen = !cli.windowed;
     let gpu_compute = cli.gpu_compute;
 
-    #[cfg(feature = "editor")]
-    let editor_startup = cli.editor.then_some((
-        cli.editor_project,
-        cli.editor_view.map(cli::EditorViewArg::project_view),
-        cli.editor_view
-            .is_some_and(cli::EditorViewArg::is_room_orthographic),
-        cli.editor_resource,
-    ));
-
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let mut app = Shell::new(config_dir, fullscreen, gpu_compute);
-    #[cfg(feature = "editor")]
-    if let Some((project_dir, view, room_orthographic, resource)) = editor_startup {
-        if let Err(error) = app
-            .state
-            .open_editor_startup(project_dir, view, resource.as_deref())
-        {
-            eprintln!("error: {error}");
-            std::process::exit(2);
-        }
-        if room_orthographic {
-            app.state.show_editor_room_orthographic();
-        }
-    }
+
     event_loop.run_app(&mut app).expect("event loop");
 }
 
@@ -359,15 +327,7 @@ impl Shell {
         // `--no-default-features` build -- the emulator-only configuration this
         // crate documents as supported, and what hl-psx's regression harness
         // uses -- failed to compile: psxed-project is an optional dependency.
-        #[cfg(all(not(target_arch = "wasm32"), feature = "editor"))]
-        match psxed_project::ensure_projects_seeded() {
-            Ok(true) => eprintln!(
-                "[projects] seeded sample project into {}",
-                psxed_project::projects_dir().display()
-            ),
-            Ok(false) => {}
-            Err(error) => eprintln!("[projects] could not seed sample project: {error}"),
-        }
+
         let audio = audio::AudioOut::open();
         let audio_status = if let Some(a) = audio.as_ref() {
             format!("[audio] opened host stream @ {} Hz", a.host_sample_rate())
@@ -399,14 +359,7 @@ impl Shell {
             None
         };
         let state = AppState::with_config_dir(config_dir);
-        #[cfg(feature = "editor")]
-        let state = {
-            let mut state = state;
-            state
-                .editor
-                .append_console_lines([audio_status, input_status]);
-            state
-        };
+
         Self {
             graphics: None,
             state,
@@ -990,8 +943,7 @@ impl ApplicationHandler for Shell {
         match event {
             WindowEvent::CloseRequested => {
                 self.state.stop_input_recording_if_active();
-                #[cfg(feature = "editor")]
-                self.state.stop_embedded_playtest();
+
                 self.state.flush_pending_input_profile_capture();
                 self.state.stop_examples_build();
                 // Flush any dirty memory card so save progress
@@ -1002,10 +954,7 @@ impl ApplicationHandler for Shell {
                 if let Err(e) = self.state.flush_memcard_port1() {
                     eprintln!("[frontend] memcard flush on exit: {e}");
                 }
-                #[cfg(feature = "editor")]
-                if let Err(e) = self.state.save_editor_project() {
-                    eprintln!("[frontend] editor save on exit: {e}");
-                }
+
                 // Persist current settings (BIOS path, library
                 // root, etc.) so the next launch picks up any
                 // user tweaks without needing a manual save step.
@@ -1080,10 +1029,7 @@ impl ApplicationHandler for Shell {
                 // BIOS polls every frame anyway.
                 // Without the editor feature the game always owns the
                 // keyboard (there is no editor workspace to take it over).
-                #[cfg(feature = "editor")]
-                let route_keyboard_to_game = !self.state.workspace.is_editor()
-                    || self.state.embedded_playtest_input_captured();
-                #[cfg(not(feature = "editor"))]
+
                 let route_keyboard_to_game = true;
                 if !repeat && route_keyboard_to_game {
                     let bindings = &self.state.settings.input.port1;
@@ -1361,16 +1307,7 @@ impl ApplicationHandler for Shell {
                     };
                     // In the editor, Escape first releases an active embedded-play
                     // input capture instead of toggling the menu.
-                    #[cfg(feature = "editor")]
-                    let editor_released_capture = !closed_controls_panel
-                        && self.state.workspace.is_editor()
-                        && self.state.embedded_playtest_running()
-                        && self.state.embedded_playtest_input_captured()
-                        && {
-                            self.state.release_embedded_playtest_input();
-                            true
-                        };
-                    #[cfg(not(feature = "editor"))]
+
                     let editor_released_capture = false;
                     if closed_controls_panel || editor_released_capture {
                         // Handled above: input capture released.
@@ -1384,9 +1321,7 @@ impl ApplicationHandler for Shell {
                         // live game to resume; otherwise just close
                         // the overlay.
                         self.state.menu.open = false;
-                        #[cfg(feature = "editor")]
-                        let resumable_embedded = self.state.embedded_playtest_input_captured();
-                        #[cfg(not(feature = "editor"))]
+
                         let resumable_embedded = false;
                         if self.state.bus.is_some()
                             && (self.state.current_game.is_some() || resumable_embedded)
@@ -1416,17 +1351,13 @@ impl ApplicationHandler for Shell {
                         }
                         MenuOutcome::Quit => {
                             self.state.stop_input_recording_if_active();
-                            #[cfg(feature = "editor")]
-                            self.state.stop_embedded_playtest();
+
                             self.state.flush_pending_input_profile_capture();
                             self.state.stop_examples_build();
                             if let Err(e) = self.state.flush_memcard_port1() {
                                 eprintln!("[frontend] memcard flush on quit: {e}");
                             }
-                            #[cfg(feature = "editor")]
-                            if let Err(e) = self.state.save_editor_project() {
-                                eprintln!("[frontend] editor save on quit: {e}");
-                            }
+
                             if let Err(e) = self.state.save_settings() {
                                 eprintln!("[frontend] settings save on quit: {e}");
                             }
@@ -1435,8 +1366,7 @@ impl ApplicationHandler for Shell {
                         }
                     }
                 }
-                #[cfg(feature = "editor")]
-                self.state.poll_embedded_playtest_build();
+
                 self.state.poll_examples_build();
                 profile.input_ms = elapsed_ms(input_start);
 
@@ -1815,91 +1745,10 @@ impl ApplicationHandler for Shell {
                 // stats every material file on disk for hot-reload, which
                 // is pure per-frame syscall churn while playing a game in
                 // the emulator workspace.
-                #[cfg(feature = "editor")]
-                if state.workspace.is_editor()
-                    && !state.embedded_playtest_running()
-                    && state.editor.editor_3d_preview_visible()
-                {
-                    let editor_camera = state.editor.viewport_3d_camera();
-                    let editor_preview_bounds = state.editor.preview_bounds_enabled();
-                    let editor_show_grid = state.editor.show_grid_enabled();
-                    let editor_show_brush_surface_grid =
-                        state.editor.show_brush_surface_grid_enabled();
-                    let editor_grid_units = state.editor.grid_snap_units();
-                    let editor_bsp_leak_path = state.editor.visible_bsp_leak_path();
-                    let editor_bsp_leak_opening = state.editor.visible_bsp_leak_opening();
-                    let editor_show_lights = state.editor.show_lights_enabled();
-                    let editor_hidden_scene_nodes = state.editor.hidden_scene_nodes();
-                    let editor_selected = state.editor.selected_node_id();
-                    let editor_character_motion = state.editor.character_motion_preview();
-                    let editor_root = state.editor.project_root();
-                    let editor_selected_bounds = state.editor.selected_bounds_3d();
-                    let editor_entity_bounds = state.editor.collect_entity_bounds(None);
-                    let editor_hovered_entity = state.editor.hovered_entity_node();
-                    gfx.render_editor_preview(
-                        state.editor.project(),
-                        editor_root,
-                        editor_camera,
-                        editor_preview_bounds,
-                        editor_show_grid,
-                        editor_show_brush_surface_grid,
-                        editor_grid_units,
-                        editor_bsp_leak_path,
-                        editor_bsp_leak_opening,
-                        editor_show_lights,
-                        editor_hidden_scene_nodes,
-                        editor_selected,
-                        editor_character_motion,
-                        editor_selected_bounds,
-                        &editor_entity_bounds,
-                        editor_hovered_entity,
-                    );
-                }
-                #[cfg(feature = "editor")]
-                let editor_camera_preview = if !state.embedded_playtest_running() {
-                    state.editor.selected_camera_preview_request()
-                } else {
-                    None
-                };
-                #[cfg(feature = "editor")]
-                if let Some(request) = editor_camera_preview {
-                    let editor_hidden_scene_nodes = state.editor.hidden_scene_nodes();
-                    let editor_root = state.editor.project_root();
-                    gfx.render_editor_camera_preview(
-                        state.editor.project(),
-                        editor_root,
-                        request,
-                        editor_hidden_scene_nodes,
-                    );
-                }
 
                 let vram_tex = gfx.vram_texture_id();
                 let (display_tex, display_uv) = frontend_display(state.bus.as_ref(), gfx);
-                #[cfg(feature = "editor")]
-                let editor_viewport = {
-                    let mut editor_viewport = if state.embedded_playtest_running() {
-                        psxed_ui::EditorViewport3dPresentation::play(
-                            display_tex,
-                            display_uv,
-                            state.editor_playtest_input_tape_status(),
-                            editor_play_metrics(state),
-                            state
-                                .bus
-                                .as_ref()
-                                .is_some_and(|bus| bus.gpu.wireframe_enabled),
-                        )
-                    } else {
-                        psxed_ui::EditorViewport3dPresentation::edit(
-                            gfx.editor_hw_texture_id(),
-                            gfx.editor_overlay_lines().to_vec(),
-                        )
-                    };
-                    if editor_camera_preview.is_some() {
-                        editor_viewport =
-                            editor_viewport.with_camera_preview(gfx.camera_preview_texture_id());
-                    }
-                    editor_viewport
-                };
+
                 let mut pointer_menu_outcome = None;
                 profile.egui = gfx.render(|ctx| {
                     app::build_ui(
@@ -1908,8 +1757,6 @@ impl ApplicationHandler for Shell {
                         input_router,
                         vram_tex,
                         display_tex,
-                        #[cfg(feature = "editor")]
-                        editor_viewport.clone(),
                         display_uv,
                         dt,
                     );
@@ -1924,17 +1771,13 @@ impl ApplicationHandler for Shell {
                     Some(MenuOutcome::ClearHostKeyboardInput) => self.host_input.clear(),
                     Some(MenuOutcome::Quit) => {
                         state.stop_input_recording_if_active();
-                        #[cfg(feature = "editor")]
-                        state.stop_embedded_playtest();
+
                         state.flush_pending_input_profile_capture();
                         state.stop_examples_build();
                         if let Err(error) = state.flush_memcard_port1() {
                             eprintln!("[frontend] memcard flush on quit: {error}");
                         }
-                        #[cfg(feature = "editor")]
-                        if let Err(error) = state.save_editor_project() {
-                            eprintln!("[frontend] editor save on quit: {error}");
-                        }
+
                         if let Err(error) = state.save_settings() {
                             eprintln!("[frontend] settings save on quit: {error}");
                         }
@@ -1956,10 +1799,7 @@ impl ApplicationHandler for Shell {
                         }
                     }
                 }
-                #[cfg(feature = "editor")]
-                if let Some(request) = state.editor.take_playtest_request() {
-                    state.handle_editor_playtest_request(request);
-                }
+
                 profile.total_ms = elapsed_ms(profile_start);
                 if let Some(line) = state.profiler.record(profile) {
                     eprintln!("{line}");
@@ -2209,402 +2049,6 @@ fn hw_display_uv(area: emulator_core::DisplayArea) -> egui::Rect {
             (area.y as f32 + height) / psx_gpu_render::VRAM_HEIGHT as f32,
         ),
     )
-}
-
-#[cfg(feature = "editor")]
-fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytestMetrics> {
-    let latest = state.profiler.latest()?;
-    let sample = state
-        .profiler
-        .live_average()
-        .or_else(|| state.profiler.average())
-        .unwrap_or(latest);
-    let visual_hz = sample.guest_visual_frame_hz();
-    let display_hz = visual_hz.unwrap_or_else(|| sample.psx_draw_hz());
-    let visual_interval_vblanks = latest
-        .guest_visual_interval_vblanks()
-        .or_else(|| sample.guest_visual_interval_vblanks())
-        .unwrap_or(0.0);
-    let (visual_frame_times_ms, visual_frame_time_count) = latest.guest.visual_frame_intervals_ms();
-    let visual_deadline_misses = latest
-        .guest_visual_deadline_misses()
-        .round()
-        .clamp(0.0, u32::MAX as f32) as u32;
-    let visual_lateness_vblanks = latest
-        .guest_visual_max_lateness_vblanks()
-        .round()
-        .clamp(0.0, u32::MAX as f32) as u32;
-    let frame_ms = if display_hz > 0.0 {
-        1000.0 / display_hz
-    } else {
-        latest.total_ms
-    };
-    let task_ms_per_hit = |task_id: u16| {
-        let task_id = task_id as usize;
-        let hits = sample.guest.task_hits[task_id];
-        if hits > 0.0 {
-            sample.guest.task_cycles[task_id] / hits / PSX_CYCLES_PER_MS
-        } else {
-            0.0
-        }
-    };
-    let task_max_ms =
-        |task_id: u16| sample.guest.task_max_cycles[task_id as usize] / PSX_CYCLES_PER_MS;
-    const DEBUG_MAP_POSITION_BIAS: i32 = 1_000_000;
-    const CHUNK_MAP_COUNTERS: &[u16] = &[
-        counter::ROOM_STREAM_RESIDENT_MASK_LO,
-        counter::ROOM_STREAM_RESIDENT_MASK_HI,
-        counter::ROOM_STREAM_LOADING_MASK_LO,
-        counter::ROOM_STREAM_LOADING_MASK_HI,
-        counter::ROOM_ACTIVE_CHUNK_MASK_LO,
-        counter::ROOM_ACTIVE_CHUNK_MASK_HI,
-        counter::ROOM_DRAWN_CHUNK_MASK_LO,
-        counter::ROOM_DRAWN_CHUNK_MASK_HI,
-        counter::ROOM_PLAYER_ROOM_INDEX,
-        counter::PORTAL_VIS_CURRENT_ROOM,
-        counter::ROOM_PLAYER_LOCAL_X_BIASED,
-        counter::ROOM_PLAYER_LOCAL_Z_BIASED,
-        counter::ROOM_PLAYER_VIEW_YAW_Q12,
-        counter::ROOM_CAMERA_LOCAL_X_BIASED,
-        counter::ROOM_CAMERA_LOCAL_Y_BIASED,
-        counter::ROOM_CAMERA_LOCAL_Z_BIASED,
-        counter::ROOM_CAMERA_GLOBAL_X_BIASED,
-        counter::ROOM_CAMERA_GLOBAL_Y_BIASED,
-        counter::ROOM_CAMERA_GLOBAL_Z_BIASED,
-        counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED,
-        counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED,
-        counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED,
-        counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED,
-        counter::PORTAL_VIS_VISIBLE_MASK_LO,
-        counter::PORTAL_VIS_VISIBLE_MASK_HI,
-        counter::PORTAL_VIS_FRONTIER_MASK_LO,
-        counter::PORTAL_VIS_FRONTIER_MASK_HI,
-        counter::PORTAL_VIS_MISSING_MASK_LO,
-        counter::PORTAL_VIS_MISSING_MASK_HI,
-        counter::PORTAL_VIS_BUILD_FAILED_MASK_LO,
-        counter::PORTAL_VIS_BUILD_FAILED_MASK_HI,
-        counter::PORTAL_VIS_TESTED_MASK_LO,
-        counter::PORTAL_VIS_TESTED_MASK_HI,
-        counter::PORTAL_VIS_ACCEPTED_MASK_LO,
-        counter::PORTAL_VIS_ACCEPTED_MASK_HI,
-        counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_LO,
-        counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_HI,
-        counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_LO,
-        counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_HI,
-        counter::PORTAL_VIS_TESTED_PORTAL_MASK_LO,
-        counter::PORTAL_VIS_TESTED_PORTAL_MASK_HI,
-        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_LO,
-        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_HI,
-        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_LO,
-        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_HI,
-        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO,
-        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI,
-    ];
-    const RENDER_MAP_COUNTERS: &[u16] = &[
-        counter::ROOM_ACTIVE_CHUNK_MASK_LO,
-        counter::ROOM_ACTIVE_CHUNK_MASK_HI,
-        counter::ROOM_DRAWN_CHUNK_MASK_LO,
-        counter::ROOM_DRAWN_CHUNK_MASK_HI,
-        counter::ROOM_STREAM_LOADING_MASK_LO,
-        counter::ROOM_STREAM_LOADING_MASK_HI,
-        counter::ROOM_PLAYER_ROOM_INDEX,
-        counter::PORTAL_VIS_CURRENT_ROOM,
-        counter::ROOM_PLAYER_LOCAL_X_BIASED,
-        counter::ROOM_PLAYER_LOCAL_Z_BIASED,
-        counter::ROOM_PLAYER_VIEW_YAW_Q12,
-        counter::ROOM_CAMERA_LOCAL_X_BIASED,
-        counter::ROOM_CAMERA_LOCAL_Y_BIASED,
-        counter::ROOM_CAMERA_LOCAL_Z_BIASED,
-        counter::ROOM_CAMERA_GLOBAL_X_BIASED,
-        counter::ROOM_CAMERA_GLOBAL_Y_BIASED,
-        counter::ROOM_CAMERA_GLOBAL_Z_BIASED,
-        counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED,
-        counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED,
-        counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED,
-        counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED,
-        counter::PORTAL_VIS_VISIBLE_MASK_LO,
-        counter::PORTAL_VIS_VISIBLE_MASK_HI,
-        counter::PORTAL_VIS_FRONTIER_MASK_LO,
-        counter::PORTAL_VIS_FRONTIER_MASK_HI,
-        counter::PORTAL_VIS_MISSING_MASK_LO,
-        counter::PORTAL_VIS_MISSING_MASK_HI,
-        counter::PORTAL_VIS_BUILD_FAILED_MASK_LO,
-        counter::PORTAL_VIS_BUILD_FAILED_MASK_HI,
-        counter::PORTAL_VIS_TESTED_MASK_LO,
-        counter::PORTAL_VIS_TESTED_MASK_HI,
-        counter::PORTAL_VIS_ACCEPTED_MASK_LO,
-        counter::PORTAL_VIS_ACCEPTED_MASK_HI,
-        counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_LO,
-        counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_HI,
-        counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_LO,
-        counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_HI,
-        counter::PORTAL_VIS_TESTED_PORTAL_MASK_LO,
-        counter::PORTAL_VIS_TESTED_PORTAL_MASK_HI,
-        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_LO,
-        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_HI,
-        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_LO,
-        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_HI,
-        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO,
-        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI,
-    ];
-    const RENDER_MAP_POSE_COUNTERS: &[u16] = &[
-        counter::ROOM_PLAYER_LOCAL_X_BIASED,
-        counter::ROOM_PLAYER_LOCAL_Z_BIASED,
-        counter::ROOM_CAMERA_GLOBAL_X_BIASED,
-        counter::ROOM_CAMERA_GLOBAL_Z_BIASED,
-    ];
-    let pose_sample = state
-        .profiler
-        .latest_with_all_guest_counters(RENDER_MAP_POSE_COUNTERS);
-    let chunk_sample = state
-        .profiler
-        .latest_with_guest_counters(RENDER_MAP_COUNTERS)
-        .or_else(|| {
-            state
-                .profiler
-                .latest_with_guest_counters(CHUNK_MAP_COUNTERS)
-        })
-        .unwrap_or(sample);
-    let pose_counter_sample = pose_sample.unwrap_or(chunk_sample);
-    let recent_counter = |id: u16| profile_counter_u32(sample.guest.counter_max_value(id as usize));
-    let chunk_mask = |lo: u16, hi: u16| {
-        let lo = chunk_sample.guest.counter_latest_value(lo as usize) as u64;
-        let hi = chunk_sample.guest.counter_latest_value(hi as usize) as u64;
-        lo | (hi << 32)
-    };
-    let player_x_biased = pose_counter_sample
-        .guest
-        .counter_latest_value(counter::ROOM_PLAYER_LOCAL_X_BIASED as usize);
-    let player_z_biased = pose_counter_sample
-        .guest
-        .counter_latest_value(counter::ROOM_PLAYER_LOCAL_Z_BIASED as usize);
-    let camera_x_biased = pose_counter_sample
-        .guest
-        .counter_latest_value(counter::ROOM_CAMERA_LOCAL_X_BIASED as usize);
-    let camera_y_biased = pose_counter_sample
-        .guest
-        .counter_latest_value(counter::ROOM_CAMERA_LOCAL_Y_BIASED as usize);
-    let camera_z_biased = pose_counter_sample
-        .guest
-        .counter_latest_value(counter::ROOM_CAMERA_LOCAL_Z_BIASED as usize);
-    let camera_global_x_biased = pose_counter_sample
-        .guest
-        .counter_latest_value(counter::ROOM_CAMERA_GLOBAL_X_BIASED as usize);
-    let camera_global_y_biased = pose_counter_sample
-        .guest
-        .counter_latest_value(counter::ROOM_CAMERA_GLOBAL_Y_BIASED as usize);
-    let camera_global_z_biased = pose_counter_sample
-        .guest
-        .counter_latest_value(counter::ROOM_CAMERA_GLOBAL_Z_BIASED as usize);
-    let camera_view_sin_yaw_biased = pose_counter_sample
-        .guest
-        .counter_latest_value(counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED as usize);
-    let camera_view_cos_yaw_biased = pose_counter_sample
-        .guest
-        .counter_latest_value(counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED as usize);
-    let camera_view_sin_pitch_biased = pose_counter_sample
-        .guest
-        .counter_latest_value(counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED as usize);
-    let camera_view_cos_pitch_biased = pose_counter_sample
-        .guest
-        .counter_latest_value(counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED as usize);
-    let pose_valid = pose_sample.is_some();
-    Some(psxed_ui::EditorPlaytestMetrics {
-        sample_serial: latest.sample_serial,
-        host_fps: sample.host_fps(),
-        host_ms: sample.host_dt_ms,
-        emu_hz: sample.emulated_vblank_hz(),
-        visual_hz,
-        draw_hz: sample.psx_draw_hz(),
-        visual_frames: latest
-            .guest_visual_frame_count()
-            .round()
-            .clamp(0.0, u32::MAX as f32) as u32,
-        visual_interval_vblanks,
-        visual_frame_times_ms,
-        visual_frame_time_count,
-        visual_deadline_misses,
-        visual_lateness_vblanks,
-        total_ms: sample.total_ms,
-        frame_ms,
-        emu_ms: sample.emu_ms,
-        hw_ms: sample.hw_render_ms,
-        ui_ms: sample.egui.total_ms,
-        step_budget_percent: sample.psx_budget_percent(),
-        fixed_update_task_ms: task_ms_per_hit(task::FIXED_UPDATE),
-        fixed_update_task_max_ms: task_max_ms(task::FIXED_UPDATE),
-        visual_render_task_ms: task_ms_per_hit(task::VISUAL_RENDER),
-        visual_render_task_max_ms: task_max_ms(task::VISUAL_RENDER),
-        chunk_visible: recent_counter(counter::ROOM_ACTIVE_CHUNKS),
-        chunk_loaded: recent_counter(counter::ROOM_STREAM_RESIDENT_SLOTS),
-        chunk_candidates: recent_counter(counter::ROOM_CHUNKS_CONSIDERED),
-        chunk_built: recent_counter(counter::ROOM_WINDOW_BUILT_CHUNKS),
-        chunk_cache_skips: recent_counter(counter::ROOM_CHUNK_CACHE_SKIPS),
-        portal_visible_rooms: recent_counter(counter::PORTAL_VIS_VISIBLE_ROOMS),
-        portal_frontier_rooms: recent_counter(counter::PORTAL_VIS_FRONTIER_ROOMS),
-        portal_missing_resident: recent_counter(counter::PORTAL_VIS_VISIBLE_MISSING_RESIDENT),
-        portal_build_failed: recent_counter(counter::PORTAL_VIS_VISIBLE_BUILD_FAILED),
-        portal_tests: recent_counter(counter::PORTAL_VIS_PORTALS_TESTED),
-        portal_accepts: recent_counter(counter::PORTAL_VIS_PORTALS_ACCEPTED),
-        portal_bounds_fallbacks: recent_counter(counter::PORTAL_VIS_BOUNDS_FALLBACKS),
-        portal_rejects: [
-            recent_counter(counter::PORTAL_VIS_REJECT_BACKFACE),
-            recent_counter(counter::PORTAL_VIS_REJECT_FRUSTUM),
-            recent_counter(counter::PORTAL_VIS_REJECT_TINY),
-        ],
-        portal_caps: [
-            recent_counter(counter::PORTAL_VIS_CAP_ROOM),
-            recent_counter(counter::PORTAL_VIS_CAP_FRUSTUM),
-            recent_counter(counter::PORTAL_VIS_CAP_DEPTH),
-        ],
-        stream_priorities: [
-            recent_counter(counter::ROOM_STREAM_PRIORITY_CURRENT),
-            recent_counter(counter::ROOM_STREAM_PRIORITY_VISIBLE),
-            recent_counter(counter::ROOM_STREAM_PRIORITY_FRONTIER),
-        ],
-        stream_requests: recent_counter(counter::ROOM_STREAM_REQUESTS),
-        stream_misses: recent_counter(counter::ROOM_STREAM_MISSES),
-        stream_prefetches: recent_counter(counter::ROOM_STREAM_PREFETCH_REQUESTS),
-        stream_evictions: recent_counter(counter::ROOM_STREAM_EVICTIONS),
-        stream_slot_limit: recent_counter(counter::ROOM_STREAM_SLOT_LIMIT),
-        stream_pending: recent_counter(counter::ROOM_STREAM_PENDING_LOADS),
-        stream_failed: recent_counter(counter::ROOM_STREAM_FAILED_LOADS),
-        stream_protected_full: recent_counter(counter::ROOM_STREAM_PROTECTED_FULL),
-        vram_texture_drops: recent_counter(counter::ROOM_MATERIAL_TEXTURE_DROPS),
-        vram_caps_full: [
-            recent_counter(counter::VRAM_SLOT_TABLE_FULL),
-            recent_counter(counter::VRAM_WINDOW_FULL),
-            recent_counter(counter::VRAM_CLUT_FULL),
-            recent_counter(counter::VRAM_UPLOAD_QUEUE_FULL),
-        ],
-        room_material_slot_overflow: recent_counter(counter::ROOM_MATERIAL_SLOT_OVERFLOW),
-        room_visibility_fallback_draws: recent_counter(counter::ROOM_VISIBILITY_FALLBACK_DRAWS),
-        chunk_loaded_mask: chunk_mask(
-            counter::ROOM_STREAM_RESIDENT_MASK_LO,
-            counter::ROOM_STREAM_RESIDENT_MASK_HI,
-        ),
-        chunk_loading_mask: chunk_mask(
-            counter::ROOM_STREAM_LOADING_MASK_LO,
-            counter::ROOM_STREAM_LOADING_MASK_HI,
-        ),
-        chunk_active_mask: chunk_mask(
-            counter::ROOM_ACTIVE_CHUNK_MASK_LO,
-            counter::ROOM_ACTIVE_CHUNK_MASK_HI,
-        ),
-        chunk_drawn_mask: chunk_mask(
-            counter::ROOM_DRAWN_CHUNK_MASK_LO,
-            counter::ROOM_DRAWN_CHUNK_MASK_HI,
-        ),
-        portal_visible_mask: chunk_mask(
-            counter::PORTAL_VIS_VISIBLE_MASK_LO,
-            counter::PORTAL_VIS_VISIBLE_MASK_HI,
-        ),
-        portal_frontier_mask: chunk_mask(
-            counter::PORTAL_VIS_FRONTIER_MASK_LO,
-            counter::PORTAL_VIS_FRONTIER_MASK_HI,
-        ),
-        portal_missing_mask: chunk_mask(
-            counter::PORTAL_VIS_MISSING_MASK_LO,
-            counter::PORTAL_VIS_MISSING_MASK_HI,
-        ),
-        portal_build_failed_mask: chunk_mask(
-            counter::PORTAL_VIS_BUILD_FAILED_MASK_LO,
-            counter::PORTAL_VIS_BUILD_FAILED_MASK_HI,
-        ),
-        portal_tested_mask: chunk_mask(
-            counter::PORTAL_VIS_TESTED_MASK_LO,
-            counter::PORTAL_VIS_TESTED_MASK_HI,
-        ),
-        portal_accepted_mask: chunk_mask(
-            counter::PORTAL_VIS_ACCEPTED_MASK_LO,
-            counter::PORTAL_VIS_ACCEPTED_MASK_HI,
-        ),
-        portal_reject_frustum_mask: chunk_mask(
-            counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_LO,
-            counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_HI,
-        ),
-        portal_bounds_fallback_mask: chunk_mask(
-            counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_LO,
-            counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_HI,
-        ),
-        portal_tested_portal_mask: chunk_mask(
-            counter::PORTAL_VIS_TESTED_PORTAL_MASK_LO,
-            counter::PORTAL_VIS_TESTED_PORTAL_MASK_HI,
-        ),
-        portal_accepted_portal_mask: chunk_mask(
-            counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_LO,
-            counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_HI,
-        ),
-        portal_reject_frustum_portal_mask: chunk_mask(
-            counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_LO,
-            counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_HI,
-        ),
-        portal_bounds_fallback_portal_mask: chunk_mask(
-            counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO,
-            counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI,
-        ),
-        player_map_valid: pose_valid,
-        player_room_index: pose_counter_sample
-            .guest
-            .counter_latest_value(counter::ROOM_PLAYER_ROOM_INDEX as usize),
-        portal_current_room_index: pose_counter_sample
-            .guest
-            .counter_latest_value(counter::PORTAL_VIS_CURRENT_ROOM as usize),
-        player_local_x: profile_counter_i32_biased(player_x_biased, DEBUG_MAP_POSITION_BIAS),
-        player_local_z: profile_counter_i32_biased(player_z_biased, DEBUG_MAP_POSITION_BIAS),
-        player_view_yaw_q12: pose_counter_sample
-            .guest
-            .counter_latest_value(counter::ROOM_PLAYER_VIEW_YAW_Q12 as usize)
-            .min(u16::MAX as u32) as u16,
-        camera_view_basis_valid: pose_valid
-            && (camera_view_sin_yaw_biased > 0
-                || camera_view_cos_yaw_biased > 0
-                || camera_view_sin_pitch_biased > 0
-                || camera_view_cos_pitch_biased > 0),
-        camera_view_sin_yaw_q12: profile_counter_i32_biased(camera_view_sin_yaw_biased, 4096)
-            .clamp(-4096, 4096),
-        camera_view_cos_yaw_q12: profile_counter_i32_biased(camera_view_cos_yaw_biased, 4096)
-            .clamp(-4096, 4096),
-        camera_view_sin_pitch_q12: profile_counter_i32_biased(camera_view_sin_pitch_biased, 4096)
-            .clamp(-4096, 4096),
-        camera_view_cos_pitch_q12: profile_counter_i32_biased(camera_view_cos_pitch_biased, 4096)
-            .clamp(-4096, 4096),
-        camera_map_valid: pose_valid
-            && (camera_x_biased > 0 || camera_y_biased > 0 || camera_z_biased > 0),
-        camera_global_valid: pose_valid
-            && (camera_global_x_biased > 0
-                || camera_global_y_biased > 0
-                || camera_global_z_biased > 0),
-        camera_local_x: profile_counter_i32_biased(camera_x_biased, DEBUG_MAP_POSITION_BIAS),
-        camera_local_y: profile_counter_i32_biased(camera_y_biased, DEBUG_MAP_POSITION_BIAS),
-        camera_local_z: profile_counter_i32_biased(camera_z_biased, DEBUG_MAP_POSITION_BIAS),
-        camera_global_x: profile_counter_i32_biased(
-            camera_global_x_biased,
-            DEBUG_MAP_POSITION_BIAS,
-        ),
-        camera_global_y: profile_counter_i32_biased(
-            camera_global_y_biased,
-            DEBUG_MAP_POSITION_BIAS,
-        ),
-        camera_global_z: profile_counter_i32_biased(
-            camera_global_z_biased,
-            DEBUG_MAP_POSITION_BIAS,
-        ),
-    })
-}
-
-#[cfg(feature = "editor")]
-fn profile_counter_u32(value: f32) -> u32 {
-    if value.is_finite() && value > 0.0 {
-        value.round().min(u32::MAX as f32) as u32
-    } else {
-        0
-    }
-}
-
-#[cfg(feature = "editor")]
-fn profile_counter_i32_biased(value: u32, bias: i32) -> i32 {
-    (value as i64 - bias as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
 #[cfg(test)]

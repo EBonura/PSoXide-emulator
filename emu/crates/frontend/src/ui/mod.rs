@@ -27,7 +27,7 @@ pub fn draw_layout(
     input_router: &mut InputRouter,
     vram_tex: egui::TextureId,
     display_tex: egui::TextureId,
-    #[cfg(feature = "editor")] editor_viewport: psxed_ui::EditorViewport3dPresentation,
+
     display_uv: egui::Rect,
     dt: f32,
 ) {
@@ -43,19 +43,6 @@ pub fn draw_layout(
     // When the editor workspace owns the central UI it takes over the whole
     // frame; the emulator panels below never run. Compiled out without the
     // editor feature (the workspace can never be the editor then).
-    #[cfg(feature = "editor")]
-    if state.workspace.is_editor() {
-        let playtest_status = state.editor_playtest_status();
-        state.editor.draw(ctx, editor_viewport, playtest_status);
-        state.sync_embedded_playtest_with_editor_project();
-        let menu_warning = state.menu_setup_warning();
-        state.menu.draw(ctx, dt, menu_warning);
-        burn::draw(ctx, state);
-        draw_recording_indicator(ctx, state);
-        draw_freecam_indicator(ctx, state);
-        draw_status_toast(ctx, state);
-        return;
-    }
 
     // Top-bar controls go first so the central panel (framebuffer)
     // clips to what's left under them. The unified debug sidebar
@@ -203,12 +190,7 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.start_examples_build();
             MenuOutcome::None
         }
-        #[cfg(feature = "editor")]
-        ToggleEditorWorkspace => {
-            state.toggle_editor_workspace();
-            state.menu.open = false;
-            MenuOutcome::None
-        }
+
         ChooseBiosPath => {
             state.choose_bios_path();
             MenuOutcome::None
