@@ -65,12 +65,6 @@ impl PlaytestInputTape {
         self.mode == PlaytestInputMode::Recording
     }
 
-    /// True while saved input is replacing live port-1 samples.
-    #[cfg(test)]
-    pub(crate) fn is_replaying(&self) -> bool {
-        self.mode == PlaytestInputMode::Replaying
-    }
-
     /// Number of video-frame samples currently retained.
     pub(crate) fn frame_count(&self) -> usize {
         self.samples.len()
@@ -182,14 +176,6 @@ impl PlaytestInputTape {
         self.replay_cursor = 0;
         self.mode = PlaytestInputMode::Replaying;
         Ok(self.samples.len())
-    }
-
-    /// Stop replaying without discarding the loaded tape.
-    #[cfg(test)]
-    pub(crate) fn stop_replay(&mut self) {
-        if self.mode == PlaytestInputMode::Replaying {
-            self.mode = PlaytestInputMode::Idle;
-        }
     }
 
     /// Return the sample to apply for this emulated frame.
