@@ -56,3 +56,8 @@ substitute for original-console validation of SDK or game behavior.
 ## License
 
 [GPL-2.0-or-later](LICENSE). Existing source and asset attribution is preserved.
+
+## Recent changes
+
+Source snapshot **2026.09.05**: Moved the emulator core and desktop/browser frontends into their own repository.
+See the [changelog](CHANGELOG.md) for the remaining changes.

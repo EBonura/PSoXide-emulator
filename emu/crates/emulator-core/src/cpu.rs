@@ -249,7 +249,7 @@ impl CpuCycleProfileSnapshot {
 pub struct InstructionClassProfileSnapshot {
     /// Retired instructions observed while profiling was enabled.
     pub instructions: u64,
-    /// Canonical zero-word NOP instructions.
+    /// Zero-word NOP instructions.
     pub nops: u64,
     /// Instructions executed in a branch or jump delay slot.
     pub delay_slot_instructions: u64,
@@ -2645,7 +2645,7 @@ impl Cpu {
     /// containing `addr` and merges its high-order bytes into `rt`
     /// from the top down.
     ///
-    /// Canonical memcpy use: `LWL rt, 3(rs)` + `LWR rt, 0(rs)`
+    /// Unaligned memcpy sequence: `LWL rt, 3(rs)` + `LWR rt, 0(rs)`
     /// loads 4 bytes from `rs..rs+4` regardless of alignment.
     ///
     /// Also: LWL/LWR preserve bytes in the destination they don't
@@ -3746,7 +3746,7 @@ mod tests {
 
     #[test]
     fn nop_advances_pc_without_side_effects() {
-        // SLL $0, $0, 0 with all fields zero is the canonical NOP.
+        // SLL $0, $0, 0 encodes a NOP.
         let mut bus = Bus::new(synthetic_bios_with_first_word(0x0000_0000)).unwrap();
         let mut cpu = Cpu::new();
         let record = cpu.step_traced(&mut bus).expect("nop decodes");
