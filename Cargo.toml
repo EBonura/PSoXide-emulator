@@ -1,33 +1,19 @@
 [workspace]
 resolver = "2"
-# The HOST workspace: everything that runs on the development machine --
-# shared PSX primitives, the emulator + frontend, the editor stack, and
-# the disc/EXE tools. One lockfile, one rust-analyzer session.
-#
-# The DEVICE side (sdk/, engine/: no_std, mipsel-sony-psx, -Zbuild-std)
-# keeps its own workspaces -- host and bare-metal builds genuinely cannot
-# share one cargo invocation. Device crates consume host-workspace members
-# (and vice versa) through plain path dependencies.
+# Host workspace. Ignored SDK/emulator members are materialized from
+# components.lock.json by tools/bootstrap-components.py before Cargo runs.
 members = [
     "crates/psx-hw",
     "crates/psx-iso",
     "crates/psx-trace",
+    "crates/psxed-format",
     "emu/crates/emulator-core",
     "emu/crates/frontend",
     "emu/crates/psoxide-settings",
     "emu/crates/psoxide-validation",
     "emu/crates/psx-gpu-render",
-    "editor/crates/psxed",
-    "editor/crates/psxed-audio",
-    "editor/crates/psxed-format",
-    "editor/crates/psxed-gltf",
-    "editor/crates/psxed-obj",
-    "editor/crates/psxed-project",
-    "editor/crates/psxed-tex",
-    "editor/crates/psxed-ui",
     "tools/mkisopsx",
-    "tools/psoxide-link",
-    "tools/psoxide-dev",
+    "tools/psoxide-link"
 ]
 # The device-side workspaces live inside this directory tree; cargo
 # requires nested workspace roots to be excluded explicitly.
@@ -43,7 +29,7 @@ edition = "2021"
 # rewriting working code to defend a number nobody relies on.
 rust-version = "1.87"
 license = "GPL-2.0-or-later"
-repository = "https://github.com/EBonura/PSoXide"
+repository = "https://github.com/EBonura/PSoXide-emulator"
 
 [workspace.lints.rust]
 missing_docs = "warn"
@@ -65,13 +51,6 @@ emulator-core      = { path = "emu/crates/emulator-core" }
 psoxide-settings   = { path = "emu/crates/psoxide-settings" }
 psoxide-validation = { path = "emu/crates/psoxide-validation" }
 psx-gpu-render     = { path = "emu/crates/psx-gpu-render" }
-psxed-audio   = { path = "editor/crates/psxed-audio" }
-psxed-format  = { path = "editor/crates/psxed-format" }
-psxed-gltf    = { path = "editor/crates/psxed-gltf" }
-psxed-obj     = { path = "editor/crates/psxed-obj" }
-psxed-project = { path = "editor/crates/psxed-project" }
-psxed-tex     = { path = "editor/crates/psxed-tex" }
-psxed-ui      = { path = "editor/crates/psxed-ui" }
 
 # ---- Cross-workspace path deps into the DEVICE side --------------------
 psx-asset     = { path = "sdk/crates/psx-asset" }
@@ -80,8 +59,6 @@ psx-vram      = { path = "sdk/crates/psx-vram" }
 psx-gte       = { path = "sdk/crates/psx-gte" }
 psx-gte-core  = { path = "sdk/crates/psx-gte-core" }
 psx-telemetry = { path = "sdk/crates/psx-telemetry" }
-psx-bsp       = { path = "engine/crates/psx-bsp" }
-psx-engine    = { path = "engine/crates/psx-engine" }
 
 # ---- External deps ------------------------------------------------------
 bitflags   = { version = "2.6", default-features = false }
@@ -167,21 +144,8 @@ opt-level = 3
 # to remain interactive on production-sized levels.
 [profile.dev.package.frontend]
 opt-level = 2
-[profile.dev.package.psxed-ui]
-opt-level = 2
-[profile.dev.package.psxed-project]
-opt-level = 2
-
-# Fast edit-and-run profile for host editor development. This keeps the tuned
-# dev settings for third-party dependencies and emulator hot paths, but avoids
-# optimising the large crates that change during normal editor work. Artifacts
-# live separately from `dev`, so switching profiles does not evict either cache.
 [profile.run-fast]
 inherits = "dev"
 
 [profile.run-fast.package.frontend]
-opt-level = 0
-[profile.run-fast.package.psxed-ui]
-opt-level = 0
-[profile.run-fast.package.psxed-project]
 opt-level = 0

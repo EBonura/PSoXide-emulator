@@ -100,9 +100,7 @@ pub enum MenuAction {
     /// Build all public SDK/engine examples, then rescan the
     /// library once the background make job completes.
     BuildExamples,
-    /// Enter or leave the host-side editor workspace.
-    #[cfg(feature = "editor")]
-    ToggleEditorWorkspace,
+
     /// Pick and persist the BIOS image path.
     ChooseBiosPath,
     /// Pick and persist the games library root.
@@ -414,10 +412,6 @@ impl MenuState {
             // every visit. Examples carry the web build instead.
             // The Editor category is the entry point into the host editor
             // workspace; it is absent in emulator-only builds.
-            #[cfg(feature = "editor")]
-            build_create_category(false),
-            #[cfg(target_arch = "wasm32")]
-            disabled_category("Editor", icons::FOLDER),
             build_settings_category(),
             build_system_category(running, 0),
             // There is no "quit" in a browser tab, so the web build omits it.
@@ -650,25 +644,6 @@ impl MenuState {
                 .find(|item| item.action == MenuAction::CycleUiScale)
             {
                 item.value = Some(format!("{}%", pct.clamp(50, 150)));
-            }
-        }
-    }
-
-    /// Update the Editor category label for the current workspace.
-    #[cfg(feature = "editor")]
-    pub fn sync_editor_label(&mut self, editor_open: bool) {
-        if let Some(create) = self.categories.iter_mut().find(|c| c.name == "Editor") {
-            if let Some(item) = create
-                .items
-                .iter_mut()
-                .find(|item| item.action == MenuAction::ToggleEditorWorkspace)
-            {
-                item.label = if editor_open {
-                    "Close editor workspace".into()
-                } else {
-                    "Open editor workspace".into()
-                };
-                item.value = Some(if editor_open { "Active" } else { "Studio" }.into());
             }
         }
     }
@@ -2526,7 +2501,7 @@ fn build_examples_category(examples: &[LibraryItem]) -> Category {
     let mut items = Vec::with_capacity(examples.len() + 2);
     if examples.is_empty() {
         items.push(MenuItem {
-            label: "Build public examples".into(),
+            label: "Build SDK examples".into(),
             action: MenuAction::BuildExamples,
             burn_action: None,
             value: Some("make examples".into()),
@@ -2605,25 +2580,6 @@ fn build_projects_category(projects: &[LibraryItem]) -> Category {
         name: "Projects",
         icon: icons::LAYERS,
         items,
-    }
-}
-
-/// Host-side creation tools.
-#[cfg(feature = "editor")]
-fn build_create_category(editor_open: bool) -> Category {
-    Category {
-        name: "Editor",
-        icon: icons::FOLDER,
-        items: vec![MenuItem {
-            label: if editor_open {
-                "Close editor workspace".into()
-            } else {
-                "Open editor workspace".into()
-            },
-            action: MenuAction::ToggleEditorWorkspace,
-            burn_action: None,
-            value: Some(if editor_open { "Active" } else { "Studio" }.into()),
-        }],
     }
 }
 
@@ -2766,14 +2722,13 @@ mod tests {
     #[test]
     fn fresh_state_has_expected_categories() {
         let s = MenuState::new();
-        assert_eq!(s.categories.len(), 7);
-        assert_eq!(s.categories[0].name, "Games");
-        assert_eq!(s.categories[1].name, "Examples");
-        assert_eq!(s.categories[2].name, "Projects");
-        assert_eq!(s.categories[3].name, "Editor");
-        assert_eq!(s.categories[4].name, "Settings");
-        assert_eq!(s.categories[5].name, "System");
-        assert_eq!(s.categories[6].name, "Quit");
+        assert_eq!(
+            s.categories
+                .iter()
+                .map(|category| category.name)
+                .collect::<Vec<_>>(),
+            ["Games", "Examples", "Projects", "Settings", "System", "Quit"]
+        );
     }
 
     #[test]
@@ -2846,7 +2801,7 @@ mod tests {
     fn set_library_preserves_category_across_rebuild() {
         let mut s = MenuState::new();
         // Move to "System" category before rebuilding.
-        s.category_index = 5;
+        s.select_category("System");
         s.set_library(&[], &[], &[]);
         assert_eq!(s.current_category(), Some("System"));
     }
@@ -2854,17 +2809,45 @@ mod tests {
     #[test]
     fn sync_run_label_flips_system_run_item() {
         let mut s = MenuState::new();
-        assert_eq!(s.categories[5].items[0].label, "Run");
+        assert_eq!(
+            s.categories
+                .iter()
+                .find(|category| category.name == "System")
+                .unwrap()
+                .items[0]
+                .label,
+            "Run"
+        );
         s.sync_run_label(true);
-        assert_eq!(s.categories[5].items[0].label, "Pause");
+        assert_eq!(
+            s.categories
+                .iter()
+                .find(|category| category.name == "System")
+                .unwrap()
+                .items[0]
+                .label,
+            "Pause"
+        );
         s.sync_run_label(false);
-        assert_eq!(s.categories[5].items[0].label, "Run");
+        assert_eq!(
+            s.categories
+                .iter()
+                .find(|category| category.name == "System")
+                .unwrap()
+                .items[0]
+                .label,
+            "Run"
+        );
     }
 
     #[test]
     fn sync_fast_boot_label_flips_system_value() {
         let mut s = MenuState::new();
-        let fast_boot = s.categories[5]
+        let fast_boot = s
+            .categories
+            .iter()
+            .find(|category| category.name == "System")
+            .unwrap()
             .items
             .iter()
             .find(|item| item.action == MenuAction::ToggleFastBoot)
@@ -2872,7 +2855,11 @@ mod tests {
         assert_eq!(fast_boot.value.as_deref(), Some("On"));
 
         s.sync_fast_boot_label(false);
-        let fast_boot = s.categories[5]
+        let fast_boot = s
+            .categories
+            .iter()
+            .find(|category| category.name == "System")
+            .unwrap()
             .items
             .iter()
             .find(|item| item.action == MenuAction::ToggleFastBoot)
@@ -2880,7 +2867,11 @@ mod tests {
         assert_eq!(fast_boot.value.as_deref(), Some("Off"));
 
         s.sync_fast_boot_label(true);
-        let fast_boot = s.categories[5]
+        let fast_boot = s
+            .categories
+            .iter()
+            .find(|category| category.name == "System")
+            .unwrap()
             .items
             .iter()
             .find(|item| item.action == MenuAction::ToggleFastBoot)
@@ -2995,10 +2986,25 @@ mod tests {
         s.sync_settings_paths("SCPH1001.BIN", "discs");
         assert_eq!(s.categories[2].items[0].value.as_deref(), Some("Refresh"));
         assert_eq!(
-            s.categories[4].items[0].value.as_deref(),
+            s.categories
+                .iter()
+                .find(|category| category.name == "Settings")
+                .unwrap()
+                .items[0]
+                .value
+                .as_deref(),
             Some("SCPH1001.BIN")
         );
-        assert_eq!(s.categories[4].items[1].value.as_deref(), Some("discs"));
+        assert_eq!(
+            s.categories
+                .iter()
+                .find(|category| category.name == "Settings")
+                .unwrap()
+                .items[1]
+                .value
+                .as_deref(),
+            Some("discs")
+        );
     }
 
     #[test]

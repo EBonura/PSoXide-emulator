@@ -22,20 +22,18 @@
 //! subcommand, the GUI runs as normal.
 
 use std::collections::BTreeMap;
-#[cfg(feature = "editor")]
-use std::collections::HashSet;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use emulator_core::{
     button, fast_boot_disc_with_hle, telemetry, warm_bios_for_disc_fast_boot, Bus, ButtonState,
     Cpu, EmulatorState, InstructionCacheMissKind, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 use psx_hw::memory;
 // `Gpu` is only constructed for the editor 3D preview dump.
-#[cfg(feature = "editor")]
-use emulator_core::Gpu;
+
 use psoxide_settings::{
     library::{GameKind, LibraryEntry},
     savestate::SaveStateV1,
@@ -45,17 +43,9 @@ use psoxide_validation::{
     format_hash, ActualHashes, PixelHash, ValidationArtifact, ValidationRunner, ValidationSuite,
 };
 use psx_iso::{Disc, Exe, TrackType};
-#[cfg(feature = "editor")]
-use psxed_project::{NodeId, ProjectDocument};
-#[cfg(feature = "editor")]
-use psxed_ui::{
-    EditorPlaytestStatus, EditorViewport3dPresentation, EditorWorkspace, ViewportCameraMode,
-    ViewportCameraState,
-};
 
 use crate::app::{bus_from_configured_bios, fast_boot_embedded_playtest_disc};
-#[cfg(feature = "editor")]
-use crate::playtest_disc::{build_embedded_playtest_disc, copy_project_disc};
+
 use crate::playtest_input::read_input_tape;
 
 mod headless_log;
@@ -95,64 +85,9 @@ pub struct Cli {
     #[arg(long)]
     pub gpu_compute: bool,
 
-    /// Boot the GUI directly into the native editor workspace, bypassing the
-    /// emulator menu. Intended for deterministic editor development and
-    /// screenshot validation.
-    #[cfg(feature = "editor")]
-    #[arg(long)]
-    pub editor: bool,
-
-    /// Project directory to open when `--editor` is set. The directory must
-    /// contain a valid `project.ron`.
-    #[cfg(feature = "editor")]
-    #[arg(long, value_name = "DIR", requires = "editor")]
-    pub editor_project: Option<PathBuf>,
-
-    /// Editor workspace to show immediately when `--editor` is set.
-    #[cfg(feature = "editor")]
-    #[arg(long, value_enum, value_name = "VIEW", requires = "editor")]
-    pub editor_view: Option<EditorViewArg>,
-
-    /// Resource name (or numeric resource id) to focus when booting the
-    /// Animation workspace.
-    #[cfg(feature = "editor")]
-    #[arg(long, value_name = "NAME_OR_ID", requires = "editor")]
-    pub editor_resource: Option<String>,
-
     /// Headless subcommand. Omit to launch the GUI.
     #[command(subcommand)]
     pub command: Option<Command>,
-}
-
-/// Scriptable native-editor destinations for deterministic GUI startup.
-#[cfg(feature = "editor")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum EditorViewArg {
-    #[value(name = "3d")]
-    ThreeD,
-    #[value(name = "2d")]
-    TwoD,
-    /// 3D workspace in the Top orthographic BSP authoring view.
-    Top,
-    Animation,
-    Material,
-}
-
-#[cfg(feature = "editor")]
-impl EditorViewArg {
-    pub const fn project_view(self) -> psxed_project::EditorWorkspaceView {
-        match self {
-            Self::ThreeD => psxed_project::EditorWorkspaceView::Room,
-            Self::TwoD => psxed_project::EditorWorkspaceView::Ui,
-            Self::Top => psxed_project::EditorWorkspaceView::Room,
-            Self::Animation => psxed_project::EditorWorkspaceView::Animation,
-            Self::Material => psxed_project::EditorWorkspaceView::Material,
-        }
-    }
-
-    pub const fn is_room_orthographic(self) -> bool {
-        matches!(self, Self::Top)
-    }
 }
 
 /// Every headless operation the frontend exposes. Add new variants
@@ -173,20 +108,10 @@ pub enum Command {
     /// Run the emulator headlessly on a specific game or EXE and
     /// emit final state info.
     Launch(LaunchArgs),
-    /// Build the in-editor Play disc image from the current generated package.
-    #[cfg(feature = "editor")]
-    BuildEditorPlaytestDisc,
-    /// Cook, build, and export a project CUE/BIN disc without opening the GUI.
-    #[cfg(feature = "editor")]
-    BuildProjectDisc(BuildProjectDiscArgs),
+
     /// Validate an authored CUE/BIN image before burning it to CD-R.
     PreburnCheck(PreburnCheckArgs),
-    /// Render an editor 3D preview screenshot without opening the GUI.
-    #[cfg(feature = "editor")]
-    DumpEditorPreview(DumpEditorPreviewArgs),
-    /// Render the complete editor UI to PNG without opening a native window.
-    #[cfg(feature = "editor")]
-    DumpEditorUi(DumpEditorUiArgs),
+
     /// Run exact-hash validation checkpoints from a manifest.
     Validate(ValidateArgs),
 }
@@ -504,15 +429,6 @@ pub struct LaunchArgs {
     pub texture_filter: String,
 }
 
-/// Arguments for `build-project-disc`.
-#[cfg(feature = "editor")]
-#[derive(Debug, Args)]
-pub struct BuildProjectDiscArgs {
-    /// Project directory containing `project.ron`, or a direct path to a project file.
-    #[arg(long, default_value = "editor/projects/default")]
-    pub project: PathBuf,
-}
-
 /// Arguments for `preburn-check`.
 #[derive(Debug, Args)]
 pub struct PreburnCheckArgs {
@@ -534,78 +450,6 @@ pub struct PreburnCheckArgs {
     /// Fail if this string appears in the built EXE.
     #[arg(long)]
     pub forbid_exe_string: Vec<String>,
-}
-
-/// Arguments for `dump-editor-preview`.
-#[cfg(feature = "editor")]
-#[derive(Debug, Args)]
-pub struct DumpEditorPreviewArgs {
-    /// Project directory containing `project.ron`, or a direct path to a project file.
-    #[arg(long, default_value = "editor/projects/default")]
-    pub project: PathBuf,
-    /// Output PPM path.
-    #[arg(long)]
-    pub out: PathBuf,
-    /// Hide brush bounds and point-light widgets for clean presentation captures.
-    #[arg(long)]
-    pub hide_editor_overlays: bool,
-    /// Orbit camera yaw in editor 4096-units-per-turn convention.
-    #[arg(long, default_value_t = 320)]
-    pub yaw: u16,
-    /// Orbit camera pitch in editor 4096-units-per-turn convention.
-    #[arg(long, default_value_t = 300)]
-    pub pitch: u16,
-    /// Orbit camera distance in editor/world units.
-    #[arg(long, default_value_t = 8192)]
-    pub radius: i32,
-    /// Orbit target X in editor/world units.
-    #[arg(long, default_value_t = 2048)]
-    pub target_x: i32,
-    /// Orbit target Y in editor/world units.
-    #[arg(long, default_value_t = 512)]
-    pub target_y: i32,
-    /// Orbit target Z in editor/world units.
-    #[arg(long, default_value_t = 2048)]
-    pub target_z: i32,
-}
-
-/// Arguments for `dump-editor-ui`.
-#[cfg(feature = "editor")]
-#[derive(Debug, Args)]
-pub struct DumpEditorUiArgs {
-    /// Project directory containing `project.ron`.
-    #[arg(long, default_value = "editor/projects/default")]
-    pub project: PathBuf,
-    /// Top-level editor workspace to render.
-    #[arg(long, value_enum, default_value = "3d")]
-    pub view: EditorViewArg,
-    /// UI scene name or zero-based index to show in the 2D workspace.
-    #[arg(long, value_name = "NAME_OR_INDEX")]
-    pub ui_scene: Option<String>,
-    /// Resource name or numeric id to focus in Animation Studio or Material Lab.
-    #[arg(long, value_name = "NAME_OR_ID")]
-    pub resource: Option<String>,
-    /// Output PNG path.
-    #[arg(long)]
-    pub out: PathBuf,
-    /// Offscreen framebuffer width in physical pixels.
-    #[arg(long, default_value_t = 1920)]
-    pub width: u32,
-    /// Offscreen framebuffer height in physical pixels.
-    #[arg(long, default_value_t = 1080)]
-    pub height: u32,
-    /// Inject the `.` frame-selected shortcut before the captured frame.
-    #[arg(long)]
-    pub frame_selected: bool,
-    /// Deterministic 60 Hz UI animation frame to capture.
-    #[arg(long, default_value_t = 1)]
-    pub ui_frame: u16,
-    /// Number of deterministic UI animation frames to capture.
-    #[arg(long, default_value_t = 1)]
-    pub ui_frame_count: u16,
-    /// 60 Hz animation-frame distance between sequence images.
-    #[arg(long, default_value_t = 1)]
-    pub ui_frame_step: u16,
 }
 
 /// Arguments for `validate`.
@@ -648,15 +492,9 @@ pub fn run(cli: Cli) -> Result<(), String> {
         Command::Scan(args) => cmd_scan(&paths, args),
         Command::List => cmd_list(&paths),
         Command::Launch(args) => cmd_launch(&paths, args),
-        #[cfg(feature = "editor")]
-        Command::BuildEditorPlaytestDisc => cmd_build_editor_playtest_disc(),
-        #[cfg(feature = "editor")]
-        Command::BuildProjectDisc(args) => cmd_build_project_disc(args),
+
         Command::PreburnCheck(args) => cmd_preburn_check(args),
-        #[cfg(feature = "editor")]
-        Command::DumpEditorPreview(args) => cmd_dump_editor_preview(args),
-        #[cfg(feature = "editor")]
-        Command::DumpEditorUi(args) => cmd_dump_editor_ui(args),
+
         Command::Validate(args) => cmd_validate(&paths, args),
     }
 }
@@ -2408,21 +2246,6 @@ fn write_cd_command_log(
         .map_err(|error| format!("write CD command log {}: {error}", path.display()))
 }
 
-#[cfg(feature = "editor")]
-fn cmd_build_editor_playtest_disc() -> Result<(), String> {
-    let disc_path =
-        build_embedded_playtest_disc(crate::playtest_disc::DEFAULT_EMBEDDED_PLAYTEST_VOLUME_ID)?;
-    println!("{}", disc_path.display());
-    Ok(())
-}
-
-#[cfg(feature = "editor")]
-fn cmd_build_project_disc(args: BuildProjectDiscArgs) -> Result<(), String> {
-    let dest_cue = build_project_disc_path(&args.project)?;
-    println!("{}", dest_cue.display());
-    Ok(())
-}
-
 fn cmd_preburn_check(args: PreburnCheckArgs) -> Result<(), String> {
     let repo_root = cli_repo_root();
     let cue_path = resolve_cli_path(&repo_root, &args.cue);
@@ -2509,39 +2332,6 @@ fn cmd_preburn_check(args: PreburnCheckArgs) -> Result<(), String> {
     println!("  boot:      {}", boot.boot_path);
     println!("  root:      {}", root_names.join(", "));
     Ok(())
-}
-
-#[cfg(feature = "editor")]
-fn build_project_disc_path(project_path: &Path) -> Result<PathBuf, String> {
-    let (project_root, project_file) = resolve_project_arg(project_path);
-    let project_root = std::fs::canonicalize(&project_root)
-        .map_err(|e| format!("project root {}: {e}", project_root.display()))?;
-    let project_file = std::fs::canonicalize(&project_file)
-        .map_err(|e| format!("project file {}: {e}", project_file.display()))?;
-    let project = ProjectDocument::load_from_path(&project_file)
-        .map_err(|e| format!("load {}: {e}", project_file.display()))?;
-
-    let repo_root = cli_repo_root();
-    run_make(
-        &repo_root,
-        "cook-playtest",
-        &[format!("PROJECT={}", project_file.display())],
-    )?;
-    run_make(&repo_root, "build-editor-playtest", &[])?;
-
-    let volume_id = crate::playtest_disc::project_disc_volume_id(&project.name);
-    let source_cue = build_embedded_playtest_disc(&volume_id)?;
-    let dest_cue = project_root.join("baked").join(format!(
-        "{}.cue",
-        psxed_project::project_file_stem(&project.name)
-    ));
-    let bytes = copy_project_disc(&source_cue, &dest_cue)?;
-    eprintln!(
-        "[cli] project disc -> {} ({} KiB)",
-        dest_cue.display(),
-        bytes / 1024
-    );
-    Ok(dest_cue)
 }
 
 fn cmd_validate(paths: &ConfigPaths, args: ValidateArgs) -> Result<(), String> {
@@ -2781,12 +2571,7 @@ fn resolve_validation_artifact(
         ValidationArtifact::Project { project } => {
             // Project artifacts are cooked + built through the editor's
             // disc-build pipeline, which is absent in emulator-only builds.
-            #[cfg(feature = "editor")]
-            {
-                let project = resolve_manifest_path(repo_root, manifest_dir, project);
-                (build_project_disc_path(&project)?, true, false)
-            }
-            #[cfg(not(feature = "editor"))]
+
             {
                 let _ = project;
                 return Err("validation Project artifacts require the `editor` feature".to_string());
@@ -2912,21 +2697,6 @@ fn resolve_manifest_path(repo_root: &Path, manifest_dir: &Path, path: &Path) -> 
         local
     } else {
         repo_root.join(path)
-    }
-}
-
-#[cfg(feature = "editor")]
-fn run_make(repo_root: &Path, target: &str, extra_args: &[String]) -> Result<(), String> {
-    let status = std::process::Command::new("make")
-        .arg(target)
-        .args(extra_args)
-        .current_dir(repo_root)
-        .status()
-        .map_err(|e| format!("spawn make {target}: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("make {target} failed: {status}"))
     }
 }
 
@@ -3060,526 +2830,6 @@ fn hash_vram(bus: &Bus) -> u64 {
         h.update(&word.to_le_bytes());
     }
     h.finish()
-}
-
-#[cfg(feature = "editor")]
-fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
-    if args.width == 0 || args.height == 0 {
-        return Err("headless editor dimensions must be non-zero".to_string());
-    }
-    if args.width > 8192 || args.height > 8192 {
-        return Err("headless editor dimensions must not exceed 8192 px".to_string());
-    }
-    if args.ui_frame_count == 0 {
-        return Err("--ui-frame-count must be at least 1".to_string());
-    }
-    if args.ui_frame_step == 0 {
-        return Err("--ui-frame-step must be at least 1".to_string());
-    }
-
-    let (project_root, _) = resolve_project_arg(&args.project);
-    let mut editor = EditorWorkspace::open_directory(&project_root)
-        .map_err(|error| format!("open editor project at {}: {error}", project_root.display()))?;
-    let workspace_view = args.view.project_view();
-    editor.show_workspace(workspace_view);
-    if args.view.is_room_orthographic() {
-        editor.show_room_orthographic();
-    }
-
-    if let Some(selector) = args.ui_scene.as_deref() {
-        if !matches!(args.view, EditorViewArg::TwoD) {
-            return Err("--ui-scene requires --view 2d".to_string());
-        }
-        if !editor.focus_ui_scene(selector) {
-            return Err(format!("editor UI scene {selector:?} was not found"));
-        }
-    }
-
-    if let Some(selector) = args.resource.as_deref() {
-        if !matches!(
-            args.view,
-            EditorViewArg::Animation | EditorViewArg::Material
-        ) {
-            return Err("--resource requires --view animation or --view material".to_string());
-        }
-        let numeric_id = selector.parse::<u64>().ok();
-        let resource_id = editor
-            .project()
-            .resources
-            .iter()
-            .find(|resource| {
-                numeric_id.is_some_and(|id| resource.id.raw() == id) || resource.name == selector
-            })
-            .or_else(|| {
-                editor
-                    .project()
-                    .resources
-                    .iter()
-                    .find(|resource| resource.name.eq_ignore_ascii_case(selector))
-            })
-            .map(|resource| resource.id)
-            .ok_or_else(|| format!("editor resource {selector:?} was not found"))?;
-        let focused = match args.view {
-            EditorViewArg::Animation => {
-                editor.open_animation_viewer_for_resource(resource_id)
-                    && editor.animation_viewer_resource_is_focused(resource_id)
-            }
-            EditorViewArg::Material => editor.focus_material_resource(resource_id),
-            EditorViewArg::ThreeD | EditorViewArg::TwoD | EditorViewArg::Top => false,
-        };
-        if !focused {
-            return Err(format!(
-                "editor resource {selector:?} could not be focused in {:?}",
-                args.view
-            ));
-        }
-    }
-
-    apply_headless_editor_pre_capture_actions(&mut editor, args.frame_selected);
-
-    let ctx = egui::Context::default();
-    crate::theme::apply(&ctx);
-    let (viewport_image, viewport_overlay_lines) = if matches!(args.view, EditorViewArg::ThreeD) {
-        headless_editor_viewport_image(&editor, &project_root)?
-    } else {
-        (
-            egui::ColorImage::new([640, 480], egui::Color32::from_rgb(8, 10, 14)),
-            Vec::new(),
-        )
-    };
-    let viewport_texture = ctx.load_texture(
-        "headless-editor-viewport",
-        viewport_image,
-        egui::TextureOptions::NEAREST,
-    );
-    let viewport =
-        standalone_editor_preview_presentation(viewport_texture.id(), viewport_overlay_lines);
-    let play_status = EditorPlaytestStatus::Idle;
-
-    // Prime one complete frame before injecting input. This mirrors the native
-    // app's first layout pass and ensures fonts/resource textures and widget
-    // focus state all exist before the captured interaction frame.
-    let first_capture_time = f64::from(args.ui_frame) / 60.0;
-    let prime_time = (first_capture_time - 1.0 / 60.0).max(0.0);
-    let first = ctx.run(
-        headless_editor_input(args.width, args.height, prime_time, Vec::new()),
-        |ctx| editor.draw(ctx, viewport.clone(), play_status),
-    );
-    let mut textures_delta = first.textures_delta;
-    let mut headless_renderer = None;
-    for capture_index in 0..args.ui_frame_count {
-        let ui_frame = args
-            .ui_frame
-            .wrapping_add(capture_index.wrapping_mul(args.ui_frame_step));
-        let capture_time = f64::from(ui_frame) / 60.0;
-        let captured = ctx.run(
-            headless_editor_input(args.width, args.height, capture_time, Vec::new()),
-            |ctx| editor.draw(ctx, viewport.clone(), play_status),
-        );
-        textures_delta.append(captured.textures_delta);
-        let paint_jobs = ctx.tessellate(captured.shapes, captured.pixels_per_point);
-        let renderer = match headless_renderer.as_mut() {
-            Some(renderer) => renderer,
-            None => headless_renderer.insert(HeadlessEditorPngRenderer::new(
-                args.width,
-                args.height,
-                captured.pixels_per_point,
-            )?),
-        };
-        let out = headless_editor_sequence_out(&args.out, capture_index, args.ui_frame_count);
-        renderer.render(&paint_jobs, std::mem::take(&mut textures_delta), &out)?;
-    }
-    println!(
-        "headless editor ui: view={:?} resource={} status={:?} frames={} out={}",
-        workspace_view,
-        args.resource.as_deref().unwrap_or("(none)"),
-        editor.status_text(),
-        args.ui_frame_count,
-        args.out.display()
-    );
-    Ok(())
-}
-
-#[cfg(feature = "editor")]
-fn headless_editor_sequence_out(out: &Path, index: u16, count: u16) -> PathBuf {
-    if count == 1 {
-        return out.to_path_buf();
-    }
-    let stem = out
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("frame");
-    let file_name = format!("{stem}_{index:03}.png");
-    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        parent.join(file_name)
-    } else {
-        PathBuf::from(file_name)
-    }
-}
-
-#[cfg(feature = "editor")]
-fn apply_headless_editor_pre_capture_actions(editor: &mut EditorWorkspace, frame_selected: bool) {
-    if frame_selected {
-        editor.frame_current_view();
-    }
-}
-
-#[cfg(feature = "editor")]
-fn standalone_editor_preview_presentation(
-    texture: egui::TextureId,
-    overlay_lines: Vec<psxed_ui::EditorViewportOverlayLine>,
-) -> EditorViewport3dPresentation {
-    let mut viewport = EditorViewport3dPresentation::edit(texture, overlay_lines);
-    // Native edit previews occupy the upper-left 640x480 region of a
-    // 2048x1024 VRAM texture. Headless UI capture uploads an already extracted
-    // 640x480 image, so sampling the native atlas UV here would crop and
-    // stretch its upper-left quadrant instead of reproducing the real view.
-    viewport.uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
-    viewport
-}
-
-#[cfg(feature = "editor")]
-fn headless_editor_viewport_image(
-    editor: &EditorWorkspace,
-    project_root: &Path,
-) -> Result<(egui::ColorImage, Vec<psxed_ui::EditorViewportOverlayLine>), String> {
-    let project = editor.project();
-    let visibility = project.editor_visibility;
-    let mut textures = crate::editor_textures::EditorTextures::new();
-    textures.refresh(project, project_root);
-    textures.refresh_models(project, project_root);
-    let mut assets = crate::editor_assets::EditorAssets::new();
-    assets.refresh(project, project_root);
-    let hidden = HashSet::new();
-    let entity_bounds = editor.collect_entity_bounds(None);
-    let mut frame = crate::editor_preview::build_phase1_frame(
-        project,
-        editor.viewport_3d_camera(),
-        visibility.preview_bounds,
-        visibility.show_lights,
-        &hidden,
-        NodeId::ROOT,
-        None,
-        None,
-        &entity_bounds,
-        None,
-        &textures,
-        &assets,
-    );
-    if visibility.show_grid && visibility.show_brush_surface_grid {
-        crate::editor_preview::prepend_bsp_surface_grid_overlay(
-            project,
-            editor.viewport_3d_camera(),
-            project.editor_viewport.snap_units,
-            &hidden,
-            &mut frame.overlay_lines,
-        );
-    }
-    // A UI dump is a single synchronous frame, so it cannot wait for the
-    // editor's debounced worker. Run the same topology-only check here to
-    // ensure headless regression captures include the current red breach
-    // marker instead of only a possibly cached green pointfile.
-    let live_leak = psxed_project::brush_world::diagnose_brush_world_leak(project.clone()).ok();
-    let leak_path = live_leak.as_ref().map_or_else(
-        || editor.visible_bsp_leak_path(),
-        |diagnostic| &diagnostic.path,
-    );
-    let leak_opening = live_leak.as_ref().map_or_else(
-        || editor.visible_bsp_leak_opening(),
-        |diagnostic| &diagnostic.likely_opening,
-    );
-    crate::editor_preview::append_bsp_leak_path_overlay(
-        project,
-        editor.viewport_3d_camera(),
-        leak_path,
-        leak_opening,
-        &hidden,
-        &mut frame.overlay_lines,
-    );
-
-    let (device, queue) = headless_wgpu_device()?;
-    let mut renderer = psx_gpu_render::HwRenderer::new_headless(device, queue);
-    if !renderer.set_internal_scale(2, None) {
-        return Err("headless editor viewport could not select 2x preview scale".to_string());
-    }
-    renderer.render_frame(&Gpu::new(), &frame.cmd_log, textures.vram_words());
-    let scale = renderer.internal_scale();
-    let (width, height, rgba) = renderer.read_subrect_rgba8(0, 0, 320 * scale, 240 * scale);
-    let image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
-    Ok((image, frame.overlay_lines))
-}
-
-#[cfg(feature = "editor")]
-fn headless_editor_input(
-    width: u32,
-    height: u32,
-    time: f64,
-    events: Vec<egui::Event>,
-) -> egui::RawInput {
-    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width as f32, height as f32));
-    let mut input = egui::RawInput {
-        screen_rect: Some(rect),
-        time: Some(time),
-        events,
-        focused: true,
-        ..Default::default()
-    };
-    if let Some(viewport) = input.viewports.get_mut(&egui::ViewportId::ROOT) {
-        viewport.native_pixels_per_point = Some(1.0);
-        viewport.inner_rect = Some(rect);
-        viewport.outer_rect = Some(rect);
-        viewport.focused = Some(true);
-        viewport.fullscreen = Some(true);
-    }
-    input
-}
-
-#[cfg(feature = "editor")]
-struct HeadlessEditorPngRenderer {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    renderer: egui_wgpu::Renderer,
-    target: wgpu::Texture,
-    view: wgpu::TextureView,
-    readback: wgpu::Buffer,
-    screen: egui_wgpu::ScreenDescriptor,
-    width: u32,
-    height: u32,
-    unpadded_bytes_per_row: u32,
-    padded_bytes_per_row: u32,
-}
-
-#[cfg(feature = "editor")]
-impl HeadlessEditorPngRenderer {
-    fn new(width: u32, height: u32, pixels_per_point: f32) -> Result<Self, String> {
-        let (device, queue) = headless_wgpu_device()?;
-        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("psoxide-headless-editor-ui"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-        let renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
-        let screen = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [width, height],
-            pixels_per_point,
-        };
-        let unpadded_bytes_per_row = width * 4;
-        let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(alignment) * alignment;
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("psoxide-headless-editor-ui-readback"),
-            size: (padded_bytes_per_row * height) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        Ok(Self {
-            device,
-            queue,
-            renderer,
-            target,
-            view,
-            readback,
-            screen,
-            width,
-            height,
-            unpadded_bytes_per_row,
-            padded_bytes_per_row,
-        })
-    }
-
-    fn render(
-        &mut self,
-        paint_jobs: &[egui::ClippedPrimitive],
-        textures_delta: egui::TexturesDelta,
-        out: &Path,
-    ) -> Result<(), String> {
-        for (id, delta) in &textures_delta.set {
-            self.renderer
-                .update_texture(&self.device, &self.queue, *id, delta);
-        }
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("psoxide-headless-editor-ui-encoder"),
-            });
-        self.renderer.update_buffers(
-            &self.device,
-            &self.queue,
-            &mut encoder,
-            paint_jobs,
-            &self.screen,
-        );
-        {
-            let mut pass = encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("psoxide-headless-editor-ui-pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.04,
-                                g: 0.04,
-                                b: 0.06,
-                                a: 1.0,
-                            }),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    occlusion_query_set: None,
-                    timestamp_writes: None,
-                })
-                .forget_lifetime();
-            self.renderer.render(&mut pass, paint_jobs, &self.screen);
-        }
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.target,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &self.readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.padded_bytes_per_row),
-                    rows_per_image: Some(self.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(Some(encoder.finish()));
-
-        let slice = self.readback.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        self.device.poll(wgpu::Maintain::Wait);
-        receiver
-            .recv()
-            .map_err(|_| "headless editor readback callback dropped".to_string())?
-            .map_err(|error| format!("headless editor readback: {error:?}"))?;
-        let mapped = slice.get_mapped_range();
-        let mut rgba = Vec::with_capacity((self.width * self.height * 4) as usize);
-        for row in 0..self.height {
-            let start = (row * self.padded_bytes_per_row) as usize;
-            let end = start + self.unpadded_bytes_per_row as usize;
-            rgba.extend_from_slice(&mapped[start..end]);
-        }
-        drop(mapped);
-        self.readback.unmap();
-        for id in &textures_delta.free {
-            self.renderer.free_texture(id);
-        }
-
-        if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("create {}: {error}", parent.display()))?;
-        }
-        image::save_buffer_with_format(
-            out,
-            &rgba,
-            self.width,
-            self.height,
-            image::ColorType::Rgba8,
-            image::ImageFormat::Png,
-        )
-        .map_err(|error| format!("write {}: {error}", out.display()))?;
-        Ok(())
-    }
-}
-
-#[cfg(feature = "editor")]
-fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
-    let (project_root, project_file) = resolve_project_arg(&args.project);
-    let project = ProjectDocument::load_from_path(&project_file)
-        .map_err(|e| format!("load {}: {e}", project_file.display()))?;
-    let editor = EditorWorkspace::open_directory(&project_root)
-        .map_err(|error| format!("open editor project at {}: {error}", project_root.display()))?;
-    let entity_bounds = editor.collect_entity_bounds(None);
-
-    let camera = ViewportCameraState {
-        mode: ViewportCameraMode::Orbit,
-        yaw_q12: args.yaw,
-        pitch_q12: args.pitch,
-        radius: args.radius,
-        target: [args.target_x, args.target_y, args.target_z],
-        position: [0, 0, 0],
-    };
-
-    let mut textures = crate::editor_textures::EditorTextures::new();
-    textures.refresh(&project, &project_root);
-    textures.refresh_models(&project, &project_root);
-    let mut assets = crate::editor_assets::EditorAssets::new();
-    assets.refresh(&project, &project_root);
-
-    let empty_hidden: HashSet<NodeId> = HashSet::new();
-    let frame = crate::editor_preview::build_phase1_frame(
-        &project,
-        camera,
-        !args.hide_editor_overlays,
-        !args.hide_editor_overlays,
-        &empty_hidden,
-        NodeId::ROOT,
-        None,
-        None,
-        &entity_bounds,
-        None,
-        &textures,
-        &assets,
-    );
-
-    let (device, queue) = headless_wgpu_device()?;
-    let mut hw = psx_gpu_render::HwRenderer::new_headless(device, queue);
-    let _ = hw.set_internal_scale(2, None);
-    hw.render_frame(&Gpu::new(), &frame.cmd_log, textures.vram_words());
-
-    let scale = hw.internal_scale();
-    let (w, h, rgba) = hw.read_subrect_rgba8(0, 0, 320 * scale, 240 * scale);
-    write_rgb_ppm_from_rgba(&args.out, w, h, &rgba)?;
-    eprintln!("[cli] editor preview -> {}", args.out.display());
-    Ok(())
-}
-
-#[cfg(feature = "editor")]
-fn resolve_project_arg(path: &Path) -> (PathBuf, PathBuf) {
-    let path = if path.is_absolute() || path.exists() {
-        path.to_path_buf()
-    } else {
-        let repo_path = cli_repo_root().join(path);
-        if repo_path.exists() {
-            repo_path
-        } else {
-            path.to_path_buf()
-        }
-    };
-    if path.is_dir() {
-        (path.clone(), path.join("project.ron"))
-    } else {
-        let root = path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-        (root, path)
-    }
 }
 
 fn counter_total(summary: &telemetry::GuestTelemetrySummary, id: u16) -> u64 {
@@ -4372,80 +3622,6 @@ mod press_script_tests {
         let _ = std::fs::remove_file(&path);
 
         assert!(csv.contains("0,0x80001000,0x80002000,0x1f8003f0,0x1f800380,112,2,1"));
-    }
-
-    #[cfg(feature = "editor")]
-    #[test]
-    fn standalone_editor_ui_preview_maps_the_complete_extracted_image() {
-        let presentation =
-            standalone_editor_preview_presentation(egui::TextureId::Managed(7), Vec::new());
-        assert_eq!(presentation.uv.min, egui::Pos2::ZERO);
-        assert_eq!(presentation.uv.max, egui::pos2(1.0, 1.0));
-
-        // A 640x480 standalone preview's corners and centre must map to the
-        // same normalized texels after only viewport scaling. The native
-        // atlas UV (0.3125, 0.46875) would fail the bottom-right assertion and
-        // recreate the cropped wall close-up this regression guards against.
-        let source = egui::vec2(640.0, 480.0);
-        for pixel in [
-            egui::Pos2::ZERO,
-            egui::pos2(320.0, 0.0),
-            egui::pos2(640.0, 0.0),
-            egui::pos2(640.0, 240.0),
-            egui::pos2(640.0, 480.0),
-            egui::pos2(320.0, 480.0),
-            egui::pos2(0.0, 480.0),
-            egui::pos2(0.0, 240.0),
-            egui::pos2(320.0, 240.0),
-        ] {
-            let normalized = egui::pos2(pixel.x / source.x, pixel.y / source.y);
-            let sampled = presentation.uv.min + normalized.to_vec2() * presentation.uv.size();
-            assert_eq!(sampled, normalized);
-        }
-    }
-
-    #[cfg(feature = "editor")]
-    #[test]
-    fn headless_editor_ui_sequence_uses_numbered_png_siblings() {
-        let out = PathBuf::from("/tmp/cortex/capture.png");
-        assert_eq!(headless_editor_sequence_out(&out, 0, 1), out);
-        assert_eq!(
-            headless_editor_sequence_out(&out, 7, 90),
-            PathBuf::from("/tmp/cortex/capture_007.png")
-        );
-    }
-
-    #[cfg(feature = "editor")]
-    #[test]
-    fn editor_cli_distinguishes_ui_2d_from_room_top() {
-        assert_eq!(
-            EditorViewArg::TwoD.project_view(),
-            psxed_project::EditorWorkspaceView::Ui
-        );
-        assert!(!EditorViewArg::TwoD.is_room_orthographic());
-        assert_eq!(
-            EditorViewArg::Top.project_view(),
-            psxed_project::EditorWorkspaceView::Room
-        );
-        assert!(EditorViewArg::Top.is_room_orthographic());
-    }
-
-    #[cfg(feature = "editor")]
-    #[test]
-    fn editor_frame_selection_is_applied_before_preview_extraction() {
-        let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../editor/archive/fixtures/brush-first-playable");
-        let mut editor = EditorWorkspace::open_directory(project).unwrap();
-        editor.show_workspace(psxed_project::EditorWorkspaceView::Room);
-        assert_eq!(editor.viewport_3d_camera().radius, 550);
-
-        apply_headless_editor_pre_capture_actions(&mut editor, true);
-
-        let framed = editor.viewport_3d_camera();
-        assert_eq!(framed.target, [512, 256, 384]);
-        assert_eq!(framed.radius, 1638);
-        assert_eq!(framed.yaw_q12, 3072);
-        assert_eq!(framed.pitch_q12, 3665);
     }
 
     #[test]

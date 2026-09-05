@@ -908,6 +908,8 @@ impl GuestRuntimeProfile {
         }
     }
 
+    #[cfg(test)]
+
     pub(crate) fn visual_frame_intervals_ms(self) -> ([f32; VISUAL_FRAME_INTERVAL_CAP], u8) {
         let mut intervals_ms = [0.0; VISUAL_FRAME_INTERVAL_CAP];
         for (interval_ms, &cycles) in intervals_ms.iter_mut().zip(
@@ -1189,10 +1191,14 @@ impl FrameProfileSample {
             .map(|cycles| PSX_MASTER_CLOCK_HZ / cycles)
     }
 
+    #[cfg(test)]
+
     pub fn guest_visual_frame_count(self) -> f32 {
         self.guest
             .counter_total(emulator_core::telemetry::counter::VISUAL_FRAMES as usize)
     }
+
+    #[cfg(test)]
 
     pub fn guest_visual_interval_vblanks(self) -> Option<f32> {
         if !self.guest.has_pacing_data() {
@@ -1206,10 +1212,14 @@ impl FrameProfileSample {
         }
     }
 
+    #[cfg(test)]
+
     pub fn guest_visual_deadline_misses(self) -> f32 {
         self.guest
             .counter_total(emulator_core::telemetry::counter::VISUAL_DEADLINE_MISSES as usize)
     }
+
+    #[cfg(test)]
 
     pub fn guest_visual_max_lateness_vblanks(self) -> f32 {
         self.guest.counter_max_value(
@@ -1572,6 +1582,7 @@ impl FrameProfiler {
     }
 
     /// Most recent sample that contains one of the requested guest counters.
+    #[cfg(test)]
     pub fn latest_with_guest_counters(&self, counter_ids: &[u16]) -> Option<FrameProfileSample> {
         self.samples.iter().rev().copied().find(|sample| {
             counter_ids
@@ -1581,6 +1592,7 @@ impl FrameProfiler {
     }
 
     /// Most recent sample that contains every requested guest counter.
+    #[cfg(test)]
     pub fn latest_with_all_guest_counters(
         &self,
         counter_ids: &[u16],
@@ -1659,11 +1671,13 @@ impl FrameProfiler {
     }
 
     /// Number of samples currently retained in the rolling history.
+    #[cfg(test)]
     pub fn history_len(&self) -> usize {
         self.samples.len()
     }
 
     /// Export the rolling history as a wide CSV for offline diagnosis.
+    #[cfg(test)]
     pub fn history_csv(&self) -> String {
         let mut out = String::new();
         push_history_csv_header(&mut out);
@@ -2357,6 +2371,8 @@ fn draw_budget_line(ui: &egui::Ui, rect: egui::Rect, max_ms: f32, budget: f32, l
     );
 }
 
+#[cfg(test)]
+
 fn push_history_csv_header(out: &mut String) {
     out.push_str(
         "index,sample_serial,host_dt_ms,total_ms,input_ms,emu_ms,audio_ms,cmd_log_ms,\
@@ -2390,6 +2406,8 @@ fn push_history_csv_header(out: &mut String) {
     out.push('\n');
 }
 
+#[cfg(test)]
+
 fn push_csv_metric_header(out: &mut String, prefix: &str, id: usize, name: &str, suffix: &str) {
     let _ = write!(
         out,
@@ -2397,6 +2415,8 @@ fn push_csv_metric_header(out: &mut String, prefix: &str, id: usize, name: &str,
         name = csv_identifier(name)
     );
 }
+
+#[cfg(test)]
 
 fn csv_identifier(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len().max(1));
@@ -2418,6 +2438,8 @@ fn csv_identifier(raw: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
 
 fn push_history_csv_sample(out: &mut String, index: usize, sample: FrameProfileSample) {
     let _ = write!(out, "{index}");
@@ -2497,17 +2519,25 @@ fn push_history_csv_sample(out: &mut String, index: usize, sample: FrameProfileS
     out.push('\n');
 }
 
+#[cfg(test)]
+
 fn push_csv_display(out: &mut String, value: impl std::fmt::Display) {
     let _ = write!(out, ",{value}");
 }
+
+#[cfg(test)]
 
 fn push_csv_f32_3(out: &mut String, value: f32) {
     let _ = write!(out, ",{value:.3}");
 }
 
+#[cfg(test)]
+
 fn push_csv_f32_1(out: &mut String, value: f32) {
     let _ = write!(out, ",{value:.1}");
 }
+
+#[cfg(test)]
 
 fn push_csv_f32_0(out: &mut String, value: f32) {
     let _ = write!(out, ",{value:.0}");
