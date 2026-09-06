@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add RAM-word watches to headless route logs for profiling unmodified games.
 - Show game-library subfolders as expandable rows, collapsed at startup, with
   indented contents and game counts. Refresh preserves open folders and selection.
 - Keep same-ID disc copies individually selectable and launch the exact file
