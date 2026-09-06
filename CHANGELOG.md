@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Show game-library subfolders as expandable rows, collapsed at startup, with
+  indented contents and game counts. Refresh preserves open folders and selection.
+- Keep same-ID disc copies individually selectable and launch the exact file
+  chosen in the library.
+
 ## Source 2026.09.05
 
 This source snapshot is tagged `source-2026.09.05`. Download versions are

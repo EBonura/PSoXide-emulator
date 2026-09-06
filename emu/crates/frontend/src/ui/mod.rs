@@ -146,6 +146,10 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.pin_save_state_as_top(slot);
             MenuOutcome::None
         }
+        ToggleLibraryFolder(folder) => {
+            state.menu.toggle_library_folder(&folder);
+            MenuOutcome::None
+        }
         LaunchGame(id) => {
             // Game-launch rebuilds Bus + Cpu from scratch. Close
             // the Menu on success so the user sees the freshly-

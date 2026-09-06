@@ -34,6 +34,14 @@ The optional `mcp` feature enables the native debugging server. Browser code
 remains under `emu/crates/frontend`; it does not depend on the editor.
 BIOS and game images are supplied locally and are not included.
 
+## Game library
+
+Choose your games directory in Settings. The Games menu follows its subfolders;
+folders start collapsed each time you launch PSoXide. Click a folder or press
+Enter to expand it. Contents are indented, including nested folders.
+Use Refresh library after moving or adding games. Keep each CUE beside its
+BIN files when organizing discs.
+
 ## Source dependencies
 
 `components.lock.json` pins the SDK by full Git commit. `make bootstrap`

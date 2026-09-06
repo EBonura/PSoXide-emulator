@@ -1465,38 +1465,24 @@ impl AppState {
         Some(repo_root.join("editor/projects"))
     }
 
-    /// Project the current library into the Menu's Games + Examples +
-    /// Projects columns. Three passes:
-    ///
-    /// 1. Walk every CUE entry and parse it to find its primary
-    ///    (data-track) BIN. Build a map
-    ///    `absolute_bin_path → (cue_title, cue_id)` so each BIN
-    ///    the CUE owns shows up with the CUE's friendly filename
-    ///    as its title (e.g. the disc's own name instead of
-    ///    the raw PVD ID "SCUS-94900"), and under the CUE's stable
-    ///    game ID so savestates key off the disc identity rather
-    ///    than the BIN byte hash alone.
-    /// 2. Walk every entry. SDK examples and project builds launch
-    ///    from their CUEs; their EXE/BIN siblings are intermediates.
-    ///    Retail BIN entries still use a CUE title/id when one owns
-    ///    them, and retail CUE entries remain hidden from Games.
-    /// 3. Alphabetise each column.
-    ///
-    /// Result: the title shows once, under its friendly
-    /// title, and clicking it launches the BIN.
+    /// Build menu rows from the scanned library. CUEs supply disc titles,
+    /// launch paths and folders; their BINs are not separate menu entries.
+    /// Path-qualified launch tokens distinguish copies with the same disc ID,
+    /// while saves continue to use the underlying library entry's stable ID.
     pub fn refresh_menu_library(&mut self) {
         use std::collections::{HashMap, HashSet};
 
         let sdk_examples_root = self.resolve_sdk_examples_dir().filter(|p| p.exists());
+        let game_root = PathBuf::from(self.settings.paths.game_library.trim());
 
-        // Pass 1: map "BIN path" → (CUE-derived title, CUE id).
-        let mut cue_owns_bin: HashMap<PathBuf, (String, String)> = HashMap::new();
+        // Keep each disc under its CUE directory, even when its BIN is elsewhere.
+        let mut cue_owns_bin: HashMap<PathBuf, (String, PathBuf)> = HashMap::new();
         for e in &self.library.entries {
             if e.kind != GameKind::DiscCue {
                 continue;
             }
             if let Some(bin) = psoxide_settings::library::primary_bin_from_cue(&e.path) {
-                cue_owns_bin.insert(bin, (e.title.clone(), e.id.clone()));
+                cue_owns_bin.insert(bin, (e.title.clone(), e.path.clone()));
             }
         }
 
@@ -1504,7 +1490,7 @@ impl AppState {
         let mut games: Vec<MenuLibraryItem> = Vec::new();
         let mut examples: Vec<MenuLibraryItem> = Vec::new();
         let mut projects: Vec<MenuLibraryItem> = Vec::new();
-        let mut cue_already_listed: std::collections::HashSet<String> =
+        let mut cue_already_listed: std::collections::HashSet<PathBuf> =
             std::collections::HashSet::new();
         let project_root = self.resolve_editor_projects_dir().filter(|p| p.exists());
 
@@ -1530,6 +1516,7 @@ impl AppState {
             if is_sdk_example {
                 match e.kind {
                     GameKind::DiscCue => examples.push(MenuLibraryItem {
+                        folder: std::path::PathBuf::new(),
                         id: path_launch_id(&e.path),
                         title: e.title.clone(),
                         subtitle: format_subtitle(e),
@@ -1567,21 +1554,24 @@ impl AppState {
                     {
                         continue;
                     }
-                    // If a CUE owns this BIN, use the CUE's
-                    // friendly title + stable ID. Also dedup: the
-                    // *first* BIN of a CUE wins; subsequent BINs
-                    // (multi-disc sets not yet modelled) are
-                    // hidden to keep the list clean.
-                    let (title, id) = if let Some((cue_title, cue_id)) = cue_owns_bin.get(&e.path) {
-                        if !cue_already_listed.insert(cue_id.clone()) {
-                            continue;
-                        }
-                        (cue_title.clone(), cue_id.clone())
-                    } else {
-                        (e.title.clone(), e.id.clone())
-                    };
+                    // Launch by path so copies with the same disc ID in
+                    // different folders remain individually selectable.
+                    let (title, launch_path) =
+                        if let Some((cue_title, cue_path)) = cue_owns_bin.get(&e.path) {
+                            if !cue_already_listed.insert(cue_path.clone()) {
+                                continue;
+                            }
+                            (cue_title.clone(), cue_path.as_path())
+                        } else {
+                            (e.title.clone(), e.path.as_path())
+                        };
                     games.push(MenuLibraryItem {
-                        id,
+                        folder: launch_path
+                            .parent()
+                            .and_then(|parent| parent.strip_prefix(&game_root).ok())
+                            .unwrap_or_else(|| std::path::Path::new(""))
+                            .to_path_buf(),
+                        id: path_launch_id(launch_path),
                         title,
                         subtitle: format_subtitle(e),
                         burnable: false,
@@ -1596,6 +1586,7 @@ impl AppState {
                         continue;
                     } else {
                         examples.push(MenuLibraryItem {
+                            folder: std::path::PathBuf::new(),
                             id: e.id.clone(),
                             title: e.title.clone(),
                             subtitle: format_subtitle(e),
@@ -1631,6 +1622,7 @@ impl AppState {
                 continue;
             }
             games.push(MenuLibraryItem {
+                folder: std::path::PathBuf::new(),
                 id: disc.id.to_string(),
                 title: disc.title.to_string(),
                 subtitle: disc.subtitle.to_string(),
@@ -1643,6 +1635,7 @@ impl AppState {
         #[cfg(target_arch = "wasm32")]
         for disc in crate::web_stream::DISCS {
             games.push(MenuLibraryItem {
+                folder: std::path::PathBuf::new(),
                 id: disc.id.to_string(),
                 title: disc.title.to_string(),
                 subtitle: disc.subtitle.to_string(),
@@ -1653,6 +1646,7 @@ impl AppState {
         #[cfg(target_arch = "wasm32")]
         for (id, title, subtitle) in &self.web_games {
             games.push(MenuLibraryItem {
+                folder: std::path::PathBuf::new(),
                 id: id.clone(),
                 title: title.clone(),
                 subtitle: subtitle.clone(),
@@ -2897,6 +2891,7 @@ fn public_example_source_items(
                 continue;
             }
             items.push(MenuLibraryItem {
+                folder: std::path::PathBuf::new(),
                 id: format!("example-source:{name}"),
                 title: name.to_string(),
                 subtitle: "not built".to_string(),
@@ -2935,6 +2930,7 @@ fn merge_baked_examples(
             continue;
         }
         let item = MenuLibraryItem {
+            folder: std::path::PathBuf::new(),
             id: baked.id.to_string(),
             title: baked.title.to_string(),
             subtitle: baked.subtitle.to_string(),
@@ -3541,6 +3537,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn library_keeps_same_id_discs_in_their_own_cue_folders() {
+        let root = frontend_test_temp_dir("library-folders");
+        let games = root.join("games");
+        for folder in ["A", "B"] {
+            let directory = games.join(folder);
+            std::fs::create_dir_all(directory.join("data")).unwrap();
+            std::fs::write(directory.join("data/disc.bin"), vec![0u8; 2352 * 20]).unwrap();
+            std::fs::write(
+                directory.join("game.cue"),
+                "FILE \"data/disc.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n",
+            )
+            .unwrap();
+        }
+        let mut state = AppState::with_config_dir(Some(root.join("config")));
+        state.settings.paths.game_library = games.to_string_lossy().into_owned();
+        state.library.scan(&games).unwrap();
+        let cues: Vec<_> = state
+            .library
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == GameKind::DiscCue)
+            .collect();
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].id, cues[1].id);
+        state.refresh_menu_library();
+        for folder in ["A", "B"] {
+            state.menu.toggle_library_folder(Path::new(folder));
+            state.menu.update(&ui::menu::MenuInput {
+                down: true,
+                ..Default::default()
+            });
+            let expected = path_launch_id(&games.join(folder).join("game.cue"));
+            assert_eq!(
+                state.menu.selected_action(),
+                Some(&ui::menu::MenuAction::LaunchGame(expected.clone()))
+            );
+            assert_eq!(
+                library_entry_for_launch_id(&state.library.entries, &expected)
+                    .unwrap()
+                    .path,
+                games.join(folder).join("game.cue")
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn ui_zoom_factor_clamps_to_supported_range() {
         assert_eq!(ui_zoom_factor(0), 0.5);
         assert_eq!(ui_zoom_factor(50), 0.5);
@@ -3788,6 +3831,7 @@ mod baked_example_merge_tests {
 
     fn item(title: &str, subtitle: &str, launchable: bool) -> MenuLibraryItem {
         MenuLibraryItem {
+            folder: std::path::PathBuf::new(),
             id: format!("scanned:{title}"),
             title: title.to_string(),
             subtitle: subtitle.to_string(),
