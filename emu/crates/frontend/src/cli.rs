@@ -269,6 +269,10 @@ pub struct LaunchArgs {
     /// an input-tape replay.
     #[arg(long)]
     pub route_log: Option<PathBuf>,
+    /// Append a RAM word to each route row (repeat for multiple addresses).
+    /// Reads bypass the guest bus, leaving emulated timing unchanged.
+    #[arg(long, requires = "route_log", value_parser = parse_ram_watch_address)]
+    pub route_watch_u32: Vec<u32>,
     /// Write an emulator-owned GP0 command census per route tick. Command
     /// capture is drained after every tick, so long input-tape replays can
     /// measure draw composition without retaining the whole command stream.
@@ -997,13 +1001,17 @@ fn run_headless_launch(
             let file = std::fs::File::create(path)
                 .map_err(|e| format!("create route log {}: {e}", path.display()))?;
             let mut writer = std::io::BufWriter::new(file);
-            writeln!(
+            write!(
                 writer,
                 "route_tick,tape_frame,cpu_tick,bus_cycles,cpu_tick_delta,bus_cycle_delta,display_x,display_y,display_width,display_height,display_start_changed,port1_polls,icache_refill_events_delta,icache_refill_words_delta,icache_refill_stall_cycles_delta"
             )
             .map_err(|e| format!("write route log {}: {e}", path.display()))?;
+            for address in &args.route_watch_u32 {
+                write!(writer, ",ram_{address:08x}").map_err(|e| e.to_string())?;
+            }
+            writeln!(writer).map_err(|e| e.to_string())?;
             let area = bus.gpu.display_area();
-            writeln!(
+            write!(
                 writer,
                 "0,0,{},{},0,0,{},{},{},{},0,{},0,0,0",
                 cpu.tick(),
@@ -1015,6 +1023,8 @@ fn run_headless_launch(
                 bus.port1_completed_polls(),
             )
             .map_err(|e| format!("write route log {}: {e}", path.display()))?;
+            write_route_ram_words(&mut writer, bus.ram(), &args.route_watch_u32)
+                .map_err(|e| e.to_string())?;
             Some(writer)
         }
         None => None,
@@ -1462,7 +1472,7 @@ fn run_headless_launch(
                 let cpu_tick = cpu.tick();
                 let bus_cycles = bus.cycles();
                 let icache_profile = cpu.instruction_cache_profile();
-                writeln!(
+                write!(
                     writer,
                     "{route_ticks},{tape_cursor},{cpu_tick},{bus_cycles},{},{},{},{},{},{},{display_start_changed},{},{},{},{}",
                     cpu_tick.saturating_sub(route_last_cpu_tick),
@@ -1483,6 +1493,8 @@ fn run_headless_launch(
                         .saturating_sub(route_last_icache_profile.refill_stall_cycles),
                 )
                 .map_err(|e| e.to_string())?;
+                write_route_ram_words(writer, bus.ram(), &args.route_watch_u32)
+                    .map_err(|e| e.to_string())?;
                 route_last_display_start = display_start;
                 route_last_cpu_tick = cpu_tick;
                 route_last_bus_cycles = bus_cycles;
@@ -2639,6 +2651,7 @@ fn validation_launch_args(
         counter_log: None,
         profile_log: None,
         route_log: None,
+        route_watch_u32: Vec::new(),
         gpu_frame_stats_log: None,
         route_screenshot_dir: None,
         route_screenshot_interval: 3_000,
@@ -2796,6 +2809,27 @@ fn parse_u32_auto(text: &str) -> Result<u32, String> {
         text.parse::<u32>()
             .map_err(|_| format!("invalid address `{text}`"))
     }
+}
+
+fn parse_ram_watch_address(text: &str) -> Result<u32, String> {
+    let address = parse_u32_auto(text)?;
+    if !matches!(address >> 21, 0 | 0x400 | 0x500) || address & 3 != 0 {
+        return Err("expected an aligned word in physical RAM, KSEG0 RAM or KSEG1 RAM".into());
+    }
+    Ok(address)
+}
+
+fn write_route_ram_words(
+    writer: &mut impl Write,
+    ram: &[u8],
+    addresses: &[u32],
+) -> std::io::Result<()> {
+    for address in addresses {
+        let offset = (address & 0x1f_ffff) as usize;
+        let word = u32::from_le_bytes(ram[offset..offset + 4].try_into().unwrap());
+        write!(writer, ",{word}")?;
+    }
+    writeln!(writer)
 }
 
 fn active_pad_pulse_mask(pulses: &[PadPulse], route_tick: u64) -> u16 {
@@ -3461,6 +3495,36 @@ fn press_button_mask(name: &str) -> Option<u16> {
 #[cfg(test)]
 mod press_script_tests {
     use super::*;
+
+    #[test]
+    fn route_ram_watches_accept_only_aligned_ram_addresses() {
+        for address in ["0", "0x1ffffc", "0x80000000", "0x801ffffc", "0xa01ffffc"] {
+            assert!(parse_ram_watch_address(address).is_ok(), "{address}");
+        }
+        for address in [
+            "0x1ffffd",
+            "0x200000",
+            "0x80200000",
+            "0x1f801810",
+            "0xbfc00000",
+            "-1",
+        ] {
+            assert!(parse_ram_watch_address(address).is_err(), "{address}");
+        }
+        assert!(
+            Cli::try_parse_from(["frontend", "launch", "--route-watch-u32", "0x80000000"]).is_err()
+        );
+    }
+
+    #[test]
+    fn route_ram_watches_read_little_endian_words_through_ram_aliases() {
+        let mut ram = vec![0; 2 * 1024 * 1024];
+        ram[0..4].copy_from_slice(&[0x78, 0x56, 0x34, 0x12]);
+        ram[0x1ffffc..].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut output = Vec::new();
+        write_route_ram_words(&mut output, &ram, &[0, 0x80000000, 0xa01ffffc]).unwrap();
+        assert_eq!(output, b",305419896,305419896,4294967295\n");
+    }
 
     #[test]
     fn launch_parses_independent_memory_cards_for_both_ports() {

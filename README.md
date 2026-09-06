@@ -30,6 +30,12 @@ Headless verification uses the same core:
 ./target/release/frontend launch --path /path/to/game.cue --steps 8000000 --dump-hash
 ```
 
+For recorded runs, `--route-log route.csv` measures emulated cycles and display
+flips. Add `--route-watch-u32 0x80010000` to sample an aligned RAM word in each
+row without changing guest timing; repeat it for additional addresses. Resolve
+addresses from the exact game's link map. A loading-state word can distinguish
+map transitions from slow gameplay without filtering by frame rate.
+
 The optional `mcp` feature enables the native debugging server. Browser code
 remains under `emu/crates/frontend`; it does not depend on the editor.
 BIOS and game images are supplied locally and are not included.
