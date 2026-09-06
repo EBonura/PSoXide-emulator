@@ -11,8 +11,8 @@
 //! (Projects + Create are editor/native-only). The debug sidebar is
 //! toggled from the toolbar, not the menu.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use egui::{Align2, FontId, Pos2, Rect, Vec2};
 
@@ -23,6 +23,7 @@ const CATEGORY_SPACING: f32 = 100.0;
 const ICON_SIZE_ACTIVE: f32 = 32.0;
 const ICON_SIZE_INACTIVE: f32 = 20.0;
 const ITEM_HEIGHT: f32 = 40.0;
+const FOLDER_INDENT: f32 = 18.0;
 /// Hard ceiling on item-row width (huge libraries / long paths elide past it).
 const ITEM_MAX_WIDTH: f32 = 820.0;
 /// Floor so short categories (System, Settings) don't shrink to a sliver.
@@ -90,6 +91,8 @@ pub enum MenuAction {
     /// stable library ID; authored project builds use a path-qualified
     /// token so projects sharing the same PSX volume ID remain distinct.
     LaunchGame(String),
+    /// Expand or collapse a directory in the Games list.
+    ToggleLibraryFolder(PathBuf),
     /// Open the CD burn submenu for a launchable example/project disc.
     OpenBurnMenu(String),
     /// Re-walk the configured library root and refresh
@@ -236,6 +239,7 @@ pub struct MenuInput {
 /// fit the same shape at a small allocation cost -- the whole
 /// category tree is rebuilt at most a few times a session.
 struct MenuItem {
+    depth: usize,
     label: String,
     action: MenuAction,
     burn_action: Option<MenuAction>,
@@ -262,6 +266,8 @@ impl Category {
 }
 
 pub struct MenuState {
+    games: Vec<LibraryItem>,
+    expanded_folders: HashSet<PathBuf>,
     pub open: bool,
     category_index: usize,
     item_index: usize,
@@ -352,8 +358,9 @@ impl Default for MenuState {
 /// from the tests' perspective).
 #[derive(Debug, Clone)]
 pub struct LibraryItem {
-    /// Stable game ID (16-hex-char fingerprint). Payload of
-    /// [`MenuAction::LaunchGame`] when the user confirms.
+    /// Directory relative to the games root; empty for items at the root.
+    pub folder: PathBuf,
+    /// Launch token passed to [`MenuAction::LaunchGame`].
     pub id: String,
     /// Main label -- typically the PVD volume identifier or the
     /// file stem.
@@ -400,7 +407,7 @@ impl MenuState {
         // cached entries. A fresh install sees placeholder "No
         // games found -- run Refresh library" rows.
         let categories = vec![
-            build_games_category(&[]),
+            build_games_category(&[], &HashSet::new()),
             build_examples_category(&[]),
             // Projects are editor-authored and filesystem-backed; the web build
             // has neither, so the category is dropped there.
@@ -420,6 +427,7 @@ impl MenuState {
                 name: "Quit",
                 icon: icons::POWER,
                 items: vec![MenuItem {
+                    depth: 0,
                     label: "Quit PSoXide".to_string(),
                     action: MenuAction::Quit,
                     burn_action: None,
@@ -429,6 +437,8 @@ impl MenuState {
         ];
 
         Self {
+            games: Vec::new(),
+            expanded_folders: HashSet::new(),
             open: true,
             category_index: 0,
             item_index: 0,
@@ -471,8 +481,17 @@ impl MenuState {
             .map(|c| c.name)
             .unwrap_or("");
 
+        let selected_action = self
+            .categories
+            .get(self.category_index)
+            .and_then(|category| category.items.get(self.item_index))
+            .filter(|_| current_cat_name != "Games" || !self.games.is_empty())
+            .map(|item| item.action.clone());
+        self.games = games.to_vec();
+        self.expanded_folders
+            .retain(|folder| games.iter().any(|game| game.folder.starts_with(folder)));
         if let Some(games_cat) = self.categories.first_mut() {
-            *games_cat = build_games_category(games);
+            *games_cat = build_games_category(&self.games, &self.expanded_folders);
         }
         if let Some(examples_cat) = self.categories.get_mut(1) {
             *examples_cat = build_examples_category(examples);
@@ -496,11 +515,42 @@ impl MenuState {
         } else {
             self.category_index = 0;
         }
+        if let Some(index) = self.categories[self.category_index]
+            .items
+            .iter()
+            .position(|item| Some(&item.action) == selected_action.as_ref())
+        {
+            self.item_index = index;
+        }
         // Clamp item index to the new category bounds.
         let item_count = self.categories[self.category_index].items.len();
         if self.item_index >= item_count {
             self.item_index = item_count.saturating_sub(1);
         }
+    }
+
+    /// Folder expansion lasts for this session; newly found folders start closed.
+    pub fn toggle_library_folder(&mut self, folder: &Path) {
+        let action = MenuAction::ToggleLibraryFolder(folder.to_path_buf());
+        if !self.categories[0]
+            .items
+            .iter()
+            .any(|item| item.action == action)
+        {
+            return;
+        }
+        if !self.expanded_folders.remove(folder) {
+            self.expanded_folders.insert(folder.to_path_buf());
+        }
+        self.categories[0] = build_games_category(&self.games, &self.expanded_folders);
+        if self.category_index == 0 {
+            self.item_index = self.categories[0]
+                .items
+                .iter()
+                .position(|item| item.action == action)
+                .unwrap_or(0);
+        }
+        self.marquee_t = 0.0;
     }
 
     /// Rebuild categories with a fresh "Run"/"Pause" label. Called
@@ -990,7 +1040,18 @@ impl MenuState {
                 .x
         };
         let needed = cat.items.iter().fold(0.0_f32, |acc, item| {
-            let label_w = measure(&item.label, label_font.clone());
+            let label_w = measure(&item.label, label_font.clone())
+                + item.depth as f32 * FOLDER_INDENT
+                + if cat.name == "Games"
+                    && matches!(
+                        item.action,
+                        MenuAction::ToggleLibraryFolder(_) | MenuAction::LaunchGame(_)
+                    )
+                {
+                    18.0
+                } else {
+                    0.0
+                };
             let value_w = item
                 .value
                 .as_deref()
@@ -1106,7 +1167,31 @@ impl MenuState {
             let launch_action = matches!(item.action, MenuAction::LaunchGame(_))
                 .then_some(&item.action)
                 .filter(|_| item.burn_action.is_some());
-            let content_left = items_x + 14.0;
+            let mut content_left = items_x + 14.0 + item.depth as f32 * FOLDER_INDENT;
+            if let MenuAction::ToggleLibraryFolder(folder) = &item.action {
+                let center = Pos2::new(content_left + 4.0, y + ITEM_HEIGHT / 2.0);
+                let points = if self.expanded_folders.contains(folder) {
+                    vec![
+                        center + Vec2::new(-4.0, -2.0),
+                        center + Vec2::new(4.0, -2.0),
+                        center + Vec2::new(0.0, 3.0),
+                    ]
+                } else {
+                    vec![
+                        center + Vec2::new(-2.0, -4.0),
+                        center + Vec2::new(-2.0, 4.0),
+                        center + Vec2::new(3.0, 0.0),
+                    ]
+                };
+                painter.add(egui::Shape::convex_polygon(
+                    points,
+                    fade(theme::MENU_TEXT_DIM),
+                    egui::Stroke::NONE,
+                ));
+                content_left += 18.0;
+            } else if cat.name == "Games" && matches!(item.action, MenuAction::LaunchGame(_)) {
+                content_left += 18.0;
+            }
             let avail_right = items_x + item_width - 12.0 - action_count as f32 * ROW_ACTION_WIDTH;
 
             let value_galley = item.value.as_deref().filter(|v| !v.is_empty()).map(|val| {
@@ -2391,6 +2476,7 @@ fn build_settings_category() -> Category {
         icon: icons::HARD_DRIVE,
         items: vec![
             MenuItem {
+                depth: 0,
                 // Native picks a file path; the web build uploads the bytes.
                 label: if cfg!(target_arch = "wasm32") {
                     "Load BIOS file"
@@ -2403,6 +2489,7 @@ fn build_settings_category() -> Category {
                 value: Some("Missing".into()),
             },
             MenuItem {
+                depth: 0,
                 label: if cfg!(target_arch = "wasm32") {
                     "Load games folder"
                 } else {
@@ -2414,12 +2501,14 @@ fn build_settings_category() -> Category {
                 value: Some("Missing".into()),
             },
             MenuItem {
+                depth: 0,
                 label: "Menu opacity".into(),
                 action: MenuAction::CycleMenuOpacity,
                 burn_action: None,
                 value: Some("90%".into()),
             },
             MenuItem {
+                depth: 0,
                 label: "UI scale".into(),
                 action: MenuAction::CycleUiScale,
                 burn_action: None,
@@ -2429,12 +2518,14 @@ fn build_settings_category() -> Category {
             // previous visit (Chrome/Edge; no-op where unsupported).
             #[cfg(target_arch = "wasm32")]
             MenuItem {
+                depth: 0,
                 label: "Reconnect saved files".into(),
                 action: MenuAction::Reconnect,
                 burn_action: None,
                 value: None,
             },
             MenuItem {
+                depth: 0,
                 label: "About".into(),
                 action: MenuAction::ShowAbout,
                 burn_action: None,
@@ -2444,15 +2535,63 @@ fn build_settings_category() -> Category {
     }
 }
 
+#[derive(Default)]
+struct LibraryFolder<'a> {
+    children: BTreeMap<std::ffi::OsString, LibraryFolder<'a>>,
+    games: Vec<&'a LibraryItem>,
+    count: usize,
+}
+
+impl LibraryFolder<'_> {
+    fn append_rows(
+        &mut self,
+        path: &Path,
+        depth: usize,
+        expanded: &HashSet<PathBuf>,
+        items: &mut Vec<MenuItem>,
+    ) {
+        let mut children: Vec<_> = self.children.iter_mut().collect();
+        children.sort_by_key(|(name, _)| name.to_string_lossy().to_lowercase());
+        for (name, folder) in children {
+            let path = path.join(name);
+            items.push(MenuItem {
+                depth,
+                label: name.to_string_lossy().into_owned(),
+                action: MenuAction::ToggleLibraryFolder(path.clone()),
+                burn_action: None,
+                value: Some(format!(
+                    "{} {}",
+                    folder.count,
+                    if folder.count == 1 { "game" } else { "games" }
+                )),
+            });
+            if expanded.contains(&path) {
+                folder.append_rows(&path, depth + 1, expanded, items);
+            }
+        }
+        self.games.sort_by_key(|game| game.title.to_lowercase());
+        for game in &self.games {
+            items.push(MenuItem {
+                depth,
+                label: game.title.clone(),
+                action: MenuAction::LaunchGame(game.id.clone()),
+                burn_action: None,
+                value: (!game.subtitle.is_empty()).then(|| game.subtitle.clone()),
+            });
+        }
+    }
+}
+
 /// Construct the Games category from a library snapshot. Empty
 /// libraries get a helpful placeholder item so the user
 /// understands the category isn't broken, just unpopulated.
-fn build_games_category(games: &[LibraryItem]) -> Category {
+fn build_games_category(games: &[LibraryItem], expanded: &HashSet<PathBuf>) -> Category {
     let mut items = Vec::with_capacity(games.len() + 2);
     // Web: a quick "load your own game file" entry at the top of Games (the
     // browser has no scanned library folder). Reuses the Settings action.
     #[cfg(target_arch = "wasm32")]
     items.push(MenuItem {
+        depth: 0,
         label: "Load games folder".into(),
         action: MenuAction::ChooseGamesPath,
         burn_action: None,
@@ -2460,27 +2599,30 @@ fn build_games_category(games: &[LibraryItem]) -> Category {
     });
     if games.is_empty() {
         items.push(MenuItem {
+            depth: 0,
             label: "No games found yet".into(),
             action: MenuAction::RescanLibrary,
             burn_action: None,
             value: Some("Refresh".into()),
         });
     } else {
-        for g in games {
-            items.push(MenuItem {
-                label: g.title.clone(),
-                action: MenuAction::LaunchGame(g.id.clone()),
-                burn_action: None,
-                value: if g.subtitle.is_empty() {
-                    None
-                } else {
-                    Some(g.subtitle.clone())
-                },
-            });
+        let mut root = LibraryFolder::default();
+        for game in games {
+            let mut folder = &mut root;
+            folder.count += 1;
+            for part in game.folder.components() {
+                if let std::path::Component::Normal(name) = part {
+                    folder = folder.children.entry(name.to_owned()).or_default();
+                    folder.count += 1;
+                }
+            }
+            folder.games.push(game);
         }
+        root.append_rows(Path::new(""), 0, expanded, &mut items);
         // Always offer a rescan at the end of the Games list so the
         // primary entries stay grouped together.
         items.push(MenuItem {
+            depth: 0,
             label: "Refresh library".into(),
             action: MenuAction::RescanLibrary,
             burn_action: None,
@@ -2501,12 +2643,14 @@ fn build_examples_category(examples: &[LibraryItem]) -> Category {
     let mut items = Vec::with_capacity(examples.len() + 2);
     if examples.is_empty() {
         items.push(MenuItem {
+            depth: 0,
             label: "Build SDK examples".into(),
             action: MenuAction::BuildExamples,
             burn_action: None,
             value: Some("make examples".into()),
         });
         items.push(MenuItem {
+            depth: 0,
             label: "Refresh library".into(),
             action: MenuAction::RescanLibrary,
             burn_action: None,
@@ -2515,6 +2659,7 @@ fn build_examples_category(examples: &[LibraryItem]) -> Category {
     } else {
         for e in examples {
             items.push(MenuItem {
+                depth: 0,
                 label: e.title.clone(),
                 action: if e.launchable {
                     MenuAction::LaunchGame(e.id.clone())
@@ -2531,6 +2676,7 @@ fn build_examples_category(examples: &[LibraryItem]) -> Category {
             });
         }
         items.push(MenuItem {
+            depth: 0,
             label: "Refresh library".into(),
             action: MenuAction::RescanLibrary,
             burn_action: None,
@@ -2551,6 +2697,7 @@ fn build_projects_category(projects: &[LibraryItem]) -> Category {
     let mut items = Vec::with_capacity(projects.len() + 1);
     if projects.is_empty() {
         items.push(MenuItem {
+            depth: 0,
             label: "No project builds found".into(),
             action: MenuAction::RescanLibrary,
             burn_action: None,
@@ -2559,6 +2706,7 @@ fn build_projects_category(projects: &[LibraryItem]) -> Category {
     } else {
         for p in projects {
             items.push(MenuItem {
+                depth: 0,
                 label: p.title.clone(),
                 action: MenuAction::LaunchGame(p.id.clone()),
                 burn_action: p.burnable.then(|| MenuAction::OpenBurnMenu(p.id.clone())),
@@ -2570,6 +2718,7 @@ fn build_projects_category(projects: &[LibraryItem]) -> Category {
             });
         }
         items.push(MenuItem {
+            depth: 0,
             label: "Refresh library".into(),
             action: MenuAction::RescanLibrary,
             burn_action: None,
@@ -2592,6 +2741,7 @@ fn disabled_category(name: &'static str, icon: char) -> Category {
         name,
         icon,
         items: vec![MenuItem {
+            depth: 0,
             label: "Not available in the web build".into(),
             action: MenuAction::Noop,
             burn_action: None,
@@ -2619,24 +2769,28 @@ fn build_system_category(running: bool, save_count: usize) -> Category {
     };
     let items = vec![
         MenuItem {
+            depth: 0,
             label: run_label.into(),
             action: MenuAction::ToggleRun,
             burn_action: None,
             value: Some("Space".into()),
         },
         MenuItem {
+            depth: 0,
             label: "Step one instruction".into(),
             action: MenuAction::StepOne,
             burn_action: None,
             value: None,
         },
         MenuItem {
+            depth: 0,
             label: "Reset".into(),
             action: MenuAction::Reset,
             burn_action: None,
             value: None,
         },
         MenuItem {
+            depth: 0,
             // Web recordings reboot the game first (cold-boot tapes).
             label: if cfg!(target_arch = "wasm32") {
                 "Record input from boot"
@@ -2649,24 +2803,28 @@ fn build_system_category(running: bool, save_count: usize) -> Category {
             value: Some("F8".into()),
         },
         MenuItem {
+            depth: 0,
             label: "Load input replay".into(),
             action: MenuAction::LoadInputReplay,
             burn_action: None,
             value: None,
         },
         MenuItem {
+            depth: 0,
             label: "Fast boot discs".into(),
             action: MenuAction::ToggleFastBoot,
             burn_action: None,
             value: Some("On".into()),
         },
         MenuItem {
+            depth: 0,
             label: save_states_label,
             action: MenuAction::OpenSaveStates,
             burn_action: None,
             value: Some("F5/F7".into()),
         },
         MenuItem {
+            depth: 0,
             label: "Controls".into(),
             action: MenuAction::OpenControls,
             burn_action: None,
@@ -2686,6 +2844,7 @@ mod tests {
 
     fn dummy_item(id: &str, title: &str, sub: &str) -> LibraryItem {
         LibraryItem {
+            folder: PathBuf::new(),
             id: id.into(),
             title: title.into(),
             subtitle: sub.into(),
@@ -2717,6 +2876,106 @@ mod tests {
             ..Default::default()
         };
         let _ = context.run(input, |context| menu.draw(context, 1.0, None));
+    }
+
+    #[test]
+    fn nested_library_folders_start_closed_and_launch_the_selected_game() {
+        let mut game = dummy_item("hl", "Half-Life", "460 MiB");
+        game.folder = PathBuf::from("Bonnie Studios/Ports");
+        let root_game = dummy_item("root", "Root game", "");
+        let games = [game, root_game];
+        let mut menu = MenuState::new();
+        menu.set_library(&games, &[], &[]);
+        assert_eq!(
+            menu.categories[0]
+                .items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Bonnie Studios", "Root game", "Refresh library"]
+        );
+        let action = menu.update(&MenuInput {
+            confirm: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            action,
+            Some(MenuAction::ToggleLibraryFolder("Bonnie Studios".into()))
+        );
+        menu.toggle_library_folder(Path::new("Bonnie Studios"));
+        assert_eq!(menu.categories[0].items[1].label, "Ports");
+        assert_eq!(menu.categories[0].items[1].depth, 1);
+        assert!(!menu.categories[0]
+            .items
+            .iter()
+            .any(|item| item.label == "Half-Life"));
+        menu.toggle_library_folder(Path::new("Bonnie Studios/Ports"));
+        assert_eq!(menu.categories[0].items[2].depth, 2);
+        menu.item_index = 2;
+        assert_eq!(
+            menu.update(&MenuInput {
+                confirm: true,
+                ..Default::default()
+            }),
+            Some(MenuAction::LaunchGame("hl".into()))
+        );
+        menu.set_library(&games, &[], &[]);
+        assert_eq!(
+            menu.selected_action(),
+            Some(&MenuAction::LaunchGame("hl".into()))
+        );
+        menu.toggle_library_folder(Path::new("Bonnie Studios"));
+        assert_eq!(menu.item_index, 0);
+        assert_eq!(menu.categories[0].items.len(), 3);
+        let mut fresh = MenuState::new();
+        fresh.set_library(&games, &[], &[]);
+        assert_eq!(fresh.categories[0].items.len(), 3);
+    }
+
+    #[test]
+    fn same_named_subfolders_expand_independently_and_refresh_keeps_selection() {
+        let mut a = dummy_item("a", "Game A", "");
+        a.folder = "A/Tests".into();
+        let mut b = dummy_item("b", "Game B", "");
+        b.folder = "B/Tests".into();
+        let mut menu = MenuState::new();
+        menu.set_library(&[a.clone(), b.clone()], &[], &[]);
+        menu.toggle_library_folder(Path::new("A"));
+        menu.toggle_library_folder(Path::new("A/Tests"));
+        menu.toggle_library_folder(Path::new("B"));
+        assert!(menu.categories[0]
+            .items
+            .iter()
+            .any(|item| item.label == "Game A"));
+        assert!(!menu.categories[0]
+            .items
+            .iter()
+            .any(|item| item.label == "Game B"));
+        menu.item_index = 2;
+        menu.set_library(&[a, b, dummy_item("new", "New root game", "")], &[], &[]);
+        assert_eq!(
+            menu.selected_action(),
+            Some(&MenuAction::LaunchGame("a".into()))
+        );
+        menu.set_library(&[], &[], &[]);
+        assert!(menu.expanded_folders.is_empty());
+        assert_eq!(menu.item_index, 0);
+    }
+
+    #[test]
+    fn clicking_a_folder_queues_expansion_instead_of_a_launch() {
+        let mut game = dummy_item("hl", "Half-Life", "");
+        game.folder = "Bonnie Studios".into();
+        let mut menu = MenuState::new();
+        menu.set_library(&[game], &[], &[]);
+        draw_pointer_click(
+            &mut menu,
+            Pos2::new(480.0, 720.0 * 0.38 + ICON_SIZE_ACTIVE + 64.0),
+        );
+        assert_eq!(
+            menu.take_pending_pointer_action(),
+            Some(MenuAction::ToggleLibraryFolder("Bonnie Studios".into()))
+        );
     }
 
     #[test]
