@@ -97,6 +97,9 @@ pub enum ValidationArtifact {
         /// Use the embedded editor playtest fast-boot path.
         #[serde(default)]
         embedded_playtest: bool,
+        /// Force the real BIOS boot path.
+        #[serde(default)]
+        bios_boot: bool,
     },
     /// Already-built focused example image.
     Example {

@@ -1,5 +1,10 @@
 # Firmware cleanup, 2026-09-15
 
+Update, later the same day: firmware loading was restored (user-supplied
+BIOS path via settings or `PSOXIDE_BIOS`) because retail discs need it. The
+audit tool, the zero-filled example headers and the no-bundled-firmware
+policy below still apply.
+
 ## Repository ownership
 
 - `EBonura/PSoXide`: SDK, shared formats and disc mastering.

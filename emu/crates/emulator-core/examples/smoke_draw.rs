@@ -1,7 +1,10 @@
-//! Run a homebrew PSX-EXE and report GPU/IRQ state.
-//! Set PSOXIDE_EXE and optionally pass the instruction count as argv[1].
+//! Quick diagnostic: run BIOS for N instructions (default 5M; pass a
+//! larger number as argv[1]) and report GPU/IRQ state. Useful for
+//! verifying Phase 4b/5b didn't silently break anything and whether
+//! the BIOS has reached the screen-fill phase yet.
 
 use emulator_core::{Bus, Cpu};
+use std::path::PathBuf;
 
 fn main() {
     let n: u64 = std::env::args()
@@ -9,13 +12,17 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5_000_000);
 
-    let mut bus = Bus::new_without_bios();
+    let bios_path = std::env::var("PSOXIDE_BIOS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("bios/SCPH1001.BIN"));
+    let bios = std::fs::read(&bios_path).expect("read BIOS");
+    let mut bus = Bus::new(bios).expect("bus");
     let mut cpu = Cpu::new();
 
-    // Side-load the executable through the built-in runtime.
-    {
-        let exe_path =
-            std::env::var("PSOXIDE_EXE").expect("set PSOXIDE_EXE to a homebrew executable");
+    // PSOXIDE_EXE=path.exe -- side-load a PSX-EXE, seeding the CPU
+    // to jump straight into the homebrew. BIOS stays resident in ROM
+    // so the homebrew's B(44h) FlushCache + BIOS syscalls still work.
+    if let Ok(exe_path) = std::env::var("PSOXIDE_EXE") {
         let raw = std::fs::read(&exe_path).expect("read PSOXIDE_EXE");
         let exe = psx_iso::Exe::parse(&raw).expect("parse PSX-EXE");
         bus.load_exe_payload(exe.load_addr, &exe.payload);

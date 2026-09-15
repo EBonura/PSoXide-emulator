@@ -38,8 +38,7 @@ map transitions from slow gameplay without filtering by frame rate.
 
 The optional `mcp` feature enables the native debugging server. Browser code
 remains under `emu/crates/frontend`; it does not depend on the editor.
-Homebrew EXEs and discs boot through the built-in runtime. No firmware image
-is required or accepted. Games that require an external BIOS are unsupported.
+BIOS and game images are supplied locally and are not included.
 
 ## Game library
 
@@ -76,9 +75,3 @@ substitute for original-console validation of SDK or game behavior.
 
 Source snapshot **2026.09.05**: Moved the emulator core and desktop/browser frontends into their own repository.
 See the [changelog](CHANGELOG.md) for the remaining changes.
-
-## Firmware policy
-
-PSoXide does not bundle or load external console firmware. Homebrew runs
-through the built-in emulator runtime. See the [cleanup audit](docs/firmware-cleanup.md)
-for the source, binary-header and history checks.
