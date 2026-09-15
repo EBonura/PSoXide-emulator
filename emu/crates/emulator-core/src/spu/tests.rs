@@ -869,6 +869,40 @@ fn reverb_address_wrap_below_base_matches_redux() {
 }
 
 #[test]
+fn reverb_address_wrap_closed_form_matches_redux_loops() {
+    // Reference: Redux's two while-loops, which the closed form replaces.
+    fn redux(start: i32, mut idx: i32) -> i32 {
+        while idx > 0x3FFFF {
+            idx = start + (idx - 0x40000);
+        }
+        while idx < start {
+            idx = 0x3FFFF - (start - idx);
+        }
+        idx.clamp(0, SPU_RAM_HALFWORDS as i32 - 1)
+    }
+    let mut s = Spu::new();
+    // 0xFFFE is where psx-spu's init parks the work area: eight halfwords at
+    // the top of RAM, where the loops ran thousands of times per tap.
+    for base in [0x1000u16, 0xE128, 0xFFFE] {
+        s.write16(REVERB_BASE, base);
+        let start = s.reverb_base_halfword() as i32;
+        for curr in [start, start + 3, 0x3FFFF] {
+            s.reverb.curr_addr = curr as u32;
+            for offset in [-0x4000, -0x11, -1, 0, 1, 0x11, 0x3FFF, 0x7FFF] {
+                for extra in [0, 1, -1] {
+                    let idx = curr + offset * 4 + extra;
+                    assert_eq!(
+                        s.reverb_ram_index(offset, extra),
+                        redux(start, idx) as usize,
+                        "base {base:#x} curr {curr:#x} offset {offset} extra {extra}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn reverb_network_turns_bus_input_into_wet_output() {
     let mut s = Spu::new();
     s.write16(REVERB_BASE, 0x1000);

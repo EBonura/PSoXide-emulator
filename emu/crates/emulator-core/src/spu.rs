@@ -1914,12 +1914,19 @@ impl Spu {
         // Redux wraps the reverb work address with two while-loops, not
         // a clean modulo. The below-start case is subtly off by one
         // (`0x3ffff - delta`), so keep that quirk for parity.
+        // Closed form of those loops: each above-end pass subtracts the work
+        // area's size, each below-start pass adds one less than it. A work
+        // area parked at the top of RAM (psx-spu's init writes mBASE=0xFFFE,
+        // eight halfwords) turned the loops into thousands of iterations per
+        // tap per sample.
+        let span = 0x40000 - start;
         let mut idx = self.reverb.curr_addr as i32 + offset.saturating_mul(4) + extra_halfwords;
-        while idx > 0x3FFFF {
-            idx = start + (idx - 0x40000);
+        if idx > 0x3FFFF {
+            idx -= span * ((idx - 0x3FFFF + span - 1) / span);
         }
-        while idx < start {
-            idx = 0x3FFFF - (start - idx);
+        if idx < start {
+            let step = (span - 1).max(1);
+            idx += step * ((start - idx + step - 1) / step);
         }
         idx.clamp(0, SPU_RAM_HALFWORDS as i32 - 1) as usize
     }
