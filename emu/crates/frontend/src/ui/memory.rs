@@ -169,7 +169,7 @@ fn draw_hex_dump(
     pc: u32,
 ) {
     let Some(bus) = bus else {
-        ui.monospace("(no BIOS loaded - Bus unavailable)");
+        ui.monospace("(no game loaded - Bus unavailable)");
         return;
     };
 
@@ -224,7 +224,7 @@ fn draw_visual_map(
     pc: u32,
 ) {
     let Some(bus) = bus else {
-        ui.monospace("(no BIOS loaded - Bus unavailable)");
+        ui.monospace("(no game loaded - Bus unavailable)");
         return;
     };
 
@@ -583,7 +583,7 @@ fn draw_disasm(
     pc: u32,
 ) {
     let Some(bus) = bus else {
-        ui.monospace("(no BIOS loaded - Bus unavailable)");
+        ui.monospace("(no game loaded - Bus unavailable)");
         return;
     };
 

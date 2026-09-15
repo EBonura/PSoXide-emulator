@@ -550,6 +550,12 @@ impl Translator {
         prim_flags: u32,
         kind: BlendKind,
     ) {
+        // Match the CPU rasterizer and PS1 per-triangle extent rejection.
+        // Quad halves are checked independently. Textured rectangles reach
+        // this helper only after splitting into at most 256-pixel UV spans.
+        if triangle_exceeds_hw_extent(v0, v1, v2) {
+            return;
+        }
         if kind == BlendKind::Opaque {
             self.push_tex_tri(v0, uv0, v1, uv1, v2, uv2, color, prim_flags, kind);
             return;
@@ -759,6 +765,12 @@ impl Translator {
         prim_flags: u32,
         kind: BlendKind,
     ) {
+        // Match the CPU rasterizer and PS1 per-triangle extent rejection.
+        // Quad halves are checked independently. Textured rectangles reach
+        // this helper only after splitting into at most 256-pixel UV spans.
+        if triangle_exceeds_hw_extent(v0, v1, v2) {
+            return;
+        }
         if kind == BlendKind::Opaque {
             self.push_tex_tri_shaded(v0, uv0, c0, v1, uv1, c1, v2, uv2, c2, prim_flags, kind);
             return;
@@ -941,6 +953,15 @@ impl Translator {
     }
 }
 
+// Same limits as emulator-core::gpu::raster. Apply after signed vertex
+// decoding and before host clipping; a giant polygon is rejected by PS1,
+// not clipped into a visible polygon by the host GPU.
+fn triangle_exceeds_hw_extent(a: (i32, i32), b: (i32, i32), c: (i32, i32)) -> bool {
+    [(a, b), (b, c), (c, a)]
+        .iter()
+        .any(|(a, b)| (a.0 - b.0).abs() > 1023 || (a.1 - b.1).abs() > 511)
+}
+
 fn full_clip() -> [u16; 4] {
     [
         0,
@@ -996,6 +1017,54 @@ mod tests {
             index: 0,
             opcode,
             fifo: fifo.into(),
+        }
+    }
+
+    #[test]
+    fn textured_polygon_extent_boundaries_and_quad_halves() {
+        assert!(!triangle_exceeds_hw_extent((0, 0), (1023, 0), (0, 511)));
+        assert!(triangle_exceeds_hw_extent((0, 0), (1024, 0), (0, 511)));
+        assert!(triangle_exceeds_hw_extent((0, 0), (1023, 0), (0, 512)));
+        assert!(triangle_exceeds_hw_extent((-1, 0), (1023, 0), (0, 1)));
+        // Only the second half (v0,v1,v2) fits. Rejecting the complete quad
+        // would incorrectly lose these three valid vertices.
+        let log = [entry(
+            0x2C,
+            vec![
+                0x2C80_8080,
+                xy(0, 0),
+                0,
+                xy(32, 0),
+                0,
+                xy(0, 32),
+                0,
+                xy(32, 600),
+                0,
+            ],
+        )];
+        let mut translator = Translator::new();
+        let frame = translator.translate(&log);
+        assert_eq!(frame.total(), 3);
+        assert_eq!(frame.vertices[0].pos, [0, 0]);
+        assert_eq!(frame.vertices[1].pos, [32, 0]);
+        assert_eq!(frame.vertices[2].pos, [0, 32]);
+    }
+
+    #[test]
+    fn flat_and_gouraud_textured_polygons_reject_oversized_halves() {
+        for opcode in (0x24u8..=0x3F).filter(|opcode| opcode & 4 != 0) {
+            let vertices = [(0, 0), (32, 0), (0, 512), (32, 600)];
+            let count = if opcode & 8 != 0 { 4 } else { 3 };
+            let mut words = vec![(u32::from(opcode) << 24) | 0x808080];
+            for (i, &(x, y)) in vertices[..count].iter().enumerate() {
+                if i > 0 && opcode & 0x10 != 0 {
+                    words.push(0x808080);
+                }
+                words.extend_from_slice(&[xy(x, y), 0]);
+            }
+            let mut translator = Translator::new();
+            let log = [entry(opcode, words)];
+            assert_eq!(translator.translate(&log).total(), 0, "opcode {opcode:x}");
         }
     }
 
