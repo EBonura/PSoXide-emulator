@@ -6,7 +6,7 @@
 //!
 //! Usage:
 //!   cargo run --release -p psx-gpu-render --example dump_exe -- \
-//!       <EXE> <OUT.ppm> [STEPS]
+//!       <BIOS> <EXE> <OUT.ppm> [STEPS]
 
 use std::path::PathBuf;
 
@@ -16,21 +16,23 @@ use psx_iso::Exe;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
+    if args.len() < 4 {
         eprintln!(
-            "usage: {} <EXE> <OUT.ppm> [STEPS]",
+            "usage: {} <BIOS> <EXE> <OUT.ppm> [STEPS]",
             args.first().map(String::as_str).unwrap_or("dump_exe")
         );
         std::process::exit(2);
     }
-    let exe_path = PathBuf::from(&args[1]);
-    let out = PathBuf::from(&args[2]);
+    let bios = PathBuf::from(&args[1]);
+    let exe_path = PathBuf::from(&args[2]);
+    let out = PathBuf::from(&args[3]);
     let steps: u64 = args
-        .get(3)
+        .get(4)
         .and_then(|s| s.parse().ok())
         .unwrap_or(5_000_000);
 
-    let mut bus = Bus::new_without_bios();
+    let bios_bytes = std::fs::read(&bios).expect("read BIOS");
+    let mut bus = Bus::new(bios_bytes).expect("BIOS rejected");
     bus.gpu.enable_cmd_log();
     bus.enable_hle_bios();
     bus.attach_digital_pad_port1();
@@ -44,7 +46,8 @@ fn main() {
     cpu.seed_from_exe(exe.initial_pc, exe.initial_gp, exe.initial_sp());
 
     eprintln!(
-        "[dump_exe] EXE={} entry=0x{:08x} payload={}B steps={}",
+        "[dump_exe] BIOS={} EXE={} entry=0x{:08x} payload={}B steps={}",
+        bios.display(),
         exe_path.display(),
         exe.initial_pc,
         exe.payload.len(),

@@ -292,7 +292,7 @@ impl Bus {
     /// Build a bus with the given BIOS image. RAM and scratchpad are
     /// zero-initialised; hardware leaves them in an undefined state, but
     /// zeroing is deterministic and adequate for a cold-boot harness.
-    pub(crate) fn new(bios: Vec<u8>) -> Result<Self, BusError> {
+    pub fn new(bios: Vec<u8>) -> Result<Self, BusError> {
         if bios.len() != memory::bios::SIZE {
             return Err(BusError::BiosSize {
                 expected: memory::bios::SIZE,

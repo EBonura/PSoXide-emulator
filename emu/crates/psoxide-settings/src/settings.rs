@@ -113,6 +113,10 @@ impl Default for VideoSettings {
 /// slashes even on Windows -- we join via `PathBuf` at read time).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Paths {
+    /// Preferred BIOS image (`SCPH1001.BIN` & friends). Empty =
+    /// use the `PSOXIDE_BIOS` env var. Normal frontend paths do
+    /// not use a hardcoded BIOS fallback.
+    pub bios: String,
     /// Root directory for the game library scanner. Empty =
     /// library feature inactive until the user sets one.
     pub game_library: String,
@@ -361,9 +365,33 @@ impl Default for InputSettings {
     }
 }
 
-/// Emulator-level timing preferences.
+/// Emulator-level toggles. `hle_bios` is the big one -- everything
+/// else can grow as we add features.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmulatorSettings {
+    /// Side-loaded EXEs rely on HLE BIOS by default; fully-booted
+    /// commercial games don't. This toggle governs the *default*
+    /// that gets applied when launching a game; per-game overrides
+    /// in the library cache can flip it.
+    ///
+    /// Defaults to **true** -- matches what `PSOXIDE_EXE=…` side-load
+    /// does unconditionally (see `app::load_exe`). Previously this
+    /// derived `Default`, giving `false`, which made the library-
+    /// launch path ship a half-initialised BIOS kernel state to the
+    /// EXE. Every SDK example's SYSCALL to `InstallISR` / `FlushCache`
+    /// etc. landed in a BIOS kernel that hadn't been cold-booted,
+    /// silently fell off a wild PC, and produced a blank screen
+    /// while `make run-tri` (env-var path, HLE unconditional) worked
+    /// fine. Flipping the default brings the two paths into agreement.
+    #[serde(default = "default_hle_for_side_load")]
+    pub hle_bios_for_side_load: bool,
+    /// Boot discs by first letting the real BIOS initialize its RAM
+    /// kernel state, then loading the `SYSTEM.CNF` PSX-EXE directly
+    /// and leaving the disc mounted for normal CD-ROM commands. This
+    /// is the default while BIOS-disc handoff parity is still under
+    /// investigation; set to `false` to force the real BIOS logo path.
+    #[serde(default = "default_fast_boot_disc")]
+    pub fast_boot_disc: bool,
     /// If set, the run loop paces itself to real-time instead of
     /// running flat-out. Defaults to false -- we want flat-out
     /// speed for parity / debugging. A future audio feature will
@@ -372,9 +400,19 @@ pub struct EmulatorSettings {
     pub real_time_pacing: bool,
 }
 
+fn default_hle_for_side_load() -> bool {
+    true
+}
+
+fn default_fast_boot_disc() -> bool {
+    true
+}
+
 impl Default for EmulatorSettings {
     fn default() -> Self {
         Self {
+            hle_bios_for_side_load: default_hle_for_side_load(),
+            fast_boot_disc: default_fast_boot_disc(),
             real_time_pacing: false,
         }
     }
@@ -569,12 +607,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("settings.ron");
         let mut s = Settings::default();
-        s.paths.game_library = "/first/path".to_string();
+        s.paths.bios = "/first/path".to_string();
         s.save(&path).unwrap();
-        s.paths.game_library = "/second/path".to_string();
+        s.paths.bios = "/second/path".to_string();
         s.save(&path).unwrap();
         let loaded = Settings::load(&path).unwrap();
-        assert_eq!(loaded.paths.game_library, "/second/path");
+        assert_eq!(loaded.paths.bios, "/second/path");
     }
 
     #[test]
@@ -714,14 +752,5 @@ mod tests {
         assert_eq!(InputBinding::named("Enter").label(), "Enter");
         assert_eq!(InputBinding::Character('j').label(), "J");
         assert_eq!(InputBinding::Unbound.label(), "-");
-    }
-    #[test]
-    fn legacy_firmware_settings_are_discarded() {
-        let old = r#"(paths: (bios: "/obsolete/firmware.bin", game_library: "games", parity_cache_dir: ""), emulator: (fast_boot_disc: false, hle_bios_for_side_load: false))"#;
-        let settings: Settings = ron::from_str(old).expect("read old settings");
-        assert_eq!(settings.paths.game_library, "games");
-        let saved = ron::to_string(&settings).unwrap();
-        assert!(!saved.contains("bios"));
-        assert!(!saved.contains("fast_boot_disc"));
     }
 }

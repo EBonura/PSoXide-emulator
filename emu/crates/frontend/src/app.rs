@@ -8,7 +8,10 @@ use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 
-use emulator_core::{fast_boot_disc, Bus, Cpu, EmulatorState, EmulatorStateRef};
+use emulator_core::{
+    fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, EmulatorState,
+    EmulatorStateRef, DISC_FAST_BOOT_WARMUP_STEPS,
+};
 use psoxide_settings::library::{GameKind, Region};
 #[cfg(not(target_arch = "wasm32"))]
 use psoxide_settings::savestate::peek_header;
@@ -387,7 +390,7 @@ pub struct AppState {
     /// Latest twin-stick freelook drive, refreshed each frame from the
     /// merged host sticks (only consumed while `freelook.enabled`).
     pub freelook_input: FreelookInput,
-    /// Optional because we let the frontend run without a game for UI
+    /// Optional because we let the frontend run without a BIOS for UI
     /// development. If absent, register panels show the reset-state CPU
     /// but no instruction stepping is possible. Unused until the step
     /// button lands alongside the Menu.
@@ -421,7 +424,7 @@ pub struct AppState {
     /// whose current value differs from the snapshot. Reset clears
     /// this along with the rest of the emulator state.
     pub gpr_snapshot: Option<[u32; 32]>,
-    /// Persisted user preferences (library root, input
+    /// Persisted user preferences (BIOS path, library root, input
     /// mappings, video tweaks). Read at startup, re-saved when Menu
     /// settings actions commit changes. The frontend mutates this
     /// directly; the filesystem is written via
@@ -436,7 +439,7 @@ pub struct AppState {
     /// subtree). Set once from the platform default or a
     /// `--config-dir` override and never mutated afterwards.
     pub paths: ConfigPaths,
-    /// What the emulator was asked to boot at the last launch. `None`
+    /// What the BIOS was asked to boot at the last launch. `None`
     /// = no game loaded yet (initial state on first run, also after
     /// "Reset" with no last-loaded game).
     pub current_game: Option<LibraryEntry>,
@@ -454,6 +457,11 @@ pub struct AppState {
     /// has access to the wgpu texture that was actually presented.
     #[cfg(not(target_arch = "wasm32"))]
     pending_savestate_thumbnails: Vec<PathBuf>,
+    /// Web build only: the BIOS image uploaded this session. The browser has no
+    /// filesystem, so a real-BIOS retail disc boot reads its BIOS from here
+    /// instead of `settings.paths.bios`. `None` until the user loads one.
+    #[cfg(target_arch = "wasm32")]
+    bios_bytes: Option<Vec<u8>>,
     /// Web build: games found by the last folder scan, as `(id, title,
     /// subtitle)`. Injected into the Games menu category; launching one reads
     /// its file bytes on demand.
@@ -487,8 +495,11 @@ pub struct AppState {
 enum WebBoot {
     /// Homebrew PS-EXE; small enough to keep the bytes for reboot.
     Exe(Vec<u8>),
+    /// Uploaded raw disc booted through the uploaded real BIOS. The disc
+    /// itself is taken back out of the outgoing bus at reboot time.
+    DiscBios,
     /// Streamed disc booted through HLE fast boot (no BIOS), same reboot
-    /// path as other streamed discs.
+    /// path as `DiscBios`.
     DiscHle,
 }
 
@@ -588,6 +599,8 @@ impl AppState {
             #[cfg(not(target_arch = "wasm32"))]
             pending_savestate_thumbnails: Vec::new(),
             #[cfg(target_arch = "wasm32")]
+            bios_bytes: None,
+            #[cfg(target_arch = "wasm32")]
             web_games: Vec::new(),
             #[cfg(target_arch = "wasm32")]
             web_quick_save: None,
@@ -624,6 +637,8 @@ impl AppState {
         // immediately instead of a "No games found" placeholder.
         out.refresh_menu_library();
         out.menu
+            .sync_fast_boot_label(out.settings.emulator.fast_boot_disc);
+        out.menu
             .set_menu_opacity(out.settings.video.menu_opacity_pct);
         out.menu.set_ui_scale(out.settings.video.ui_scale_pct);
 
@@ -636,7 +651,7 @@ impl AppState {
         if env_flag("PSOXIDE_OPEN_CONTROLS") {
             out.menu.open_controls();
         }
-        // Web: look (async) for a previously-saved games folder so the menu can
+        // Web: look (async) for a previously-saved BIOS/folder so the menu can
         // offer a one-click reconnect.
         #[cfg(target_arch = "wasm32")]
         crate::web_files::check_saved();
@@ -660,7 +675,10 @@ impl AppState {
 
     /// Rebuild the emulator state around `entry`. Same flow the
     /// headless `launch` CLI runs: mount the disc or legacy EXE,
-    /// plug a pad into port 1, and boot through the built-in runtime.
+    /// plug a pad into port 1, and use a real BIOS only for retail
+    /// disc paths. On success the emulator is paused at the reset
+    /// vector (or the legacy EXE entry point); the user clicks Run
+    /// to start stepping.
     /// Boot a homebrew disc image from raw bytes via the no-BIOS HLE path (the
     /// same one embedded Play uses for PSoXide-authored discs). Used by the web
     /// build to auto-boot a bundled disc, and later a user-supplied one.
@@ -677,11 +695,16 @@ impl AppState {
     pub fn boot_disc(&mut self, disc: Disc) -> Result<(), String> {
         let mut bus = Bus::new_without_bios();
         let mut cpu = Cpu::new();
-        fast_boot_disc(&mut bus, &mut cpu, &disc).map_err(|e| format!("boot disc: {e:?}"))?;
+        fast_boot_disc_with_hle(&mut bus, &mut cpu, &disc, true)
+            .map_err(|e| format!("boot disc: {e:?}"))?;
         bus.cdrom.insert_disc(Some(disc));
         bus.attach_digital_pad_port1();
-        bus.attach_memcard_port1(Vec::new());
-        self.swap_in_booted(bus, cpu);
+        self.bus = Some(bus);
+        self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
+        self.cpu = cpu;
+        self.running = true;
+        self.menu.open = false;
+        self.menu.sync_run_label(true);
         Ok(())
     }
 
@@ -728,7 +751,7 @@ impl AppState {
                 bus
             }
             GameKind::DiscBin | GameKind::DiscIso => {
-                let mut bus = Bus::new_without_bios();
+                let mut bus = bus_from_configured_bios(&self.settings)?;
                 let bytes = std::fs::read(&entry.path)
                     .map_err(|e| format!("{}: {e}", entry.path.display()))?;
                 if bytes.len() < SECTOR_BYTES {
@@ -739,9 +762,13 @@ impl AppState {
                 }
                 game_hash = Some(emulator_core::game_image_hash(&bytes));
                 let disc = Disc::from_bin(bytes);
-                fast_boot_disc(&mut bus, &mut cpu, &disc)
-                    .map_err(|e| format!("boot disc: {e:?}"))?;
-                boot_mode = "HLE";
+                boot_mode = maybe_fast_boot_disc(
+                    &mut bus,
+                    &mut cpu,
+                    &disc,
+                    entry,
+                    self.settings.emulator.fast_boot_disc,
+                );
                 bus.cdrom.insert_disc(Some(disc));
                 bus.attach_digital_pad_port1();
                 // Load + attach the per-game memory card on port 1.
@@ -756,16 +783,20 @@ impl AppState {
                 bus
             }
             GameKind::DiscCue | GameKind::DiscCcd => {
-                let mut bus = Bus::new_without_bios();
+                let mut bus = bus_from_configured_bios(&self.settings)?;
                 let disc = match entry.kind {
                     GameKind::DiscCue => psoxide_settings::library::load_disc_from_cue(&entry.path),
                     GameKind::DiscCcd => psoxide_settings::library::load_disc_from_ccd(&entry.path),
                     _ => unreachable!(),
                 }?;
                 game_hash = Some(disc_image_hash(&disc));
-                fast_boot_disc(&mut bus, &mut cpu, &disc)
-                    .map_err(|e| format!("boot disc: {e:?}"))?;
-                boot_mode = "HLE";
+                boot_mode = maybe_fast_boot_disc(
+                    &mut bus,
+                    &mut cpu,
+                    &disc,
+                    entry,
+                    self.settings.emulator.fast_boot_disc,
+                );
                 bus.cdrom.insert_disc(Some(disc));
                 bus.attach_digital_pad_port1();
                 self.paths
@@ -1646,13 +1677,27 @@ impl AppState {
         // library at a folder when none is configured yet.
         #[cfg(target_arch = "wasm32")]
         {
-            if !self.web_games.is_empty() {
+            let (has_bios, has_games) = (self.bios_bytes.is_some(), !self.web_games.is_empty());
+            if has_bios && has_games {
                 return None;
             }
+            // A saved BIOS/folder from a previous visit that the browser won't
+            // re-open without a user gesture: offer one-click Reconnect.
             if crate::web_files::saved_available() {
-                return Some("Saved games found - reconnect your folder in Settings");
+                return Some(
+                    "Saved BIOS / games found - your browser needs one click: Reconnect in Settings",
+                );
             }
-            return Some("Load a games folder in Settings");
+            // Otherwise prompt for whatever's missing (bundled discs still play
+            // without either).
+            return match (has_bios, has_games) {
+                (true, true) => None,
+                (false, false) => {
+                    Some("Load a BIOS and a games folder you legally own from Settings")
+                }
+                (false, true) => Some("Load a BIOS you legally own from Settings"),
+                (true, false) => Some("Load a games folder you legally own from Settings"),
+            };
         }
         #[cfg(not(target_arch = "wasm32"))]
         if self.games_path_missing() {
@@ -1662,12 +1707,53 @@ impl AppState {
         }
     }
 
-    /// Web: reconnect the previously-saved games folder (one click to
+    /// Move Menu selection to Settings and ensure the overlay is open.
+    pub fn select_settings_category(&mut self) {
+        self.menu.open = true;
+        self.menu.select_category("Settings");
+    }
+
+    /// Choose and persist a BIOS image from the Menu Settings column.
+    /// `rfd` (native file dialog) has no wasm backend, so the web build gets a
+    /// stub below; disc/BIOS loading on the web is a later phase.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn choose_bios_path(&mut self) {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Choose PlayStation BIOS")
+            .add_filter("PlayStation BIOS", &["bin", "rom"]);
+        if let Some(dir) = path_parent_or_self(self.settings.paths.bios.trim()) {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        self.settings.paths.bios = path.to_string_lossy().into_owned();
+        match self.save_settings() {
+            Ok(()) => {
+                self.sync_menu_settings_paths();
+                self.status_message_set(format!("BIOS path saved: {}", path_label(&path)));
+            }
+            Err(e) => {
+                eprintln!("[frontend] {e}");
+                self.status_message_set(e);
+            }
+        }
+    }
+
+    /// Web: pick a BIOS (persistent File System Access picker where available,
+    /// else a one-shot `<input>`). Bytes land in `bios_bytes` via
+    /// `poll_web_uploads` on a later frame; the chosen location is remembered.
+    #[cfg(target_arch = "wasm32")]
+    pub fn choose_bios_path(&mut self) {
+        crate::web_files::pick_bios();
+    }
+
+    /// Web: reconnect the previously-saved BIOS + games folder (one click to
     /// re-grant; the browser won't re-read remembered files without a gesture).
     #[cfg(target_arch = "wasm32")]
     pub fn reconnect_web_files(&mut self) {
         crate::web_files::reconnect();
-        self.status_message_set("Reconnecting saved games...");
+        self.status_message_set("Reconnecting saved BIOS / games...");
     }
 
     /// Pick a recorded input tape (CSV or `.pxtape`) and replay it against a
@@ -1800,7 +1886,7 @@ impl AppState {
         let saved_game = self.current_game.take();
         let result = match boot {
             WebBoot::Exe(bytes) => self.boot_exe_bytes(bytes),
-            WebBoot::DiscHle => {
+            WebBoot::DiscBios | WebBoot::DiscHle => {
                 let disc = self
                     .bus
                     .as_mut()
@@ -1808,6 +1894,7 @@ impl AppState {
                     .ok_or_else(|| "no disc image to reboot".to_string());
                 match (disc, boot) {
                     (Err(error), _) => Err(error),
+                    (Ok(disc), WebBoot::DiscBios) => self.boot_disc_with_bios(disc),
                     (Ok(disc), _) => self.boot_disc(disc),
                 }
             }
@@ -1816,7 +1903,7 @@ impl AppState {
         result
     }
 
-    /// Web: drain any game files the user picked and apply them. Called
+    /// Web: drain any BIOS / game files the user picked and apply them. Called
     /// once per frame from the shell (uploads complete asynchronously).
     #[cfg(target_arch = "wasm32")]
     pub fn poll_web_uploads(&mut self) {
@@ -1831,6 +1918,12 @@ impl AppState {
         }
         for loaded in crate::web_files::drain() {
             match loaded.kind {
+                crate::web_files::Upload::Bios => {
+                    let kib = loaded.bytes.len() / 1024;
+                    self.bios_bytes = Some(loaded.bytes);
+                    self.sync_menu_settings_paths();
+                    self.status_message_set(format!("BIOS loaded: {} ({kib} KiB)", loaded.name));
+                }
                 crate::web_files::Upload::Game => {
                     // One tape belongs to one bootable disc identity (the
                     // native launch path holds the same rule): download the
@@ -1852,7 +1945,7 @@ impl AppState {
                         .unwrap_or(&loaded.name)
                         .to_string();
                     // PS-EXE homebrew boots via HLE (no BIOS); anything else is
-                    // treated as a raw disc image and boots through HLE too.
+                    // treated as a raw disc image and needs the real BIOS.
                     let (result, boot) = if kind == GameKind::Exe {
                         let reboot_bytes = loaded.bytes.clone();
                         (
@@ -1860,7 +1953,10 @@ impl AppState {
                             WebBoot::Exe(reboot_bytes),
                         )
                     } else {
-                        (self.boot_disc_bytes(loaded.bytes), WebBoot::DiscHle)
+                        (
+                            self.boot_disc_bytes_with_bios(loaded.bytes),
+                            WebBoot::DiscBios,
+                        )
                     };
                     match result {
                         Ok(()) => {
@@ -2074,6 +2170,41 @@ impl AppState {
         self.status_message_set("Loaded browser quick-save");
     }
 
+    /// Web: boot a raw `.bin` disc image through the uploaded real BIOS,
+    /// mirroring the native `GameKind::DiscBin` path (minus the filesystem
+    /// memcard -- the web build uses a blank in-memory card).
+    #[cfg(target_arch = "wasm32")]
+    fn boot_disc_bytes_with_bios(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        if bytes.len() < SECTOR_BYTES {
+            return Err("disc image too small to be valid".to_string());
+        }
+        self.boot_disc_with_bios(Disc::from_bin(bytes))
+    }
+
+    /// Web: boot an already-modelled disc through the uploaded real BIOS.
+    /// Split from the bytes wrapper so a replay reboot can reuse the disc
+    /// taken back out of the outgoing bus instead of keeping a second copy.
+    #[cfg(target_arch = "wasm32")]
+    fn boot_disc_with_bios(&mut self, disc: Disc) -> Result<(), String> {
+        let Some(bios) = self.bios_bytes.clone() else {
+            return Err("Load a BIOS first (Settings -> Load BIOS file)".to_string());
+        };
+        let mut bus = Bus::new(bios).map_err(|e| format!("BIOS rejected: {e}"))?;
+        let mut cpu = Cpu::new();
+        maybe_fast_boot_disc_path(
+            &mut bus,
+            &mut cpu,
+            &disc,
+            std::path::Path::new("uploaded.bin"),
+            self.settings.emulator.fast_boot_disc,
+        );
+        bus.cdrom.insert_disc(Some(disc));
+        bus.attach_digital_pad_port1();
+        bus.attach_memcard_port1(Vec::new());
+        self.swap_in_booted(bus, cpu);
+        Ok(())
+    }
+
     /// Side-load a homebrew PS-EXE from bytes via the no-BIOS HLE path,
     /// mirroring the native `GameKind::Exe` branch.
     ///
@@ -2144,9 +2275,10 @@ impl AppState {
         crate::web_files::pick_games();
     }
 
-    /// Refresh the Settings menu's games folder.
+    /// Refresh the Settings Menu row values from persisted path state.
     pub fn sync_menu_settings_paths(&mut self) {
-        self.menu.sync_settings_paths(self.games_path_label());
+        self.menu
+            .sync_settings_paths(self.bios_path_label(), self.games_path_label());
     }
 
     /// Current display label for every rebindable port-1 target, for
@@ -2197,6 +2329,28 @@ impl AppState {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    fn bios_path_label(&self) -> String {
+        let configured = self.settings.paths.bios.trim();
+        if !configured.is_empty() {
+            return path_label(PathBuf::from(configured));
+        }
+        if let Some(env) = std::env::var_os("PSOXIDE_BIOS") {
+            return format!("env: {}", path_label(PathBuf::from(env)));
+        }
+        "Missing".into()
+    }
+
+    /// Web: the BIOS is held in memory (uploaded), not a path.
+    #[cfg(target_arch = "wasm32")]
+    fn bios_path_label(&self) -> String {
+        if self.bios_bytes.is_some() {
+            "Loaded".into()
+        } else {
+            "None".into()
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn games_path_label(&self) -> String {
         let configured = self.settings.paths.game_library.trim();
         if configured.is_empty() {
@@ -2210,6 +2364,29 @@ impl AppState {
     #[cfg(target_arch = "wasm32")]
     fn games_path_label(&self) -> String {
         String::new()
+    }
+
+    /// Flip the disc fast-boot preference, keep the Menu label in
+    /// sync, and persist immediately so the next launch uses the
+    /// requested path even if the app exits abruptly.
+    pub fn toggle_fast_boot_disc(&mut self) {
+        let enabled = !self.settings.emulator.fast_boot_disc;
+        self.settings.emulator.fast_boot_disc = enabled;
+        self.menu.sync_fast_boot_label(enabled);
+
+        let msg = if enabled {
+            "Fast boot enabled: PS logo skipped on disc launch"
+        } else {
+            "Fast boot disabled: BIOS logo shown on disc launch"
+        };
+
+        match self.save_settings() {
+            Ok(()) => self.status_message_set(msg),
+            Err(e) => {
+                eprintln!("[frontend] {e}");
+                self.status_message_set(format!("{msg} (settings save failed)"));
+            }
+        }
     }
 
     /// Cycle the menu backdrop opacity through a few presets, keep the Menu
@@ -2774,6 +2951,28 @@ fn example_key(name: &str) -> String {
     name.to_ascii_lowercase()
 }
 
+/// Pick the BIOS path the launcher should read, honouring
+/// precedence: explicit settings field > env var. Centralised so
+/// every normal frontend caller agrees and no local path leaks into
+/// app defaults.
+pub(crate) fn resolve_bios_path(settings: &Settings) -> Result<PathBuf, String> {
+    let configured = settings.paths.bios.trim();
+    if !configured.is_empty() {
+        Ok(PathBuf::from(configured))
+    } else if let Ok(p) = std::env::var("PSOXIDE_BIOS") {
+        Ok(PathBuf::from(p))
+    } else {
+        Err("BIOS path is not configured. Open Settings and choose a BIOS image, or export PSOXIDE_BIOS.".to_string())
+    }
+}
+
+pub(crate) fn bus_from_configured_bios(settings: &Settings) -> Result<Bus, String> {
+    let bios_path = resolve_bios_path(settings)?;
+    let bios =
+        std::fs::read(&bios_path).map_err(|e| format!("BIOS {}: {e}", bios_path.display()))?;
+    Bus::new(bios).map_err(|e| format!("BIOS rejected: {e}"))
+}
+
 // Only the native file-dialog helpers (`choose_*_path`) use this to seed the
 // dialog's starting directory; the web build has no native dialog.
 #[cfg(not(target_arch = "wasm32"))]
@@ -2983,16 +3182,33 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     }
 }
 
-/// Load an authored disc through the built-in runtime.
+/// Fast-boot an embedded editor playtest disc through the same no-BIOS path
+/// used by the in-editor Play viewport. Reached via the editor Play path and
+/// the headless CLI; both are compiled out on wasm, so it is dead there.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn fast_boot_embedded_playtest_disc(
     bus: &mut Bus,
     cpu: &mut Cpu,
     disc: &Disc,
     path: &Path,
-) -> Result<(), String> {
-    fast_boot_disc(bus, cpu, disc)
-        .map_err(|error| format!("boot {}: {error:?}", path.display()))?;
-    Ok(())
+) {
+    match fast_boot_disc_with_hle(bus, cpu, disc, true) {
+        Ok(info) => {
+            eprintln!(
+                "[frontend] embedded Play disc fast-booted {} via {} entry=0x{:08x} payload={}B",
+                path.display(),
+                info.boot_path,
+                info.initial_pc,
+                info.payload_len
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "[frontend] embedded Play disc fast boot unavailable for {} ({e:?}); falling back to BIOS boot",
+                path.display()
+            );
+        }
+    }
 }
 
 /// Input-tape change-detection hash for a modelled disc: every track's raw
@@ -3002,6 +3218,16 @@ fn disc_image_hash(disc: &Disc) -> u64 {
     emulator_core::game_image_hash_parts(
         (0u8..=99).filter_map(|number| disc.track(number).map(|track| track.bytes.as_slice())),
     )
+}
+
+fn maybe_fast_boot_disc(
+    bus: &mut Bus,
+    cpu: &mut Cpu,
+    disc: &Disc,
+    entry: &LibraryEntry,
+    enabled: bool,
+) -> &'static str {
+    maybe_fast_boot_disc_path(bus, cpu, disc, &entry.path, enabled)
 }
 
 /// The settings field a rebind target reads from. Kept as a pair of
@@ -3074,7 +3300,46 @@ fn binding_for_target_mut(
     }
 }
 
-fn load_initial_bus(_settings: &Settings, cpu: &mut Cpu) -> Option<Bus> {
+fn maybe_fast_boot_disc_path(
+    bus: &mut Bus,
+    cpu: &mut Cpu,
+    disc: &Disc,
+    path: &Path,
+    enabled: bool,
+) -> &'static str {
+    if !enabled {
+        return "BIOS boot";
+    }
+    if let Err(e) = warm_bios_for_disc_fast_boot(bus, cpu, DISC_FAST_BOOT_WARMUP_STEPS) {
+        eprintln!(
+            "[frontend] BIOS warmup failed for {} ({e:?}); falling back to BIOS boot",
+            path.display()
+        );
+        return "BIOS boot";
+    }
+    match fast_boot_disc_with_hle(bus, cpu, disc, false) {
+        Ok(info) => {
+            eprintln!(
+                "[frontend] warm-fast-booted {} via {} entry=0x{:08x} load=0x{:08x} payload={}B",
+                path.display(),
+                info.boot_path,
+                info.initial_pc,
+                info.load_addr,
+                info.payload_len
+            );
+            "fast boot"
+        }
+        Err(e) => {
+            eprintln!(
+                "[frontend] fast boot unavailable for {} ({e:?}); falling back to BIOS boot",
+                path.display()
+            );
+            "BIOS boot"
+        }
+    }
+}
+
+fn load_initial_bus(settings: &Settings, cpu: &mut Cpu) -> Option<Bus> {
     if let Some((exe, exe_path)) = load_exe() {
         let mut bus = Bus::new_without_bios();
         bus.load_exe_payload(exe.load_addr, &exe.payload);
@@ -3098,14 +3363,39 @@ fn load_initial_bus(_settings: &Settings, cpu: &mut Cpu) -> Option<Bus> {
         );
         return Some(bus);
     }
-    let disc = load_disc()?;
-    let mut bus = Bus::new_without_bios();
-    if let Err(error) = fast_boot_disc(&mut bus, cpu, &disc) {
-        eprintln!("[frontend] cannot boot disc: {error:?}");
-        return None;
+    load_bus(settings)
+}
+
+fn load_bus(settings: &Settings) -> Option<Bus> {
+    let path = match resolve_bios_path(settings) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("[frontend] {e}");
+            return None;
+        }
+    };
+    let mut bus = match std::fs::read(&path) {
+        Ok(bytes) => match Bus::new(bytes) {
+            Ok(bus) => bus,
+            Err(e) => {
+                eprintln!("[frontend] BIOS at {} rejected: {e}", path.display());
+                return None;
+            }
+        },
+        Err(e) => {
+            eprintln!("[frontend] no BIOS at {}: {e}", path.display());
+            return None;
+        }
+    };
+
+    // Optional disc. Absence is not an error -- BIOS boots fine without
+    // one and just sits on the "insert disc" screen. Presence wires the
+    // bytes into the CD-ROM controller's tray so `CdlGetID` / `CdlReadN`
+    // return real data once the BIOS/game asks.
+    if let Some(disc) = load_disc() {
+        bus.cdrom.insert_disc(Some(disc));
     }
-    bus.cdrom.insert_disc(Some(disc));
-    bus.attach_digital_pad_port1();
+
     Some(bus)
 }
 

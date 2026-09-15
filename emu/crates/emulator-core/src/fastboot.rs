@@ -7,7 +7,15 @@
 
 use psx_iso::{load_boot_exe_from_disc, BootError, Disc};
 
+use crate::cpu::ExecutionError;
 use crate::{gpu::GP1_ADDR, Bus, Cpu};
+
+/// Number of BIOS instructions to run before warm disc fast boot.
+///
+/// By this point SCPH1001 has installed the syscall tables, exception
+/// vectors, and interrupt mask state that retail games expect, but it
+/// has not spent time on the disc license path.
+pub const DISC_FAST_BOOT_WARMUP_STEPS: u64 = 10_000_000;
 
 /// Summary of a successful disc fast boot.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,11 +32,29 @@ pub struct DiscFastBootInfo {
     pub stack_pointer: Option<u32>,
 }
 
-/// Load the disc executable and enable the built-in runtime.
+/// Load a disc's boot EXE into RAM and seed the CPU at its entry point.
+///
+/// Callers should mount the same [`Disc`] in the CD-ROM controller
+/// after this returns, so the running game can continue issuing normal
+/// CD commands.
 pub fn fast_boot_disc(
     bus: &mut Bus,
     cpu: &mut Cpu,
     disc: &Disc,
+) -> Result<DiscFastBootInfo, BootError> {
+    fast_boot_disc_with_hle(bus, cpu, disc, true)
+}
+
+/// Variant of [`fast_boot_disc`] that lets callers choose whether to
+/// enable HLE BIOS dispatch after loading the EXE.
+///
+/// Set `enable_hle_bios` to `false` when the real BIOS has already run
+/// far enough to install its RAM syscall and exception handlers.
+pub fn fast_boot_disc_with_hle(
+    bus: &mut Bus,
+    cpu: &mut Cpu,
+    disc: &Disc,
+    enable_hle_bios: bool,
 ) -> Result<DiscFastBootInfo, BootError> {
     let boot = load_boot_exe_from_disc(disc)?;
     let payload_len = boot.exe.payload.len();
@@ -39,6 +65,13 @@ pub fn fast_boot_disc(
     }
     bus.load_exe_payload(boot.exe.load_addr, &boot.exe.payload);
     bus.clear_exe_bss(boot.exe.bss_addr, boot.exe.bss_size);
+    if !enable_hle_bios {
+        // The abbreviated BIOS warmup installs kernel state but intentionally
+        // stops before the license/shell path. PA5 silicon telemetry proves
+        // that disc executables normally inherit the shell's configured SPU
+        // reverb preset, so restore that observable handoff explicitly.
+        bus.apply_retail_bios_shell_audio_profile();
+    }
     // OpenBIOS enables display immediately before Exec. Some retail
     // games rely on inheriting that shell state instead of issuing
     // GP1(03h) themselves during early startup.
@@ -50,7 +83,9 @@ pub fn fast_boot_disc(
         1,
         0,
     );
-    bus.enable_hle_bios();
+    if enable_hle_bios {
+        bus.enable_hle_bios();
+    }
 
     Ok(DiscFastBootInfo {
         boot_path: boot.boot_path,
@@ -59,4 +94,19 @@ pub fn fast_boot_disc(
         payload_len,
         stack_pointer,
     })
+}
+
+/// Run the real BIOS long enough to install its RAM kernel state.
+pub fn warm_bios_for_disc_fast_boot(
+    bus: &mut Bus,
+    cpu: &mut Cpu,
+    steps: u64,
+) -> Result<(), ExecutionError> {
+    for _ in 0..steps {
+        cpu.step(bus)?;
+        if bus.run_spu_to_current_cycle() != 0 {
+            let _ = bus.spu.drain_audio();
+        }
+    }
+    Ok(())
 }

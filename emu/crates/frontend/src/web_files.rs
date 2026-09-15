@@ -3,7 +3,7 @@
 //! Two backends, chosen at runtime by [`supported`]:
 //!
 //! - **File System Access API** (Chrome/Edge): real-file pickers that return
-//!   persistable *handles*. The folder handles are saved in IndexedDB
+//!   persistable *handles*. The BIOS + folder handles are saved in IndexedDB
 //!   (locations only, never the bytes), so on a later visit they can be
 //!   reconnected with one click. The async + IndexedDB logic lives in a small
 //!   `inline_js` glue; Rust drives it via `spawn_local` and feeds results back
@@ -27,6 +27,8 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 /// Which slot a picked file fills.
 #[derive(Clone, Copy)]
 pub enum Upload {
+    /// A PlayStation BIOS image.
+    Bios,
     /// A game image (raw `.bin` disc, or a homebrew `.exe`).
     Game,
     /// A recorded input tape (browser CSV or native `.pxtape`).
@@ -47,7 +49,7 @@ struct ScannedGame {
 pub struct LoadedFile {
     pub kind: Upload,
     pub name: String,
-    /// Stable launch token for games.
+    /// Stable launch token for games; BIOS reads have no game id.
     pub game_id: Option<String>,
     pub bytes: Vec<u8>,
 }
@@ -72,7 +74,7 @@ pub enum QuickStateEvent {
 }
 
 thread_local! {
-    /// Bytes read and waiting for the shell to apply (game boot).
+    /// Bytes read and waiting for the shell to apply (BIOS load / game boot).
     static PENDING: RefCell<Vec<LoadedFile>> = const { RefCell::new(Vec::new()) };
     /// IndexedDB quick-save operations completed since the last frame.
     static QUICK_STATES: RefCell<Vec<QuickStateEvent>> = const { RefCell::new(Vec::new()) };
@@ -163,6 +165,12 @@ export function fsaSupported() {
          ('showOpenFilePicker' in window) &&
          ('showDirectoryPicker' in window);
 }
+export async function pickBios() {
+  const [h] = await window.showOpenFilePicker();
+  await _put('bios', h);
+  const f = await h.getFile();
+  return new Uint8Array(await f.arrayBuffer());
+}
 export async function pickFolder() {
   const dh = await window.showDirectoryPicker();
   await _put('folder', dh);
@@ -173,6 +181,17 @@ export async function pickFolder() {
 // handle's permission as 'granted' (persistent permissions / installed PWA).
 // Returns the data when granted, `false` when a handle exists but a user gesture
 // is needed, `undefined` when there is no saved handle.
+export async function autoBios() {
+  const h = await _get('bios');
+  if (!h) return undefined;
+  try {
+    if ((await h.queryPermission({ mode: 'read' })) === 'granted') {
+      const f = await h.getFile();
+      return new Uint8Array(await f.arrayBuffer());
+    }
+  } catch (e) {}
+  return false;
+}
 export async function autoFolder() {
   const dh = await _get('folder');
   if (!dh) return undefined;
@@ -183,6 +202,13 @@ export async function autoFolder() {
     }
   } catch (e) {}
   return false;
+}
+export async function reconnectBios() {
+  const h = await _get('bios');
+  if (!h) return null;
+  if ((await h.requestPermission({ mode: 'read' })) !== 'granted') return null;
+  const f = await h.getFile();
+  return new Uint8Array(await f.arrayBuffer());
 }
 export async function reconnectFolder() {
   const dh = await _get('folder');
@@ -241,10 +267,16 @@ export function downloadCsv(filenameStem, csv) {
 extern "C" {
     #[wasm_bindgen(js_name = fsaSupported)]
     fn fsa_supported() -> bool;
+    #[wasm_bindgen(js_name = pickBios)]
+    fn fsa_pick_bios() -> js_sys::Promise;
     #[wasm_bindgen(js_name = pickFolder)]
     fn fsa_pick_folder() -> js_sys::Promise;
+    #[wasm_bindgen(js_name = autoBios)]
+    fn fsa_auto_bios() -> js_sys::Promise;
     #[wasm_bindgen(js_name = autoFolder)]
     fn fsa_auto_folder() -> js_sys::Promise;
+    #[wasm_bindgen(js_name = reconnectBios)]
+    fn fsa_reconnect_bios() -> js_sys::Promise;
     #[wasm_bindgen(js_name = reconnectFolder)]
     fn fsa_reconnect_folder() -> js_sys::Promise;
     #[wasm_bindgen(js_name = readGame)]
@@ -278,12 +310,12 @@ pub fn supported() -> bool {
     fsa_supported()
 }
 
-/// True while a saved folder handle is waiting to be reconnected.
+/// True while a saved BIOS/folder handle is waiting to be reconnected.
 pub fn saved_available() -> bool {
     SAVED.with(|s| s.get())
 }
 
-/// At startup, try to silently restore the saved games folder. The File
+/// At startup, try to silently restore the saved BIOS + games folder. The File
 /// System Access API only lets us re-read a stored handle without a user gesture
 /// when the browser still reports permission as `granted` (persistent
 /// permissions / installed PWA) -- that path loads everything automatically.
@@ -295,6 +327,16 @@ pub fn check_saved() {
     }
     spawn_local(async {
         let mut needs_gesture = false;
+
+        if let Ok(v) = JsFuture::from(fsa_auto_bios()).await {
+            if v.as_bool() == Some(false) {
+                // Handle exists, but the browser needs a gesture to re-grant.
+                needs_gesture = true;
+            } else if !v.is_undefined() && !v.is_null() {
+                // Permission still granted: the bytes came back, load them now.
+                push_bytes(Upload::Bios, "BIOS".to_string(), None, &v);
+            }
+        }
 
         if let Ok(v) = JsFuture::from(fsa_auto_folder()).await {
             if v.as_bool() == Some(false) {
@@ -334,6 +376,19 @@ pub fn take_scanned() -> Option<Vec<(String, String, String)>> {
     }
 }
 
+/// Pick a BIOS: persistent picker if supported, else a one-shot `<input>`.
+pub fn pick_bios() {
+    if supported() {
+        spawn_local(async {
+            if let Ok(v) = JsFuture::from(fsa_pick_bios()).await {
+                push_bytes(Upload::Bios, "BIOS".to_string(), None, &v);
+            }
+        });
+    } else {
+        pick_input(Upload::Bios);
+    }
+}
+
 /// Pick a games source: a folder via the persistent picker if supported, else a
 /// one-shot `<input webkitdirectory>`.
 pub fn pick_games() {
@@ -357,12 +412,19 @@ pub fn pick_tape() {
 }
 
 /// Reconnect previously-saved handles (File System Access only). No-op
-/// otherwise. Re-grants permission then relists the folder.
+/// otherwise. Re-grants permission then re-reads the BIOS + relists the folder.
 pub fn reconnect() {
     SAVED.with(|s| s.set(false));
     if !supported() {
         return;
     }
+    spawn_local(async {
+        if let Ok(v) = JsFuture::from(fsa_reconnect_bios()).await {
+            if !v.is_null() && !v.is_undefined() {
+                push_bytes(Upload::Bios, "BIOS".to_string(), None, &v);
+            }
+        }
+    });
     spawn_local(async {
         if let Ok(v) = JsFuture::from(fsa_reconnect_folder()).await {
             if let Some(list) = v.as_string() {
@@ -534,6 +596,7 @@ fn subfolder_of(path: &str) -> String {
 
 fn pick_input(kind: Upload) {
     let accept = match kind {
+        Upload::Bios => ".bin,.rom",
         Upload::Game => ".bin,.exe",
         Upload::Tape => ".csv,.pxtape",
     };
