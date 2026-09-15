@@ -910,6 +910,40 @@ mod tests {
         cpu.vram.words().to_vec()
     }
 
+    #[test]
+    fn oversized_textured_quad_preserves_background() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping HW extent test: no headless wgpu adapter");
+            return;
+        };
+        let mut words = line_env();
+        words.extend_from_slice(&[
+            0x0200_FF00,
+            0,
+            xyw(320, 240),
+            // A black 4bpp foreground quad whose height exceeds the GPU's
+            // 511-pixel triangle limit must not erase the valid background.
+            0x2E80_8080,
+            pack_xy((-209, -1023)),
+            (480 * 64) << 16,
+            pack_xy((431, -1023)),
+            (6 + 32) << 16,
+            pack_xy((-209, 1023)),
+            0,
+            pack_xy((431, 1023)),
+            0,
+        ]);
+        let cpu = run_both_backends(&words, &mut renderer, &[(384, 0, 0x1111), (1, 480, 1)]);
+        let (_, _, rgba) = renderer.read_subrect_rgba8(0, 0, 320, 240);
+        for (i, got) in rgba.chunks_exact(4).enumerate() {
+            let y = i / 320;
+            let x = i % 320;
+            let want = bgr15_to_rgba8(cpu[y * VRAM_WIDTH as usize + x]);
+            assert_eq!(got, want, "background at ({x},{y})");
+            assert_eq!(got, [0, 255, 0, 255]);
+        }
+    }
+
     fn pack_xy(p: (i32, i32)) -> u32 {
         ((p.0 as u32) & 0xFFFF) | (((p.1 as u32) & 0xFFFF) << 16)
     }
