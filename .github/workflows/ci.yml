@@ -9,6 +9,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev mesa-vulkan-drivers
+      - run: python3 tools/test_sony_material_audit.py
+      - run: python3 tools/sony-material-audit.py
       - run: rustup show
       - run: python3 tools/bootstrap-components.py
       - run: python3 tools/bootstrap-components.py --check
