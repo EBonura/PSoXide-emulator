@@ -11,25 +11,6 @@
 use emulator_core::snapshot::{EmulatorState, EmulatorStateRef};
 use emulator_core::{Bus, Cpu};
 use psoxide_settings::savestate::SaveStateV1;
-use psx_hw::memory;
-
-/// Hand-assemble `lui $t0, 0x1234` / `ori $t0, $t0, 0x5678` /
-/// `sw $t0, 0($zero)` at the BIOS reset vector, little-endian (R3000A
-/// is LE). Leaves the rest of the BIOS image zeroed, which decodes as
-/// `sll $zero, $zero, 0` (a true hardware NOP) -- so stepping past the
-/// three real instructions is harmless.
-fn synthetic_bios() -> Vec<u8> {
-    let mut bios = vec![0u8; memory::bios::SIZE];
-    let words: [u32; 3] = [
-        0x3C08_1234, // lui  $t0, 0x1234
-        0x3508_5678, // ori  $t0, $t0, 0x5678
-        0xAC08_0000, // sw   $t0, 0($zero)
-    ];
-    for (i, word) in words.iter().enumerate() {
-        bios[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
-    }
-    bios
-}
 
 fn step_n(cpu: &mut Cpu, bus: &mut Bus, n: usize) {
     for _ in 0..n {
@@ -40,7 +21,14 @@ fn step_n(cpu: &mut Cpu, bus: &mut Bus, n: usize) {
 #[test]
 fn save_state_round_trips_cpu_and_bus_state() {
     let mut cpu = Cpu::new();
-    let mut bus = Bus::new(synthetic_bios()).expect("bios is exactly BIOS::SIZE bytes");
+    let mut bus = Bus::new_without_bios();
+    for (index, word) in [0x3C08_1234u32, 0x3508_5678, 0xAC08_0000]
+        .into_iter()
+        .enumerate()
+    {
+        bus.write32(0x1000 + index as u32 * 4, word);
+    }
+    cpu.seed_from_exe(0x8000_1000, 0, None);
 
     // lui + ori + sw + a couple of harmless zero-word NOPs so the
     // tick counter and PC have moved past the "interesting" bytes.
@@ -117,7 +105,14 @@ fn save_state_round_trips_cpu_and_bus_state() {
 #[test]
 fn save_state_preserves_stale_instruction_cache_contents() {
     let mut cpu = Cpu::new();
-    let mut bus = Bus::new(synthetic_bios()).expect("bios is exactly BIOS::SIZE bytes");
+    let mut bus = Bus::new_without_bios();
+    for (index, word) in [0x3C08_1234u32, 0x3508_5678, 0xAC08_0000]
+        .into_iter()
+        .enumerate()
+    {
+        bus.write32(0x1000 + index as u32 * 4, word);
+    }
+    cpu.seed_from_exe(0x8000_1000, 0, None);
     let base = 0x0000_1000;
     let program = [
         0x3C08_FFFE, // lui   $t0, 0xFFFE
