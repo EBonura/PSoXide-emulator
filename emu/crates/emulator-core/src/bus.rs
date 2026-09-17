@@ -195,6 +195,11 @@ pub struct Bus {
     /// fetch, another fill) waits for this.
     #[serde(default)]
     code_fill_busy_until: u64,
+    /// Physical address of the next word the running fill will stream. A
+    /// fetch of anything else while the fill is still busy abandons the
+    /// stream.
+    #[serde(default)]
+    code_fill_next_streamed: u32,
     /// The instruction being executed was fetched from main RAM uncached, so
     /// a RAM data access it makes shares the bus with that fetch.
     #[serde(default)]
@@ -338,6 +343,7 @@ impl Bus {
             dram_refresh_deadline: default_dram_refresh_deadline(),
             last_cpu_ram_access_cycle: 0,
             code_fill_busy_until: 0,
+            code_fill_next_streamed: 0,
             code_fetch_on_ram_bus: false,
             scheduler: {
                 let mut s = crate::scheduler::Scheduler::new();
@@ -1390,6 +1396,34 @@ impl Bus {
         }
     }
 
+    /// Clocks to restart the pipeline after abandoning a streaming fill.
+    const STREAM_ABANDON_CYCLES: u32 = 2;
+
+    /// Called with every fetch address before the fetch is costed. While a
+    /// line fill is streaming, the core can only take the next word of that
+    /// line; a jump anywhere else waits for the fill to finish and restarts.
+    ///
+    /// hwtest v1.22 records `0x8C`/`0x8D` call two two-instruction leaves in
+    /// turn from an uncached wrapper. When the leaves share a cache index,
+    /// every call misses, runs `jr; nop` out of the first half of the fill and
+    /// leaves: 8.2 clocks more than a hit on silicon. The fill's stall is 5
+    /// and the remainder of the fill 1, which leaves 2 for the restart. The
+    /// target there was uncached; a cached target is assumed to pay the same,
+    /// since the cache is still being written, until a probe says otherwise.
+    #[inline]
+    pub(crate) fn abandon_streaming_fill_cycles(&mut self, phys: u32) -> u32 {
+        if self.cycles >= self.code_fill_busy_until {
+            return 0;
+        }
+        if phys == self.code_fill_next_streamed {
+            self.code_fill_next_streamed = phys.wrapping_add(4);
+            return 0;
+        }
+        let wait = (self.code_fill_busy_until - self.cycles) as u32;
+        self.code_fill_busy_until = self.cycles;
+        wait + Self::STREAM_ABANDON_CYCLES
+    }
+
     /// The instruction about to execute came out of the I-cache.
     #[inline]
     pub(crate) fn note_cached_fetch(&mut self) {
@@ -1448,6 +1482,9 @@ impl Bus {
             // than one clock later.
             self.code_fill_busy_until =
                 self.cycles + u64::from(fill_wait + refresh + words.saturating_mul(2));
+            // The word being executed is `lead_words` into the fill; the one
+            // after it is what the stream delivers next.
+            self.code_fill_next_streamed = (phys & !3).wrapping_add(4);
             stalls.saturating_add(fill_wait).saturating_add(refresh)
         } else {
             stalls
