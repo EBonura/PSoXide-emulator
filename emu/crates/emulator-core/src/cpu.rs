@@ -364,6 +364,13 @@ enum ProfiledDataAccess {
     Other,
 }
 
+/// How far behind a RAM load the core is, and which register it fills.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+struct LoadShadow {
+    position: u8,
+    register: u8,
+}
+
 /// MIPS R3000A CPU state.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Cpu {
@@ -409,6 +416,10 @@ pub struct Cpu {
     /// between an op and its result read hides the latency. The emulator
     /// computes GTE results eagerly, so this models timing only.
     gte_busy_until: u64,
+    /// A RAM load is still on the bus and the instructions behind it may be
+    /// running under it. See [`Cpu::hides_in_load_shadow`].
+    #[serde(default)]
+    load_shadow: Option<LoadShadow>,
     /// Hardware GTE result-read latency. Unlike MAC1-3/SXY/SZ, MAC0 (data
     /// reg 24) and LZCR (data reg 31) are not always readable the instant
     /// their producing operation issues. The eager GTE core computes the
@@ -597,6 +608,7 @@ impl Cpu {
             pending_load: None,
             committing_load: None,
             gte_busy_until: 0,
+            load_shadow: None,
             gte_mac0_ready_at: 0,
             gte_mac0_stale: 0,
             gte_lzcr_ready_at: 0,
@@ -735,6 +747,7 @@ impl Cpu {
         self.pending_load = None;
         self.committing_load = None;
         self.gte_busy_until = 0;
+        self.load_shadow = None;
         self.gte_mac0_ready_at = 0;
         self.gte_mac0_stale = 0;
         self.gte_lzcr_ready_at = 0;
@@ -946,7 +959,7 @@ impl Cpu {
             bus,
             self.instruction_cache_event_profile_enabled,
         );
-        bus.note_cached_fetch();
+        bus.note_cached_fetch(fill.words == 0 && abandon == 0);
         let filled_words = fill.words;
         let streaming = self.cache_control & CACHE_CONTROL_NOSTR == 0;
         let stalls = bus.icache_fill_stalls(phys, fill.words, fill.lead_words, streaming);
@@ -1559,7 +1572,11 @@ impl Cpu {
         // Timer 1's counter behind Redux's by ~2 cycles per memory
         // access -- which showed as a 34-count offset at step
         // 19,472,447's Timer 1 read.
-        let issue_cycles = cycle_cost(instr);
+        let issue_cycles = if self.hides_in_load_shadow(instr, bus) {
+            0
+        } else {
+            cycle_cost(instr)
+        };
         bus.tick(issue_cycles);
         if self.cpu_cycle_profile_enabled {
             self.cpu_cycle_profile.issue_cycles = self
@@ -1593,6 +1610,13 @@ impl Cpu {
             .flatten();
         let execute_cycles_before = bus.cycles();
         self.execute(instr, pc_before, in_delay_slot, bus)?;
+        if bus.take_ram_load_from_cached_code() {
+            // Every load opcode names its destination in rt.
+            self.load_shadow = Some(LoadShadow {
+                position: 0,
+                register: ((instr >> 16) & 0x1F) as u8,
+            });
+        }
         if self.cpu_cycle_profile_enabled {
             self.record_execution_stalls(
                 instr,
@@ -1991,16 +2015,55 @@ impl Cpu {
         }
         let cop_op = ((instr >> 21) & 0x1F) as u8;
         match cop_op {
-            // MFC2/CFC2 read a GTE result. Real hardware does NOT stall these
-            // reads -- reading a result register before it has settled returns
-            // a stale value (modelled per-register in `gte_read_data_latency`).
-            0x00 => self.op_mfc2(instr, bus),
-            0x02 => self.op_cfc2(instr, bus),
+            // MFC2/CFC2 wait for a running command. hwtest v1.23 records
+            // 0x130-0x134 on a launch PAL console: RTPS, a read, then 20 nops
+            // costs 37 clocks a turn whichever of SXY2, MAC0, MAC1 or IR1 is
+            // read, against 22 when the read comes after RTPS has finished:
+            // the read waits exactly as long as another command would.
+            // What the read then RETURNS is a separate matter: MAC0 and LZCR
+            // can still be stale, by instruction count, as the conformance
+            // cases pinned on silicon require (`gte_read_data_latency`).
+            0x00 => {
+                self.gte_sync(bus);
+                self.op_mfc2(instr, bus)
+            }
+            0x02 => {
+                self.gte_sync(bus);
+                self.op_cfc2(instr, bus)
+            }
             0x04 => self.op_mtc2(instr, bus),
             0x06 => self.op_ctc2(instr, bus),
             // Unassigned COP2 move/control fields are inert on silicon.
             _ => Ok(()),
         }
+    }
+
+    /// Load scheduling (LSI's LDSCH): the wait of a RAM load overlaps the
+    /// instructions behind it, as long as they need neither the bus nor the
+    /// value being loaded. Returns whether `instr` costs nothing for it.
+    ///
+    /// hwtest v1.23 records 0x125-0x128 with v1.22's 0x74/0xC8/0xCE, 64 turns
+    /// of a load followed by k `addiu` on another register, clocks a turn:
+    /// 7, 8, 9, 9, 9, 9 (k = 6), 11 (k = 8). The first two instructions behind
+    /// a load pay in full; the next four are free; after that the wait is
+    /// over. The pcsx-redux load-timings test describes the same shape.
+    fn hides_in_load_shadow(&mut self, instr: u32, bus: &Bus) -> bool {
+        let Some(shadow) = self.load_shadow.as_mut() else {
+            return false;
+        };
+        shadow.position += 1;
+        let opcode = instr >> 26;
+        let touches_bus = opcode >= 0x20;
+        let rs = ((instr >> 21) & 0x1F) as u8;
+        let rt = ((instr >> 16) & 0x1F) as u8;
+        // rt is a destination in the immediate formats, so this errs towards
+        // ending the shadow early, never towards hiding a dependent read.
+        let reads_loaded = shadow.register != 0 && (rs == shadow.register || rt == shadow.register);
+        if touches_bus || reads_loaded || !bus.last_fetch_was_a_cache_hit() || shadow.position > 6 {
+            self.load_shadow = None;
+            return false;
+        }
+        shadow.position > 2
     }
 
     /// Stall the CPU until any in-flight GTE command has completed. Called
@@ -4201,7 +4264,94 @@ mod tests {
         cpu.gprs[8] = 0x8000_2001;
         let plain = warm_cycles(&mut cpu, &mut bus, &[sw, sw]);
         assert_eq!(pair, plain);
-        assert_eq!(pair, 4);
+    }
+
+    const ADDIU_T2: u32 = (0x09 << 26) | (10 << 21) | (10 << 16) | 1;
+    const SW_ZERO_T0: u32 = (0x2B << 26) | (8 << 21);
+    const LW_T1_T0: u32 = (0x23 << 26) | (8 << 21) | (9 << 16);
+
+    /// `turns` x (`access`, then `behind` independent instructions), warm.
+    fn access_then(access: u32, behind: usize, turns: usize) -> u64 {
+        let mut program = std::vec::Vec::new();
+        for _ in 0..turns {
+            program.push(access);
+            program.extend(std::iter::repeat_n(ADDIU_T2, behind));
+        }
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        cpu.gprs[8] = 0x8000_4000;
+        warm_cycles(&mut cpu, &mut bus, &program)
+    }
+
+    #[test]
+    fn the_write_buffer_hides_a_store_with_work_behind_it() {
+        // hwtest v1.23 0x129/0x12A, v1.22 0x1F/0x76: clocks a turn.
+        assert_eq!(access_then(SW_ZERO_T0, 1, 16), 16 * 2);
+        assert_eq!(access_then(SW_ZERO_T0, 2, 16), 16 * 3);
+        assert_eq!(access_then(SW_ZERO_T0, 3, 16), 16 * 4);
+        // Back to back: four slots, then one store per completed write.
+        // 0x12D has a burst of eight at twelve clocks.
+        assert_eq!(access_then(SW_ZERO_T0, 0, 8), 12);
+        assert_eq!(access_then(SW_ZERO_T0, 0, 4), 4);
+    }
+
+    #[test]
+    fn a_ram_load_hides_the_third_to_sixth_instruction_behind_it() {
+        // hwtest v1.22/v1.23 0xC8, 0x74, 0x125-0x128, 0xCE: clocks a turn.
+        for (behind, clocks) in [
+            (0u64, 7u64),
+            (1, 8),
+            (2, 9),
+            (3, 9),
+            (4, 9),
+            (6, 9),
+            (8, 11),
+        ] {
+            let turns = 8;
+            let total = access_then(LW_T1_T0, behind as usize, turns);
+            assert_eq!(total, clocks * turns as u64, "{behind} behind");
+        }
+    }
+
+    #[test]
+    fn an_instruction_that_reads_the_loaded_register_is_not_hidden() {
+        // `lw t1; addiu x3; addu t3,t1,t1` : the fourth instruction would hide,
+        // but it needs the value.
+        let addu_t3_t1_t1 = (9 << 21) | (9 << 16) | (11 << 11) | 0x21;
+        let dependent = [LW_T1_T0, ADDIU_T2, ADDIU_T2, addu_t3_t1_t1, ADDIU_T2];
+        let independent = [LW_T1_T0, ADDIU_T2, ADDIU_T2, ADDIU_T2, ADDIU_T2];
+        // A fresh machine each: the I-cache would keep serving the first
+        // program to the second.
+        let run = |program: &[u32]| {
+            let mut cpu = Cpu::new();
+            let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+            cpu.gprs[8] = 0x8000_4000;
+            warm_cycles(&mut cpu, &mut bus, program)
+        };
+        let with_use = run(&dependent);
+        let without = run(&independent);
+        assert_eq!(without, 9);
+        assert_eq!(with_use, 11);
+    }
+
+    #[test]
+    fn a_coprocessor_read_waits_for_the_running_command() {
+        // hwtest v1.23 0x130-0x134: RTPS; mfc2; 20 nops is 37 clocks a turn,
+        // and 22 (plus the 16 nops) when the read comes after RTPS is done.
+        const RTPS: u32 = 0x4A08_0001;
+        const MFC2_T2_SXY2: u32 = 0x480A_7000;
+        let turn = |nops_before: usize| {
+            let mut program = std::vec![RTPS];
+            program.extend(std::iter::repeat_n(0, nops_before));
+            program.push(MFC2_T2_SXY2);
+            program.extend(std::iter::repeat_n(0, 20));
+            let mut cpu = Cpu::new();
+            let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+            cpu.cop0[12] |= 1 << 30; // COP2 usable
+            warm_cycles(&mut cpu, &mut bus, &program)
+        };
+        assert_eq!(turn(0), 37);
+        assert_eq!(turn(16), 22 + 16);
     }
 
     #[test]

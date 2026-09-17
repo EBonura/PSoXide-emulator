@@ -212,6 +212,17 @@ pub struct Bus {
     /// a RAM data access it makes shares the bus with that fetch.
     #[serde(default)]
     code_fetch_on_ram_bus: bool,
+    /// The instruction being executed came straight out of the I-cache.
+    #[serde(default)]
+    last_fetch_hit: bool,
+    /// Set by a RAM load issued from cached code; taken by the CPU to open
+    /// the load shadow.
+    #[serde(default)]
+    ram_load_from_cached_code: bool,
+    /// Completion cycles of the stores queued in the BIU write buffer, oldest
+    /// first. Zero means an empty slot.
+    #[serde(default)]
+    write_queue: [u64; 4],
     // VBlank scheduling lives in `scheduler` under
     // [`EventSlot::VBlank`]. Seeded at `FIRST_VBLANK_CYCLE` by
     // `Bus::new`; every VBlank handler invocation re-schedules the
@@ -356,6 +367,9 @@ impl Bus {
             code_stream_end: 0,
             code_stream_next_ready: 0,
             code_fetch_on_ram_bus: false,
+            last_fetch_hit: false,
+            ram_load_from_cached_code: false,
+            write_queue: [0; 4],
             scheduler: {
                 let mut s = crate::scheduler::Scheduler::new();
                 // Seed the first VBlank at scanline 243. Every fire
@@ -1339,6 +1353,8 @@ impl Bus {
                 .overlap_counter_write_with_external_read(self.cycles, stalls);
         }
         if phys < memory::ram::MIRROR_END {
+            self.ram_load_from_cached_code =
+                !self.code_fetch_on_ram_bus && self.cycles >= self.code_fill_busy_until;
             let stalls = self.ram_load_stalls_with_code_contention(stalls);
             let access_gap = self.cycles.saturating_sub(self.last_cpu_ram_access_cycle);
             self.last_cpu_ram_access_cycle = self.cycles;
@@ -1378,11 +1394,14 @@ impl Bus {
             } else {
                 memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES
             };
-            1u32.saturating_add(memory_timing::dram_refresh_wait(
-                self.cycles,
-                &mut self.dram_refresh_deadline,
-                refresh_stall,
-            ))
+            self.queue_store()
+                .saturating_add(memory_timing::dram_refresh_wait(
+                    self.cycles,
+                    &mut self.dram_refresh_deadline,
+                    refresh_stall,
+                ))
+        } else if to_physical(virt) == crate::gpu::GP0_ADDR {
+            self.queue_store()
         } else {
             self.memory_control.write_stalls(virt, width)
         }
@@ -1455,10 +1474,66 @@ impl Bus {
         (settled - self.cycles) as u32
     }
 
-    /// The instruction about to execute came out of the I-cache.
+    /// The instruction about to execute came out of the I-cache, as a hit
+    /// or behind a fill.
     #[inline]
-    pub(crate) fn note_cached_fetch(&mut self) {
+    pub(crate) fn note_cached_fetch(&mut self, hit: bool) {
         self.code_fetch_on_ram_bus = false;
+        self.last_fetch_hit = hit;
+    }
+
+    #[inline]
+    pub(crate) fn last_fetch_was_a_cache_hit(&self) -> bool {
+        self.last_fetch_hit
+    }
+
+    #[inline]
+    pub(crate) fn take_ram_load_from_cached_code(&mut self) -> bool {
+        core::mem::take(&mut self.ram_load_from_cached_code)
+    }
+
+    /// First store into an empty write buffer reaches RAM this long after it
+    /// was issued; each one behind it follows at `WRITE_QUEUE_PERIOD`.
+    const WRITE_QUEUE_FIRST: u64 = 5;
+    const WRITE_QUEUE_PERIOD: u64 = 2;
+
+    /// Queue a CPU store in the four-entry write buffer and return the clocks
+    /// the core waits for a free slot.
+    ///
+    /// hwtest v1.22/v1.23 on a launch PAL console, 64 stores, clocks a turn:
+    /// back to back 2.0 (`0x76`), with one instruction behind each 2.0
+    /// (`0x129`), with two 3.0 and with three 4.0 (`0x12A`, `0x1F`), so a store
+    /// with anything behind it is one clock. Bursts of two and four stores
+    /// cost one clock a store (`0x12B`, `0x12C`); a burst of eight costs twelve
+    /// (`0x12D`): four slots, then one store for every write that completes.
+    /// GP0 stores behave the same (`0xFA`, `0x12E`).
+    fn queue_store(&mut self) -> u32 {
+        let now = self.cycles;
+        for slot in &mut self.write_queue {
+            if *slot != 0 && *slot <= now {
+                *slot = 0;
+            }
+        }
+        self.write_queue
+            .sort_unstable_by_key(|&slot| if slot == 0 { u64::MAX } else { slot });
+        let mut wait = 0;
+        if self.write_queue[3] != 0 {
+            // Full: the oldest write has to land first.
+            wait = self.write_queue[0] - now;
+            self.write_queue.rotate_left(1);
+            self.write_queue[3] = 0;
+        }
+        let issued = now + wait;
+        let newest = self.write_queue.iter().copied().max().unwrap_or(0);
+        let completion = (issued + Self::WRITE_QUEUE_FIRST).max(newest + Self::WRITE_QUEUE_PERIOD);
+        let free = self
+            .write_queue
+            .iter()
+            .position(|&slot| slot == 0)
+            .unwrap_or(3);
+        self.write_queue[free] = completion;
+        self.ram_write_buffer_ready_cycle = completion;
+        wait as u32
     }
 
     /// Uncached instruction-fetch stall cycles.
@@ -2867,7 +2942,7 @@ impl Bus {
         let store_stall = self.cpu_write_stalls(virt, AccessWidth::Word);
         self.add_cycles(store_stall);
         if to_physical(virt) < memory::ram::MIRROR_END {
-            self.ram_write_buffer_ready_cycle = self.cycles.saturating_add(8);
+            // The write buffer's drain time was set when the store was queued.
         }
         if to_physical(virt) == crate::gpu::GP0_ADDR {
             if !self.gpu.note_cpu_gp0_arrival() {
@@ -3036,7 +3111,7 @@ impl Bus {
         self.add_cycles(store_stall);
         let phys = to_physical(virt);
         if phys < memory::ram::MIRROR_END {
-            self.ram_write_buffer_ready_cycle = self.cycles.saturating_add(8);
+            // The write buffer's drain time was set when the store was queued.
         }
         self.trace_mmio(MmioKind::W8, phys, source & 0xFF);
         if !self.cpu_write_narrow_mmio(virt, phys, source, AccessWidth::Byte) {
@@ -3052,7 +3127,7 @@ impl Bus {
         self.add_cycles(store_stall);
         let phys = to_physical(virt);
         if phys < memory::ram::MIRROR_END {
-            self.ram_write_buffer_ready_cycle = self.cycles.saturating_add(8);
+            // The write buffer's drain time was set when the store was queued.
         }
         self.trace_mmio(MmioKind::W16, phys, source & 0xFFFF);
         if !self.cpu_write_narrow_mmio(virt, phys, source, AccessWidth::Half) {
