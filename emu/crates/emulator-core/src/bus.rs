@@ -195,11 +195,19 @@ pub struct Bus {
     /// fetch, another fill) waits for this.
     #[serde(default)]
     code_fill_busy_until: u64,
-    /// Physical address of the next word the running fill will stream. A
-    /// fetch of anything else while the fill is still busy abandons the
-    /// stream.
+    /// A line fill is streaming: the core is executing its words as they
+    /// arrive. Ends when execution runs off the filled words or jumps away.
     #[serde(default)]
-    code_fill_next_streamed: u32,
+    code_stream_active: bool,
+    /// Physical address of the next word the stream will deliver, and one
+    /// past the last.
+    #[serde(default)]
+    code_stream_next: u32,
+    #[serde(default)]
+    code_stream_end: u32,
+    /// Cycle at which `code_stream_next` arrives.
+    #[serde(default)]
+    code_stream_next_ready: u64,
     /// The instruction being executed was fetched from main RAM uncached, so
     /// a RAM data access it makes shares the bus with that fetch.
     #[serde(default)]
@@ -343,7 +351,10 @@ impl Bus {
             dram_refresh_deadline: default_dram_refresh_deadline(),
             last_cpu_ram_access_cycle: 0,
             code_fill_busy_until: 0,
-            code_fill_next_streamed: 0,
+            code_stream_active: false,
+            code_stream_next: 0,
+            code_stream_end: 0,
+            code_stream_next_ready: 0,
             code_fetch_on_ram_bus: false,
             scheduler: {
                 let mut s = crate::scheduler::Scheduler::new();
@@ -1396,32 +1407,52 @@ impl Bus {
         }
     }
 
-    /// Clocks to restart the pipeline after abandoning a streaming fill.
-    const STREAM_ABANDON_CYCLES: u32 = 2;
+    /// Clocks to restart the pipeline after jumping out of a streamed line.
+    const STREAM_RESTART_CYCLES: u32 = 2;
 
-    /// Called with every fetch address before the fetch is costed. While a
-    /// line fill is streaming, the core can only take the next word of that
-    /// line; a jump anywhere else waits for the fill to finish and restarts.
+    /// Called with every fetch address before the fetch is costed; returns
+    /// the clocks the core waits on a streaming line fill.
     ///
-    /// hwtest v1.22 records `0x8C`/`0x8D` call two two-instruction leaves in
-    /// turn from an uncached wrapper. When the leaves share a cache index,
-    /// every call misses, runs `jr; nop` out of the first half of the fill and
-    /// leaves: 8.2 clocks more than a hit on silicon. The fill's stall is 5
-    /// and the remainder of the fill 1, which leaves 2 for the restart. The
-    /// target there was uncached; a cached target is assumed to pay the same,
-    /// since the cache is still being written, until a probe says otherwise.
+    /// The model, from hwtest v1.22 and the standing I-cache records, which
+    /// read the same on a launch PAL console and an SCPH-9902:
+    ///
+    /// * A main-RAM fill delivers a word every two clocks. The missed word
+    ///   arrives two clocks after the miss (one more if the fill starts
+    ///   mid-line, two more for each word that has to come first), and the
+    ///   core executes each word as it lands. Four words run in nine clocks
+    ///   (`0x1C`: 2356 for 256 lines).
+    /// * Falling off the end of the filled words costs nothing.
+    /// * Jumping away waits for the fill to let go of the bus, then two
+    ///   clocks to restart. A cold `jr; nop` leaf costs 8, 7 and 5 clocks
+    ///   more than a warm one when entered at word 0, 1 and 2 (`0x42`-`0x45`:
+    ///   26/25/23 against 18), and 8.2 in the alias ping-pong (`0x8C`/`0x8D`).
+    ///   The measured jump targets were uncached; a cached target is assumed
+    ///   to pay the same, the cache being mid-write, until a probe says
+    ///   otherwise.
     #[inline]
-    pub(crate) fn abandon_streaming_fill_cycles(&mut self, phys: u32) -> u32 {
-        if self.cycles >= self.code_fill_busy_until {
+    pub(crate) fn streaming_fill_wait(&mut self, phys: u32) -> u32 {
+        if !self.code_stream_active {
             return 0;
         }
-        if phys == self.code_fill_next_streamed {
-            self.code_fill_next_streamed = phys.wrapping_add(4);
+        let settled = self.code_fill_busy_until + u64::from(Self::STREAM_RESTART_CYCLES);
+        if self.cycles >= settled {
+            // Every word landed a while ago: this is ordinary cached code.
+            self.code_stream_active = false;
             return 0;
         }
-        let wait = (self.code_fill_busy_until - self.cycles) as u32;
-        self.code_fill_busy_until = self.cycles;
-        wait + Self::STREAM_ABANDON_CYCLES
+        if phys == self.code_stream_next {
+            if phys == self.code_stream_end {
+                self.code_stream_active = false;
+                return 0;
+            }
+            let wait = self.code_stream_next_ready.saturating_sub(self.cycles) as u32;
+            self.code_stream_next = phys.wrapping_add(4);
+            // The bus delivers on its own clock, however fast the core eats.
+            self.code_stream_next_ready += 2;
+            return wait;
+        }
+        self.code_stream_active = false;
+        (settled - self.cycles) as u32
     }
 
     /// The instruction about to execute came out of the I-cache.
@@ -1455,9 +1486,10 @@ impl Bus {
         }
     }
 
-    /// Cache-line refill stall cycles for a fill of `words` from `phys`, of
-    /// which `lead_words` come before the one being executed. `streaming` is
-    /// cache-control NOSTR clear, the normal state.
+    /// Start an I-cache line fill and return the stall before the missed
+    /// word executes. `words` are fetched, `lead_words` of them ahead of the
+    /// missed one; `streaming` is cache-control NOSTR clear, the normal state.
+    /// See [`Bus::streaming_fill_wait`] for the model.
     #[inline]
     pub(crate) fn icache_fill_stalls(
         &mut self,
@@ -1466,29 +1498,40 @@ impl Bus {
         lead_words: u32,
         streaming: bool,
     ) -> u32 {
-        let stalls = self
-            .memory_control
-            .icache_fill_stalls(phys, words, lead_words, streaming);
-        if words != 0 && phys < memory::ram::MIRROR_END {
-            // A fill cannot start until the previous one has let go.
-            let fill_wait = self.code_fill_busy_until.saturating_sub(self.cycles) as u32;
-            let refresh = memory_timing::dram_refresh_wait(
-                self.cycles,
-                &mut self.dram_refresh_deadline,
-                memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES,
-            );
-            // Two clocks a word. The cold load sweep (hwtest v1.22 `0x3C`,
-            // 24 clocks a line net of refresh) puts the release here rather
-            // than one clock later.
-            self.code_fill_busy_until =
-                self.cycles + u64::from(fill_wait + refresh + words.saturating_mul(2));
-            // The word being executed is `lead_words` into the fill; the one
-            // after it is what the stream delivers next.
-            self.code_fill_next_streamed = (phys & !3).wrapping_add(4);
-            stalls.saturating_add(fill_wait).saturating_add(refresh)
-        } else {
-            stalls
+        if words == 0 {
+            return 0;
         }
+        if phys >= memory::ram::MIRROR_END {
+            return self
+                .memory_control
+                .icache_fill_stalls(phys, words, lead_words, streaming);
+        }
+        // A fill cannot start until the previous one has let go.
+        let fill_wait = self.code_fill_busy_until.saturating_sub(self.cycles) as u32;
+        let refresh = memory_timing::dram_refresh_wait(
+            self.cycles,
+            &mut self.dram_refresh_deadline,
+            memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES,
+        );
+        let start = self.cycles + u64::from(fill_wait + refresh);
+        // One extra setup clock when a miss starts the fill mid-line.
+        let mid_line = u32::from(lead_words == 0 && phys & 0xC != 0);
+        let bus_cycles = words * 2 + mid_line;
+        let stall = if streaming {
+            let stall = 2 + mid_line + lead_words * 2;
+            self.code_stream_active = true;
+            self.code_stream_next = (phys & !3).wrapping_add(4);
+            self.code_stream_end = (phys & !0xF)
+                .wrapping_add(0x10)
+                .min((phys & !3).wrapping_add((words - lead_words) * 4));
+            self.code_stream_next_ready = start + u64::from(stall) + 2;
+            stall
+        } else {
+            self.code_stream_active = false;
+            bus_cycles + 1
+        };
+        self.code_fill_busy_until = start + u64::from(bus_cycles);
+        fill_wait + refresh + stall
     }
 
     /// Inner cycle-advancement helper shared by `tick` and `add_cycles`.

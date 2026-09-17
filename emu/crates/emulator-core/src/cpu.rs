@@ -916,7 +916,7 @@ impl Cpu {
         if self.instruction_cache_event_profile_enabled {
             self.last_instruction_cache_refill = None;
         }
-        let abandon = bus.abandon_streaming_fill_cycles(memory::to_physical(addr));
+        let abandon = bus.streaming_fill_wait(memory::to_physical(addr));
         if abandon != 0 {
             if self.cpu_cycle_profile_enabled {
                 self.cpu_cycle_profile.icache_refill_stall_cycles = self
@@ -4252,31 +4252,61 @@ mod tests {
 
     #[test]
     fn jumping_out_of_a_streaming_fill_waits_for_it_and_restarts() {
-        // hwtest v1.22 records 0x8C/0x8D: a missed two-instruction leaf costs
-        // 8 clocks more than a hit.
+        // A cold `j; nop` leaf against the same leaf warm, entered at word 0,
+        // 1 and 2 of its line. Silicon, both consoles: 8, 7 and 5 clocks
+        // (records 0x42-0x44 read 26/25/23 against 0x45's 18), and 8.2 a call
+        // in the alias ping-pong (0x8C/0x8D).
         let j_far = (0x02 << 26) | ((0x8000_3040u32 & 0x0FFF_FFFF) >> 2);
+        for (entry_word, extra) in [(0u32, 8u64), (1, 7), (2, 5)] {
+            let mut cpu = Cpu::new();
+            let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+            cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+            let leaf = 0x8000_1000 + entry_word * 4;
+            bus.write32(leaf, j_far);
+            // Make the landing line resident, so only the leaf's line can
+            // miss. (0x3040, not 0x3000: that shares the leaf's cache index.)
+            cpu.pc = 0x8000_3040;
+            for _ in 0..4 {
+                cpu.step(&mut bus).unwrap();
+            }
+            let mut clocks = [0u64; 2];
+            for pass in &mut clocks {
+                bus.add_cycles(100);
+                cpu.pc = leaf;
+                let start = bus.cycles();
+                for _ in 0..3 {
+                    cpu.step(&mut bus).unwrap();
+                }
+                *pass = bus.cycles() - start;
+            }
+            assert_eq!(clocks[1], 3, "entry word {entry_word}");
+            assert_eq!(clocks[0] - clocks[1], extra, "entry word {entry_word}");
+        }
+    }
+
+    #[test]
+    fn a_multiply_does_not_hide_behind_a_front_loaded_refill() {
+        // `multu` as the last word of a line, `mflo` as the first of the next,
+        // cold. The missed word lands two clocks after the miss, so the read
+        // is three clocks behind the multiply and still stalls: 1 + 2 + 1 + 4
+        // for a latency of 6. Charging the whole fill before the first word
+        // would have hidden the multiply inside it.
         let mut cpu = Cpu::new();
         let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
         cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
-        bus.write32(0x8000_1000, j_far);
-        // Make the landing line resident, so only the leaf's line can miss.
-        // (0x3040, not 0x3000: that would share the leaf's cache index.)
-        cpu.pc = 0x8000_3040;
-        for _ in 0..4 {
+        cpu.gprs[8] = 0x7FF;
+        cpu.gprs[9] = 0x0001_0041;
+        bus.write32(0x8000_100C, MULTU_T0_T1);
+        bus.write32(0x8000_1010, MFLO_T2);
+        cpu.pc = 0x8000_1000;
+        for _ in 0..3 {
             cpu.step(&mut bus).unwrap();
         }
-        let mut clocks = [0u64; 2];
-        for pass in &mut clocks {
-            bus.add_cycles(100);
-            cpu.pc = 0x8000_1000;
-            let start = bus.cycles();
-            for _ in 0..3 {
-                cpu.step(&mut bus).unwrap();
-            }
-            *pass = bus.cycles() - start;
-        }
-        assert_eq!(clocks[1], 3);
-        assert_eq!(clocks[0] - clocks[1], 8);
+        bus.add_cycles(100);
+        let start = bus.cycles();
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.cycles() - start, 8);
     }
 
     #[test]
