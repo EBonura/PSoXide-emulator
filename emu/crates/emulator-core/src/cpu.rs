@@ -916,6 +916,16 @@ impl Cpu {
         if self.instruction_cache_event_profile_enabled {
             self.last_instruction_cache_refill = None;
         }
+        let abandon = bus.abandon_streaming_fill_cycles(memory::to_physical(addr));
+        if abandon != 0 {
+            if self.cpu_cycle_profile_enabled {
+                self.cpu_cycle_profile.icache_refill_stall_cycles = self
+                    .cpu_cycle_profile
+                    .icache_refill_stall_cycles
+                    .saturating_add(abandon as u64);
+            }
+            bus.add_cycles(abandon);
+        }
         if !self.instruction_cache_enabled_at(addr) {
             let stalls = bus.instruction_read_stalls(addr);
             if self.cpu_cycle_profile_enabled {
@@ -4238,6 +4248,35 @@ mod tests {
             }
             assert_eq!(bus.cycles() - start, clocks);
         }
+    }
+
+    #[test]
+    fn jumping_out_of_a_streaming_fill_waits_for_it_and_restarts() {
+        // hwtest v1.22 records 0x8C/0x8D: a missed two-instruction leaf costs
+        // 8 clocks more than a hit.
+        let j_far = (0x02 << 26) | ((0x8000_3040u32 & 0x0FFF_FFFF) >> 2);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+        bus.write32(0x8000_1000, j_far);
+        // Make the landing line resident, so only the leaf's line can miss.
+        // (0x3040, not 0x3000: that would share the leaf's cache index.)
+        cpu.pc = 0x8000_3040;
+        for _ in 0..4 {
+            cpu.step(&mut bus).unwrap();
+        }
+        let mut clocks = [0u64; 2];
+        for pass in &mut clocks {
+            bus.add_cycles(100);
+            cpu.pc = 0x8000_1000;
+            let start = bus.cycles();
+            for _ in 0..3 {
+                cpu.step(&mut bus).unwrap();
+            }
+            *pass = bus.cycles() - start;
+        }
+        assert_eq!(clocks[1], 3);
+        assert_eq!(clocks[0] - clocks[1], 8);
     }
 
     #[test]
