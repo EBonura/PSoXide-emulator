@@ -14,6 +14,7 @@ use psx_hw::memory;
 
 pub(super) const BASE: u32 = 0x1F80_1000;
 pub(super) const END: u32 = BASE + 9 * 4;
+pub(super) const RAM_SIZE_ADDR: u32 = 0x1F80_1060;
 
 const MEM_DELAY_WRITE_MASK: u32 = 0xAF1F_FFFF;
 const COMMON_DELAY_WRITE_MASK: u32 = 0x0003_FFFF;
@@ -79,8 +80,13 @@ impl AccessWidth {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct MemoryControl {
     regs: [u32; 9],
+    /// `0x1F801060`. Only bit 7 has a modelled effect.
+    #[serde(default = "default_ram_size")]
+    ram_size: u32,
     bios_stalls: [u32; 3],
     spu_stalls: [u32; 3],
+    #[serde(default)]
+    spu_write_stalls: [u32; 3],
     cdrom_stalls: [u32; 3],
     exp1_stalls: [u32; 3],
     exp2_stalls: [u32; 3],
@@ -104,8 +110,10 @@ impl Default for MemoryControl {
                 0x0007_0777, // expansion 2 delay/size
                 0x0000_132C, // common delay (SCPH-9902 PAL silicon capture)
             ],
+            ram_size: default_ram_size(),
             bios_stalls: [0; 3],
             spu_stalls: [0; 3],
+            spu_write_stalls: [0; 3],
             cdrom_stalls: [0; 3],
             exp1_stalls: [0; 3],
             exp2_stalls: [0; 3],
@@ -116,10 +124,34 @@ impl Default for MemoryControl {
     }
 }
 
+/// What the BIOS leaves in RAM_SIZE. The upper half reads back as garbage on
+/// silicon (`0x8C610B88` on the console that took the v1.22 captures).
+fn default_ram_size() -> u32 {
+    0x0000_0B88
+}
+
 impl MemoryControl {
     #[inline]
     pub(super) fn contains(phys: u32) -> bool {
         (BASE..END).contains(&phys)
+    }
+
+    pub(super) fn ram_size(&self) -> u32 {
+        self.ram_size
+    }
+
+    pub(super) fn set_ram_size(&mut self, value: u32) {
+        self.ram_size = value;
+    }
+
+    /// RAM_SIZE bit 7: one extra clock when a RAM data access has to share
+    /// the bus with a RAM code fetch. hwtest v1.22 measures it both ways a
+    /// program can meet it: 64 loads executed through KSEG1 cost 1193 clocks
+    /// with the bit set and 1120 with it clear, and a cold sweep of 4 KiB of
+    /// load-heavy code costs 6242 against 5958, one clock per line refill.
+    /// Loads from warm cached code do not move (531 against 526).
+    pub(super) fn code_data_contention_cycles(&self) -> u32 {
+        (self.ram_size >> 7) & 1
     }
 
     pub(super) fn read(&self, phys: u32, width: AccessWidth) -> u32 {
@@ -214,12 +246,29 @@ impl MemoryControl {
         2
     }
 
-    /// Stall for an uncached instruction read. RAM instruction fetches use
-    /// the external bus's six-cycle path; BIOS uses its programmed word wait.
+    /// CPU store stall on a programmable external bus, beyond the issue
+    /// cycle. Only the SPU is modelled: hwtest v1.22 record `0xFD` (64
+    /// halfword stores to an SPU register) reads 911 cycles on silicon, 14.2
+    /// each, and the wait-state equation with the delay register's WRITE
+    /// nibble gives exactly 14 for the BIOS value, as its read nibble gives
+    /// the measured 27 for loads. Nothing has measured the other buses.
+    pub(super) fn write_stalls(&self, virt: u32, width: AccessWidth) -> u32 {
+        let phys = memory::to_physical(virt);
+        if (0x1F80_1C00..0x1F80_2000).contains(&phys) {
+            self.spu_write_stalls[width.index()]
+        } else {
+            0
+        }
+    }
+
+    /// Stall for an uncached instruction read. BIOS uses its programmed word
+    /// wait. A main-RAM fetch is six clocks in all: hwtest v1.22 record
+    /// `0x1E` (128 nops through KSEG1) reads 784 on silicon, 6.1 each, where
+    /// the seven this used to charge read 906.
     pub(super) fn instruction_read_stalls(&self, virt: u32) -> u32 {
         let phys = memory::to_physical(virt);
         if phys < memory::ram::MIRROR_END {
-            6
+            5
         } else if (memory::bios::BASE..memory::bios::BASE + memory::bios::SIZE as u32)
             .contains(&phys)
         {
@@ -229,17 +278,39 @@ impl MemoryControl {
         }
     }
 
-    /// I-cache refill cost. RAM supports one word per cycle during a line
-    /// burst; BIOS refills retain the programmed 8-bit ROM word wait.
-    pub(super) fn icache_fill_stalls(&self, phys: u32, words: u32) -> u32 {
+    /// I-cache refill stall, for a fill of `words` of which `lead_words`
+    /// come before the one being executed. BIOS refills retain the programmed
+    /// 8-bit ROM word wait.
+    ///
+    /// A main-RAM fill takes two clocks per word plus one of setup, and the
+    /// core *streams*: it executes each word as it arrives instead of waiting
+    /// for the line. So n words executed in sequence take 2n + 1 clocks in
+    /// all, which this returns as an n + 1 stall ahead of n one-clock
+    /// instructions. Measured with hwtest v1.22 on a launch PAL console:
+    ///
+    /// * the cold 4 KiB sweep costs 9 clocks a line (2356 for 256);
+    /// * with cache-control NOSTR set it costs 13 (3376): the whole fill, then
+    ///   the four instructions, which is `streaming = false` here;
+    /// * with two-word refills it costs 14 (3656): word 0 misses and fills
+    ///   two words (3 + 2), then word 2 finds a matching line with an invalid
+    ///   word, which refills all four from word 0 and has to wait for the two
+    ///   leading words before it can execute anything (7 + 2).
+    pub(super) fn icache_fill_stalls(
+        &self,
+        phys: u32,
+        words: u32,
+        lead_words: u32,
+        streaming: bool,
+    ) -> u32 {
         if words == 0 {
             return 0;
         }
         if phys < memory::ram::MIRROR_END {
-            // Main RAM bursts one word per clock after a one-clock line-fill
-            // setup. The 4 KiB cold-cache sweep resolves exactly one setup
-            // clock for each of its 256 four-word lines.
-            words.saturating_add(1)
+            if streaming {
+                words.saturating_add(1).saturating_add(lead_words)
+            } else {
+                Self::ram_fill_cycles(words)
+            }
         } else if (memory::bios::BASE..memory::bios::BASE + memory::bios::SIZE as u32)
             .contains(&phys)
         {
@@ -247,6 +318,11 @@ impl MemoryControl {
         } else {
             0
         }
+    }
+
+    /// Clocks a main-RAM line fill of `words` holds the bus for.
+    pub(super) fn ram_fill_cycles(words: u32) -> u32 {
+        words.saturating_mul(2).saturating_add(1)
     }
 
     /// SPU DMA FIFO service cadence for the active memory-controller profile.
@@ -307,6 +383,7 @@ impl MemoryControl {
                 stall
             }
         });
+        self.spu_write_stalls = calculate_access_stalls(self.regs[5], common, self.regs[5] & 0xF);
         self.cdrom_stalls = calculate_stalls(self.regs[6], common).map(|stall| {
             // Likewise, the one-cycle CD bridge surcharge is visible in the
             // earlier short-COMMON0 profile but not in the late PAL timings.
@@ -342,7 +419,13 @@ impl MemoryControl {
 /// the complete access time because the instruction issue cycle is charged by
 /// the CPU itself.
 fn calculate_stalls(delay: u32, common: u32) -> [u32; 3] {
-    let access = ((delay >> 4) & 0xF) as i32;
+    calculate_access_stalls(delay, common, (delay >> 4) & 0xF)
+}
+
+/// The same equation for either direction: `access` is the delay register's
+/// read nibble (bits 4-7) or write nibble (bits 0-3).
+fn calculate_access_stalls(delay: u32, common: u32, access: u32) -> [u32; 3] {
+    let access = access as i32;
     let use_com0 = delay & (1 << 8) != 0;
     let use_com2 = delay & (1 << 10) != 0;
     let use_com3 = delay & (1 << 11) != 0;
@@ -455,8 +538,15 @@ mod tests {
     #[test]
     fn cache_refill_distinguishes_ram_burst_from_bios_rom() {
         let control = MemoryControl::default();
-        assert_eq!(control.icache_fill_stalls(0x0001_0000, 4), 5);
-        assert_eq!(control.icache_fill_stalls(memory::bios::BASE, 4), 128);
+        assert_eq!(control.icache_fill_stalls(0x0001_0000, 4, 0, true), 5);
+        assert_eq!(
+            control.icache_fill_stalls(memory::bios::BASE, 4, 0, true),
+            128
+        );
+        // NOSTR: the whole fill before anything executes.
+        assert_eq!(control.icache_fill_stalls(0x0001_0000, 4, 0, false), 9);
+        // Word 2 of a matching line: wait out the two leading words.
+        assert_eq!(control.icache_fill_stalls(0x0001_0000, 4, 2, true), 7);
     }
 
     #[test]
