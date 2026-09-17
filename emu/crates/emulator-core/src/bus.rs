@@ -189,6 +189,16 @@ pub struct Bus {
     /// silicon.
     #[serde(default)]
     last_cpu_ram_access_cycle: u64,
+    /// Cycle until which the last I-cache line fill holds the RAM bus. The
+    /// core streams instructions out of a fill while it is still running, so
+    /// anything else that needs RAM in the meantime (a data load, an uncached
+    /// fetch, another fill) waits for this.
+    #[serde(default)]
+    code_fill_busy_until: u64,
+    /// The instruction being executed was fetched from main RAM uncached, so
+    /// a RAM data access it makes shares the bus with that fetch.
+    #[serde(default)]
+    code_fetch_on_ram_bus: bool,
     // VBlank scheduling lives in `scheduler` under
     // [`EventSlot::VBlank`]. Seeded at `FIRST_VBLANK_CYCLE` by
     // `Bus::new`; every VBlank handler invocation re-schedules the
@@ -327,6 +337,8 @@ impl Bus {
             ram_write_buffer_ready_cycle: 0,
             dram_refresh_deadline: default_dram_refresh_deadline(),
             last_cpu_ram_access_cycle: 0,
+            code_fill_busy_until: 0,
+            code_fetch_on_ram_bus: false,
             scheduler: {
                 let mut s = crate::scheduler::Scheduler::new();
                 // Seed the first VBlank at scanline 243. Every fire
@@ -1310,6 +1322,7 @@ impl Bus {
                 .overlap_counter_write_with_external_read(self.cycles, stalls);
         }
         if phys < memory::ram::MIRROR_END {
+            let stalls = self.ram_load_stalls_with_code_contention(stalls);
             let access_gap = self.cycles.saturating_sub(self.last_cpu_ram_access_cycle);
             self.last_cpu_ram_access_cycle = self.cycles;
             let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
@@ -1340,7 +1353,7 @@ impl Bus {
     /// Keep this separate from CPU reads: the external write buffer hides
     /// most of the read wait-state cost but still occupies one extra clock.
     #[inline]
-    pub(crate) fn cpu_write_stalls(&mut self, virt: u32) -> u32 {
+    pub(crate) fn cpu_write_stalls(&mut self, virt: u32, width: AccessWidth) -> u32 {
         if to_physical(virt) < memory::ram::MIRROR_END {
             self.last_cpu_ram_access_cycle = self.cycles;
             let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
@@ -1354,15 +1367,50 @@ impl Bus {
                 refresh_stall,
             ))
         } else {
-            0
+            self.memory_control.write_stalls(virt, width)
         }
+    }
+
+    /// A RAM load that has to share the bus with a code fetch.
+    ///
+    /// Two cases, both measured by hwtest v1.22 (see
+    /// [`MemoryControl::code_data_contention_cycles`]). While a line fill is
+    /// still streaming, the load waits for the fill to let go of the bus. And
+    /// when the instruction itself was fetched from RAM uncached, the load is
+    /// five wait clocks rather than six. Either way RAM_SIZE bit 7 adds one.
+    fn ram_load_stalls_with_code_contention(&self, stalls: u32) -> u32 {
+        let contention = self.memory_control.code_data_contention_cycles();
+        let fill_wait = self.code_fill_busy_until.saturating_sub(self.cycles) as u32;
+        if fill_wait > 0 {
+            stalls + fill_wait + contention
+        } else if self.code_fetch_on_ram_bus {
+            stalls.saturating_sub(1) + contention
+        } else {
+            stalls
+        }
+    }
+
+    /// The instruction about to execute came out of the I-cache.
+    #[inline]
+    pub(crate) fn note_cached_fetch(&mut self) {
+        self.code_fetch_on_ram_bus = false;
     }
 
     /// Uncached instruction-fetch stall cycles.
     #[inline]
     pub(crate) fn instruction_read_stalls(&mut self, virt: u32) -> u32 {
-        let stalls = self.memory_control.instruction_read_stalls(virt);
-        if to_physical(virt) < memory::ram::MIRROR_END {
+        let on_ram = to_physical(virt) < memory::ram::MIRROR_END;
+        self.code_fetch_on_ram_bus = on_ram;
+        let fill_wait = if on_ram {
+            self.code_fill_busy_until.saturating_sub(self.cycles) as u32
+        } else {
+            0
+        };
+        let stalls = self
+            .memory_control
+            .instruction_read_stalls(virt)
+            .saturating_add(fill_wait);
+        if on_ram {
             stalls.saturating_add(memory_timing::dram_refresh_wait(
                 self.cycles,
                 &mut self.dram_refresh_deadline,
@@ -1373,16 +1421,34 @@ impl Bus {
         }
     }
 
-    /// Cache-line refill stall cycles for `words` fetched from `phys`.
+    /// Cache-line refill stall cycles for a fill of `words` from `phys`, of
+    /// which `lead_words` come before the one being executed. `streaming` is
+    /// cache-control NOSTR clear, the normal state.
     #[inline]
-    pub(crate) fn icache_fill_stalls(&mut self, phys: u32, words: u32) -> u32 {
-        let stalls = self.memory_control.icache_fill_stalls(phys, words);
+    pub(crate) fn icache_fill_stalls(
+        &mut self,
+        phys: u32,
+        words: u32,
+        lead_words: u32,
+        streaming: bool,
+    ) -> u32 {
+        let stalls = self
+            .memory_control
+            .icache_fill_stalls(phys, words, lead_words, streaming);
         if words != 0 && phys < memory::ram::MIRROR_END {
-            stalls.saturating_add(memory_timing::dram_refresh_wait(
+            // A fill cannot start until the previous one has let go.
+            let fill_wait = self.code_fill_busy_until.saturating_sub(self.cycles) as u32;
+            let refresh = memory_timing::dram_refresh_wait(
                 self.cycles,
                 &mut self.dram_refresh_deadline,
                 memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES,
-            ))
+            );
+            // Two clocks a word. The cold load sweep (hwtest v1.22 `0x3C`,
+            // 24 clocks a line net of refresh) puts the release here rather
+            // than one clock later.
+            self.code_fill_busy_until =
+                self.cycles + u64::from(fill_wait + refresh + words.saturating_mul(2));
+            stalls.saturating_add(fill_wait).saturating_add(refresh)
         } else {
             stalls
         }
@@ -2617,6 +2683,9 @@ impl Bus {
         if MemoryControl::contains(phys) {
             return self.memory_control.read(phys, AccessWidth::Word);
         }
+        if phys == memory_timing::RAM_SIZE_ADDR {
+            return self.memory_control.ram_size();
+        }
 
         if phys == IRQ_STAT_ADDR {
             return self.irq.stat();
@@ -2715,7 +2784,7 @@ impl Bus {
     /// though DMA-ready GPUSTAT.28 can remain high for CPU-fed rendering.
     pub(crate) fn cpu_write32(&mut self, virt: u32, value: u32) {
         self.data_bus_latch = value;
-        let store_stall = self.cpu_write_stalls(virt);
+        let store_stall = self.cpu_write_stalls(virt, AccessWidth::Word);
         self.add_cycles(store_stall);
         if to_physical(virt) < memory::ram::MIRROR_END {
             self.ram_write_buffer_ready_cycle = self.cycles.saturating_add(8);
@@ -2738,6 +2807,10 @@ impl Bus {
         }
         if MemoryControl::contains(phys) {
             self.memory_control.write(phys, AccessWidth::Word, value);
+            return;
+        }
+        if phys == memory_timing::RAM_SIZE_ADDR {
+            self.memory_control.set_ram_size(value);
             return;
         }
         if phys == IRQ_STAT_ADDR {
@@ -2879,7 +2952,7 @@ impl Bus {
     /// word; direct bus clients keep using [`Bus::write8`] for an actual byte.
     pub(crate) fn cpu_write8(&mut self, virt: u32, source: u32) {
         self.data_bus_latch = source;
-        let store_stall = self.cpu_write_stalls(virt);
+        let store_stall = self.cpu_write_stalls(virt, AccessWidth::Byte);
         self.add_cycles(store_stall);
         let phys = to_physical(virt);
         if phys < memory::ram::MIRROR_END {
@@ -2895,7 +2968,7 @@ impl Bus {
     /// the complete GPR value even though RAM consumes only its low halfword.
     pub(crate) fn cpu_write16(&mut self, virt: u32, source: u32) {
         self.data_bus_latch = source;
-        let store_stall = self.cpu_write_stalls(virt);
+        let store_stall = self.cpu_write_stalls(virt, AccessWidth::Half);
         self.add_cycles(store_stall);
         let phys = to_physical(virt);
         if phys < memory::ram::MIRROR_END {
@@ -3217,13 +3290,21 @@ fn gpu_command_block_cycles(total_words: u32, block_count: u32) -> u32 {
         .saturating_add(5)
 }
 
-/// Linked-list command traffic pays the same DRAM burst slope, with a larger
-/// per-node header/pointer arbitration cost than contiguous BCR blocks.
+/// Linked-list command traffic pays the same DRAM burst slope plus a per-node
+/// header/pointer arbitration cost.
+///
+/// hwtest v1.22 walks lists of empty packets, which is what every unused
+/// ordering-table slot is: 2634 clocks for 256 and 10516 for 1024 on a launch
+/// PAL console, 10.27 a node either way, of which the header word and its
+/// burst share are 1.06. That leaves 9.2 for arbitration, not the 15 this
+/// used to charge. The same capture's two-node 258-word list (record `0x6B`)
+/// reads 324, which this now gives as 325 where it gave 337.
 #[inline]
 fn gpu_command_linked_cycles(total_words: u32, node_count: u32) -> u32 {
     total_words
         .saturating_add(total_words.div_ceil(16))
-        .saturating_add(node_count.saturating_mul(15))
+        .saturating_add(node_count.saturating_mul(9))
+        .saturating_add(node_count / 5)
         .saturating_add(5)
 }
 

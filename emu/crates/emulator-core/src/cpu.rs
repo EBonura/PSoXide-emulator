@@ -35,6 +35,10 @@ const CACHE_CONTROL_TAG: u32 = 1 << 2;
 const CACHE_CONTROL_IBLKSZ_SHIFT: u32 = 8;
 const CACHE_CONTROL_IBLKSZ_MASK: u32 = 3 << CACHE_CONTROL_IBLKSZ_SHIFT;
 const CACHE_CONTROL_IS1: u32 = 1 << 11;
+/// "No streaming": the core waits for a whole line fill before executing any
+/// of it. Clear in the BIOS value. hwtest v1.22 record `0xE9` sets it and a
+/// cold sweep goes from 9 clocks a line to 13.
+const CACHE_CONTROL_NOSTR: u32 = 1 << 17;
 /// COP0 Status.CU2: permit GTE register transfers and commands.
 const COP0_STATUS_CU2: u32 = 1 << 30;
 /// Retail BIOS state after `FlushCache` returns: scratchpad and I-cache
@@ -926,13 +930,16 @@ impl Cpu {
         let phys = memory::to_physical(addr);
         let iblksz =
             ((self.cache_control & CACHE_CONTROL_IBLKSZ_MASK) >> CACHE_CONTROL_IBLKSZ_SHIFT) as u8;
-        let (instruction, filled_words, refill) = self.instruction_cache.fetch(
+        let (instruction, fill, refill) = self.instruction_cache.fetch(
             phys,
             iblksz,
             bus,
             self.instruction_cache_event_profile_enabled,
         );
-        let stalls = bus.icache_fill_stalls(phys, filled_words);
+        bus.note_cached_fetch();
+        let filled_words = fill.words;
+        let streaming = self.cache_control & CACHE_CONTROL_NOSTR == 0;
+        let stalls = bus.icache_fill_stalls(phys, fill.words, fill.lead_words, streaming);
         if filled_words != 0 {
             self.instruction_cache_profile.refill_events = self
                 .instruction_cache_profile
@@ -1290,6 +1297,38 @@ impl Cpu {
         }
     }
 
+    /// SWL/SWR are emulated as read-merge-write, but main RAM does not see a
+    /// read: the memory controller writes the selected byte lanes. hwtest
+    /// v1.22 record `0xCD` (64 `swl; swr` pairs) reads 266 cycles on silicon,
+    /// the cost of 128 ordinary stores, where charging a load for each read
+    /// 902. Other buses keep the load charge until something measures them.
+    fn charge_unaligned_store_read(&self, bus: &mut Bus, aligned: u32) {
+        if !Self::is_cpu_local_memory(aligned) {
+            self.charge_read(bus, aligned, AccessWidth::Word);
+        }
+    }
+
+    /// Main RAM or scratchpad, through any segment.
+    fn is_cpu_local_memory(addr: u32) -> bool {
+        let phys = memory::to_physical(addr);
+        phys < memory::ram::MIRROR_END
+            || (memory::scratchpad::BASE
+                ..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
+                .contains(&phys)
+    }
+
+    /// Lane-steering cycles for a partial LWL/LWR. They were fitted to the
+    /// unaligned SPU word probe (38.94 cycles for the pair on a 16-bit bus).
+    /// Main RAM shows none: hwtest v1.22 record `0xCC` (64 `lwl; lwr` pairs)
+    /// reads 901 cycles on silicon, two plain seven-cycle loads each.
+    fn unaligned_lane_cycles(addr: u32, cycles: u32) -> u32 {
+        if Self::is_cpu_local_memory(addr) {
+            0
+        } else {
+            cycles
+        }
+    }
+
     /// Read only the byte lanes consumed by LWL. The external bus does not
     /// blindly perform a 32-bit transaction for a partial-word opcode: this
     /// is observable on the SPU's 16-bit register bus. Partial forms have one
@@ -1299,17 +1338,17 @@ impl Cpu {
         match addr & 3 {
             0 => {
                 self.charge_read(bus, aligned, AccessWidth::Byte);
-                bus.add_cycles(1);
+                bus.add_cycles(Self::unaligned_lane_cycles(aligned, 1));
                 bus.read8(aligned) as u32
             }
             1 => {
                 self.charge_read(bus, aligned, AccessWidth::Half);
-                bus.add_cycles(1);
+                bus.add_cycles(Self::unaligned_lane_cycles(aligned, 1));
                 bus.read16(aligned) as u32
             }
             2 => {
                 self.charge_read(bus, aligned, AccessWidth::Word);
-                bus.add_cycles(1);
+                bus.add_cycles(Self::unaligned_lane_cycles(aligned, 1));
                 bus.read16(aligned) as u32 | ((bus.read8(aligned + 2) as u32) << 16)
             }
             _ => {
@@ -1334,17 +1373,17 @@ impl Cpu {
                 // The R3000's right-merge path has a two-cycle lane-steering
                 // penalty. Together with LWL's one cycle this reproduces the
                 // 38.94-cycle unaligned SPU word measured on silicon.
-                bus.add_cycles(2);
+                bus.add_cycles(Self::unaligned_lane_cycles(aligned, 2));
                 ((bus.read8(aligned + 1) as u32) << 8) | ((bus.read16(aligned + 2) as u32) << 16)
             }
             2 => {
                 self.charge_read(bus, aligned + 2, AccessWidth::Half);
-                bus.add_cycles(2);
+                bus.add_cycles(Self::unaligned_lane_cycles(aligned, 2));
                 (bus.read16(aligned + 2) as u32) << 16
             }
             _ => {
                 self.charge_read(bus, aligned + 3, AccessWidth::Byte);
-                bus.add_cycles(2);
+                bus.add_cycles(Self::unaligned_lane_cycles(aligned, 2));
                 (bus.read8(aligned + 3) as u32) << 24
             }
         }
@@ -2185,12 +2224,12 @@ impl Cpu {
             // MFHI/MFLO read the multiply/divide unit; stall until an
             // in-flight MULT/DIV has retired (the R3000A HI/LO interlock).
             0x10 => {
-                stall_to(bus, self.hilo_busy_until);
+                hilo_stall_to(bus, self.hilo_busy_until);
                 self.op_mfhi(instr)
             }
             0x11 => self.op_mthi(instr),
             0x12 => {
-                stall_to(bus, self.hilo_busy_until);
+                hilo_stall_to(bus, self.hilo_busy_until);
                 self.op_mflo(instr)
             }
             0x13 => self.op_mtlo(instr),
@@ -2697,7 +2736,7 @@ impl Cpu {
             .committing_load
             .is_some_and(|(pending_reg, _)| pending_reg == rt)
         {
-            bus.add_cycles(1);
+            bus.add_cycles(Self::unaligned_lane_cycles(addr, 1));
         }
         let word = self.read_lwr_lanes(addr, bus);
         let current = self.staged_gpr(rt);
@@ -2723,12 +2762,13 @@ impl Cpu {
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         let aligned = addr & !3;
-        self.charge_read(bus, aligned, AccessWidth::Word);
+        self.charge_unaligned_store_read(bus, aligned);
         let mem = bus.read32(aligned);
         let reg = self.gpr(rt);
         let shift = (addr & 3) * 8;
         let merged = (mem & !(0xFFFF_FFFFu32 >> (24 - shift))) | (reg >> (24 - shift));
-        bus.write32(aligned, merged);
+        // Charged as the ordinary store it is on the bus.
+        bus.cpu_write32(aligned, merged);
         Ok(())
     }
 
@@ -2743,12 +2783,13 @@ impl Cpu {
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         let aligned = addr & !3;
-        self.charge_read(bus, aligned, AccessWidth::Word);
+        self.charge_unaligned_store_read(bus, aligned);
         let mem = bus.read32(aligned);
         let reg = self.gpr(rt);
         let shift = (addr & 3) * 8;
         let merged = (mem & !(0xFFFF_FFFFu32 << shift)) | (reg << shift);
-        bus.write32(aligned, merged);
+        // Charged as the ordinary store it is on the bus.
+        bus.cpu_write32(aligned, merged);
         Ok(())
     }
 
@@ -3243,6 +3284,25 @@ const DIV_CYCLES: u32 = 36;
 fn stall_to(bus: &mut Bus, deadline: u64) {
     let now = bus.cycles();
     if now < deadline {
+        bus.add_cycles((deadline - now) as u32);
+    }
+}
+
+/// The HI/LO interlock. As [`stall_to`], except that a read arriving one
+/// cycle before the unit retires does not stall.
+///
+/// Measured on a launch PAL console with the hwtest v1.22 gap sweep (records
+/// `0x79`-`0x84`, 16 repeats of `multu; k nops; mflo`): with k = m - 1 nops
+/// behind a multiply of latency m the pair costs m + 1 cycles, one fewer than
+/// with no nops at all, at all three bands (110/126, 158/174, 222/238), and
+/// from k = m on the cost is k + 2 as modelled. So the result is readable one
+/// cycle sooner than the stalled path suggests, and taking the stall costs a
+/// cycle to come out of. Only k = 0 and k = m - 1 are measured below m; the
+/// shape between them is assumed flat, as it was before.
+#[inline]
+fn hilo_stall_to(bus: &mut Bus, deadline: u64) {
+    let now = bus.cycles();
+    if now + 1 < deadline {
         bus.add_cycles((deadline - now) as u32);
     }
 }
@@ -4046,17 +4106,153 @@ mod tests {
         let settle = (100 - bus.cycles()) as u32;
         bus.add_cycles(settle);
 
+        // Main RAM selects lanes for nothing: every form is the six RAM
+        // stalls. hwtest v1.22 record 0xCC reads 901 clocks for 64 lwl/lwr
+        // pairs on silicon, two plain loads each. The steering cycles belong
+        // to the 16-bit SPU bus they were fitted on.
         let start = bus.cycles();
         assert_eq!(cpu.read_lwl_lanes(0x1001, &mut bus), 0x0000_5678);
-        assert_eq!(bus.cycles() - start, 7); // six RAM stalls + lane steering
+        assert_eq!(bus.cycles() - start, 6);
 
         let start = bus.cycles();
         assert_eq!(cpu.read_lwr_lanes(0x1002, &mut bus), 0x1234_0000);
-        assert_eq!(bus.cycles() - start, 8); // right merge steers for two cycles
+        assert_eq!(bus.cycles() - start, 6);
 
         let start = bus.cycles();
         assert_eq!(cpu.read_lwl_lanes(0x1003, &mut bus), 0x1234_5678);
-        assert_eq!(bus.cycles() - start, 6); // full-word form has no lane penalty
+        assert_eq!(bus.cycles() - start, 6);
+
+        assert_eq!(Cpu::unaligned_lane_cycles(0x1F80_1DAA, 2), 2);
+        assert_eq!(Cpu::unaligned_lane_cycles(0x8000_1000, 2), 0);
+        assert_eq!(Cpu::unaligned_lane_cycles(0x1F80_0000, 2), 0);
+    }
+
+    /// Cycles for `program` run warm from KSEG0, the way the hwtest warm
+    /// harness runs a block: once to fill the I-cache, then timed.
+    fn warm_cycles(cpu: &mut Cpu, bus: &mut Bus, program: &[u32]) -> u64 {
+        const BASE: u32 = 0x8000_1000;
+        cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+        for (index, word) in program.iter().enumerate() {
+            bus.write32(BASE + index as u32 * 4, *word);
+        }
+        let mut elapsed = 0;
+        for _pass in 0..2 {
+            // Clear of the DRAM refresh slot, which has its own coverage.
+            let settle = 600 - (bus.cycles() % 515);
+            bus.add_cycles(settle as u32 % 515);
+            cpu.pc = BASE;
+            let start = bus.cycles();
+            for _ in program {
+                cpu.step(bus).unwrap();
+            }
+            elapsed = bus.cycles() - start;
+        }
+        elapsed
+    }
+
+    const MULTU_T0_T1: u32 = (8 << 21) | (9 << 16) | 0x19;
+    const MFLO_T2: u32 = (10 << 11) | 0x12;
+
+    fn multu_gap_program(gap: usize) -> [u32; 18] {
+        let mut program = [0u32; 18];
+        program[0] = MULTU_T0_T1;
+        program[1 + gap] = MFLO_T2;
+        program
+    }
+
+    #[test]
+    fn a_multiply_read_one_cycle_early_does_not_stall() {
+        // hwtest v1.22 gap sweep on a launch PAL console, per repeat of
+        // `multu; k nops; mflo` with a small rs (latency 6): 8 clocks at
+        // k = 0, 7 at k = 5, 8 at k = 6, 9 at k = 7.
+        for (gap, clocks) in [(0usize, 8u64), (5, 7), (6, 8), (7, 9)] {
+            let mut cpu = Cpu::new();
+            let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+            cpu.gprs[8] = 0x7FF;
+            cpu.gprs[9] = 0x0001_0041;
+            let program = multu_gap_program(gap);
+            let total = warm_cycles(&mut cpu, &mut bus, &program[..gap + 2]);
+            assert_eq!(total, clocks, "gap {gap}");
+        }
+    }
+
+    #[test]
+    fn unaligned_ram_stores_cost_two_ordinary_stores() {
+        // hwtest v1.22 record 0xCD: 64 `swl; swr` pairs in 266 clocks.
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        cpu.gprs[8] = 0x8000_2001;
+        let swl = (0x2A << 26) | (8 << 21) | (9 << 16) | 3;
+        let swr = (0x2E << 26) | (8 << 21) | (9 << 16);
+        let pair = warm_cycles(&mut cpu, &mut bus, &[swl, swr]);
+        let sw = (0x2B << 26) | (8 << 21) | (9 << 16) | 3;
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        cpu.gprs[8] = 0x8000_2001;
+        let plain = warm_cycles(&mut cpu, &mut bus, &[sw, sw]);
+        assert_eq!(pair, plain);
+        assert_eq!(pair, 4);
+    }
+
+    #[test]
+    fn a_load_waits_for_a_streaming_line_fill_and_pays_ram_size_bit_7() {
+        // hwtest v1.22 records 0x3C/0x3D: a cold sweep of `lw; nop; lw; nop`
+        // lines costs 24 clocks a line with RAM_SIZE bit 7 set and 23 clear
+        // (6242 and 5958 for 256 lines, less the refresh slots).
+        for (ram_size, clocks) in [(0x0000_0B88u32, 24u64), (0x0000_0B08, 23)] {
+            let mut cpu = Cpu::new();
+            let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+            bus.write32(0x1F80_1060, ram_size);
+            cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+            cpu.gprs[25] = 0x8000_4000;
+            let lw = (0x23 << 26) | (25 << 21) | (3 << 16);
+            for (index, word) in [lw, 0, lw, 0].into_iter().enumerate() {
+                bus.write32(0x8000_1000 + index as u32 * 4, word);
+            }
+            bus.add_cycles(100);
+            cpu.pc = 0x8000_1000;
+            let start = bus.cycles();
+            for _ in 0..4 {
+                cpu.step(&mut bus).unwrap();
+            }
+            assert_eq!(bus.cycles() - start, clocks, "RAM_SIZE {ram_size:#x}");
+        }
+    }
+
+    #[test]
+    fn cache_control_nostr_makes_a_line_fill_blocking() {
+        // hwtest v1.22 records 0xE1/0xE9: a cold sweep of nops costs 9 clocks
+        // a line streaming and 13 with NOSTR set.
+        for (cache_control, clocks) in [
+            (CACHE_CONTROL_BIOS_NORMAL, 9u64),
+            (CACHE_CONTROL_BIOS_NORMAL | CACHE_CONTROL_NOSTR, 13),
+        ] {
+            let mut cpu = Cpu::new();
+            let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+            cpu.cache_control = cache_control;
+            bus.add_cycles(100);
+            cpu.pc = 0x8000_1000;
+            let start = bus.cycles();
+            for _ in 0..4 {
+                cpu.step(&mut bus).unwrap();
+            }
+            assert_eq!(bus.cycles() - start, clocks);
+        }
+    }
+
+    #[test]
+    fn code_run_through_kseg1_costs_six_clocks_an_instruction() {
+        // hwtest v1.22 record 0x1E: 128 nops through KSEG1 in 784 clocks.
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+        bus.add_cycles(100);
+        cpu.pc = 0xA000_1000;
+        let start = bus.cycles();
+        for _ in 0..8 {
+            cpu.step(&mut bus).unwrap();
+        }
+        assert_eq!(bus.cycles() - start, 48);
     }
 
     #[test]
