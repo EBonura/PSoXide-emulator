@@ -85,6 +85,10 @@ fn default_bios() -> Box<[u8; memory::bios::SIZE]> {
     Box::new([0; memory::bios::SIZE])
 }
 
+fn check_gpu_request_after_restore() -> bool {
+    true
+}
+
 fn gpu_linked_list_fifo_guard_from_env() -> bool {
     std::env::var("PSOXIDE_CHECK_GPU_LL_FIFO").as_deref() == Ok("1")
 }
@@ -311,8 +315,9 @@ pub struct Bus {
     /// Opt-in packing diagnostic; not a finite-FIFO overflow model.
     #[serde(skip, default = "gpu_linked_list_fifo_guard_from_env")]
     gpu_linked_list_fifo_guard: bool,
-    /// Armed request-mode GPU DMA waiting for DREQ, with no payload fetched.
-    #[serde(default)]
+    /// Derived scheduling hint, not positional save-state data. After restore,
+    /// inspect CHCR and the completion event once to recover an armed wait.
+    #[serde(skip, default = "check_gpu_request_after_restore")]
     gpu_dma_waiting_for_request: bool,
     #[serde(skip)]
     gpu_linked_list_transfer: u32,
@@ -1641,7 +1646,15 @@ impl Bus {
             // GP1 direction latches and GPU busy credit can change DREQ as
             // time advances. Retry only the waiting channel, never one whose
             // payload already ran and merely awaits its completion event.
-            self.run_dma_channel(2);
+            if self
+                .scheduler
+                .target(crate::scheduler::EventSlot::GpuDma)
+                .is_some()
+            {
+                self.gpu_dma_waiting_for_request = false;
+            } else {
+                self.run_dma_channel(2);
+            }
         }
     }
 
@@ -2360,13 +2373,15 @@ impl Bus {
     ///   `scheduleGPUDMAIRQ(size)` where size is the
     ///   `gpuDmaChainSize` traversed count.
     fn run_dma_gpu(&mut self) -> Option<u32> {
-        if !self.dma.is_channel_enabled(2) {
-            self.gpu_dma_waiting_for_request = false;
-            return None;
-        }
         let ch = &self.dma.channels[2];
         if (ch.channel_control >> 24) & 1 == 0 {
             self.gpu_dma_waiting_for_request = false;
+            return None;
+        }
+        if !self.dma.is_channel_enabled(2) {
+            // DPCR suspends an armed request; re-enabling it must not lose
+            // the pending CHCR. This also recovers that state after restore.
+            self.gpu_dma_waiting_for_request = true;
             return None;
         }
         let sync_mode = (ch.channel_control >> 9) & 0x3;
@@ -4137,6 +4152,38 @@ mod tests {
         assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0);
         assert!(!bus.gpu_dma_waiting_for_request);
         assert_eq!(bus.scheduler.target(EventSlot::GpuDma), None);
+    }
+
+    #[test]
+    fn gpu_request_dma_survives_dpcr_suspend_and_save_restore() {
+        let mut bus = linked_list_upload_fixture(false, true, 0);
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0000);
+        bus.run_dma_channel(2);
+        bus.dma.dpcr = 0;
+        bus.tick(100);
+        let snapshot = psoxide_settings::savestate::SaveStateV1::new(&bus, "dma", 0)
+            .to_bytes()
+            .unwrap();
+        let state: psoxide_settings::savestate::SaveStateV1<Bus> =
+            psoxide_settings::savestate::SaveStateV1::from_bytes(&snapshot).unwrap();
+        let mut restored = state.payload;
+        restored.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        restored.tick(100);
+        assert_eq!(restored.gpu.vram.get_pixel(4, 5), 0);
+        restored.dma.dpcr = 1 << (2 * 4 + 3);
+        restored.tick(100);
+        assert_eq!(restored.gpu.vram.get_pixel(4, 5), 0x5678);
+        let completion = restored.scheduler.target(EventSlot::GpuDma);
+        let snapshot = psoxide_settings::savestate::SaveStateV1::new(&restored, "dma", 0)
+            .to_bytes()
+            .unwrap();
+        let state: psoxide_settings::savestate::SaveStateV1<Bus> =
+            psoxide_settings::savestate::SaveStateV1::from_bytes(&snapshot).unwrap();
+        let mut in_flight = state.payload;
+        let commands = in_flight.gpu.gp0_opcode_histogram();
+        in_flight.tick(1);
+        assert_eq!(in_flight.gpu.gp0_opcode_histogram(), commands);
+        assert_eq!(in_flight.scheduler.target(EventSlot::GpuDma), completion);
     }
 
     #[test]
