@@ -62,3 +62,44 @@ This fixes an independently reproduced missing request gate. Celeste sets direct
 2 before its list submissions, so this correction alone is not evidence for the
 hardware corruption's cause. List execution after admission remains synchronous;
 it does not implement per-node requests or finite FIFO consumption.
+
+## Experimental timed FIFO diagnostic
+
+`PSOXIDE_EXPERIMENTAL_DMA_FIFO=1` enables a separate, non-default investigation
+model. Leave the packing guard unset to observe its rendering instead of stopping
+at an oversized node. CPU GP0 and DMA traffic share an ordered input queue.
+Linked-list headers are admitted by DREQ; each admitted payload is fetched from
+RAM one word at a time as bus time advances, without rechecking DREQ mid-node.
+DPCR suspension and CHCR cancellation remain effective. GPU work consumes the
+queue using the existing command cost model, permitting drawing-area/offset
+commands while drawing and consuming active A0 image data without a drawing gate.
+
+The structural reference is [Beetle/Mednafen at
+05261cede8ad70dd48081d27b878622b67517a6d](https://github.com/libretro/beetle-psx-libretro/tree/05261cede8ad70dd48081d27b878622b67517a6d/mednafen/psx):
+`dma.c` admits a whole node at request boundaries; `gpu.c` accounts for a
+16-word FIFO plus a front-command staging allowance and rejects excess incoming
+words while drawing prevents consumption. The implementation here is independent;
+reference behavior is corroborating evidence, not a new silicon measurement.
+
+The model deliberately remains experimental:
+
+- Existing raster costs are reused; no costs were fitted to the Celeste footage.
+- DMA setup uses a reference-derived 15/10-clock countdown for nonempty/empty
+  nodes and one payload word per bus clock, plus explicit state-transition ticks.
+  Exact hardware arbitration and CPU bus stealing are not newly calibrated.
+- Primitive execution remains the existing complete-packet rasterizer, including
+  whole-quad processing rather than a fully modeled hardware command sequencer.
+- Front-command staging is approximated from packet size, with the explicit
+  two-word E1/E2/E6/A0 allowance. This is not full command-by-command silicon
+  characterization.
+- Snapshots explicitly fail while the experiment is enabled. The new queue and
+  transfer state are not silently discarded into an apparently usable save.
+- Default emulation is unchanged by this experiment. It must not be used as a
+  general compatibility claim for commercial games or untested GPU commands.
+
+Transport tests demonstrate actual timed RAM fetches, tick-chunk equivalence,
+request suspension, valid A0 uploads (including a node larger than 16 words), and
+an overflowing long draw burst that becomes lossless when regrouped. Thus the
+experiment does not simply truncate every large node or inject game-specific
+corruption. Visual results and remaining discrepancies belong in the investigation
+report, separately from these transport assertions.

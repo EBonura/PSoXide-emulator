@@ -110,6 +110,44 @@ pub enum BusError {
     },
 }
 
+/// State for the opt-in, cycle-stepped linked-list transport diagnostic.
+/// The default DMA path remains unchanged. This mode is not save-state safe.
+struct ExperimentalGpuList {
+    address: u32,
+    next: u32,
+    remaining: u32,
+    word: u32,
+    setup_cycles: u32,
+    need_header: bool,
+    transfer: u32,
+    headers: u32,
+}
+
+fn serialize_supported_gpu<S: serde::Serializer>(
+    gpu: &Gpu,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if gpu.experimental_dma_fifo_enabled() {
+        eprintln!("[experimental-dma-fifo] refusing save state: FIFO diagnostic state is not serializable");
+        return Err(serde::ser::Error::custom(
+            "save states are unsupported with PSOXIDE_EXPERIMENTAL_DMA_FIFO=1",
+        ));
+    }
+    serde::Serialize::serialize(gpu, serializer)
+}
+
+fn deserialize_supported_gpu<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Gpu, D::Error> {
+    if std::env::var("PSOXIDE_EXPERIMENTAL_DMA_FIFO").as_deref() == Ok("1") {
+        eprintln!("[experimental-dma-fifo] refusing save-state load in diagnostic mode");
+        return Err(serde::de::Error::custom(
+            "loading save states is unsupported with PSOXIDE_EXPERIMENTAL_DMA_FIFO=1",
+        ));
+    }
+    serde::Deserialize::deserialize(deserializer)
+}
+
 /// The PS1 system bus.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Bus {
@@ -151,6 +189,10 @@ pub struct Bus {
     dma: Dma,
     /// GPU -- owns VRAM and handles the GP0/GP1 MMIO ports. The
     /// frontend's VRAM viewer reads `bus.gpu.vram` directly.
+    #[serde(
+        serialize_with = "serialize_supported_gpu",
+        deserialize_with = "deserialize_supported_gpu"
+    )]
     pub gpu: Gpu,
     /// SPU -- full 24-voice ADPCM synthesis, ADSR envelopes, stereo
     /// mixing at 44.1 kHz. Output drains into `spu.audio_out`; the
@@ -320,6 +362,8 @@ pub struct Bus {
     #[serde(skip, default = "check_gpu_request_after_restore")]
     gpu_dma_waiting_for_request: bool,
     #[serde(skip)]
+    experimental_gpu_list: Option<ExperimentalGpuList>,
+    #[serde(skip)]
     gpu_linked_list_transfer: u32,
     #[serde(skip)]
     gpu_linked_list_log: Vec<(u32, u32, u32)>,
@@ -420,6 +464,7 @@ impl Bus {
             gpu_linked_list_log_enabled: false,
             gpu_linked_list_fifo_guard: gpu_linked_list_fifo_guard_from_env(),
             gpu_dma_waiting_for_request: false,
+            experimental_gpu_list: None,
             gpu_linked_list_transfer: 0,
             gpu_linked_list_log: Vec::new(),
         };
@@ -1630,7 +1675,6 @@ impl Bus {
     /// Any cycle delta must flow through this function so the timer
     /// bank's accumulator matches Redux's lazy-read timer model.
     fn advance_cycles(&mut self, n: u32) {
-        self.cycles = self.cycles.wrapping_add(n as u64);
         // Timers used to be ticked here every instruction (~25M
         // calls/sec, three accumulator-divides each). They're now
         // advanced lazily -- `service_timers()` runs once per
@@ -1641,7 +1685,18 @@ impl Bus {
         // cycles. Keeping the unit identical to the global clock makes
         // silicon-derived command costs composable with Timer 1/HBlank
         // measurements and avoids the old arbitrary 32× decay scale.
-        self.gpu.decay_busy(n as u64);
+        if self.experimental_gpu_list.is_some() {
+            // Interleave actual RAM fetches and FIFO consumption. Do not
+            // snapshot a whole node and then pretend it arrived over time.
+            for _ in 0..n {
+                self.cycles = self.cycles.wrapping_add(1);
+                self.gpu.decay_busy(1);
+                self.advance_experimental_gpu_list();
+            }
+        } else {
+            self.cycles = self.cycles.wrapping_add(n as u64);
+            self.gpu.decay_busy(n as u64);
+        }
         if self.gpu_dma_waiting_for_request {
             // GP1 direction latches and GPU busy credit can change DREQ as
             // time advances. Retry only the waiting channel, never one whose
@@ -2402,6 +2457,20 @@ impl Bus {
         }
         self.gpu_dma_waiting_for_request = false;
         self.gpu.note_dma_transfer_started();
+        if sync_mode == 2 && self.gpu.experimental_dma_fifo_enabled() {
+            self.experimental_gpu_list = Some(ExperimentalGpuList {
+                address: self.dma.channels[2].base & 0x001f_fffc,
+                next: 0,
+                remaining: 0,
+                word: 0,
+                setup_cycles: 0,
+                need_header: true,
+                transfer: self.gpu_linked_list_transfer,
+                headers: 0,
+            });
+            self.gpu_linked_list_transfer = self.gpu_linked_list_transfer.wrapping_add(1);
+            return None;
+        }
         let completion = match sync_mode {
             0 => self.dma_gpu_manual(direction_to_device),
             1 => self.dma_gpu_block(direction_to_device),
@@ -2496,6 +2565,66 @@ impl Bus {
         } else {
             gpu_download_cycles(total_words)
         }
+    }
+
+    fn advance_experimental_gpu_list(&mut self) {
+        let Some(mut list) = self.experimental_gpu_list.take() else {
+            return;
+        };
+        if self.dma.channels[2].channel_control & (1 << 24) == 0 {
+            return;
+        }
+        if !self.dma.is_channel_enabled(2) {
+            self.experimental_gpu_list = Some(list);
+            return;
+        }
+        if list.setup_cycles > 0 {
+            list.setup_cycles -= 1;
+        } else if list.need_header {
+            // Reference DMA implementations sample DREQ between nodes,
+            // not between every word in an admitted node's burst.
+            if self.gpu.dma_fifo_requests_node()
+                && self
+                    .gpu
+                    .read32_at(crate::gpu::GP1_ADDR, self.cycles)
+                    .unwrap()
+                    & (1 << 25)
+                    != 0
+            {
+                assert!(
+                    list.headers < 0x100_0000,
+                    "experimental GPU linked-list cycle"
+                );
+                let header = read_ram_u32(&self.ram[..], list.address);
+                list.headers += 1;
+                if self.gpu_linked_list_log_enabled {
+                    self.gpu_linked_list_log
+                        .push((list.transfer, list.address, header));
+                }
+                list.remaining = header >> 24;
+                if self.gpu_linked_list_fifo_guard && list.remaining > 16 {
+                    panic!("GPU_LL_FIFO_CONTRACT: mode=linked-list node={:#010x} payload_words={}; opt-in packing diagnostic", list.address, list.remaining);
+                }
+                list.next = header & 0x00ff_ffff;
+                list.word = list.address.wrapping_add(4);
+                list.need_header = false;
+                // Reference-model assumptions, not new silicon timing claims.
+                list.setup_cycles = if list.remaining == 0 { 10 } else { 15 };
+            }
+        } else if list.remaining > 0 {
+            let word = read_ram_u32(&self.ram[..], list.word);
+            self.gpu.gp0_push_dma(word);
+            list.word = list.word.wrapping_add(4);
+            list.remaining -= 1;
+        } else if list.next & 0x0080_0000 != 0 {
+            self.scheduler
+                .schedule(crate::scheduler::EventSlot::GpuDma, self.cycles, 1);
+            return;
+        } else {
+            list.address = list.next & 0x001f_fffc;
+            list.need_header = true;
+        }
+        self.experimental_gpu_list = Some(list);
     }
 
     fn dma_gpu_linked_list(&mut self) -> u32 {
@@ -4113,6 +4242,146 @@ mod tests {
         bus.dma.channels[2].base = 0x300;
         bus.dma.channels[2].channel_control = 0x0100_0401;
         bus
+    }
+
+    #[test]
+    fn experimental_fifo_polyline_requires_terminator_before_next_node() {
+        let mut bus = linked_list_upload_fixture(false, true, 0);
+        bus.gpu.enable_experimental_dma_fifo();
+        // One admitted burst can contain the full polyline. A node boundary
+        // before its terminator does not request another node on the reference.
+        for word in [0x4800_00ff, 0, 0x0001_0001] {
+            bus.gpu.gp0_push_dma(word);
+            bus.gpu.decay_busy(100);
+        }
+        assert!(!bus.gpu.dma_fifo_requests_node());
+        bus.gpu.gp0_push_dma(0x5000_5000);
+        bus.gpu.decay_busy(100);
+        assert!(bus.gpu.dma_fifo_requests_node());
+    }
+
+    #[test]
+    fn experimental_fifo_refuses_lossy_save_states() {
+        let mut bus = linked_list_upload_fixture(false, true, 0);
+        bus.gpu.enable_experimental_dma_fifo();
+        let error = psoxide_settings::savestate::SaveStateV1::new(&bus, "dma", 0)
+            .to_bytes()
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            psoxide_settings::savestate::SaveStateError::Encode(_)
+        ));
+    }
+
+    #[test]
+    fn experimental_fifo_transfer_is_independent_of_tick_chunking() {
+        let mut batched = experimental_draw_burst(true);
+        let mut stepped = experimental_draw_burst(true);
+        batched.run_dma_channel(2);
+        stepped.run_dma_channel(2);
+        batched.tick(50000);
+        for _ in 0..50000 {
+            stepped.tick(1);
+        }
+        assert_eq!(batched.gpu.vram.words(), stepped.gpu.vram.words());
+        assert_eq!(
+            batched.gpu.gp0_opcode_histogram(),
+            stepped.gpu.gp0_opcode_histogram()
+        );
+        assert_eq!(
+            batched.gpu.experimental_dma_dropped_words(),
+            stepped.gpu.experimental_dma_dropped_words()
+        );
+        assert_eq!(
+            batched.dma.channels[2].channel_control,
+            stepped.dma.channels[2].channel_control
+        );
+    }
+
+    #[test]
+    fn experimental_fifo_observes_dpcr_and_dreq_between_nodes() {
+        let mut bus = linked_list_upload_fixture(false, true, 0);
+        bus.gpu.enable_experimental_dma_fifo();
+        bus.run_dma_channel(2);
+        bus.tick(1); // header admitted
+        bus.dma.dpcr = 0;
+        bus.tick(1000);
+        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0);
+        bus.dma.dpcr = 1 << (2 * 4 + 3);
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0000);
+        bus.tick(1000);
+        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0x5678); // admitted node finishes
+        assert_eq!(bus.gpu.vram.get_pixel(4, 6), 0); // next node waits
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        bus.tick(1000);
+        assert_eq!(bus.gpu.vram.get_pixel(4, 6), 0xef01);
+    }
+
+    #[test]
+    fn experimental_fifo_fetches_words_over_time_and_preserves_small_uploads() {
+        let mut bus = linked_list_upload_fixture(false, true, 0);
+        bus.gpu.enable_experimental_dma_fifo();
+        bus.run_dma_channel(2);
+        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0);
+        bus.tick(5);
+        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0);
+        write_ram_u32(&mut bus.ram[..], 0x310, 0xcafe_beef);
+        bus.tick(10000);
+        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0xbeef);
+        assert_eq!(bus.gpu.vram.get_pixel(4, 6), 0xef01);
+        assert_eq!(bus.gpu.experimental_dma_dropped_words(), 0);
+        assert_eq!(bus.dma.channels[2].channel_control & (1 << 24), 0);
+    }
+
+    fn experimental_draw_burst(split: bool) -> Bus {
+        let mut bus = linked_list_upload_fixture(false, true, 0);
+        bus.gpu.enable_experimental_dma_fifo();
+        // A costly fill followed by 249 legal NOPs. The same 252 words
+        // can overflow one admitted burst but fit across small-node requests.
+        let mut words = vec![0x0200_00ff, 0, (128 << 16) | 128];
+        words.extend([0; 249]);
+        let mut address = 0x300;
+        let chunks: Vec<_> = words.chunks(if split { 15 } else { 252 }).collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let next = address + (chunk.len() as u32 + 1) * 4;
+            let link = if i + 1 == chunks.len() {
+                0x00ff_ffff
+            } else {
+                next
+            };
+            write_ram_u32(
+                &mut bus.ram[..],
+                address,
+                ((chunk.len() as u32) << 24) | link,
+            );
+            for (j, word) in chunk.iter().enumerate() {
+                write_ram_u32(&mut bus.ram[..], address + (j as u32 + 1) * 4, *word);
+            }
+            address = next;
+        }
+        bus
+    }
+
+    #[test]
+    fn experimental_fifo_overflow_depends_on_timed_consumption_not_node_size_alone() {
+        let mut burst = experimental_draw_burst(false);
+        burst.run_dma_channel(2);
+        burst.tick(50000);
+        assert!(burst.gpu.experimental_dma_dropped_words() > 0);
+        let mut split = experimental_draw_burst(true);
+        split.run_dma_channel(2);
+        split.tick(50000);
+        assert_eq!(split.gpu.experimental_dma_dropped_words(), 0);
+        assert_eq!(burst.gpu.vram.words(), split.gpu.vram.words());
+        // A0 upload words are consumed without the drawing-budget gate.
+        // This 22-word node exceeds 16 but fits without any loss: the model
+        // must not simply truncate every oversized node.
+        let mut uploads = linked_list_upload_fixture(false, false, 0);
+        uploads.gpu.enable_experimental_dma_fifo();
+        uploads.run_dma_channel(2);
+        uploads.tick(10000);
+        assert_eq!(uploads.gpu.experimental_dma_dropped_words(), 0);
+        assert_eq!(uploads.gpu.vram.get_pixel(4, 6), 0xef01);
     }
 
     #[test]

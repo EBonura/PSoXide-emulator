@@ -77,6 +77,14 @@ pub struct Gpu {
     /// full packet has arrived, [`Gpu::execute_gp0_packet`] dispatches
     /// on the opcode and clears the buffer.
     gp0_fifo: Vec<u32>,
+    /// Experimental timed DMA transport, disabled by default. See the
+    /// diagnostic document; save-state replay is not supported in this mode.
+    #[serde(skip)]
+    experimental_dma_fifo: bool,
+    #[serde(skip)]
+    dma_input_fifo: std::collections::VecDeque<(u32, bool)>,
+    #[serde(skip)]
+    dma_input_dropped: u64,
     /// Number of words the current packet expects in total (including
     /// the first/opcode word). `0` means "no packet in progress".
     gp0_expected: usize,
@@ -641,6 +649,10 @@ impl Gpu {
             vram: Vram::new(),
             status: GpuStatus::new(),
             gp0_fifo: Vec::with_capacity(12),
+            experimental_dma_fifo: std::env::var("PSOXIDE_EXPERIMENTAL_DMA_FIFO").as_deref()
+                == Ok("1"),
+            dma_input_fifo: std::collections::VecDeque::new(),
+            dma_input_dropped: 0,
             gp0_expected: 0,
             gp0_write_count: 0,
             draw_offset_x: 0,
@@ -1275,7 +1287,18 @@ impl Gpu {
     /// Drain busy credit over time. Called by the bus each tick
     /// so the busy flag settles back to "ready" as cycles advance.
     /// One elapsed CPU/bus cycle decays one unit of credit.
-    pub fn decay_busy(&mut self, cycles: u64) {
+    pub fn decay_busy(&mut self, mut cycles: u64) {
+        if self.experimental_dma_fifo {
+            self.drain_dma_input_fifo();
+            while cycles > 0 && !self.dma_input_fifo.is_empty() {
+                let elapsed = self.busy_credit.max(1).min(cycles);
+                self.busy_credit = self.busy_credit.saturating_sub(elapsed);
+                self.dma_busy_credit = self.dma_busy_credit.saturating_sub(elapsed);
+                self.cmd_ingest_credit = self.cmd_ingest_credit.saturating_sub(elapsed);
+                cycles -= elapsed;
+                self.drain_dma_input_fifo();
+            }
+        }
         self.busy_credit = self.busy_credit.saturating_sub(cycles);
         self.dma_busy_credit = self.dma_busy_credit.saturating_sub(cycles);
         self.cmd_ingest_credit = self.cmd_ingest_credit.saturating_sub(cycles);
@@ -1361,7 +1384,86 @@ impl Gpu {
     }
 
     fn is_dma_busy(&self) -> bool {
+        if self.experimental_dma_fifo {
+            return !self.dma_fifo_requests_node();
+        }
         self.dma_busy_credit > 0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enable_experimental_dma_fifo(&mut self) {
+        self.experimental_dma_fifo = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn experimental_dma_dropped_words(&self) -> u64 {
+        self.dma_input_dropped
+    }
+
+    pub(crate) fn experimental_dma_fifo_enabled(&self) -> bool {
+        self.experimental_dma_fifo
+    }
+
+    pub(crate) fn dma_fifo_requests_node(&self) -> bool {
+        // The reference sequencer does not admit a new node while an
+        // unterminated polyline is active, even when its FIFO is empty.
+        if self.polyline.is_some() {
+            return false;
+        }
+        if self.dma_input_fifo.is_empty() {
+            return true;
+        }
+        if self.vram_upload.is_some() || self.vram_download.is_some() || self.polyline.is_some() {
+            return false;
+        }
+        self.dma_input_fifo.len() < self.dma_fifo_capacity() - 16
+    }
+
+    /// Independently implemented diagnostic model informed by Mednafen's
+    /// command-buffer allowance: a 16-word queue plus the front command's
+    /// staging space, except during an active image/polyline transfer.
+    fn dma_fifo_capacity(&self) -> usize {
+        let command_allowance = if self.vram_upload.is_some()
+            || self.vram_download.is_some()
+            || self.polyline.is_some()
+        {
+            0
+        } else {
+            self.dma_input_fifo
+                .front()
+                .map_or(0, |(word, _)| match (word >> 24) as u8 {
+                    0xe1 | 0xe2 | 0xe6 | 0xa0..=0xbf => 2,
+                    op => gp0_packet_size(op),
+                })
+        };
+        16 + command_allowance
+    }
+
+    fn drain_dma_input_fifo(&mut self) {
+        while let Some(&(word, _)) = self.dma_input_fifo.front() {
+            if self.vram_download.is_some() {
+                break;
+            }
+            let transfer = self.vram_upload.is_some();
+            let op = (word >> 24) as u8;
+            let superscalar_state =
+                matches!(op, 0xe3..=0xe5) && !transfer && self.polyline.is_none();
+            if !transfer && !superscalar_state && self.busy_credit > 0 {
+                break;
+            }
+            let count = if transfer || self.polyline.is_some() {
+                1
+            } else {
+                gp0_packet_size(op)
+            };
+            if self.dma_input_fifo.len() < count {
+                break;
+            }
+            for _ in 0..count {
+                let (word, from_dma) = self.dma_input_fifo.pop_front().unwrap();
+                self.gp0_write(word, from_dma);
+            }
+        }
     }
 
     /// Estimate the command's GPU execution time in CPU/bus cycles.
@@ -1613,7 +1715,7 @@ impl Gpu {
                     .map(|now| now.saturating_add(GP1_STATUS_LATCH_CYCLES));
                 let old_irq_bit = self.status.raw & (1 << 24);
                 let old_irq_requested = self.irq_requested;
-                self.gp0_write(value, false);
+                self.gp0_push(value);
                 if let Some(deadline) = irq_deadline {
                     self.status.raw = (self.status.raw & !(1 << 24)) | old_irq_bit;
                     self.irq_requested = old_irq_requested;
@@ -1921,6 +2023,7 @@ impl Gpu {
     }
 
     fn reset_command_buffer(&mut self) {
+        self.dma_input_fifo.clear();
         self.gp0_fifo.clear();
         self.gp0_expected = 0;
         self.vram_upload = None;
@@ -1972,14 +2075,34 @@ impl Gpu {
     /// channel 2 can ship words through the same path CPU-direct writes
     /// take.
     pub fn gp0_push(&mut self, word: u32) {
-        self.gp0_write(word, false);
+        if self.experimental_dma_fifo {
+            self.enqueue_dma_input(word, false);
+        } else {
+            self.gp0_write(word, false);
+        }
     }
 
     /// DMA-channel-2 version of [`Gpu::gp0_push`]. Packet assembly and
     /// rendering are identical, but completed draw work also drives the
     /// silicon-observed GPUSTAT.28 transition.
     pub(crate) fn gp0_push_dma(&mut self, word: u32) {
-        self.gp0_write(word, true);
+        if !self.experimental_dma_fifo {
+            self.gp0_write(word, true);
+            return;
+        }
+        self.enqueue_dma_input(word, true);
+    }
+
+    fn enqueue_dma_input(&mut self, word: u32, from_dma: bool) {
+        if self.dma_input_fifo.len() >= self.dma_fifo_capacity() {
+            if self.dma_input_dropped == 0 {
+                eprintln!("[experimental-dma-fifo] first overflow: queued={} word={word:#010x}; reference-derived diagnostic, not silicon calibration", self.dma_input_fifo.len());
+            }
+            self.dma_input_dropped += 1;
+            return;
+        }
+        self.dma_input_fifo.push_back((word, from_dma));
+        self.drain_dma_input_fifo();
     }
 
     /// Whether GP0 is currently accepting packed pixel words for an A0h
