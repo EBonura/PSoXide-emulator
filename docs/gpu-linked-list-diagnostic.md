@@ -49,3 +49,16 @@ cargo test -p emulator-core gpu_linked_list_fifo_guard
 They cover an A0 upload in a 16-payload-word node, rejection before side effects,
 and byte-identical VRAM/command execution when the same valid upload stream is
 split into smaller nodes. The disabled diagnostic retains the larger-node behavior.
+
+## Separate request-gating correction
+
+Request/block and linked-list DMA now leave CHCR busy without reading RAM while
+GPUSTAT DREQ is deasserted. Bus time advancement retries that waiting channel
+when the GPU's existing direction latch/readiness model asserts DREQ. Cancellation
+clears the wait; manual DMA remains CPU-triggered. The focused tests change RAM
+while blocked and verify that resumption fetches the new value exactly once.
+
+This fixes an independently reproduced missing request gate. Celeste sets direction
+2 before its list submissions, so this correction alone is not evidence for the
+hardware corruption's cause. List execution after admission remains synchronous;
+it does not implement per-node requests or finite FIFO consumption.
