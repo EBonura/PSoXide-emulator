@@ -311,6 +311,9 @@ pub struct Bus {
     /// Opt-in packing diagnostic; not a finite-FIFO overflow model.
     #[serde(skip, default = "gpu_linked_list_fifo_guard_from_env")]
     gpu_linked_list_fifo_guard: bool,
+    /// Armed request-mode GPU DMA waiting for DREQ, with no payload fetched.
+    #[serde(default)]
+    gpu_dma_waiting_for_request: bool,
     #[serde(skip)]
     gpu_linked_list_transfer: u32,
     #[serde(skip)]
@@ -411,6 +414,7 @@ impl Bus {
             dma_log: Vec::new(),
             gpu_linked_list_log_enabled: false,
             gpu_linked_list_fifo_guard: gpu_linked_list_fifo_guard_from_env(),
+            gpu_dma_waiting_for_request: false,
             gpu_linked_list_transfer: 0,
             gpu_linked_list_log: Vec::new(),
         };
@@ -1633,6 +1637,12 @@ impl Bus {
         // silicon-derived command costs composable with Timer 1/HBlank
         // measurements and avoids the old arbitrary 32× decay scale.
         self.gpu.decay_busy(n as u64);
+        if self.gpu_dma_waiting_for_request {
+            // GP1 direction latches and GPU busy credit can change DREQ as
+            // time advances. Retry only the waiting channel, never one whose
+            // payload already ran and merely awaits its completion event.
+            self.run_dma_channel(2);
+        }
     }
 
     /// Advance the timer bank to the current bus cycle and forward
@@ -2351,14 +2361,31 @@ impl Bus {
     ///   `gpuDmaChainSize` traversed count.
     fn run_dma_gpu(&mut self) -> Option<u32> {
         if !self.dma.is_channel_enabled(2) {
+            self.gpu_dma_waiting_for_request = false;
             return None;
         }
         let ch = &self.dma.channels[2];
         if (ch.channel_control >> 24) & 1 == 0 {
+            self.gpu_dma_waiting_for_request = false;
             return None;
         }
         let sync_mode = (ch.channel_control >> 9) & 0x3;
         let direction_to_device = ch.channel_control & 1 != 0;
+        // Request and linked-list modes are gated by the GPU's DREQ output.
+        // Manual mode is CPU-triggered and does not require DREQ. Crucially,
+        // check before fetching either a linked-list header or payload RAM.
+        if matches!(sync_mode, 1 | 2)
+            && self
+                .gpu
+                .read32_at(crate::gpu::GP1_ADDR, self.cycles)
+                .unwrap()
+                & (1 << 25)
+                == 0
+        {
+            self.gpu_dma_waiting_for_request = true;
+            return None;
+        }
+        self.gpu_dma_waiting_for_request = false;
         self.gpu.note_dma_transfer_started();
         let completion = match sync_mode {
             0 => self.dma_gpu_manual(direction_to_device),
@@ -4074,6 +4101,57 @@ mod tests {
     }
 
     #[test]
+    fn gpu_linked_list_waits_for_dreq_then_fetches_current_ram_once() {
+        let mut bus = linked_list_upload_fixture(false, true, 0);
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0000);
+        bus.run_dma_channel(2);
+        assert!(bus.gpu_dma_waiting_for_request);
+        assert_eq!(bus.scheduler.target(EventSlot::GpuDma), None);
+        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0);
+        bus.tick(100);
+        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0);
+        // Change RAM after the blocked kick: resumption must fetch this value,
+        // not a payload snapshotted before the device requested any data.
+        write_ram_u32(&mut bus.ram[..], 0x310, 0xcafe_beef);
+        bus.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        bus.tick(100);
+        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0xbeef);
+        assert!(!bus.gpu_dma_waiting_for_request);
+        let completion = bus.scheduler.target(EventSlot::GpuDma).unwrap();
+        let commands = bus.gpu.gp0_opcode_histogram();
+        bus.tick(1);
+        assert_eq!(bus.scheduler.target(EventSlot::GpuDma), Some(completion));
+        assert_eq!(bus.gpu.gp0_opcode_histogram(), commands);
+        bus.tick(10000);
+        assert_eq!(bus.dma.channels[2].channel_control & (1 << 24), 0);
+    }
+
+    #[test]
+    fn gpu_request_dma_cancellation_does_not_resume_on_later_dreq() {
+        let mut bus = linked_list_upload_fixture(false, true, 0);
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0000);
+        bus.run_dma_channel(2);
+        bus.dma.channels[2].channel_control = 0;
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        bus.tick(100);
+        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0);
+        assert!(!bus.gpu_dma_waiting_for_request);
+        assert_eq!(bus.scheduler.target(EventSlot::GpuDma), None);
+    }
+
+    #[test]
+    fn gpu_manual_dma_remains_cpu_triggered_with_dreq_off() {
+        let mut bus = linked_list_upload_fixture(false, false, 0);
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0000);
+        bus.dma.channels[2].base = 0x304;
+        bus.dma.channels[2].block_control = 11;
+        bus.dma.channels[2].channel_control = 0x1100_0001;
+        bus.run_dma_channel(2);
+        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0x5678);
+        assert!(!bus.gpu_dma_waiting_for_request);
+    }
+
+    #[test]
     fn gpu_linked_list_fifo_guard_accepts_uploads_and_sixteen_payload_words() {
         let mut bus = linked_list_upload_fixture(true, true, 5);
         assert!(bus.run_dma_gpu().is_some());
@@ -4113,6 +4191,7 @@ mod tests {
     #[test]
     fn gpu_block_dma_from_device_reads_gpuread_instead_of_pushing_gp0() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0003);
         bus.dma.dpcr = 1 << (2 * 4 + 3);
         bus.gpu.vram.set_pixel(4, 5, 0xCAFE);
         bus.gpu.vram.set_pixel(5, 5, 0xBEEF);
@@ -4137,6 +4216,7 @@ mod tests {
     #[test]
     fn gpu_upload_block_dma_uses_silicon_calibrated_request_pacing() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
         bus.dma.dpcr = 1 << (2 * 4 + 3);
         bus.gpu.gp0_push(0xA000_0000);
         bus.gpu.gp0_push(0);
