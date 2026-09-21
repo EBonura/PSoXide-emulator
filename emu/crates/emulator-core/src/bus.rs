@@ -85,6 +85,10 @@ fn default_bios() -> Box<[u8; memory::bios::SIZE]> {
     Box::new([0; memory::bios::SIZE])
 }
 
+fn gpu_linked_list_fifo_guard_from_env() -> bool {
+    std::env::var("PSOXIDE_CHECK_GPU_LL_FIFO").as_deref() == Ok("1")
+}
+
 fn default_dram_refresh_deadline() -> u64 {
     memory_timing::DRAM_REFRESH_PERIOD_CYCLES
 }
@@ -304,6 +308,9 @@ pub struct Bus {
     /// corruption/order changes without perturbing guest code generation.
     #[serde(skip)]
     gpu_linked_list_log_enabled: bool,
+    /// Opt-in packing diagnostic; not a finite-FIFO overflow model.
+    #[serde(skip, default = "gpu_linked_list_fifo_guard_from_env")]
+    gpu_linked_list_fifo_guard: bool,
     #[serde(skip)]
     gpu_linked_list_transfer: u32,
     #[serde(skip)]
@@ -403,6 +410,7 @@ impl Bus {
             dma_log_enabled: false,
             dma_log: Vec::new(),
             gpu_linked_list_log_enabled: false,
+            gpu_linked_list_fifo_guard: gpu_linked_list_fifo_guard_from_env(),
             gpu_linked_list_transfer: 0,
             gpu_linked_list_log: Vec::new(),
         };
@@ -2464,6 +2472,13 @@ impl Bus {
             }
             node_count = node_count.saturating_add(1);
             let word_count = (header >> 24) & 0xFF;
+            // See docs/gpu-linked-list-diagnostic.md: this checks the 16-word
+            // GPU FIFO payload envelope, not Sony's stricter total-size rule
+            // for MargePrim (which includes the DMA tag). No overflow/drop
+            // policy is inferred, and normal emulation remains unchanged.
+            if self.gpu_linked_list_fifo_guard && word_count > 16 {
+                panic!("GPU_LL_FIFO_CONTRACT: mode=linked-list transfer={transfer} node={addr:#010x} payload_words={word_count} fifo_payload_limit=16; opt-in packing diagnostic, not overflow simulation");
+            }
             for i in 0..word_count {
                 let word_addr = addr.wrapping_add(4 + i * 4);
                 let word = read_ram_u32(&self.ram[..], word_addr);
@@ -4019,6 +4034,80 @@ mod tests {
         bus.run_dma_channel(3);
 
         assert_eq!(bus.scheduler.target(EventSlot::CdrDma), Some(101));
+    }
+
+    fn linked_list_upload_fixture(guard: bool, split: bool, padding: usize) -> Bus {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.gpu_linked_list_fifo_guard = guard;
+        bus.dma.dpcr = 1 << (2 * 4 + 3);
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        // Two complete 16x1 A0 uploads, each 11 payload words. A0 commands
+        // in a linked list are legal; the diagnostic concerns node grouping.
+        let mut first = vec![0xa000_0000, 0x0005_0004, 0x0001_0010];
+        first.extend([0x1234_5678; 8]);
+        let mut second = vec![0xa000_0000, 0x0006_0004, 0x0001_0010];
+        second.extend([0xabcd_ef01; 8]);
+        first.extend(std::iter::repeat_n(0, padding)); // GP0 NOPs
+        let nodes = if split {
+            vec![first, second]
+        } else {
+            first.extend(second);
+            vec![first]
+        };
+        let mut addr = 0x300;
+        for (index, words) in nodes.iter().enumerate() {
+            let next = addr + 4 * (words.len() as u32 + 1);
+            let link = if index + 1 == nodes.len() {
+                0x00ff_ffff
+            } else {
+                next
+            };
+            write_ram_u32(&mut bus.ram[..], addr, ((words.len() as u32) << 24) | link);
+            for (i, word) in words.iter().enumerate() {
+                write_ram_u32(&mut bus.ram[..], addr + 4 + i as u32 * 4, *word);
+            }
+            addr = next;
+        }
+        bus.dma.channels[2].base = 0x300;
+        bus.dma.channels[2].channel_control = 0x0100_0401;
+        bus
+    }
+
+    #[test]
+    fn gpu_linked_list_fifo_guard_accepts_uploads_and_sixteen_payload_words() {
+        let mut bus = linked_list_upload_fixture(true, true, 5);
+        assert!(bus.run_dma_gpu().is_some());
+        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0x5678);
+        assert_eq!(bus.gpu.vram.get_pixel(19, 5), 0x1234);
+        assert_eq!(bus.gpu.vram.get_pixel(4, 6), 0xef01);
+    }
+
+    #[test]
+    fn gpu_linked_list_fifo_guard_regrouping_preserves_the_command_stream() {
+        let mut original = linked_list_upload_fixture(false, false, 0);
+        let mut regrouped = linked_list_upload_fixture(true, true, 0);
+        assert!(original.run_dma_gpu().is_some());
+        assert!(regrouped.run_dma_gpu().is_some());
+        assert_eq!(original.gpu.vram.words(), regrouped.gpu.vram.words());
+        assert_eq!(
+            original.gpu.gp0_opcode_histogram(),
+            regrouped.gpu.gp0_opcode_histogram()
+        );
+    }
+
+    #[test]
+    fn gpu_linked_list_fifo_guard_rejects_celeste_sized_node_before_payload() {
+        // Same 252-word size as the first unchanged Celeste active-frame
+        // node. Valid commands alone do not make that grouping conformant.
+        let mut bus = linked_list_upload_fixture(true, false, 230);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bus.run_dma_gpu()));
+        let error = result.expect_err("252-word node must fail the opt-in diagnostic");
+        let message = error.downcast_ref::<String>().unwrap();
+        assert!(message.contains("mode=linked-list"));
+        assert!(message.contains("node=0x00000300"));
+        assert!(message.contains("payload_words=252"));
+        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0);
+        assert_eq!(bus.gpu.vram.get_pixel(4, 6), 0);
     }
 
     #[test]
