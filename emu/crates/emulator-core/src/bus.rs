@@ -435,18 +435,9 @@ impl Bus {
                 // of `EventSlot::VBlank` in `drain_scheduler_events`
                 // reschedules the next one.
                 s.schedule(crate::scheduler::EventSlot::VBlank, 0, FIRST_VBLANK_CYCLE);
-                // NOTE: SPU scheduler seed is deliberately *not* here.
-                // Reason: Redux's SPU runs in a detached `std::thread`
-                // that doesn't run during the parity-oracle trace. If
-                // we tick the SPU on every 768th cycle during the same
-                // window, our ADSR advances (envelope non-zero,
-                // voice_on_cycle bookkeeping) while Redux's stays
-                // frozen -- and downstream SPU reads diverge. Until
-                // the parity oracle learns to pump Redux's SPU thread
-                // synchronously, we leave SPU synthesis dormant during
-                // CPU execution and pump it on demand from the
-                // frontend's per-frame audio callback instead. See
-                // `Spu::seed_scheduler` + `Bus::run_spu_samples`.
+                // SPU uses its serialized absolute sample deadline directly in
+                // the inclusive bus event drain. No scheduler slot is needed,
+                // including when restoring older states with no SpuAsync slot.
                 s
             },
             mmio_trace: MmioTrace::new(),
@@ -1162,18 +1153,13 @@ impl Bus {
     fn drain_scheduler_events_inner(&mut self, include_cdr_dma: bool, include_sio: bool) {
         use crate::scheduler::EventSlot;
         let now = self.cycles;
-        // Fast path -- runs once per retired instruction via
-        // `Bus::tick`. `lowest_target` is the cached minimum across
-        // every active slot (VBlank included), and both take rules
-        // (`take_slot_due_inclusive`: fire when `target <= now`;
-        // `take_due`: fire when `target < now`) can only fire once
-        // `now` has reached the target, so `now < lowest_target`
-        // proves every taker below would return `None`. One compare
-        // instead of the VBlank check + exclude-mask setup + queue
-        // walk that used to run on every instruction.
-        if now < self.scheduler.lowest_target() {
+        // SPU clock edges are inclusive, unlike the legacy strict DMA slots.
+        // Its existing serialized deadline also works for older saves that
+        // never scheduled SpuAsync. Frontends only drain the produced samples.
+        if now < self.scheduler.lowest_target().min(self.spu_sample_deadline) {
             return;
         }
+        self.run_spu_to_current_cycle();
         let mut dma_edge = false;
         // NOTE: `service_timers()` is intentionally NOT called here.
         // This function runs from the per-instruction `Bus::tick`
@@ -1305,12 +1291,9 @@ impl Bus {
                         .schedule(EventSlot::VBlank, target, self.vblank_period);
                 }
                 EventSlot::SpuAsync => {
-                    // Kept for forward compatibility; we pump the SPU
-                    // from the frontend instead of the scheduler while
-                    // the parity oracle runs with a dormant SPU
-                    // thread. If anything schedules this slot it is
-                    // a logic bug -- log and drop.
-                    debug_assert!(false, "SpuAsync fired but SPU pumps from frontend");
+                    // No production path schedules this legacy slot. The
+                    // inclusive sample deadline above owns the SPU clock.
+                    self.run_spu_to_current_cycle();
                 }
                 // Not-yet-migrated slots. A subsystem scheduling one
                 // of these today would silently do nothing; they're
@@ -1842,6 +1825,7 @@ impl Bus {
     /// True when some source is both pending in `I_STAT` and enabled
     /// in `I_MASK`. The CPU mirrors this into `COP0.CAUSE.IP[2]`.
     pub fn external_interrupt_pending(&mut self) -> bool {
+        self.run_spu_to_current_cycle();
         self.irq.pending_tick()
     }
 
@@ -2224,6 +2208,7 @@ impl Bus {
     /// handler in `drain_scheduler_events` does that at the scheduled
     /// cycle.
     fn run_dma_spu(&mut self) -> Option<u32> {
+        self.run_spu_to_current_cycle();
         if !self.dma.is_channel_enabled(4) {
             return None;
         }
@@ -2777,6 +2762,7 @@ impl Bus {
             return self.memory_control.read(phys, AccessWidth::Byte) as u8;
         }
         if phys == IRQ_STAT_ADDR {
+            self.run_spu_to_current_cycle();
             return self.irq.stat() as u8;
         }
         if phys == IRQ_MASK_ADDR {
@@ -2795,6 +2781,7 @@ impl Bus {
             return (value >> ((phys & 3) * 8)) as u8;
         }
         if Spu::contains(phys) {
+            self.run_spu_to_current_cycle();
             let aligned = phys & !1;
             return (self.spu.read16_at(aligned, self.cycles) >> ((phys & 1) * 8)) as u8;
         }
@@ -2879,6 +2866,7 @@ impl Bus {
         // `I_MASK` via `lhu` and would otherwise see the stale echo
         // buffer instead of the live interrupt-controller state.
         if phys == IRQ_STAT_ADDR {
+            self.run_spu_to_current_cycle();
             return self.irq.stat() as u16;
         }
         if phys == IRQ_MASK_ADDR {
@@ -2896,6 +2884,7 @@ impl Bus {
             return self.dma.read16(phys);
         }
         if Spu::contains(phys) {
+            self.run_spu_to_current_cycle();
             return self.spu.read16_at(phys, self.cycles);
         }
         if let Some(value) = self.gpu.read32_at(phys & !3, self.cycles) {
@@ -3029,6 +3018,7 @@ impl Bus {
         }
 
         if phys == IRQ_STAT_ADDR {
+            self.run_spu_to_current_cycle();
             return self.irq.stat();
         }
         if phys == IRQ_MASK_ADDR {
@@ -3050,6 +3040,7 @@ impl Bus {
             return v;
         }
         if Spu::contains(phys) {
+            self.run_spu_to_current_cycle();
             return self.spu.read32_at(phys, self.cycles);
         }
         if Sio0::contains(phys) {
@@ -3155,6 +3146,7 @@ impl Bus {
             return;
         }
         if phys == IRQ_STAT_ADDR {
+            self.run_spu_to_current_cycle();
             self.irq.write_stat_at(value, self.cycles);
             return;
         }
@@ -3213,6 +3205,7 @@ impl Bus {
             return;
         }
         if Spu::contains(phys) {
+            self.run_spu_to_current_cycle();
             self.spu.write32_at(phys, value, self.cycles);
             self.service_spu_irq();
             return;
@@ -3329,6 +3322,7 @@ impl Bus {
         width: AccessWidth,
     ) -> bool {
         if phys == IRQ_STAT_ADDR {
+            self.run_spu_to_current_cycle();
             self.irq.write_stat_at(source, self.cycles);
             return true;
         }
@@ -3361,6 +3355,7 @@ impl Bus {
             return true;
         }
         if Spu::contains(phys) {
+            self.run_spu_to_current_cycle();
             self.spu.write16_at(phys & !1, source as u16, self.cycles);
             self.service_spu_irq();
             return true;
@@ -3405,6 +3400,11 @@ impl Bus {
     }
 
     fn write8_impl(&mut self, virt: u32, phys: u32, value: u8) {
+        // Preserve this host helper's byte-lane behavior while observing time;
+        // architectural SB uses cpu_write_narrow_mmio's full source word.
+        if Spu::contains(phys) || phys == IRQ_STAT_ADDR {
+            self.run_spu_to_current_cycle();
+        }
         if phys < memory::ram::MIRROR_END {
             self.ram[(phys as usize) % memory::ram::SIZE] = value;
             return;
@@ -3520,6 +3520,7 @@ impl Bus {
         // mask stays 0 and pending() always returns false, so no IRQ
         // exception is ever taken.
         if phys == IRQ_STAT_ADDR {
+            self.run_spu_to_current_cycle();
             self.irq.write_stat_at(value as u32, self.cycles);
             return;
         }
@@ -3540,6 +3541,7 @@ impl Bus {
             return;
         }
         if Spu::contains(phys) {
+            self.run_spu_to_current_cycle();
             self.spu.write16_at(phys, value, self.cycles);
             self.service_spu_irq();
             return;
@@ -4660,6 +4662,22 @@ mod tests {
         let mut copied = [0u16; 4];
         bus.spu.dma_read(&mut copied);
         assert_eq!(copied, [0x1111, 0x2222, 0x3333, 0x4444]);
+    }
+
+    #[test]
+    fn architectural_narrow_spu_stores_catch_up_elapsed_samples() {
+        for width in [1, 2] {
+            let mut bus = Bus::new_without_bios();
+            bus.add_cycles(crate::spu::SAMPLE_CYCLES as u32);
+            assert_eq!(bus.spu.samples_produced(), 0);
+            if width == 1 {
+                bus.cpu_write8(crate::spu::MAIN_VOL_L, 0x1234);
+            } else {
+                bus.cpu_write16(crate::spu::MAIN_VOL_L, 0x1234);
+            }
+            assert_eq!(bus.spu.samples_produced(), 1);
+            assert_eq!(bus.read16(crate::spu::MAIN_VOL_L), 0x1234);
+        }
     }
 
     #[test]
