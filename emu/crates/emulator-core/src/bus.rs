@@ -1955,7 +1955,7 @@ impl Bus {
         // handler ~1 hblank early and diverges the trace by dozens of
         // instructions.
         use crate::scheduler::EventSlot;
-        if std::env::var_os("PSOXIDE_TRACE_MDEC_DMA").is_some() && ch <= 1 {
+        if ch <= 1 && std::env::var_os("PSOXIDE_TRACE_MDEC_DMA").is_some() {
             let channel = self.dma.channels[ch];
             eprintln!(
                 "[mdec-dma] start ch={ch} cycle={} dpcr={:#010x} bcr={:#010x} chcr={:#010x} out_ready={}",
