@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const EXAMPLE_OUT: &str = "build/examples/mipsel-sony-psx/release";
 const SPU_PUMP_CYCLES: u64 = 560_000;
-const SPU_SAMPLES_PER_PUMP: usize = 735;
 
 pub struct SideLoadedExe {
     pub bus: Bus,
@@ -78,7 +77,7 @@ pub fn step_cpu_and_pump_spu(
 pub fn pump_spu_if_due(bus: &mut Bus, cycles_at_last_spu_pump: &mut u64) {
     if bus.cycles() - *cycles_at_last_spu_pump > SPU_PUMP_CYCLES {
         *cycles_at_last_spu_pump = bus.cycles();
-        bus.run_spu_samples(SPU_SAMPLES_PER_PUMP);
+        bus.run_spu_to_current_cycle();
         let _ = bus.spu.drain_audio();
     }
 }

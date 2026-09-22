@@ -3,9 +3,9 @@
 //!
 //! Design:
 //!
-//! - The SPU produces samples on the emulation thread via
-//!   `Bus::run_spu_samples(n)` + `Bus::spu.drain_audio()` → `(i16, i16)`
-//!   pairs at 44.1 kHz stereo. The shell pumps this every frame.
+//! - The bus clock produces SPU samples on the emulation thread. The shell
+//!   catches up with `Bus::run_spu_to_current_cycle()` and drains the queue
+//!   via `Bus::spu.drain_audio()` every frame: `(i16, i16)` at 44.1 kHz stereo.
 //! - A cpal output stream runs on an OS-provided audio thread and pulls
 //!   samples out of a shared ring buffer on each callback. If the
 //!   producer falls behind, the callback writes silence instead of
@@ -231,7 +231,7 @@ impl AudioOut {
     }
 
     /// Push drained SPU samples into the ring. The shell calls this
-    /// after each `run_spu_samples` pump. Discards oldest samples
+    /// after each frame's clock catch-up and queue drain. Discards oldest samples
     /// when the queue grows past the backlog cap -- prevents
     /// unbounded growth when the emulator runs faster than real time
     /// (fast-forward, rewind).

@@ -212,7 +212,7 @@ pub fn side_load_and_hash(exe_path: &Path, vblanks: u64) -> Option<SdkExampleSta
         }
         if bus.cycles() - cycles_at_last_pump > 560_000 {
             cycles_at_last_pump = bus.cycles();
-            bus.run_spu_samples(735);
+            bus.run_spu_to_current_cycle();
             let _ = bus.spu.drain_audio();
         }
     }

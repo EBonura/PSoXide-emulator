@@ -164,3 +164,15 @@ fn acknowledgement_catches_up_before_clearing_a_due_irq() {
     assert_eq!(b.read32(0x1f801070) & (1 << 9), 0);
     assert_ne!(b.read16(spu::SPUSTAT) & (1 << 6), 0);
 }
+
+#[test]
+fn already_produced_audio_is_available_when_catchup_produces_nothing() {
+    let mut bus = Bus::new_without_bios();
+    bus.tick(768);
+    // A frontend must drain the pending output, not gate the drain on how
+    // many additional samples this optional catch-up call produced.
+    assert_eq!(bus.run_spu_to_current_cycle(), 0);
+    assert_eq!(bus.spu.audio_queue_len(), 1);
+    assert_eq!(bus.spu.drain_audio().len(), 1);
+    assert_eq!(bus.spu.audio_queue_len(), 0);
+}

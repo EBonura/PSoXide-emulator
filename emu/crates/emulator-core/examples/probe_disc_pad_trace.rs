@@ -37,8 +37,7 @@ mod pad_support;
 use pad_support::{effective_mask, format_pad_pulses, parse_pad_pulses, parse_u16_mask, PadPulse};
 
 use emulator_core::{
-    fast_boot_disc_with_hle, spu, warm_bios_for_disc_fast_boot, Bus, Cpu,
-    DISC_FAST_BOOT_WARMUP_STEPS,
+    fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 use std::path::PathBuf;
 
@@ -283,7 +282,6 @@ fn main() {
         bus.attach_memcard_port1(std::fs::read(path).expect("memory card readable"));
     }
 
-    let mut audio_cycle_accum = 0u64;
     let mut audio_stats = AudioStats::default();
     let mut audio_capture = audio_dump.as_ref().map(|_| Vec::new());
     let mut current_pad_mask = None;
@@ -320,12 +318,9 @@ fn main() {
         &mut pad_mask_changes,
     );
     for _ in 0..steps {
-        let cycles_before = bus.cycles();
         if cpu.step(&mut bus).is_err() {
             break;
         }
-        audio_cycle_accum =
-            audio_cycle_accum.saturating_add(bus.cycles().saturating_sub(cycles_before));
         sync_pad_mask(
             &mut bus,
             held_buttons,
@@ -333,10 +328,8 @@ fn main() {
             &mut current_pad_mask,
             &mut pad_mask_changes,
         );
-        let sample_count = (audio_cycle_accum / spu::SAMPLE_CYCLES) as usize;
-        audio_cycle_accum %= spu::SAMPLE_CYCLES;
-        if sample_count != 0 {
-            bus.run_spu_samples(sample_count);
+        bus.run_spu_to_current_cycle();
+        if bus.spu.audio_queue_len() != 0 {
             let samples = bus.spu.drain_audio();
             audio_stats.add_samples(&samples);
             if let Some(capture) = audio_capture.as_mut() {

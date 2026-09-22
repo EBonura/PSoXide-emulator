@@ -51,25 +51,19 @@ fn main() {
 
     let target_samples = (seconds * SAMPLE_RATE as f32).round() as usize;
     let mut samples = Vec::with_capacity(target_samples);
-    let mut audio_cycle_accum = 0u64;
     let mut steps = 0u64;
 
     while samples.len() < target_samples && steps < 250_000_000 {
-        let cycles_before = bus.cycles();
         if let Err(error) = cpu.step(&mut bus) {
             eprintln!("[probe-cdda] CPU stopped at step {steps}: {error:?}");
             break;
         }
         steps += 1;
-        audio_cycle_accum =
-            audio_cycle_accum.saturating_add(bus.cycles().saturating_sub(cycles_before));
-        let sample_count = (audio_cycle_accum / spu::SAMPLE_CYCLES) as usize;
-        audio_cycle_accum %= spu::SAMPLE_CYCLES;
-        if sample_count == 0 {
+        bus.run_spu_to_current_cycle();
+        if bus.spu.audio_queue_len() == 0 {
             continue;
         }
 
-        bus.run_spu_samples(sample_count);
         samples.extend(bus.spu.drain_audio());
         if samples.len() > target_samples {
             samples.truncate(target_samples);
