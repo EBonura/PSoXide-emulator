@@ -85,8 +85,8 @@ fn run_milestone(steps: u64, disc_path: Option<&str>) -> MilestoneState {
     // pure BIOS and never trip this; D+ will until GTE / SPU /
     // MDEC land.
     //
-    // Pump the SPU periodically the way the frontend does -- one
-    // NTSC frame's worth of samples every ~560k CPU cycles. This
+    // Drain clock-produced SPU audio periodically the way the frontend does,
+    // every ~560k CPU cycles. This
     // exercises the real per-frame flow and catches crashes in
     // the SPU pipeline (e.g. the Gaussian OOB at index 1028 that
     // only fired during the Crash-1 run because the frontend
@@ -98,7 +98,7 @@ fn run_milestone(steps: u64, disc_path: Option<&str>) -> MilestoneState {
         }
         if bus.cycles() - cycles_at_last_pump > 560_000 {
             cycles_at_last_pump = bus.cycles();
-            bus.run_spu_samples(735);
+            bus.run_spu_to_current_cycle();
             let _ = bus.spu.drain_audio();
         }
     }
@@ -254,7 +254,7 @@ fn milestone_d_bios_accepts_licensed_disc() {
             }
             if bus.cycles() - cycles_at_last_pump > 560_000 {
                 cycles_at_last_pump = bus.cycles();
-                bus.run_spu_samples(735);
+                bus.run_spu_to_current_cycle();
                 let _ = bus.spu.drain_audio();
             }
         }

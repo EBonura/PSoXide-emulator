@@ -21,7 +21,6 @@ use pad_support::{parse_pad_pulses, parse_u16_mask, sync_pad_mask};
 use std::path::PathBuf;
 
 const SPU_PUMP_CYCLES: u64 = 560_000;
-const SPU_FRAME_SAMPLES: usize = 735;
 
 fn main() {
     let n: u64 = std::env::args()
@@ -160,7 +159,7 @@ fn main() {
         }
         if bus.cycles().saturating_sub(cycles_at_last_pump) > SPU_PUMP_CYCLES {
             cycles_at_last_pump = bus.cycles();
-            bus.run_spu_samples(SPU_FRAME_SAMPLES);
+            bus.run_spu_to_current_cycle();
             let _ = bus.spu.drain_audio();
         }
 

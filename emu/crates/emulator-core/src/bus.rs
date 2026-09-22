@@ -1775,6 +1775,10 @@ impl Bus {
 
     /// Pump the SPU forward by `n` samples on exact 768-cycle edges.
     ///
+    /// This advances the deadline even beyond the current bus cycle. It is a
+    /// low-level synthesis/test primitive; CPU-running callers must instead use
+    /// [`Bus::run_spu_to_current_cycle`] to avoid synthesizing elapsed audio twice.
+    ///
     /// Also forwards any CD audio samples the CDROM has decoded
     /// (CD-DA / XA ADPCM) into the SPU's CD input mix -- one
     /// drain-and-feed per call keeps the latency bounded.
@@ -1798,7 +1802,9 @@ impl Bus {
 
     /// Produce every SPU sample whose exact clock edge has elapsed. The phase
     /// belongs to the emulated machine, so BIOS warmup and frontend handoffs
-    /// cannot discard a partial sample period.
+    /// cannot discard a partial sample period. The return value counts newly
+    /// produced samples, not samples already queued: consumers must drain based
+    /// on the SPU output queue, even when this call returns zero.
     pub fn run_spu_to_current_cycle(&mut self) -> usize {
         if self.spu_sample_deadline > self.cycles {
             return 0;

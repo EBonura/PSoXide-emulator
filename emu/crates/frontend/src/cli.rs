@@ -1371,7 +1371,8 @@ fn run_headless_launch(
                 }
             }
         }
-        if bus.run_spu_to_current_cycle() != 0 {
+        bus.run_spu_to_current_cycle();
+        if bus.spu.audio_queue_len() != 0 {
             let drained = bus.spu.drain_audio();
             if args.dump_audio.is_some() {
                 audio_capture.extend(drained);
@@ -3495,6 +3496,53 @@ fn press_button_mask(name: &str) -> Option<u16> {
 #[cfg(test)]
 mod press_script_tests {
     use super::*;
+
+    #[test]
+    fn headless_audio_dump_drains_samples_already_clocked_by_bus() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "psoxide-cli-clocked-audio-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let exe_path = root.join("loop.exe");
+        let wav_path = root.join("audio.wav");
+        let mut exe = vec![0u8; 4096];
+        exe[..8].copy_from_slice(b"PS-X EXE");
+        for (offset, word) in [
+            (0x10, 0x8001_0000u32),
+            (0x18, 0x8001_0000),
+            (0x1c, 2048),
+            (0x30, 0x801f_ff00),
+            (2048, 0x0800_4000), // j 0x80010000, followed by a NOP delay slot.
+        ] {
+            exe[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        std::fs::write(&exe_path, exe).unwrap();
+        let cli = Cli::try_parse_from([
+            "frontend",
+            "launch",
+            "--path",
+            exe_path.to_str().unwrap(),
+            "--steps",
+            "4096",
+            "--dump-audio",
+            wav_path.to_str().unwrap(),
+        ])
+        .unwrap();
+        let Some(Command::Launch(args)) = cli.command else {
+            panic!("expected launch command");
+        };
+        let result = run_headless_launch(&ConfigPaths::rooted(&root), args, false).unwrap();
+        let wav = std::fs::read(&wav_path).unwrap();
+        let expected_samples = result.cycles / emulator_core::spu::SAMPLE_CYCLES;
+        assert!(expected_samples > 0);
+        assert_eq!(wav.len(), 44 + expected_samples as usize * 4);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn route_ram_watches_accept_only_aligned_ram_addresses() {
