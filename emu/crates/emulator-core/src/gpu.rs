@@ -1418,6 +1418,11 @@ impl Gpu {
         self.experimental_dma_fifo
     }
 
+    /// Whether the input FIFO can take one more word without dropping it.
+    pub(crate) fn dma_fifo_has_room(&self) -> bool {
+        self.dma_input_fifo.len() < self.dma_fifo_capacity()
+    }
+
     pub(crate) fn dma_fifo_requests_node(&self) -> bool {
         // The reference sequencer does not admit a new node while an
         // unterminated polyline is active, even when its FIFO is empty.

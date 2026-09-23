@@ -93,6 +93,17 @@ fn gpu_linked_list_fifo_guard_from_env() -> bool {
     std::env::var("PSOXIDE_CHECK_GPU_LL_FIFO").as_deref() == Ok("1")
 }
 
+/// `PSOXIDE_GPU_DMA_OVERFLOW=drop` restores the FIFO model's original
+/// handling of a linked-list node larger than the GPU FIFO: words that
+/// arrive while it is full are discarded. It reproduces the Celeste 0.2.3
+/// corruption, but on silicon (hwtest v1.24 case 224) such a list still
+/// delivered its final GP0(1Fh), which the dropping rule loses, and which
+/// words silicon loses is not yet known. By default the channel waits for
+/// room instead, losing nothing.
+fn gpu_dma_overflow_drops_from_env() -> bool {
+    std::env::var("PSOXIDE_GPU_DMA_OVERFLOW").as_deref() == Ok("drop")
+}
+
 fn default_dram_refresh_deadline() -> u64 {
     memory_timing::DRAM_REFRESH_PERIOD_CYCLES
 }
@@ -330,6 +341,8 @@ pub struct Bus {
     /// Opt-in packing diagnostic; not a finite-FIFO overflow model.
     #[serde(skip, default = "gpu_linked_list_fifo_guard_from_env")]
     gpu_linked_list_fifo_guard: bool,
+    #[serde(skip, default = "gpu_dma_overflow_drops_from_env")]
+    gpu_dma_overflow_drops: bool,
     /// Derived scheduling hint, not positional save-state data. After restore,
     /// inspect CHCR and the completion event once to recover an armed wait.
     #[serde(skip, default = "check_gpu_request_after_restore")]
@@ -430,6 +443,7 @@ impl Bus {
             dma_log: Vec::new(),
             gpu_linked_list_log_enabled: false,
             gpu_linked_list_fifo_guard: gpu_linked_list_fifo_guard_from_env(),
+            gpu_dma_overflow_drops: gpu_dma_overflow_drops_from_env(),
             gpu_dma_waiting_for_request: false,
             experimental_gpu_list: None,
             gpu_linked_list_transfer: 0,
@@ -2579,6 +2593,12 @@ impl Bus {
                 list.setup_cycles = if list.remaining == 0 { 10 } else { 15 };
             }
         } else if list.remaining > 0 {
+            if !self.gpu_dma_overflow_drops && !self.gpu.dma_fifo_has_room() {
+                // A node larger than the FIFO: the channel waits for the GPU
+                // to drain rather than lose words (see the env switch).
+                self.experimental_gpu_list = Some(list);
+                return;
+            }
             let word = read_ram_u32(&self.ram[..], list.word);
             self.gpu.gp0_push_dma(word);
             list.word = list.word.wrapping_add(4);
@@ -4373,6 +4393,7 @@ mod tests {
     #[test]
     fn experimental_fifo_overflow_depends_on_timed_consumption_not_node_size_alone() {
         let mut burst = experimental_draw_burst(false);
+        burst.gpu_dma_overflow_drops = true;
         burst.run_dma_channel(2);
         burst.tick(50000);
         assert!(burst.gpu.experimental_dma_dropped_words() > 0);
@@ -4390,6 +4411,66 @@ mod tests {
         uploads.tick(10000);
         assert_eq!(uploads.gpu.experimental_dma_dropped_words(), 0);
         assert_eq!(uploads.gpu.vram.get_pixel(4, 6), 0xef01);
+    }
+
+    /// hwtest v1.24's packed list: four 24-word nodes of Gouraud
+    /// triangles, then GP0(1Fh). Silicon delivered the 1Fh (case 224).
+    fn packed_gouraud_list(drops: bool) -> Bus {
+        let mut bus = linked_list_upload_fixture(false, true, 0);
+        bus.gpu.enable_experimental_dma_fifo();
+        bus.gpu_dma_overflow_drops = drops;
+        let xy = |x: u32, y: u32| (y << 16) | x;
+        let mut nodes: Vec<Vec<u32>> = (0..4)
+            .map(|_| {
+                (0..4)
+                    .flat_map(|_| {
+                        [
+                            0x3000_0040,
+                            xy(0, 0),
+                            0x4000,
+                            xy(63, 0),
+                            0x40_0000,
+                            xy(0, 63),
+                        ]
+                    })
+                    .collect()
+            })
+            .collect();
+        nodes.push(vec![0x1F00_0000]);
+        let mut address = 0x1000;
+        for (i, words) in nodes.iter().enumerate() {
+            let next = address + (words.len() as u32 + 1) * 4;
+            let link = if i + 1 == nodes.len() {
+                0x00ff_ffff
+            } else {
+                next
+            };
+            write_ram_u32(
+                &mut bus.ram[..],
+                address,
+                ((words.len() as u32) << 24) | link,
+            );
+            for (j, word) in words.iter().enumerate() {
+                write_ram_u32(&mut bus.ram[..], address + (j as u32 + 1) * 4, *word);
+            }
+            address = next;
+        }
+        bus.dma.channels[2].base = 0x1000;
+        bus.run_dma_channel(2);
+        bus.tick(200_000);
+        bus
+    }
+
+    #[test]
+    fn fifo_node_larger_than_the_fifo_waits_and_keeps_the_final_1f() {
+        let mut bus = packed_gouraud_list(false);
+        assert_eq!(bus.gpu.experimental_dma_dropped_words(), 0);
+        assert_eq!(bus.gpu.gp0_opcode_histogram()[0x30], 16);
+        assert_eq!(bus.dma.channels[2].channel_control & (1 << 24), 0);
+        assert_ne!(bus.gpu.read32(crate::gpu::GP1_ADDR).unwrap() & (1 << 24), 0);
+        // The opt-in dropping rule loses words and, with them, the 1Fh.
+        let dropping = packed_gouraud_list(true);
+        assert!(dropping.gpu.experimental_dma_dropped_words() > 0);
     }
 
     #[test]
