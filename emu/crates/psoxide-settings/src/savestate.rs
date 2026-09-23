@@ -45,15 +45,17 @@ pub const SAVESTATE_MAGIC: &[u8; 8] = b"PSOX001\0";
 /// On-disk format version, independent of the PSoXide crate
 /// version. Bumped when the payload layout changes in a way that
 /// can't round-trip through the current deserializer.
-pub const SAVESTATE_FORMAT_VERSION: u32 = 6;
+pub const SAVESTATE_FORMAT_VERSION: u32 = 7;
 /// Oldest payload schema this build can deserialize. Version 2 added
 /// architectural instruction-cache state; version 3 adds the SPU transfer
 /// FIFO; version 4 adds the CPU data-bus hold latch and HLE exception-return
 /// state; version 5 adds the source-sensitive GPU command/DMA execution
-/// backlog; version 6 adds the GPU's GP1(09h) upper-VRAM-addressing latch.
+/// backlog; version 6 adds the GPU's GP1(09h) upper-VRAM-addressing latch;
+/// version 7 adds the GPU DMA input FIFO and the in-flight linked-list walk,
+/// now that the FIFO DMA model is the default.
 /// Older states cannot resume faithfully because one of those pieces of
 /// in-flight hardware state was never serialized.
-pub const SAVESTATE_MIN_SUPPORTED_VERSION: u32 = 6;
+pub const SAVESTATE_MIN_SUPPORTED_VERSION: u32 = 7;
 
 /// Errors from save-state load / save.
 #[derive(Debug, Error)]

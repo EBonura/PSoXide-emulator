@@ -57,6 +57,11 @@ fn default_u32_256() -> [u32; 256] {
     [0; 256]
 }
 
+/// The FIFO DMA model is on unless `PSOXIDE_EXPERIMENTAL_DMA_FIFO=0`.
+pub(crate) fn dma_fifo_model_from_env() -> bool {
+    std::env::var("PSOXIDE_EXPERIMENTAL_DMA_FIFO").as_deref() != Ok("0")
+}
+
 fn clut_line_invalid() -> u32 {
     u32::MAX
 }
@@ -77,11 +82,15 @@ pub struct Gpu {
     /// full packet has arrived, [`Gpu::execute_gp0_packet`] dispatches
     /// on the opcode and clears the buffer.
     gp0_fifo: Vec<u32>,
-    /// Experimental timed DMA transport, disabled by default. See the
-    /// diagnostic document; save-state replay is not supported in this mode.
-    #[serde(skip)]
+    /// Timed DMA transport: linked-list payload enters a finite GPU input
+    /// FIFO and is consumed at the GPU's own pace. A [`crate::Bus`] turns it
+    /// on by default since the hwtest v1.24 console capture (cases 211-226:
+    /// CHCR stays busy while a list draws); `PSOXIDE_EXPERIMENTAL_DMA_FIFO=0`
+    /// selects the older word-count completion model for comparison. A
+    /// standalone `Gpu` fed by host code has no clock to drain a queue, so it
+    /// executes words immediately. A save state keeps the model it was
+    /// taken under, since the in-flight transfer state differs between them.
     experimental_dma_fifo: bool,
-    #[serde(skip)]
     dma_input_fifo: std::collections::VecDeque<(u32, bool)>,
     #[serde(skip)]
     dma_input_dropped: u64,
@@ -649,8 +658,7 @@ impl Gpu {
             vram: Vram::new(),
             status: GpuStatus::new(),
             gp0_fifo: Vec::with_capacity(12),
-            experimental_dma_fifo: std::env::var("PSOXIDE_EXPERIMENTAL_DMA_FIFO").as_deref()
-                == Ok("1"),
+            experimental_dma_fifo: false,
             dma_input_fifo: std::collections::VecDeque::new(),
             dma_input_dropped: 0,
             gp0_expected: 0,
@@ -1393,6 +1401,12 @@ impl Gpu {
     #[cfg(test)]
     pub(crate) fn enable_experimental_dma_fifo(&mut self) {
         self.experimental_dma_fifo = true;
+    }
+
+    /// Select the DMA transport model. Only a bus, which advances the
+    /// queue with time, should turn the FIFO model on.
+    pub(crate) fn set_dma_fifo_model(&mut self, enabled: bool) {
+        self.experimental_dma_fifo = enabled;
     }
 
     #[cfg(test)]
