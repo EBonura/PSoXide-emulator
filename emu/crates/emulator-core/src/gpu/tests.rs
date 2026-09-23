@@ -2748,3 +2748,60 @@ fn unpaced_gp0_bursts_past_the_fifo_are_counted() {
         "no new overflow after the reset"
     );
 }
+
+/// Draw cost of one packet, from the timing histogram.
+fn packet_cost(setup: &[u32], packet: &[u32]) -> u64 {
+    let mut gpu = Gpu::new();
+    for &word in setup {
+        gpu.write32(GP0_ADDR, word);
+    }
+    let op = (packet[0] >> 24) as usize;
+    let before = gpu.gp0_timing_histogram()[op];
+    for &word in packet {
+        gpu.write32(GP0_ADDR, word);
+    }
+    gpu.gp0_timing_histogram()[op] - before
+}
+
+#[test]
+fn draw_cost_follows_the_silicon_setup_and_fill_fit() {
+    let area = [0xE300_0000, 0xE400_0000 | 1023 | (511 << 10), 0xE500_0000];
+    let xy = |x: u32, y: u32| (y << 16) | x;
+    // v1.24 expensive list: a half-screen Gouraud triangle, 38,121 px over
+    // 239 lines, costs about 1.08 clocks a pixel.
+    let screen = [0xE300_0000, 0xE400_0000 | 319 | (239 << 10), 0xE500_0000];
+    let big = [
+        0x3000_0010,
+        xy(0, 0),
+        0x1000,
+        xy(319, 0),
+        0x10_0000,
+        xy(0, 239),
+    ];
+    assert_eq!(packet_cost(&screen, &big), 41_336);
+    // v1.23 record 101: a 32x32 Gouraud triangle.
+    let small = [
+        0x3000_0010,
+        xy(640, 400),
+        0x1000,
+        xy(672, 400),
+        0x10_0000,
+        xy(640, 432),
+    ];
+    assert_eq!(packet_cost(&area, &small), 620);
+    // Tiny primitives cost their setup: flat 44, Gouraud 195.
+    let tiny_flat = [0x2000_80FF, xy(640, 400), xy(642, 400), xy(640, 402)];
+    assert_eq!(packet_cost(&area, &tiny_flat), DRAW_FLAT_SETUP);
+    let tiny = [
+        0x3000_0010,
+        xy(16, 16),
+        0x1000,
+        xy(18, 16),
+        0x10_0000,
+        xy(16, 18),
+    ];
+    assert_eq!(packet_cost(&area, &tiny), DRAW_GOURAUD_SETUP);
+    // A flat 32x32 triangle fills at about half the interpolated rate.
+    let flat = [0x2000_80FF, xy(640, 400), xy(672, 400), xy(640, 432)];
+    assert_eq!(packet_cost(&area, &flat), 344);
+}
