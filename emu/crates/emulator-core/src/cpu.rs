@@ -545,6 +545,16 @@ pub struct Cpu {
     /// state lands between instructions, where the next step re-arms it.
     #[serde(skip)]
     gte_irq_watch: Option<u32>,
+    /// The last instruction was a branch or jump, taken or not, so the next
+    /// one sits in its delay slot. `pending_pc` only records a taken
+    /// branch's target; a fault in the delay slot of a branch that was not
+    /// taken still reports Cause.BD and EPC on the branch.
+    branch_delay_next: bool,
+    /// The instruction now executing sits in a branch delay slot. Read by
+    /// the fault paths that are not handed `in_delay_slot`. Only meaningful
+    /// inside `step`, so never saved.
+    #[serde(skip)]
+    executing_in_branch_delay: bool,
     /// Emulator-owned instruction-cache refill profile. Excluded from save
     /// states because it is diagnostic history, not emulated hardware state.
     #[serde(skip)]
@@ -596,6 +606,16 @@ pub struct Cpu {
     /// from the recorded trace. Syscall-entered spans clear this to
     /// false and stay that way until the outermost RFE.
     clean_irq_entry: bool,
+}
+
+/// Every MIPS I branch and jump: REGIMM, J, JAL, BEQ, BNE, BLEZ, BGTZ, and
+/// SPECIAL JR/JALR. The instruction after any of them is a delay slot.
+fn is_branch_or_jump(instr: u32) -> bool {
+    match instr >> 26 {
+        0x01..=0x07 => true,
+        0x00 => matches!(instr & 0x3F, 0x08 | 0x09),
+        _ => false,
+    }
 }
 
 impl Cpu {
@@ -664,6 +684,8 @@ impl Cpu {
             irq_line_high_steps: 0,
             should_take_interrupt_steps: 0,
             gte_irq_watch: None,
+            branch_delay_next: false,
+            executing_in_branch_delay: false,
             instruction_cache_profile: InstructionCacheProfileSnapshot::default(),
             instruction_cache_event_profile_enabled: false,
             last_instruction_cache_refill: None,
@@ -753,6 +775,7 @@ impl Cpu {
         // low-RAM exception path.
         self.cop0[12] |= COP0_STATUS_CU2;
         self.pending_pc = None;
+        self.branch_delay_next = false;
         self.pending_load = None;
         self.committing_load = None;
         self.gte_busy_until = 0;
@@ -1514,6 +1537,7 @@ impl Cpu {
                     self.pc = out.next_pc;
                 }
                 self.pending_pc = None;
+                self.branch_delay_next = false;
                 self.pending_load = None;
                 self.committing_load = None;
                 bus.tick(2);
@@ -1541,7 +1565,8 @@ impl Cpu {
             // supply instructions. Reject it (and every other unmapped
             // instruction address) before consulting the I-cache, otherwise
             // an emulator-only scratchpad code kernel can appear to work.
-            let in_delay_slot = self.pending_pc.is_some();
+            let in_delay_slot = self.pending_pc.is_some() || self.branch_delay_next;
+            self.branch_delay_next = false;
             self.cop0[8] = pc_before;
             let code = if pc_before & 3 != 0 {
                 ExceptionCode::AddressErrorLoad
@@ -1551,6 +1576,7 @@ impl Cpu {
             self.enter_exception(code, pc_before, in_delay_slot);
             self.stage_hle_unresolved_exception(bus);
             self.pending_pc = None;
+            self.branch_delay_next = false;
             if let Some((reg, value)) = self.pending_load.take() {
                 let index = (reg & 31) as usize;
                 if index != 0 {
@@ -1600,6 +1626,12 @@ impl Cpu {
         // the branch target instead of the usual `pc + 4`.
         let branch_after_this = self.pending_pc.take();
         let in_delay_slot = branch_after_this.is_some();
+        // Architectural delay slot, taken branch or not: what Cause.BD and
+        // EPC report for a fault here. `in_delay_slot` keeps meaning "a
+        // taken branch redirects after this", which also gates the
+        // Redux-style interrupt check below.
+        let in_branch_delay = std::mem::take(&mut self.branch_delay_next) || in_delay_slot;
+        self.executing_in_branch_delay = in_branch_delay;
 
         if self.instruction_class_profile_enabled {
             self.profile_instruction_class(instr, in_delay_slot);
@@ -1619,7 +1651,9 @@ impl Cpu {
             .then(|| self.profiled_data_access(instr))
             .flatten();
         let execute_cycles_before = bus.cycles();
-        self.execute(instr, pc_before, in_delay_slot, bus)?;
+        self.execute(instr, pc_before, in_branch_delay, bus)?;
+        self.executing_in_branch_delay = false;
+        self.branch_delay_next = is_branch_or_jump(instr) && self.pending_exception_pc.is_none();
         if bus.take_ram_load_from_cached_code() {
             // Every load opcode names its destination in rt.
             self.load_shadow = Some(LoadShadow {
@@ -2390,10 +2424,8 @@ impl Cpu {
             }
             None => {
                 // Signed overflow -- destination unchanged, raise
-                // CAUSE.ExcCode = 12 (Overflow). `in_delay_slot` is
-                // inferred from the pending branch already staged
-                // when Cpu::step dispatched us.
-                let in_delay_slot = self.pending_pc.is_some();
+                // CAUSE.ExcCode = 12 (Overflow).
+                let in_delay_slot = self.executing_in_branch_delay;
                 self.enter_exception(ExceptionCode::Overflow, self.pc, in_delay_slot);
                 Ok(())
             }
@@ -2954,7 +2986,7 @@ impl Cpu {
                 Ok(())
             }
             None => {
-                let in_delay_slot = self.pending_pc.is_some();
+                let in_delay_slot = self.executing_in_branch_delay;
                 self.enter_exception(ExceptionCode::Overflow, self.pc, in_delay_slot);
                 Ok(())
             }
@@ -2975,7 +3007,7 @@ impl Cpu {
                 Ok(())
             }
             None => {
-                let in_delay_slot = self.pending_pc.is_some();
+                let in_delay_slot = self.executing_in_branch_delay;
                 self.enter_exception(ExceptionCode::Overflow, self.pc, in_delay_slot);
                 Ok(())
             }
@@ -3141,7 +3173,7 @@ impl Cpu {
         }
         bus.drain_scheduler_events_post_op();
         let pending = bus.external_interrupt_pending();
-        if watched && self.pending_pc.is_none() && pending {
+        if watched && self.pending_pc.is_none() && !self.branch_delay_next && pending {
             return true;
         }
         if !pending {
@@ -3299,12 +3331,10 @@ impl Cpu {
     /// Raise an AdEL or AdES address-error exception. Stores the
     /// offending virtual address in COP0 BadVaddr (cop0[8]) and
     /// hands off to [`Cpu::enter_exception`] with the appropriate
-    /// code. `in_delay_slot` is recovered from `pending_pc` the
-    /// same way `op_addi` does for overflow -- every load/store
-    /// reaches this helper from inside `execute()` where that
-    /// invariant holds.
+    /// code. The delay-slot flag comes from `executing_in_branch_delay`,
+    /// which `step` sets for the instruction it is executing.
     fn raise_address_error(&mut self, code: ExceptionCode, addr: u32, bus: &mut Bus) {
-        let in_delay_slot = self.pending_pc.is_some();
+        let in_delay_slot = self.executing_in_branch_delay;
         self.cop0[8] = addr;
         self.enter_exception(code, self.pc, in_delay_slot);
         self.stage_hle_unresolved_exception(bus);
@@ -3335,6 +3365,7 @@ impl Cpu {
         self.gprs[31] = crate::hle_bios::EXCEPTION_RETURN_STUB;
         self.pending_exception_pc = Some(handler);
         self.pending_pc = None;
+        self.branch_delay_next = false;
         self.pending_load = None;
         self.hle_exception_active = true;
     }
@@ -3351,6 +3382,7 @@ impl Cpu {
         self.cop0[12] = (saved_sr & !0x0F) | ((saved_sr >> 2) & 0x0F);
         self.pc = bus.read32(crate::hle_bios::THREAD_RETURN_PC);
         self.pending_pc = None;
+        self.branch_delay_next = false;
         self.pending_load = None;
         self.committing_load = None;
         self.pending_exception_pc = None;
@@ -3381,6 +3413,7 @@ impl Cpu {
         self.enter_exception(ExceptionCode::Interrupt, self.pc, false);
         self.pending_exception_pc = None;
         self.pending_pc = None;
+        self.branch_delay_next = false;
         self.pending_load = None;
         self.committing_load = None;
 
@@ -4213,6 +4246,54 @@ mod tests {
         let (cpu, _) = gte_irq_fixture(|_| {});
         assert_eq!(cpu.pc(), 0x8000_1008);
         assert_eq!(cpu.cop2.read_data(12), 0x5A5A_0002);
+    }
+
+    /// Run `code` from `0x8000_1000` for `steps` instructions with `$t0`
+    /// = 0x7FFF_FFFF and `$t1` = 1; returns (Cause, EPC).
+    fn fault_fixture(code: &[u32], steps: usize) -> (u32, u32) {
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        for (i, word) in code.iter().enumerate() {
+            bus.write32(0x8000_1000 + 4 * i as u32, *word);
+        }
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x8000_1000;
+        cpu.cop0[12] = 0;
+        cpu.set_gpr(8, 0x7FFF_FFFF);
+        cpu.set_gpr(9, 1);
+        for _ in 0..steps {
+            cpu.step(&mut bus).unwrap();
+        }
+        assert_eq!(cpu.pc(), 0x8000_0080, "the fault was taken");
+        (cpu.cop0[13], cpu.cop0[14])
+    }
+
+    const ADD_OVERFLOW: u32 = 0x0109_5020; // add $t2, $t0, $t1
+    const BD: u32 = 1 << 31;
+
+    #[test]
+    fn overflow_outside_a_delay_slot_reports_its_own_address() {
+        let (cause, epc) = fault_fixture(&[ADD_OVERFLOW], 1);
+        assert_eq!((cause >> 2) & 0x1F, 12);
+        assert_eq!(cause & BD, 0);
+        assert_eq!(epc, 0x8000_1000);
+    }
+
+    #[test]
+    fn overflow_in_a_not_taken_branch_delay_slot_reports_the_branch() {
+        // bne $zero, $zero (never taken); add in its delay slot.
+        let (cause, epc) = fault_fixture(&[0x1400_0004, ADD_OVERFLOW], 2);
+        assert_eq!((cause >> 2) & 0x1F, 12);
+        assert_ne!(cause & BD, 0);
+        assert_eq!(epc, 0x8000_1000);
+    }
+
+    #[test]
+    fn load_address_error_in_a_taken_branch_delay_slot_reports_the_branch() {
+        // beq $zero, $zero (always taken); lw $t2, 1($zero) in its slot.
+        let (cause, epc) = fault_fixture(&[0x1000_0004, 0x8C0A_0001], 2);
+        assert_eq!((cause >> 2) & 0x1F, 4);
+        assert_ne!(cause & BD, 0);
+        assert_eq!(epc, 0x8000_1000);
     }
 
     /// Truth-table regression for LWL / LWR / SWL / SWR unaligned
