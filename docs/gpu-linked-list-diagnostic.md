@@ -78,6 +78,15 @@ still mean the same thing. A standalone `Gpu` driven by host code (renderer
 tests, replay tools) still executes words immediately, since it has no clock
 to drain a queue.
 
+A node larger than the FIFO no longer loses words by default: the channel
+waits for room mid-node. On silicon the v1.24 packed list (four 24-word
+nodes) still delivered its final GP0(1Fh) and matched its sampled pixels,
+while the dropping rule described below lost the 1Fh and failed case 227.
+Silicon most likely does lose words from such a node (the list finished
+after about half of its drawing), but which words is not established, so it
+is not modelled. `PSOXIDE_GPU_DMA_OVERFLOW=drop` restores the dropping rule,
+which reproduces the Celeste 0.2.3 corruption below.
+
 The rest of this section is the original description of the model. Leave the
 packing guard unset to observe its rendering instead of stopping
 at an oversized node. CPU GP0 and DMA traffic share an ordered input queue.
