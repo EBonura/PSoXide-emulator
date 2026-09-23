@@ -1482,28 +1482,43 @@ impl Gpu {
 
     /// Estimate the command's GPU execution time in CPU/bus cycles.
     ///
-    /// The coefficients come from the build-158 `gpu/bandwidth` silicon
-    /// capture. They are deliberately expressed as small rational numbers
-    /// rather than wall-clock milliseconds: Timer 1 observes HBlank while
-    /// the CPU polls GPUSTAT, so a cycle-domain backlog reproduces both the
-    /// benchmark and ordinary game synchronization.
+    /// Polygons and rectangles follow one shape, fitted to the hwtest
+    /// v1.23 DMA-list batches (records 100-114) and the v1.24 list-busy
+    /// cases (211-226) captured on a console: a primitive costs its setup
+    /// or its fill, whichever is longer, where the fill is a per-pixel rate
+    /// plus a per-scanline term. Setup overlaps the fill: a 32x32
+    /// Gouraud-textured triangle costs no more than a textured one although
+    /// its setup is twice as long. Flat fills run at about half a clock a
+    /// pixel; any interpolated attribute (Gouraud colour, texture
+    /// coordinates across a triangle) and blending with the framebuffer at
+    /// about one. Quads are two triangles. See
+    /// PSoXide-editor `docs/emulator-accuracy-from-silicon.md` for the fit
+    /// and its residuals.
     fn gp0_packet_timing_cost(&self, op: u8) -> u64 {
-        let flat_cost = |pixels: u64, semi: bool| {
+        // Single-word commands reach here with an empty packet buffer.
+        let semi = self
+            .gp0_fifo
+            .first()
+            .is_some_and(|&word| prim_is_semi_trans(word));
+        // Blending reads the framebuffer: a slower pixel floor and a longer
+        // span start. Textured primitives measured no semi-transparency
+        // cost beyond their own (record 105, and the ps1-tests bandwidth
+        // pair), so they ignore it.
+        let rate = |base: u64| {
             if semi {
-                scale_gpu_pixels(pixels, 51, 64)
+                (base.max(DRAW_SEMI_Q8), DRAW_SEMI_SCANLINE_Q8)
             } else {
-                scale_gpu_pixels(pixels, 135, 256)
+                (base, DRAW_SCANLINE_Q8)
             }
         };
-        let flat_poly_cost = |pixels: u64, semi: bool| {
-            if semi {
-                scale_gpu_pixels(pixels, 51, 64)
-            } else {
-                scale_gpu_pixels(pixels, 137, 256)
-            }
+        let tex_rate = |base: u64| (base, DRAW_SCANLINE_Q8);
+        let tri = |a: usize, b: usize, c: usize| {
+            [
+                self.decode_vertex(self.gp0_fifo[a]),
+                self.decode_vertex(self.gp0_fifo[b]),
+                self.decode_vertex(self.gp0_fifo[c]),
+            ]
         };
-        let textured_rect_cost = |pixels: u64| scale_gpu_pixels(pixels, 135, 128);
-        let textured_poly_cost = |pixels: u64| scale_gpu_pixels(pixels, 179, 64);
 
         match op {
             // GP0(1Fh) traverses the command input path before IRQ1 and the
@@ -1511,13 +1526,13 @@ impl Gpu {
             // following read has bits 26/28 clear and the second has them
             // set, the same edge measured for the IRQ status latch itself.
             0x1F => GP1_STATUS_LATCH_CYCLES,
-            // GP0(02h) has a dedicated fast fill engine. Silicon moves a
-            // little over twelve pixels per CPU cycle for this path.
+            // GP0(02h) has a dedicated fast fill engine: a little over twelve
+            // pixels per CPU cycle, after a fixed start (record 110).
             0x02 => {
                 let size = self.gp0_fifo[2];
                 let w = ((size & 0x3FF) + 0x0F) & !0x0F;
                 let h = (size >> 16) & 0x1FF;
-                scale_gpu_pixels(u64::from(w) * u64::from(h), 41, 512)
+                DRAW_FILL_SETUP + scale_gpu_pixels(u64::from(w) * u64::from(h), 41, 512)
             }
             // VRAM-to-VRAM uses the slower internal read/modify/write path.
             0x80..=0x9F => {
@@ -1526,88 +1541,57 @@ impl Gpu {
                 let raw_h = (size >> 16) & 0x1FF;
                 let w = if raw_w == 0 { 1024 } else { raw_w };
                 let h = if raw_h == 0 { 512 } else { raw_h };
-                scale_gpu_pixels(u64::from(w) * u64::from(h), 171, 128)
+                DRAW_COPY_SETUP + scale_gpu_pixels(u64::from(w) * u64::from(h), 171, 128)
             }
-            // Flat polygons.
             0x20..=0x23 => {
-                let v = [
-                    self.decode_vertex(self.gp0_fifo[1]),
-                    self.decode_vertex(self.gp0_fifo[2]),
-                    self.decode_vertex(self.gp0_fifo[3]),
-                ];
-                flat_poly_cost(
-                    self.timing_polygon_pixels(&v),
-                    prim_is_semi_trans(self.gp0_fifo[0]),
-                )
+                self.timing_triangle_cost(&tri(1, 2, 3), DRAW_FLAT_SETUP, rate(DRAW_FLAT_Q8))
             }
             0x28..=0x2B => {
-                let v0 = self.decode_vertex(self.gp0_fifo[1]);
-                let v1 = self.decode_vertex(self.gp0_fifo[2]);
-                let v2 = self.decode_vertex(self.gp0_fifo[3]);
-                let v3 = self.decode_vertex(self.gp0_fifo[4]);
-                let pixels = self.timing_polygon_pixels(&[v0, v1, v2])
-                    + self.timing_polygon_pixels(&[v1, v3, v2]);
-                flat_poly_cost(pixels, prim_is_semi_trans(self.gp0_fifo[0]))
+                self.timing_triangle_cost(&tri(1, 2, 3), DRAW_FLAT_SETUP, rate(DRAW_FLAT_Q8))
+                    + self.timing_triangle_cost(&tri(2, 4, 3), DRAW_FLAT_SETUP, rate(DRAW_FLAT_Q8))
             }
-            // Gouraud polygons use the same write-side throughput as flat
-            // polygons in the current silicon corpus; interpolation setup is
-            // small compared with a large primitive.
             0x30..=0x33 => {
-                let v = [
-                    self.decode_vertex(self.gp0_fifo[1]),
-                    self.decode_vertex(self.gp0_fifo[3]),
-                    self.decode_vertex(self.gp0_fifo[5]),
-                ];
-                flat_poly_cost(
-                    self.timing_polygon_pixels(&v),
-                    prim_is_semi_trans(self.gp0_fifo[0]),
-                )
+                self.timing_triangle_cost(&tri(1, 3, 5), DRAW_GOURAUD_SETUP, rate(DRAW_INTERP_Q8))
             }
             0x38..=0x3B => {
-                let v0 = self.decode_vertex(self.gp0_fifo[1]);
-                let v1 = self.decode_vertex(self.gp0_fifo[3]);
-                let v2 = self.decode_vertex(self.gp0_fifo[5]);
-                let v3 = self.decode_vertex(self.gp0_fifo[7]);
-                let pixels = self.timing_polygon_pixels(&[v0, v1, v2])
-                    + self.timing_polygon_pixels(&[v1, v3, v2]);
-                flat_poly_cost(pixels, prim_is_semi_trans(self.gp0_fifo[0]))
+                self.timing_triangle_cost(&tri(1, 3, 5), DRAW_GOURAUD_SETUP, rate(DRAW_INTERP_Q8))
+                    + self.timing_triangle_cost(
+                        &tri(3, 7, 5),
+                        DRAW_GOURAUD_SETUP,
+                        rate(DRAW_INTERP_Q8),
+                    )
             }
-            // Textured flat and Gouraud polygons. Texture fetch and UV
-            // interpolation dominate, and the silicon benchmark shows the
-            // same throughput with its semi-transparency flag set.
-            0x24..=0x27 => {
-                let v = [
-                    self.decode_vertex(self.gp0_fifo[1]),
-                    self.decode_vertex(self.gp0_fifo[3]),
-                    self.decode_vertex(self.gp0_fifo[5]),
-                ];
-                textured_poly_cost(self.timing_polygon_pixels(&v))
-            }
+            0x24..=0x27 => self.timing_triangle_cost(
+                &tri(1, 3, 5),
+                DRAW_TEXTURED_SETUP,
+                tex_rate(DRAW_INTERP_Q8),
+            ),
             0x2C..=0x2F => {
-                let v0 = self.decode_vertex(self.gp0_fifo[1]);
-                let v1 = self.decode_vertex(self.gp0_fifo[3]);
-                let v2 = self.decode_vertex(self.gp0_fifo[5]);
-                let v3 = self.decode_vertex(self.gp0_fifo[7]);
-                let pixels = self.timing_polygon_pixels(&[v0, v1, v2])
-                    + self.timing_polygon_pixels(&[v1, v3, v2]);
-                textured_poly_cost(pixels)
+                self.timing_triangle_cost(
+                    &tri(1, 3, 5),
+                    DRAW_TEXTURED_SETUP,
+                    tex_rate(DRAW_INTERP_Q8),
+                ) + self.timing_triangle_cost(
+                    &tri(3, 7, 5),
+                    DRAW_TEXTURED_SETUP,
+                    tex_rate(DRAW_INTERP_Q8),
+                )
             }
-            0x34..=0x37 => {
-                let v = [
-                    self.decode_vertex(self.gp0_fifo[1]),
-                    self.decode_vertex(self.gp0_fifo[4]),
-                    self.decode_vertex(self.gp0_fifo[7]),
-                ];
-                textured_poly_cost(self.timing_polygon_pixels(&v))
-            }
+            0x34..=0x37 => self.timing_triangle_cost(
+                &tri(1, 4, 7),
+                DRAW_GOURAUD_TEXTURED_SETUP,
+                tex_rate(DRAW_INTERP_Q8),
+            ),
             0x3C..=0x3F => {
-                let v0 = self.decode_vertex(self.gp0_fifo[1]);
-                let v1 = self.decode_vertex(self.gp0_fifo[4]);
-                let v2 = self.decode_vertex(self.gp0_fifo[7]);
-                let v3 = self.decode_vertex(self.gp0_fifo[10]);
-                let pixels = self.timing_polygon_pixels(&[v0, v1, v2])
-                    + self.timing_polygon_pixels(&[v1, v3, v2]);
-                textured_poly_cost(pixels)
+                self.timing_triangle_cost(
+                    &tri(1, 4, 7),
+                    DRAW_GOURAUD_TEXTURED_SETUP,
+                    tex_rate(DRAW_INTERP_Q8),
+                ) + self.timing_triangle_cost(
+                    &tri(4, 10, 7),
+                    DRAW_GOURAUD_TEXTURED_SETUP,
+                    tex_rate(DRAW_INTERP_Q8),
+                )
             }
             // Line setup/throughput from the PAL short/long batch pairs.
             // Monochrome is about 0.90 clocks/pixel plus six setup clocks;
@@ -1622,51 +1606,97 @@ impl Gpu {
                 let v1 = self.decode_vertex(self.gp0_fifo[3]);
                 16 + scale_gpu_pixels(timing_line_steps(v0, v1), 263, 256)
             }
-            // Flat rectangles.
+            // Rectangles. A textured rectangle steps its texture coordinate
+            // by one texel a pixel, so it fills nearly at the flat rate.
             0x60..=0x63 => {
                 let size = self.gp0_fifo[2];
-                flat_cost(
-                    self.timing_rect_pixels(
-                        self.gp0_fifo[1],
-                        (size & 0xFFFF) as i32,
-                        (size >> 16) as i32,
-                    ),
-                    prim_is_semi_trans(self.gp0_fifo[0]),
-                )
-            }
-            0x68..=0x6B => flat_cost(
-                self.timing_rect_pixels(self.gp0_fifo[1], 1, 1),
-                prim_is_semi_trans(self.gp0_fifo[0]),
-            ),
-            0x70..=0x73 => flat_cost(
-                self.timing_rect_pixels(self.gp0_fifo[1], 8, 8),
-                prim_is_semi_trans(self.gp0_fifo[0]),
-            ),
-            0x78..=0x7B => flat_cost(
-                self.timing_rect_pixels(self.gp0_fifo[1], 16, 16),
-                prim_is_semi_trans(self.gp0_fifo[0]),
-            ),
-            // Textured rectangles. Like textured polygons, the benchmark's
-            // semi flag does not change throughput when sampled texels are
-            // opaque, so the texture path owns the coefficient.
-            0x64..=0x67 => {
-                let size = self.gp0_fifo[3];
-                textured_rect_cost(self.timing_rect_pixels(
+                self.timing_rect_cost(
                     self.gp0_fifo[1],
                     (size & 0xFFFF) as i32,
                     (size >> 16) as i32,
-                ))
+                    DRAW_FLAT_SETUP,
+                    rate(DRAW_FLAT_Q8),
+                )
             }
-            0x6C..=0x6F => textured_rect_cost(self.timing_rect_pixels(self.gp0_fifo[1], 1, 1)),
-            0x74..=0x77 => textured_rect_cost(self.timing_rect_pixels(self.gp0_fifo[1], 8, 8)),
-            0x7C..=0x7F => textured_rect_cost(self.timing_rect_pixels(self.gp0_fifo[1], 16, 16)),
+            0x68..=0x6B => {
+                self.timing_rect_cost(self.gp0_fifo[1], 1, 1, DRAW_FLAT_SETUP, rate(DRAW_FLAT_Q8))
+            }
+            0x70..=0x73 => {
+                self.timing_rect_cost(self.gp0_fifo[1], 8, 8, DRAW_FLAT_SETUP, rate(DRAW_FLAT_Q8))
+            }
+            0x78..=0x7B => self.timing_rect_cost(
+                self.gp0_fifo[1],
+                16,
+                16,
+                DRAW_FLAT_SETUP,
+                rate(DRAW_FLAT_Q8),
+            ),
+            0x64..=0x67 => {
+                let size = self.gp0_fifo[3];
+                self.timing_rect_cost(
+                    self.gp0_fifo[1],
+                    (size & 0xFFFF) as i32,
+                    (size >> 16) as i32,
+                    DRAW_TEXTURED_SETUP,
+                    tex_rate(DRAW_FLAT_Q8),
+                )
+            }
+            0x6C..=0x6F => self.timing_rect_cost(
+                self.gp0_fifo[1],
+                1,
+                1,
+                DRAW_TEXTURED_SETUP,
+                tex_rate(DRAW_FLAT_Q8),
+            ),
+            0x74..=0x77 => self.timing_rect_cost(
+                self.gp0_fifo[1],
+                8,
+                8,
+                DRAW_TEXTURED_SETUP,
+                tex_rate(DRAW_FLAT_Q8),
+            ),
+            0x7C..=0x7F => self.timing_rect_cost(
+                self.gp0_fifo[1],
+                16,
+                16,
+                DRAW_TEXTURED_SETUP,
+                tex_rate(DRAW_FLAT_Q8),
+            ),
             _ => 0,
         }
     }
 
-    fn timing_rect_pixels(&self, pos: u32, w: i32, h: i32) -> u64 {
+    /// `max(setup, fill)`: the setup of a primitive overlaps its own fill.
+    fn timing_triangle_cost(
+        &self,
+        vertices: &[(i32, i32); 3],
+        setup: u64,
+        (pixel_q8, line_q8): (u64, u64),
+    ) -> u64 {
+        let pixels = self.timing_polygon_pixels(vertices);
+        let top = vertices.iter().map(|v| v.1).min().unwrap_or(0);
+        let bottom = vertices.iter().map(|v| v.1).max().unwrap_or(0);
+        let clip_top = (self.draw_area_top as i32).max(0);
+        let clip_bottom = (self.draw_area_bottom as i32 + 1).min(VRAM_HEIGHT as i32);
+        let lines = (bottom.min(clip_bottom) - top.max(clip_top)).max(0) as u64;
+        setup.max((pixels * pixel_q8 + lines * line_q8).div_ceil(256))
+    }
+
+    fn timing_rect_cost(
+        &self,
+        pos: u32,
+        w: i32,
+        h: i32,
+        setup: u64,
+        (pixel_q8, line_q8): (u64, u64),
+    ) -> u64 {
+        let (pixels, lines) = self.timing_rect_extent(pos, w, h);
+        setup.max((pixels * pixel_q8 + lines * line_q8).div_ceil(256))
+    }
+
+    fn timing_rect_extent(&self, pos: u32, w: i32, h: i32) -> (u64, u64) {
         if w <= 0 || h <= 0 {
-            return 0;
+            return (0, 0);
         }
         let x = sign_extend_11((pos & 0x7FF) as i32) + self.draw_offset_x;
         let y = sign_extend_11(((pos >> 16) & 0x7FF) as i32) + self.draw_offset_y;
@@ -1679,9 +1709,12 @@ impl Gpu {
             .min(self.draw_area_bottom as i32 + 1)
             .min(VRAM_HEIGHT as i32);
         if left >= right || top >= bottom {
-            0
+            (0, 0)
         } else {
-            (right - left) as u64 * (bottom - top) as u64
+            (
+                (right - left) as u64 * (bottom - top) as u64,
+                (bottom - top) as u64,
+            )
         }
     }
 
@@ -2310,21 +2343,8 @@ impl Gpu {
     /// in `gp0_fifo`. Dispatches on the opcode in word 0.
     fn execute_gp0_packet(&mut self, from_dma: bool) {
         let op = (self.gp0_fifo[0] >> 24) & 0xFF;
-        let pixel_cost = self.gp0_packet_timing_cost(op as u8);
-        // The raster engine also has a command-level setup latency. Across
-        // the bandwidth corpus, 400 repetitions consistently finish about
-        // 60 HBlanks early without this term (roughly 320 CPU cycles per
-        // command), independent of primitive size or texture mode.
-        let timing_cost = if matches!(op, 0x40..=0x5F) {
-            // Lines have their own much smaller setup pipeline; the returned
-            // cost already includes it and must not inherit the 320-cycle
-            // polygon/rectangle setup term.
-            pixel_cost
-        } else if pixel_cost == 0 {
-            0
-        } else {
-            pixel_cost.saturating_add(320)
-        };
+        // Setup is part of the fitted per-primitive cost.
+        let timing_cost = self.gp0_packet_timing_cost(op as u8);
         self.gp0_opcode_hist[op as usize] = self.gp0_opcode_hist[op as usize].saturating_add(1);
         self.gp0_timing_hist[op as usize] =
             self.gp0_timing_hist[op as usize].saturating_add(timing_cost);
@@ -3941,6 +3961,33 @@ impl Gpu {
         }
     }
 }
+
+// Draw-cost model (see `Gpu::gp0_packet_timing_cost`). Rates are CPU clocks
+// per pixel or per scanline in 1/256 units; setups are CPU clocks.
+/// Setup of a flat primitive (records 112, 10E).
+const DRAW_FLAT_SETUP: u64 = 44;
+/// Setup of a Gouraud triangle (v1.24 cheap list, case 216).
+const DRAW_GOURAUD_SETUP: u64 = 195;
+/// Setup of a textured primitive (record 113).
+const DRAW_TEXTURED_SETUP: u64 = 134;
+/// Setup of a Gouraud-textured triangle (record 114).
+const DRAW_GOURAUD_TEXTURED_SETUP: u64 = 269;
+/// Start of a GP0(02h) fill before its fast per-pixel rate (record 110).
+const DRAW_FILL_SETUP: u64 = 149;
+/// Start of a VRAM copy before its per-pixel rate (record 111).
+const DRAW_COPY_SETUP: u64 = 608;
+/// Flat fill, and any rectangle (records 100, 108-10A).
+const DRAW_FLAT_Q8: u64 = 136;
+/// A triangle interpolating colour or texture coordinates (records 101-104,
+/// 106, and the v1.24 expensive list, cases 219-222).
+const DRAW_INTERP_Q8: u64 = 274;
+/// Per covered scanline, separating 32-line from 239-line triangles.
+const DRAW_SCANLINE_Q8: u64 = 572;
+/// Floor for an untextured semi-transparent pixel and its span start, from
+/// record 107 (32x32 triangles) together with the ps1-tests `gpu/bandwidth`
+/// full-screen semi-transparent quad.
+const DRAW_SEMI_Q8: u64 = 199;
+const DRAW_SEMI_SCANLINE_Q8: u64 = 1526;
 
 fn scale_gpu_pixels(pixels: u64, numerator: u64, denominator: u64) -> u64 {
     pixels
