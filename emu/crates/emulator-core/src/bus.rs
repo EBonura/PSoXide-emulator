@@ -4474,6 +4474,57 @@ mod tests {
     }
 
     #[test]
+    fn fifo_dma_request_returns_before_the_last_primitive_finishes() {
+        // Two 128x128 Gouraud triangles in their own nodes, then GP0(1Fh).
+        let mut bus = linked_list_upload_fixture(false, true, 0);
+        bus.gpu.enable_experimental_dma_fifo();
+        let xy = |x: u32, y: u32| (y << 16) | x;
+        let tri = [
+            0x3000_0040,
+            xy(0, 0),
+            0x4000,
+            xy(127, 0),
+            0x40_0000,
+            xy(0, 127),
+        ];
+        let nodes = [&tri[..], &tri[..], &[0x1F00_0000][..]];
+        let mut address = 0x1000;
+        for (i, words) in nodes.iter().enumerate() {
+            let next = address + (words.len() as u32 + 1) * 4;
+            let link = if i + 1 == nodes.len() {
+                0x00ff_ffff
+            } else {
+                next
+            };
+            write_ram_u32(
+                &mut bus.ram[..],
+                address,
+                ((words.len() as u32) << 24) | link,
+            );
+            for (j, word) in words.iter().enumerate() {
+                write_ram_u32(&mut bus.ram[..], address + (j as u32 + 1) * 4, *word);
+            }
+            address = next;
+        }
+        bus.dma.channels[2].base = 0x1000;
+        bus.run_dma_channel(2);
+        while bus.dma.channels[2].channel_control & (1 << 24) != 0 {
+            bus.tick(1);
+        }
+        bus.tick(64);
+        // hwtest v1.24: bit 28 is back with CHCR, bits 24 and 26 wait for
+        // the drawing (cases 219-222).
+        let stat = bus.gpu.read32(crate::gpu::GP1_ADDR).unwrap();
+        assert_ne!(stat & (1 << 28), 0);
+        assert_eq!(stat & (1 << 24), 0);
+        assert_eq!(stat & (1 << 26), 0);
+        bus.tick(20_000);
+        let stat = bus.gpu.read32(crate::gpu::GP1_ADDR).unwrap();
+        assert_ne!(stat & (1 << 24), 0);
+        assert_ne!(stat & (1 << 26), 0);
+    }
+
+    #[test]
     fn gpu_linked_list_waits_for_dreq_then_fetches_current_ram_once() {
         let mut bus = linked_list_upload_fixture(false, true, 0);
         bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0000);

@@ -94,6 +94,10 @@ pub struct Gpu {
     dma_input_fifo: std::collections::VecDeque<(u32, bool)>,
     #[serde(skip)]
     dma_input_dropped: u64,
+    /// A GP0(1Fh) taken out of the input FIFO while a primitive was still
+    /// drawing, executed once the drawing finishes (FIFO model only).
+    #[serde(default)]
+    deferred_irq_command: Option<(u32, bool)>,
     /// Number of words the current packet expects in total (including
     /// the first/opcode word). `0` means "no packet in progress".
     gp0_expected: usize,
@@ -661,6 +665,7 @@ impl Gpu {
             experimental_dma_fifo: false,
             dma_input_fifo: std::collections::VecDeque::new(),
             dma_input_dropped: 0,
+            deferred_irq_command: None,
             gp0_expected: 0,
             gp0_write_count: 0,
             draw_offset_x: 0,
@@ -1298,12 +1303,19 @@ impl Gpu {
     pub fn decay_busy(&mut self, mut cycles: u64) {
         if self.experimental_dma_fifo {
             self.drain_dma_input_fifo();
-            while cycles > 0 && !self.dma_input_fifo.is_empty() {
+            while cycles > 0
+                && (!self.dma_input_fifo.is_empty() || self.deferred_irq_command.is_some())
+            {
                 let elapsed = self.busy_credit.max(1).min(cycles);
                 self.busy_credit = self.busy_credit.saturating_sub(elapsed);
                 self.dma_busy_credit = self.dma_busy_credit.saturating_sub(elapsed);
                 self.cmd_ingest_credit = self.cmd_ingest_credit.saturating_sub(elapsed);
                 cycles -= elapsed;
+                if self.busy_credit == 0 {
+                    if let Some((word, from_dma)) = self.deferred_irq_command.take() {
+                        self.gp0_write(word, from_dma);
+                    }
+                }
                 self.drain_dma_input_fifo();
             }
         }
@@ -1319,7 +1331,10 @@ impl Gpu {
         if Self::gpu_wedged() {
             return true;
         }
-        self.cmd_ingest_credit > 0 || self.is_dma_busy()
+        // A GP0(1Fh) waiting on the drawing still occupies the command
+        // path: on silicon bit 26 returns with the interrupt, not with the
+        // DMA request (hwtest v1.24 cases 222 and 226).
+        self.cmd_ingest_credit > 0 || self.is_dma_busy() || self.deferred_irq_command.is_some()
     }
 
     /// Is the GPU currently "busy"? Used to gate GPUSTAT ready
@@ -1467,6 +1482,20 @@ impl Gpu {
             let op = (word >> 24) as u8;
             let superscalar_state =
                 matches!(op, 0xe3..=0xe5) && !transfer && self.polyline.is_none();
+            if op == 0x1F
+                && !transfer
+                && self.polyline.is_none()
+                && self.busy_credit > 0
+                && self.deferred_irq_command.is_none()
+            {
+                // hwtest v1.24 cases 219-226: GPUSTAT bit 28 (and the DMA
+                // request) comes back as soon as the list's last node, the
+                // GP0(1Fh), is in the GPU, about one large primitive before
+                // the drawing ends, while bit 24 follows the drawing. The
+                // command leaves the FIFO now; its interrupt waits.
+                self.deferred_irq_command = self.dma_input_fifo.pop_front();
+                continue;
+            }
             if !transfer && !superscalar_state && self.busy_credit > 0 {
                 break;
             }
