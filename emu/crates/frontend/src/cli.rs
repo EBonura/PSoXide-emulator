@@ -1043,6 +1043,23 @@ fn run_headless_launch(
         }
         None => None,
     };
+    // Limit-study oracle counters, one row per route tick (see
+    // emulator-core limits.rs). Only written when PSOXIDE_LIMIT_LOG is set.
+    let mut limit_log = match std::env::var_os("PSOXIDE_LIMIT_LOG") {
+        Some(path) => {
+            let path = std::path::PathBuf::from(path);
+            let file = std::fs::File::create(&path)
+                .map_err(|e| format!("create limit log {}: {e}", path.display()))?;
+            let mut writer = std::io::BufWriter::new(file);
+            writeln!(
+                writer,
+                "route_tick,port1_polls,bus_cycles,active,wait_cycles,skipped_cycles,free_instructions,guard_trips"
+            )
+            .map_err(|e| e.to_string())?;
+            Some(writer)
+        }
+        None => None,
+    };
     cpu.set_cpu_cycle_profile_enabled(
         args.cpu_cycle_profile_log.is_some()
             || args.mmio_stall_line_log.is_some()
@@ -1522,6 +1539,20 @@ fn run_headless_launch(
                 route_last_bus_cycles = bus_cycles;
                 route_last_icache_profile = icache_profile;
             }
+            if let Some(writer) = limit_log.as_mut() {
+                writeln!(
+                    writer,
+                    "{route_ticks},{},{},{},{},{},{},{}",
+                    bus.port1_completed_polls(),
+                    bus.cycles(),
+                    u8::from(bus.limits.is_active()),
+                    bus.limits.wait_cycles,
+                    bus.limits.skipped_cycles,
+                    bus.limits.free_instructions,
+                    bus.limits.guard_trips,
+                )
+                .map_err(|e| e.to_string())?;
+            }
             if let Some(writer) = cpu_cycle_profile_log.as_mut() {
                 let snapshot = cpu.cpu_cycle_profile();
                 let delta = snapshot.delta_since(last_cpu_cycle_profile);
@@ -1927,6 +1958,23 @@ fn run_headless_launch(
 
     if let Some(writer) = route_log.as_mut() {
         writer.flush().map_err(|e| e.to_string())?;
+    }
+    if let Some(writer) = limit_log.as_mut() {
+        writer.flush().map_err(|e| e.to_string())?;
+    }
+    if bus.limits.configured() {
+        eprintln!(
+            "[limits] oracles=[{}] active={} wait_cycles={} skipped_cycles={} free_instructions={} guard_trips={}",
+            bus.limits.describe(),
+            bus.limits.is_active(),
+            bus.limits.wait_cycles,
+            bus.limits.skipped_cycles,
+            bus.limits.free_instructions,
+            bus.limits.guard_trips,
+        );
+        if let Some(path) = std::env::var_os("PSOXIDE_LIMIT_PROFILE_OUT") {
+            bus.limits.write_profile(std::path::Path::new(&path))?;
+        }
     }
     if let Some(writer) = cpu_cycle_profile_log.as_mut() {
         writer.flush().map_err(|error| error.to_string())?;

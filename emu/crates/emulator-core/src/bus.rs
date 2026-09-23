@@ -278,6 +278,11 @@ pub struct Bus {
     /// tooling -- excluded from save states.
     #[serde(skip)]
     pub mmio_trace: MmioTrace,
+    /// Limit-study oracles (see `limits.rs`). Off unless the
+    /// `PSOXIDE_LIMIT_*` environment names some; excluded from save
+    /// states (a restored bus re-reads the environment).
+    #[serde(skip, default = "crate::limits::LimitOracles::from_env")]
+    pub limits: crate::limits::LimitOracles,
     /// Out-of-band profiler/debug telemetry emitted by instrumented
     /// homebrew through the Expansion 2 debug port. Debug tooling --
     /// excluded from save states.
@@ -430,6 +435,7 @@ impl Bus {
                 s
             },
             mmio_trace: MmioTrace::new(),
+            limits: crate::limits::LimitOracles::from_env(),
             telemetry: GuestTelemetry::new(),
             hle_bios_enabled: false,
             hle_bios_calls: [[0; 256]; 3],
@@ -1089,6 +1095,9 @@ impl Bus {
     /// exception dispatch. Redux achieves the same effect via
     /// `branchTest` → `counters->update()`.
     pub fn drain_scheduler_events_post_op(&mut self) {
+        if self.limits.pending() {
+            self.maybe_activate_limits();
+        }
         // Advance timer state to `now` once per branch boundary so
         // any IRQ that would have fired between the last branchTest
         // and this one lands in `I_STAT` in time for the same
@@ -1422,6 +1431,9 @@ impl Bus {
     /// most of the read wait-state cost but still occupies one extra clock.
     #[inline]
     pub(crate) fn cpu_write_stalls(&mut self, virt: u32, width: AccessWidth) -> u32 {
+        if to_physical(virt) < memory::ram::MIRROR_END && self.limits.on(crate::limits::RAM) {
+            return 0;
+        }
         if to_physical(virt) < memory::ram::MIRROR_END {
             self.last_cpu_ram_access_cycle = self.cycles;
             let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
@@ -1648,6 +1660,14 @@ impl Bus {
     /// Any cycle delta must flow through this function so the timer
     /// bank's accumulator matches Redux's lazy-read timer model.
     fn advance_cycles(&mut self, n: u32) {
+        if self.limits.frozen() {
+            // Limit oracle: the instruction runs in a free code range.
+            self.limits.skip(n as u64);
+            return;
+        }
+        if self.experimental_gpu_list.is_some() && self.limits.on(crate::limits::GPU) {
+            self.finish_gpu_list_now();
+        }
         // Timers used to be ticked here every instruction (~25M
         // calls/sec, three accumulator-divides each). They're now
         // advanced lazily -- `service_timers()` runs once per
@@ -1728,6 +1748,66 @@ impl Bus {
         }
         if self.gpu.take_irq_requested() {
             self.irq.raise(IrqSource::Gpu);
+        }
+    }
+
+    /// Switch the configured limit oracles on once the guest has completed
+    /// the start poll (see `limits.rs`).
+    fn maybe_activate_limits(&mut self) {
+        let polls = self.port1_completed_polls();
+        if polls < self.limits.start_poll() {
+            return;
+        }
+        let mask = self.limits.activate(self.cycles);
+        self.gpu.set_limit_free_draw(mask & crate::limits::GPU != 0);
+        self.cdrom
+            .set_limit_fast_reads(mask & crate::limits::CD != 0);
+        eprintln!(
+            "[limits] active at poll {polls} cycle {} oracles=[{}]",
+            self.cycles,
+            self.limits.describe()
+        );
+    }
+
+    /// Replace the limit-oracle configuration (tests and tools; normal runs
+    /// read `PSOXIDE_LIMIT_*` at construction). Activates at once when the
+    /// start poll has already been reached.
+    pub fn set_limit_oracles(&mut self, limits: crate::limits::LimitOracles) {
+        self.limits = limits;
+        if self.limits.pending() {
+            self.maybe_activate_limits();
+        }
+    }
+
+    /// Whether limit oracle `bit` (a `limits::*` constant) is on.
+    #[inline]
+    pub fn limit(&self, bit: u32) -> bool {
+        self.limits.on(bit)
+    }
+
+    /// GPU oracle: walk an in-flight linked list to its end now. The walk
+    /// only stops early if the channel is disabled or the GPU refuses a
+    /// node, which a drawing-free GPU does not do.
+    fn finish_gpu_list_now(&mut self) {
+        let mut guard = 0u32;
+        while self.experimental_gpu_list.is_some() && guard < 0x0400_0000 {
+            if let Some(list) = self.experimental_gpu_list.as_mut() {
+                list.setup_cycles = 0;
+            }
+            let before = self
+                .experimental_gpu_list
+                .as_ref()
+                .map(|list| (list.address, list.word, list.remaining, list.need_header));
+            self.advance_experimental_gpu_list();
+            self.gpu.decay_busy(0);
+            let after = self
+                .experimental_gpu_list
+                .as_ref()
+                .map(|list| (list.address, list.word, list.remaining, list.need_header));
+            if before == after {
+                break;
+            }
+            guard += 1;
         }
     }
 
@@ -1980,6 +2060,11 @@ impl Bus {
             }
             2 => {
                 if let Some(gpu_cycles) = self.run_dma_gpu() {
+                    let gpu_cycles = if self.limits.on(crate::limits::GPU) {
+                        1
+                    } else {
+                        gpu_cycles
+                    };
                     let target = self.cycles + gpu_cycles as u64;
                     self.log_dma_schedule("GpuDma", gpu_cycles as u64, target);
                     self.scheduler
@@ -2032,7 +2117,11 @@ impl Bus {
                     // ordering table is finished. PS1 DRAM hyper-page mode is
                     // one cycle per word plus one row-address setup per 16
                     // words (the same measured model used by DuckStation).
-                    let otc_cycles = otc_words.saturating_add(otc_words.div_ceil(16));
+                    let otc_cycles = if self.limits.on(crate::limits::GPU) {
+                        0
+                    } else {
+                        otc_words.saturating_add(otc_words.div_ceil(16))
+                    };
                     // SCPH-9902 PX6 capture: the first CHCR read after the
                     // CPU regains the bus still sees START|TRIGGER, and the
                     // immediately following read sees both clear. Keep the
@@ -4388,6 +4477,68 @@ mod tests {
             address = next;
         }
         bus
+    }
+
+    #[test]
+    fn default_bus_has_no_limit_oracles() {
+        let bus = Bus::new(synthetic_bios()).unwrap();
+        assert!(!bus.limits.configured());
+        assert!(!bus.limits.is_active());
+    }
+
+    fn gpu_oracle() -> crate::limits::LimitOracles {
+        use crate::limits::{LimitOracles, RangeSet, GPU};
+        LimitOracles::new(
+            GPU,
+            0,
+            RangeSet::default(),
+            RangeSet::default(),
+            RangeSet::default(),
+        )
+    }
+
+    #[test]
+    fn gpu_oracle_walks_a_drawing_list_at_once_with_the_same_pixels() {
+        let mut timed = experimental_draw_burst(true);
+        timed.run_dma_channel(2);
+        timed.tick(64);
+        assert_ne!(timed.dma.channels[2].channel_control & (1 << 24), 0);
+        timed.tick(200_000);
+
+        let mut free = experimental_draw_burst(true);
+        free.set_limit_oracles(gpu_oracle());
+        free.run_dma_channel(2);
+        free.tick(1);
+        free.tick(1);
+        free.drain_scheduler_events_post_op();
+        assert_eq!(free.dma.channels[2].channel_control & (1 << 24), 0);
+        assert!(!free.gpu.is_busy());
+        assert_eq!(timed.gpu.vram.words(), free.gpu.vram.words());
+    }
+
+    #[test]
+    fn gpu_oracle_charges_no_draw_time() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.set_limit_oracles(gpu_oracle());
+        bus.gpu.charge_busy(10_000);
+        assert!(!bus.gpu.is_busy());
+    }
+
+    #[test]
+    fn limit_oracles_wait_for_their_start_poll() {
+        use crate::limits::{LimitOracles, RangeSet, GPU};
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.set_limit_oracles(LimitOracles::new(
+            GPU,
+            5,
+            RangeSet::default(),
+            RangeSet::default(),
+            RangeSet::default(),
+        ));
+        bus.drain_scheduler_events_post_op();
+        assert!(!bus.limits.is_active());
+        bus.gpu.charge_busy(10_000);
+        assert!(bus.gpu.is_busy());
     }
 
     #[test]

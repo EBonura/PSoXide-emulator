@@ -985,6 +985,13 @@ impl Cpu {
         let phys = memory::to_physical(addr);
         let iblksz =
             ((self.cache_control & CACHE_CONTROL_IBLKSZ_MASK) >> CACHE_CONTROL_IBLKSZ_SHIFT) as u8;
+        if bus.limit(crate::limits::ICACHE) {
+            // Limit oracle: every cached fetch hits. The cache still fills
+            // (so its contents stay coherent), but no fill touches the bus.
+            let (instruction, _, _) = self.instruction_cache.fetch(phys, iblksz, bus, false);
+            bus.note_cached_fetch(true);
+            return instruction;
+        }
         let (instruction, fill, refill) = self.instruction_cache.fetch(
             phys,
             iblksz,
@@ -1343,6 +1350,9 @@ impl Cpu {
     #[inline]
     fn charge_read(&self, bus: &mut Bus, addr: u32, width: AccessWidth) {
         if !self.cache_isolated() || Self::cache_control_lane(addr).is_some() {
+            if Self::limit_free_read(bus, addr) {
+                return;
+            }
             let stalls = bus.cpu_read_stalls(addr, width);
             if crate::timers::Timers::contains(memory::to_physical(addr)) {
                 bus.add_root_counter_read_stalls(addr, stalls);
@@ -1350,6 +1360,23 @@ impl Cpu {
                 bus.add_cycles(stalls);
             }
         }
+    }
+
+    /// Limit oracles `ram` and `mmio`: a data read that costs only its
+    /// issue cycle.
+    #[inline]
+    fn limit_free_read(bus: &Bus, addr: u32) -> bool {
+        let phys = memory::to_physical(addr);
+        (bus.limit(crate::limits::RAM) && phys < memory::ram::MIRROR_END)
+            || (bus.limit(crate::limits::MMIO) && Self::polled_status_register(phys))
+    }
+
+    /// GPUSTAT and the interrupt, DMA and timer registers: what guest wait
+    /// loops poll.
+    fn polled_status_register(phys: u32) -> bool {
+        (0x1F80_1070..=0x1F80_10FF).contains(&phys)
+            || crate::timers::Timers::contains(phys)
+            || (0x1F80_1814..0x1F80_1818).contains(&phys)
     }
 
     /// SWL/SWR are emulated as read-merge-write, but main RAM does not see a
@@ -1481,6 +1508,23 @@ impl Cpu {
     /// `step_traced` go through here, so the interpreter logic
     /// stays in one place.
     fn execute_one(&mut self, bus: &mut Bus) -> Result<ExecutedInstruction, ExecutionError> {
+        if !bus.limits.tracks_pc() {
+            return self.execute_one_inner(bus);
+        }
+        // Limit oracles with code ranges: free ranges freeze the clock for
+        // the instruction; wait and profile ranges count what it charged.
+        let pc = self.pc;
+        bus.limits.begin_instruction(pc);
+        let cycles_before = bus.cycles();
+        let skipped_before = bus.limits.skipped_cycles;
+        let outcome = self.execute_one_inner(bus);
+        let charged = bus.cycles().saturating_sub(cycles_before);
+        let skipped = bus.limits.skipped_cycles - skipped_before;
+        bus.limits.end_instruction(pc, charged, skipped);
+        outcome
+    }
+
+    fn execute_one_inner(&mut self, bus: &mut Bus) -> Result<ExecutedInstruction, ExecutionError> {
         // Diagnostic only -- track how many steps the IRQ pin was high.
         // We deliberately do NOT mirror the pin into `cop0[13].IP[2]`:
         // PCSX-Redux's CAUSE register is only written at exception
@@ -2126,6 +2170,9 @@ impl Cpu {
     /// between an op and its result read.
     #[inline]
     fn gte_sync(&mut self, bus: &mut Bus) {
+        if bus.limit(crate::limits::GTE) {
+            return;
+        }
         stall_to(bus, self.gte_busy_until);
     }
 
@@ -2350,12 +2397,16 @@ impl Cpu {
             // MFHI/MFLO read the multiply/divide unit; stall until an
             // in-flight MULT/DIV has retired (the R3000A HI/LO interlock).
             0x10 => {
-                hilo_stall_to(bus, self.hilo_busy_until);
+                if !bus.limit(crate::limits::MULDIV) {
+                    hilo_stall_to(bus, self.hilo_busy_until);
+                }
                 self.op_mfhi(instr)
             }
             0x11 => self.op_mthi(instr),
             0x12 => {
-                hilo_stall_to(bus, self.hilo_busy_until);
+                if !bus.limit(crate::limits::MULDIV) {
+                    hilo_stall_to(bus, self.hilo_busy_until);
+                }
                 self.op_mflo(instr)
             }
             0x13 => self.op_mtlo(instr),
@@ -4419,6 +4470,130 @@ mod tests {
         program[0] = MULTU_T0_T1;
         program[1 + gap] = MFLO_T2;
         program
+    }
+
+    fn limit_oracles(mask: u32, free: &str, wait: &str) -> crate::limits::LimitOracles {
+        use crate::limits::{LimitOracles, RangeSet};
+        LimitOracles::new(
+            mask,
+            0,
+            RangeSet::parse(free).unwrap(),
+            RangeSet::parse(wait).unwrap(),
+            RangeSet::default(),
+        )
+    }
+
+    /// `warm_cycles` on a fresh machine, with `limits` installed.
+    fn warm_cycles_with(limits: crate::limits::LimitOracles, program: &[u32]) -> u64 {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.set_limit_oracles(limits);
+        cpu.gprs[8] = 0x8000_4000;
+        cpu.gprs[9] = 0x0001_0041;
+        cpu.cop0[12] |= 1 << 30; // COP2 usable
+        warm_cycles(&mut cpu, &mut bus, program)
+    }
+
+    #[test]
+    fn muldiv_oracle_removes_the_hilo_interlock() {
+        use crate::limits::MULDIV;
+        let program = multu_gap_program(0);
+        // rs = 0x8000_4000: the full 13-cycle multiply.
+        assert_eq!(
+            warm_cycles_with(limit_oracles(0, "", ""), &program[..2]),
+            15
+        );
+        assert_eq!(
+            warm_cycles_with(limit_oracles(MULDIV, "", ""), &program[..2]),
+            2
+        );
+    }
+
+    #[test]
+    fn gte_oracle_removes_the_command_interlock() {
+        use crate::limits::GTE;
+        const RTPS: u32 = 0x4A08_0001;
+        const MFC2_T2_SXY2: u32 = 0x480A_7000;
+        let mut program = std::vec![RTPS, MFC2_T2_SXY2];
+        program.extend(std::iter::repeat_n(0, 20));
+        assert_eq!(warm_cycles_with(limit_oracles(0, "", ""), &program), 37);
+        assert_eq!(warm_cycles_with(limit_oracles(GTE, "", ""), &program), 22);
+    }
+
+    #[test]
+    fn ram_oracle_makes_loads_and_stores_cost_their_issue_cycle() {
+        use crate::limits::RAM;
+        let loads = [LW_T1_T0; 8];
+        let stores = [SW_ZERO_T0; 8];
+        assert_eq!(warm_cycles_with(limit_oracles(0, "", ""), &loads), 56);
+        assert_eq!(warm_cycles_with(limit_oracles(RAM, "", ""), &loads), 8);
+        assert_eq!(warm_cycles_with(limit_oracles(0, "", ""), &stores), 12);
+        assert_eq!(warm_cycles_with(limit_oracles(RAM, "", ""), &stores), 8);
+    }
+
+    #[test]
+    fn mmio_oracle_makes_status_polls_cost_one_cycle() {
+        use crate::limits::MMIO;
+        let lw_gpustat = (0x23 << 26) | (8 << 21) | (9 << 16);
+        let run = |mask| {
+            let mut cpu = Cpu::new();
+            let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+            bus.set_limit_oracles(limit_oracles(mask, "", ""));
+            let program = [lw_gpustat; 4];
+            cpu.gprs[8] = 0x1F80_1814;
+            warm_cycles(&mut cpu, &mut bus, &program)
+        };
+        assert!(run(0) > 4);
+        assert_eq!(run(MMIO), 4);
+    }
+
+    #[test]
+    fn icache_oracle_makes_a_cold_run_cost_its_issue_cycles() {
+        use crate::limits::ICACHE;
+        let cold = |mask| {
+            let mut cpu = Cpu::new();
+            let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+            bus.set_limit_oracles(limit_oracles(mask, "", ""));
+            cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+            for index in 0..8u32 {
+                bus.write32(0x8000_1000 + index * 4, ADDIU_T2);
+            }
+            bus.add_cycles(100);
+            cpu.pc = 0x8000_1000;
+            let start = bus.cycles();
+            for _ in 0..8 {
+                cpu.step(&mut bus).unwrap();
+            }
+            bus.cycles() - start
+        };
+        assert!(cold(0) > 8);
+        assert_eq!(cold(ICACHE), 8);
+    }
+
+    #[test]
+    fn free_ranges_take_no_time_and_wait_ranges_are_counted() {
+        let program = [ADDIU_T2; 8];
+        // The program sits at 0x80001000; free its first four words.
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.set_limit_oracles(limit_oracles(
+            0,
+            "80001000 80001010 f",
+            "80001010 80001020 w",
+        ));
+        let total = warm_cycles(&mut cpu, &mut bus, &program);
+        assert_eq!(total, 4);
+        // Both passes: the cold one pays refills inside the wait range too.
+        let waited = bus.limits.wait_cycles;
+        assert!(waited > 8, "{waited}");
+        assert!(bus.limits.skipped_cycles >= 8);
+        assert_eq!(bus.limits.free_instructions, 8);
+        // Counting alone changes nothing.
+        let counted = warm_cycles_with(limit_oracles(0, "", "80001000 80001020 w"), &program);
+        assert_eq!(
+            counted,
+            warm_cycles_with(limit_oracles(0, "", ""), &program)
+        );
     }
 
     #[test]

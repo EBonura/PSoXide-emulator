@@ -19,6 +19,7 @@ pub mod gpu;
 pub mod hle_bios;
 pub mod input_tape;
 pub mod irq;
+pub mod limits;
 pub mod mdec;
 pub mod mmio_trace;
 pub mod pad;
