@@ -175,6 +175,11 @@ pub struct LimitOracles {
     pub skipped_cycles: u64,
     /// Cycles charged inside wait ranges since activation.
     pub wait_cycles: u64,
+    /// The part of `wait_cycles` that was stalls, when the CPU cycle
+    /// profile is on: I-cache refills, RAM loads, RAM stores, MMIO, GTE and
+    /// multiply/divide interlocks, in that order. Lets a caller take a stall
+    /// category out of the work outside the wait loops only.
+    pub wait_stalls: [u64; 6],
     /// Times a free range hit [`FREE_GUARD`].
     pub guard_trips: u64,
     /// Instructions retired inside free ranges since activation.
@@ -362,9 +367,11 @@ impl LimitOracles {
     /// Called after the instruction at `pc` retired, with the cycles it
     /// charged and the cycles the freeze skipped.
     #[inline]
-    pub(crate) fn end_instruction(&mut self, pc: u32, charged: u64, skipped: u64) {
+    /// Returns whether `pc` is in a wait range.
+    pub(crate) fn end_instruction(&mut self, pc: u32, charged: u64, skipped: u64) -> bool {
         self.frozen = false;
-        if !self.wait.is_empty() && self.wait.find(pc).is_some() {
+        let waiting = !self.wait.is_empty() && self.wait.find(pc).is_some();
+        if waiting {
             self.wait_cycles += charged;
         }
         if !self.profile.is_empty() {
@@ -374,6 +381,15 @@ impl LimitOracles {
                 totals.1 += skipped;
                 totals.2 += 1;
             }
+        }
+        waiting
+    }
+
+    /// Add one waiting instruction's stalls (see [`Self::wait_stalls`]).
+    #[inline]
+    pub(crate) fn add_wait_stalls(&mut self, stalls: [u64; 6]) {
+        for (total, add) in self.wait_stalls.iter_mut().zip(stalls) {
+            *total += add;
         }
     }
 
