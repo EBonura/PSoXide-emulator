@@ -2953,6 +2953,7 @@ impl Bus {
     ///
     /// Used by [`crate::Cpu::should_take_interrupt`] -- see the
     /// "interrupts vs GTE" hardware bug workaround.
+    #[inline]
     pub fn peek_instruction(&self, virt: u32) -> Option<u32> {
         let phys = to_physical(virt);
         if phys < memory::ram::MIRROR_END {
