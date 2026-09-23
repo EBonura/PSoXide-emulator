@@ -537,6 +537,14 @@ pub struct Cpu {
     /// exception?". Excluded from save states.
     #[serde(skip)]
     should_take_interrupt_steps: u64,
+    /// Address of a GTE command about to execute, recorded at the start of
+    /// the instruction before it when no interrupt was pending then. An
+    /// interrupt found pending when that command starts was raised during
+    /// the instruction before it, the case where silicon runs the command
+    /// and takes the interrupt with EPC still on it. Transient: a save
+    /// state lands between instructions, where the next step re-arms it.
+    #[serde(skip)]
+    gte_irq_watch: Option<u32>,
     /// Emulator-owned instruction-cache refill profile. Excluded from save
     /// states because it is diagnostic history, not emulated hardware state.
     #[serde(skip)]
@@ -655,6 +663,7 @@ impl Cpu {
             exception_counts: [0; 32],
             irq_line_high_steps: 0,
             should_take_interrupt_steps: 0,
+            gte_irq_watch: None,
             instruction_cache_profile: InstructionCacheProfileSnapshot::default(),
             instruction_cache_event_profile_enabled: false,
             last_instruction_cache_refill: None,
@@ -1526,6 +1535,7 @@ impl Cpu {
         }
 
         let pc_before = self.pc;
+        let gte_irq_taken_after = self.gte_irq_hazard(pc_before, bus);
         if pc_before & 3 != 0 || !Self::instruction_address_is_executable(pc_before) {
             // The PS1 scratchpad is the repurposed data cache and cannot
             // supply instructions. Reject it (and every other unmapped
@@ -1664,7 +1674,16 @@ impl Cpu {
             self.apply_redux_bios_kernel_call_intercept();
             bus.drain_scheduler_events_post_op();
         }
-        if in_delay_slot && self.should_take_interrupt(bus) {
+        if gte_irq_taken_after && self.pending_exception_pc.is_none() {
+            // The GTE command has run; EPC stays on it, so a handler that
+            // returns to EPC runs it a second time (hwtest v1.24 0xC9).
+            self.should_take_interrupt_steps = self.should_take_interrupt_steps.saturating_add(1);
+            self.enter_exception(ExceptionCode::Interrupt, pc_before, false);
+            self.pc = self
+                .pending_exception_pc
+                .take()
+                .expect("enter_exception staged a vector");
+        } else if in_delay_slot && self.should_take_interrupt(bus) {
             self.should_take_interrupt_steps = self.should_take_interrupt_steps.saturating_add(1);
             // Redux passes `bd=0` to `exception(0x400, 0)`: the IRQ
             // is taken cleanly between instructions, not in a delay
@@ -3079,6 +3098,58 @@ impl Cpu {
         self.cop0[12] & (1 << 16) != 0
     }
 
+    /// Interrupts against GTE commands, as a console behaves (hwtest v1.24
+    /// cases 0xC8-0xCB, psx-spx "Interrupts vs GTE Commands"): an interrupt
+    /// raised during the instruction before a GTE command is taken after
+    /// the command has executed, with EPC pointing at the command. A handler
+    /// that returns to EPC therefore runs it twice; the BIOS handler and
+    /// psx-rt step EPC over it. This is DuckStation's model.
+    ///
+    /// Interrupts are otherwise dispatched at branch boundaries (Redux's
+    /// `branchTest`), so this samples the line at the two boundaries around
+    /// the instruction before each GTE command: armed at the start of that
+    /// instruction when nothing is pending, and returning `true` (take the
+    /// interrupt after this step) when the command starts with one pending.
+    /// An interrupt already pending before would have been taken earlier on
+    /// silicon and keeps the deferral in [`Cpu::should_take_interrupt`].
+    /// A delay-slot command is excluded: EPC would hold the branch.
+    #[inline(always)]
+    fn gte_irq_hazard(&mut self, pc: u32, bus: &mut Bus) -> bool {
+        const IRQ_ENABLED: u32 = 0x401;
+        let watched = self.gte_irq_watch.take() == Some(pc);
+        if self.cop0[12] & IRQ_ENABLED != IRQ_ENABLED {
+            return false;
+        }
+        let next = self.pending_pc.unwrap_or(pc.wrapping_add(4));
+        let next_is_gte = bus
+            .peek_instruction(next)
+            .is_some_and(|word| word & 0xFE00_0000 == 0x4A00_0000);
+        if !watched && !next_is_gte {
+            return false;
+        }
+        self.gte_irq_sample(watched, next_is_gte.then_some(next), bus)
+    }
+
+    /// The slow half of [`Cpu::gte_irq_hazard`], reached only around GTE
+    /// commands.
+    #[inline(never)]
+    fn gte_irq_sample(&mut self, watched: bool, next_gte: Option<u32>, bus: &mut Bus) -> bool {
+        if bus.hle_bios_enabled && bus.hle_irq_jump_buffer().is_some() {
+            // The HLE BIOS stands in for the kernel's own handler, which
+            // steps EPC over a GTE command: keep the deferral.
+            return false;
+        }
+        bus.drain_scheduler_events_post_op();
+        let pending = bus.external_interrupt_pending();
+        if watched && self.pending_pc.is_none() && pending {
+            return true;
+        }
+        if !pending {
+            self.gte_irq_watch = next_gte;
+        }
+        false
+    }
+
     /// `true` when the CPU should take an interrupt exception right
     /// now. Mirrors PCSX-Redux's `branchTest`:
     ///   `(I_STAT & I_MASK) && ((SR & 0x401) == 0x401)`
@@ -4106,6 +4177,42 @@ mod tests {
         bus.irq_mut().raise(crate::irq::IrqSource::VBlank);
         bus.irq_mut().write_mask(0x1);
         assert!(cpu.should_take_interrupt(&mut bus));
+    }
+
+    /// A GTE command at `0x8000_1004` behind a nop, interrupts enabled,
+    /// vector in RAM. Returns the CPU after `before_gte` has run on it.
+    fn gte_irq_fixture(before_gte: impl FnOnce(&mut Bus)) -> (Cpu, Bus) {
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.write32(0x8000_1000, 0); // nop
+        bus.write32(0x8000_1004, 0x4A18_0001); // RTPS
+        bus.write32(0x8000_1008, 0);
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x8000_1000;
+        cpu.cop0[12] = 0x4000_0401; // CU2, IM2, IEc; BEV clear
+        bus.irq_mut().write_mask(0x1);
+        // SXY FIFO sentinels: each RTPS shifts SXY1 into SXY0.
+        cpu.cop2.write_data(12, 0x5A5A_0001);
+        cpu.cop2.write_data(13, 0x5A5A_0002);
+        cpu.cop2.write_data(14, 0x5A5A_0003);
+        cpu.step(&mut bus).unwrap(); // the nop, which arms the watch
+        before_gte(&mut bus);
+        cpu.step(&mut bus).unwrap(); // the RTPS
+        (cpu, bus)
+    }
+
+    #[test]
+    fn interrupt_raised_before_a_gte_command_is_taken_after_it_with_epc_on_it() {
+        let (cpu, _) = gte_irq_fixture(|bus| bus.irq_mut().raise(crate::irq::IrqSource::VBlank));
+        assert_eq!(cpu.cop0[14], 0x8000_1004, "EPC stays on the GTE command");
+        assert_eq!(cpu.pc(), 0x8000_0080);
+        assert_eq!(cpu.cop2.read_data(12), 0x5A5A_0002, "the command ran once");
+    }
+
+    #[test]
+    fn gte_command_without_a_new_interrupt_runs_normally() {
+        let (cpu, _) = gte_irq_fixture(|_| {});
+        assert_eq!(cpu.pc(), 0x8000_1008);
+        assert_eq!(cpu.cop2.read_data(12), 0x5A5A_0002);
     }
 
     /// Truth-table regression for LWL / LWR / SWL / SWR unaligned
