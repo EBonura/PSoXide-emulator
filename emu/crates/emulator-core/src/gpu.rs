@@ -1701,12 +1701,19 @@ impl Gpu {
     }
 
     /// `max(setup, fill)`: the setup of a primitive overlaps its own fill.
+    ///
+    /// A triangle past the hardware extent limit draws nothing (see
+    /// `triangle_exceeds_hw_extent`), so it costs its setup like one clipped
+    /// away entirely (record 10E) rather than the area it would have covered.
     fn timing_triangle_cost(
         &self,
         vertices: &[(i32, i32); 3],
         setup: u64,
         (pixel_q8, line_q8): (u64, u64),
     ) -> u64 {
+        if triangle_exceeds_hw_extent(vertices[0], vertices[1], vertices[2]) {
+            return setup;
+        }
         let pixels = self.timing_polygon_pixels(vertices);
         let top = vertices.iter().map(|v| v.1).min().unwrap_or(0);
         let bottom = vertices.iter().map(|v| v.1).max().unwrap_or(0);

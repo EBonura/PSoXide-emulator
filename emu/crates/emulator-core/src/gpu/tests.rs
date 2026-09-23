@@ -2805,3 +2805,114 @@ fn draw_cost_follows_the_silicon_setup_and_fill_fit() {
     let flat = [0x2000_80FF, xy(640, 400), xy(672, 400), xy(640, 432)];
     assert_eq!(packet_cost(&area, &flat), 344);
 }
+
+/// Signed GP0 vertex word.
+fn vertex_word(x: i32, y: i32) -> u32 {
+    ((y as u32 & 0x7FF) << 16) | (x as u32 & 0x7FF)
+}
+
+/// Pixels a packet writes into an all-zero VRAM (draw with a non-zero
+/// colour).
+fn rasterized_pixels(setup: &[u32], packet: &[u32]) -> u64 {
+    let mut gpu = Gpu::new();
+    for &word in setup.iter().chain(packet) {
+        gpu.write32(GP0_ADDR, word);
+    }
+    let mut pixels = 0;
+    for y in 0..VRAM_HEIGHT as u16 {
+        for x in 0..VRAM_WIDTH as u16 {
+            pixels += u64::from(gpu.vram.get_pixel(x, y) != 0);
+        }
+    }
+    pixels
+}
+
+/// A 320x240 drawing area with the origin at its centre, as a first-person
+/// viewmodel draws.
+const CENTRED_SCREEN: [u32; 3] = [
+    0xE300_0000,
+    0xE400_0000 | 319 | (239 << 10),
+    0xE500_0000 | 160 | (120 << 11),
+];
+
+#[test]
+fn draw_cost_charges_the_clipped_span_the_rasterizer_draws() {
+    let flat = |v: [(i32, i32); 3]| {
+        [
+            0x2000_00FF,
+            vertex_word(v[0].0, v[0].1),
+            vertex_word(v[1].0, v[1].1),
+            vertex_word(v[2].0, v[2].1),
+        ]
+    };
+    // A glock viewmodel triangle hanging off the bottom edge, a triangle
+    // cut by the bottom edge and one cut by the left edge. The fill is
+    // billed on the clipped area, which tracks the pixels actually written.
+    for (v, cost) in [
+        ([(99, 136), (113, 121), (87, 106)], 101),
+        ([(0, 100), (100, 100), (0, 200)], 1_001),
+        ([(-200, 0), (-100, 0), (-100, 50)], 1_228),
+    ] {
+        let packet = flat(v);
+        let drawn = rasterized_pixels(&CENTRED_SCREEN, &packet);
+        let mut gpu = Gpu::new();
+        for &word in &CENTRED_SCREEN {
+            gpu.write32(GP0_ADDR, word);
+        }
+        let screen_v = v.map(|(x, y)| gpu.decode_vertex(vertex_word(x, y)));
+        let billed = gpu.timing_polygon_pixels(&screen_v);
+        assert!(
+            billed.abs_diff(drawn) * 100 <= drawn * 8,
+            "{v:?}: billed {billed} px, drew {drawn}"
+        );
+        assert_eq!(packet_cost(&CENTRED_SCREEN, &packet), cost, "{v:?}");
+    }
+    // The same glock triangle textured: 131 clipped pixels over 14 lines.
+    let glock = [
+        0x2480_8080,
+        vertex_word(99, 136),
+        0,
+        vertex_word(113, 121),
+        0,
+        vertex_word(87, 106),
+        0,
+    ];
+    assert_eq!(packet_cost(&CENTRED_SCREEN, &glock), 172);
+}
+
+#[test]
+fn triangles_past_the_extent_limit_cost_only_their_setup() {
+    let v = vertex_word;
+    // 1,000 lines tall and 1,100 pixels wide: both are dropped by the GPU,
+    // and used to be billed for the area they would have covered on screen.
+    let tall_flat = [0x2000_00FF, v(0, 0), v(100, 0), v(0, 1000)];
+    let wide_flat = [0x2000_00FF, v(-600, 0), v(500, 0), v(0, 10)];
+    for packet in [tall_flat, wide_flat] {
+        assert_eq!(rasterized_pixels(&CENTRED_SCREEN, &packet), 0);
+        assert_eq!(packet_cost(&CENTRED_SCREEN, &packet), DRAW_FLAT_SETUP);
+    }
+    let tall_textured = [0x2480_8080, v(0, 0), 0, v(100, 0), 0, v(0, 1000), 0];
+    assert_eq!(
+        packet_cost(&CENTRED_SCREEN, &tall_textured),
+        DRAW_TEXTURED_SETUP
+    );
+    let tall_gouraud = [0x3000_00FF, v(0, 0), 0xFF, v(100, 0), 0xFF, v(0, 1000)];
+    assert_eq!(
+        packet_cost(&CENTRED_SCREEN, &tall_gouraud),
+        DRAW_GOURAUD_SETUP
+    );
+    // 511 lines is still drawn and billed for its clipped area.
+    let tall_ok = [0x2000_00FF, v(0, 0), v(100, 0), v(0, 511)];
+    assert!(packet_cost(&CENTRED_SCREEN, &tall_ok) > 5_000);
+    // A quad whose second half (v1, v3, v2) is too tall keeps the first.
+    let quad = [0x2800_00FF, v(0, 0), v(100, 0), v(0, 100), v(100, 700)];
+    let first_half = [0x2000_00FF, v(0, 0), v(100, 0), v(0, 100)];
+    assert_eq!(
+        rasterized_pixels(&CENTRED_SCREEN, &quad),
+        rasterized_pixels(&CENTRED_SCREEN, &first_half)
+    );
+    assert_eq!(
+        packet_cost(&CENTRED_SCREEN, &quad),
+        packet_cost(&CENTRED_SCREEN, &first_half) + DRAW_FLAT_SETUP
+    );
+}
