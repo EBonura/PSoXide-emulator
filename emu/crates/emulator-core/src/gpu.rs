@@ -1787,12 +1787,16 @@ impl Gpu {
         }
         match phys {
             GP0_ADDR => {
-                let fast_irq = value >> 24 == 0x1f && self.irq_after_canceled_set_is_immediate;
+                // Only a word in command position is GP0(1Fh). The same top
+                // byte in a packet parameter, VRAM upload pixel data or a
+                // polyline vertex is data and requests nothing.
+                let irq_command = value >> 24 == 0x1f && self.next_gp0_word_is_command();
+                let fast_irq = irq_command && self.irq_after_canceled_set_is_immediate;
                 if fast_irq {
                     self.irq_after_canceled_set_is_immediate = false;
                 }
                 let irq_deadline = now
-                    .filter(|_| value >> 24 == 0x1f && !fast_irq)
+                    .filter(|_| irq_command && !fast_irq)
                     .map(|now| now.saturating_add(GP1_STATUS_LATCH_CYCLES));
                 let old_irq_bit = self.status.raw & (1 << 24);
                 let old_irq_requested = self.irq_requested;
@@ -1848,6 +1852,40 @@ impl Gpu {
             }
             _ => false,
         }
+    }
+
+    /// Whether the next word written to GP0 starts a command, rather than
+    /// continuing a packet, an A0h upload or a polyline. The words still
+    /// queued in the input FIFO come first, so this replays the parser over
+    /// them from its live state.
+    fn next_gp0_word_is_command(&self) -> bool {
+        let mut upload_words = self.vram_upload.map_or(0, |t| t.remaining);
+        let mut polyline = self.polyline.is_some();
+        let mut header = self.gp0_fifo.first().copied().unwrap_or(0);
+        let mut packet_words = self.gp0_expected.saturating_sub(self.gp0_fifo.len());
+        for &(word, _) in &self.dma_input_fifo {
+            if upload_words > 0 {
+                upload_words -= 1;
+                continue;
+            }
+            if polyline {
+                polyline = !is_polyline_terminator(word);
+                continue;
+            }
+            if packet_words == 0 {
+                header = word;
+                packet_words = gp0_packet_size((word >> 24) as u8);
+            }
+            packet_words -= 1;
+            if packet_words == 0 {
+                match (header >> 24) as u8 {
+                    0xA0..=0xBF => upload_words = vram_transfer_words(word),
+                    0x48..=0x4F | 0x58..=0x5F => polyline = true,
+                    _ => {}
+                }
+            }
+        }
+        upload_words == 0 && !polyline && packet_words == 0
     }
 
     fn apply_gp1_status(&mut self, value: u32) {
@@ -3689,8 +3727,7 @@ impl Gpu {
     fn ingest_polyline_word(&mut self, word: u32) {
         // Sentinel check -- both halves have the terminator pattern.
         // Redux uses `(word & 0xF000F000) == 0x50005000`.
-        let is_term = (word & 0xF000_F000) == 0x5000_5000;
-        if is_term {
+        if is_polyline_terminator(word) {
             self.polyline = None;
             self.polyline_cmd_log_index = None;
             return;
@@ -3863,25 +3900,8 @@ impl Gpu {
         let y = ((xy >> 16) & 0x1FF) as u16;
         // Hardware uses a wrap-around convention: width/height of 0
         // means 1024 / 512 respectively. Matches Redux.
-        let w = {
-            let raw = (wh & 0x3FF) as u16;
-            if raw == 0 {
-                1024
-            } else {
-                raw
-            }
-        };
-        let h = {
-            let raw = ((wh >> 16) & 0x1FF) as u16;
-            if raw == 0 {
-                512
-            } else {
-                raw
-            }
-        };
-        let pixels = w as u32 * h as u32;
-        // Two 16bpp pixels per 32-bit word, round up.
-        let remaining = pixels.div_ceil(2);
+        let (w, h) = vram_transfer_size(wh);
+        let remaining = vram_transfer_words(wh);
         self.vram_upload = Some(VramTransfer {
             x,
             y,
@@ -4193,6 +4213,26 @@ fn for_each_line_pixel(
         x += dx;
         y += dy;
     }
+}
+
+/// Width and height of an A0h/C0h transfer from its size word. Hardware
+/// uses a wrap-around convention: 0 means 1024 wide or 512 high.
+fn vram_transfer_size(wh: u32) -> (u16, u16) {
+    let w = (wh & 0x3FF) as u16;
+    let h = ((wh >> 16) & 0x1FF) as u16;
+    (if w == 0 { 1024 } else { w }, if h == 0 { 512 } else { h })
+}
+
+/// GP0 words an A0h upload of this size carries: two 16bpp pixels per
+/// word, rounded up.
+fn vram_transfer_words(wh: u32) -> u32 {
+    let (w, h) = vram_transfer_size(wh);
+    (u32::from(w) * u32::from(h)).div_ceil(2)
+}
+
+/// Redux's polyline end test, `(word & 0xF000F000) == 0x50005000`.
+fn is_polyline_terminator(word: u32) -> bool {
+    word & 0xF000_F000 == 0x5000_5000
 }
 
 /// Sign-extend an 11-bit integer (PS1 vertex coords + drawing offset
