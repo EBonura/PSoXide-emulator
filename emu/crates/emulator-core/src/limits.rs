@@ -38,6 +38,8 @@
 //! `PSOXIDE_LIMIT_FROM_POLL=N` keeps every switch off until the guest has
 //! completed N pad polls, so the run is identical to a plain one up to the
 //! start of the measured window (loads and menus included).
+//! `PSOXIDE_LIMIT_FROM_CYCLE=C` also waits for bus cycle C, for guests that
+//! poll the pad during their loads.
 
 use std::path::Path;
 
@@ -160,6 +162,7 @@ pub struct LimitOracles {
     active: u32,
     pending: bool,
     from_poll: u64,
+    from_cycle: u64,
     free: RangeSet,
     wait: RangeSet,
     profile: RangeSet,
@@ -190,6 +193,7 @@ impl LimitOracles {
         Self::from_settings(
             std::env::var("PSOXIDE_LIMIT_ORACLES").ok().as_deref(),
             std::env::var("PSOXIDE_LIMIT_FROM_POLL").ok().as_deref(),
+            std::env::var("PSOXIDE_LIMIT_FROM_CYCLE").ok().as_deref(),
             std::env::var_os("PSOXIDE_LIMIT_FREE")
                 .as_deref()
                 .map(Path::new),
@@ -206,6 +210,7 @@ impl LimitOracles {
     fn from_settings(
         oracles: Option<&str>,
         from_poll: Option<&str>,
+        from_cycle: Option<&str>,
         free: Option<&Path>,
         wait: Option<&Path>,
         profile: Option<&Path>,
@@ -214,21 +219,27 @@ impl LimitOracles {
             Some(list) => parse_oracles(list)?,
             None => 0,
         };
-        let from_poll = match from_poll {
-            Some(text) => text
-                .trim()
-                .parse()
-                .map_err(|error| format!("FROM_POLL {text}: {error}"))?,
-            None => 0,
+        let number = |name: &str, text: Option<&str>| -> Result<u64, String> {
+            match text {
+                Some(text) => text
+                    .trim()
+                    .parse()
+                    .map_err(|error| format!("{name} {text}: {error}")),
+                None => Ok(0),
+            }
         };
+        let from_poll = number("FROM_POLL", from_poll)?;
+        let from_cycle = number("FROM_CYCLE", from_cycle)?;
         let load = |path: Option<&Path>| path.map(RangeSet::load).transpose();
-        Ok(Self::new(
+        let mut limits = Self::new(
             configured,
             from_poll,
             load(free)?.unwrap_or_default(),
             load(wait)?.unwrap_or_default(),
             load(profile)?.unwrap_or_default(),
-        ))
+        );
+        limits.from_cycle = from_cycle;
+        Ok(limits)
     }
 
     /// Build a configuration directly (tests, tools).
@@ -290,6 +301,16 @@ impl LimitOracles {
     /// The poll at which a pending configuration activates.
     pub(crate) fn start_poll(&self) -> u64 {
         self.from_poll
+    }
+
+    /// The bus cycle before which a pending configuration stays off.
+    pub(crate) fn start_cycle(&self) -> u64 {
+        self.from_cycle
+    }
+
+    /// Also wait for bus cycle `cycle` before activating.
+    pub fn set_start_cycle(&mut self, cycle: u64) {
+        self.from_cycle = cycle;
     }
 
     /// Turn the configured switches on. Returns the newly active mask.
@@ -405,7 +426,7 @@ mod tests {
 
     #[test]
     fn nothing_configured_by_default() {
-        let limits = LimitOracles::from_settings(None, None, None, None, None).unwrap();
+        let limits = LimitOracles::from_settings(None, None, None, None, None, None).unwrap();
         assert!(!limits.configured());
         assert!(!limits.pending());
         assert!(!limits.tracks_pc());

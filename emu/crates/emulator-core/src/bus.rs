@@ -1755,7 +1755,7 @@ impl Bus {
     /// the start poll (see `limits.rs`).
     fn maybe_activate_limits(&mut self) {
         let polls = self.port1_completed_polls();
-        if polls < self.limits.start_poll() {
+        if polls < self.limits.start_poll() || self.cycles < self.limits.start_cycle() {
             return;
         }
         let mask = self.limits.activate(self.cycles);
@@ -4539,6 +4539,18 @@ mod tests {
         assert!(!bus.limits.is_active());
         bus.gpu.charge_busy(10_000);
         assert!(bus.gpu.is_busy());
+    }
+
+    #[test]
+    fn limit_oracles_wait_for_their_start_cycle() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        let mut limits = gpu_oracle();
+        limits.set_start_cycle(1_000);
+        bus.set_limit_oracles(limits);
+        assert!(!bus.limits.is_active());
+        bus.tick(1_000);
+        bus.drain_scheduler_events_post_op();
+        assert!(bus.limits.is_active());
     }
 
     #[test]
