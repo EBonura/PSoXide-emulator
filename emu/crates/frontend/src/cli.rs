@@ -1053,7 +1053,7 @@ fn run_headless_launch(
             let mut writer = std::io::BufWriter::new(file);
             writeln!(
                 writer,
-                "route_tick,port1_polls,bus_cycles,active,wait_cycles,skipped_cycles,free_instructions,guard_trips"
+                "route_tick,port1_polls,bus_cycles,active,wait_cycles,skipped_cycles,free_instructions,guard_trips,wait_icache,wait_ram_load,wait_ram_store,wait_mmio,wait_gte,wait_muldiv"
             )
             .map_err(|e| e.to_string())?;
             Some(writer)
@@ -1540,9 +1540,10 @@ fn run_headless_launch(
                 route_last_icache_profile = icache_profile;
             }
             if let Some(writer) = limit_log.as_mut() {
+                let [w0, w1, w2, w3, w4, w5] = bus.limits.wait_stalls;
                 writeln!(
                     writer,
-                    "{route_ticks},{},{},{},{},{},{},{}",
+                    "{route_ticks},{},{},{},{},{},{},{},{w0},{w1},{w2},{w3},{w4},{w5}",
                     bus.port1_completed_polls(),
                     bus.cycles(),
                     u8::from(bus.limits.is_active()),

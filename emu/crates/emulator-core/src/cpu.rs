@@ -1517,10 +1517,21 @@ impl Cpu {
         bus.limits.begin_instruction(pc);
         let cycles_before = bus.cycles();
         let skipped_before = bus.limits.skipped_cycles;
+        let profile_before = self.cpu_cycle_profile;
         let outcome = self.execute_one_inner(bus);
         let charged = bus.cycles().saturating_sub(cycles_before);
         let skipped = bus.limits.skipped_cycles - skipped_before;
-        bus.limits.end_instruction(pc, charged, skipped);
+        if bus.limits.end_instruction(pc, charged, skipped) && self.cpu_cycle_profile_enabled {
+            let d = self.cpu_cycle_profile.delta_since(profile_before);
+            bus.limits.add_wait_stalls([
+                d.icache_refill_stall_cycles,
+                d.ram_load_stall_cycles,
+                d.ram_store_stall_cycles,
+                d.mmio_stall_cycles,
+                d.gte_busy_stall_cycles,
+                d.muldiv_interlock_stall_cycles,
+            ]);
+        }
         outcome
     }
 
@@ -4588,11 +4599,29 @@ mod tests {
         assert!(waited > 8, "{waited}");
         assert!(bus.limits.skipped_cycles >= 8);
         assert_eq!(bus.limits.free_instructions, 8);
-        // Counting alone changes nothing.
+        assert_eq!(bus.limits.wait_stalls, [0; 6]); // no cycle profile, no split
+                                                    // Counting alone changes nothing.
         let counted = warm_cycles_with(limit_oracles(0, "", "80001000 80001020 w"), &program);
         assert_eq!(
             counted,
             warm_cycles_with(limit_oracles(0, "", ""), &program)
+        );
+    }
+
+    #[test]
+    fn wait_ranges_split_their_stalls_when_the_cycle_profile_is_on() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.set_limit_oracles(limit_oracles(0, "", "80001000 80001020 w"));
+        cpu.set_cpu_cycle_profile_enabled(true);
+        cpu.gprs[8] = 0x8000_4000;
+        warm_cycles(&mut cpu, &mut bus, &[LW_T1_T0; 8]);
+        let [_, ram_load, ram_store, mmio, gte, muldiv] = bus.limits.wait_stalls;
+        assert!(ram_load > 0);
+        assert_eq!((ram_store, mmio, gte, muldiv), (0, 0, 0, 0));
+        assert_eq!(
+            bus.limits.wait_stalls.iter().sum::<u64>() + cpu.cpu_cycle_profile().issue_cycles,
+            bus.limits.wait_cycles
         );
     }
 
