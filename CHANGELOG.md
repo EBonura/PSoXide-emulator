@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- GPU DMA now walks linked lists through the GPU's input FIFO by default, as
+  a console measured it (hwtest v1.24). `PSOXIDE_EXPERIMENTAL_DMA_FIFO=0`
+  restores the old word-count timing. Save states move to format 7 and keep
+  the in-flight transfer; older save states no longer load.
 - Add RAM-word watches to headless route logs for profiling unmodified games.
 - Show game-library subfolders as expandable rows, collapsed at startup, with
   indented contents and game counts. Refresh preserves open folders and selection.

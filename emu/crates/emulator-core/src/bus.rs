@@ -110,8 +110,10 @@ pub enum BusError {
     },
 }
 
-/// State for the opt-in, cycle-stepped linked-list transport diagnostic.
-/// The default DMA path remains unchanged. This mode is not save-state safe.
+/// State for the cycle-stepped linked-list transport (the FIFO DMA model,
+/// default since hwtest v1.24). Serialized so a save taken mid-walk resumes
+/// the walk.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct ExperimentalGpuList {
     address: u32,
     next: u32,
@@ -121,31 +123,6 @@ struct ExperimentalGpuList {
     need_header: bool,
     transfer: u32,
     headers: u32,
-}
-
-fn serialize_supported_gpu<S: serde::Serializer>(
-    gpu: &Gpu,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    if gpu.experimental_dma_fifo_enabled() {
-        eprintln!("[experimental-dma-fifo] refusing save state: FIFO diagnostic state is not serializable");
-        return Err(serde::ser::Error::custom(
-            "save states are unsupported with PSOXIDE_EXPERIMENTAL_DMA_FIFO=1",
-        ));
-    }
-    serde::Serialize::serialize(gpu, serializer)
-}
-
-fn deserialize_supported_gpu<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Gpu, D::Error> {
-    if std::env::var("PSOXIDE_EXPERIMENTAL_DMA_FIFO").as_deref() == Ok("1") {
-        eprintln!("[experimental-dma-fifo] refusing save-state load in diagnostic mode");
-        return Err(serde::de::Error::custom(
-            "loading save states is unsupported with PSOXIDE_EXPERIMENTAL_DMA_FIFO=1",
-        ));
-    }
-    serde::Deserialize::deserialize(deserializer)
 }
 
 /// The PS1 system bus.
@@ -189,10 +166,6 @@ pub struct Bus {
     dma: Dma,
     /// GPU -- owns VRAM and handles the GP0/GP1 MMIO ports. The
     /// frontend's VRAM viewer reads `bus.gpu.vram` directly.
-    #[serde(
-        serialize_with = "serialize_supported_gpu",
-        deserialize_with = "deserialize_supported_gpu"
-    )]
     pub gpu: Gpu,
     /// SPU -- full 24-voice ADPCM synthesis, ADSR envelopes, stereo
     /// mixing at 44.1 kHz. Output drains into `spu.audio_out`; the
@@ -361,7 +334,6 @@ pub struct Bus {
     /// inspect CHCR and the completion event once to recover an armed wait.
     #[serde(skip, default = "check_gpu_request_after_restore")]
     gpu_dma_waiting_for_request: bool,
-    #[serde(skip)]
     experimental_gpu_list: Option<ExperimentalGpuList>,
     #[serde(skip)]
     gpu_linked_list_transfer: u32,
@@ -408,7 +380,11 @@ impl Bus {
             irq: Irq::new(),
             timers: Timers::new(),
             dma: Dma::new(),
-            gpu: Gpu::new(),
+            gpu: {
+                let mut gpu = Gpu::new();
+                gpu.set_dma_fifo_model(crate::gpu::dma_fifo_model_from_env());
+                gpu
+            },
             spu: Spu::new(),
             sio0: Sio0::new(),
             sio1: Sio1::new(),
@@ -4215,8 +4191,10 @@ mod tests {
         assert_eq!(bus.scheduler.target(EventSlot::CdrDma), Some(101));
     }
 
+    /// Built on the word-count transport; the FIFO tests switch it on.
     fn linked_list_upload_fixture(guard: bool, split: bool, padding: usize) -> Bus {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.gpu.set_dma_fifo_model(false);
         bus.gpu_linked_list_fifo_guard = guard;
         bus.dma.dpcr = 1 << (2 * 4 + 3);
         bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
@@ -4269,16 +4247,37 @@ mod tests {
     }
 
     #[test]
-    fn experimental_fifo_refuses_lossy_save_states() {
-        let mut bus = linked_list_upload_fixture(false, true, 0);
-        bus.gpu.enable_experimental_dma_fifo();
-        let error = psoxide_settings::savestate::SaveStateV1::new(&bus, "dma", 0)
+    fn fifo_save_state_taken_mid_walk_resumes_the_walk() {
+        let mut live = experimental_draw_burst(true);
+        live.run_dma_channel(2);
+        live.tick(300);
+        assert!(live.experimental_gpu_list.is_some());
+        let snapshot = psoxide_settings::savestate::SaveStateV1::new(&live, "dma", 0)
             .to_bytes()
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            psoxide_settings::savestate::SaveStateError::Encode(_)
-        ));
+            .unwrap();
+        let state: psoxide_settings::savestate::SaveStateV1<Bus> =
+            psoxide_settings::savestate::SaveStateV1::from_bytes(&snapshot).unwrap();
+        let mut restored = state.payload;
+        assert!(restored.gpu.experimental_dma_fifo_enabled());
+        assert!(restored.experimental_gpu_list.is_some());
+        live.tick(50000);
+        restored.tick(50000);
+        assert_eq!(live.gpu.vram.words(), restored.gpu.vram.words());
+        assert_eq!(
+            live.dma.channels[2].channel_control,
+            restored.dma.channels[2].channel_control
+        );
+        assert_eq!(live.dma.channels[2].channel_control & (1 << 24), 0);
+    }
+
+    #[test]
+    fn bus_uses_the_fifo_dma_model_by_default() {
+        if std::env::var("PSOXIDE_EXPERIMENTAL_DMA_FIFO").as_deref() == Ok("0") {
+            return;
+        }
+        let bus = Bus::new(synthetic_bios()).unwrap();
+        assert!(bus.gpu.experimental_dma_fifo_enabled());
+        assert!(!crate::gpu::Gpu::new().experimental_dma_fifo_enabled());
     }
 
     #[test]

@@ -63,10 +63,23 @@ This fixes an independently reproduced missing request gate. Celeste sets direct
 hardware corruption's cause. List execution after admission remains synchronous;
 it does not implement per-node requests or finite FIFO consumption.
 
-## Experimental timed FIFO diagnostic
+## Timed FIFO model (default since hwtest v1.24)
 
-`PSOXIDE_EXPERIMENTAL_DMA_FIFO=1` enables a separate, non-default investigation
-model. Leave the packing guard unset to observe its rendering instead of stopping
+The FIFO model is the default for every `Bus` since the hwtest v1.24 console
+capture of 2026-09-23 (PSoXide-editor
+`docs/emulator-accuracy-from-silicon.md`). Cases 211-226 time channel 2 on
+lists that draw: on silicon CHCR stays busy until the last packet is in the
+GPU (expensive list 586,354 clocks, cheap 2,996) and GP0(1Fh) follows the
+drawing. This model reproduces that shape; the word-count model clears CHCR
+at 283 clocks for both lists and raises the 1Fh 6 clocks after the kick.
+`PSOXIDE_EXPERIMENTAL_DMA_FIFO=0` selects the word-count model for
+comparison; the variable keeps its old name so existing scripts that set `=1`
+still mean the same thing. A standalone `Gpu` driven by host code (renderer
+tests, replay tools) still executes words immediately, since it has no clock
+to drain a queue.
+
+The rest of this section is the original description of the model. Leave the
+packing guard unset to observe its rendering instead of stopping
 at an oversized node. CPU GP0 and DMA traffic share an ordered input queue.
 Linked-list headers are admitted by DREQ; each admitted payload is fetched from
 RAM one word at a time as bus time advances, without rechecking DREQ mid-node.
@@ -92,10 +105,10 @@ The model deliberately remains experimental:
 - Front-command staging is approximated from packet size, with the explicit
   two-word E1/E2/E6/A0 allowance. This is not full command-by-command silicon
   characterization.
-- Snapshots explicitly fail while the experiment is enabled. The new queue and
-  transfer state are not silently discarded into an apparently usable save.
-- Default emulation is unchanged by this experiment. It must not be used as a
-  general compatibility claim for commercial games or untested GPU commands.
+- Save states carry the queue, the in-flight list walk and the model flag
+  (format version 7), so a save taken mid-walk resumes the walk.
+- Raster costs were recalibrated separately against silicon; see the
+  emulator-accuracy document for the records used.
 
 Transport tests demonstrate actual timed RAM fetches, tick-chunk equivalence,
 request suspension, valid A0 uploads (including a node larger than 16 words), and
