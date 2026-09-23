@@ -4524,6 +4524,188 @@ mod tests {
         assert_ne!(stat & (1 << 26), 0);
     }
 
+    /// GPUSTAT.24 or I_STAT.1 after the posted status latch has matured.
+    fn gpu_irq_seen(bus: &mut Bus) -> bool {
+        bus.tick(200_000);
+        bus.read32(crate::gpu::GP1_ADDR) & (1 << 24) != 0
+            || bus.read32(IRQ_STAT_ADDR) & (1 << (IrqSource::Gpu as u32)) != 0
+    }
+
+    /// Words whose top byte is 1Fh but which never start a command: a
+    /// VRAM upload payload, the parameters of a triangle and a rectangle,
+    /// and the vertices and colours of both polyline kinds. Each stream
+    /// ends back in command position.
+    fn gp0_data_words_with_1f_top_byte() -> Vec<u32> {
+        vec![
+            // A0h: 4x1 upload, two payload words.
+            0xA000_0000,
+            0x0010_0020,
+            0x0001_0004,
+            0x1F00_1F00,
+            0x1FFF_1F1F,
+            // Monochrome triangle with 1Fh-topped vertices.
+            0x2000_00FF,
+            0x1F00_0010,
+            0x1F10_0020,
+            0x1F20_0010,
+            // Variable monochrome rectangle.
+            0x6000_00FF,
+            0x1F00_0000,
+            0x1F00_0001,
+            // Monochrome polyline, then the terminator.
+            0x4800_00FF,
+            0x1F00_0000,
+            0x1F10_0010,
+            0x1F20_0020,
+            0x5555_5555,
+            // Gouraud polyline: 1Fh in a colour and a vertex word.
+            0x5800_00FF,
+            0x0000_0000,
+            0x1F00_FF00,
+            0x0010_0010,
+            0x1F00_00FF,
+            0x1F20_0020,
+            0x5000_5000,
+        ]
+    }
+
+    #[test]
+    fn gp0_port_data_words_with_1f_top_byte_do_not_raise_irq1() {
+        for fifo in [true, false] {
+            let mut bus = Bus::new(synthetic_bios()).unwrap();
+            bus.gpu.set_dma_fifo_model(fifo);
+            for word in gp0_data_words_with_1f_top_byte() {
+                bus.write32(crate::gpu::GP0_ADDR, word);
+                bus.tick(64);
+            }
+            assert!(!gpu_irq_seen(&mut bus), "fifo={fifo}");
+            assert_eq!(bus.gpu.vram.get_pixel(0x20, 0x10), 0x1F00);
+            assert_eq!(bus.gpu.vram.get_pixel(0x23, 0x10), 0x1FFF);
+            // The parser is back in command position: a real GP0(1Fh) acts.
+            bus.write32(crate::gpu::GP0_ADDR, 0x1F00_0000);
+            assert!(gpu_irq_seen(&mut bus), "fifo={fifo}");
+        }
+    }
+
+    #[test]
+    fn gp0_port_words_queued_behind_busy_drawing_keep_their_position() {
+        // A full-VRAM fill keeps the GPU busy, so the FIFO model holds the
+        // following commands in its input queue: whether a 1Fh-topped word
+        // is a command depends on the queued words ahead of it, not only on
+        // the packet being assembled.
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.gpu.set_dma_fifo_model(true);
+        for word in [0x0200_0000, 0, (511 << 16) | 1023] {
+            bus.write32(crate::gpu::GP0_ADDR, word);
+        }
+        for word in [
+            0x2000_00FF,
+            0x1F00_0010,
+            0x1F10_0020,
+            0x1F20_0010,
+            0xA000_0000,
+            0x0010_0020,
+            0x0001_0002,
+            0x1F00_1F00,
+        ] {
+            bus.write32(crate::gpu::GP0_ADDR, word);
+            bus.add_cycles(1);
+        }
+        assert!(!gpu_irq_seen(&mut bus));
+        assert_eq!(bus.gpu.vram.get_pixel(0x21, 0x10), 0x1F00);
+        bus.write32(crate::gpu::GP0_ADDR, 0x1F00_0000);
+        assert!(gpu_irq_seen(&mut bus));
+    }
+
+    /// A linked list at 0x1000, one node per entry.
+    fn gpu_list_bus(fifo: bool, nodes: &[Vec<u32>]) -> Bus {
+        let mut bus = linked_list_upload_fixture(false, true, 0);
+        bus.gpu.set_dma_fifo_model(fifo);
+        let mut address = 0x1000;
+        for (i, words) in nodes.iter().enumerate() {
+            let next = address + (words.len() as u32 + 1) * 4;
+            let link = if i + 1 == nodes.len() {
+                0x00ff_ffff
+            } else {
+                next
+            };
+            write_ram_u32(
+                &mut bus.ram[..],
+                address,
+                ((words.len() as u32) << 24) | link,
+            );
+            for (j, word) in words.iter().enumerate() {
+                write_ram_u32(&mut bus.ram[..], address + (j as u32 + 1) * 4, *word);
+            }
+            address = next;
+        }
+        bus.dma.channels[2].base = 0x1000;
+        bus
+    }
+
+    /// The same words as linked-list nodes, one command per node except
+    /// the upload, whose payload continues in a second node. (The FIFO
+    /// model, like the reference sequencer, admits no node while a
+    /// polyline is open, so each polyline stays whole.)
+    fn gp0_data_word_nodes() -> Vec<Vec<u32>> {
+        let words = gp0_data_words_with_1f_top_byte();
+        [0..4, 4..5, 5..9, 9..12, 12..17, 17..24]
+            .into_iter()
+            .map(|range| words[range].to_vec())
+            .collect()
+    }
+
+    #[test]
+    fn gp0_linked_list_data_words_with_1f_top_byte_do_not_raise_irq1() {
+        for fifo in [true, false] {
+            let mut bus = gpu_list_bus(fifo, &gp0_data_word_nodes());
+            bus.run_dma_channel(2);
+            assert!(!gpu_irq_seen(&mut bus), "fifo={fifo}");
+            assert_eq!(bus.dma.channels[2].channel_control & (1 << 24), 0);
+            assert_eq!(bus.gpu.vram.get_pixel(0x20, 0x10), 0x1F00);
+            assert_eq!(bus.gpu.vram.get_pixel(0x23, 0x10), 0x1FFF);
+        }
+    }
+
+    #[test]
+    fn gp0_linked_list_final_1f_command_raises_irq1() {
+        for fifo in [true, false] {
+            let mut nodes = gp0_data_word_nodes();
+            nodes.push(vec![0x1F00_0000]);
+            let mut bus = gpu_list_bus(fifo, &nodes);
+            bus.run_dma_channel(2);
+            assert!(gpu_irq_seen(&mut bus), "fifo={fifo}");
+        }
+    }
+
+    #[test]
+    fn gp0_block_dma_upload_payload_with_1f_top_byte_does_not_raise_irq1() {
+        for fifo in [true, false] {
+            let mut bus = linked_list_upload_fixture(false, true, 0);
+            bus.gpu.set_dma_fifo_model(fifo);
+            for word in [0xA000_0000, 0x0010_0020, 0x0001_0008] {
+                bus.write32(crate::gpu::GP0_ADDR, word);
+            }
+            for i in 0..4u32 {
+                write_ram_u32(&mut bus.ram[..], 0x2000 + i * 4, 0x1F00_1F00 | i);
+            }
+            bus.dma.channels[2].base = 0x2000;
+            bus.dma.channels[2].block_control = (2 << 16) | 2;
+            bus.dma.channels[2].channel_control = 0x0100_0201;
+            bus.run_dma_channel(2);
+            assert!(!gpu_irq_seen(&mut bus), "fifo={fifo}");
+            assert_eq!(bus.gpu.vram.get_pixel(0x20, 0x10), 0x1F00);
+            assert_eq!(bus.gpu.vram.get_pixel(0x27, 0x10), 0x1F00);
+            assert_eq!(bus.gpu.vram.get_pixel(0x26, 0x10), 0x1F03);
+            // Block DMA of a command stream: the 1Fh here is a command.
+            write_ram_u32(&mut bus.ram[..], 0x2000, 0x1F00_0000);
+            bus.dma.channels[2].block_control = (1 << 16) | 1;
+            bus.dma.channels[2].channel_control = 0x0100_0201;
+            bus.run_dma_channel(2);
+            assert!(gpu_irq_seen(&mut bus), "fifo={fifo}");
+        }
+    }
+
     #[test]
     fn gpu_linked_list_waits_for_dreq_then_fetches_current_ram_once() {
         let mut bus = linked_list_upload_fixture(false, true, 0);
