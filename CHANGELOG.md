@@ -19,6 +19,10 @@
 - GPUSTAT bit 28 returns once a list's final GP0(1Fh) is in the GPU, before
   the last primitive finishes drawing.
 - Add RAM-word watches to headless route logs for profiling unmodified games.
+- Add opt-in limit-study oracles (`PSOXIDE_LIMIT_ORACLES=icache,ram,muldiv,
+  gte,gpu,cd,mmio`), free code ranges, counted wait ranges and a per-function
+  cycle profile, switched on from a chosen pad poll. Off by default; a plain
+  run is byte-identical.
 - Show game-library subfolders as expandable rows, collapsed at startup, with
   indented contents and game counts. Refresh preserves open folders and selection.
 - Keep same-ID disc copies individually selectable and launch the exact file

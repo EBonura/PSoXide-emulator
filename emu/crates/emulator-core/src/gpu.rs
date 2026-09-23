@@ -94,6 +94,10 @@ pub struct Gpu {
     dma_input_fifo: std::collections::VecDeque<(u32, bool)>,
     #[serde(skip)]
     dma_input_dropped: u64,
+    /// Limit oracle (`PSOXIDE_LIMIT_ORACLES=gpu`): commands take no
+    /// drawing time. Set by the bus when the oracle activates.
+    #[serde(skip)]
+    limit_free_draw: bool,
     /// A GP0(1Fh) taken out of the input FIFO while a primitive was still
     /// drawing, executed once the drawing finishes (FIFO model only).
     #[serde(default)]
@@ -665,6 +669,7 @@ impl Gpu {
             experimental_dma_fifo: false,
             dma_input_fifo: std::collections::VecDeque::new(),
             dma_input_dropped: 0,
+            limit_free_draw: false,
             deferred_irq_command: None,
             gp0_expected: 0,
             gp0_write_count: 0,
@@ -1281,6 +1286,7 @@ impl Gpu {
 
     /// Add CPU/bus-cycle work to the GPU execution backlog.
     pub fn charge_busy(&mut self, cost: u64) {
+        let cost = if self.limit_free_draw { 0 } else { cost };
         self.busy_credit = self.busy_credit.saturating_add(cost);
         if cost > 0 {
             self.cmd_ingest_credit = self.cmd_ingest_credit.max(GP1_STATUS_LATCH_CYCLES);
@@ -1290,6 +1296,7 @@ impl Gpu {
     /// Add DMA-fed work and retain the queue prefix through it. Later CPU
     /// commands can extend total busy time without extending DMA busy time.
     fn charge_dma_busy(&mut self, cost: u64) {
+        let cost = if self.limit_free_draw { 0 } else { cost };
         self.busy_credit = self.busy_credit.saturating_add(cost);
         self.dma_busy_credit = self.busy_credit;
         if cost > 0 {
@@ -1420,6 +1427,16 @@ impl Gpu {
 
     /// Select the DMA transport model. Only a bus, which advances the
     /// queue with time, should turn the FIFO model on.
+    /// Limit oracle: make every command free to draw (see `limits.rs`).
+    pub(crate) fn set_limit_free_draw(&mut self, free: bool) {
+        self.limit_free_draw = free;
+        if free {
+            self.busy_credit = 0;
+            self.dma_busy_credit = 0;
+            self.cmd_ingest_credit = 0;
+        }
+    }
+
     pub(crate) fn set_dma_fifo_model(&mut self, enabled: bool) {
         self.experimental_dma_fifo = enabled;
     }

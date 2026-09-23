@@ -218,6 +218,10 @@ pub struct CdRom {
     /// Index register low 2 bits -- selects the register visible at
     /// each sub-port for the next read/write.
     index: u8,
+    /// Limit oracle (`PSOXIDE_LIMIT_ORACLES=cd`): data reads seek for
+    /// free and stream 8x faster than double speed. Set by the bus.
+    #[serde(skip)]
+    limit_fast_reads: bool,
     /// Drive status byte returned by `GetStat` and embedded in the
     /// first byte of most responses. Read by phase-6c command handlers.
     #[allow(dead_code)]
@@ -492,6 +496,7 @@ impl CdRom {
     pub fn new() -> Self {
         Self {
             index: 0,
+            limit_fast_reads: false,
             // Cold boot: on a closed shell with no disc seated, we
             // want the BIOS to reach the "Please insert disc" shell --
             // that needs SHELL_OPEN clear (lid closed) so the Init
@@ -1434,6 +1439,9 @@ impl CdRom {
     /// alignment before the first sector at both speeds, so charge 1.5
     /// frames double / 3 frames single ahead of the chained stream.
     fn initial_sector_read_cycles(&self) -> u64 {
+        if self.limit_fast_data() {
+            return self.sector_read_cycles();
+        }
         if self.mode & 0x80 != 0 {
             CD_READ_TIME * 3 / 2
         } else {
@@ -1446,10 +1454,33 @@ impl CdRom {
     /// reads at `cdReadTime / 2`, not `cdReadTime`; the old value fed
     /// XA audio at half rate, which made long music streams underrun.
     fn sector_read_cycles(&self) -> u64 {
+        if self.limit_fast_data() {
+            return CD_READ_TIME / 16;
+        }
         if self.mode & 0x80 != 0 {
             CD_READ_TIME / 2
         } else {
             CD_READ_TIME
+        }
+    }
+
+    /// Limit oracle: switch fast data reads on or off (see `limits.rs`).
+    pub(crate) fn set_limit_fast_reads(&mut self, fast: bool) {
+        self.limit_fast_reads = fast;
+    }
+
+    /// Fast reads apply to data only: XA-ADPCM streams (mode bit 6) keep
+    /// their real-time pace.
+    fn limit_fast_data(&self) -> bool {
+        self.limit_fast_reads && self.mode & 0x40 == 0
+    }
+
+    /// Head travel; one fast sector period under the CD limit oracle.
+    fn seek_travel_cycles(&self, lba_diff: u32) -> u64 {
+        if self.limit_fast_data() {
+            CD_READ_TIME / 16
+        } else {
+            seek_cycles(lba_diff)
         }
     }
 
@@ -1634,7 +1665,7 @@ impl CdRom {
             let (m, s, f) = self.setloc_msf;
             msf_to_lba(m, s, f)
         };
-        let delay = seek_cycles(target_lba.abs_diff(self.read_lba));
+        let delay = self.seek_travel_cycles(target_lba.abs_diff(self.read_lba));
         self.read_lba = target_lba;
         self.setloc_pending = false;
         self.schedule_second_response(vec![stat], delay);
@@ -1679,7 +1710,7 @@ impl CdRom {
         if self.setloc_pending {
             let (m, s, f) = self.setloc_msf;
             let target = msf_to_lba(m, s, f);
-            travel = seek_cycles(target.abs_diff(self.read_lba));
+            travel = self.seek_travel_cycles(target.abs_diff(self.read_lba));
             self.read_lba = target;
             self.setloc_pending = false;
             self.location_changed = true;
