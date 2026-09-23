@@ -338,6 +338,20 @@ pub struct LaunchArgs {
     /// Ignore RAM load stall attribution before this route tick.
     #[arg(long, default_value_t = 0, requires = "ram_load_stall_line_log")]
     pub ram_load_stall_line_start_route_tick: u64,
+    /// Attribute I-cache refill stall cycles to the canonical 16-byte I-cache
+    /// line of the fetch that missed. Unlike `--icache-event-log` this is a
+    /// fixed-size histogram, not one CSV row per refill.
+    #[arg(long)]
+    pub icache_stall_line_log: Option<PathBuf>,
+    /// Ignore I-cache refill stall attribution before this route tick.
+    #[arg(long, default_value_t = 0, requires = "icache_stall_line_log")]
+    pub icache_stall_line_start_route_tick: u64,
+    /// Key the PC-line and stall-line logs by 4-byte instruction word (CSV
+    /// column `pc`) instead of 16-byte I-cache line (`line_pc`). A line can
+    /// hold the tail of one function and the head of the next, so only word
+    /// granularity maps exactly onto linker-map symbols.
+    #[arg(long)]
+    pub pc_log_words: bool,
     /// Write every exact instruction-cache refill, including the replaced
     /// victim line and the incoming line. This measures temporal eviction
     /// pairs rather than inferring conflicts from set occupancy.
@@ -1032,7 +1046,8 @@ fn run_headless_launch(
     cpu.set_cpu_cycle_profile_enabled(
         args.cpu_cycle_profile_log.is_some()
             || args.mmio_stall_line_log.is_some()
-            || args.ram_load_stall_line_log.is_some(),
+            || args.ram_load_stall_line_log.is_some()
+            || args.icache_stall_line_log.is_some(),
     );
     let mut cpu_cycle_profile_log = match args.cpu_cycle_profile_log.as_ref() {
         Some(path) => {
@@ -1065,17 +1080,14 @@ fn run_headless_launch(
         None => None,
     };
     let mut last_cpu_cycle_profile = cpu.cpu_cycle_profile();
-    let mut pc_line_histogram = args.pc_line_log.as_ref().map(|_| PcLineHistogram::new());
-    let mut mmio_stall_lines = args
-        .mmio_stall_line_log
-        .as_ref()
-        .map(|_| PcLineHistogram::new());
+    let new_pc_histogram = |_: &PathBuf| PcLineHistogram::new(args.pc_log_words);
+    let mut pc_line_histogram = args.pc_line_log.as_ref().map(new_pc_histogram);
+    let mut mmio_stall_lines = args.mmio_stall_line_log.as_ref().map(new_pc_histogram);
     let mut last_mmio_stall_cycles = last_cpu_cycle_profile.mmio_stall_cycles;
-    let mut ram_load_stall_lines = args
-        .ram_load_stall_line_log
-        .as_ref()
-        .map(|_| PcLineHistogram::new());
+    let mut ram_load_stall_lines = args.ram_load_stall_line_log.as_ref().map(new_pc_histogram);
     let mut last_ram_load_stall_cycles = last_cpu_cycle_profile.ram_load_stall_cycles;
+    let mut icache_stall_lines = args.icache_stall_line_log.as_ref().map(new_pc_histogram);
+    let mut last_icache_stall_cycles = last_cpu_cycle_profile.icache_refill_stall_cycles;
     cpu.set_instruction_cache_event_profile_enabled(args.icache_event_log.is_some());
     let mut icache_event_log = match args.icache_event_log.as_ref() {
         Some(path) => {
@@ -1292,6 +1304,7 @@ fn run_headless_launch(
         // itself instead of the PC that follows it.
         let mmio_attribution_pc = mmio_stall_lines.as_ref().map(|_| cpu.pc());
         let ram_load_attribution_pc = ram_load_stall_lines.as_ref().map(|_| cpu.pc());
+        let icache_attribution_pc = icache_stall_lines.as_ref().map(|_| cpu.pc());
         if let Err(e) = cpu.step(&mut bus) {
             eprintln!("[cli] step {i} failed: {e:?}");
             eprintln!(
@@ -1340,6 +1353,14 @@ fn run_headless_launch(
             let delta = now.saturating_sub(last_ram_load_stall_cycles);
             last_ram_load_stall_cycles = now;
             if route_ticks >= args.ram_load_stall_line_start_route_tick {
+                lines.record_n(pc, delta);
+            }
+        }
+        if let (Some(lines), Some(pc)) = (icache_stall_lines.as_mut(), icache_attribution_pc) {
+            let now = cpu.cpu_cycle_profile().icache_refill_stall_cycles;
+            let delta = now.saturating_sub(last_icache_stall_cycles);
+            last_icache_stall_cycles = now;
+            if route_ticks >= args.icache_stall_line_start_route_tick {
                 lines.record_n(pc, delta);
             }
         }
@@ -1952,6 +1973,18 @@ fn run_headless_launch(
         histogram.write(path, "ram_load_stall_cycles")?;
         if emit_summary {
             eprintln!("[cli] RAM load stall attribution → {}", path.display());
+        }
+    }
+    if let (Some(path), Some(histogram)) = (
+        args.icache_stall_line_log.as_ref(),
+        icache_stall_lines.as_ref(),
+    ) {
+        histogram.write(path, "icache_refill_stall_cycles")?;
+        if emit_summary {
+            eprintln!(
+                "[cli] I-cache refill stall attribution → {}",
+                path.display()
+            );
         }
     }
     if let (Some(path), Some(profile)) = (
@@ -2668,6 +2701,9 @@ fn validation_launch_args(
         mmio_stall_line_start_route_tick: 0,
         ram_load_stall_line_log: None,
         ram_load_stall_line_start_route_tick: 0,
+        icache_stall_line_log: None,
+        icache_stall_line_start_route_tick: 0,
+        pc_log_words: false,
         icache_event_log: None,
         icache_event_start_route_tick: 0,
         instruction_class_log: None,
@@ -3037,19 +3073,24 @@ fn write_rgb_ppm_from_rgba(
     Ok(())
 }
 
-const PC_LINE_BYTES: usize = 16;
+const PC_LINE_SHIFT: u32 = 4;
+const PC_WORD_SHIFT: u32 = 2;
 
+/// Exact per-PC histogram at I-cache-line or instruction-word granularity.
 struct PcLineHistogram {
+    bucket_shift: u32,
     ram: Box<[u64]>,
     bios: Box<[u64]>,
     other: BTreeMap<u32, u64>,
 }
 
 impl PcLineHistogram {
-    fn new() -> Self {
+    fn new(words: bool) -> Self {
+        let bucket_shift = if words { PC_WORD_SHIFT } else { PC_LINE_SHIFT };
         Self {
-            ram: vec![0; memory::ram::SIZE / PC_LINE_BYTES].into_boxed_slice(),
-            bios: vec![0; memory::bios::SIZE / PC_LINE_BYTES].into_boxed_slice(),
+            bucket_shift,
+            ram: vec![0; memory::ram::SIZE >> bucket_shift].into_boxed_slice(),
+            bios: vec![0; memory::bios::SIZE >> bucket_shift].into_boxed_slice(),
             other: BTreeMap::new(),
         }
     }
@@ -3066,17 +3107,18 @@ impl PcLineHistogram {
         }
         let physical = memory::to_physical(pc);
         if physical < memory::ram::MIRROR_END {
-            let offset = physical as usize % memory::ram::SIZE;
-            self.ram[offset / PC_LINE_BYTES] =
-                self.ram[offset / PC_LINE_BYTES].saturating_add(count);
+            let bucket = (physical as usize % memory::ram::SIZE) >> self.bucket_shift;
+            self.ram[bucket] = self.ram[bucket].saturating_add(count);
         } else if (memory::bios::BASE..memory::bios::BASE + memory::bios::SIZE as u32)
             .contains(&physical)
         {
-            let offset = (physical - memory::bios::BASE) as usize;
-            self.bios[offset / PC_LINE_BYTES] =
-                self.bios[offset / PC_LINE_BYTES].saturating_add(count);
+            let bucket = (physical - memory::bios::BASE) as usize >> self.bucket_shift;
+            self.bios[bucket] = self.bios[bucket].saturating_add(count);
         } else {
-            let total = self.other.entry(pc & !0xf).or_insert(0);
+            let total = self
+                .other
+                .entry(pc >> self.bucket_shift << self.bucket_shift)
+                .or_insert(0);
             *total = total.saturating_add(count);
         }
     }
@@ -3092,35 +3134,41 @@ impl PcLineHistogram {
         let file = std::fs::File::create(path)
             .map_err(|error| format!("create {}: {error}", path.display()))?;
         let mut writer = std::io::BufWriter::new(file);
-        writeln!(writer, "line_pc,{value_name},percent").map_err(|error| error.to_string())?;
+        let key = if self.bucket_shift == PC_WORD_SHIFT {
+            "pc"
+        } else {
+            "line_pc"
+        };
+        writeln!(writer, "{key},{value_name},percent").map_err(|error| error.to_string())?;
 
+        let shift = self.bucket_shift;
         let mut ranked = Vec::new();
         ranked.extend(
             self.ram
                 .iter()
                 .enumerate()
                 .filter(|(_, count)| **count != 0)
-                .map(|(line, &count)| (0x8000_0000 | (line * PC_LINE_BYTES) as u32, count)),
+                .map(|(bucket, &count)| (0x8000_0000 | ((bucket as u32) << shift), count)),
         );
         ranked.extend(
             self.bios
                 .iter()
                 .enumerate()
                 .filter(|(_, count)| **count != 0)
-                .map(|(line, &count)| (0xbfc0_0000 | (line * PC_LINE_BYTES) as u32, count)),
+                .map(|(bucket, &count)| (0xbfc0_0000 | ((bucket as u32) << shift), count)),
         );
-        ranked.extend(self.other.iter().map(|(&line, &count)| (line, count)));
+        ranked.extend(self.other.iter().map(|(&pc, &count)| (pc, count)));
         let total = ranked.iter().map(|(_, count)| *count).sum::<u64>();
         ranked.sort_unstable_by(|(pc_a, count_a), (pc_b, count_b)| {
             count_b.cmp(count_a).then_with(|| pc_a.cmp(pc_b))
         });
-        for (line_pc, count) in ranked {
+        for (pc, count) in ranked {
             let percent = if total == 0 {
                 0.0
             } else {
                 count as f64 * 100.0 / total as f64
             };
-            writeln!(writer, "0x{line_pc:08x},{count},{percent:.6}")
+            writeln!(writer, "0x{pc:08x},{count},{percent:.6}")
                 .map_err(|error| error.to_string())?;
         }
         writer.flush().map_err(|error| error.to_string())
@@ -3629,6 +3677,11 @@ mod press_script_tests {
             "mmio-lines.csv",
             "--mmio-stall-line-start-route-tick",
             "77",
+            "--icache-stall-line-log",
+            "icache-lines.csv",
+            "--icache-stall-line-start-route-tick",
+            "66",
+            "--pc-log-words",
             "--icache-event-log",
             "icache-events.csv",
             "--icache-event-start-route-tick",
@@ -3657,6 +3710,12 @@ mod press_script_tests {
         );
         assert_eq!(args.mmio_stall_line_start_route_tick, 77);
         assert_eq!(
+            args.icache_stall_line_log,
+            Some(PathBuf::from("icache-lines.csv"))
+        );
+        assert_eq!(args.icache_stall_line_start_route_tick, 66);
+        assert!(args.pc_log_words);
+        assert_eq!(
             args.icache_event_log,
             Some(PathBuf::from("icache-events.csv"))
         );
@@ -3673,7 +3732,7 @@ mod press_script_tests {
     fn pc_line_histogram_counts_every_instruction_and_canonicalises_aliases() {
         let path =
             std::env::temp_dir().join(format!("psoxide-pc-lines-{}.csv", std::process::id()));
-        let mut histogram = PcLineHistogram::new();
+        let mut histogram = PcLineHistogram::new(false);
         histogram.record(0x8000_1004);
         histogram.record(0xa000_100c);
         histogram.record(0xbfc0_0000);
@@ -3689,10 +3748,33 @@ mod press_script_tests {
     }
 
     #[test]
+    fn pc_word_histogram_keeps_each_instruction_of_a_shared_line_apart() {
+        let path =
+            std::env::temp_dir().join(format!("psoxide-pc-words-{}.csv", std::process::id()));
+        let mut histogram = PcLineHistogram::new(true);
+        // One I-cache line holding the tail of one function (0x..1004) and
+        // the head of the next (0x..100c), reached through two aliases.
+        histogram.record(0x8000_1004);
+        histogram.record_n(0xa000_100c, 3);
+        histogram.record(0xbfc0_0008);
+        histogram
+            .write(&path, "instructions")
+            .expect("write PC-word CSV");
+        let csv = std::fs::read_to_string(&path).expect("read PC-word CSV");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(csv.starts_with("pc,instructions,percent\n"));
+        assert!(csv.contains("0x8000100c,3,60.000000"));
+        assert!(csv.contains("0x80001004,1,20.000000"));
+        assert!(csv.contains("0xbfc00008,1,20.000000"));
+        assert!(!csv.contains("0x80001000,"));
+    }
+
+    #[test]
     fn pc_line_histogram_names_and_sums_cycle_values() {
         let path =
             std::env::temp_dir().join(format!("psoxide-mmio-lines-{}.csv", std::process::id()));
-        let mut histogram = PcLineHistogram::new();
+        let mut histogram = PcLineHistogram::new(false);
         histogram.record_n(0x8000_1004, 1_234);
         histogram.record_n(0xa000_100c, 6);
         histogram.record_n(0x8000_2000, 760);
