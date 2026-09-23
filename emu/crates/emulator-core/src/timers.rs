@@ -142,9 +142,17 @@ impl Timers {
     /// Stride between consecutive timers.
     pub const STRIDE: u32 = 0x10;
 
-    /// All counters / modes / targets zero-initialised.
+    /// All counters / modes / targets zero-initialised, with the Timer 1
+    /// VBlank sync phase of the launch PAL console the default profile is
+    /// calibrated on: its sync-mode-1 reset lands 26 lines after the VBlank
+    /// interrupt, so a read at the interrupt returns 237 on a 263-line NTSC
+    /// field (hwtest v1.24 case 206, every flip at line 237 with no spread).
+    /// The SCPH-9902 profile measured 29.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            vblank_sync_offset_lines: 26,
+            ..Self::default()
+        }
     }
 
     /// Select the Timer 1 vertical-blank sync phase for a hardware profile.
@@ -430,6 +438,19 @@ impl Timers {
             held
         };
         let cycles = cycles - held_cycles;
+        if idx == 1 && self.timers[1].mode & MODE_SYNC_ENABLE != 0 {
+            // A read holds the counter, not the VBlank sync: a reset that
+            // falls inside the held cycles must still happen. Walk the whole
+            // interval and count only after the hold.
+            return self.advance_timer1_synced(
+                self.last_advance_cycle,
+                cycles + held_cycles,
+                self.last_advance_cycle.saturating_add(held_cycles),
+                hsync_period,
+                next_vblank,
+                vblank_period,
+            );
+        }
         if cycles == 0 {
             return false;
         }
@@ -441,15 +462,6 @@ impl Timers {
                 cycles,
                 hsync_period,
                 dot_clock_divisor,
-                vblank_period,
-            );
-        }
-        if idx == 1 && self.timers[1].mode & MODE_SYNC_ENABLE != 0 {
-            return self.advance_timer1_synced(
-                interval_start,
-                cycles,
-                hsync_period,
-                next_vblank,
                 vblank_period,
             );
         }
@@ -506,6 +518,7 @@ impl Timers {
         &mut self,
         start: u64,
         cycles: u64,
+        count_from: u64,
         hsync_period: u64,
         next_vblank: u64,
         vblank_period: u64,
@@ -531,21 +544,31 @@ impl Timers {
             } else {
                 None
             };
-            let blank_end = previous_start.map(|start| start.saturating_add(blank_duration));
-            let in_vblank = blank_end.is_some_and(|blank_end| cursor < blank_end);
-            let (boundary, enters_vblank) = if in_vblank {
-                (blank_end.expect("active VBlank has an end"), false)
-            } else {
-                (next_vblank, true)
+            // The VBlank event reschedules `next_vblank` a period ahead
+            // before the timers are serviced, so a lazy catch-up can start
+            // before `previous_start`. That VBlank's reset still lies ahead
+            // of the cursor: take it, rather than treating the whole span up
+            // to the end of that blank as already inside it (which skipped
+            // the reset and let the counter run past a frame's lines).
+            let (boundary, enters_vblank, in_vblank) = match previous_start {
+                Some(start) if cursor < start => (start, true, false),
+                Some(start) if cursor < start.saturating_add(blank_duration) => {
+                    (start.saturating_add(blank_duration), false, true)
+                }
+                _ => (next_vblank, true, false),
             };
             let segment = (end - cursor).min(boundary.saturating_sub(cursor).max(1));
 
             let timer = &mut self.timers[1];
             let source = (timer.mode >> 8) & 0x3;
-            let ticks = if matches!(source, 1 | 3) {
-                hblank_ticks_between(cursor, cursor.saturating_add(segment), hsync)
+            let count_start = cursor.max(count_from);
+            let count_end = cursor.saturating_add(segment);
+            let ticks = if count_end <= count_start {
+                0
+            } else if matches!(source, 1 | 3) {
+                hblank_ticks_between(count_start, count_end, hsync)
             } else {
-                segment
+                count_end - count_start
             };
             let sync = (timer.mode & MODE_SYNC_MODE_MASK) >> 1;
             let count_enabled = match sync {
@@ -891,6 +914,7 @@ mod tests {
     #[test]
     fn timer1_sync_mode_3_waits_for_vblank_then_free_runs() {
         let mut t = Timers::new();
+        t.set_vblank_sync_offset_lines(0);
         t.write32(0x1F80_1114, MODE_SYNC_ENABLE | (3 << 1), 0);
         let period = NTSC_PERIOD;
         t.advance_to_video(500, NTSC_HSYNC, 8, 1000, period);
@@ -927,12 +951,38 @@ mod tests {
     #[test]
     fn timer1_sync_mode_1_resets_at_vblank() {
         let mut t = Timers::new();
+        t.set_vblank_sync_offset_lines(0);
         t.write32(0x1F80_1114, MODE_SYNC_ENABLE | (1 << 1), 0);
         let period = NTSC_PERIOD;
         t.advance_to_video(900, NTSC_HSYNC, 8, 1000, period);
         assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 898);
         t.advance_to_video(1000, NTSC_HSYNC, 8, 1000, period);
         assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 0);
+    }
+
+    #[test]
+    fn timer1_default_profile_reads_line_237_at_the_vblank_interrupt() {
+        let mut t = Timers::new();
+        t.write32(0x1F80_1114, MODE_SYNC_ENABLE | (1 << 1) | (1 << 8), 0);
+        let period = NTSC_PERIOD;
+        // Serviced mid-field, then just after the next two VBlank events,
+        // each time after the scheduler has already moved the edge on.
+        t.advance_to_video(period / 2, NTSC_HSYNC, 8, period, period);
+        t.advance_to_video(period + 100, NTSC_HSYNC, 8, 2 * period, period);
+        t.advance_to_video(2 * period + 100, NTSC_HSYNC, 8, 3 * period, period);
+        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 237);
+    }
+
+    #[test]
+    fn timer1_vblank_reset_inside_a_read_hold_still_happens() {
+        let mut t = Timers::new();
+        t.set_vblank_sync_offset_lines(0);
+        t.write32(0x1F80_1114, MODE_SYNC_ENABLE | (1 << 1), 0);
+        t.advance_to_video(996, NTSC_HSYNC, 8, 1000, NTSC_PERIOD);
+        // A read holds the counter across the VBlank at 1000.
+        t.hold_counter_for_read(0x1F80_1110, 8);
+        t.advance_to_video(1010, NTSC_HSYNC, 8, 1000 + NTSC_PERIOD, NTSC_PERIOD);
+        assert!(t.read32(0x1F80_1110) & 0xFFFF < 16);
     }
 
     #[test]
