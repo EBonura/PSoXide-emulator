@@ -810,6 +810,71 @@ pub fn change_clear_rcnt(bus: &mut Bus, t: u32, flag: u32) -> u32 {
     old
 }
 
+// ------------------------------------------------------------------ timers
+
+fn timer_reg(t: u32, reg: u32) -> u32 {
+    0x1F80_1100 + 0x10 * t + reg
+}
+
+/// B(02h) init_timer(t, reload, flags), psx-spx: for t = 0..2, mode 0,
+/// target = reload, then mode 48h (49h when flags bit 4), OR 100h when
+/// flags bit 0 is clear, OR 10h when flags bit 12 is set. Returns 1, or
+/// 0 for t > 2. (OpenBIOS applies 100h when bit 0 is set; this follows
+/// psx-spx.)
+pub fn init_timer(bus: &mut Bus, t: u32, reload: u32, flags: u32) -> u32 {
+    let t = t & 0xFFFF;
+    if t > 2 {
+        return 0;
+    }
+    bus.write16(timer_reg(t, 4), 0);
+    bus.write16(timer_reg(t, 8), reload as u16);
+    let mut mode: u16 = if flags & 0x10 != 0 { 0x49 } else { 0x48 };
+    if flags & 1 == 0 {
+        mode |= 0x100;
+    }
+    if flags & 0x1000 != 0 {
+        mode |= 0x10;
+    }
+    bus.write16(timer_reg(t, 4), mode);
+    1
+}
+
+/// B(03h) get_timer(t): current counter for t = 0..2, else 0.
+pub fn get_timer(bus: &mut Bus, t: u32) -> u32 {
+    if t > 2 {
+        return 0;
+    }
+    u32::from(bus.read16(timer_reg(t, 0)))
+}
+
+/// B(04h) enable_timer_irq / B(05h) disable_timer_irq: I_MASK bit 4/5/6
+/// for t = 0..2, bit 0 for t = 3. Enable returns 1 for t = 0..2 and 0 for
+/// 3; disable always returns 1. Other t change nothing here (psx-spx:
+/// "random/garbage bits").
+pub fn set_timer_irq(bus: &mut Bus, t: u32, enable: bool) -> u32 {
+    let bit = match t {
+        0..=2 => 1 << (4 + t),
+        3 => 1,
+        _ => 0,
+    };
+    let mask = bus.read32(0x1F80_1074);
+    bus.write32(0x1F80_1074, if enable { mask | bit } else { mask & !bit });
+    if enable {
+        u32::from(t <= 2)
+    } else {
+        1
+    }
+}
+
+/// B(06h) restart_timer(t): counter to 0, returns 1 for t = 0..2.
+pub fn restart_timer(bus: &mut Bus, t: u32) -> u32 {
+    if t > 2 {
+        return 0;
+    }
+    bus.write16(timer_reg(t, 0), 0);
+    1
+}
+
 /// C(0Dh) SetIrqAutoAck(irq, flag).
 pub fn set_irq_autoack(bus: &mut Bus, irq: u32, flag: u32) {
     if irq < 11 {
@@ -825,4 +890,31 @@ pub fn set_exit_jmpbuf(bus: &mut Bus, buf: u32) {
 /// Current exit buffer.
 pub fn exit_jmpbuf(bus: &Bus) -> u32 {
     peek32(bus, kvar::EXIT_JMPBUF)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hle_bus() -> Bus {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        bus
+    }
+
+    #[test]
+    fn timer_helpers_program_the_documented_registers() {
+        let mut bus = hle_bus();
+        assert_eq!(init_timer(&mut bus, 1, 0x1234, 0x1000), 1);
+        assert_eq!(bus.read16(0x1F80_1118), 0x1234);
+        assert_eq!(bus.read16(0x1F80_1114) & 0x3FF, 0x158);
+        assert_eq!(init_timer(&mut bus, 3, 1, 0), 0);
+        assert_eq!(set_timer_irq(&mut bus, 2, true), 1);
+        assert_eq!(set_timer_irq(&mut bus, 3, true), 0);
+        assert_eq!(bus.read32(0x1F80_1074) & 0x41, 0x41);
+        assert_eq!(set_timer_irq(&mut bus, 2, false), 1);
+        assert_eq!(bus.read32(0x1F80_1074) & 0x40, 0);
+        assert_eq!(restart_timer(&mut bus, 0), 1);
+        assert_eq!(get_timer(&mut bus, 7), 0);
+    }
 }
