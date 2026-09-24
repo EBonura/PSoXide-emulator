@@ -97,7 +97,11 @@ pub fn fast_boot_disc_with_hle(
     cpu.seed_from_exe_with_args(boot.exe.initial_pc, boot.exe.initial_gp, Some(sp), 1, 0);
     cpu.seed_frame_pointer(fp);
     if enable_hle_bios {
-        bus.enable_hle_bios();
+        bus.enable_hle_bios_with(crate::hle_kernel::KernelConfig {
+            tcb: boot.cnf.tcb,
+            event: boot.cnf.event,
+            stack: boot.cnf.stack,
+        });
     }
 
     Ok(DiscFastBootInfo {
@@ -139,8 +143,6 @@ fn apply_hle_entry_state(bus: &mut Bus) {
     bus.set_dicr_raw(0x8C8C_0000);
     // CD-ROM and DMA interrupts unmasked.
     bus.write32(I_MASK_ADDR, 0x0000_000C);
-    // SetMem's RAM-size variable reads 2 (MB).
-    bus.write32(crate::hle_bios::RAM_SIZE_MB_VAR, 2);
     bus.apply_hle_entry_audio_profile();
     // Shell display: 640x480 interlaced, 15-bit, NTSC (an NTSC BIOS leaves
     // this even for PAL discs), with dithering and drawing to the displayed

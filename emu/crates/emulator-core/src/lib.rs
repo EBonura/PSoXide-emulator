@@ -29,6 +29,7 @@ pub mod fastboot;
 pub mod freelook;
 pub mod gpu;
 pub mod hle_bios;
+pub mod hle_kernel;
 pub mod input_tape;
 pub mod irq;
 pub mod limits;
