@@ -9,6 +9,17 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+/// A diagnostic environment switch, read once per process. Several trace
+/// switches sat on per-instruction paths (MFC2, timer writes, GP0 overflow)
+/// and paid a libc `getenv` scan on every call.
+#[macro_export]
+macro_rules! env_flag {
+    ($name:literal) => {{
+        static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *FLAG.get_or_init(|| std::env::var_os($name).is_some())
+    }};
+}
+
 pub mod bus;
 pub mod cdrom;
 pub mod cpu;

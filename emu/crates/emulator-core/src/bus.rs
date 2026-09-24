@@ -996,7 +996,7 @@ impl Bus {
         };
         self.hle_bios_calls[idx][func as usize] =
             self.hle_bios_calls[idx][func as usize].saturating_add(1);
-        if std::env::var_os("PSOXIDE_TRACE_HLE_BIOS").is_some() {
+        if crate::env_flag!("PSOXIDE_TRACE_HLE_BIOS") {
             eprintln!("[hle-bios] {table:?}({func:02x}h)");
         }
     }
@@ -1235,7 +1235,7 @@ impl Bus {
                     }
                 }
                 EventSlot::MdecOutDma => {
-                    if std::env::var_os("PSOXIDE_TRACE_MDEC_DMA").is_some() {
+                    if crate::env_flag!("PSOXIDE_TRACE_MDEC_DMA") {
                         eprintln!(
                             "[mdec-dma] output due cycle={} target={target} ch0={:#010x} ch1={:#010x}",
                             self.cycles,
@@ -1682,10 +1682,25 @@ impl Bus {
         if self.experimental_gpu_list.is_some() {
             // Interleave actual RAM fetches and FIFO consumption. Do not
             // snapshot a whole node and then pretend it arrived over time.
-            for _ in 0..n {
+            let mut left = n;
+            while left > 0 {
+                // Host fast path: a run of cycles in which neither the walk
+                // nor the FIFO can change anything but counters is applied
+                // at once. Exactly what the per-cycle loop would do.
+                let quiet = self.gpu_list_quiet_cycles(left);
+                if quiet > 0 {
+                    self.cycles = self.cycles.wrapping_add(u64::from(quiet));
+                    self.gpu.decay_busy_quiet(u64::from(quiet));
+                    if let Some(list) = self.experimental_gpu_list.as_mut() {
+                        list.setup_cycles = list.setup_cycles.saturating_sub(quiet);
+                    }
+                    left -= quiet;
+                    continue;
+                }
                 self.cycles = self.cycles.wrapping_add(1);
                 self.gpu.decay_busy(1);
                 self.advance_experimental_gpu_list();
+                left -= 1;
             }
         } else {
             self.cycles = self.cycles.wrapping_add(n as u64);
@@ -2034,7 +2049,7 @@ impl Bus {
         // handler ~1 hblank early and diverges the trace by dozens of
         // instructions.
         use crate::scheduler::EventSlot;
-        if ch <= 1 && std::env::var_os("PSOXIDE_TRACE_MDEC_DMA").is_some() {
+        if ch <= 1 && crate::env_flag!("PSOXIDE_TRACE_MDEC_DMA") {
             let channel = self.dma.channels[ch];
             eprintln!(
                 "[mdec-dma] start ch={ch} cycle={} dpcr={:#010x} bcr={:#010x} chcr={:#010x} out_ready={}",
@@ -2049,7 +2064,7 @@ impl Bus {
         match ch {
             0 => {
                 if let Some(mdec_words) = self.run_dma_mdec_in() {
-                    if std::env::var_os("PSOXIDE_TRACE_MDEC_DMA").is_some() {
+                    if crate::env_flag!("PSOXIDE_TRACE_MDEC_DMA") {
                         eprintln!(
                             "[mdec-dma] input accepted cycle={} words={mdec_words} command={:#010x} state={:?} rle={} next={:?} out_ready={} wait_for_out={}",
                             self.cycles,
@@ -2208,7 +2223,7 @@ impl Bus {
         use crate::scheduler::EventSlot;
 
         if self.scheduler.is_pending(EventSlot::MdecOutDma) || !self.mdec.can_dma_out() {
-            if std::env::var_os("PSOXIDE_TRACE_MDEC_DMA").is_some() {
+            if crate::env_flag!("PSOXIDE_TRACE_MDEC_DMA") {
                 eprintln!(
                     "[mdec-dma] output deferred cycle={} pending={} can_out={}",
                     self.cycles,
@@ -2226,13 +2241,13 @@ impl Bus {
             self.log_dma_schedule("MdecOut", delay, target);
             self.scheduler
                 .schedule(EventSlot::MdecOutDma, self.cycles, delay);
-            if std::env::var_os("PSOXIDE_TRACE_MDEC_DMA").is_some() {
+            if crate::env_flag!("PSOXIDE_TRACE_MDEC_DMA") {
                 eprintln!(
                     "[mdec-dma] output scheduled cycle={} words={mdec_words} delay={delay}",
                     self.cycles
                 );
             }
-        } else if std::env::var_os("PSOXIDE_TRACE_MDEC_DMA").is_some() {
+        } else if crate::env_flag!("PSOXIDE_TRACE_MDEC_DMA") {
             let channel = self.dma.channels[1];
             eprintln!(
                 "[mdec-dma] output not armed cycle={} dpcr={:#010x} bcr={:#010x} chcr={:#010x}",
@@ -2654,6 +2669,39 @@ impl Bus {
         } else {
             gpu_download_cycles(total_words)
         }
+    }
+
+    /// Cycles (at most `left`) over which `advance_experimental_gpu_list`
+    /// would only count down its setup delay or keep waiting on a FIFO that
+    /// cannot drain, and `Gpu::decay_busy(1)` would only decay credit.
+    fn gpu_list_quiet_cycles(&self, left: u32) -> u32 {
+        let Some(list) = self.experimental_gpu_list.as_ref() else {
+            return 0;
+        };
+        if self.dma.channels[2].channel_control & (1 << 24) == 0 {
+            return 0;
+        }
+        let list_quiet = if !self.dma.is_channel_enabled(2) {
+            left
+        } else if list.setup_cycles > 0 {
+            list.setup_cycles.min(left)
+        } else if list.need_header {
+            if self.gpu.dma_fifo_requests_node() {
+                0
+            } else {
+                left
+            }
+        } else if list.remaining > 0 {
+            if !self.gpu_dma_overflow_drops && !self.gpu.dma_fifo_has_room() {
+                left
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let gpu_quiet = self.gpu.fifo_quiet_cycles().min(u64::from(u32::MAX)) as u32;
+        list_quiet.min(gpu_quiet)
     }
 
     fn advance_experimental_gpu_list(&mut self) {
@@ -3446,7 +3494,7 @@ impl Bus {
         }
         if Timers::contains(phys) {
             self.service_timers();
-            if std::env::var_os("PSOXIDE_TRACE_TIMERS").is_some()
+            if crate::env_flag!("PSOXIDE_TRACE_TIMERS")
                 && (phys - Timers::BASE) % Timers::STRIDE == 4
             {
                 eprintln!(
