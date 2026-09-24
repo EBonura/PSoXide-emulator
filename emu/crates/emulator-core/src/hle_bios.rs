@@ -19,11 +19,11 @@
 //! `PC` hits one of the three entry addresses, running the requested
 //! service in host Rust, and "returning" by setting `PC = $ra`.
 //!
-//! Scope for the first pass: TTY output, `FlushCache`, and the event
-//! system in "always-ready" mode so homebrew that polls `TestEvent`
-//! doesn't spin forever. Games that use richer BIOS facilities
-//! (file I/O, memory cards, controllers) can land their handlers
-//! here incrementally as we exercise them.
+//! Scope so far: TTY output, `FlushCache`, the stateless memory and
+//! string helpers, `SetMem`, and the event system in "always-ready" mode
+//! so homebrew that polls `TestEvent` doesn't spin forever. Games that
+//! use richer BIOS facilities (file I/O, memory cards, controllers) land
+//! their handlers here as the kernel model grows.
 
 use crate::Bus;
 use psx_hw::memory::to_physical;
@@ -104,31 +104,61 @@ fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> u32 {
     bus.hle_bios_log_call(table, func);
     match (table, func) {
         // --- A-table ---
+        //
+        // Numbering and semantics follow the OpenBIOS `romA0table`
+        // (pcsx-redux src/mips/openbios/kernel/handlers.c, MIT, used as a
+        // specification only) after its `patchA0table`, which aliases
+        // A(00h..09h) to B(32h..3Bh) and A(3Bh..3Eh) to B(3Ch..3Fh), and the
+        // psx-spx "BIOS Memory Fill/Copy/Compare" and "BIOS String Functions"
+        // descriptions. Stateful libc (malloc, rand, strtok) and the
+        // functions psx-spx documents as buggy (memcmp/bcmp, memmove,
+        // strstr, strpbrk) are deliberately absent until the kernel RAM
+        // layout exists; they fall through to the unimplemented arm.
 
-        // A(0x2A) malloc / A(0x33) memset / similar memory helpers.
-        // Most commercial games roll their own allocator; these
-        // fallthroughs prevent a jump-to-zero on a stray call.
-        (Table::A, 0x2A) => 0,
-        (Table::A, 0x33) => {
-            // memset(dest, val, n) -- write `n` bytes of `val` to `dest`.
-            let (dest, val, n) = (args[0], args[1] as u8, args[2]);
-            for i in 0..n.min(0x20_0000) {
-                let _ = bus.write8_safe(dest.wrapping_add(i), val);
-            }
-            dest
+        // A(0Eh) abs / A(0Fh) labs.
+        (Table::A, 0x0E) | (Table::A, 0x0F) => (args[0] as i32).wrapping_abs() as u32,
+
+        // A(15h) strcat(dst, src).
+        (Table::A, 0x15) => libc::strcat(bus, args[0], args[1]),
+        // A(17h) strcmp(s1, s2) / A(18h) strncmp(s1, s2, maxlen).
+        (Table::A, 0x17) => libc::strncmp(bus, args[0], args[1], None),
+        (Table::A, 0x18) => libc::strncmp(bus, args[0], args[1], Some(args[2])),
+        // A(19h) strcpy(dst, src) / A(1Ah) strncpy(dst, src, maxlen).
+        (Table::A, 0x19) => libc::strcpy(bus, args[0], args[1]),
+        (Table::A, 0x1A) => libc::strncpy(bus, args[0], args[1], args[2]),
+        // A(1Bh) strlen(s).
+        (Table::A, 0x1B) => libc::strlen(bus, args[0]),
+        // A(1Ch) index / A(1Eh) strchr, A(1Dh) rindex / A(1Fh) strrchr.
+        (Table::A, 0x1C) | (Table::A, 0x1E) => libc::strchr(bus, args[0], args[1] as u8, false),
+        (Table::A, 0x1D) | (Table::A, 0x1F) => libc::strchr(bus, args[0], args[1] as u8, true),
+        // A(25h) toupper / A(26h) tolower. psx-spx documents 00h..7Fh only;
+        // bytes 80h..FFh come back unchanged here.
+        (Table::A, 0x25) => u32::from((args[0] as u8).to_ascii_uppercase()),
+        (Table::A, 0x26) => u32::from((args[0] as u8).to_ascii_lowercase()),
+
+        // A(27h) bcopy(src, dst, len) / A(2Ah) memcpy(dst, src, len).
+        (Table::A, 0x27) => {
+            libc::memcpy(bus, args[1], args[0], args[2], args[0]);
+            args[0]
         }
+        (Table::A, 0x2A) => {
+            libc::memcpy(bus, args[0], args[1], args[2], args[0]);
+            args[0]
+        }
+        // A(28h) bzero(dst, len) / A(2Bh) memset(dst, fill, len).
+        (Table::A, 0x28) => libc::memset(bus, args[0], 0, args[1]),
+        (Table::A, 0x2B) => libc::memset(bus, args[0], args[1] as u8, args[2]),
+        // A(2Eh) memchr(src, byte, len).
+        (Table::A, 0x2E) => libc::memchr(bus, args[0], args[1] as u8, args[2]),
 
-        // A(0x3C) putchar / A(0x3D) getchar.
+        // A(3Ch) putchar.
         (Table::A, 0x3C) => {
             write_byte_to_stdout(args[0] as u8);
             0
         }
-        // A(0x3D) getchar -- no stdin source yet; return -1 (EOF).
-        (Table::A, 0x3D) => u32::MAX,
-
-        // A(0x3E) puts(*s) / A(0x3F) printf.
+        // A(3Eh) puts(s) / A(3Fh) printf.
         (Table::A, 0x3E) => {
-            write_cstring_to_stdout(bus, args[0]);
+            write_puts_to_stdout(bus, args[0]);
             0
         }
         (Table::A, 0x3F) => {
@@ -140,25 +170,25 @@ fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> u32 {
             0
         }
 
-        // A(0x44) FlushCache -- the CPU intercept invalidates its
+        // A(44h) FlushCache -- the CPU intercept invalidates its
         // instruction cache before this HLE handler returns.
         (Table::A, 0x44) => 0,
 
-        // A(0x70) _bu_init (memcard filesystem init) -- accept.
+        // A(70h) _bu_init (memcard filesystem init) -- accept.
         (Table::A, 0x70) => 0,
 
-        // A(0x96) AddCDROMDevice / A(0x97) AddMemCardDevice -- games
+        // A(96h) AddCDROMDevice / A(97h) AddMemCardDevice -- games
         // call these during init to register filesystem drivers.
         // We don't model the device table; accept so the game moves on.
         (Table::A, 0x96) | (Table::A, 0x97) => 0,
 
-        // A(0x9F) EnterCriticalSection / A(0xA0) ExitCriticalSection.
-        // On hardware these manipulate SR.IE. HLE BIOS can't safely
-        // forge IE-manipulation, but games use them as bracket
-        // scopes -- as long as pairs balance and both return plausibly,
-        // the game proceeds. EnterCriticalSection returns 1.
-        (Table::A, 0x9F) => 1,
-        (Table::A, 0xA0) => 0,
+        // A(9Fh) SetMem(megabytes): 2 clears RAM_SIZE bits 8-9, 8 sets them,
+        // and the size is recorded at [0x60] (psx-spx; OpenBIOS
+        // kernel/misc.c setMemSize). Other values change nothing.
+        (Table::A, 0x9F) => {
+            set_mem_size(bus, args[0]);
+            0
+        }
 
         // --- B-table ---
 
@@ -213,6 +243,11 @@ fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> u32 {
             write_byte_to_stdout(args[0] as u8);
             0
         }
+        // B(3Fh) puts -- same as A(3Eh).
+        (Table::B, 0x3F) => {
+            write_puts_to_stdout(bus, args[0]);
+            0
+        }
 
         // B(0x4A) InitCard, B(0x4B) StartCard, B(0x4C) StopCard.
         (Table::B, 0x4A) | (Table::B, 0x4B) | (Table::B, 0x4C) => 1,
@@ -235,11 +270,192 @@ fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> u32 {
     }
 }
 
+/// RAM_SIZE memory-control register.
+const RAM_SIZE_PORT: u32 = 0x1F80_1060;
+/// Kernel variable holding the effective RAM size in megabytes.
+pub(crate) const RAM_SIZE_MB_VAR: u32 = 0x0000_0060;
+
+fn set_mem_size(bus: &mut Bus, megabytes: u32) {
+    let current = bus.read32(RAM_SIZE_PORT);
+    let value = match megabytes {
+        2 => current & !0x300,
+        8 => current | 0x300,
+        _ => return,
+    };
+    bus.write32(RAM_SIZE_PORT, value);
+    bus.write32(RAM_SIZE_MB_VAR, megabytes);
+}
+
+/// Stateless BIOS memory and string helpers. Behaviour, including the
+/// null-pointer and length refusals, follows psx-spx. Every loop is capped
+/// at the size of main RAM so a bad guest pointer cannot hang the host.
+mod libc {
+    use crate::Bus;
+
+    /// Largest transfer or scan one call performs (2 MiB, the RAM size).
+    const MAX_BYTES: u32 = 0x20_0000;
+    /// Lengths above this are refused by the BIOS memory functions.
+    const MAX_LEN: u32 = 0x7FFF_FFFF;
+
+    fn rd(bus: &Bus, addr: u32) -> u8 {
+        bus.try_read8(addr).unwrap_or(0)
+    }
+
+    /// Forward byte copy shared by memcpy and bcopy. `guard` is the pointer
+    /// the BIOS refuses when null: `dst` for memcpy, `src` for bcopy.
+    pub(super) fn memcpy(bus: &mut Bus, dst: u32, src: u32, len: u32, guard: u32) {
+        if guard == 0 || len > MAX_LEN {
+            return;
+        }
+        for i in 0..len.min(MAX_BYTES) {
+            let b = rd(bus, src.wrapping_add(i));
+            let _ = bus.write8_safe(dst.wrapping_add(i), b);
+        }
+    }
+
+    /// memset/bzero: returns `dst`, or 0 when the fill is refused or empty.
+    pub(super) fn memset(bus: &mut Bus, dst: u32, fill: u8, len: u32) -> u32 {
+        if dst == 0 || len == 0 || len > MAX_LEN {
+            return 0;
+        }
+        for i in 0..len.min(MAX_BYTES) {
+            let _ = bus.write8_safe(dst.wrapping_add(i), fill);
+        }
+        dst
+    }
+
+    pub(super) fn memchr(bus: &Bus, src: u32, byte: u8, len: u32) -> u32 {
+        if src == 0 || len > MAX_LEN {
+            return 0;
+        }
+        (0..len.min(MAX_BYTES))
+            .map(|i| src.wrapping_add(i))
+            .find(|&addr| rd(bus, addr) == byte)
+            .unwrap_or(0)
+    }
+
+    pub(super) fn strlen(bus: &Bus, src: u32) -> u32 {
+        if src == 0 {
+            return 0;
+        }
+        (0..MAX_BYTES)
+            .find(|&i| rd(bus, src.wrapping_add(i)) == 0)
+            .unwrap_or(MAX_BYTES)
+    }
+
+    /// strcmp (`maxlen` = None) and strncmp. Mismatching bytes are
+    /// sign-extended before subtracting; null pointers give 0 (both), -1
+    /// (first) or +1 (second).
+    pub(super) fn strncmp(bus: &Bus, s1: u32, s2: u32, maxlen: Option<u32>) -> u32 {
+        match (s1, s2) {
+            (0, 0) => return 0,
+            (0, _) => return u32::MAX,
+            (_, 0) => return 1,
+            _ => {}
+        }
+        for i in 0..maxlen.unwrap_or(MAX_BYTES).min(MAX_BYTES) {
+            let a = rd(bus, s1.wrapping_add(i));
+            let b = rd(bus, s2.wrapping_add(i));
+            if a != b {
+                return (i32::from(a as i8) - i32::from(b as i8)) as u32;
+            }
+            if a == 0 {
+                break;
+            }
+        }
+        0
+    }
+
+    /// strcpy: copies up to and including the terminator; returns `dst`,
+    /// or 0 when either pointer is null.
+    pub(super) fn strcpy(bus: &mut Bus, dst: u32, src: u32) -> u32 {
+        if dst == 0 || src == 0 {
+            return 0;
+        }
+        for i in 0..MAX_BYTES {
+            let b = rd(bus, src.wrapping_add(i));
+            let _ = bus.write8_safe(dst.wrapping_add(i), b);
+            if b == 0 {
+                break;
+            }
+        }
+        dst
+    }
+
+    /// strncpy: at most `maxlen` bytes. A source of `maxlen` or more
+    /// characters gets no terminator; a shorter one is zero padded.
+    pub(super) fn strncpy(bus: &mut Bus, dst: u32, src: u32, maxlen: u32) -> u32 {
+        if dst == 0 || src == 0 {
+            return 0;
+        }
+        let limit = maxlen.min(MAX_BYTES);
+        let mut i = 0;
+        while i < limit {
+            let b = rd(bus, src.wrapping_add(i));
+            let _ = bus.write8_safe(dst.wrapping_add(i), b);
+            i += 1;
+            if b == 0 {
+                break;
+            }
+        }
+        while i < limit {
+            let _ = bus.write8_safe(dst.wrapping_add(i), 0);
+            i += 1;
+        }
+        dst
+    }
+
+    /// strcat: appends `src` at the terminator of `dst`; returns `dst`, or
+    /// 0 when either pointer is null.
+    pub(super) fn strcat(bus: &mut Bus, dst: u32, src: u32) -> u32 {
+        if dst == 0 || src == 0 {
+            return 0;
+        }
+        let end = dst.wrapping_add(strlen(bus, dst));
+        strcpy(bus, end, src);
+        dst
+    }
+
+    /// index/strchr (`last` = false) and rindex/strrchr. Returns an
+    /// address, never an offset; searching for 0 finds the terminator.
+    pub(super) fn strchr(bus: &Bus, src: u32, ch: u8, last: bool) -> u32 {
+        if src == 0 {
+            return 0;
+        }
+        let mut found = 0;
+        for i in 0..MAX_BYTES {
+            let addr = src.wrapping_add(i);
+            let b = rd(bus, addr);
+            if b == ch {
+                found = addr;
+                if !last {
+                    break;
+                }
+            }
+            if b == 0 {
+                break;
+            }
+        }
+        found
+    }
+}
+
 fn write_byte_to_stdout(byte: u8) {
     use std::io::Write;
     let mut out = std::io::stdout().lock();
     let _ = out.write_all(&[byte]);
     let _ = out.flush();
+}
+
+/// A(3Eh)/B(3Fh) puts: a null pointer prints `<NULL>` (psx-spx).
+fn write_puts_to_stdout(bus: &mut Bus, addr: u32) {
+    if addr == 0 {
+        for &b in b"<NULL>" {
+            write_byte_to_stdout(b);
+        }
+        return;
+    }
+    write_cstring_to_stdout(bus, addr);
 }
 
 fn write_cstring_to_stdout(bus: &mut Bus, addr: u32) {
@@ -434,6 +650,189 @@ fn pad_existing_field(out: &mut Vec<u8>, start: usize, width: usize, pad: u8, le
 mod tests {
     use super::{append_padded, dispatch, pad_existing_field};
     use crate::Bus;
+
+    const RA: u32 = 0x8001_0100;
+
+    fn call(bus: &mut Bus, vector: u32, func: u32, args: [u32; 4]) -> u32 {
+        dispatch(vector, bus, args, 0x801F_FF00, func, RA)
+            .expect("BIOS vector dispatch")
+            .v0
+    }
+
+    fn put_str(bus: &mut Bus, addr: u32, bytes: &[u8]) {
+        for (i, &b) in bytes.iter().enumerate() {
+            bus.write8_safe(addr + i as u32, b);
+        }
+    }
+
+    fn get_bytes(bus: &Bus, addr: u32, len: u32) -> Vec<u8> {
+        (0..len).map(|i| bus.try_read8(addr + i).unwrap()).collect()
+    }
+
+    #[test]
+    fn memcpy_and_bcopy_return_their_guarded_pointer() {
+        let mut bus = Bus::new_without_bios();
+        put_str(&mut bus, 0x8002_0000, b"abcd");
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x2A, [0x8003_0000, 0x8002_0000, 4, 0]),
+            0x8003_0000
+        );
+        assert_eq!(get_bytes(&bus, 0x8003_0000, 4), b"abcd");
+        // bcopy swaps the operands and returns src.
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x27, [0x8002_0000, 0x8003_1000, 3, 0]),
+            0x8002_0000
+        );
+        assert_eq!(get_bytes(&bus, 0x8003_1000, 3), b"abc");
+        // memcpy refuses dst=0 and huge lengths but still returns dst.
+        assert_eq!(call(&mut bus, 0xA0, 0x2A, [0, 0x8002_0000, 4, 0]), 0);
+        assert_eq!(
+            call(
+                &mut bus,
+                0xA0,
+                0x2A,
+                [0x8003_2000, 0x8002_0000, 0x8000_0000, 0]
+            ),
+            0x8003_2000
+        );
+        assert_eq!(get_bytes(&bus, 0x8003_2000, 1), [0]);
+    }
+
+    #[test]
+    fn memset_and_bzero_follow_the_documented_return_values() {
+        let mut bus = Bus::new_without_bios();
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x2B, [0x8002_0000, 0x5A, 3, 0]),
+            0x8002_0000
+        );
+        assert_eq!(get_bytes(&bus, 0x8002_0000, 4), [0x5A, 0x5A, 0x5A, 0]);
+        assert_eq!(call(&mut bus, 0xA0, 0x2B, [0x8002_0000, 0x11, 0, 0]), 0);
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x28, [0x8002_0000, 2, 0, 0]),
+            0x8002_0000
+        );
+        assert_eq!(get_bytes(&bus, 0x8002_0000, 3), [0, 0, 0x5A]);
+    }
+
+    #[test]
+    fn malloc_slot_no_longer_writes_memory() {
+        let mut bus = Bus::new_without_bios();
+        put_str(&mut bus, 0x8002_0000, b"keep");
+        // A(33h) is malloc; it used to run memset over its arguments.
+        call(&mut bus, 0xA0, 0x33, [0x8002_0000, 0, 4, 0]);
+        assert_eq!(get_bytes(&bus, 0x8002_0000, 4), b"keep");
+    }
+
+    #[test]
+    fn string_compare_sign_extends_and_handles_null_pointers() {
+        let mut bus = Bus::new_without_bios();
+        put_str(&mut bus, 0x8002_0000, b"abc\0");
+        put_str(&mut bus, 0x8002_0100, b"abd\0");
+        put_str(&mut bus, 0x8002_0200, &[0x80, 0]);
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x17, [0x8002_0000, 0x8002_0000, 0, 0]),
+            0
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x17, [0x8002_0000, 0x8002_0100, 0, 0]) as i32,
+            -1
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x18, [0x8002_0000, 0x8002_0100, 2, 0]),
+            0
+        );
+        // 0x80 sign-extends to -128, so it sorts below 'a'.
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x17, [0x8002_0200, 0x8002_0000, 0, 0]) as i32,
+            -128 - 0x61
+        );
+        assert_eq!(call(&mut bus, 0xA0, 0x17, [0, 0, 0, 0]), 0);
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x17, [0, 0x8002_0000, 0, 0]) as i32,
+            -1
+        );
+        assert_eq!(call(&mut bus, 0xA0, 0x17, [0x8002_0000, 0, 0, 0]), 1);
+    }
+
+    #[test]
+    fn string_copy_length_and_search() {
+        let mut bus = Bus::new_without_bios();
+        put_str(&mut bus, 0x8002_0000, b"hello\0");
+        assert_eq!(call(&mut bus, 0xA0, 0x1B, [0x8002_0000, 0, 0, 0]), 5);
+        assert_eq!(call(&mut bus, 0xA0, 0x1B, [0, 0, 0, 0]), 0);
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x19, [0x8003_0000, 0x8002_0000, 0, 0]),
+            0x8003_0000
+        );
+        assert_eq!(get_bytes(&bus, 0x8003_0000, 6), b"hello\0");
+        assert_eq!(call(&mut bus, 0xA0, 0x19, [0, 0x8002_0000, 0, 0]), 0);
+
+        // strncpy: short source is zero padded, long source gets no terminator.
+        put_str(&mut bus, 0x8003_1000, &[0xEE; 8]);
+        call(&mut bus, 0xA0, 0x1A, [0x8003_1000, 0x8002_0000, 7, 0]);
+        assert_eq!(get_bytes(&bus, 0x8003_1000, 8), b"hello\0\0\xEE");
+        put_str(&mut bus, 0x8003_2000, &[0xEE; 4]);
+        call(&mut bus, 0xA0, 0x1A, [0x8003_2000, 0x8002_0000, 3, 0]);
+        assert_eq!(get_bytes(&bus, 0x8003_2000, 4), b"hel\xEE");
+
+        put_str(&mut bus, 0x8003_3000, b"ab\0");
+        call(&mut bus, 0xA0, 0x15, [0x8003_3000, 0x8002_0000, 0, 0]);
+        assert_eq!(get_bytes(&bus, 0x8003_3000, 8), b"abhello\0");
+
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x1E, [0x8002_0000, u32::from(b'l'), 0, 0]),
+            0x8002_0002
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x1F, [0x8002_0000, u32::from(b'l'), 0, 0]),
+            0x8002_0003
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x1C, [0x8002_0000, 0, 0, 0]),
+            0x8002_0005
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x1C, [0x8002_0000, u32::from(b'z'), 0, 0]),
+            0
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x2E, [0x8002_0000, u32::from(b'o'), 5, 0]),
+            0x8002_0004
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x2E, [0x8002_0000, u32::from(b'o'), 4, 0]),
+            0
+        );
+    }
+
+    #[test]
+    fn set_mem_updates_ram_size_port_and_kernel_variable() {
+        let mut bus = Bus::new_without_bios();
+        call(&mut bus, 0xA0, 0x9F, [8, 0, 0, 0]);
+        assert_eq!(bus.read32(0x1F80_1060) & 0x300, 0x300);
+        assert_eq!(bus.read32(0x60), 8);
+        call(&mut bus, 0xA0, 0x9F, [2, 0, 0, 0]);
+        assert_eq!(bus.read32(0x1F80_1060) & 0x300, 0);
+        assert_eq!(bus.read32(0x60), 2);
+        // Anything else is ignored.
+        call(&mut bus, 0xA0, 0x9F, [4, 0, 0, 0]);
+        assert_eq!(bus.read32(0x60), 2);
+    }
+
+    #[test]
+    fn abs_and_case_conversion() {
+        let mut bus = Bus::new_without_bios();
+        assert_eq!(call(&mut bus, 0xA0, 0x0E, [(-5i32) as u32, 0, 0, 0]), 5);
+        assert_eq!(call(&mut bus, 0xA0, 0x0F, [7, 0, 0, 0]), 7);
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x25, [u32::from(b'q'), 0, 0, 0]),
+            u32::from(b'Q')
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x26, [0x141, 0, 0, 0]),
+            u32::from(b'a')
+        );
+    }
 
     #[test]
     fn printf_field_padding_handles_both_alignments() {
