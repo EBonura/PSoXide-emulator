@@ -30,7 +30,7 @@ keeps the tools, so everything listed here is maintained.
 | `bench_frame_paths` | Frame-path benchmark harness. |
 | `cache_inspect`, `cache_diff` | I-cache model inspection and comparison. |
 | `dma3_audit` | DMA channel 3 (CD-ROM) transfer audit. |
-| `bios_syscall_probe` | BIOS A/B/C-table call instrumentation. |
+| `bios_syscall_probe` | BIOS A/B/C-table call instrumentation. With `PSOXIDE_CENSUS_OUT=<dir>` it records the full BIOS usage census (calls by phase, exceptions, kernel-RAM access from game code, EXE-entry state). Needs a real BIOS; its output directory holds BIOS bytes and game frames and stays private. |
 | `smoke_draw` | Minimal first-instructions GPU smoke test. |
 | `texwarp` | Measures affine texture warping in **texels**, per pixel, against an analytic perspective-correct ground truth, and ranks every mitigation (subdivision schemes, diagonal choice, UV scale) by error per primitive. See [`docs/texture-warping-2026-07-27.md`](../../../../docs/texture-warping-2026-07-27.md). |
 

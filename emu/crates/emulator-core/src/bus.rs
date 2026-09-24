@@ -1090,6 +1090,12 @@ impl Bus {
         self.hle_strict
     }
 
+    /// Side-effect-free DMA register read (DPCR/DICR/channel regs).
+    /// Diagnostic only; used by the BIOS census probe.
+    pub fn debug_dma_read32(&self, phys: u32) -> u32 {
+        self.dma.read32(phys)
+    }
+
     /// Snapshot of HLE BIOS call counts: `[A, B, C]` tables × 256
     /// function slots. Diagnostic only.
     pub fn hle_bios_call_counts(&self) -> [[u32; 256]; 3] {
