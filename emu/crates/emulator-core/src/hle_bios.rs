@@ -533,7 +533,14 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             Done(0)
         }
 
-        // B(02h)..B(06h) timer helpers are not implemented yet.
+        // B(02h) init_timer, B(03h) get_timer, B(04h)/B(05h) enable/
+        // disable_timer_irq, B(06h) restart_timer (psx-spx "BIOS Timer
+        // Functions").
+        (Table::B, 0x02) => Done(ex::init_timer(bus, args[0], args[1], args[2])),
+        (Table::B, 0x03) => Done(ex::get_timer(bus, args[0])),
+        (Table::B, 0x04) => Done(ex::set_timer_irq(bus, args[0], true)),
+        (Table::B, 0x05) => Done(ex::set_timer_irq(bus, args[0], false)),
+        (Table::B, 0x06) => Done(ex::restart_timer(bus, args[0])),
 
         // B(07h) DeliverEvent and B(17h) ReturnFromException are guest
         // code in kernel RAM (see hle_exceptions); their table entries
