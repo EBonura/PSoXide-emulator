@@ -235,6 +235,18 @@ pub fn dispatch(pc: u32, bus: &mut Bus, gprs: &mut [u32; 32]) -> Option<Hle> {
     };
     let mut flush = table == Table::A && func == 0x44;
     let ret = run(table, func, bus, gprs, &mut flush);
+    if let Ret::Retry = ret {
+        // The function is waiting on hardware: leave the CPU at the call
+        // so emulated time passes and the call is made again.
+        return Some(Hle {
+            v0: None,
+            next_pc: pc,
+            table,
+            func,
+            outcome: Outcome::Done,
+            flush_icache: false,
+        });
+    }
     if table != Table::Kernel {
         bus.hle_bios_log_call(table, func);
     }
@@ -245,7 +257,7 @@ fn finish(bus: &mut Bus, gprs: &[u32; 32], table: Table, func: u8, ret: Ret, flu
     let (outcome, v0) = match ret {
         Ret::Done(v0) => (Outcome::Done, v0),
         Ret::Stub(v0) => (Outcome::Stub, v0),
-        Ret::Unimplemented => (Outcome::Unimplemented, 0),
+        Ret::Unimplemented | Ret::Retry => (Outcome::Unimplemented, 0),
     };
     if outcome != Outcome::Done {
         let args = [gprs[4], gprs[5], gprs[6], gprs[7]];
@@ -267,11 +279,14 @@ enum Ret {
     Done(u32),
     Stub(u32),
     Unimplemented,
+    /// Not finished (waiting on hardware); call again. Must not have side
+    /// effects before the wait condition is met.
+    Retry,
 }
 
 fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut bool) -> Ret {
     use crate::hle_kernel::{self as k, Heap};
-    use Ret::{Done, Stub, Unimplemented};
+    use Ret::{Done, Retry, Stub, Unimplemented};
     let args = [gprs[4], gprs[5], gprs[6], gprs[7]];
     let sp = gprs[29];
     match (table, func) {
@@ -289,6 +304,35 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
 
         // A(0Eh) abs / A(0Fh) labs.
         (Table::A, 0x0E) | (Table::A, 0x0F) => Done((args[0] as i32).wrapping_abs() as u32),
+
+        // A(0Ch) strtoul / A(0Dh) strtol(src, &end, base), A(10h) atoi /
+        // A(11h) atol(src), A(12h) atob(src, &value): psx-spx "Number/
+        // String/Character Conversion", quirks included.
+        (Table::A, 0x0C) | (Table::A, 0x0D) => {
+            let (src, end_dst, base) = (args[0], args[1], args[2]);
+            if src == 0 {
+                return Done(0);
+            }
+            let (value, end) = libc::strtol(bus, src, base, func == 0x0D, false);
+            if end_dst != 0 {
+                k::poke32(bus, end_dst, end);
+            }
+            Done(value)
+        }
+        (Table::A, 0x10) | (Table::A, 0x11) => {
+            if args[0] == 0 {
+                return Done(0);
+            }
+            Done(libc::strtol(bus, args[0], 10, true, true).0)
+        }
+        (Table::A, 0x12) => {
+            if args[0] == 0 {
+                return Done(0);
+            }
+            let (value, end) = libc::strtol(bus, args[0], 10, true, false);
+            k::poke32(bus, args[1], value);
+            Done(end)
+        }
 
         // A(13h) setjmp(buf) / A(14h) longjmp(buf, value). Buffer layout
         // (psx-spx): ra, sp, fp, s0..s7, gp. longjmp returns `value`
@@ -345,6 +389,20 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // A(2Eh) memchr(src, byte, len).
         (Table::A, 0x2E) => Done(libc::memchr(bus, args[0], args[1] as u8, args[2])),
 
+        // A(2Fh) rand / A(30h) srand(seed): x = x*41C64E6Dh + 3039h,
+        // result (x >> 16) & 7FFFh (psx-spx). The seed lives in kernel RAM.
+        (Table::A, 0x2F) => {
+            let x = k::peek32(bus, k::kvar::RAND_SEED)
+                .wrapping_mul(0x41C6_4E6D)
+                .wrapping_add(0x3039);
+            k::poke32(bus, k::kvar::RAND_SEED, x);
+            Done((x >> 16) & 0x7FFF)
+        }
+        (Table::A, 0x30) => {
+            k::poke32(bus, k::kvar::RAND_SEED, args[0]);
+            Done(0)
+        }
+
         // A(33h) malloc / A(34h) free / A(37h) calloc / A(38h) realloc /
         // A(39h) InitHeap (psx-spx "BIOS Memory Allocation").
         (Table::A, 0x33) => Done(k::malloc(bus, Heap::User, args[0])),
@@ -377,6 +435,32 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             hle_printf(bus, args[0], &[args[1], args[2], args[3]], sp);
             Done(0)
         }
+
+        // A(48h) SendGP1Command, A(49h) GPU_cw, A(4Ah) GPU_cwp,
+        // A(4Dh) GetGPUStatus, A(4Eh) gpu_sync (psx-spx "BIOS GPU
+        // Functions"). gpu_sync waits by returning to the call until the
+        // GPU is ready, so emulated time passes as it would in the loop.
+        (Table::A, 0x48) => {
+            bus.write32(crate::gpu::GP1_ADDR, args[0]);
+            Done(gprs[2])
+        }
+        (Table::A, 0x49) | (Table::A, 0x4A) | (Table::A, 0x4E) => {
+            if !gpu_sync(bus) {
+                return Retry;
+            }
+            match func {
+                0x49 => bus.write32(crate::gpu::GP0_ADDR, args[0]),
+                0x4A => {
+                    for i in 0..args[1].min(0x10_0000) {
+                        let word = k::peek32(bus, args[0].wrapping_add(4 * i));
+                        bus.write32(crate::gpu::GP0_ADDR, word);
+                    }
+                }
+                _ => {}
+            }
+            Done(0)
+        }
+        (Table::A, 0x4D) => Done(bus.read32(crate::gpu::GP1_ADDR)),
 
         // A(44h) FlushCache -- the CPU intercept invalidates its
         // instruction cache before this HLE handler returns.
@@ -472,6 +556,15 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             Done(0)
         }
 
+        // B(35h) write(fd, src, len): only the TTY (fd 0/1) exists so far;
+        // its bytes go to the host console. Returns the length written.
+        (Table::B, 0x35) if args[0] <= 1 => {
+            for i in 0..args[2].min(0x10_0000) {
+                write_byte_to_stdout(bus.try_read8(args[1].wrapping_add(i)).unwrap_or(0));
+            }
+            Done(args[2])
+        }
+
         // B(3Dh) putchar -- same as A(3Ch).
         (Table::B, 0x3D) => {
             write_byte_to_stdout(args[0] as u8);
@@ -546,6 +639,27 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // arguments and caller, and a stop in strict mode.
         _ => Unimplemented,
     }
+}
+
+/// DMA channel 2 (GPU) control register.
+const D2_CHCR: u32 = 0x1F80_10A8;
+
+/// One pass of gpu_sync. With GPU DMA off: ready once GPUSTAT bit 28 is set.
+/// With DMA on: wait for D2_CHCR bit 24 to clear, then bit 28, then turn
+/// DMA off with GP1(04h). Returns false while still waiting.
+fn gpu_sync(bus: &mut Bus) -> bool {
+    let stat = bus.read32(crate::gpu::GP1_ADDR);
+    let dma_on = stat & 0x6000_0000 != 0;
+    if dma_on && bus.read32(D2_CHCR) & (1 << 24) != 0 {
+        return false;
+    }
+    if stat & (1 << 28) == 0 {
+        return false;
+    }
+    if dma_on {
+        bus.write32(crate::gpu::GP1_ADDR, 0x0400_0000);
+    }
+    true
 }
 
 /// Registers saved by setjmp, in buffer order: ra, sp, fp, s0..s7, gp.
@@ -695,6 +809,66 @@ mod libc {
         let end = dst.wrapping_add(strlen(bus, dst));
         strcpy(bus, end, src);
         dst
+    }
+
+    /// strtol family. Skips blanks (09h..0Dh, 20h), then an optional "-"
+    /// (when `signed`), then a prefix overriding `base`: "0b" binary, "0x"
+    /// hex, and "o" octal, or for atoi (`atoi_octal`) a leading "0" octal.
+    /// Bases outside 2..=36 mean 10. Digits accumulate without overflow
+    /// checks until a non-digit. Returns `(value, end address)`.
+    pub(super) fn strtol(
+        bus: &Bus,
+        src: u32,
+        base: u32,
+        signed: bool,
+        atoi_octal: bool,
+    ) -> (u32, u32) {
+        let mut p = src;
+        let at = |p: u32| rd(bus, p).to_ascii_lowercase();
+        while matches!(at(p), 0x09..=0x0D | b' ') {
+            p = p.wrapping_add(1);
+        }
+        let negative = signed && at(p) == b'-';
+        if negative {
+            p = p.wrapping_add(1);
+        }
+        let mut base = if (2..=36).contains(&base) { base } else { 10 };
+        match (at(p), at(p.wrapping_add(1))) {
+            (b'0', b'b') => {
+                base = 2;
+                p = p.wrapping_add(2);
+            }
+            (b'0', b'x') => {
+                base = 16;
+                p = p.wrapping_add(2);
+            }
+            (b'o', _) if !atoi_octal => {
+                base = 8;
+                p = p.wrapping_add(1);
+            }
+            (b'0', _) if atoi_octal => {
+                base = 8;
+                p = p.wrapping_add(1);
+            }
+            _ => {}
+        }
+        let mut value: u32 = 0;
+        for _ in 0..MAX_BYTES {
+            let digit = match (at(p) as char).to_digit(36) {
+                Some(d) if d < base => d,
+                _ => break,
+            };
+            value = value.wrapping_mul(base).wrapping_add(digit);
+            p = p.wrapping_add(1);
+        }
+        (
+            if negative {
+                value.wrapping_neg()
+            } else {
+                value
+            },
+            p,
+        )
     }
 
     /// index/strchr (`last` = false) and rindex/strrchr. Returns an
@@ -1163,6 +1337,43 @@ mod tests {
         assert_eq!(
             first.to_string().split(" a1=").next(),
             Some("A(43h) exec a0=0x00000040")
+        );
+    }
+
+    #[test]
+    fn number_conversion_follows_the_documented_quirks() {
+        let mut bus = hle_bus();
+        put_str(&mut bus, 0x8002_0000, b" \t-0x1Fz\0");
+        let v = call(&mut bus, 0xA0, 0x0D, [0x8002_0000, 0x8002_0100, 10, 0]);
+        assert_eq!(v as i32, -31);
+        assert_eq!(crate::hle_kernel::peek32(&bus, 0x8002_0100), 0x8002_0007);
+        // strtoul has no sign: it stops at the "-".
+        assert_eq!(call(&mut bus, 0xA0, 0x0C, [0x8002_0000, 0, 10, 0]), 0);
+        // strtol's "o" prefix is octal; atoi treats a leading 0 as octal.
+        put_str(&mut bus, 0x8002_0200, b"o17\0");
+        assert_eq!(call(&mut bus, 0xA0, 0x0D, [0x8002_0200, 0, 10, 0]), 15);
+        put_str(&mut bus, 0x8002_0300, b"010\0");
+        assert_eq!(call(&mut bus, 0xA0, 0x10, [0x8002_0300, 0, 0, 0]), 8);
+        assert_eq!(call(&mut bus, 0xA0, 0x0D, [0x8002_0300, 0, 10, 0]), 10);
+        // atob swaps the results.
+        let end = call(&mut bus, 0xA0, 0x12, [0x8002_0300, 0x8002_0400, 0, 0]);
+        assert_eq!(end, 0x8002_0303);
+        assert_eq!(crate::hle_kernel::peek32(&bus, 0x8002_0400), 10);
+        assert_eq!(call(&mut bus, 0xA0, 0x10, [0, 0, 0, 0]), 0);
+    }
+
+    #[test]
+    fn rand_uses_the_documented_generator_with_state_in_ram() {
+        let mut bus = hle_bus();
+        call(&mut bus, 0xA0, 0x30, [1, 0, 0, 0]);
+        assert_eq!(call(&mut bus, 0xA0, 0x2F, [0; 4]), 0x41C6);
+        let x = 0x41C6_7EA6u32
+            .wrapping_mul(0x41C6_4E6D)
+            .wrapping_add(0x3039);
+        assert_eq!(call(&mut bus, 0xA0, 0x2F, [0; 4]), (x >> 16) & 0x7FFF);
+        assert_eq!(
+            crate::hle_kernel::peek32(&bus, crate::hle_kernel::kvar::RAND_SEED),
+            x
         );
     }
 
