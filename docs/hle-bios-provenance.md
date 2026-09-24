@@ -46,6 +46,14 @@ Update it in the same commit as any HLE change.
 | EXE entry registers (a0=1, a1=0, gp from the header, sp=fp=STACK) | `fastboot.rs` | census, all runs |
 | Entry hardware state on the HLE path: DPCR 9099h, DICR 8C8C0000h, I_MASK 000Ch, [0x60]=2, SPU shell profile with main volume 3FFFh/37EFh, CD volume 0, transfer control 0004h, GP1(08h) 640x480i NTSC, GP0(E1h) dither and draw-to-display | `fastboot.rs` `apply_hle_entry_state`, `spu.rs` | census, constant across all 38 runs |
 | SPU shell reverb profile | `spu.rs` `apply_retail_bios_shell_audio_profile` | PA5 real-console capture (predates this file) |
+| Kernel RAM layout: table of tables at 100h, A0/B0/C0 tables at 200h/874h/674h, C(06h) at C80h, B(5Bh) at 43D0h, FCB 8648h, DCB 6EE0h, kernel heap A000E000h/2000h with ExCB, EvCB, PCB, TCB allocated in that order with 4-byte size headers | `hle_kernel.rs` | psx-spx "BIOS Memory Map" and "Table of Tables"; census: addresses and header words at EXE entry (values only, no code) |
+| Trap stubs (BREAK with code B00xxh) and HLE kernel variables at A00h | `hle_kernel.rs` | original |
+| InitHeap, malloc, free, calloc, realloc, alloc/free_kernel_memory, SysInitMemory, SetConf, GetConf | `hle_kernel.rs`, `hle_bios.rs` | psx-spx "BIOS Memory Allocation" and A(9Ch)/A(9Dh); allocator algorithm original |
+| B(56h)/B(57h) patch recognition: hash, masks, variant table, counterpatch branch lengths and pointer word offsets | `hle_kernel.rs` | OpenBIOS `patches/` (MIT); psx-spx "BIOS Patches" for what each routine does |
+| setjmp, longjmp, HookEntryInt r2=1 | `hle_bios.rs`, `cpu.rs` | psx-spx A(13h)/A(14h), B(19h) |
+| ChangeClearPAD B(5Bh) returns previous value; _96_remove | `hle_bios.rs` | psx-spx; OpenBIOS `sio0/driver.c` setSIO0AutoAck, `cdrom/cdrom.c` deinitCDRom |
+| strtol, strtoul, atoi, atol, atob, rand, srand | `hle_bios.rs` | psx-spx "Number/String/Character Conversion" and "Misc Functions" |
+| SendGP1Command, GPU_cw, GPU_cwp, GetGPUStatus, gpu_sync | `hle_bios.rs` | psx-spx "BIOS GPU Functions" |
 | Events always ready, HookEntryInt, unresolved-exception hook, FlushCache | `hle_bios.rs`, `cpu.rs` | predates this file; to be re-derived from psx-spx and OpenBIOS when the kernel model replaces them |
 
 ## Tooling
@@ -62,7 +70,8 @@ Update it in the same commit as any HLE change.
 - The SYSTEM.CNF parser and ISO9660 file lookup live in `emulator-core` for
   now; they should move into `psx-iso` (SDK repository) with a BOOT parser
   that accepts an argument.
-- Stateful libc (malloc family, rand, strtok), the functions psx-spx
-  documents as buggy (memcmp, bcmp, memmove, strstr, strpbrk), setjmp and
-  longjmp, file and device I/O, memory card, CD and pad services, and the
-  event, exception and thread model are unimplemented and report loudly.
+- strtok, the functions psx-spx documents as buggy (memcmp, bcmp,
+  memmove, strstr, strpbrk), file and device I/O, memory card, CD and pad
+  services, and the event, exception and thread model are unimplemented
+  and report loudly.
+- The retail initial rand seed is not known; the HLE starts at 0.
