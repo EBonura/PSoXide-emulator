@@ -382,6 +382,14 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // instruction cache before this HLE handler returns.
         (Table::A, 0x44) => Done(0),
 
+        // A(56h)/A(72h) _96_remove: the kernel's CD-ROM handlers and
+        // events are removed. Only the kernel flag exists so far; the
+        // handler chains and events arrive with the exception core.
+        (Table::A, 0x56) | (Table::A, 0x72) => {
+            k::poke32(bus, k::kvar::CD_KERNEL_ACTIVE, 0);
+            Done(0)
+        }
+
         // A(70h) _bu_init (memcard filesystem init) -- accept.
         (Table::A, 0x70) => Stub(0),
 
@@ -488,6 +496,14 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             *flush |= rewrote;
             bus.hle_bios_record_patch(site, gprs[31]);
             Done(base)
+        }
+
+        // B(5Bh) ChangeClearPAD(flag): pad/card handler VBlank auto-ack.
+        // Returns the previous setting (OpenBIOS setSIO0AutoAck).
+        (Table::B, 0x5B) => {
+            let previous = k::peek32(bus, k::kvar::SIO0_AUTO_ACK);
+            k::poke32(bus, k::kvar::SIO0_AUTO_ACK, args[0]);
+            Done(previous)
         }
 
         // B(4Ah) InitCard, B(4Bh) StartCard, B(4Ch) StopCard.
@@ -1190,6 +1206,9 @@ mod tests {
             .map(|i| crate::hle_kernel::peek32(&bus, 0x8002_0000 + 4 * i))
             .collect();
         assert_eq!(conf, [0x10, 4, 0x801F_FF00]);
+        // B(5Bh) returns the previous auto-ack setting.
+        assert_eq!(call(&mut bus, 0xB0, 0x5B, [0, 0, 0, 0]), 1);
+        assert_eq!(call(&mut bus, 0xB0, 0x5B, [1, 0, 0, 0]), 0);
         // B(00h) allocates from the kernel heap set up at boot.
         let k = call(&mut bus, 0xB0, 0x00, [8, 0, 0, 0]);
         assert!((0xA000_E000..0xA001_0000).contains(&k), "{k:#x}");
