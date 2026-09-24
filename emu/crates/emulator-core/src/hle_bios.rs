@@ -1414,10 +1414,10 @@ mod tests {
     fn unimplemented_and_stubbed_calls_are_recorded_once_per_function() {
         let mut bus = hle_bus();
         assert!(bus.hle_bios_first_unimplemented().is_none());
-        // B(12h) InitPad is a stub; A(43h) exec is unimplemented.
+        // B(12h) InitPad is a stub; A(3Ah) abort is unimplemented.
         assert_eq!(call(&mut bus, 0xB0, 0x12, [0, 0, 0, 0]), 1);
-        assert_eq!(call(&mut bus, 0xA0, 0x43, [0x40, 0, 0, 0]), 0);
-        assert_eq!(call(&mut bus, 0xA0, 0x43, [0x80, 0, 0, 0]), 0);
+        assert_eq!(call(&mut bus, 0xA0, 0x3A, [0x40, 0, 0, 0]), 0);
+        assert_eq!(call(&mut bus, 0xA0, 0x3A, [0x80, 0, 0, 0]), 0);
         // Implemented calls leave no record.
         call(&mut bus, 0xA0, 0x1B, [0, 0, 0, 0]);
 
@@ -1426,13 +1426,13 @@ mod tests {
         assert_eq!(records[0].outcome, Outcome::Stub);
         assert_eq!(records[0].name, "initPad");
         let first = bus.hle_bios_first_unimplemented().unwrap();
-        assert_eq!((first.table, first.func), (Table::A, 0x43));
+        assert_eq!((first.table, first.func), (Table::A, 0x3A));
         assert_eq!(first.args[0], 0x40);
         assert_eq!(first.ra, RA);
         assert_eq!(first.count, 2);
         assert_eq!(
             first.to_string().split(" a1=").next(),
-            Some("A(43h) exec a0=0x00000040")
+            Some("A(3Ah) abort a0=0x00000040")
         );
     }
 

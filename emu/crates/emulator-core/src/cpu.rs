@@ -830,6 +830,18 @@ impl Cpu {
         self.set_gpr(30, fp);
     }
 
+    /// Test hook: mutable register file.
+    #[cfg(test)]
+    pub(crate) fn gprs_mut_for_test(&mut self) -> &mut [u32; 32] {
+        &mut self.gprs
+    }
+
+    /// Test hook: set the PC.
+    #[cfg(test)]
+    pub(crate) fn set_pc_for_test(&mut self, pc: u32) {
+        self.pc = pc;
+    }
+
     /// Current program counter.
     #[inline]
     pub fn pc(&self) -> u32 {
@@ -3883,7 +3895,7 @@ mod tests {
         bus.set_hle_strict(true);
         cpu.pc = 0xA0;
         cpu.gprs[2] = 0x1234_5678;
-        cpu.gprs[9] = 0x43; // exec
+        cpu.gprs[9] = 0x3A; // abort
         cpu.gprs[31] = 0x8001_0000;
         let cycles = bus.cycles();
         let err = cpu.step(&mut bus).unwrap_err();
@@ -3891,8 +3903,8 @@ mod tests {
             err,
             ExecutionError::HleUnimplemented {
                 table: 'A',
-                func: 0x43,
-                name: "exec",
+                func: 0x3A,
+                name: "abort",
                 ra: 0x8001_0000,
             }
         );
