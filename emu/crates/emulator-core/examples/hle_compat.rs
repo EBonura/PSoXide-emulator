@@ -11,8 +11,12 @@
 //! ```bash
 //! cargo run -p emulator-core --release --example hle_compat -- \
 //!     --games-dir "/path/to/your/discs" --frames 1800 [--only crash] \
-//!     [--input-tape run.pxtape] [--strict] [--json report.json]
+//!     [--input-tape run.pxtape] [--strict] [--json report.json] \
+//!     [--shots <dir>]
 //! ```
+//!
+//! `--shots` writes each game's final display as `<id>.ppm`. That is game
+//! imagery: keep the directory local.
 //!
 //! Every run uses the same fixed setup so results compare across builds:
 //! a digital pad on port 1 (buttons from `--input-tape`, one sample per
@@ -115,6 +119,7 @@ fn main() {
     let mut json = None;
     let mut strict = false;
     let mut parity = false;
+    let mut shots: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -126,6 +131,7 @@ fn main() {
             "--json" => json = Some(args_support::take_path(&mut args, "--json")),
             "--strict" => strict = true,
             "--parity" => parity = true,
+            "--shots" => shots = Some(args_support::take_path(&mut args, "--shots")),
             other => panic!("unknown argument {other}; see the header of hle_compat.rs"),
         }
     }
@@ -161,7 +167,17 @@ fn main() {
             Some(Found::Disc(path)) => match disc_support::load_disc_path(&path) {
                 Ok(disc) => {
                     eprintln!("[hle-compat] {} <- {}", game.id, file_name(&path));
-                    run_hle(&mut result, disc.clone(), frames, tape.as_deref(), strict);
+                    let shot = shots
+                        .as_ref()
+                        .map(|dir| dir.join(format!("{}.ppm", game.id)));
+                    run_hle(
+                        &mut result,
+                        disc.clone(),
+                        frames,
+                        tape.as_deref(),
+                        strict,
+                        shot,
+                    );
                     if let Some(bios) = parity_bios.as_ref() {
                         result.parity = parity_diff(bios, &disc);
                         if result.parity.is_none() {
@@ -304,6 +320,7 @@ fn run_hle(
     frames: u64,
     tape: Option<&[PadSample]>,
     strict: bool,
+    shot: Option<PathBuf>,
 ) {
     let mut bus = Bus::new_without_bios();
     bus.set_hle_strict(strict);
@@ -372,6 +389,9 @@ fn run_hle(
         .iter()
         .map(|(name, _)| name.clone())
         .collect();
+    if let Some(path) = shot {
+        write_ppm(&bus, &path);
+    }
     for record in bus.hle_bios_records() {
         let line = format!(
             "{}({:02X}h) {} x{}",
@@ -508,6 +528,21 @@ fn print_table(results: &[GameResult]) {
             }
         }
     }
+}
+
+fn write_ppm(bus: &Bus, path: &Path) {
+    let (rgba, w, h) = bus.gpu.display_rgba8();
+    if w == 0 || h == 0 {
+        return;
+    }
+    let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
+    for px in rgba.chunks_exact(4) {
+        ppm.extend_from_slice(&px[..3]);
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, ppm);
 }
 
 fn file_name(path: &Path) -> String {
