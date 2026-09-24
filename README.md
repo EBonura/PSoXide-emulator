@@ -70,6 +70,10 @@ substitute for original-console validation of SDK or game behavior.
 ## License
 
 [GPL-2.0-or-later](LICENSE). Existing source and asset attribution is preserved.
+Where the BIOS replacement's behaviour comes from is recorded in
+[docs/hle-bios-provenance.md](docs/hle-bios-provenance.md).
+
+PlayStation is a trademark of Sony Interactive Entertainment Inc.; PSoXide is not affiliated with or endorsed by Sony.
 
 ## Recent changes
 
