@@ -290,6 +290,24 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // A(0Eh) abs / A(0Fh) labs.
         (Table::A, 0x0E) | (Table::A, 0x0F) => Done((args[0] as i32).wrapping_abs() as u32),
 
+        // A(13h) setjmp(buf) / A(14h) longjmp(buf, value). Buffer layout
+        // (psx-spx): ra, sp, fp, s0..s7, gp. longjmp returns `value`
+        // unchanged (0 is not bumped to 1) at the restored ra.
+        (Table::A, 0x13) => {
+            let buf = args[0];
+            for (slot, reg) in JMPBUF_REGS.iter().enumerate() {
+                k::poke32(bus, buf.wrapping_add(4 * slot as u32), gprs[*reg]);
+            }
+            Done(0)
+        }
+        (Table::A, 0x14) => {
+            let buf = args[0];
+            for (slot, reg) in JMPBUF_REGS.iter().enumerate() {
+                gprs[*reg] = k::peek32(bus, buf.wrapping_add(4 * slot as u32));
+            }
+            Done(args[1])
+        }
+
         // A(15h) strcat(dst, src).
         (Table::A, 0x15) => Done(libc::strcat(bus, args[0], args[1])),
         // A(17h) strcmp(s1, s2) / A(18h) strncmp(s1, s2, maxlen).
@@ -513,6 +531,9 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         _ => Unimplemented,
     }
 }
+
+/// Registers saved by setjmp, in buffer order: ra, sp, fp, s0..s7, gp.
+const JMPBUF_REGS: [usize; 12] = [31, 29, 30, 16, 17, 18, 19, 20, 21, 22, 23, 28];
 
 /// RAM_SIZE memory-control register.
 const RAM_SIZE_PORT: u32 = 0x1F80_1060;
