@@ -81,7 +81,9 @@ pub fn fast_boot_disc_with_hle(
             bus.write8_safe(BOOT_ARG_ADDR + offset as u32, byte);
         }
     }
-    if !enable_hle_bios {
+    if enable_hle_bios {
+        apply_hle_entry_state(bus);
+    } else {
         // The abbreviated BIOS warmup installs kernel state but intentionally
         // stops before the license/shell path. PA5 silicon telemetry proves
         // that disc executables normally inherit the shell's configured SPU
@@ -110,6 +112,41 @@ pub fn fast_boot_disc_with_hle(
         event: boot.cnf.event,
         boot_arg: boot.cnf.boot_arg,
     })
+}
+
+/// DMA control register.
+const DPCR_ADDR: u32 = 0x1F80_10F0;
+/// Interrupt mask register.
+const I_MASK_ADDR: u32 = 0x1F80_1074;
+/// GPU command port.
+const GP0_ADDR: u32 = 0x1F80_1810;
+
+/// Hardware state a disc executable inherits from a real boot, for the HLE
+/// path that never runs the BIOS. Every value was constant across the 38
+/// census runs (31 discs) captured at EXE entry under SCPH1001; see
+/// docs/hle-bios-provenance.md. The warm fast boot inherits the same state
+/// from the real BIOS instead.
+///
+/// Deliberately not reproduced: I_STAT (a VBlank latched while the BIOS
+/// held interrupts off, which the first emulated VBlank recreates), the CD
+/// drive's mode and motor state, and leftover values such as CAUSE, the
+/// SPU transfer address and pending key-offs.
+fn apply_hle_entry_state(bus: &mut Bus) {
+    // DMA: MDEC-in, MDEC-out and CD-ROM enabled at priority 1; DICR has
+    // master enable, the GPU and CD-ROM channel enables and their
+    // completion flags set, so the master flag is high.
+    bus.write32(DPCR_ADDR, 0x0000_9099);
+    bus.set_dicr_raw(0x8C8C_0000);
+    // CD-ROM and DMA interrupts unmasked.
+    bus.write32(I_MASK_ADDR, 0x0000_000C);
+    // SetMem's RAM-size variable reads 2 (MB).
+    bus.write32(crate::hle_bios::RAM_SIZE_MB_VAR, 2);
+    bus.apply_hle_entry_audio_profile();
+    // Shell display: 640x480 interlaced, 15-bit, NTSC (an NTSC BIOS leaves
+    // this even for PAL discs), with dithering and drawing to the displayed
+    // field enabled.
+    bus.write32(GP1_ADDR, 0x0800_0027);
+    bus.write32(GP0_ADDR, 0xE100_0600);
 }
 
 /// Run the real BIOS long enough to install its RAM kernel state.
@@ -170,6 +207,28 @@ mod tests {
             assert_eq!((cpu.gpr(29), cpu.gpr(30)), (sp, fp));
             assert_eq!((cpu.gpr(4), cpu.gpr(5)), (1, 0));
         }
+    }
+
+    #[test]
+    fn hle_boot_reproduces_the_measured_entry_state() {
+        let mut bus = Bus::new_without_bios();
+        let mut cpu = Cpu::new();
+        fast_boot_disc(&mut bus, &mut cpu, &disc(b"BOOT = cdrom:\\GAME.EXE;1\r\n")).unwrap();
+        assert_eq!(bus.read32(DPCR_ADDR), 0x0000_9099);
+        assert_eq!(bus.read32(0x1F80_10F4), 0x8C8C_0000);
+        assert_eq!(bus.read32(I_MASK_ADDR) & 0xFFFF, 0x000C);
+        assert_eq!(bus.read32(0x60), 2);
+        assert_eq!(bus.read16(0x1F80_1D80), 0x3FFF);
+        assert_eq!(bus.read16(0x1F80_1D82), 0x37EF);
+        assert_eq!(bus.read16(0x1F80_1DAA), 0xC085);
+        assert_eq!(bus.read16(0x1F80_1DAC), 0x0004);
+        assert_eq!(bus.read16(0x1F80_1DB0), 0);
+        let gpustat = bus.read32(0x1F80_1814);
+        // 640x480 interlaced, NTSC, display on, dither and draw-to-display.
+        assert_eq!(gpustat & 0x00FF_0600, 0x004E_0600);
+        assert_eq!(gpustat & (1 << 23), 0);
+        // The IRQ mask must not raise anything at entry.
+        assert!(!bus.external_interrupt_pending());
     }
 
     #[test]
