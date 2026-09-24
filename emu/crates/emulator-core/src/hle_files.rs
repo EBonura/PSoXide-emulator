@@ -167,12 +167,20 @@ pub mod kvar {
     pub const RD_STAGE: u32 = 0x0B60;
     /// read() byte count.
     pub const RD_LEN: u32 = 0x0B64;
+    /// Executable loader stage.
+    pub const LD_STAGE: u32 = 0x0B70;
+    /// Executable extent.
+    pub const LD_LBA: u32 = 0x0B74;
+    /// Executable file size.
+    pub const LD_SIZE: u32 = 0x0B78;
 }
 
 /// Sector buffer for directory reads and partial sectors (2 KiB).
 pub const SECTOR_BUF: u32 = 0x0000_3200;
 /// Device name strings.
 const STRINGS: u32 = 0x0000_3180;
+/// Header buffer for A(42h)/A(51h) into Exec.
+pub const EXEC_HEADER: u32 = 0x0000_3A00;
 
 /// Kernel-internal trap functions of the file layer and devices.
 pub mod internal {
@@ -953,6 +961,85 @@ fn finish_read(bus: &mut Bus, f: u32, n: u32) -> u32 {
     n
 }
 
+// ------------------------------------------------------ executable loading
+
+/// Progress of A(41h)/A(42h)/A(51h).
+pub enum LoadStep {
+    /// Still reading; call again.
+    Pending,
+    /// Not a file on the kernel CD-ROM device (other devices are not
+    /// supported by the loader yet).
+    Unsupported,
+    /// Finished: 1 = loaded, 0 = failed.
+    Done(u32),
+}
+
+/// A(41h) LoadTest (`body` false) / A(42h) Load (`body` true): read the
+/// executable's 800h-byte header, copy bytes 10h..4Bh to `header`
+/// (psx-spx), and for Load also read the body to its load address.
+/// Returns 1 on success, 0 on failure (OpenBIOS).
+pub fn load_step(bus: &mut Bus, path: u32, header: u32, body: bool) -> LoadStep {
+    const LOOKUP: u32 = 0;
+    const HEADER: u32 = 1;
+    const BODY: u32 = 2;
+    match find_device(bus, path) {
+        Some((d, _, _)) if peek32(bus, d + dcb::OPEN) == stub_addr(3, internal::CD_OPEN) => {}
+        _ => return LoadStep::Unsupported,
+    }
+    let name = find_device(bus, path).map(|(_, _, n)| n).unwrap_or(path);
+    let fail = |bus: &mut Bus| {
+        poke32(bus, kvar::LD_STAGE, LOOKUP);
+        LoadStep::Done(0)
+    };
+    match peek32(bus, kvar::LD_STAGE) {
+        LOOKUP => match cd_lookup_step(bus, name) {
+            None => LoadStep::Pending,
+            Some(None) => fail(bus),
+            Some(Some((lba, size))) => {
+                poke32(bus, kvar::LD_LBA, lba);
+                poke32(bus, kvar::LD_SIZE, size);
+                poke32(bus, kvar::LD_STAGE, HEADER);
+                LoadStep::Pending
+            }
+        },
+        HEADER => {
+            let lba = peek32(bus, kvar::LD_LBA);
+            match cd_read_step(bus, lba, 1, SECTOR_BUF) {
+                None => LoadStep::Pending,
+                Some(false) => fail(bus),
+                Some(true) => {
+                    let magic: Vec<u8> = (0..8).map(|i| buf8(bus, i)).collect();
+                    if magic != b"PS-X EXE" {
+                        return fail(bus);
+                    }
+                    for off in (0..0x3C).step_by(4) {
+                        let w = buf32(bus, 0x10 + off);
+                        poke32(bus, header + off, w);
+                    }
+                    if !body {
+                        poke32(bus, kvar::LD_STAGE, LOOKUP);
+                        return LoadStep::Done(1);
+                    }
+                    poke32(bus, kvar::LD_STAGE, BODY);
+                    LoadStep::Pending
+                }
+            }
+        }
+        _ => {
+            let lba = peek32(bus, kvar::LD_LBA) + 1;
+            let (dst, size) = (peek32(bus, header + 8), peek32(bus, header + 12));
+            match cd_read_step(bus, lba, size.div_ceil(0x800), dst) {
+                None => LoadStep::Pending,
+                Some(false) => fail(bus),
+                Some(true) => {
+                    poke32(bus, kvar::LD_STAGE, LOOKUP);
+                    LoadStep::Done(1)
+                }
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------ CD-ROM IRQ handlers
 
 /// Kernel CdromIoIrq verifier: a drive interrupt that reached the CPU is
@@ -1108,5 +1195,44 @@ mod tests {
             u32::MAX,
             "unknown device (and B(55h) of a free fd)"
         );
+    }
+
+    #[test]
+    fn load_and_exec_run_a_second_executable_from_the_disc() {
+        // CHILD.EXE: store a0+a1 at [0x80050000] and return.
+        let mut child = vec![0u8; psx_iso::EXE_HEADER_BYTES];
+        child[..8].copy_from_slice(b"PS-X EXE");
+        child[0x10..0x14].copy_from_slice(&0x8006_0000u32.to_le_bytes());
+        child[0x18..0x1C].copy_from_slice(&0x8006_0000u32.to_le_bytes());
+        child[0x1C..0x20].copy_from_slice(&0x800u32.to_le_bytes());
+        let mut body = vec![0u8; 0x800];
+        for (i, w) in [0x3C08_8005u32, 0x0085_4821, 0xAD09_0000, 0x03E0_0008, 0]
+            .iter()
+            .enumerate()
+        {
+            body[4 * i..4 * i + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        child.extend_from_slice(&body);
+        let mut iso = IsoBuilder::new();
+        iso.add_file("CHILD.EXE", child);
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        bus.cdrom.insert_disc(Some(Disc::from_bin(iso.build_bin())));
+        for (i, b) in b"cdrom:\\CHILD.EXE;1\0".iter().enumerate() {
+            bus.write8_safe(0x8002_0000 + i as u32, *b);
+        }
+        let header = 0x8002_0100;
+        let words = program_on(
+            0xA0,
+            &[
+                (0x42, [Some(0x8002_0000), Some(header), Some(0)]),
+                (0x43, [Some(header), Some(5), Some(6)]),
+            ],
+        );
+        run(&mut bus, &words, 0x8004_0000);
+        assert_eq!(bus.read32(0x8004_0008), 1, "Load");
+        assert_eq!(bus.read32(header), 0x8006_0000, "header copied from 10h");
+        assert_eq!(bus.read32(0x8005_0000), 11, "child ran with a0=5, a1=6");
+        assert_eq!(bus.read32(0x8004_000C), 1, "Exec returned 1");
     }
 }

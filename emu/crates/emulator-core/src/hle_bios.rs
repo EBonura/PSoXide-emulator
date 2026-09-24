@@ -493,6 +493,40 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         }
         (Table::A, 0x4D) => Done(bus.read32(crate::gpu::GP1_ADDR)),
 
+        // A(41h) LoadTest(name, header), A(42h) Load(name, header) and
+        // A(51h) LoadExec(name, stackbase, stackoffset) (psx-spx "BIOS File
+        // Execute"), for executables on the kernel CD-ROM device.
+        (Table::A, 0x41) | (Table::A, 0x42) | (Table::A, 0x51) => {
+            let header = if func == 0x51 {
+                files::EXEC_HEADER
+            } else {
+                args[1]
+            };
+            match files::load_step(bus, args[0], header, func != 0x41) {
+                files::LoadStep::Pending => Retry,
+                files::LoadStep::Unsupported => Unimplemented,
+                files::LoadStep::Done(ok) if func != 0x51 => {
+                    *flush |= func == 0x42 && ok == 1;
+                    Done(ok)
+                }
+                files::LoadStep::Done(0) => Jump(ex::code().hang),
+                files::LoadStep::Done(_) => {
+                    // Part 2: the caller's stack values, then Exec(header,
+                    // 1, 0). A returning executable ends in the "JMP $"
+                    // lockup of part 4 (reloading the boot file, part 3,
+                    // is not attempted).
+                    k::poke32(bus, files::EXEC_HEADER + 0x20, args[1]);
+                    k::poke32(bus, files::EXEC_HEADER + 0x24, args[2]);
+                    *flush = true;
+                    gprs[4] = files::EXEC_HEADER;
+                    gprs[5] = 1;
+                    gprs[6] = 0;
+                    gprs[31] = ex::code().hang;
+                    Jump(ex::code().exec)
+                }
+            }
+        }
+
         // A(44h) FlushCache -- the CPU intercept invalidates its
         // instruction cache before this HLE handler returns.
         (Table::A, 0x44) => Done(0),

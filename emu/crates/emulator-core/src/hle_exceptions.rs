@@ -87,6 +87,8 @@ pub struct KernelCode {
     pub syscall_stub: u32,
     /// A(43h) Exec.
     pub exec: u32,
+    /// Endless loop.
+    pub hang: u32,
 }
 
 /// Assembled kernel code (deterministic; built once).
@@ -331,9 +333,15 @@ fn assemble() -> KernelCode {
     a.jr(RA);
     a.addiu(V0, ZERO, 1);
 
+    // "JMP $" lockup (LoadExec part 4).
+    a.label("hang");
+    a.b("hang");
+    a.nop();
+
     let rfe = a.addr("rfe");
     let deliver_event = a.addr("deliver_event");
     let exec = a.addr("exec");
+    let hang = a.addr("hang");
     let rcnt_verifier = [
         a.addr("rcnt0"),
         a.addr("rcnt1"),
@@ -361,6 +369,7 @@ fn assemble() -> KernelCode {
         unresolved_glue,
         syscall_stub,
         exec,
+        hang,
     }
 }
 
