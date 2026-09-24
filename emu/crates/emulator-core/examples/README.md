@@ -22,6 +22,7 @@ keeps the tools, so everything listed here is maintained.
 | `cdrom_probe` | CD-ROM command/state probe; used by the cortex preburn suite. |
 | `probe_cdda_wav` | Captures CD-DA/SPU audio output to WAV; used by the preburn suite and the audio example targets. |
 | `probe_disc_pad_trace` | Disc boot + pad input flow trace; used by the preburn boot-flow gate. |
+| `hle_compat` | Runs the commercial discs listed in `compat/games.toml` (found by hash in `--games-dir`) under the HLE BIOS for a fixed number of frames and reports the first unimplemented BIOS call, speed and display hash. `--parity` with `PSOXIDE_PARITY_BIOS` diffs the EXE-entry state against a real-BIOS boot (dev-only). |
 
 ## Performance and internals
 

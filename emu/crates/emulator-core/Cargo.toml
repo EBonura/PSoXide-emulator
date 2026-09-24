@@ -26,6 +26,11 @@ psoxide-settings = { workspace = true }
 # rasterizer tests can feed the *exact* bytes the engine emits, rather
 # than hand-assembled GP0 words. Acyclic: psx-gpu only depends on psx-hw.
 psx-gpu = { workspace = true }
+# hle_compat example: reads compat/games.toml, matches discs by sha256 and
+# writes a JSON report.
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+toml = "1"
 
 [features]
 default = []
