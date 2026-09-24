@@ -104,6 +104,8 @@ pub fn function_name(table: Table, func: u8) -> &'static str {
             crate::hle_kernel::internal::START_PAD => "startPad",
             crate::hle_kernel::internal::STOP_PAD => "stopPad",
             crate::hle_kernel::internal::SET_PAD_OUTPUT_DATA => "setPadOutputData",
+            crate::hle_exceptions::internal::SYSCALL_VERIFIER => "syscallVerifier",
+            0x04..=0x07 => "rcntHandler",
             _ => "?",
         },
         t => crate::bios_names::function_name(t.index(), u32::from(func)),
@@ -181,6 +183,8 @@ pub struct Hle {
     /// The handler changed code in RAM; the instruction cache must be
     /// invalidated (FlushCache, kernel patch counterpatches).
     pub flush_icache: bool,
+    /// The function is waiting and will be called again from the same PC.
+    pub retry: bool,
 }
 
 /// Intercept a fetch at `pc` when it is a BIOS call.
@@ -226,6 +230,7 @@ pub fn dispatch(pc: u32, bus: &mut Bus, gprs: &mut [u32; 32]) -> Option<Hle> {
                     func: t1 as u8,
                     outcome: Outcome::Done,
                     flush_icache: false,
+                    retry: false,
                 })
             }
         }
@@ -235,16 +240,25 @@ pub fn dispatch(pc: u32, bus: &mut Bus, gprs: &mut [u32; 32]) -> Option<Hle> {
     };
     let mut flush = table == Table::A && func == 0x44;
     let ret = run(table, func, bus, gprs, &mut flush);
-    if let Ret::Retry = ret {
+    let jump = match ret {
         // The function is waiting on hardware: leave the CPU at the call
         // so emulated time passes and the call is made again.
+        Ret::Retry => Some((pc, true)),
+        Ret::Jump(target) => Some((target, false)),
+        _ => None,
+    };
+    if let Some((next_pc, retry)) = jump {
+        if table != Table::Kernel && !retry {
+            bus.hle_bios_log_call(table, func);
+        }
         return Some(Hle {
             v0: None,
-            next_pc: pc,
+            next_pc,
             table,
             func,
             outcome: Outcome::Done,
-            flush_icache: false,
+            flush_icache: flush,
+            retry,
         });
     }
     if table != Table::Kernel {
@@ -257,7 +271,7 @@ fn finish(bus: &mut Bus, gprs: &[u32; 32], table: Table, func: u8, ret: Ret, flu
     let (outcome, v0) = match ret {
         Ret::Done(v0) => (Outcome::Done, v0),
         Ret::Stub(v0) => (Outcome::Stub, v0),
-        Ret::Unimplemented | Ret::Retry => (Outcome::Unimplemented, 0),
+        Ret::Unimplemented | Ret::Retry | Ret::Jump(_) => (Outcome::Unimplemented, 0),
     };
     if outcome != Outcome::Done {
         let args = [gprs[4], gprs[5], gprs[6], gprs[7]];
@@ -270,6 +284,7 @@ fn finish(bus: &mut Bus, gprs: &[u32; 32], table: Table, func: u8, ret: Ret, flu
         func,
         outcome,
         flush_icache: flush,
+        retry: false,
     }
 }
 
@@ -282,11 +297,15 @@ enum Ret {
     /// Not finished (waiting on hardware); call again. Must not have side
     /// effects before the wait condition is met.
     Retry,
+    /// Continue at this guest address (a tail call into kernel code; the
+    /// handler has set any argument registers and `$ra`).
+    Jump(u32),
 }
 
 fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut bool) -> Ret {
+    use crate::hle_exceptions as ex;
     use crate::hle_kernel::{self as k, Heap};
-    use Ret::{Done, Retry, Stub, Unimplemented};
+    use Ret::{Done, Jump, Retry, Stub, Unimplemented};
     let args = [gprs[4], gprs[5], gprs[6], gprs[7]];
     let sp = gprs[29];
     match (table, func) {
@@ -514,21 +533,34 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             Done(0)
         }
 
-        // B(07h) DeliverEvent -- accept; our event system is always-
-        // ready so there's nothing to deliver.
-        (Table::B, 0x07) => Stub(0),
+        // B(02h)..B(06h) timer helpers are not implemented yet.
 
-        // B(08h) OpenEvent: return a synthetic handle. We accept
-        // everything; the handle encodes table + slot for debug.
-        (Table::B, 0x08) => Stub(0xF400_0000 | (args[0] & 0xFFFF)),
+        // B(07h) DeliverEvent and B(17h) ReturnFromException are guest
+        // code in kernel RAM (see hle_exceptions); their table entries
+        // point there, so they only reach this match through a stale
+        // trap stub.
 
-        // B(09h) CloseEvent, B(0Ah) WaitEvent, B(0Bh) TestEvent,
-        // B(0Ch) EnableEvent, B(0Dh) DisableEvent -- always-ready.
-        (Table::B, 0x09)
-        | (Table::B, 0x0A)
-        | (Table::B, 0x0B)
-        | (Table::B, 0x0C)
-        | (Table::B, 0x0D) => Stub(1),
+        // Events over the EvCBs in kernel RAM (psx-spx "BIOS Event
+        // Functions"): OpenEvent, CloseEvent, WaitEvent, TestEvent,
+        // EnableEvent, DisableEvent, UnDeliverEvent.
+        (Table::B, 0x08) => Done(ex::open_event(bus, args[0], args[1], args[2], args[3])),
+        (Table::B, 0x09) => {
+            ex::close_event(bus, args[0]);
+            Done(1)
+        }
+        (Table::B, 0x0A) => match ex::wait_event(bus, args[0]) {
+            Some(v) => Done(v),
+            None => Retry,
+        },
+        (Table::B, 0x0B) => Done(u32::from(ex::test_event(bus, args[0]))),
+        (Table::B, 0x0C) | (Table::B, 0x0D) => {
+            ex::set_event_enabled(bus, args[0], func == 0x0C);
+            Done(1)
+        }
+        (Table::B, 0x20) => {
+            ex::undeliver_event(bus, args[0], args[1]);
+            Done(0)
+        }
 
         // B(12h) InitPad(buf1, siz1, buf2, siz2): tell the kernel
         // where to stash pad state. Since we poll the hardware
@@ -538,21 +570,14 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // B(13h) StartPad, B(14h) StopPad -- accept.
         (Table::B, 0x13) | (Table::B, 0x14) => Stub(1),
 
-        // B(17h) ReturnFromException is completed by Cpu::execute_one:
-        // when a side-loaded guest IRQ hook is active it restores the
-        // interrupted CPU frame instead of returning to this call's `$ra`.
-        (Table::B, 0x17) => Done(0),
-
-        // B(18h) ResetEntryInt / B(19h) HookEntryInt. The latter receives
-        // a BIOS-compatible JumpBuffer pointer (ra, sp, fp, s0..s7, gp).
-        // Retaining it lets side-loaded EXEs use their real guest ISR rather
-        // than relying on a synthetic VBlank callback.
+        // B(18h) ResetEntryInt: default exit buffer, returned.
+        // B(19h) HookEntryInt(buf): exit through `buf` after the chains.
         (Table::B, 0x18) => {
-            bus.set_hle_irq_jump_buffer(None);
-            Done(0)
+            ex::set_exit_jmpbuf(bus, ex::DEFAULT_JMPBUF);
+            Done(ex::DEFAULT_JMPBUF)
         }
         (Table::B, 0x19) => {
-            bus.set_hle_irq_jump_buffer(Some(args[0]));
+            ex::set_exit_jmpbuf(bus, args[0]);
             Done(0)
         }
 
@@ -604,10 +629,38 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
 
         // --- C-table (kernel interrupt handlers) ---
 
-        // C(00h) EnqueueTimerAndVblankIrqs / C(01h) EnqueueSyscallHandler /
-        // C(02h) SysEnqIntRP / C(03h) SysDeqIntRP. Registration is
-        // accepted but the chains never run.
-        (Table::C, 0x00) | (Table::C, 0x01) | (Table::C, 0x02) | (Table::C, 0x03) => Stub(0),
+        // Exception chains (psx-spx "Priority Chains"):
+        // C(00h) EnqueueTimerAndVblankIrqs, C(01h) EnqueueSyscallHandler,
+        // C(02h) SysEnqIntRP, C(03h) SysDeqIntRP, C(04h) free EvCB
+        // slot, C(07h) InstallExceptionHandlers, C(0Ch)
+        // InitDefInt, C(0Dh) SetIrqAutoAck.
+        (Table::C, 0x00) => {
+            ex::enqueue_rcnt(bus, args[0], true);
+            Done(0)
+        }
+        (Table::C, 0x01) => {
+            ex::enqueue_syscall_handler(bus, args[0]);
+            Done(0)
+        }
+        (Table::C, 0x02) => {
+            ex::enq_int(bus, args[0], args[1]);
+            Done(0)
+        }
+        (Table::C, 0x03) => Done(ex::deq_int(bus, args[0], args[1])),
+        (Table::C, 0x04) => Done(ex::free_evcb(bus).unwrap_or(u32::MAX)),
+        (Table::C, 0x07) => {
+            ex::install_vector(bus);
+            *flush = true;
+            Done(0)
+        }
+        (Table::C, 0x0C) => {
+            ex::enqueue_defint(bus, args[0]);
+            Done(0)
+        }
+        (Table::C, 0x0D) => {
+            ex::set_irq_autoack(bus, args[0], args[1]);
+            Done(0)
+        }
 
         // C(08h) SysInitMemory(addr, size): new kernel heap.
         (Table::C, 0x08) => {
@@ -631,9 +684,31 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             Done(0)
         }
 
-        // C(0Ah) ChangeClearRCnt -- affects how the kernel's
-        // root-counter handler clears flags. No-op.
-        (Table::C, 0x0A) => Stub(args[1]),
+        // C(0Ah) ChangeClearRCnt(t, flag): root-counter auto-ack; returns
+        // the previous flag.
+        (Table::C, 0x0A) => Done(ex::change_clear_rcnt(bus, args[0], args[1])),
+
+        // Default SYSCALL/exception verifier and root-counter handlers,
+        // reached from the exception handler's chains.
+        (Table::Kernel, ex::internal::SYSCALL_VERIFIER) => match ex::syscall_verifier(bus) {
+            ex::SyscallAction::Pass => Done(0),
+            ex::SyscallAction::Return => Jump(ex::code().return_from_exception),
+            ex::SyscallAction::Deliver(class, spec, then) => {
+                gprs[4] = class;
+                gprs[5] = spec;
+                gprs[31] = then;
+                Jump(ex::code().deliver_event)
+            }
+        },
+        (Table::Kernel, n)
+            if (ex::internal::RCNT_HANDLER..ex::internal::RCNT_HANDLER + 4).contains(&n) =>
+        {
+            if ex::rcnt_handler(bus, n - ex::internal::RCNT_HANDLER) {
+                Jump(ex::code().return_from_exception)
+            } else {
+                Done(0)
+            }
+        }
 
         // Everything else is loud: logged once per function with its
         // arguments and caller, and a stop in strict mode.
@@ -1318,8 +1393,8 @@ mod tests {
     fn unimplemented_and_stubbed_calls_are_recorded_once_per_function() {
         let mut bus = hle_bus();
         assert!(bus.hle_bios_first_unimplemented().is_none());
-        // B(0Bh) TestEvent is a stub; A(43h) exec is unimplemented.
-        assert_eq!(call(&mut bus, 0xB0, 0x0B, [1, 0, 0, 0]), 1);
+        // B(12h) InitPad is a stub; A(43h) exec is unimplemented.
+        assert_eq!(call(&mut bus, 0xB0, 0x12, [0, 0, 0, 0]), 1);
         assert_eq!(call(&mut bus, 0xA0, 0x43, [0x40, 0, 0, 0]), 0);
         assert_eq!(call(&mut bus, 0xA0, 0x43, [0x80, 0, 0, 0]), 0);
         // Implemented calls leave no record.
@@ -1328,7 +1403,7 @@ mod tests {
         let records = bus.hle_bios_records();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].outcome, Outcome::Stub);
-        assert_eq!(records[0].name, "testEvent");
+        assert_eq!(records[0].name, "initPad");
         let first = bus.hle_bios_first_unimplemented().unwrap();
         assert_eq!((first.table, first.func), (Table::A, 0x43));
         assert_eq!(first.args[0], 0x40);
@@ -1382,9 +1457,10 @@ mod tests {
         let mut bus = hle_bus();
         let hook = 0x8001_4000;
         call(&mut bus, 0xB0, 0x19, [hook, 0, 0, 0]);
-        assert_eq!(bus.hle_irq_jump_buffer(), Some(hook));
-        call(&mut bus, 0xB0, 0x18, [0; 4]);
-        assert_eq!(bus.hle_irq_jump_buffer(), None);
+        assert_eq!(crate::hle_exceptions::exit_jmpbuf(&bus), hook);
+        let default = call(&mut bus, 0xB0, 0x18, [0; 4]);
+        assert_eq!(default, crate::hle_exceptions::DEFAULT_JMPBUF);
+        assert_eq!(crate::hle_exceptions::exit_jmpbuf(&bus), default);
     }
 
     #[test]

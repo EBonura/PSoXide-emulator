@@ -30,6 +30,7 @@ pub mod freelook;
 pub mod gpu;
 pub mod hle_asm;
 pub mod hle_bios;
+pub mod hle_exceptions;
 pub mod hle_kernel;
 pub mod input_tape;
 pub mod irq;

@@ -316,12 +316,6 @@ pub struct Bus {
     /// from save states (a restored bus re-reads the environment).
     #[serde(skip, default = "hle_strict_from_env")]
     hle_strict: bool,
-    /// Guest `JumpBuffer` registered through BIOS B(19h) `HookEntryInt`.
-    /// Side-loaded executables do not have a retail kernel to remember and
-    /// invoke this hook, so the HLE path retains the guest pointer and the CPU
-    /// uses it when a real emulated hardware IRQ is taken.
-    #[serde(default)]
-    hle_irq_jump_buffer: Option<u32>,
     /// HSync cycles for the current video region (NTSC = 2172,
     /// PAL = 2167). Used by the timer bank's HBlank source and by
     /// the VBlank scheduler. Flipped by [`Bus::set_pal_mode`];
@@ -461,7 +455,6 @@ impl Bus {
             hle_bios_records: Vec::new(),
             hle_bios_patches: Vec::new(),
             hle_strict: hle_strict_from_env(),
-            hle_irq_jump_buffer: None,
             hsync_cycles: HSYNC_CYCLES_NTSC,
             vblank_hsync_cycles: HSYNC_CYCLES_NTSC,
             vblank_period: VBLANK_PERIOD_CYCLES_NTSC,
@@ -687,16 +680,7 @@ impl Bus {
     /// replace table entries, such as the unresolved-exception slot A(40h).
     pub fn enable_hle_bios_with(&mut self, config: crate::hle_kernel::KernelConfig) {
         self.hle_bios_enabled = true;
-        self.hle_irq_jump_buffer = None;
         crate::hle_kernel::install(self, config);
-    }
-
-    pub(crate) fn set_hle_irq_jump_buffer(&mut self, pointer: Option<u32>) {
-        self.hle_irq_jump_buffer = pointer.filter(|pointer| *pointer != 0);
-    }
-
-    pub(crate) fn hle_irq_jump_buffer(&self) -> Option<u32> {
-        self.hle_irq_jump_buffer
     }
 
     /// Plug a digital controller into port 1 so homebrew / commercial
