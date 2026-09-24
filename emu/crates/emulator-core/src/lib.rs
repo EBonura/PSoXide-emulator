@@ -20,6 +20,7 @@ macro_rules! env_flag {
     }};
 }
 
+pub mod bios_names;
 pub mod bus;
 pub mod cdrom;
 pub mod cpu;

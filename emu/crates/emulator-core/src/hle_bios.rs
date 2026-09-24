@@ -56,6 +56,20 @@ pub enum Table {
 }
 
 impl Table {
+    /// Table index as used by [`crate::bios_names`]: 0 = A, 1 = B, 2 = C.
+    pub fn index(self) -> u8 {
+        match self {
+            Table::A => 0,
+            Table::B => 1,
+            Table::C => 2,
+        }
+    }
+
+    /// Single-letter label, `'A'`, `'B'` or `'C'`.
+    pub fn letter(self) -> char {
+        (b'A' + self.index()) as char
+    }
+
     fn from_phys(phys: u32) -> Option<Self> {
         match phys {
             0xA0 => Some(Table::A),
@@ -63,6 +77,59 @@ impl Table {
             0xC0 => Some(Table::C),
             _ => None,
         }
+    }
+}
+
+/// How a BIOS function was serviced.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// Implemented with the documented semantics.
+    Done,
+    /// Accepted without the real effect (events are always ready, device
+    /// registration is ignored, ...). The guest proceeds, but may rely on
+    /// state the kernel never produced.
+    Stub,
+    /// Not implemented. Returns 0 without touching guest state, logs once
+    /// per function, and stops the CPU when strict mode is on.
+    Unimplemented,
+}
+
+/// First occurrence of a stubbed or unimplemented BIOS function.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallRecord {
+    /// Dispatch table.
+    pub table: Table,
+    /// Function number.
+    pub func: u8,
+    /// Conventional name from [`crate::bios_names`], or `"?"`.
+    pub name: &'static str,
+    /// How the call was serviced.
+    pub outcome: Outcome,
+    /// `$a0..$a3` at the first call.
+    pub args: [u32; 4],
+    /// Caller's `$ra` at the first call.
+    pub ra: u32,
+    /// Bus cycle of the first call.
+    pub cycle: u64,
+    /// Calls so far.
+    pub count: u64,
+}
+
+impl std::fmt::Display for CallRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}({:02X}h) {} a0={:#010x} a1={:#010x} a2={:#010x} a3={:#010x} ra={:#010x} cycle={}",
+            self.table.letter(),
+            self.func,
+            self.name,
+            self.args[0],
+            self.args[1],
+            self.args[2],
+            self.args[3],
+            self.ra,
+            self.cycle
+        )
     }
 }
 
@@ -76,6 +143,12 @@ pub struct Hle {
     /// resumes right after the caller's `jalr` (or, in the BIOS-stub
     /// pattern, right after the `jr $t0 ; li $t1, N` pair).
     pub next_pc: u32,
+    /// Which table was called.
+    pub table: Table,
+    /// Function number (`$t1 & 0xFF`).
+    pub func: u8,
+    /// How the call was serviced.
+    pub outcome: Outcome,
 }
 
 /// Look at `cpu_pc`; if it matches a BIOS table entry, run the
@@ -96,12 +169,34 @@ pub fn dispatch(
     let phys = to_physical(cpu_pc);
     let table = Table::from_phys(phys)?;
     let func = (t1_func_num & 0xFF) as u8;
-    let v0 = run(table, func, bus, args, sp);
-    Some(Hle { v0, next_pc: ra })
+    bus.hle_bios_log_call(table, func);
+    let (outcome, v0) = match run(table, func, bus, args, sp) {
+        Ret::Done(v0) => (Outcome::Done, v0),
+        Ret::Stub(v0) => (Outcome::Stub, v0),
+        Ret::Unimplemented => (Outcome::Unimplemented, 0),
+    };
+    if outcome != Outcome::Done {
+        bus.hle_bios_record_call(table, func, outcome, args, ra);
+    }
+    Some(Hle {
+        v0,
+        next_pc: ra,
+        table,
+        func,
+        outcome,
+    })
 }
 
-fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> u32 {
-    bus.hle_bios_log_call(table, func);
+/// Handler result. `Unimplemented` arms must not have side effects, so
+/// strict mode can stop before the call changes anything.
+enum Ret {
+    Done(u32),
+    Stub(u32),
+    Unimplemented,
+}
+
+fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> Ret {
+    use Ret::{Done, Stub, Unimplemented};
     match (table, func) {
         // --- A-table ---
         //
@@ -116,50 +211,54 @@ fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> u32 {
         // layout exists; they fall through to the unimplemented arm.
 
         // A(0Eh) abs / A(0Fh) labs.
-        (Table::A, 0x0E) | (Table::A, 0x0F) => (args[0] as i32).wrapping_abs() as u32,
+        (Table::A, 0x0E) | (Table::A, 0x0F) => Done((args[0] as i32).wrapping_abs() as u32),
 
         // A(15h) strcat(dst, src).
-        (Table::A, 0x15) => libc::strcat(bus, args[0], args[1]),
+        (Table::A, 0x15) => Done(libc::strcat(bus, args[0], args[1])),
         // A(17h) strcmp(s1, s2) / A(18h) strncmp(s1, s2, maxlen).
-        (Table::A, 0x17) => libc::strncmp(bus, args[0], args[1], None),
-        (Table::A, 0x18) => libc::strncmp(bus, args[0], args[1], Some(args[2])),
+        (Table::A, 0x17) => Done(libc::strncmp(bus, args[0], args[1], None)),
+        (Table::A, 0x18) => Done(libc::strncmp(bus, args[0], args[1], Some(args[2]))),
         // A(19h) strcpy(dst, src) / A(1Ah) strncpy(dst, src, maxlen).
-        (Table::A, 0x19) => libc::strcpy(bus, args[0], args[1]),
-        (Table::A, 0x1A) => libc::strncpy(bus, args[0], args[1], args[2]),
+        (Table::A, 0x19) => Done(libc::strcpy(bus, args[0], args[1])),
+        (Table::A, 0x1A) => Done(libc::strncpy(bus, args[0], args[1], args[2])),
         // A(1Bh) strlen(s).
-        (Table::A, 0x1B) => libc::strlen(bus, args[0]),
+        (Table::A, 0x1B) => Done(libc::strlen(bus, args[0])),
         // A(1Ch) index / A(1Eh) strchr, A(1Dh) rindex / A(1Fh) strrchr.
-        (Table::A, 0x1C) | (Table::A, 0x1E) => libc::strchr(bus, args[0], args[1] as u8, false),
-        (Table::A, 0x1D) | (Table::A, 0x1F) => libc::strchr(bus, args[0], args[1] as u8, true),
+        (Table::A, 0x1C) | (Table::A, 0x1E) => {
+            Done(libc::strchr(bus, args[0], args[1] as u8, false))
+        }
+        (Table::A, 0x1D) | (Table::A, 0x1F) => {
+            Done(libc::strchr(bus, args[0], args[1] as u8, true))
+        }
         // A(25h) toupper / A(26h) tolower. psx-spx documents 00h..7Fh only;
         // bytes 80h..FFh come back unchanged here.
-        (Table::A, 0x25) => u32::from((args[0] as u8).to_ascii_uppercase()),
-        (Table::A, 0x26) => u32::from((args[0] as u8).to_ascii_lowercase()),
+        (Table::A, 0x25) => Done(u32::from((args[0] as u8).to_ascii_uppercase())),
+        (Table::A, 0x26) => Done(u32::from((args[0] as u8).to_ascii_lowercase())),
 
         // A(27h) bcopy(src, dst, len) / A(2Ah) memcpy(dst, src, len).
         (Table::A, 0x27) => {
             libc::memcpy(bus, args[1], args[0], args[2], args[0]);
-            args[0]
+            Done(args[0])
         }
         (Table::A, 0x2A) => {
             libc::memcpy(bus, args[0], args[1], args[2], args[0]);
-            args[0]
+            Done(args[0])
         }
         // A(28h) bzero(dst, len) / A(2Bh) memset(dst, fill, len).
-        (Table::A, 0x28) => libc::memset(bus, args[0], 0, args[1]),
-        (Table::A, 0x2B) => libc::memset(bus, args[0], args[1] as u8, args[2]),
+        (Table::A, 0x28) => Done(libc::memset(bus, args[0], 0, args[1])),
+        (Table::A, 0x2B) => Done(libc::memset(bus, args[0], args[1] as u8, args[2])),
         // A(2Eh) memchr(src, byte, len).
-        (Table::A, 0x2E) => libc::memchr(bus, args[0], args[1] as u8, args[2]),
+        (Table::A, 0x2E) => Done(libc::memchr(bus, args[0], args[1] as u8, args[2])),
 
         // A(3Ch) putchar.
         (Table::A, 0x3C) => {
             write_byte_to_stdout(args[0] as u8);
-            0
+            Done(0)
         }
         // A(3Eh) puts(s) / A(3Fh) printf.
         (Table::A, 0x3E) => {
             write_puts_to_stdout(bus, args[0]);
-            0
+            Done(0)
         }
         (Table::A, 0x3F) => {
             // printf varargs follow the MIPS o32 ABI: a1-a3 first, then the
@@ -167,106 +266,102 @@ fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> u32 {
             // both sources lets public hardware suites print complete rows
             // instead of losing their fourth and later values.
             hle_printf(bus, args[0], &[args[1], args[2], args[3]], sp);
-            0
+            Done(0)
         }
 
         // A(44h) FlushCache -- the CPU intercept invalidates its
         // instruction cache before this HLE handler returns.
-        (Table::A, 0x44) => 0,
+        (Table::A, 0x44) => Done(0),
 
         // A(70h) _bu_init (memcard filesystem init) -- accept.
-        (Table::A, 0x70) => 0,
+        (Table::A, 0x70) => Stub(0),
 
         // A(96h) AddCDROMDevice / A(97h) AddMemCardDevice -- games
         // call these during init to register filesystem drivers.
         // We don't model the device table; accept so the game moves on.
-        (Table::A, 0x96) | (Table::A, 0x97) => 0,
+        (Table::A, 0x96) | (Table::A, 0x97) => Stub(0),
 
         // A(9Fh) SetMem(megabytes): 2 clears RAM_SIZE bits 8-9, 8 sets them,
         // and the size is recorded at [0x60] (psx-spx; OpenBIOS
         // kernel/misc.c setMemSize). Other values change nothing.
         (Table::A, 0x9F) => {
             set_mem_size(bus, args[0]);
-            0
+            Done(0)
         }
 
         // --- B-table ---
 
-        // B(0x00) SysMalloc -- not a real malloc; many games replace
-        // the kernel heap with their own and never call this.
-        (Table::B, 0x00) => 0,
-
-        // B(0x07) DeliverEvent -- accept; our event system is always-
+        // B(07h) DeliverEvent -- accept; our event system is always-
         // ready so there's nothing to deliver.
-        (Table::B, 0x07) => 0,
+        (Table::B, 0x07) => Stub(0),
 
-        // B(0x08) OpenEvent: return a synthetic handle. We accept
+        // B(08h) OpenEvent: return a synthetic handle. We accept
         // everything; the handle encodes table + slot for debug.
-        (Table::B, 0x08) => 0xF400_0000 | (args[0] & 0xFFFF),
+        (Table::B, 0x08) => Stub(0xF400_0000 | (args[0] & 0xFFFF)),
 
-        // B(0x09) CloseEvent, B(0x0A) WaitEvent, B(0x0B) TestEvent,
-        // B(0x0C) EnableEvent, B(0x0D) DisableEvent -- always-ready.
+        // B(09h) CloseEvent, B(0Ah) WaitEvent, B(0Bh) TestEvent,
+        // B(0Ch) EnableEvent, B(0Dh) DisableEvent -- always-ready.
         (Table::B, 0x09)
         | (Table::B, 0x0A)
         | (Table::B, 0x0B)
         | (Table::B, 0x0C)
-        | (Table::B, 0x0D) => 1,
+        | (Table::B, 0x0D) => Stub(1),
 
-        // B(0x12) InitPad(buf1, siz1, buf2, siz2): tell the kernel
+        // B(12h) InitPad(buf1, siz1, buf2, siz2): tell the kernel
         // where to stash pad state. Since we poll the hardware
         // directly via psx-pad there's nothing for us to do.
-        (Table::B, 0x12) => 1,
+        (Table::B, 0x12) => Stub(1),
 
-        // B(0x13) StartPad, B(0x14) StopPad -- accept.
-        (Table::B, 0x13) | (Table::B, 0x14) => 1,
+        // B(13h) StartPad, B(14h) StopPad -- accept.
+        (Table::B, 0x13) | (Table::B, 0x14) => Stub(1),
 
-        // B(0x17) ReturnFromException is completed by Cpu::execute_one:
+        // B(17h) ReturnFromException is completed by Cpu::execute_one:
         // when a side-loaded guest IRQ hook is active it restores the
         // interrupted CPU frame instead of returning to this call's `$ra`.
-        (Table::B, 0x17) => 0,
+        (Table::B, 0x17) => Done(0),
 
-        // B(0x18) ResetEntryInt / B(0x19) HookEntryInt. The latter receives
+        // B(18h) ResetEntryInt / B(19h) HookEntryInt. The latter receives
         // a BIOS-compatible JumpBuffer pointer (ra, sp, fp, s0..s7, gp).
         // Retaining it lets side-loaded EXEs use their real guest ISR rather
         // than relying on a synthetic VBlank callback.
         (Table::B, 0x18) => {
             bus.set_hle_irq_jump_buffer(None);
-            0
+            Done(0)
         }
         (Table::B, 0x19) => {
             bus.set_hle_irq_jump_buffer(Some(args[0]));
-            0
+            Done(0)
         }
 
-        // B(0x3D) std_out_putchar -- same as A(0x3C).
+        // B(3Dh) putchar -- same as A(3Ch).
         (Table::B, 0x3D) => {
             write_byte_to_stdout(args[0] as u8);
-            0
+            Done(0)
         }
         // B(3Fh) puts -- same as A(3Eh).
         (Table::B, 0x3F) => {
             write_puts_to_stdout(bus, args[0]);
-            0
+            Done(0)
         }
 
-        // B(0x4A) InitCard, B(0x4B) StartCard, B(0x4C) StopCard.
-        (Table::B, 0x4A) | (Table::B, 0x4B) | (Table::B, 0x4C) => 1,
+        // B(4Ah) InitCard, B(4Bh) StartCard, B(4Ch) StopCard.
+        (Table::B, 0x4A) | (Table::B, 0x4B) | (Table::B, 0x4C) => Stub(1),
 
         // --- C-table (kernel interrupt handlers) ---
 
-        // C(0x00) EnqueueTimerAndVblankIrqs / C(0x01) EnqueueSyscallHandler.
-        // Install canned handlers. We never actually invoke them --
-        // but accepting the registration lets games proceed.
-        (Table::C, 0x00) | (Table::C, 0x01) | (Table::C, 0x02) | (Table::C, 0x03) => 0,
+        // C(00h) EnqueueTimerAndVblankIrqs / C(01h) EnqueueSyscallHandler /
+        // C(02h) SysEnqIntRP / C(03h) SysDeqIntRP. Registration is
+        // accepted but the chains never run.
+        (Table::C, 0x00) | (Table::C, 0x01) | (Table::C, 0x02) | (Table::C, 0x03) => Stub(0),
 
-        // C(0x0A) ChangeClearRCnt -- affects how the kernel's
+        // C(0Ah) ChangeClearRCnt -- affects how the kernel's
         // root-counter handler clears flags. No-op.
-        (Table::C, 0x0A) => args[1],
+        (Table::C, 0x0A) => Stub(args[1]),
 
-        // Everything else: zero. Games that trip a real missing
-        // syscall will show up in the HLE call histogram and we
-        // can fill them in one at a time.
-        _ => 0,
+        // Everything else, including B(00h) alloc_kernel_memory (it needs
+        // the kernel heap), is loud: logged once per function with its
+        // arguments and caller, and a stop in strict mode.
+        _ => Unimplemented,
     }
 }
 
@@ -648,7 +743,7 @@ fn pad_existing_field(out: &mut Vec<u8>, start: usize, width: usize, pad: u8, le
 
 #[cfg(test)]
 mod tests {
-    use super::{append_padded, dispatch, pad_existing_field};
+    use super::{append_padded, dispatch, pad_existing_field, Outcome, Table};
     use crate::Bus;
 
     const RA: u32 = 0x8001_0100;
@@ -845,6 +940,32 @@ mod tests {
         out.extend_from_slice(b"BIOS");
         pad_existing_field(&mut out, start, 6, b' ', false);
         assert_eq!(&out[start..], b"  BIOS");
+    }
+
+    #[test]
+    fn unimplemented_and_stubbed_calls_are_recorded_once_per_function() {
+        let mut bus = Bus::new_without_bios();
+        assert!(bus.hle_bios_first_unimplemented().is_none());
+        // B(0Bh) TestEvent is a stub; A(33h) malloc is unimplemented.
+        assert_eq!(call(&mut bus, 0xB0, 0x0B, [1, 0, 0, 0]), 1);
+        assert_eq!(call(&mut bus, 0xA0, 0x33, [0x40, 0, 0, 0]), 0);
+        assert_eq!(call(&mut bus, 0xA0, 0x33, [0x80, 0, 0, 0]), 0);
+        // Implemented calls leave no record.
+        call(&mut bus, 0xA0, 0x1B, [0, 0, 0, 0]);
+
+        let records = bus.hle_bios_records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].outcome, Outcome::Stub);
+        assert_eq!(records[0].name, "testEvent");
+        let first = bus.hle_bios_first_unimplemented().unwrap();
+        assert_eq!((first.table, first.func), (Table::A, 0x33));
+        assert_eq!(first.args[0], 0x40);
+        assert_eq!(first.ra, RA);
+        assert_eq!(first.count, 2);
+        assert_eq!(
+            first.to_string().split(" a1=").next(),
+            Some("A(33h) user_malloc a0=0x00000040")
+        );
     }
 
     #[test]
