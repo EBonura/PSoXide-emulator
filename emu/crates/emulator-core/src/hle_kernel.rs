@@ -118,6 +118,8 @@ pub mod kvar {
     pub const PAD_STARTED: u32 = 0x0A2C;
     /// setPadOutputData arguments: pad1 buffer, size, pad2 buffer, size.
     pub const PAD_OUTPUT: u32 = 0x0A30;
+    /// A(2Fh)/A(30h) random generator state.
+    pub const RAND_SEED: u32 = 0x0A40;
 }
 
 /// Kernel-internal functions reachable through stubs in table 3.
