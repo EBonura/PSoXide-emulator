@@ -1308,7 +1308,12 @@ impl Gpu {
     /// so the busy flag settles back to "ready" as cycles advance.
     /// One elapsed CPU/bus cycle decays one unit of credit.
     pub fn decay_busy(&mut self, mut cycles: u64) {
-        if self.experimental_dma_fifo {
+        // Host fast path: when the FIFO cannot make progress during these
+        // cycles (nothing queued, or the head waits on a busy GPU that stays
+        // busy throughout), the slow path below reduces to the three credit
+        // subtractions at the end. Exactly equivalent; it only skips the
+        // drain calls that would find nothing to do.
+        if self.experimental_dma_fifo && self.fifo_quiet_cycles() < cycles {
             self.drain_dma_input_fifo();
             while cycles > 0
                 && (!self.dma_input_fifo.is_empty() || self.deferred_irq_command.is_some())
@@ -1326,6 +1331,46 @@ impl Gpu {
                 self.drain_dma_input_fifo();
             }
         }
+        self.busy_credit = self.busy_credit.saturating_sub(cycles);
+        self.dma_busy_credit = self.dma_busy_credit.saturating_sub(cycles);
+        self.cmd_ingest_credit = self.cmd_ingest_credit.saturating_sub(cycles);
+    }
+
+    /// How many cycles the FIFO model can advance with nothing but credit
+    /// decay: unbounded when nothing is queued or deferred, `busy_credit - 1`
+    /// when the head word waits on a GPU that stays busy that long (see
+    /// `drain_dma_input_fifo`'s stall rules), 0 when a drain could progress.
+    pub(crate) fn fifo_quiet_cycles(&self) -> u64 {
+        let Some(&(word, _)) = self.dma_input_fifo.front() else {
+            return if self.deferred_irq_command.is_none() {
+                u64::MAX
+            } else {
+                self.busy_credit.saturating_sub(1)
+            };
+        };
+        if self.vram_download.is_some() {
+            // The drain never moves while a download is pending; a deferred
+            // interrupt command still fires when the credit runs out.
+            return if self.deferred_irq_command.is_none() {
+                u64::MAX
+            } else {
+                self.busy_credit.saturating_sub(1)
+            };
+        }
+        if self.vram_upload.is_some() || self.busy_credit < 2 {
+            return 0;
+        }
+        let op = (word >> 24) as u8;
+        if self.polyline.is_none()
+            && (matches!(op, 0xe3..=0xe5) || (op == 0x1F && self.deferred_irq_command.is_none()))
+        {
+            return 0;
+        }
+        self.busy_credit - 1
+    }
+
+    /// Credit decay for cycles that `fifo_quiet_cycles` allowed.
+    pub(crate) fn decay_busy_quiet(&mut self, cycles: u64) {
         self.busy_credit = self.busy_credit.saturating_sub(cycles);
         self.dma_busy_credit = self.dma_busy_credit.saturating_sub(cycles);
         self.cmd_ingest_credit = self.cmd_ingest_credit.saturating_sub(cycles);
@@ -1393,8 +1438,7 @@ impl Gpu {
         if self.gp0_burst_words <= Self::GP0_FIFO_DEPTH {
             return true;
         }
-        if self.gp0_overflow_count == 0 && std::env::var_os("PSOXIDE_TRACE_GP0_OVERFLOW").is_some()
-        {
+        if self.gp0_overflow_count == 0 && crate::env_flag!("PSOXIDE_TRACE_GP0_OVERFLOW") {
             eprintln!(
                 "[gpu] GP0 burst exceeded the {}-word FIFO while busy; \
                  silicon may lose these words (further overflows counted \
@@ -4105,6 +4149,28 @@ fn clipped_polygon_area(
     let bottom = i64::from(bottom_exclusive.min(VRAM_HEIGHT as i32)) * FP;
     if left >= right || top >= bottom || vertices.len() < 3 {
         return 0;
+    }
+
+    // Host fast path: a primitive wholly inside the drawing area clips to
+    // itself, so its area comes straight from the vertices (same arithmetic,
+    // no allocation).
+    if vertices.iter().all(|&(x, y)| {
+        let (x, y) = (i64::from(x) * FP, i64::from(y) * FP);
+        x >= left && x <= right && y >= top && y <= bottom
+    }) {
+        let mut twice_area = 0i128;
+        for i in 0..vertices.len() {
+            let (x0, y0) = vertices[i];
+            let (x1, y1) = vertices[(i + 1) % vertices.len()];
+            let (x0, y0, x1, y1) = (
+                i64::from(x0) * FP,
+                i64::from(y0) * FP,
+                i64::from(x1) * FP,
+                i64::from(y1) * FP,
+            );
+            twice_area += i128::from(x0) * i128::from(y1) - i128::from(x1) * i128::from(y0);
+        }
+        return ((twice_area.unsigned_abs() + (1u128 << 32)) >> 33) as u64;
     }
 
     let mut polygon: Vec<(i64, i64)> = vertices

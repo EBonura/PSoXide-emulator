@@ -713,7 +713,7 @@ impl CdRom {
                 .expect("loop condition guarantees an element");
             if self.dropped_sectors == 0 {
                 self.dropped_lba_first = lost;
-                if std::env::var_os("PSOXIDE_TRACE_SECTOR_DROP").is_some() {
+                if crate::env_flag!("PSOXIDE_TRACE_SECTOR_DROP") {
                     eprintln!(
                         "[drop] lba={lost} read_lba={} waiting={} reading={} mode=0x{:02X} \
                          irq_flag={} fifo={} last_cmd=0x{:02X} scheduling_cycle={}",
@@ -780,7 +780,7 @@ impl CdRom {
         while let Some((skipped, _)) = self.waiting_sectors.pop_front() {
             if self.dropped_sectors == 0 {
                 self.dropped_lba_first = skipped;
-                if std::env::var_os("PSOXIDE_TRACE_SECTOR_DROP").is_some() {
+                if crate::env_flag!("PSOXIDE_TRACE_SECTOR_DROP") {
                     eprintln!(
                         "[drop/snap] lba={skipped} newest={} backlog={} reading={} fifo={}",
                         newest_lba,
@@ -2013,7 +2013,7 @@ impl CdRom {
             self.schedule_error_response(vec![stat]);
             return;
         };
-        if std::env::var_os("PSOXIDE_TRACE_CDDA_PLAY").is_some() {
+        if crate::env_flag!("PSOXIDE_TRACE_CDDA_PLAY") {
             match params.first() {
                 Some(&bcd) => eprintln!(
                     "[cdda] play track bcd=0x{bcd:02X} (decimal {})",

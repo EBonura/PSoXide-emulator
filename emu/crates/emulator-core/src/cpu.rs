@@ -2208,7 +2208,7 @@ impl Cpu {
         // PSOXIDE_TRACE_STALE=1: log the first stale-serving reads (PC, reg,
         // tick distance) to identify exactly which game code trips the model.
         #[allow(clippy::collapsible_if)]
-        if std::env::var_os("PSOXIDE_TRACE_STALE").is_some() {
+        if crate::env_flag!("PSOXIDE_TRACE_STALE") {
             use std::sync::atomic::{AtomicU32, Ordering};
             static N: AtomicU32 = AtomicU32::new(0);
             let stale = match rd {
@@ -2366,7 +2366,7 @@ impl Cpu {
         // Opt-in trace: catch anything setting SR.BEV (bit 22) mid-run --
         // exceptions then vector through the ROM handler and fall off the
         // mapped BIOS, which presents as a wild pc at 0xbfc80000.
-        if std::env::var_os("PSOXIDE_TRACE_EXC").is_some() {
+        if crate::env_flag!("PSOXIDE_TRACE_EXC") {
             let rd = (instr >> 11) & 31;
             let rt = ((instr >> 16) & 31) as u8;
             let v = self.gpr(rt);
@@ -3343,9 +3343,7 @@ impl Cpu {
             self.exception_counts[code_bits as usize].saturating_add(1);
         // Opt-in fault tracing for guest debugging: every non-IRQ exception
         // with its cause, EPC, and delay-slot flag.
-        if !matches!(code, ExceptionCode::Interrupt)
-            && std::env::var_os("PSOXIDE_TRACE_EXC").is_some()
-        {
+        if !matches!(code, ExceptionCode::Interrupt) && crate::env_flag!("PSOXIDE_TRACE_EXC") {
             eprintln!(
                 "[cpu] exception code {} at pc=0x{:08x} bd={}",
                 code_bits, pc, in_delay_slot as u32
