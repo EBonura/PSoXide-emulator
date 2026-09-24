@@ -627,6 +627,12 @@ impl CdRom {
         self.cd_audio.len()
     }
 
+    /// Current drive status byte as a GetStat would report it.
+    /// Diagnostic only; used by the BIOS census probe.
+    pub fn debug_stat_byte(&self) -> u8 {
+        self.stat_byte()
+    }
+
     /// Live SetMode byte -- diagnostic for XA / raw-sector streaming.
     pub fn debug_mode(&self) -> u8 {
         self.mode

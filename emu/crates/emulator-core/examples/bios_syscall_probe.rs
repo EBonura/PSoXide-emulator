@@ -10,7 +10,15 @@
 //! PSOXIDE_PAD1_PULSES="0x0008@600+8,0x4000@650+8" \
 //!   cargo run -p emulator-core --example bios_syscall_probe --release -- 2000000000
 //! ```
+//!
+//! Set `PSOXIDE_CENSUS_OUT=<dir>` for the full BIOS usage census (boot
+//! vs game phase call counts, exception/IRQ/SYSCALL entries, kernel-RAM
+//! accesses from user code, EXE-entry state snapshot); see
+//! `support/census.rs`. `PSOXIDE_STOP_VBLANK=<n>` stops after `n`
+//! VBlank IRQs instead of the step budget.
 
+#[path = "support/census.rs"]
+mod census;
 #[path = "support/disc.rs"]
 mod disc_support;
 #[path = "support/pad.rs"]
@@ -19,8 +27,6 @@ mod pad_support;
 use emulator_core::{Bus, Cpu};
 use pad_support::{parse_pad_pulses, parse_u16_mask, sync_pad_mask};
 use std::path::PathBuf;
-
-const SPU_PUMP_CYCLES: u64 = 560_000;
 
 fn main() {
     let n: u64 = std::env::args()
@@ -33,8 +39,17 @@ fn main() {
         .unwrap_or_else(|_| PathBuf::from("bios/SCPH1001.BIN"));
     let bios = std::fs::read(&bios_path).expect("BIOS readable");
     let mut bus = Bus::new(bios).expect("bus");
+    let mut census = census::Census::from_env();
+    let stop_vblank = std::env::var("PSOXIDE_STOP_VBLANK")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(u64::MAX);
+    let mut stop_reason = "step budget";
     if let Ok(disc_path) = std::env::var("PSOXIDE_DISC") {
         let disc = disc_support::load_disc_path(&PathBuf::from(&disc_path)).expect("disc readable");
+        if let Some(c) = census.as_mut() {
+            c.set_boot_exe(&disc);
+        }
         bus.cdrom.insert_disc(Some(disc));
         eprintln!("[probe] mounted {disc_path}");
     }
@@ -65,7 +80,6 @@ fn main() {
         .unwrap_or(128);
     let mut trace_count = 0usize;
     let mut current_pad_mask = None;
-    let mut cycles_at_last_pump = 0u64;
 
     // Histograms: [table][function_index] → call count.
     //   table 0 = A-functions @ 0xa0
@@ -92,8 +106,12 @@ fn main() {
         // Before each step, sample pc -- dispatch happens when we
         // execute at exactly 0xa0 / 0xb0 / 0xc0 (the J to the
         // table dispatcher). `t1` carries the function number.
+        if let Some(c) = census.as_mut() {
+            c.pre_step(&cpu, &mut bus);
+        }
         let pc = cpu.pc();
-        let table = match pc {
+        // Any KUSEG/KSEG0/KSEG1 mirror of the dispatch vectors.
+        let table = match pc & 0x1FFF_FFFF {
             0xa0 => Some(0u8),
             0xb0 => Some(1u8),
             0xc0 => Some(2u8),
@@ -125,7 +143,7 @@ fn main() {
             // Putchar capture: argument is in $a0.
             let a0 = cpu.gprs()[4];
             match (t, t1) {
-                (0, 0x3D) | (1, 0x3D) => {
+                (0, 0x3C) | (1, 0x3D) => {
                     // Single-char putchar.
                     if a0 < 128 {
                         putchar_log.push(a0 as u8 as char);
@@ -155,11 +173,21 @@ fn main() {
         }
         if let Err(e) = cpu.step(&mut bus) {
             eprintln!("[probe] step {i} error: {e:?}");
+            stop_reason = "step error";
             break;
         }
-        if bus.cycles().saturating_sub(cycles_at_last_pump) > SPU_PUMP_CYCLES {
-            cycles_at_last_pump = bus.cycles();
-            bus.run_spu_to_current_cycle();
+        if let Some(c) = census.as_mut() {
+            c.post_step(&bus);
+        }
+        if i & 0xFFF == 0 && bus.irq().raise_counts()[0] >= stop_vblank {
+            stop_reason = "stop vblank";
+            break;
+        }
+        // Pump the SPU every step, as the frontend's headless loop does.
+        // A coarse pump starves CD-XA/SPU timing and stalls FMV intros
+        // (seen on Gran Turismo 2 and Resident Evil 3).
+        bus.run_spu_to_current_cycle();
+        if bus.spu.audio_queue_len() != 0 {
             let _ = bus.spu.drain_audio();
         }
 
@@ -192,6 +220,10 @@ fn main() {
                 }
             }
         }
+    }
+
+    if let Some(c) = census.as_ref() {
+        c.finish(&cpu, &mut bus, stop_reason);
     }
 
     let labels = ["A", "B", "C"];
@@ -242,99 +274,8 @@ fn main() {
     }
 }
 
-/// Canonical names for the BIOS A/B/C function numbers. Pulled
-/// from nocash PSX-SPX -- not exhaustive, just the common ones so
-/// the histogram reads more usefully than raw hex.
+/// Standard BIOS function names; see `emulator_core::bios_names` for their
+/// provenance.
 fn function_name(table: u8, fn_no: u8) -> &'static str {
-    match (table, fn_no) {
-        (0, 0x00) => "FileOpen",
-        (0, 0x01) => "FileSeek",
-        (0, 0x02) => "FileRead",
-        (0, 0x03) => "FileWrite",
-        (0, 0x04) => "FileClose",
-        (0, 0x05) => "FileIoctl",
-        (0, 0x06) => "exit",
-        (0, 0x13) => "SaveState",
-        (0, 0x17) => "strcmp",
-        (0, 0x18) => "strncmp",
-        (0, 0x19) => "strcpy",
-        (0, 0x1A) => "strncpy",
-        (0, 0x1B) => "strlen",
-        (0, 0x25) => "toupper",
-        (0, 0x28) => "bzero",
-        (0, 0x2A) => "memcpy",
-        (0, 0x2B) => "memset",
-        (0, 0x2C) => "memmove",
-        (0, 0x2F) => "rand",
-        (0, 0x33) => "malloc",
-        (0, 0x34) => "free",
-        (0, 0x39) => "InitHeap",
-        (0, 0x3C) => "std_in_getchar",
-        (0, 0x3D) => "std_out_putchar",
-        (0, 0x40) => "SystemErrorUnresolvedException",
-        (0, 0x44) => "FlushCache",
-        (0, 0x47) => "GPU_cw",
-        (0, 0x49) => "GPU_cwb",
-        (0, 0x54) => "CdInit",
-        (0, 0x70) => "_bu_init",
-        (0, 0x78) => "CdReadSector",
-        (0, 0x96) => "AddCDROMDevice",
-        (0, 0xa1) => "SystemError",
-        (0, 0xa2) => "EnqueueCdIntr",
-        (0, 0xa3) => "DequeueCdIntr",
-        (0, 0xa4) => "CdGetLbn",
-        (0, 0xa5) => "CdReadSector",
-        (0, 0xa6) => "CdGetStatus",
-        (0, 0xa7) => "bu_callback_okay",
-        (0, 0xa8) => "bu_callback_err_write",
-        (0, 0xa9) => "bu_callback_err_busy",
-        (0, 0xaa) => "bu_callback_err_eject",
-        (0, 0xab) => "_card_info",
-        (0, 0xac) => "_card_async_load_directory",
-        (0, 0xae) => "_card_status",
-        (0, 0xaf) => "_card_wait",
-
-        (1, 0x00) => "alloc_kernel_memory",
-        (1, 0x07) => "DeliverEvent",
-        (1, 0x08) => "OpenEvent",
-        (1, 0x09) => "CloseEvent",
-        (1, 0x0A) => "WaitEvent",
-        (1, 0x0B) => "TestEvent",
-        (1, 0x0C) => "EnableEvent",
-        (1, 0x0D) => "DisableEvent",
-        (1, 0x0E) => "OpenTh",
-        (1, 0x0F) => "CloseTh",
-        (1, 0x10) => "ChangeTh",
-        (1, 0x12) => "InitPad",
-        (1, 0x13) => "StartPad",
-        (1, 0x14) => "StopPad",
-        (1, 0x17) => "ReturnFromException",
-        (1, 0x18) => "SetDefaultExitFromException",
-        (1, 0x19) => "SetCustomExitFromException",
-        (1, 0x20) => "UnDeliverEvent",
-        (1, 0x32) => "FileOpen",
-        (1, 0x3C) => "std_in_getchar",
-        (1, 0x3D) => "std_out_putchar",
-        (1, 0x3F) => "std_out_puts",
-        (1, 0x4A) => "InitCard",
-        (1, 0x4B) => "StartCard",
-        (1, 0x4C) => "StopCard",
-        (1, 0x56) => "GetC0Table",
-        (1, 0x57) => "GetB0Table",
-        (1, 0x5B) => "ChangeClearPad",
-
-        (2, 0x00) => "EnqueueTimerAndVblankIrqs",
-        (2, 0x01) => "EnqueueSyscallHandler",
-        (2, 0x02) => "SysEnqIntRP",
-        (2, 0x03) => "SysDeqIntRP",
-        (2, 0x07) => "InstallExceptionHandlers",
-        (2, 0x08) => "SysInitMemory",
-        (2, 0x09) => "SysInitKernelVariables",
-        (2, 0x0A) => "ChangeClearRCnt",
-        (2, 0x0C) => "InitDefInt",
-        (2, 0x12) => "InstallDevices",
-        (2, 0x1A) => "FlushStdInOutPut",
-
-        _ => "?",
-    }
+    census::function_name(table, fn_no as u32)
 }
