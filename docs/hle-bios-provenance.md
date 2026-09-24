@@ -54,7 +54,15 @@ Update it in the same commit as any HLE change.
 | ChangeClearPAD B(5Bh) returns previous value; _96_remove | `hle_bios.rs` | psx-spx; OpenBIOS `sio0/driver.c` setSIO0AutoAck, `cdrom/cdrom.c` deinitCDRom |
 | strtol, strtoul, atoi, atol, atob, rand, srand | `hle_bios.rs` | psx-spx "Number/String/Character Conversion" and "Misc Functions" |
 | SendGP1Command, GPU_cw, GPU_cwp, GetGPUStatus, gpu_sync | `hle_bios.rs` | psx-spx "BIOS GPU Functions" |
-| Events always ready, HookEntryInt, unresolved-exception hook, FlushCache | `hle_bios.rs`, `cpu.rs` | predates this file; to be re-derived from psx-spx and OpenBIOS when the kernel model replaces them |
+| Exception vector at 80h and its copy at 0 (first word 3) | `hle_exceptions.rs` | psx-spx "Garbage Area" and C(06h); OpenBIOS `vectors.s` notes on games that read these words |
+| Exception handler at C80h: register save to the current TCB, GTE EPC adjust, patch-slot layout, four ExCB priority chains (verifier then handler), longjmp to the exit buffer with r2=1 | `hle_exceptions.rs` | psx-spx "BIOS Interrupt/Exception Handling"; layout and protocol from OpenBIOS `kernel/vectors.s` (MIT) |
+| ReturnFromException (k0 not restored, k1 restored last) | `hle_exceptions.rs` | psx-spx B(17h); OpenBIOS `returnFromException` |
+| Events: OpenEvent, CloseEvent, WaitEvent, TestEvent, Enable/DisableEvent, DeliverEvent, UnDeliverEvent, EvCB layout, status and mode values, classes | `hle_exceptions.rs`, `hle_bios.rs` | psx-spx "BIOS Event Functions"; OpenBIOS `kernel/events.c` |
+| Default chain elements: SYSCALL handler (prio 0), root counters T0-T2 and VBlank (prio 1), default IRQ handler (prio 3); ChangeClearRCnt, SetIrqAutoAck, SysEnqIntRP, SysDeqIntRP (searches the whole chain, unlike the documented retail bug) | `hle_exceptions.rs` | psx-spx "Priority Chains", C(0Ah), C(0Dh), C(02h)/C(03h); OpenBIOS `handlers/irq.c`, `setup.c`, `syscall.c` |
+| SYSCALL 0-3 and the unknown-syscall / unresolved-exception events | `hle_exceptions.rs` | psx-spx SYS(01h)-(03h), "Unresolved Exception Events"; OpenBIOS `syscallVerifier` |
+| Threads: OpenTh (SR left as is), CloseTh, ChangeTh via SYSCALL(3) | `hle_exceptions.rs`, `hle_bios.rs` | psx-spx "BIOS Thread Functions"; OpenBIOS `kernel/threads.c` |
+| HookEntryInt, ResetEntryInt default exit buffer (ReturnFromException, exception stack top minus 4) | `hle_exceptions.rs` | psx-spx B(18h)/B(19h) |
+| Unresolved-exception hook for side-loaded homebrew, FlushCache | `hle_bios.rs`, `cpu.rs` | predates this file; to be re-derived from psx-spx and OpenBIOS when the kernel model replaces them |
 
 ## Tooling
 
@@ -71,7 +79,7 @@ Update it in the same commit as any HLE change.
   now; they should move into `psx-iso` (SDK repository) with a BOOT parser
   that accepts an argument.
 - strtok, the functions psx-spx documents as buggy (memcmp, bcmp,
-  memmove, strstr, strpbrk), file and device I/O, memory card, CD and pad
-  services, and the event, exception and thread model are unimplemented
-  and report loudly.
+  memmove, strstr, strpbrk), the timer helpers B(02h)-B(06h), file and
+  device I/O, memory card, CD and pad services (including the kernel's
+  CD-ROM and pad/card chain elements) are unimplemented and report loudly.
 - The retail initial rand seed is not known; the HLE starts at 0.
