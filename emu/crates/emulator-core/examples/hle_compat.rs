@@ -82,6 +82,7 @@ struct GameResult {
     first_unimplemented: Option<String>,
     unimplemented: Vec<String>,
     stubbed: Vec<String>,
+    kernel_patches: Vec<String>,
     stop_reason: Option<String>,
     frames: u64,
     instructions: u64,
@@ -366,6 +367,11 @@ fn run_hle(
     result.display_hash = Some(format!("0x{:016x}", bus.gpu.display_hash().0));
     result.distinct_display_hashes = hashes.len();
     result.first_unimplemented = bus.hle_bios_first_unimplemented().map(ToString::to_string);
+    result.kernel_patches = bus
+        .hle_bios_patches()
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
     for record in bus.hle_bios_records() {
         let line = format!(
             "{}({:02X}h) {} x{}",
