@@ -4599,6 +4599,7 @@ mod tests {
         assert!(waited > 8, "{waited}");
         assert!(bus.limits.skipped_cycles >= 8);
         assert_eq!(bus.limits.free_instructions, 8);
+        assert_eq!(bus.limits.thawed_accesses, 0);
         assert_eq!(bus.limits.wait_stalls, [0; 6]); // no cycle profile, no split
                                                     // Counting alone changes nothing.
         let counted = warm_cycles_with(limit_oracles(0, "", "80001000 80001020 w"), &program);
@@ -4606,6 +4607,25 @@ mod tests {
             counted,
             warm_cycles_with(limit_oracles(0, "", ""), &program)
         );
+    }
+
+    #[test]
+    fn a_free_range_still_pays_for_hardware_reads() {
+        // Four GPUSTAT reads in a free range: the issue cycles are free, the
+        // MMIO wait states are not.
+        let lw_gpustat = (0x23 << 26) | (8 << 21) | (9 << 16);
+        let run = |free: &str| {
+            let mut cpu = Cpu::new();
+            let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+            bus.set_limit_oracles(limit_oracles(0, free, ""));
+            cpu.gprs[8] = 0x1F80_1814;
+            let cycles = warm_cycles(&mut cpu, &mut bus, &[lw_gpustat; 4]);
+            (cycles, bus.limits.thawed_accesses)
+        };
+        let (plain, _) = run("");
+        let (free, thawed) = run("80001000 80001010 f");
+        assert_eq!(thawed, 8);
+        assert_eq!(free, plain - 4);
     }
 
     #[test]

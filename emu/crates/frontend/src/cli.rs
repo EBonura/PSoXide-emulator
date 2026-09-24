@@ -1965,13 +1965,14 @@ fn run_headless_launch(
     }
     if bus.limits.configured() {
         eprintln!(
-            "[limits] oracles=[{}] active={} wait_cycles={} skipped_cycles={} free_instructions={} guard_trips={}",
+            "[limits] oracles=[{}] active={} wait_cycles={} skipped_cycles={} free_instructions={} guard_trips={} thawed_accesses={}",
             bus.limits.describe(),
             bus.limits.is_active(),
             bus.limits.wait_cycles,
             bus.limits.skipped_cycles,
             bus.limits.free_instructions,
             bus.limits.guard_trips,
+            bus.limits.thawed_accesses,
         );
         if let Some(path) = std::env::var_os("PSOXIDE_LIMIT_PROFILE_OUT") {
             bus.limits.write_profile(std::path::Path::new(&path))?;

@@ -1374,6 +1374,7 @@ impl Bus {
     /// do not accidentally pay CPU pipeline costs.
     #[inline]
     pub(crate) fn cpu_read_stalls(&mut self, virt: u32, width: AccessWidth) -> u32 {
+        self.thaw_limits_for_io(virt);
         // Root-counter reads use the same three-cycle total (one issue + two
         // wait) measured for the other internal MMIO registers by the public
         // access-time suite. Counter phase differences in compound loops must
@@ -1776,6 +1777,24 @@ impl Bus {
         self.limits = limits;
         if self.limits.pending() {
             self.maybe_activate_limits();
+        }
+    }
+
+    /// Free code ranges: a hardware access (I/O area or expansion ports,
+    /// not RAM, scratchpad or BIOS) is charged in real time.
+    #[inline]
+    fn thaw_limits_for_io(&mut self, virt: u32) {
+        if self.limits.frozen() {
+            let phys = to_physical(virt);
+            let memory = phys < memory::ram::MIRROR_END
+                || (memory::scratchpad::BASE
+                    ..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
+                    .contains(&phys)
+                || (memory::bios::BASE..memory::bios::BASE + memory::bios::SIZE as u32)
+                    .contains(&phys);
+            if !memory {
+                self.limits.thaw();
+            }
         }
     }
 
@@ -3207,6 +3226,7 @@ impl Bus {
     /// silicon the store itself blocks once the input path is occupied even
     /// though DMA-ready GPUSTAT.28 can remain high for CPU-fed rendering.
     pub(crate) fn cpu_write32(&mut self, virt: u32, value: u32) {
+        self.thaw_limits_for_io(virt);
         self.data_bus_latch = value;
         let store_stall = self.cpu_write_stalls(virt, AccessWidth::Word);
         self.add_cycles(store_stall);
@@ -3377,6 +3397,7 @@ impl Bus {
     /// bus. Several PS1 devices ignore byte enables and latch that complete
     /// word; direct bus clients keep using [`Bus::write8`] for an actual byte.
     pub(crate) fn cpu_write8(&mut self, virt: u32, source: u32) {
+        self.thaw_limits_for_io(virt);
         self.data_bus_latch = source;
         let store_stall = self.cpu_write_stalls(virt, AccessWidth::Byte);
         self.add_cycles(store_stall);
@@ -3393,6 +3414,7 @@ impl Bus {
     /// CPU `SH` transaction; see [`Bus::cpu_write8`] for why `source` retains
     /// the complete GPR value even though RAM consumes only its low halfword.
     pub(crate) fn cpu_write16(&mut self, virt: u32, source: u32) {
+        self.thaw_limits_for_io(virt);
         self.data_bus_latch = source;
         let store_stall = self.cpu_write_stalls(virt, AccessWidth::Half);
         self.add_cycles(store_stall);
