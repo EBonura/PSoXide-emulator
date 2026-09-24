@@ -301,6 +301,17 @@ pub struct Bus {
     /// save states.
     #[serde(skip, default = "default_hle_bios_calls")]
     hle_bios_calls: [[u32; 256]; 3],
+    /// First-occurrence records of HLE BIOS calls that were stubbed or not
+    /// implemented, in first-call order. Diagnostic only; excluded from
+    /// save states.
+    #[serde(skip)]
+    hle_bios_records: Vec<crate::hle_bios::CallRecord>,
+    /// Stop the CPU with [`crate::cpu::ExecutionError::HleUnimplemented`]
+    /// on the first unimplemented HLE BIOS call instead of returning 0.
+    /// Defaults to the `PSOXIDE_HLE_STRICT` environment switch; excluded
+    /// from save states (a restored bus re-reads the environment).
+    #[serde(skip, default = "hle_strict_from_env")]
+    hle_strict: bool,
     /// Guest `JumpBuffer` registered through BIOS B(19h) `HookEntryInt`.
     /// Side-loaded executables do not have a retail kernel to remember and
     /// invoke this hook, so the HLE path retains the guest pointer and the CPU
@@ -363,6 +374,10 @@ pub struct Bus {
 /// [`Bus::hle_bios_calls`] field -- the outer `[T; 3]` would satisfy
 /// `Default` on its own, but `T = [u32; 256]` doesn't, so the whole
 /// nested array needs an explicit zeroed literal.
+fn hle_strict_from_env() -> bool {
+    std::env::var("PSOXIDE_HLE_STRICT").is_ok_and(|value| value != "0" && !value.is_empty())
+}
+
 fn default_hle_bios_calls() -> [[u32; 256]; 3] {
     [[0; 256]; 3]
 }
@@ -439,6 +454,8 @@ impl Bus {
             telemetry: GuestTelemetry::new(),
             hle_bios_enabled: false,
             hle_bios_calls: [[0; 256]; 3],
+            hle_bios_records: Vec::new(),
+            hle_strict: hle_strict_from_env(),
             hle_irq_jump_buffer: None,
             hsync_cycles: HSYNC_CYCLES_NTSC,
             vblank_hsync_cycles: HSYNC_CYCLES_NTSC,
@@ -999,6 +1016,65 @@ impl Bus {
         if crate::env_flag!("PSOXIDE_TRACE_HLE_BIOS") {
             eprintln!("[hle-bios] {table:?}({func:02x}h)");
         }
+    }
+
+    /// Internal: remember the first stubbed or unimplemented call of each
+    /// BIOS function, and say so on stderr the first time an unimplemented
+    /// one is reached.
+    pub(crate) fn hle_bios_record_call(
+        &mut self,
+        table: crate::hle_bios::Table,
+        func: u8,
+        outcome: crate::hle_bios::Outcome,
+        args: [u32; 4],
+        ra: u32,
+    ) {
+        if let Some(record) = self
+            .hle_bios_records
+            .iter_mut()
+            .find(|record| record.table == table && record.func == func)
+        {
+            record.count = record.count.saturating_add(1);
+            return;
+        }
+        let record = crate::hle_bios::CallRecord {
+            table,
+            func,
+            name: crate::bios_names::function_name(table.index(), u32::from(func)),
+            outcome,
+            args,
+            ra,
+            cycle: self.cycles,
+            count: 1,
+        };
+        if outcome == crate::hle_bios::Outcome::Unimplemented {
+            eprintln!("[hle-bios] unimplemented {record}");
+        }
+        self.hle_bios_records.push(record);
+    }
+
+    /// Stubbed and unimplemented HLE BIOS calls seen so far, one record per
+    /// function in first-call order.
+    pub fn hle_bios_records(&self) -> &[crate::hle_bios::CallRecord] {
+        &self.hle_bios_records
+    }
+
+    /// First unimplemented HLE BIOS call, if any.
+    pub fn hle_bios_first_unimplemented(&self) -> Option<&crate::hle_bios::CallRecord> {
+        self.hle_bios_records
+            .iter()
+            .find(|record| record.outcome == crate::hle_bios::Outcome::Unimplemented)
+    }
+
+    /// Make unimplemented HLE BIOS calls stop the CPU (see
+    /// [`crate::cpu::ExecutionError::HleUnimplemented`]).
+    pub fn set_hle_strict(&mut self, strict: bool) {
+        self.hle_strict = strict;
+    }
+
+    /// Whether unimplemented HLE BIOS calls stop the CPU.
+    pub fn hle_strict(&self) -> bool {
+        self.hle_strict
     }
 
     /// Snapshot of HLE BIOS call counts: `[A, B, C]` tables × 256

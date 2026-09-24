@@ -82,6 +82,21 @@ pub enum ExecutionError {
         /// Raw 32-bit instruction word.
         instr: u32,
     },
+
+    /// Strict HLE mode (see [`Bus::set_hle_strict`]) reached a BIOS
+    /// function the HLE does not implement. The CPU stops at the dispatch
+    /// vector before the call has any effect.
+    #[error("unimplemented HLE BIOS call {table}({func:02X}h) {name} (ra={ra:#010x})")]
+    HleUnimplemented {
+        /// Dispatch table letter, `A`, `B` or `C`.
+        table: char,
+        /// Function number from `$t1`.
+        func: u8,
+        /// Conventional function name, or `"?"`.
+        name: &'static str,
+        /// Caller's return address.
+        ra: u32,
+    },
 }
 
 /// Lightweight return value of `Cpu::execute_one`. Carries just
@@ -1576,6 +1591,17 @@ impl Cpu {
             let ra = self.gpr(31);
             let hle_cycles_before = bus.cycles();
             if let Some(out) = crate::hle_bios::dispatch(self.pc, bus, args, sp, t1, ra) {
+                if out.outcome == crate::hle_bios::Outcome::Unimplemented && bus.hle_strict() {
+                    return Err(ExecutionError::HleUnimplemented {
+                        table: out.table.letter(),
+                        func: out.func,
+                        name: crate::bios_names::function_name(
+                            out.table.index(),
+                            u32::from(out.func),
+                        ),
+                        ra,
+                    });
+                }
                 // A(44h) FlushCache normally executes the BIOS's isolated
                 // tag-clear loop. HLE skips that code, so preserve the
                 // observable architectural result here.
@@ -3952,6 +3978,38 @@ mod tests {
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.pc(), 0x8000_4000);
         assert_eq!(cpu.fetch(&mut bus), 0x8888_8888);
+    }
+
+    #[test]
+    fn strict_hle_stops_at_an_unimplemented_call_without_side_effects() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        bus.set_hle_strict(true);
+        cpu.pc = 0xA0;
+        cpu.gprs[2] = 0x1234_5678;
+        cpu.gprs[9] = 0x33; // malloc
+        cpu.gprs[31] = 0x8001_0000;
+        let cycles = bus.cycles();
+        let err = cpu.step(&mut bus).unwrap_err();
+        assert_eq!(
+            err,
+            ExecutionError::HleUnimplemented {
+                table: 'A',
+                func: 0x33,
+                name: "user_malloc",
+                ra: 0x8001_0000,
+            }
+        );
+        assert_eq!(cpu.pc(), 0xA0);
+        assert_eq!(cpu.gprs[2], 0x1234_5678);
+        assert_eq!(bus.cycles(), cycles);
+
+        // Without strict mode the same call returns 0 and resumes at $ra.
+        bus.set_hle_strict(false);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc(), 0x8001_0000);
+        assert_eq!(cpu.gprs[2], 0);
     }
 
     #[test]
