@@ -11,7 +11,8 @@
 //! ```bash
 //! cargo run -p emulator-core --release --example hle_compat -- \
 //!     --games-dir "/path/to/your/discs" --frames 1800 [--only crash] \
-//!     [--input-tape run.pxtape] [--strict] [--json report.json] \
+//!     [--input-tape run.pxtape | --pad-pulses 0x0008@600+8,...] \
+//!     [--strict] [--json report.json] \
 //!     [--shots <dir>]
 //! ```
 //!
@@ -36,6 +37,8 @@
 mod args_support;
 #[path = "support/disc.rs"]
 mod disc_support;
+#[path = "support/pad.rs"]
+mod pad_support;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -120,6 +123,7 @@ fn main() {
     let mut strict = false;
     let mut parity = false;
     let mut shots: Option<PathBuf> = None;
+    let mut pulses: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -128,6 +132,7 @@ fn main() {
             "--frames" => frames = args_support::take_u64(&mut args, "--frames"),
             "--only" => only.push(args_support::take_string(&mut args, "--only")),
             "--input-tape" => tape_path = Some(args_support::take_path(&mut args, "--input-tape")),
+            "--pad-pulses" => pulses = Some(args_support::take_string(&mut args, "--pad-pulses")),
             "--json" => json = Some(args_support::take_path(&mut args, "--json")),
             "--strict" => strict = true,
             "--parity" => parity = true,
@@ -141,9 +146,20 @@ fn main() {
             .expect("--parity needs PSOXIDE_PARITY_BIOS=<path to your BIOS dump>");
         std::fs::read(&path).expect("PSOXIDE_PARITY_BIOS readable")
     });
-    let tape = tape_path
-        .as_ref()
-        .map(|path| read_tape(path).unwrap_or_else(|e| panic!("{e}")));
+    // A scripted pulse list (mask@vblank+frames, the frontend's
+    // --pad-pulses format) becomes a one-sample-per-VBlank tape.
+    let tape = match (&tape_path, &pulses) {
+        (Some(path), _) => Some(read_tape(path).unwrap_or_else(|e| panic!("{e}"))),
+        (None, Some(text)) => {
+            let pulses = pad_support::parse_pad_pulses(text).unwrap_or_else(|e| panic!("{e}"));
+            Some(
+                (0..frames)
+                    .map(|vb| PadSample::from_buttons(pad_support::effective_mask(0, &pulses, vb)))
+                    .collect(),
+            )
+        }
+        (None, None) => None,
+    };
 
     let games: Vec<Game> = load_list(&list)
         .into_iter()
@@ -199,7 +215,7 @@ fn main() {
         let report = Report {
             schema: "psoxide-hle-compat/1",
             frames,
-            input_tape: tape_path.as_deref().map(file_name),
+            input_tape: tape_path.as_deref().map(file_name).or(pulses),
             frame_limiter: false,
             results,
         };
