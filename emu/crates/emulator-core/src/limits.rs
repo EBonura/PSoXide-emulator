@@ -22,12 +22,15 @@
 //! - `mmio`: CPU reads of GPUSTAT, the DMA, timer and interrupt registers
 //!   cost the one issue cycle only.
 //!
-//! `PSOXIDE_LIMIT_FREE=FILE` names code ranges whose instructions take no
-//! time at all (issue and every stall, including bus stalls the instruction
-//! causes). Interrupt handlers entered from inside the range are charged
-//! normally. A free range that polls hardware would never see time pass, so
-//! after [`FREE_GUARD`] consecutive free instructions the range is charged
-//! again until the CPU leaves it; the trips are counted.
+//! `PSOXIDE_LIMIT_FREE=FILE` names code ranges whose computing takes no time
+//! (issue, fetch, RAM, GTE and multiply/divide costs). A hardware access
+//! (anything in the I/O area, GP0 stores included) still costs real time
+//! from that access on, so a bounded wait or a GPU write inside a free range
+//! sees the hardware progress. Interrupt handlers entered from inside the
+//! range are charged normally. A free range that spins without touching
+//! hardware would never see time pass, so after [`FREE_GUARD`] consecutive
+//! free instructions the range is charged again until the CPU leaves it;
+//! the trips are counted.
 //!
 //! `PSOXIDE_LIMIT_WAIT=FILE` names wait loops whose charged cycles are
 //! counted (not changed), so a caller can split each frame into work and
@@ -184,6 +187,8 @@ pub struct LimitOracles {
     pub guard_trips: u64,
     /// Instructions retired inside free ranges since activation.
     pub free_instructions: u64,
+    /// Hardware accesses from free ranges, charged in real time.
+    pub thawed_accesses: u64,
     /// Per profile range: (charged cycles, skipped cycles, instructions).
     pub profile_totals: Vec<(u64, u64, u64)>,
     /// Bus cycle at activation, if active.
@@ -336,6 +341,15 @@ impl LimitOracles {
     #[inline]
     pub(crate) fn frozen(&self) -> bool {
         self.frozen
+    }
+
+    /// A frozen instruction touched hardware: charge it from here on.
+    #[inline]
+    pub(crate) fn thaw(&mut self) {
+        if self.frozen {
+            self.frozen = false;
+            self.thawed_accesses += 1;
+        }
     }
 
     /// Called before an instruction at `pc` runs; freezes the clock when
