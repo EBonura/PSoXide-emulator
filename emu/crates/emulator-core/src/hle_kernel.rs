@@ -16,9 +16,13 @@
 //! | `0x0200..0x04FF` | A0 table, 0xC0 entries (retail address) |
 //! | `0x0674..0x06F3` | C0 table, 0x20 entries (retail address) |
 //! | `0x0874..0x09F3` | B0 table, 0x60 entries (retail address) |
-//! | `0x0A00..0x0A7F` | HLE kernel variables ([`kvar`]) |
-//! | `0x0C80..0x0E7F` | C(06h) entry and patch zone (retail address) |
+//! | `0x0A00..0x0AFF` | HLE kernel variables ([`kvar`], [`crate::hle_exceptions::kvar`]) |
+//! | `0x0000..0x000F`, `0x0080..0x008F` | exception vector (and its copy) |
+//! | `0x0C80..0x0EFF` | C(06h) exception handler (retail address) |
 //! | `0x1000..0x15FF` | trap stubs, one word per function |
+//! | `0x1600..0x25FF` | exception stack |
+//! | `0x2600..0x2FFF` | kernel routines (ReturnFromException, DeliverEvent, ...) |
+//! | `0x3000..0x31FF` | kernel data (exit buffer, chain elements, IRQ table) |
 //! | `0x43D0..0x5DFF` | B(5Bh) entry and patch zone (retail address) |
 //! | `0x6EE0..0x71FF` | DCBs, `0x8648..0x8907` FCBs (retail addresses) |
 //! | `0xDF80..0xDFFF` | left to games (psx-spx: "used for BIOS patches") |
@@ -55,7 +59,7 @@ pub const INTERNAL_LEN: u32 = 0x40;
 /// fixed offsets from it.
 pub const EXCEPTION_HANDLER: u32 = 0x0000_0C80;
 /// End of the region reserved at [`EXCEPTION_HANDLER`].
-pub const EXCEPTION_HANDLER_END: u32 = 0x0000_0E80;
+pub const EXCEPTION_HANDLER_END: u32 = 0x0000_0F00;
 /// B(5Bh), the pad/card auto-ack function. Games read `B0[5Bh]` and
 /// patch at fixed offsets from it (up to +1988h is documented).
 pub const PAD_CARD_ENTRY: u32 = 0x0000_43D0;
@@ -231,7 +235,6 @@ pub fn install(bus: &mut Bus, cfg: KernelConfig) {
     for func in 0..INTERNAL_LEN as u8 {
         poke32(bus, stub_addr(3, func), trap_word(3, func));
     }
-    poke32(bus, EXCEPTION_HANDLER, trap_word(2, 0x06));
     poke32(bus, C0_TABLE + 4 * 0x06, EXCEPTION_HANDLER);
     poke32(bus, PAD_CARD_ENTRY, trap_word(1, 0x5B));
     poke32(bus, B0_TABLE + 4 * 0x5B, PAD_CARD_ENTRY);
@@ -242,6 +245,7 @@ pub fn install(bus: &mut Bus, cfg: KernelConfig) {
     poke32(bus, TOT + 0x50, DCB_BASE);
     poke32(bus, TOT + 0x54, DCB_SIZE);
     allocate_control_blocks(bus, cfg);
+    crate::hle_exceptions::install(bus);
 }
 
 /// Initialise the kernel heap and allocate ExCB, EvCB, PCB and TCB in the
@@ -295,6 +299,7 @@ pub fn set_conf(bus: &mut Bus, event: u32, tcb: u32, stack: u32) {
         .map(|i| peek32(bus, old + 4 * i))
         .collect();
     allocate_control_blocks(bus, KernelConfig { tcb, event, stack });
+    crate::hle_exceptions::enqueue_defaults(bus);
     let new = current_tcb(bus);
     if old != 0 && new != 0 {
         for (i, word) in saved.into_iter().enumerate() {
