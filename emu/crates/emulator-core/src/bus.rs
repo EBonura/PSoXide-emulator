@@ -306,6 +306,10 @@ pub struct Bus {
     /// save states.
     #[serde(skip)]
     hle_bios_records: Vec<crate::hle_bios::CallRecord>,
+    /// Kernel patch routines seen at B(56h)/B(57h). Diagnostic only;
+    /// the applied effects live in guest RAM.
+    #[serde(skip)]
+    hle_bios_patches: Vec<(String, u32)>,
     /// Stop the CPU with [`crate::cpu::ExecutionError::HleUnimplemented`]
     /// on the first unimplemented HLE BIOS call instead of returning 0.
     /// Defaults to the `PSOXIDE_HLE_STRICT` environment switch; excluded
@@ -455,6 +459,7 @@ impl Bus {
             hle_bios_enabled: false,
             hle_bios_calls: [[0; 256]; 3],
             hle_bios_records: Vec::new(),
+            hle_bios_patches: Vec::new(),
             hle_strict: hle_strict_from_env(),
             hle_irq_jump_buffer: None,
             hsync_cycles: HSYNC_CYCLES_NTSC,
@@ -1064,6 +1069,29 @@ impl Bus {
             eprintln!("[hle-bios] unimplemented {record}");
         }
         self.hle_bios_records.push(record);
+    }
+
+    /// Internal: remember a B(56h)/B(57h) kernel-patch call site, and say
+    /// so on stderr when the routine is not recognised.
+    pub(crate) fn hle_bios_record_patch(&mut self, site: crate::hle_kernel::PatchSite, ra: u32) {
+        let name = match site {
+            crate::hle_kernel::PatchSite::AlreadyApplied => return,
+            crate::hle_kernel::PatchSite::Known(patch) => patch.name.to_string(),
+            crate::hle_kernel::PatchSite::Unknown(hash) => {
+                eprintln!("[hle-bios] unknown kernel patch hash {hash:08x} at ra={ra:#010x}");
+                format!("unknown:{hash:08x}")
+            }
+        };
+        if !self.hle_bios_patches.iter().any(|(n, _)| *n == name) {
+            self.hle_bios_patches.push((name, ra));
+        }
+    }
+
+    /// Kernel patch routines seen at B(56h)/B(57h) call sites, as
+    /// `(name, $ra)` in first-seen order; unrecognised ones are named
+    /// `unknown:<hash>`.
+    pub fn hle_bios_patches(&self) -> &[(String, u32)] {
+        &self.hle_bios_patches
     }
 
     /// Stubbed and unimplemented HLE BIOS calls seen so far, one record per

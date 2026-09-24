@@ -442,6 +442,300 @@ pub fn realloc(bus: &mut Bus, old: u32, new_size: u32) -> u32 {
     new
 }
 
+// ------------------------------------------------------- kernel patches
+
+/// Psy-Q kernel patch routines recognised at B(56h)/B(57h) call sites.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Patch {
+    /// OpenBIOS name for the variant.
+    pub name: &'static str,
+    /// Bit in [`kvar::PATCH_FLAGS`].
+    pub bit: u32,
+    hash: u32,
+    table: u8,
+    action: PatchAction,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PatchAction {
+    /// Let the routine run; its writes land in the reserved zones.
+    Passthrough,
+    /// Skip the routine: branch over `skip` instructions after the call,
+    /// optionally storing injected function pointers first. Each pointer
+    /// is `(hi_word, lo_word, internal function)`: the destination address
+    /// is decoded from the lui/addiu immediates at those word offsets.
+    Skip {
+        skip: u32,
+        pointers: &'static [(usize, usize, u8)],
+        mc_delay: u32,
+    },
+}
+
+use internal::{SET_PAD_OUTPUT_DATA, START_PAD, STOP_PAD};
+
+const fn skip(skip: u32) -> PatchAction {
+    PatchAction::Skip {
+        skip,
+        pointers: &[],
+        mc_delay: 0,
+    }
+}
+
+/// Hashes, masks and per-variant behaviour from OpenBIOS
+/// `src/mips/openbios/patches` (MIT, Copyright (c) 2021 PCSX-Redux
+/// authors). The effects that OpenBIOS applies to its own drivers are
+/// recorded in [`kvar`] for the HLE pad and card drivers.
+pub const PATCHES: &[Patch] = &[
+    Patch {
+        name: "_patch_card_info#1",
+        bit: 0,
+        hash: 0x5123_F82A,
+        table: 1,
+        action: skip(0),
+    },
+    Patch {
+        name: "_patch_card2#1",
+        bit: 1,
+        hash: 0x0BC8_1000,
+        table: 1,
+        action: PatchAction::Skip {
+            skip: 9,
+            pointers: &[],
+            mc_delay: 200,
+        },
+    },
+    Patch {
+        name: "_patch_card2#2",
+        bit: 2,
+        hash: 0xC29D_F18F,
+        table: 1,
+        action: PatchAction::Skip {
+            skip: 9,
+            pointers: &[],
+            mc_delay: 40,
+        },
+    },
+    Patch {
+        name: "_patch_pad#1",
+        bit: 3,
+        hash: 0xF803_A6A6,
+        table: 1,
+        action: PatchAction::Skip {
+            skip: 11,
+            pointers: &[(3, 4, START_PAD), (6, 7, STOP_PAD)],
+            mc_delay: 0,
+        },
+    },
+    Patch {
+        name: "_patch_pad#2",
+        bit: 4,
+        hash: 0x6DEE_1051,
+        table: 1,
+        action: PatchAction::Skip {
+            skip: 10,
+            pointers: &[(1, 3, START_PAD), (4, 7, STOP_PAD)],
+            mc_delay: 0,
+        },
+    },
+    Patch {
+        name: "_patch_pad#3",
+        bit: 5,
+        hash: 0x012A_FC0A,
+        table: 1,
+        action: skip(2),
+    },
+    Patch {
+        name: "_remove_ChgclrPAD#1",
+        bit: 6,
+        hash: 0xCEF1_65BA,
+        table: 1,
+        action: skip(7),
+    },
+    Patch {
+        name: "_remove_ChgclrPAD#2",
+        bit: 7,
+        hash: 0x5DF8_CC5D,
+        table: 1,
+        action: skip(5),
+    },
+    Patch {
+        name: "_send_pad#1",
+        bit: 8,
+        hash: 0xA1C4_9B0E,
+        table: 1,
+        action: PatchAction::Skip {
+            skip: 15,
+            pointers: &[(7, 8, SET_PAD_OUTPUT_DATA)],
+            mc_delay: 0,
+        },
+    },
+    Patch {
+        name: "_send_pad#2",
+        bit: 9,
+        hash: 0x561B_6AD1,
+        table: 1,
+        action: PatchAction::Skip {
+            skip: 12,
+            pointers: &[(3, 7, SET_PAD_OUTPUT_DATA)],
+            mc_delay: 0,
+        },
+    },
+    Patch {
+        name: "_clear_card#1",
+        bit: 10,
+        hash: 0x95C1_4C17,
+        table: 2,
+        action: PatchAction::Passthrough,
+    },
+    Patch {
+        name: "custom_handler#1",
+        bit: 11,
+        hash: 0xF80A_EEE3,
+        table: 2,
+        action: PatchAction::Passthrough,
+    },
+    Patch {
+        name: "_initgun#1",
+        bit: 12,
+        hash: 0x5753_F599,
+        table: 2,
+        action: PatchAction::Passthrough,
+    },
+    Patch {
+        name: "_patch_card#1",
+        bit: 13,
+        hash: 0x847E_ABF2,
+        table: 2,
+        action: PatchAction::Passthrough,
+    },
+    Patch {
+        name: "_patch_card#2",
+        bit: 14,
+        hash: 0x2A81_BBEF,
+        table: 2,
+        action: PatchAction::Passthrough,
+    },
+    Patch {
+        name: "_patch_gte#1",
+        bit: 15,
+        hash: 0x61C9_14A1,
+        table: 2,
+        action: PatchAction::Passthrough,
+    },
+    Patch {
+        name: "_patch_gte#2",
+        bit: 16,
+        hash: 0xC223_044D,
+        table: 2,
+        action: PatchAction::Passthrough,
+    },
+    Patch {
+        name: "_patch_gte#3",
+        bit: 17,
+        hash: 0xBF87_3C49,
+        table: 2,
+        action: PatchAction::Passthrough,
+    },
+];
+
+/// Masks selecting which bits of each word enter the hash (2 bits per word:
+/// 0 keep, 1 upper half, 2 opcode only, 3 ignore).
+const HASH_MASK_B0: u32 = 0xFFC9_A655;
+const HASH_MASK_C0: u32 = 0x5AA4_5555;
+const HASH_WORDS: usize = 16;
+
+fn hash_one(mut a: u32) -> u32 {
+    a = (a ^ 61) ^ (a >> 16);
+    a = a.wrapping_add(a << 3);
+    a ^= a >> 4;
+    a = a.wrapping_mul(0x27D4_EB2F);
+    a ^= a >> 15;
+    a
+}
+
+/// OpenBIOS patch signature hash over `words`.
+pub fn patch_hash(words: &[u32], mask_word: u32) -> u32 {
+    let mask_bytes = mask_word.to_le_bytes();
+    let mut next_mask = mask_bytes.iter();
+    let mut hash: u32 = 0x5810_D659;
+    let mut mask: u32 = 1;
+    for &word in words {
+        if mask == 1 {
+            mask = u32::from(*next_mask.next().unwrap_or(&0)) | 0x100;
+        }
+        let n = match mask & 3 {
+            1 => word & 0xFFFF_0000,
+            2 => word & 0xFC00_0000,
+            3 => 0,
+            _ => word,
+        };
+        mask >>= 2;
+        hash = hash.wrapping_add(hash_one(n)).wrapping_mul(0xB503_198F);
+    }
+    hash
+}
+
+/// Outcome of inspecting a B(56h)/B(57h) call site.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PatchSite {
+    /// Code at `$ra` was already neutralised by an earlier call.
+    AlreadyApplied,
+    /// Recognised variant.
+    Known(&'static Patch),
+    /// Unrecognised code; the routine runs against the reserved zones.
+    Unknown(u32),
+}
+
+/// Inspect the code after a GetC0Table or GetB0Table call and apply the
+/// matching patch's effect. `table` is 2 for C0 and 1 for B0. Returns
+/// whether game code was rewritten (the caller must flush the I-cache).
+pub fn handle_patch_site(bus: &mut Bus, table: u8, ra: u32) -> (PatchSite, bool) {
+    let words: Vec<u32> = (0..HASH_WORDS as u32)
+        .map(|i| peek32(bus, ra + 4 * i))
+        .collect();
+    if words[0] == 0 && words[1] == 0 && words[3] == 0 {
+        return (PatchSite::AlreadyApplied, false);
+    }
+    let mask = if table == 2 {
+        HASH_MASK_C0
+    } else {
+        HASH_MASK_B0
+    };
+    let hash = patch_hash(&words, mask);
+    let Some(patch) = PATCHES.iter().find(|p| p.table == table && p.hash == hash) else {
+        return (PatchSite::Unknown(hash), false);
+    };
+    let rewrote = apply_known(bus, patch, ra, &words);
+    (PatchSite::Known(patch), rewrote)
+}
+
+fn apply_known(bus: &mut Bus, patch: &Patch, ra: u32, words: &[u32]) -> bool {
+    let flags = peek32(bus, kvar::PATCH_FLAGS);
+    poke32(bus, kvar::PATCH_FLAGS, flags | (1 << patch.bit));
+    let PatchAction::Skip {
+        skip,
+        pointers,
+        mc_delay,
+    } = patch.action
+    else {
+        return false;
+    };
+    for &(hi, lo, func) in pointers {
+        let addr = ((words[hi] & 0xFFFF) << 16).wrapping_add(words[lo] as u16 as i16 as u32);
+        poke32(bus, addr, stub_addr(3, func));
+    }
+    if mc_delay != 0 {
+        poke32(bus, kvar::MC_HANDLER_DELAY, mc_delay);
+    }
+    // Neutralise the routine: two nops, then `b +skip` with a nop in its
+    // delay slot (OpenBIOS counterpatch).
+    poke32(bus, ra, 0);
+    poke32(bus, ra + 4, 0);
+    poke32(bus, ra + 8, 0x1000_0000 | skip);
+    poke32(bus, ra + 12, 0);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -532,5 +826,48 @@ mod tests {
         assert_eq!(peek32(&bus, d), 0x1122_3344);
         assert_eq!(peek32(&bus, c - 4) & 1, 1, "old block freed");
         assert_eq!(realloc(&mut bus, d, 0), 0);
+    }
+
+    #[test]
+    fn patch_hash_matches_the_reference_implementation() {
+        // Values from tools/kcall_scan.py patch_hash on the same inputs.
+        let words: Vec<u32> = (0..16u32).map(|i| i * 0x0101_0101 + 0x3C00_0000).collect();
+        assert_eq!(patch_hash(&[0; 16], HASH_MASK_B0), 0x516A_3159);
+        assert_eq!(patch_hash(&words, HASH_MASK_B0), 0x1D8A_6EB7);
+        assert_eq!(patch_hash(&words, HASH_MASK_C0), 0xFAE7_504D);
+    }
+
+    #[test]
+    fn known_counterpatch_rewrites_the_call_site_and_injects_pointers() {
+        let mut bus = Bus::new_without_bios();
+        install(&mut bus, KernelConfig::default());
+        let ra = 0x8003_0000;
+        // Synthetic call site; the hash lookup is covered separately, so
+        // exercise the rewrite for a known variant directly.
+        let patch = PATCHES.iter().find(|p| p.name == "_patch_pad#1").unwrap();
+        let mut words = [0u32; 16];
+        words[3] = 0x3C01_8005; // lui at, 0x8005
+        words[4] = 0xAC23_FFF0; // sw v1, -0x10(at)
+        words[6] = 0x3C01_8005;
+        words[7] = 0xAC23_0010;
+        words[2] = 0x1234_5678;
+        for (i, w) in words.iter().enumerate() {
+            poke32(&mut bus, ra + 4 * i as u32, *w);
+        }
+        apply_known(&mut bus, patch, ra, &words);
+        assert_eq!(peek32(&bus, 0x8004_FFF0), stub_addr(3, START_PAD));
+        assert_eq!(peek32(&bus, 0x8005_0010), stub_addr(3, STOP_PAD));
+        assert_eq!(peek32(&bus, ra + 8), 0x1000_000B);
+        assert_eq!(
+            (
+                peek32(&bus, ra),
+                peek32(&bus, ra + 4),
+                peek32(&bus, ra + 12)
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(peek32(&bus, kvar::PATCH_FLAGS), 1 << patch.bit);
+        let (site, rewrote) = handle_patch_site(&mut bus, 1, ra);
+        assert_eq!((site, rewrote), (PatchSite::AlreadyApplied, false));
     }
 }

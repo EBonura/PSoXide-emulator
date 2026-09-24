@@ -233,8 +233,8 @@ pub fn dispatch(pc: u32, bus: &mut Bus, gprs: &mut [u32; 32]) -> Option<Hle> {
         let (t, f) = crate::hle_kernel::decode_trap(bus.peek_instruction(pc)?)?;
         (Table::from_index(t), f)
     };
-    let flush = table == Table::A && func == 0x44;
-    let ret = run(table, func, bus, gprs);
+    let mut flush = table == Table::A && func == 0x44;
+    let ret = run(table, func, bus, gprs, &mut flush);
     if table != Table::Kernel {
         bus.hle_bios_log_call(table, func);
     }
@@ -269,7 +269,7 @@ enum Ret {
     Unimplemented,
 }
 
-fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32]) -> Ret {
+fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut bool) -> Ret {
     use crate::hle_kernel::{self as k, Heap};
     use Ret::{Done, Stub, Unimplemented};
     let args = [gprs[4], gprs[5], gprs[6], gprs[7]];
@@ -457,6 +457,21 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32]) -> Ret {
             Done(0)
         }
 
+        // B(56h) GetC0Table / B(57h) GetB0Table. Psy-Q libraries call
+        // these only to patch the kernel; the code after the call is
+        // hashed and known variants are handled as OpenBIOS does.
+        (Table::B, 0x56) | (Table::B, 0x57) => {
+            let (patch_table, base) = if func == 0x56 {
+                (2, k::C0_TABLE)
+            } else {
+                (1, k::B0_TABLE)
+            };
+            let (site, rewrote) = k::handle_patch_site(bus, patch_table, gprs[31]);
+            *flush |= rewrote;
+            bus.hle_bios_record_patch(site, gprs[31]);
+            Done(base)
+        }
+
         // B(4Ah) InitCard, B(4Bh) StartCard, B(4Ch) StopCard.
         (Table::B, 0x4A) | (Table::B, 0x4B) | (Table::B, 0x4C) => Stub(1),
 
@@ -470,6 +485,22 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32]) -> Ret {
         // C(08h) SysInitMemory(addr, size): new kernel heap.
         (Table::C, 0x08) => {
             k::init_heap(bus, Heap::Kernel, args[0], args[1]);
+            Done(0)
+        }
+
+        // --- Kernel-internal functions handed out by counterpatches ---
+        (Table::Kernel, k::internal::START_PAD) => {
+            k::poke32(bus, k::kvar::PAD_STARTED, 1);
+            Done(0)
+        }
+        (Table::Kernel, k::internal::STOP_PAD) => {
+            k::poke32(bus, k::kvar::PAD_STARTED, 0);
+            Done(0)
+        }
+        (Table::Kernel, k::internal::SET_PAD_OUTPUT_DATA) => {
+            for (i, value) in args.iter().enumerate() {
+                k::poke32(bus, k::kvar::PAD_OUTPUT + 4 * i as u32, *value);
+            }
             Done(0)
         }
 
@@ -1106,6 +1137,19 @@ mod tests {
         assert_eq!(bus.hle_irq_jump_buffer(), Some(hook));
         call(&mut bus, 0xB0, 0x18, [0; 4]);
         assert_eq!(bus.hle_irq_jump_buffer(), None);
+    }
+
+    #[test]
+    fn get_table_calls_return_the_retail_table_addresses_and_report_patches() {
+        let mut bus = hle_bus();
+        // Code after the call that matches no known patch routine.
+        for i in 0..16u32 {
+            crate::hle_kernel::poke32(&mut bus, RA + 4 * i, 0x2400_0000 | i);
+        }
+        assert_eq!(call(&mut bus, 0xB0, 0x56, [0; 4]), 0x674);
+        assert_eq!(call(&mut bus, 0xB0, 0x57, [0; 4]), 0x874);
+        assert_eq!(bus.hle_bios_patches().len(), 2);
+        assert!(bus.hle_bios_patches()[0].0.starts_with("unknown:"));
     }
 
     #[test]
