@@ -3523,6 +3523,9 @@ impl Cpu {
             self.gprs[register as usize] = bus.read32(jump_buffer.wrapping_add(offset));
         }
         self.gprs[28] = bus.read32(jump_buffer.wrapping_add(44));
+        // psx-spx: the hook runs with r2=1, so a buffer recorded by setjmp
+        // "returns" from setjmp with 1.
+        self.gprs[2] = 1;
         self.pc = ra;
         self.hle_irq_frame = Some(Box::new(frame));
     }
@@ -5137,6 +5140,40 @@ mod tests {
             (cpu.pc(), cpu.gprs[2], cpu.gprs[31]),
             (0x8003_0000, 0x55, 0x8001_0000)
         );
+    }
+
+    #[test]
+    fn hle_longjmp_restores_callee_saved_registers_and_returns_value() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let mut cpu = Cpu::new();
+        for r in [16usize, 23, 28, 29, 30] {
+            cpu.gprs[r] = 0x1000 + r as u32;
+        }
+        cpu.pc = 0xA0;
+        cpu.gprs[9] = 0x13;
+        cpu.gprs[4] = 0x8002_0000;
+        cpu.gprs[31] = 0x8001_0040;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!((cpu.pc(), cpu.gprs[2]), (0x8001_0040, 0));
+
+        for r in [16usize, 23, 28, 29, 30] {
+            cpu.gprs[r] = 0;
+        }
+        cpu.pc = 0xA0;
+        cpu.gprs[9] = 0x14;
+        cpu.gprs[4] = 0x8002_0000;
+        cpu.gprs[5] = 0;
+        cpu.gprs[31] = 0x8005_0000;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(
+            (cpu.pc(), cpu.gprs[2]),
+            (0x8001_0040, 0),
+            "0 is not bumped to 1"
+        );
+        for r in [16usize, 23, 28, 29, 30] {
+            assert_eq!(cpu.gprs[r], 0x1000 + r as u32);
+        }
     }
 
     #[test]
