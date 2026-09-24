@@ -562,6 +562,19 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             Done(0)
         }
 
+        // Threads (psx-spx "BIOS Thread Functions"): OpenTh, CloseTh, and
+        // ChangeTh, which is SYSCALL(3) with the new TCB in a1.
+        (Table::B, 0x0E) => Done(ex::open_thread(bus, args[0], args[1], args[2])),
+        (Table::B, 0x0F) => {
+            ex::close_thread(bus, args[0]);
+            Done(1)
+        }
+        (Table::B, 0x10) => {
+            gprs[4] = 3;
+            gprs[5] = ex::thread_tcb(bus, args[0]);
+            Jump(ex::code().syscall_stub)
+        }
+
         // B(12h) InitPad(buf1, siz1, buf2, siz2): tell the kernel
         // where to stash pad state. Since we poll the hardware
         // directly via psx-pad there's nothing for us to do.
@@ -631,8 +644,8 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
 
         // Exception chains (psx-spx "Priority Chains"):
         // C(00h) EnqueueTimerAndVblankIrqs, C(01h) EnqueueSyscallHandler,
-        // C(02h) SysEnqIntRP, C(03h) SysDeqIntRP, C(04h) free EvCB
-        // slot, C(07h) InstallExceptionHandlers, C(0Ch)
+        // C(02h) SysEnqIntRP, C(03h) SysDeqIntRP, C(04h)/C(05h) free
+        // EvCB/TCB slot, C(07h) InstallExceptionHandlers, C(0Ch)
         // InitDefInt, C(0Dh) SetIrqAutoAck.
         (Table::C, 0x00) => {
             ex::enqueue_rcnt(bus, args[0], true);
@@ -648,6 +661,7 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         }
         (Table::C, 0x03) => Done(ex::deq_int(bus, args[0], args[1])),
         (Table::C, 0x04) => Done(ex::free_evcb(bus).unwrap_or(u32::MAX)),
+        (Table::C, 0x05) => Done(ex::free_tcb(bus).unwrap_or(u32::MAX)),
         (Table::C, 0x07) => {
             ex::install_vector(bus);
             *flush = true;

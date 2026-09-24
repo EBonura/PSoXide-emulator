@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Exception core of the HLE kernel: exception vector, handler, priority
-//! chains, events, root-counter and default IRQ handlers, and SYSCALL
-//! 0-2.
+//! chains, events, root-counter and default IRQ handlers, SYSCALL 1/2/3,
+//! and threads.
 //!
 //! The parts that call guest code or are patched by games run as guest
 //! MIPS code assembled at boot ([`crate::hle_asm`]): the vector at 80h,
@@ -83,6 +83,8 @@ pub struct KernelCode {
     pub defint_verifier: u32,
     /// DeliverEvent(F0000010h, 1000h) continuation: calls A(40h).
     pub unresolved_glue: u32,
+    /// `syscall; jr ra` used by ChangeTh.
+    pub syscall_stub: u32,
 }
 
 /// Assembled kernel code (deterministic; built once).
@@ -279,6 +281,13 @@ fn assemble() -> KernelCode {
     a.jr(T0);
     a.nop();
 
+    // ChangeTh helper: SYSCALL(3) with a1 = new TCB; the handler returns
+    // past the syscall.
+    a.label("syscall_stub");
+    a.syscall();
+    a.jr(RA);
+    a.nop();
+
     let rfe = a.addr("rfe");
     let deliver_event = a.addr("deliver_event");
     let rcnt_verifier = [
@@ -289,6 +298,7 @@ fn assemble() -> KernelCode {
     ];
     let defint_verifier = a.addr("defint");
     let unresolved_glue = a.addr("unresolved");
+    let syscall_stub = a.addr("syscall_stub");
     let cause_epc = a.addr("cause_epc");
     let mut words = a.finish();
     // Fill in `li ra, rfe` in the unresolved glue.
@@ -305,6 +315,7 @@ fn assemble() -> KernelCode {
         rcnt_verifier,
         defint_verifier,
         unresolved_glue,
+        syscall_stub,
     }
 }
 
@@ -687,6 +698,48 @@ pub fn undeliver_event(bus: &mut Bus, class: u32, spec: u32) {
     }
 }
 
+// ----------------------------------------------------------------- threads
+
+fn tcb(bus: &Bus, index: u32) -> u32 {
+    peek32(bus, TOT + 0x10) + crate::hle_kernel::TCB_SIZE * index
+}
+
+fn tcb_count(bus: &Bus) -> u32 {
+    peek32(bus, TOT + 0x14) / crate::hle_kernel::TCB_SIZE
+}
+
+/// C(05h) get_free_TCB_slot.
+pub fn free_tcb(bus: &Bus) -> Option<u32> {
+    (0..tcb_count(bus)).find(|&i| peek32(bus, tcb(bus, i)) == crate::hle_kernel::TCB_FREE)
+}
+
+/// B(0Eh) OpenTh(pc, sp, gp): returns FF000000h | slot or FFFFFFFFh.
+/// SR is left as it was (psx-spx documents this).
+pub fn open_thread(bus: &mut Bus, pc: u32, sp: u32, gp: u32) -> u32 {
+    let Some(slot) = free_tcb(bus) else {
+        return u32::MAX;
+    };
+    let t = tcb(bus, slot);
+    poke32(bus, t, crate::hle_kernel::TCB_USED);
+    poke32(bus, t + 4, 0x1000);
+    poke32(bus, t + 8 + 4 * 29, sp);
+    poke32(bus, t + 8 + 4 * 30, sp);
+    poke32(bus, t + 8 + 4 * 28, gp);
+    poke32(bus, t + crate::hle_bios::TCB_RETURN_PC, pc);
+    0xFF00_0000 | slot
+}
+
+/// B(0Fh) CloseTh.
+pub fn close_thread(bus: &mut Bus, thread: u32) {
+    let t = tcb(bus, thread & 0xFFFF);
+    poke32(bus, t, crate::hle_kernel::TCB_FREE);
+}
+
+/// TCB address for ChangeTh's SYSCALL(3).
+pub fn thread_tcb(bus: &Bus, thread: u32) -> u32 {
+    tcb(bus, thread & 0xFFFF)
+}
+
 // ------------------------------------------------------------ syscall path
 
 /// What the default SYSCALL/exception verifier decided.
@@ -722,6 +775,13 @@ pub fn syscall_verifier(bus: &mut Bus) -> SyscallAction {
                 2 => {
                     let sr = peek32(bus, t + TCB_SR);
                     poke32(bus, t + TCB_SR, sr | 0x404);
+                    SyscallAction::Return
+                }
+                3 => {
+                    let new = peek32(bus, reg(5));
+                    poke32(bus, reg(2), 1);
+                    let pcb = peek32(bus, TOT + 8);
+                    poke32(bus, pcb, new);
                     SyscallAction::Return
                 }
                 _ => SyscallAction::Deliver(0xF000_0010, 0x4000, code().return_from_exception),
