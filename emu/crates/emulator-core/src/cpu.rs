@@ -1591,36 +1591,34 @@ impl Cpu {
                     record_instr: 0,
                 });
             }
-            let args = [self.gpr(4), self.gpr(5), self.gpr(6), self.gpr(7)];
-            let sp = self.gpr(29);
-            let t1 = self.gpr(9);
             let ra = self.gpr(31);
             let hle_cycles_before = bus.cycles();
-            if let Some(out) = crate::hle_bios::dispatch(self.pc, bus, args, sp, t1, ra) {
+            if let Some(out) = crate::hle_bios::dispatch(self.pc, bus, &mut self.gprs) {
                 if out.outcome == crate::hle_bios::Outcome::Unimplemented && bus.hle_strict() {
                     return Err(ExecutionError::HleUnimplemented {
                         table: out.table.letter(),
                         func: out.func,
-                        name: crate::bios_names::function_name(
-                            out.table.index(),
-                            u32::from(out.func),
-                        ),
+                        name: crate::hle_bios::function_name(out.table, out.func),
                         ra,
                     });
                 }
                 // A(44h) FlushCache normally executes the BIOS's isolated
-                // tag-clear loop. HLE skips that code, so preserve the
-                // observable architectural result here.
-                if memory::to_physical(self.pc) == 0xA0 && t1 & 0xFF == 0x44 {
+                // tag-clear loop, and kernel-patch counterpatches rewrite
+                // guest code. HLE skips the loop, so preserve the
+                // architectural result here.
+                if out.flush_icache {
                     self.instruction_cache.invalidate_all();
                 }
-                let returning_from_hle_irq = memory::to_physical(self.pc) == 0xB0
-                    && t1 & 0xFF == 0x17
+                let returning_from_hle_irq = out.table == crate::hle_bios::Table::B
+                    && out.func == 0x17
+                    && out.v0.is_some()
                     && self.hle_irq_frame.is_some();
                 if returning_from_hle_irq {
                     self.finish_hle_irq();
                 } else {
-                    self.set_gpr(2, out.v0);
+                    if let Some(v0) = out.v0 {
+                        self.set_gpr(2, v0);
+                    }
                     self.pc = out.next_pc;
                 }
                 self.pending_pc = None;
@@ -3433,26 +3431,30 @@ impl Cpu {
     }
 
     /// Route a side-loaded EXE's address error through the unresolved-handler
-    /// pointer that the retail kernel exposes at low RAM 0x300. The frame
-    /// layout matches psn00bsdk's `Thread::registers`, so existing homebrew
-    /// handlers can inspect CAUSE, change the saved return PC, and return.
+    /// slot A(40h) of the RAM A0 table, when the guest has replaced it. The
+    /// interrupted frame goes to the current thread's TCB (`[[0x108]]`),
+    /// whose layout matches psn00bsdk's `Thread::registers`, so existing
+    /// homebrew handlers can inspect CAUSE, change the saved return PC, and
+    /// return.
     fn stage_hle_unresolved_exception(&mut self, bus: &mut Bus) {
         if !bus.hle_bios_enabled || self.hle_exception_active {
             return;
         }
-        let handler = bus.read32(crate::hle_bios::UNRESOLVED_HANDLER_PTR);
-        if handler == 0 {
+        let handler = crate::hle_kernel::peek32(bus, crate::hle_bios::UNRESOLVED_HANDLER_PTR);
+        let tcb = crate::hle_kernel::current_tcb(bus);
+        if handler == 0 || handler == crate::hle_kernel::stub_addr(0, 0x40) || tcb == 0 {
             return;
         }
-
+        use crate::hle_bios::{TCB_CAUSE, TCB_HI, TCB_LO, TCB_REGISTERS, TCB_RETURN_PC, TCB_SR};
+        use crate::hle_kernel::poke32;
         for (index, value) in self.gprs.iter().copied().enumerate() {
-            bus.write32(crate::hle_bios::THREAD_REGISTERS + index as u32 * 4, value);
+            poke32(bus, tcb + TCB_REGISTERS + index as u32 * 4, value);
         }
-        bus.write32(crate::hle_bios::THREAD_RETURN_PC, self.cop0[14]);
-        bus.write32(crate::hle_bios::THREAD_HI, self.hi);
-        bus.write32(crate::hle_bios::THREAD_LO, self.lo);
-        bus.write32(crate::hle_bios::THREAD_SR, self.cop0[12]);
-        bus.write32(crate::hle_bios::THREAD_CAUSE, self.cop0[13]);
+        poke32(bus, tcb + TCB_RETURN_PC, self.cop0[14]);
+        poke32(bus, tcb + TCB_HI, self.hi);
+        poke32(bus, tcb + TCB_LO, self.lo);
+        poke32(bus, tcb + TCB_SR, self.cop0[12]);
+        poke32(bus, tcb + TCB_CAUSE, self.cop0[13]);
 
         self.gprs[31] = crate::hle_bios::EXCEPTION_RETURN_STUB;
         self.pending_exception_pc = Some(handler);
@@ -3463,16 +3465,19 @@ impl Cpu {
     }
 
     fn finish_hle_exception(&mut self, bus: &mut Bus) {
+        use crate::hle_bios::{TCB_CAUSE, TCB_HI, TCB_LO, TCB_REGISTERS, TCB_RETURN_PC, TCB_SR};
+        use crate::hle_kernel::peek32;
+        let tcb = crate::hle_kernel::current_tcb(bus);
         for index in 0..32 {
-            self.gprs[index] = bus.read32(crate::hle_bios::THREAD_REGISTERS + index as u32 * 4);
+            self.gprs[index] = peek32(bus, tcb + TCB_REGISTERS + index as u32 * 4);
         }
         self.gprs[0] = 0;
-        self.hi = bus.read32(crate::hle_bios::THREAD_HI);
-        self.lo = bus.read32(crate::hle_bios::THREAD_LO);
-        self.cop0[13] = bus.read32(crate::hle_bios::THREAD_CAUSE);
-        let saved_sr = bus.read32(crate::hle_bios::THREAD_SR);
+        self.hi = peek32(bus, tcb + TCB_HI);
+        self.lo = peek32(bus, tcb + TCB_LO);
+        self.cop0[13] = peek32(bus, tcb + TCB_CAUSE);
+        let saved_sr = peek32(bus, tcb + TCB_SR);
         self.cop0[12] = (saved_sr & !0x0F) | ((saved_sr >> 2) & 0x0F);
-        self.pc = bus.read32(crate::hle_bios::THREAD_RETURN_PC);
+        self.pc = peek32(bus, tcb + TCB_RETURN_PC);
         self.pending_pc = None;
         self.branch_delay_next = false;
         self.pending_load = None;
@@ -3971,18 +3976,18 @@ mod tests {
     fn hle_flush_cache_invalidates_stale_code() {
         let mut cpu = Cpu::new();
         let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
-        bus.hle_bios_enabled = true;
-        bus.write32(0x4000, 0x7777_7777);
+        bus.enable_hle_bios();
+        bus.write32(0x2_4000, 0x7777_7777);
         cpu.cache_control = CACHE_CONTROL_IS1 | (3 << CACHE_CONTROL_IBLKSZ_SHIFT);
-        cpu.pc = 0x8000_4000;
+        cpu.pc = 0x8002_4000;
         assert_eq!(cpu.fetch(&mut bus), 0x7777_7777);
-        bus.write32(0xA000_4000, 0x8888_8888);
+        bus.write32(0xA002_4000, 0x8888_8888);
 
         cpu.pc = 0xA0;
         cpu.gprs[9] = 0x44;
-        cpu.gprs[31] = 0x8000_4000;
+        cpu.gprs[31] = 0x8002_4000;
         cpu.step(&mut bus).unwrap();
-        assert_eq!(cpu.pc(), 0x8000_4000);
+        assert_eq!(cpu.pc(), 0x8002_4000);
         assert_eq!(cpu.fetch(&mut bus), 0x8888_8888);
     }
 
@@ -3994,7 +3999,7 @@ mod tests {
         bus.set_hle_strict(true);
         cpu.pc = 0xA0;
         cpu.gprs[2] = 0x1234_5678;
-        cpu.gprs[9] = 0x33; // malloc
+        cpu.gprs[9] = 0x43; // exec
         cpu.gprs[31] = 0x8001_0000;
         let cycles = bus.cycles();
         let err = cpu.step(&mut bus).unwrap_err();
@@ -4002,8 +4007,8 @@ mod tests {
             err,
             ExecutionError::HleUnimplemented {
                 table: 'A',
-                func: 0x33,
-                name: "user_malloc",
+                func: 0x43,
+                name: "exec",
                 ra: 0x8001_0000,
             }
         );
@@ -5076,24 +5081,62 @@ mod tests {
         cpu.raise_address_error(ExceptionCode::AddressErrorStore, 0x1F80_104A, &mut bus);
         assert_eq!(cpu.pending_exception_pc, Some(0x8001_2340));
         assert!(cpu.hle_exception_active);
+        // The frame lands in the current thread's TCB, found via [[0x108]].
+        let tcb = crate::hle_kernel::current_tcb(&bus);
+        assert_ne!(tcb, 0);
+        use crate::hle_bios::{TCB_CAUSE, TCB_REGISTERS, TCB_RETURN_PC};
+        assert_eq!(bus.read32(tcb + TCB_REGISTERS + 5 * 4), 0xCAFE_BABE);
+        assert_eq!(bus.read32(tcb + TCB_RETURN_PC), 0x8001_0000);
         assert_eq!(
-            bus.read32(crate::hle_bios::THREAD_REGISTERS + 5 * 4),
-            0xCAFE_BABE
-        );
-        assert_eq!(bus.read32(crate::hle_bios::THREAD_RETURN_PC), 0x8001_0000);
-        assert_eq!(
-            (bus.read32(crate::hle_bios::THREAD_CAUSE) >> 2) & 0x1F,
+            (bus.read32(tcb + TCB_CAUSE) >> 2) & 0x1F,
             ExceptionCode::AddressErrorStore as u32
         );
 
         // The guest handler skips the faulting instruction before returning.
-        bus.write32(crate::hle_bios::THREAD_RETURN_PC, 0x8001_0004);
+        bus.write32(tcb + TCB_RETURN_PC, 0x8001_0004);
         cpu.gprs[5] = 0;
         cpu.finish_hle_exception(&mut bus);
         assert_eq!(cpu.pc, 0x8001_0004);
         assert_eq!(cpu.gprs[5], 0xCAFE_BABE);
         assert!(!cpu.hle_exception_active);
         assert_eq!(cpu.isr_depth, 0);
+    }
+
+    #[test]
+    fn hle_unresolved_exception_ignores_the_default_a40_slot() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x8001_0000;
+        cpu.raise_address_error(ExceptionCode::AddressErrorStore, 0x1F80_104A, &mut bus);
+        assert!(!cpu.hle_exception_active);
+        assert_eq!(cpu.pending_exception_pc, Some(0x8000_0080));
+    }
+
+    #[test]
+    fn hle_table_entries_dispatch_to_traps_or_guest_code() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let mut cpu = Cpu::new();
+        // Direct call of the RAM table entry for A(1Bh) strlen.
+        bus.write32(0x8002_0000, u32::from_le_bytes(*b"abc\0"));
+        let entry = bus.read32(crate::hle_kernel::A0_TABLE + 4 * 0x1B);
+        cpu.pc = entry;
+        cpu.gprs[4] = 0x8002_0000;
+        cpu.gprs[31] = 0x8001_0000;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!((cpu.pc(), cpu.gprs[2]), (0x8001_0000, 3));
+
+        // A guest replacement of an entry is jumped to by the vector.
+        bus.write32(crate::hle_kernel::A0_TABLE + 4 * 0x1B, 0x8003_0000);
+        cpu.pc = 0xA0;
+        cpu.gprs[9] = 0x1B;
+        cpu.gprs[2] = 0x55;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(
+            (cpu.pc(), cpu.gprs[2], cpu.gprs[31]),
+            (0x8003_0000, 0x55, 0x8001_0000)
+        );
     }
 
     #[test]

@@ -28,23 +28,24 @@
 use crate::Bus;
 use psx_hw::memory::to_physical;
 
-/// Minimal low-RAM kernel objects used by side-loaded EXEs. Retail BIOS owns
-/// this area; keeping the synthetic objects here lets homebrew that hooks the
-/// unresolved-exception callback use the documented process/thread pointers.
-pub(crate) const PROCESS_LIST_PTR: u32 = 0x0000_0108;
-pub(crate) const UNRESOLVED_HANDLER_PTR: u32 = 0x0000_0300;
-pub(crate) const SYNTHETIC_PROCESS: u32 = 0x8000_0400;
-pub(crate) const SYNTHETIC_THREAD: u32 = 0x8000_0500;
+/// A0 table slot for A(40h) SystemErrorUnresolvedException. Homebrew
+/// replaces this entry to hook unresolved exceptions.
+pub(crate) const UNRESOLVED_HANDLER_PTR: u32 = crate::hle_kernel::A0_TABLE + 4 * 0x40;
+/// Return address given to a guest unresolved-exception handler; reaching
+/// it restores the saved thread frame.
 pub(crate) const EXCEPTION_RETURN_STUB: u32 = 0x8000_00D0;
 
-pub(crate) const THREAD_REGISTERS: u32 = SYNTHETIC_THREAD + 8;
-pub(crate) const THREAD_RETURN_PC: u32 = THREAD_REGISTERS + 32 * 4;
-pub(crate) const THREAD_HI: u32 = THREAD_RETURN_PC + 4;
-pub(crate) const THREAD_LO: u32 = THREAD_HI + 4;
-pub(crate) const THREAD_SR: u32 = THREAD_LO + 4;
-pub(crate) const THREAD_CAUSE: u32 = THREAD_SR + 4;
+/// Offsets inside a TCB (psx-spx "Thread Control Blocks"): registers r0..r31
+/// from +08h, then return PC, HI, LO, SR and CAUSE.
+pub(crate) const TCB_REGISTERS: u32 = 0x08;
+pub(crate) const TCB_RETURN_PC: u32 = 0x88;
+pub(crate) const TCB_HI: u32 = 0x8C;
+pub(crate) const TCB_LO: u32 = 0x90;
+pub(crate) const TCB_SR: u32 = 0x94;
+pub(crate) const TCB_CAUSE: u32 = 0x98;
 
-/// One of the three BIOS dispatcher tables.
+/// One of the three BIOS dispatcher tables, or the HLE kernel's own
+/// internal functions (reached only through pointers the kernel hands out).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Table {
     /// Entry point at physical `0xA0`.
@@ -53,21 +54,37 @@ pub enum Table {
     B,
     /// Entry point at physical `0xC0`.
     C,
+    /// Kernel-internal functions ([`crate::hle_kernel::internal`]).
+    Kernel,
 }
 
 impl Table {
-    /// Table index as used by [`crate::bios_names`]: 0 = A, 1 = B, 2 = C.
+    /// Table index as used by [`crate::bios_names`]: 0 = A, 1 = B, 2 = C,
+    /// 3 = kernel-internal.
     pub fn index(self) -> u8 {
         match self {
             Table::A => 0,
             Table::B => 1,
             Table::C => 2,
+            Table::Kernel => 3,
         }
     }
 
-    /// Single-letter label, `'A'`, `'B'` or `'C'`.
+    /// Single-letter label, `'A'`, `'B'`, `'C'`, or `'K'` for internal.
     pub fn letter(self) -> char {
-        (b'A' + self.index()) as char
+        match self {
+            Table::Kernel => 'K',
+            other => (b'A' + other.index()) as char,
+        }
+    }
+
+    fn from_index(index: u8) -> Self {
+        match index {
+            0 => Table::A,
+            1 => Table::B,
+            2 => Table::C,
+            _ => Table::Kernel,
+        }
     }
 
     fn from_phys(phys: u32) -> Option<Self> {
@@ -77,6 +94,19 @@ impl Table {
             0xC0 => Some(Table::C),
             _ => None,
         }
+    }
+}
+
+/// Conventional name of `(table, func)`, including the internal functions.
+pub fn function_name(table: Table, func: u8) -> &'static str {
+    match table {
+        Table::Kernel => match func {
+            crate::hle_kernel::internal::START_PAD => "startPad",
+            crate::hle_kernel::internal::STOP_PAD => "stopPad",
+            crate::hle_kernel::internal::SET_PAD_OUTPUT_DATA => "setPadOutputData",
+            _ => "?",
+        },
+        t => crate::bios_names::function_name(t.index(), u32::from(func)),
     }
 }
 
@@ -133,58 +163,102 @@ impl std::fmt::Display for CallRecord {
     }
 }
 
-/// Result of one HLE dispatch: `$v0` return value and the updated PC.
+/// Result of one HLE dispatch.
 #[derive(Copy, Clone, Debug)]
 pub struct Hle {
-    /// Value to write into `$r2 ($v0)`. `0` if the syscall doesn't
-    /// return a meaningful value.
-    pub v0: u32,
-    /// Value to set PC to after the call. Normally `$ra`, so the CPU
-    /// resumes right after the caller's `jalr` (or, in the BIOS-stub
-    /// pattern, right after the `jr $t0 ; li $t1, N` pair).
+    /// Value for `$v0`, or `None` when the table entry was guest code and
+    /// the CPU only jumps there.
+    pub v0: Option<u32>,
+    /// PC to continue at: `$ra` after an HLE call (as left by the handler,
+    /// so longjmp can redirect it), or the guest entry for a guest jump.
     pub next_pc: u32,
     /// Which table was called.
     pub table: Table,
-    /// Function number (`$t1 & 0xFF`).
+    /// Function number.
     pub func: u8,
     /// How the call was serviced.
     pub outcome: Outcome,
+    /// The handler changed code in RAM; the instruction cache must be
+    /// invalidated (FlushCache, kernel patch counterpatches).
+    pub flush_icache: bool,
 }
 
-/// Look at `cpu_pc`; if it matches a BIOS table entry, run the
-/// service that `$t1 ($r9)` selects and return the post-call state.
-/// Otherwise return `None` and let the CPU fetch normally.
+/// Intercept a fetch at `pc` when it is a BIOS call.
 ///
-/// `args` is the four argument registers `$a0..$a3` (`$r4..$r7`),
-/// `t1_func_num` is `$r9` (the function selector set by the caller's
-/// delay-slot load), and `ra` is `$r31`.
-pub fn dispatch(
-    cpu_pc: u32,
-    bus: &mut Bus,
-    args: [u32; 4],
-    sp: u32,
-    t1_func_num: u32,
-    ra: u32,
-) -> Option<Hle> {
-    let phys = to_physical(cpu_pc);
-    let table = Table::from_phys(phys)?;
-    let func = (t1_func_num & 0xFF) as u8;
-    bus.hle_bios_log_call(table, func);
-    let (outcome, v0) = match run(table, func, bus, args, sp) {
+/// Two forms are recognised, both only below 64 KiB of RAM:
+///
+/// * the `0xA0`/`0xB0`/`0xC0` vectors: the function number is in `$t1`;
+///   the RAM table entry is looked up like the retail dispatcher does. An
+///   entry pointing at an HLE trap word runs that function; an entry the
+///   guest replaced with its own code is jumped to.
+/// * a trap word itself (see [`crate::hle_kernel::trap_word`]), reached by
+///   calling a table entry directly or through a pointer the kernel handed
+///   out.
+///
+/// `gprs` is the CPU register file: handlers read their arguments from it
+/// and may change callee-saved registers (longjmp).
+pub fn dispatch(pc: u32, bus: &mut Bus, gprs: &mut [u32; 32]) -> Option<Hle> {
+    let phys = to_physical(pc);
+    if phys >= 0x1_0000 {
+        return None;
+    }
+    let (table, func) = if let Some(vector) = Table::from_phys(phys) {
+        let t1 = gprs[9];
+        let (base, len) = crate::hle_kernel::table(vector.index());
+        if t1 >= len {
+            return Some(finish(
+                bus,
+                gprs,
+                vector,
+                t1 as u8,
+                Ret::Unimplemented,
+                false,
+            ));
+        }
+        let entry = crate::hle_kernel::peek32(bus, base + 4 * t1);
+        match crate::hle_kernel::decode_trap(crate::hle_kernel::peek32(bus, entry)) {
+            Some((t, f)) => (Table::from_index(t), f),
+            None => {
+                return Some(Hle {
+                    v0: None,
+                    next_pc: entry,
+                    table: vector,
+                    func: t1 as u8,
+                    outcome: Outcome::Done,
+                    flush_icache: false,
+                })
+            }
+        }
+    } else {
+        let (t, f) = crate::hle_kernel::decode_trap(bus.peek_instruction(pc)?)?;
+        (Table::from_index(t), f)
+    };
+    let flush = table == Table::A && func == 0x44;
+    let ret = run(table, func, bus, gprs);
+    if table != Table::Kernel {
+        bus.hle_bios_log_call(table, func);
+    }
+    Some(finish(bus, gprs, table, func, ret, flush))
+}
+
+fn finish(bus: &mut Bus, gprs: &[u32; 32], table: Table, func: u8, ret: Ret, flush: bool) -> Hle {
+    let (outcome, v0) = match ret {
         Ret::Done(v0) => (Outcome::Done, v0),
         Ret::Stub(v0) => (Outcome::Stub, v0),
         Ret::Unimplemented => (Outcome::Unimplemented, 0),
     };
     if outcome != Outcome::Done {
-        bus.hle_bios_record_call(table, func, outcome, args, ra);
+        let args = [gprs[4], gprs[5], gprs[6], gprs[7]];
+        bus.hle_bios_record_call(table, func, outcome, args, gprs[31]);
     }
-    Some(Hle {
-        v0,
-        next_pc: ra,
+    Hle {
+        v0: Some(v0),
+        next_pc: gprs[31],
         table,
         func,
         outcome,
-    })
+        flush_icache: flush,
+    }
 }
 
 /// Handler result. `Unimplemented` arms must not have side effects, so
@@ -195,8 +269,11 @@ enum Ret {
     Unimplemented,
 }
 
-fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> Ret {
+fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32]) -> Ret {
+    use crate::hle_kernel::{self as k, Heap};
     use Ret::{Done, Stub, Unimplemented};
+    let args = [gprs[4], gprs[5], gprs[6], gprs[7]];
+    let sp = gprs[29];
     match (table, func) {
         // --- A-table ---
         //
@@ -250,6 +327,20 @@ fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> Ret {
         // A(2Eh) memchr(src, byte, len).
         (Table::A, 0x2E) => Done(libc::memchr(bus, args[0], args[1] as u8, args[2])),
 
+        // A(33h) malloc / A(34h) free / A(37h) calloc / A(38h) realloc /
+        // A(39h) InitHeap (psx-spx "BIOS Memory Allocation").
+        (Table::A, 0x33) => Done(k::malloc(bus, Heap::User, args[0])),
+        (Table::A, 0x34) => {
+            k::free(bus, args[0]);
+            Done(0)
+        }
+        (Table::A, 0x37) => Done(k::calloc(bus, args[0], args[1])),
+        (Table::A, 0x38) => Done(k::realloc(bus, args[0], args[1])),
+        (Table::A, 0x39) => {
+            k::init_heap(bus, Heap::User, args[0], args[1]);
+            Done(0)
+        }
+
         // A(3Ch) putchar.
         (Table::A, 0x3C) => {
             write_byte_to_stdout(args[0] as u8);
@@ -281,6 +372,20 @@ fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> Ret {
         // We don't model the device table; accept so the game moves on.
         (Table::A, 0x96) | (Table::A, 0x97) => Stub(0),
 
+        // A(9Ch) SetConf(events, threads, stacktop): reallocate the
+        // control blocks. A(9Dh) GetConf(&events, &threads, &stacktop).
+        (Table::A, 0x9C) => {
+            k::set_conf(bus, args[0], args[1], args[2]);
+            Done(0)
+        }
+        (Table::A, 0x9D) => {
+            let (event, tcb, stack) = k::get_conf(bus);
+            k::poke32(bus, args[0], event);
+            k::poke32(bus, args[1], tcb);
+            k::poke32(bus, args[2], stack);
+            Done(0)
+        }
+
         // A(9Fh) SetMem(megabytes): 2 clears RAM_SIZE bits 8-9, 8 sets them,
         // and the size is recorded at [0x60] (psx-spx; OpenBIOS
         // kernel/misc.c setMemSize). Other values change nothing.
@@ -290,6 +395,14 @@ fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> Ret {
         }
 
         // --- B-table ---
+
+        // B(00h) alloc_kernel_memory / B(01h) free_kernel_memory: the same
+        // allocator over the kernel heap set up by SysInitMemory.
+        (Table::B, 0x00) => Done(k::malloc(bus, Heap::Kernel, args[0])),
+        (Table::B, 0x01) => {
+            k::free(bus, args[0]);
+            Done(0)
+        }
 
         // B(07h) DeliverEvent -- accept; our event system is always-
         // ready so there's nothing to deliver.
@@ -354,12 +467,17 @@ fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> Ret {
         // accepted but the chains never run.
         (Table::C, 0x00) | (Table::C, 0x01) | (Table::C, 0x02) | (Table::C, 0x03) => Stub(0),
 
+        // C(08h) SysInitMemory(addr, size): new kernel heap.
+        (Table::C, 0x08) => {
+            k::init_heap(bus, Heap::Kernel, args[0], args[1]);
+            Done(0)
+        }
+
         // C(0Ah) ChangeClearRCnt -- affects how the kernel's
         // root-counter handler clears flags. No-op.
         (Table::C, 0x0A) => Stub(args[1]),
 
-        // Everything else, including B(00h) alloc_kernel_memory (it needs
-        // the kernel heap), is loud: logged once per function with its
+        // Everything else is loud: logged once per function with its
         // arguments and caller, and a stop in strict mode.
         _ => Unimplemented,
     }
@@ -748,10 +866,22 @@ mod tests {
 
     const RA: u32 = 0x8001_0100;
 
+    fn hle_bus() -> Bus {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        bus
+    }
+
     fn call(bus: &mut Bus, vector: u32, func: u32, args: [u32; 4]) -> u32 {
-        dispatch(vector, bus, args, 0x801F_FF00, func, RA)
+        let mut gprs = [0u32; 32];
+        gprs[4..8].copy_from_slice(&args);
+        gprs[9] = func;
+        gprs[29] = 0x801F_FF00;
+        gprs[31] = RA;
+        dispatch(vector, bus, &mut gprs)
             .expect("BIOS vector dispatch")
             .v0
+            .expect("HLE function, not a guest jump")
     }
 
     fn put_str(bus: &mut Bus, addr: u32, bytes: &[u8]) {
@@ -766,7 +896,7 @@ mod tests {
 
     #[test]
     fn memcpy_and_bcopy_return_their_guarded_pointer() {
-        let mut bus = Bus::new_without_bios();
+        let mut bus = hle_bus();
         put_str(&mut bus, 0x8002_0000, b"abcd");
         assert_eq!(
             call(&mut bus, 0xA0, 0x2A, [0x8003_0000, 0x8002_0000, 4, 0]),
@@ -795,7 +925,7 @@ mod tests {
 
     #[test]
     fn memset_and_bzero_follow_the_documented_return_values() {
-        let mut bus = Bus::new_without_bios();
+        let mut bus = hle_bus();
         assert_eq!(
             call(&mut bus, 0xA0, 0x2B, [0x8002_0000, 0x5A, 3, 0]),
             0x8002_0000
@@ -811,7 +941,7 @@ mod tests {
 
     #[test]
     fn malloc_slot_no_longer_writes_memory() {
-        let mut bus = Bus::new_without_bios();
+        let mut bus = hle_bus();
         put_str(&mut bus, 0x8002_0000, b"keep");
         // A(33h) is malloc; it used to run memset over its arguments.
         call(&mut bus, 0xA0, 0x33, [0x8002_0000, 0, 4, 0]);
@@ -820,7 +950,7 @@ mod tests {
 
     #[test]
     fn string_compare_sign_extends_and_handles_null_pointers() {
-        let mut bus = Bus::new_without_bios();
+        let mut bus = hle_bus();
         put_str(&mut bus, 0x8002_0000, b"abc\0");
         put_str(&mut bus, 0x8002_0100, b"abd\0");
         put_str(&mut bus, 0x8002_0200, &[0x80, 0]);
@@ -851,7 +981,7 @@ mod tests {
 
     #[test]
     fn string_copy_length_and_search() {
-        let mut bus = Bus::new_without_bios();
+        let mut bus = hle_bus();
         put_str(&mut bus, 0x8002_0000, b"hello\0");
         assert_eq!(call(&mut bus, 0xA0, 0x1B, [0x8002_0000, 0, 0, 0]), 5);
         assert_eq!(call(&mut bus, 0xA0, 0x1B, [0, 0, 0, 0]), 0);
@@ -902,7 +1032,7 @@ mod tests {
 
     #[test]
     fn set_mem_updates_ram_size_port_and_kernel_variable() {
-        let mut bus = Bus::new_without_bios();
+        let mut bus = hle_bus();
         call(&mut bus, 0xA0, 0x9F, [8, 0, 0, 0]);
         assert_eq!(bus.read32(0x1F80_1060) & 0x300, 0x300);
         assert_eq!(bus.read32(0x60), 8);
@@ -916,7 +1046,7 @@ mod tests {
 
     #[test]
     fn abs_and_case_conversion() {
-        let mut bus = Bus::new_without_bios();
+        let mut bus = hle_bus();
         assert_eq!(call(&mut bus, 0xA0, 0x0E, [(-5i32) as u32, 0, 0, 0]), 5);
         assert_eq!(call(&mut bus, 0xA0, 0x0F, [7, 0, 0, 0]), 7);
         assert_eq!(
@@ -944,12 +1074,12 @@ mod tests {
 
     #[test]
     fn unimplemented_and_stubbed_calls_are_recorded_once_per_function() {
-        let mut bus = Bus::new_without_bios();
+        let mut bus = hle_bus();
         assert!(bus.hle_bios_first_unimplemented().is_none());
-        // B(0Bh) TestEvent is a stub; A(33h) malloc is unimplemented.
+        // B(0Bh) TestEvent is a stub; A(43h) exec is unimplemented.
         assert_eq!(call(&mut bus, 0xB0, 0x0B, [1, 0, 0, 0]), 1);
-        assert_eq!(call(&mut bus, 0xA0, 0x33, [0x40, 0, 0, 0]), 0);
-        assert_eq!(call(&mut bus, 0xA0, 0x33, [0x80, 0, 0, 0]), 0);
+        assert_eq!(call(&mut bus, 0xA0, 0x43, [0x40, 0, 0, 0]), 0);
+        assert_eq!(call(&mut bus, 0xA0, 0x43, [0x80, 0, 0, 0]), 0);
         // Implemented calls leave no record.
         call(&mut bus, 0xA0, 0x1B, [0, 0, 0, 0]);
 
@@ -958,27 +1088,45 @@ mod tests {
         assert_eq!(records[0].outcome, Outcome::Stub);
         assert_eq!(records[0].name, "testEvent");
         let first = bus.hle_bios_first_unimplemented().unwrap();
-        assert_eq!((first.table, first.func), (Table::A, 0x33));
+        assert_eq!((first.table, first.func), (Table::A, 0x43));
         assert_eq!(first.args[0], 0x40);
         assert_eq!(first.ra, RA);
         assert_eq!(first.count, 2);
         assert_eq!(
             first.to_string().split(" a1=").next(),
-            Some("A(33h) user_malloc a0=0x00000040")
+            Some("A(43h) exec a0=0x00000040")
         );
     }
 
     #[test]
     fn hook_entry_int_tracks_and_resets_guest_jump_buffer() {
-        let mut bus = Bus::new_without_bios();
+        let mut bus = hle_bus();
         let hook = 0x8001_4000;
-
-        let installed =
-            dispatch(0xB0, &mut bus, [hook, 0, 0, 0], 0, 0x19, 0x8001_0100).expect("B0 dispatch");
-        assert_eq!(installed.next_pc, 0x8001_0100);
+        call(&mut bus, 0xB0, 0x19, [hook, 0, 0, 0]);
         assert_eq!(bus.hle_irq_jump_buffer(), Some(hook));
-
-        dispatch(0xB0, &mut bus, [0; 4], 0, 0x18, 0x8001_0200).expect("B0 dispatch");
+        call(&mut bus, 0xB0, 0x18, [0; 4]);
         assert_eq!(bus.hle_irq_jump_buffer(), None);
+    }
+
+    #[test]
+    fn user_heap_calls_and_conf() {
+        let mut bus = hle_bus();
+        assert_eq!(call(&mut bus, 0xA0, 0x33, [16, 0, 0, 0]), 0, "no heap yet");
+        call(&mut bus, 0xA0, 0x39, [0x8010_0000, 0x1000, 0, 0]);
+        let p = call(&mut bus, 0xA0, 0x33, [16, 0, 0, 0]);
+        assert_eq!(p, 0x8010_0004);
+        call(
+            &mut bus,
+            0xA0,
+            0x9D,
+            [0x8002_0000, 0x8002_0004, 0x8002_0008, 0],
+        );
+        let conf: Vec<u32> = (0..3)
+            .map(|i| crate::hle_kernel::peek32(&bus, 0x8002_0000 + 4 * i))
+            .collect();
+        assert_eq!(conf, [0x10, 4, 0x801F_FF00]);
+        // B(00h) allocates from the kernel heap set up at boot.
+        let k = call(&mut bus, 0xB0, 0x00, [8, 0, 0, 0]);
+        assert!((0xA000_E000..0xA001_0000).contains(&k), "{k:#x}");
     }
 }

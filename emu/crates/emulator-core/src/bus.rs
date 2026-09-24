@@ -671,20 +671,19 @@ impl Bus {
     /// BIOS boot sequence. Never enable when validating parity -- the
     /// oracle emulator runs the real BIOS ROM and will diverge.
     pub fn enable_hle_bios(&mut self) {
+        self.enable_hle_bios_with(crate::hle_kernel::KernelConfig::default());
+    }
+
+    /// [`Bus::enable_hle_bios`] with the kernel sized from a disc's
+    /// SYSTEM.CNF. Lays out the HLE kernel in low RAM: dispatch tables and
+    /// trap stubs, kernel heap with the ExCB/EvCB/PCB/TCB control blocks,
+    /// and the table of tables at 0x100 (so homebrew exception hooks find
+    /// the documented process/thread pointers). The guest remains free to
+    /// replace table entries, such as the unresolved-exception slot A(40h).
+    pub fn enable_hle_bios_with(&mut self, config: crate::hle_kernel::KernelConfig) {
         self.hle_bios_enabled = true;
         self.hle_irq_jump_buffer = None;
-        // The retail kernel publishes a Process** at 0x108. Side-loading an
-        // EXE skips that initialization, so provide a reserved low-RAM
-        // process/thread pair for homebrew exception hooks. The guest remains
-        // free to replace the unresolved-handler pointer at 0x300.
-        self.write32(
-            crate::hle_bios::PROCESS_LIST_PTR,
-            crate::hle_bios::SYNTHETIC_PROCESS,
-        );
-        self.write32(
-            crate::hle_bios::SYNTHETIC_PROCESS,
-            crate::hle_bios::SYNTHETIC_THREAD,
-        );
+        crate::hle_kernel::install(self, config);
     }
 
     pub(crate) fn set_hle_irq_jump_buffer(&mut self, pointer: Option<u32>) {
@@ -1023,6 +1022,7 @@ impl Bus {
             crate::hle_bios::Table::A => 0,
             crate::hle_bios::Table::B => 1,
             crate::hle_bios::Table::C => 2,
+            crate::hle_bios::Table::Kernel => return,
         };
         self.hle_bios_calls[idx][func as usize] =
             self.hle_bios_calls[idx][func as usize].saturating_add(1);
@@ -1053,7 +1053,7 @@ impl Bus {
         let record = crate::hle_bios::CallRecord {
             table,
             func,
-            name: crate::bios_names::function_name(table.index(), u32::from(func)),
+            name: crate::hle_bios::function_name(table, func),
             outcome,
             args,
             ra,
