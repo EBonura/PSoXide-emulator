@@ -273,6 +273,12 @@ pub struct LaunchArgs {
     /// Reads bypass the guest bus, leaving emulated timing unchanged.
     #[arg(long, requires = "route_log", value_parser = parse_ram_watch_address)]
     pub route_watch_u32: Vec<u32>,
+    /// Append the host wall time each route tick took, in nanoseconds
+    /// (`host_ns`, last column). Measures emulator speed per emulated
+    /// vblank on a real route; off by default, so a plain route log is
+    /// byte-comparable across hosts and runs.
+    #[arg(long, requires = "route_log")]
+    pub route_log_host_ns: bool,
     /// Write an emulator-owned GP0 command census per route tick. Command
     /// capture is drained after every tick, so long input-tape replays can
     /// measure draw composition without retaining the whole command stream.
@@ -1003,6 +1009,7 @@ fn run_headless_launch(
     if let Some(path) = args.route_screenshot_dir.as_ref() {
         std::fs::create_dir_all(path).map_err(|e| format!("mkdir {}: {e}", path.display()))?;
     }
+    let mut route_host_clock = args.route_log_host_ns.then(std::time::Instant::now);
     let mut route_log = match args.route_log.as_ref() {
         Some(path) => {
             if let Some(parent) = path
@@ -1023,6 +1030,9 @@ fn run_headless_launch(
             for address in &args.route_watch_u32 {
                 write!(writer, ",ram_{address:08x}").map_err(|e| e.to_string())?;
             }
+            if args.route_log_host_ns {
+                write!(writer, ",host_ns").map_err(|e| e.to_string())?;
+            }
             writeln!(writer).map_err(|e| e.to_string())?;
             let area = bus.gpu.display_area();
             write!(
@@ -1037,8 +1047,13 @@ fn run_headless_launch(
                 bus.port1_completed_polls(),
             )
             .map_err(|e| format!("write route log {}: {e}", path.display()))?;
-            write_route_ram_words(&mut writer, bus.ram(), &args.route_watch_u32)
-                .map_err(|e| e.to_string())?;
+            write_route_ram_words(
+                &mut writer,
+                bus.ram(),
+                &args.route_watch_u32,
+                args.route_log_host_ns.then_some(0),
+            )
+            .map_err(|e| e.to_string())?;
             Some(writer)
         }
         None => None,
@@ -1532,7 +1547,13 @@ fn run_headless_launch(
                         .saturating_sub(route_last_icache_profile.refill_stall_cycles),
                 )
                 .map_err(|e| e.to_string())?;
-                write_route_ram_words(writer, bus.ram(), &args.route_watch_u32)
+                let host_ns = route_host_clock.as_mut().map(|last| {
+                    let now = std::time::Instant::now();
+                    let ns = now.duration_since(*last).as_nanos();
+                    *last = now;
+                    ns
+                });
+                write_route_ram_words(writer, bus.ram(), &args.route_watch_u32, host_ns)
                     .map_err(|e| e.to_string())?;
                 route_last_display_start = display_start;
                 route_last_cpu_tick = cpu_tick;
@@ -2736,6 +2757,7 @@ fn validation_launch_args(
         profile_log: None,
         route_log: None,
         route_watch_u32: Vec::new(),
+        route_log_host_ns: false,
         gpu_frame_stats_log: None,
         route_screenshot_dir: None,
         route_screenshot_interval: 3_000,
@@ -2910,11 +2932,15 @@ fn write_route_ram_words(
     writer: &mut impl Write,
     ram: &[u8],
     addresses: &[u32],
+    host_ns: Option<u128>,
 ) -> std::io::Result<()> {
     for address in addresses {
         let offset = (address & 0x1f_ffff) as usize;
         let word = u32::from_le_bytes(ram[offset..offset + 4].try_into().unwrap());
         write!(writer, ",{word}")?;
+    }
+    if let Some(ns) = host_ns {
+        write!(writer, ",{ns}")?;
     }
     writeln!(writer)
 }
@@ -3668,7 +3694,7 @@ mod press_script_tests {
         ram[0..4].copy_from_slice(&[0x78, 0x56, 0x34, 0x12]);
         ram[0x1ffffc..].copy_from_slice(&u32::MAX.to_le_bytes());
         let mut output = Vec::new();
-        write_route_ram_words(&mut output, &ram, &[0, 0x80000000, 0xa01ffffc]).unwrap();
+        write_route_ram_words(&mut output, &ram, &[0, 0x80000000, 0xa01ffffc], None).unwrap();
         assert_eq!(output, b",305419896,305419896,4294967295\n");
     }
 
