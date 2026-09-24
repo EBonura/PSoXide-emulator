@@ -648,6 +648,19 @@ impl Bus {
         self.spu.apply_retail_bios_shell_audio_profile();
     }
 
+    /// Apply the SPU state a disc executable finds after a real boot, for
+    /// the HLE path that has no BIOS shell to program it.
+    pub fn apply_hle_entry_audio_profile(&mut self) {
+        self.spu.apply_hle_entry_audio_profile();
+    }
+
+    /// Load DICR verbatim, including the write-1-to-clear flag bits a
+    /// guest store cannot set. Used to reproduce the DMA interrupt state
+    /// the BIOS leaves at EXE entry; it raises no interrupt.
+    pub(crate) fn set_dicr_raw(&mut self, value: u32) {
+        self.dma.dicr = value;
+    }
+
     /// Current VBlank period -- one frame in cycles.
     pub fn vblank_period(&self) -> u64 {
         self.vblank_period

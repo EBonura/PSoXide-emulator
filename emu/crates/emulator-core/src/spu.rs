@@ -1185,6 +1185,19 @@ impl Spu {
         self.reverb.reset_output();
     }
 
+    /// SPU state at EXE entry for the HLE boot path: the retail shell
+    /// profile above plus the main volume (3FFFh/37EFh), CD input volume
+    /// (0/0) and transfer control (0004h) measured at EXE entry under the
+    /// retail BIOS on every census disc.
+    pub fn apply_hle_entry_audio_profile(&mut self) {
+        self.apply_retail_bios_shell_audio_profile();
+        self.write16(MAIN_VOL_L, 0x3FFF);
+        self.write16(MAIN_VOL_R, 0x37EF);
+        self.write16(CD_VOL_L, 0);
+        self.write16(CD_VOL_R, 0);
+        self.write16(TRANSFER_CTRL, 0x0004);
+    }
+
     /// Advance the noise generator by one SPU sample. Port of
     /// PCSX-Redux's `NoiseClock` (Dr. Hell / Xebra algorithm), which
     /// in turn matches measurements from a real PSX SPU.
