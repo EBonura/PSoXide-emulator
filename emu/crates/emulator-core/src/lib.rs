@@ -41,6 +41,7 @@ pub mod sio;
 mod sio1;
 pub mod snapshot;
 pub mod spu;
+pub mod system_cnf;
 pub mod telemetry;
 pub mod timers;
 pub mod vram;

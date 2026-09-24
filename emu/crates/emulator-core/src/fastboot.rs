@@ -5,9 +5,10 @@
 //! mounted in the CD-ROM controller; only the initial executable load
 //! is short-circuited.
 
-use psx_iso::{load_boot_exe_from_disc, BootError, Disc};
+use psx_iso::{BootError, Disc};
 
 use crate::cpu::ExecutionError;
+use crate::system_cnf::{load_disc_boot, BOOT_ARG_ADDR};
 use crate::{gpu::GP1_ADDR, Bus, Cpu};
 
 /// Number of BIOS instructions to run before warm disc fast boot.
@@ -28,8 +29,20 @@ pub struct DiscFastBootInfo {
     pub load_addr: u32,
     /// Bytes copied into RAM.
     pub payload_len: usize,
-    /// Stack pointer applied to the CPU, if one was provided.
+    /// Stack pointer applied to the CPU. Always set: `SYSTEM.CNF`'s
+    /// `STACK` (or its default) replaces the executable header's value.
     pub stack_pointer: Option<u32>,
+    /// Frame pointer applied to the CPU.
+    pub frame_pointer: u32,
+    /// `STACK` as the BIOS evaluates it; 0 means the caller's stack was
+    /// kept (see [`crate::system_cnf::CALLER_STACK_SP`]).
+    pub cnf_stack: u32,
+    /// `TCB` from `SYSTEM.CNF`.
+    pub tcb: u32,
+    /// `EVENT` from `SYSTEM.CNF`.
+    pub event: u32,
+    /// Argument from the `BOOT` line, copied to `0x180`.
+    pub boot_arg: Option<String>,
 }
 
 /// Load a disc's boot EXE into RAM and seed the CPU at its entry point.
@@ -56,15 +69,18 @@ pub fn fast_boot_disc_with_hle(
     disc: &Disc,
     enable_hle_bios: bool,
 ) -> Result<DiscFastBootInfo, BootError> {
-    let boot = load_boot_exe_from_disc(disc)?;
+    let boot = load_disc_boot(disc)?;
     let payload_len = boot.exe.payload.len();
-    let stack_pointer = boot.stack_pointer.or_else(|| boot.exe.initial_sp());
+    let (sp, fp) = boot.cnf.entry_stack();
 
-    if let Some(sp) = stack_pointer {
-        bus.clear_ram_range(0x8001_0000, sp);
-    }
+    bus.clear_ram_range(0x8001_0000, sp);
     bus.load_exe_payload(boot.exe.load_addr, &boot.exe.payload);
     bus.clear_exe_bss(boot.exe.bss_addr, boot.exe.bss_size);
+    if let Some(arg) = boot.cnf.boot_arg_bytes() {
+        for (offset, byte) in arg.into_iter().enumerate() {
+            bus.write8_safe(BOOT_ARG_ADDR + offset as u32, byte);
+        }
+    }
     if !enable_hle_bios {
         // The abbreviated BIOS warmup installs kernel state but intentionally
         // stops before the license/shell path. PA5 silicon telemetry proves
@@ -76,23 +92,23 @@ pub fn fast_boot_disc_with_hle(
     // games rely on inheriting that shell state instead of issuing
     // GP1(03h) themselves during early startup.
     bus.write32(GP1_ADDR, 0x0300_0000);
-    cpu.seed_from_exe_with_args(
-        boot.exe.initial_pc,
-        boot.exe.initial_gp,
-        stack_pointer,
-        1,
-        0,
-    );
+    cpu.seed_from_exe_with_args(boot.exe.initial_pc, boot.exe.initial_gp, Some(sp), 1, 0);
+    cpu.seed_frame_pointer(fp);
     if enable_hle_bios {
         bus.enable_hle_bios();
     }
 
     Ok(DiscFastBootInfo {
-        boot_path: boot.boot_path,
+        boot_path: boot.cnf.boot_path,
         initial_pc: boot.exe.initial_pc,
         load_addr: boot.exe.load_addr,
         payload_len,
-        stack_pointer,
+        stack_pointer: Some(sp),
+        frame_pointer: fp,
+        cnf_stack: boot.cnf.stack,
+        tcb: boot.cnf.tcb,
+        event: boot.cnf.event,
+        boot_arg: boot.cnf.boot_arg,
     })
 }
 
@@ -110,4 +126,65 @@ pub fn warm_bios_for_disc_fast_boot(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use psx_iso::{IsoBuilder, EXE_HEADER_BYTES};
+
+    fn disc(system_cnf: &[u8]) -> Disc {
+        let mut exe = vec![0u8; EXE_HEADER_BYTES];
+        exe[..8].copy_from_slice(b"PS-X EXE");
+        exe[0x10..0x14].copy_from_slice(&0x8001_0000u32.to_le_bytes());
+        exe[0x18..0x1C].copy_from_slice(&0x8001_0000u32.to_le_bytes());
+        exe[0x1C..0x20].copy_from_slice(&4u32.to_le_bytes());
+        // Header stack fields are ignored on disc boot.
+        exe[0x30..0x34].copy_from_slice(&0x801F_0000u32.to_le_bytes());
+        exe.extend_from_slice(&[0; 4]);
+        let mut builder = IsoBuilder::new();
+        builder.add_file("SYSTEM.CNF", system_cnf.to_vec());
+        builder.add_file("GAME.EXE", exe);
+        Disc::from_bin(builder.build_bin())
+    }
+
+    #[test]
+    fn stack_line_replaces_the_header_and_prefix_keeps_the_caller_stack() {
+        for (cnf, sp, fp) in [
+            (
+                &b"BOOT = cdrom:\\GAME.EXE;1\r\nSTACK = 801FFFF0\r\n"[..],
+                0x801F_FFF0,
+                0x801F_FFF0,
+            ),
+            (b"BOOT = cdrom:\\GAME.EXE;1\r\n", 0x801F_FF00, 0x801F_FF00),
+            (
+                b"BOOT = cdrom:\\GAME.EXE;1\r\nSTACK = 0x801FFFF0\r\n",
+                0x801F_FDD8,
+                0x801F_FF00,
+            ),
+        ] {
+            let mut bus = Bus::new_without_bios();
+            let mut cpu = Cpu::new();
+            let info = fast_boot_disc(&mut bus, &mut cpu, &disc(cnf)).unwrap();
+            assert_eq!(info.stack_pointer, Some(sp));
+            assert_eq!((cpu.gpr(29), cpu.gpr(30)), (sp, fp));
+            assert_eq!((cpu.gpr(4), cpu.gpr(5)), (1, 0));
+        }
+    }
+
+    #[test]
+    fn boot_argument_lands_at_0x180() {
+        let mut bus = Bus::new_without_bios();
+        let mut cpu = Cpu::new();
+        let info = fast_boot_disc(
+            &mut bus,
+            &mut cpu,
+            &disc(b"BOOT = cdrom:\\GAME.EXE;1 go\r\nTCB = 8\r\nEVENT = 20\r\n"),
+        )
+        .unwrap();
+        assert_eq!(info.boot_arg.as_deref(), Some("go"));
+        assert_eq!((info.tcb, info.event), (8, 0x20));
+        let arg: Vec<u8> = (0..3).map(|i| bus.try_read8(0x180 + i).unwrap()).collect();
+        assert_eq!(arg, b"go\0");
+    }
 }
