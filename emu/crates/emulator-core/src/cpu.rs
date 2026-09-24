@@ -849,6 +849,12 @@ impl Cpu {
         self.set_gpr(5, argv);
     }
 
+    /// Set `$fp` after [`Self::seed_from_exe_with_args`], for the disc boot
+    /// case where the BIOS leaves it different from `$sp`.
+    pub(crate) fn seed_frame_pointer(&mut self, fp: u32) {
+        self.set_gpr(30, fp);
+    }
+
     /// Current program counter.
     #[inline]
     pub fn pc(&self) -> u32 {
