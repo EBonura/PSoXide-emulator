@@ -85,6 +85,8 @@ pub struct KernelCode {
     pub unresolved_glue: u32,
     /// `syscall; jr ra` used by ChangeTh.
     pub syscall_stub: u32,
+    /// A(43h) Exec.
+    pub exec: u32,
 }
 
 /// Assembled kernel code (deterministic; built once).
@@ -288,8 +290,50 @@ fn assemble() -> KernelCode {
     a.jr(RA);
     a.nop();
 
+    // A(43h) Exec(header, a1, a2) (psx-spx; register protocol from
+    // OpenBIOS psxexec.s): save s0/ra/sp/fp/gp in the header's reserved
+    // words, zero-fill the memfill region, set sp=fp=base+offset when a
+    // stack base is given, gp from the header, call the entry with
+    // (a1, a2), then restore and return 1.
+    a.label("exec");
+    a.sw(S0, 0x38, A0);
+    a.sw(RA, 0x34, A0);
+    a.sw(SP, 0x28, A0);
+    a.sw(FP, 0x2C, A0);
+    a.sw(GP, 0x30, A0);
+    a.lw(T0, 0x1C, A0);
+    a.lw(T3, 0x20, A0);
+    a.beqz(T0, "exec_nobss");
+    a.mov(S0, A0);
+    a.lw(T1, 0x18, A0);
+    a.label("exec_bss");
+    a.addi(T0, T0, -4);
+    a.sw(ZERO, 0, T1);
+    a.bgtz(T0, "exec_bss");
+    a.addi(T1, T1, 4);
+    a.label("exec_nobss");
+    a.beqz(T3, "exec_nostack");
+    a.lw(T2, 0x00, S0);
+    a.lw(T1, 0x24, S0);
+    a.nop();
+    a.addu(SP, T3, T1);
+    a.mov(FP, SP);
+    a.label("exec_nostack");
+    a.lw(GP, 0x04, S0);
+    a.mov(A0, A1);
+    a.jalr(T2);
+    a.mov(A1, A2);
+    a.lw(RA, 0x34, S0);
+    a.lw(SP, 0x28, S0);
+    a.lw(FP, 0x2C, S0);
+    a.lw(GP, 0x30, S0);
+    a.lw(S0, 0x38, S0);
+    a.jr(RA);
+    a.addiu(V0, ZERO, 1);
+
     let rfe = a.addr("rfe");
     let deliver_event = a.addr("deliver_event");
+    let exec = a.addr("exec");
     let rcnt_verifier = [
         a.addr("rcnt0"),
         a.addr("rcnt1"),
@@ -316,6 +360,7 @@ fn assemble() -> KernelCode {
         defint_verifier,
         unresolved_glue,
         syscall_stub,
+        exec,
     }
 }
 
@@ -492,6 +537,7 @@ pub fn install(bus: &mut Bus) {
     let b0 = crate::hle_kernel::B0_TABLE;
     poke32(bus, b0 + 4 * 0x07, code.deliver_event);
     poke32(bus, b0 + 4 * 0x17, code.return_from_exception);
+    poke32(bus, crate::hle_kernel::A0_TABLE + 4 * 0x43, code.exec);
 
     // Default exit buffer: ReturnFromException on the exception stack
     // (stack top minus 4, psx-spx), other registers 0.
@@ -900,6 +946,73 @@ mod tests {
         let mut bus = Bus::new_without_bios();
         bus.enable_hle_bios();
         bus
+    }
+
+    #[test]
+    fn exec_runs_the_entry_with_its_stack_and_returns_one() {
+        use crate::Cpu;
+        let mut bus = hle_bus();
+        let mut cpu = Cpu::new();
+        let header = 0x8003_0000;
+        let entry = 0x8004_0000;
+        // Entry: store sp to [0x80050000], a0/a1 after it, then return.
+        for (i, w) in [
+            0x3C08_8005u32,
+            0xAD1D_0000,
+            0xAD04_0004,
+            0xAD05_0008,
+            0x03E0_0008,
+            0,
+        ]
+        .iter()
+        .enumerate()
+        {
+            bus.write32(entry + 4 * i as u32, *w);
+        }
+        for (off, v) in [
+            (0x00, entry),
+            (0x04, 0x1234),
+            (0x18, 0x8006_0000),
+            (0x1C, 8),
+            (0x20, 0x801F_0000),
+            (0x24, 0x10),
+        ] {
+            bus.write32(header + off, v);
+        }
+        bus.write32(0x8006_0000, 0xFFFF_FFFF);
+        bus.write32(0x8006_0004, 0xFFFF_FFFF);
+        bus.write32(0x8006_0008, 0xFFFF_FFFF);
+        // Call A(43h) through the vector, returning to a spin loop.
+        bus.write32(0x8001_0000, 0x1000_FFFF);
+        cpu.gprs_mut_for_test()[4] = header;
+        cpu.gprs_mut_for_test()[5] = 7;
+        cpu.gprs_mut_for_test()[6] = 9;
+        cpu.gprs_mut_for_test()[9] = 0x43;
+        cpu.gprs_mut_for_test()[29] = 0x801F_FF00;
+        cpu.gprs_mut_for_test()[31] = 0x8001_0000;
+        cpu.set_pc_for_test(0xA0);
+        for _ in 0..500 {
+            if cpu.pc() == 0x8001_0000 {
+                break;
+            }
+            cpu.step(&mut bus).unwrap();
+        }
+        assert_eq!(cpu.pc(), 0x8001_0000);
+        assert_eq!(cpu.gpr(2), 1);
+        assert_eq!(cpu.gpr(29), 0x801F_FF00, "caller's sp restored");
+        assert_eq!(
+            bus.read32(0x8005_0000),
+            0x801F_0010,
+            "entry ran on base+offset"
+        );
+        assert_eq!((bus.read32(0x8005_0004), bus.read32(0x8005_0008)), (7, 9));
+        assert_eq!(bus.read32(0x8006_0000), 0);
+        assert_eq!(bus.read32(0x8006_0004), 0);
+        assert_eq!(
+            bus.read32(0x8006_0008),
+            0xFFFF_FFFF,
+            "only b_size bytes cleared"
+        );
     }
 
     #[test]

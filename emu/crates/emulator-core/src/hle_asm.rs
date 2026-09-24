@@ -183,6 +183,9 @@ impl Asm {
     pub fn bnez(&mut self, rs: u32, target: &'static str) {
         self.bne(rs, ZERO, target);
     }
+    pub fn bgtz(&mut self, rs: u32, target: &'static str) {
+        self.branch(0x07, rs, 0, target);
+    }
     pub fn b(&mut self, target: &'static str) {
         self.beq(ZERO, ZERO, target);
     }
