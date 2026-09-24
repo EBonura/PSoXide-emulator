@@ -246,6 +246,7 @@ pub fn install(bus: &mut Bus, cfg: KernelConfig) {
     poke32(bus, TOT + 0x54, DCB_SIZE);
     allocate_control_blocks(bus, cfg);
     crate::hle_exceptions::install(bus);
+    crate::hle_files::install(bus);
 }
 
 /// Initialise the kernel heap and allocate ExCB, EvCB, PCB and TCB in the

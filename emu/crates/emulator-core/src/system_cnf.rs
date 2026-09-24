@@ -183,7 +183,7 @@ fn trim(bytes: &[u8]) -> &[u8] {
     &bytes[start..end.max(start)]
 }
 
-fn normalize_path(path: &str) -> Vec<String> {
+pub(crate) fn normalize_path(path: &str) -> Vec<String> {
     let upper = path.trim().trim_matches('\0').trim().to_ascii_uppercase();
     let rest = upper
         .strip_prefix("CDROM0:")

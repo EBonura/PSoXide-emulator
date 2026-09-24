@@ -106,6 +106,13 @@ pub fn function_name(table: Table, func: u8) -> &'static str {
             crate::hle_kernel::internal::SET_PAD_OUTPUT_DATA => "setPadOutputData",
             crate::hle_exceptions::internal::SYSCALL_VERIFIER => "syscallVerifier",
             0x04..=0x07 => "rcntHandler",
+            0x10..=0x15 => "fileContinuation",
+            0x1F => "nop",
+            0x20 => "ttyInOut",
+            0x28 => "cdOpen",
+            0x29 => "cdRead",
+            0x38 => "cdromIoIrq",
+            0x39 => "cdromDmaIrq",
             _ => "?",
         },
         t => crate::bios_names::function_name(t.index(), u32::from(func)),
@@ -304,6 +311,11 @@ enum Ret {
 
 fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut bool) -> Ret {
     use crate::hle_exceptions as ex;
+    use crate::hle_files as files;
+    let file_call = |call: files::FileCall| match call {
+        files::FileCall::Return(v) => Done(v),
+        files::FileCall::Jump(target) => Jump(target),
+    };
     use crate::hle_kernel::{self as k, Heap};
     use Ret::{Done, Jump, Retry, Stub, Unimplemented};
     let args = [gprs[4], gprs[5], gprs[6], gprs[7]];
@@ -489,17 +501,18 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // events are removed. Only the kernel flag exists so far; the
         // handler chains and events arrive with the exception core.
         (Table::A, 0x56) | (Table::A, 0x72) => {
-            k::poke32(bus, k::kvar::CD_KERNEL_ACTIVE, 0);
+            crate::hle_files::cd_remove(bus);
             Done(0)
         }
 
         // A(70h) _bu_init (memcard filesystem init) -- accept.
         (Table::A, 0x70) => Stub(0),
 
-        // A(96h) AddCDROMDevice / A(97h) AddMemCardDevice -- games
-        // call these during init to register filesystem drivers.
-        // We don't model the device table; accept so the game moves on.
-        (Table::A, 0x96) | (Table::A, 0x97) => Stub(0),
+        // A(96h) AddCDROMDevice: the kernel CD-ROM device, if absent.
+        (Table::A, 0x96) => Done(crate::hle_files::add_kernel_cdrom(bus)),
+        // A(97h) AddMemCardDevice -- the memory card device is not
+        // modelled yet; accept so the game moves on.
+        (Table::A, 0x97) => Stub(0),
 
         // A(9Ch) SetConf(events, threads, stacktop): reallocate the
         // control blocks. A(9Dh) GetConf(&events, &threads, &stacktop).
@@ -603,12 +616,22 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
 
         // B(35h) write(fd, src, len): only the TTY (fd 0/1) exists so far;
         // its bytes go to the host console. Returns the length written.
-        (Table::B, 0x35) if args[0] <= 1 => {
-            for i in 0..args[2].min(0x10_0000) {
-                write_byte_to_stdout(bus.try_read8(args[1].wrapping_add(i)).unwrap_or(0));
-            }
-            Done(args[2])
+        // File functions (psx-spx "BIOS File Functions"): B(32h)..B(36h)
+        // and their A(00h)..A(04h) aliases, driver calls through the DCBs
+        // in RAM, AddDevice/RemoveDevice, _get_errno/_get_error.
+        (Table::B, 0x32) | (Table::A, 0x00) => file_call(files::open(bus, gprs, args[0], args[1])),
+        (Table::B, 0x33) | (Table::A, 0x01) => Done(files::lseek(bus, args[0], args[1], args[2])),
+        (Table::B, 0x34) | (Table::A, 0x02) => {
+            file_call(files::read_write(bus, gprs, args[0], args[1], args[2], 1))
         }
+        (Table::B, 0x35) | (Table::A, 0x03) => {
+            file_call(files::read_write(bus, gprs, args[0], args[1], args[2], 2))
+        }
+        (Table::B, 0x36) | (Table::A, 0x04) => file_call(files::close(bus, gprs, args[0])),
+        (Table::B, 0x47) => file_call(files::add_device(bus, gprs, args[0])),
+        (Table::B, 0x48) => file_call(files::remove_device(bus, gprs, args[0])),
+        (Table::B, 0x54) => Done(files::errno(bus)),
+        (Table::B, 0x55) => Done(files::file_error(bus, args[0])),
 
         // B(3Dh) putchar -- same as A(3Ch).
         (Table::B, 0x3D) => {
@@ -703,6 +726,50 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
                 k::poke32(bus, k::kvar::PAD_OUTPUT + 4 * i as u32, *value);
             }
             Done(0)
+        }
+
+        // --- File layer continuations, kernel devices, CD-ROM driver ---
+        (Table::Kernel, n)
+            if (files::internal::CONT_OPEN..=files::internal::CONT_PASS).contains(&n) =>
+        {
+            let v0 = gprs[2];
+            let saved = files::pop_frame(bus, gprs);
+            Done(files::continuation(bus, n, v0, saved))
+        }
+        (Table::Kernel, files::internal::NOP) => Done(0),
+        (Table::Kernel, files::internal::TTY_INOUT) => Done(files::tty_inout(
+            bus,
+            args[0],
+            args[1],
+            &mut write_byte_to_stdout,
+        )),
+        (Table::Kernel, files::internal::CD_OPEN) => {
+            match files::cd_open_step(bus, args[0], args[1]) {
+                Some(v) => Done(v),
+                None => Retry,
+            }
+        }
+        (Table::Kernel, files::internal::CD_READ) => {
+            match files::cd_read_file_step(bus, args[0], args[1], args[2]) {
+                Some(v) => Done(v),
+                None => Retry,
+            }
+        }
+        (Table::Kernel, files::internal::CD_IO_IRQ) => match files::cd_io_irq(bus) {
+            Some(spec) => {
+                gprs[4] = 0xF000_0003;
+                gprs[5] = spec;
+                gprs[31] = ex::code().return_from_exception;
+                Jump(ex::code().deliver_event)
+            }
+            None => Done(0),
+        },
+        (Table::Kernel, files::internal::CD_DMA_IRQ) => {
+            if files::cd_dma_irq(bus) {
+                Jump(ex::code().return_from_exception)
+            } else {
+                Done(0)
+            }
         }
 
         // C(0Ah) ChangeClearRCnt(t, flag): root-counter auto-ack; returns
