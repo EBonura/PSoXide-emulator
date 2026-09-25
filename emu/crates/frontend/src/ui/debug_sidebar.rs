@@ -8,7 +8,7 @@ use egui::{Align, Layout, Rect, RichText, SidePanel, UiBuilder};
 use crate::app::AppState;
 use crate::theme;
 
-use super::{memory, profiler, registers, vram};
+use super::{memory, registers, vram};
 
 const SIDEBAR_MIN_WIDTH: f32 = 320.0;
 const SIDEBAR_MAX_WIDTH: f32 = 900.0;
@@ -133,9 +133,6 @@ fn draw_contents(ui: &mut egui::Ui, state: &mut AppState, vram_tex: egui::Textur
             });
             collapsible(ui, "VRAM", state.panels.vram, |ui| {
                 vram::draw_contents(ui, vram_tex);
-            });
-            collapsible(ui, "Host frame profiler", state.panels.profiler, |ui| {
-                profiler::draw_contents(ui, &mut state.profiler);
             });
         });
 }

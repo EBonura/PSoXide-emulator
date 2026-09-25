@@ -538,7 +538,7 @@ fn icon_button(icon: char) -> Button<'static> {
         .wrap_mode(egui::TextWrapMode::Extend)
 }
 
-/// Left-hand cluster: status pill + responsive FPS / MIPS / dt metrics.
+/// Left-hand cluster: status pill, the game's frame rate and emulation speed.
 fn draw_metrics(ui: &mut egui::Ui, state: &AppState, available_width: f32) {
     ui.add_space(2.0);
 
@@ -551,46 +551,22 @@ fn draw_metrics(ui: &mut egui::Ui, state: &AppState, available_width: f32) {
     ui.add_space(4.0);
     ui.add(toolbar_label(status_label, METRIC_TEXT));
 
-    let host_fps = state.hud.fps();
-    let ms = state.hud.average_dt() * 1000.0;
-    let mips = state.hud.ips() / 1_000_000.0;
-    let audio = state.hud.audio_queue_len();
-    let profile_avg = state
-        .profiler
-        .live_average()
-        .or_else(|| state.profiler.average());
-    let emu_hz = profile_avg
-        .map(|sample| sample.emulated_vblank_hz())
-        .unwrap_or(0.0);
-    let (cadence_label, cadence_hz) = profile_avg
-        .and_then(|sample| sample.guest_visual_frame_hz().map(|hz| ("VIS", hz)))
-        .unwrap_or_else(|| {
-            (
-                "DRAW",
-                profile_avg
-                    .map(|sample| sample.psx_draw_hz())
-                    .unwrap_or(0.0),
-            )
-        });
-
-    maybe_metric(ui, available_width, 170.0, "EMU", format!("{emu_hz:4.1}"));
-    maybe_metric(
-        ui,
-        available_width,
-        260.0,
-        cadence_label,
-        format!("{cadence_hz:4.1}"),
-    );
-    maybe_metric(
-        ui,
-        available_width,
-        360.0,
-        "HOST",
-        format!("{host_fps:4.1}"),
-    );
-    maybe_metric(ui, available_width, 460.0, "MIPS", format!("{mips:4.1}"));
-    maybe_metric(ui, available_width, 560.0, "dt", format!("{ms:4.1} ms"));
-    maybe_metric(ui, available_width, 660.0, "AUDIO", format!("{audio}"));
+    // Guest-side figures live in the debug sidebar's guest performance
+    // panel; the toolbar keeps the two numbers a player cares about.
+    let game_fps = state
+        .guest_stats
+        .recent_fps()
+        .map_or_else(|| "--".to_string(), |fps| format!("{fps:4.1}"));
+    maybe_metric(ui, available_width, 170.0, "FPS", game_fps);
+    if let Some((speed, _)) = state.guest_stats.host_speed() {
+        maybe_metric(
+            ui,
+            available_width,
+            260.0,
+            "SPEED",
+            format!("{:3.0}%", speed * 100.0),
+        );
+    }
 }
 
 /// One "LABEL value" pair, formatted so the label is dim and the

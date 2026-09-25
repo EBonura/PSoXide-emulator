@@ -52,8 +52,6 @@ pub struct PanelVisibility {
     pub memory: bool,
     /// VRAM viewer section.
     pub vram: bool,
-    /// Frame-profiler section.
-    pub profiler: bool,
 }
 
 impl PanelVisibility {
@@ -69,7 +67,6 @@ impl PanelVisibility {
             registers: dev_open,
             memory: dev_open,
             vram: dev_open,
-            profiler: dev_open,
         }
     }
 }
@@ -2545,6 +2542,16 @@ impl AppState {
         self.status_message = Some((msg.into(), STATUS_MESSAGE_TTL_SECS));
     }
 
+    /// Whether the guest performance panel (the debug sidebar) is on screen.
+    pub fn guest_panel_visible(&self) -> bool {
+        self.panels.debug_sidebar
+    }
+
+    /// F3: show or hide the guest performance panel where the user is.
+    pub fn toggle_performance_panel(&mut self) {
+        self.panels.debug_sidebar = !self.panels.debug_sidebar;
+    }
+
     /// Save a guest-performance CSV from the debug sidebar: next to the
     /// game's saves on native, as a browser download on the web.
     pub fn export_guest_stats_csv(&mut self, csv: &str, seconds: u32) {
@@ -3010,6 +3017,7 @@ mod freelook_projection_tests {
 }
 
 pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
+    let guest_panel_visible = state.guest_panel_visible();
     let max_steps = state.run_steps_per_frame.max(1);
     // Freelook: integrate held keys into the camera pose, then push it to the
     // GTE hook for this frame (a no-op while the toggle is off).
@@ -3033,11 +3041,11 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     // per-instruction breakpoint probe entirely in the common
     // no-breakpoints case.
     let check_breakpoints = !state.breakpoints.is_empty();
-    // Guest telemetry (and the core's CPU cycle attribution it needs) runs
-    // only while the debug sidebar is open.
+    // CPU cycle attribution (a per-instruction cost) runs only while the
+    // guest performance panel is on screen; the rest records every vblank.
     state
         .guest_stats
-        .set_enabled(&mut state.cpu, state.panels.debug_sidebar);
+        .set_cpu_attribution(&mut state.cpu, guest_panel_visible);
     let cycles_before = bus.cycles();
     let tick_before = state.cpu.tick();
     let vblank_before = bus.irq().raise_counts()[0];
