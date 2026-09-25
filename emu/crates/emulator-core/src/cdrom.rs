@@ -2640,6 +2640,12 @@ xa_filter=({},{}) sched_cycle={} read_lba={} now={} pending=[{}]",
         byte
     }
 
+    /// Put the head on `lba` without reading: where a boot loader left the
+    /// drive when the executable it loaded starts.
+    pub fn park_head(&mut self, lba: u32) {
+        self.read_lba = lba;
+    }
+
     /// Sectors GetlocP reported on, in order, before bad-Q substitution
     /// (the first [`GETLOCP_LOG_CAP`]; diagnostic).
     pub fn getlocp_lbas(&self) -> &[u32] {

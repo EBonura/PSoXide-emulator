@@ -71,6 +71,10 @@ pub fn fast_boot_disc_with_hle(
 ) -> Result<DiscFastBootInfo, BootError> {
     let boot = load_disc_boot(disc)?;
     let payload_len = boot.exe.payload.len();
+    // The loader reads the EXE and stops: the game's first seek starts from
+    // the sector after it (measured at entry under a real BIOS).
+    let (exe_lba, exe_size) = crate::system_cnf::file_extent(disc, &boot.cnf.boot_path)?;
+    bus.cdrom.park_head(exe_lba + exe_size.div_ceil(2048));
     let (sp, fp) = boot.cnf.entry_stack();
 
     bus.clear_ram_range(0x8001_0000, sp);
@@ -231,6 +235,20 @@ mod tests {
         assert_eq!(gpustat & (1 << 23), 0);
         // The IRQ mask must not raise anything at entry.
         assert!(!bus.external_interrupt_pending());
+    }
+
+    #[test]
+    fn hle_boot_leaves_the_cd_head_after_the_executable() {
+        // A real boot reads the EXE and stops there: at entry the head is on
+        // the sector after its last one (measured on CTR, Tekken 3, Crash,
+        // MGS, Resident Evil 2). The game's first seek starts from there.
+        let disc = disc(b"BOOT = cdrom:\\GAME.EXE;1\r\n");
+        let (lba, size) = crate::system_cnf::file_extent(&disc, "GAME.EXE").unwrap();
+        let mut bus = Bus::new_without_bios();
+        let mut cpu = Cpu::new();
+        fast_boot_disc(&mut bus, &mut cpu, &disc).unwrap();
+        bus.cdrom.insert_disc(Some(disc));
+        assert_eq!(bus.cdrom.debug_read_lba(), lba + size.div_ceil(2048));
     }
 
     #[test]

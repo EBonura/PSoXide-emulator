@@ -531,13 +531,12 @@ fn run_hle(
             path.display()
         );
     }
-    let cd_log = std::env::var("PSOXIDE_COMPAT_CDLOG")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok());
+    let cd_log = cd_log_cap();
     if let Some(cap) = cd_log {
         bus.cdrom.enable_command_log(cap);
         bus.cdrom.enable_response_log(cap);
     }
+    let entry_cycle = bus.cycles();
     let saves = states
         .dir
         .as_ref()
@@ -602,7 +601,7 @@ fn run_hle(
         write_ppm(&bus, &path);
     }
     if cd_log.is_some() {
-        print_cd_log(&bus);
+        print_cd_log(&bus, "cd", entry_cycle);
     }
     if let Some(dir) = &states.dir {
         // Main RAM at the end of the run, for disassembling a stall.
@@ -756,6 +755,12 @@ fn run_reference(
         eprintln!("[hle-compat] reference: real BIOS did not reach the EXE entry");
         return None;
     }
+    let cd_log = cd_log_cap();
+    if let Some(cap) = cd_log {
+        bus.cdrom.enable_command_log(cap);
+        bus.cdrom.enable_response_log(cap);
+    }
+    let entry_cycle = bus.cycles();
     let periodic = periodic_shots(shot.as_deref(), shot_every);
     let (stop, frames_run, _, hashes) = run_frames(
         &mut cpu,
@@ -774,6 +779,9 @@ fn run_reference(
     if let Some(path) = shot {
         write_ppm(&bus, &path);
     }
+    if cd_log.is_some() {
+        print_cd_log(&bus, "cd-bios", entry_cycle);
+    }
     Some(Reference {
         stop_reason: stop,
         frames: frames_run,
@@ -786,7 +794,15 @@ fn run_reference(
 
 /// `PSOXIDE_COMPAT_CDLOG=N`: the first N CD commands and responses of the
 /// HLE run, interleaved by cycle, on stderr (runs of one command folded).
-fn print_cd_log(bus: &Bus) {
+fn cd_log_cap() -> Option<usize> {
+    std::env::var("PSOXIDE_COMPAT_CDLOG")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+}
+
+/// Times are seconds from the EXE entry (`entry_cycle`), so the HLE and
+/// `--reference` logs line up.
+fn print_cd_log(bus: &Bus, tag: &str, entry_cycle: u64) {
     let mut lines: Vec<(u64, String)> = Vec::new();
     for c in bus.cdrom.command_log() {
         lines.push((
@@ -813,10 +829,13 @@ fn print_cd_log(bus: &Bus) {
             continue;
         }
         if repeat > 0 {
-            eprintln!("[cd]   (x{repeat} more)");
+            eprintln!("[{tag}]   (x{repeat} more)");
         }
         repeat = 0;
-        eprintln!("[cd] {:.3}s {text}", cycle as f64 / CPU_HZ);
+        eprintln!(
+            "[{tag}] {:.4}s {text}",
+            cycle.saturating_sub(entry_cycle) as f64 / CPU_HZ
+        );
         last = text;
     }
 }
@@ -939,6 +958,7 @@ fn entry_state(cpu: &Cpu, bus: &mut Bus) -> Vec<(&'static str, u32, u32)> {
         ("sio1_mode", u32::from(bus.read16(0x1F80_1058)), u32::MAX),
         ("sio1_ctrl", u32::from(bus.read16(0x1F80_105A)), u32::MAX),
         ("sio1_baud", u32::from(bus.read16(0x1F80_105E)), u32::MAX),
+        ("cd_head_lba", bus.cdrom.debug_read_lba(), u32::MAX),
     ]
 }
 
