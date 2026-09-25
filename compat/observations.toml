@@ -1,0 +1,248 @@
+# Human judgement behind docs/COMPATIBILITY.md, one table per compat/games.toml
+# id. tools/compat_report.py merges this with an hle_compat --reference run.
+#
+# hle, bios    status tier with no BIOS and with a real BIOS: none, boots,
+#              intro, menu, in-game, playable, perfect (defined in the doc)
+# fmv          plays, partial, broken, none seen, n/a
+# issues       known problems, with a short cause when known
+# evidence     "headless frames" (hle_compat shots looked at) or
+#              "Manny, console" / "Manny, GUI"
+# libcrypt     true for LibCrypt-protected discs (they need a .sbi)
+# hle_hash,    final display hashes of the run the tiers were judged on;
+# bios_hash    when a new run ends elsewhere the report asks for a re-check
+# measured_on  emulator commit of that run
+#
+# Facts about the emulator's results only: no game data.
+
+[_notes]
+text = """
+Six discs were black under both kernels before this round (Gran Turismo 2,
+Marvel vs. Capcom, Resident Evil 3, SF Alpha 2 Gold, Spider-Man, WipEout 3).
+The FMV fixes (byte-lane DMA stores, XA sectors kept out of the data buffer,
+MDEC end of decode) got all of them going; Gran Turismo 2 also needed GetlocL
+to fail while the drive seeks. WipEout divided by the SIO1 baud register,
+which a narrow read returned as 0 whatever was written.
+
+Differences between the no-BIOS and real-BIOS columns come from the HLE
+kernel being cheaper than the retail one in places: after the cycle costs
+added so far (TestEvent, memcpy, memset, bzero) it still reaches the same
+screens 11 to 17 frames early in the first seconds of CTR, Tekken 3 and
+WipEout, so fixed-time button presses can land on different screens.
+
+CTR, SF Alpha 2 Gold, WipEout, Tomb Raider, Metal Slug X and Formula One
+2001 end their 3600-frame runs on a loading screen, so they were also run for
+7200 frames; their rows describe that run.
+
+Tomb Raider's image is stored as .img.ecm; the disc loader decodes ECM in
+memory. The two PAL LibCrypt discs have no .sbi yet; the loader reads one
+from next to the .cue when it is there.
+
+Homebrew: the 16 PSoXide homebrew discs of the HLE gate (Cortex Ignition,
+Half-Life, Quake, Celeste Classic Collection, NitroXide, VoXide and others)
+run on both paths with route and visual-hash logs identical to the previous
+landing, except cs-psx, whose route log moves by a few cycles at one point
+under both kernels (a CD interrupt now delivered after its acknowledge);
+its frames are unchanged.
+"""
+
+[crash]
+hle = "in-game"
+bios = "in-game"
+fmv = "n/a"
+issues = []
+evidence = "headless frames"
+hle_hash = "0x31c078d2ba5aedbf"
+bios_hash = "0x31c078d2ba5aedbf"
+measured_on = "866d404ae"
+
+[ctr]
+hle = "menu"
+bios = "menu"
+fmv = "n/a"
+issues = ["7200-frame run: ends on character select in both kernels (the scripted input does not start a race); the HLE is about 11 frames ahead of the real kernel early on"]
+evidence = "headless frames"
+hle_hash = "0x8629c77d6fd2ee14"
+bios_hash = "0xbeab12d5f2b9439b"
+measured_on = "866d404ae"
+
+[gt2]
+hle = "menu"
+bios = "menu"
+fmv = "plays"
+issues = []
+evidence = "headless frames"
+hle_hash = "0x3958bc4980e5ae91"
+bios_hash = "0x3958bc4980e5ae91"
+measured_on = "866d404ae"
+
+[mgs]
+hle = "menu"
+bios = "menu"
+fmv = "none seen"
+issues = ["the title screen ignores the scripted Start presses under both kernels (not investigated)"]
+evidence = "headless frames"
+hle_hash = "0xc9b1c60a85b20b9e"
+bios_hash = "0xfa34fa39a2d3b5de"
+measured_on = "866d404ae"
+
+[mslugx]
+hle = "in-game"
+bios = "in-game"
+fmv = "n/a"
+issues = ["7200-frame run: mission 1 in both kernels"]
+evidence = "headless frames"
+hle_hash = "0xeb07f882a6697f20"
+bios_hash = "0x730f4f7b511afc05"
+measured_on = "866d404ae"
+
+[mvc]
+hle = "menu"
+bios = "menu"
+fmv = "plays"
+issues = []
+evidence = "headless frames"
+hle_hash = "0xaef3a07c7f864e4d"
+bios_hash = "0x442c604cacbde203"
+measured_on = "866d404ae"
+
+[re2]
+hle = "menu"
+bios = "menu"
+fmv = "plays"
+issues = []
+evidence = "headless frames"
+hle_hash = "0x55e9e4a77aa3846e"
+bios_hash = "0x55e9e4a77aa3846e"
+measured_on = "866d404ae"
+
+[re3]
+hle = "menu"
+bios = "menu"
+fmv = "plays"
+issues = []
+evidence = "headless frames"
+hle_hash = "0x4a0cd8d0c4f17a0a"
+bios_hash = "0x5d65efa9c4cdba02"
+measured_on = "866d404ae"
+
+[sfa2g]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = ["7200-frame run: first fight in both kernels"]
+evidence = "headless frames"
+hle_hash = "0xa727659a2d1e453e"
+bios_hash = "0x45391ae69d5054b4"
+measured_on = "866d404ae"
+
+[spiderman]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = []
+evidence = "headless frames"
+hle_hash = "0xfeb0a56ce8f91790"
+bios_hash = "0x5fd26a366bd8d6b0"
+measured_on = "866d404ae"
+
+[tekken3]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = ["the HLE runs about 16 frames ahead of the real kernel, so the fight differs from the real-BIOS run"]
+evidence = "headless frames"
+hle_hash = "0xf372304b44c5aee6"
+bios_hash = "0xf346e8a80b59a599"
+measured_on = "866d404ae"
+
+[tombraider]
+hle = "menu"
+bios = "menu"
+fmv = "plays"
+issues = ["7200-frame run: black from Start Game on in both kernels (not investigated)"]
+evidence = "headless frames"
+hle_hash = "0xe2ce0e04c54c35a5"
+bios_hash = "0xe2ce0e04c54c35a5"
+measured_on = "866d404ae"
+
+[wipeout]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = ["7200-frame run: on the starting grid in both kernels"]
+evidence = "headless frames"
+hle_hash = "0xbd1b583575bd5eeb"
+bios_hash = "0xd16559d105be2f90"
+measured_on = "866d404ae"
+
+[wipeout2097]
+hle = "in-game"
+bios = "in-game"
+fmv = "n/a"
+issues = []
+evidence = "headless frames"
+hle_hash = "0x243e4b7a6b0c55be"
+bios_hash = "0xcd065b064e2295e8"
+measured_on = "866d404ae"
+
+[wipeout3]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = []
+evidence = "headless frames"
+hle_hash = "0xb824ce2fec06e75d"
+bios_hash = "0xa6b475d3c7923b9c"
+measured_on = "866d404ae"
+
+[chronocross]
+hle = "menu"
+bios = "menu"
+fmv = "plays"
+issues = ["no BIOS: the name-entry letter grid and default name are missing; the game draws them from the BIOS ROM font through Krom2RawAdd B(51h), which the HLE cannot provide (no Sony font is shipped); identical to the real-BIOS run up to that screen"]
+evidence = "headless frames"
+hle_hash = "0x00cc094b7ae1a276"
+bios_hash = "0x8bc6e21524023177"
+measured_on = "866d404ae"
+
+[valkyrie]
+hle = "in-game"
+bios = "in-game"
+fmv = "none seen"
+issues = ["reaches the opening cutscene after New Game; battles not reached"]
+evidence = "headless frames"
+hle_hash = "0x175a1a0489b36f9b"
+bios_hash = "0x679b62275a6c47b8"
+measured_on = "866d404ae"
+
+[nightmare]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = []
+evidence = "headless frames"
+hle_hash = "0xc024eb9c6ef174b5"
+bios_hash = "0xa6881489ee84004a"
+measured_on = "866d404ae"
+
+[f12001]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+libcrypt = true
+issues = ["7200-frame run: practice session pit menu in the cockpit in both kernels; any LibCrypt effect not seen"]
+evidence = "headless frames"
+hle_hash = "0x21048f42604b787c"
+bios_hash = "0x0e963f5235cabf53"
+measured_on = "866d404ae"
+
+[soulreaver]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+libcrypt = true
+issues = ["LibCrypt: psx-spx says the game hangs later (after learning to glide) without the key"]
+evidence = "headless frames"
+hle_hash = "0xec3a9b5c3fa2b539"
+bios_hash = "0xec3a9b5c3fa2b539"
+measured_on = "866d404ae"
