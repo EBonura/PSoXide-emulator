@@ -331,8 +331,74 @@ fn getlocl_without_prior_sector_returns_error_even_with_disc() {
     assert_ne!(first & drive_status_bit::ERROR, 0);
     assert_eq!(
         cd.read8(BASE + 1),
-        0,
-        "invalid-header error should be a 1-byte reply"
+        0x80,
+        "psx-spx: GetlocL fails with error code 80h"
+    );
+}
+
+/// A disc whose sectors carry their own MSF in the header, like a real one.
+fn addressed_disc(sectors: u32) -> Disc {
+    let bcd = |v: u32| ((v / 10) << 4 | (v % 10)) as u8;
+    let mut bin = Vec::new();
+    for lba in 0..sectors {
+        let at = lba + 150;
+        let header = [bcd(at / 4500), bcd(at / 75 % 60), bcd(at % 75), 2];
+        bin.extend(raw_sector(header, [0x01, 0x00, 0x08, 0x00], 0));
+    }
+    Disc::from_bin(bin)
+}
+
+/// psx-spx: GetlocL fails with error 80h while the drive is still seeking
+/// after a new ReadN, and the caller is expected to retry. Returning the
+/// header of the sector read before the seek instead made Gran Turismo 2
+/// believe its stream had landed in the wrong place, and it paused, sought
+/// and restarted the read forever after skipping the intro.
+#[test]
+fn getlocl_fails_with_80h_while_a_read_is_still_seeking() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(addressed_disc(64)));
+    cd.load_next_sector();
+    assert!(cd.last_sector_header_valid);
+    cd.scheduling_cycle = 1_000;
+    cd.setloc_msf = (0x00, 0x02, 0x40);
+    cd.setloc_pending = true;
+    cd.cmd_read();
+    cd.cmd_get_loc_l();
+    let error = cd
+        .pending
+        .iter()
+        .find(|ev| ev.irq == IrqType::Error)
+        .expect("GetlocL fails during the seek");
+    assert_ne!(error.bytes[0] & drive_status_bit::ERROR, 0);
+    assert_eq!(error.bytes[1..], [0x80]);
+}
+
+/// SeekL: GetlocL fails during the seek, then reports the target sector's
+/// header, as the drive has read it to confirm the seek (DuckStation).
+#[test]
+fn getlocl_reports_the_seekl_target_once_the_seek_is_over() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(addressed_disc(64)));
+    cd.load_next_sector();
+    cd.scheduling_cycle = 1_000;
+    cd.setloc_msf = (0x00, 0x02, 0x40);
+    cd.setloc_pending = true;
+    cd.cmd_seek();
+    cd.pending.clear();
+    cd.cmd_get_loc_l();
+    assert!(cd.pending.iter().any(|ev| ev.irq == IrqType::Error));
+
+    cd.pending.clear();
+    cd.scheduling_cycle = 1_000 + 100_000_000;
+    cd.cmd_get_loc_l();
+    let reply = cd
+        .pending
+        .iter()
+        .find(|ev| ev.irq != IrqType::Error)
+        .expect("GetlocL answers after the seek");
+    assert_eq!(
+        reply.bytes,
+        [0x00, 0x02, 0x40, 0x02, 0x01, 0x00, 0x08, 0x00]
     );
 }
 
