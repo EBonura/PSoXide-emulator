@@ -458,23 +458,36 @@ fn fps_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx, s: &Summary) {
 
     let painter = ui.painter_at(rect);
     let mut steps: Vec<Pos2> = Vec::new();
-    let mut average: Vec<Pos2> = Vec::new();
     let mut late_marks: Vec<(f32, f32, u16)> = Vec::new();
-    let mut recent: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
     let dots = axis.span() <= (refresh * 12.0) as u64;
     let lookback = axis.first.saturating_sub(refresh as u64 + 1);
-    for sample in stats.range(lookback, axis.last) {
-        if !sample.presented {
-            continue;
+    // Frames presented in the second ending at each pixel column: a real
+    // time series, so a long load drops to zero instead of being bridged.
+    let presents: Vec<u64> = stats
+        .range(lookback, axis.last)
+        .filter(|sample| sample.presented)
+        .map(|sample| sample.vblank)
+        .collect();
+    let second = refresh.round().max(1.0) as u64;
+    let bin = axis.bin();
+    let mut average: Vec<Pos2> = Vec::new();
+    let (mut lo, mut hi) = (0usize, 0usize);
+    let newest = stats.newest_vblank().unwrap_or(0);
+    let oldest = stats.oldest_vblank().unwrap_or(0);
+    let mut v = axis.first.max(oldest + second);
+    while v <= axis.last.min(newest) {
+        while hi < presents.len() && presents[hi] <= v {
+            hi += 1;
         }
-        recent.push_back(sample.vblank);
-        while recent
-            .front()
-            .is_some_and(|&v| v + (refresh as u64) <= sample.vblank)
-        {
-            recent.pop_front();
+        while lo < hi && presents[lo] + second <= v {
+            lo += 1;
         }
-        if sample.vblank < axis.first || sample.present_interval == 0 {
+        let count = (hi - lo) as f64;
+        average.push(Pos2::new(axis.x(v as f64 + 0.5), y(count.min(y_max))));
+        v += bin;
+    }
+    for sample in stats.range(axis.first, axis.last) {
+        if !sample.presented || sample.present_interval == 0 {
             continue;
         }
         let interval = sample.present_interval;
@@ -491,8 +504,6 @@ fn fps_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx, s: &Summary) {
         }
         steps.push(Pos2::new(x0, yy));
         steps.push(Pos2::new(x1, yy));
-        let covered = recent.len() as f64;
-        average.push(Pos2::new(x1, y(covered.min(y_max))));
         if interval > s.target {
             late_marks.push((x1, yy, interval));
         }
@@ -746,7 +757,8 @@ fn budget_meters(ui: &mut Ui, stats: &GuestStats, ctx: &Ctx) {
                     "Wait loops polling RAM",
                 ),
             ],
-            "Wait loops are tight store-free loops (a heuristic).".into(),
+            "Wait loops: short loops that store nothing outside their stack frame (a heuristic)."
+                .into(),
         );
     } else {
         ui.label(RichText::new("CPU attribution was off for this span.").color(plot::TEXT_DIM));
@@ -812,10 +824,10 @@ fn class_hint(class: CpuClass) -> &'static str {
         CpuClass::Hardware => "I/O register and DMA accesses, including GPU FIFO back-pressure.",
         CpuClass::Other => "Charged cycles no class above claims.",
         CpuClass::WaitHardware => {
-            "Tight store-free loops that read I/O (GPUSTAT, DMA, CD): waiting on hardware."
+            "Short loops storing nothing outside the stack that read I/O (GPUSTAT, DMA, CD): waiting on hardware."
         }
         CpuClass::WaitMemory => {
-            "Tight store-free loops that read RAM (vsync counters, flags), plus HLE kernel waits."
+            "Short loops storing nothing outside the stack that read RAM (vsync counters, flags), plus HLE kernel waits."
         }
     }
 }
