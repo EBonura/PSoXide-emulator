@@ -1590,3 +1590,56 @@ fn stopping_mid_seek_cancels_the_journey() {
         assert_eq!(cd.drive_status & drive_status_bit::PLAYING, 0);
     }
 }
+
+/// A source whose sectors arrive when the test says so, like the web build's
+/// on-demand image.
+struct GatedSource {
+    bytes: Vec<u8>,
+    open: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl psx_iso::TrackSource for GatedSource {
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+    fn read_at(&self, offset: u64, out: &mut [u8]) -> bool {
+        self.ready(offset, out.len() as u64) && self.bytes.read_at(offset, out)
+    }
+    fn ready(&self, _offset: u64, _len: u64) -> bool {
+        self.open.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// A sector delivery whose sector has not arrived waits, event intact, and
+/// lands (with the right data) once it has; the frontend's per-frame check
+/// reports the wait before the frame runs.
+#[test]
+fn a_delivery_waits_for_a_sector_the_image_has_not_supplied() {
+    let open = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let raw = raw_sector([0x00, 0x02, 0x00, 0x02], [0, 0, 0x08, 0], 0x5A);
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(Disc::from_source(Box::new(GatedSource {
+        bytes: raw.repeat(4),
+        open: open.clone(),
+    }))));
+    cd.scheduling_cycle = 1_000;
+    cd.cmd_read();
+    let ack_cycle = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1;
+    assert!(cd.tick(ack_cycle));
+    cd.irq_flag = 0;
+    cd.responses.clear();
+    assert!(cd.prefetch_upcoming());
+
+    open.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(!cd.prefetch_upcoming());
+    let first_due = ack_cycle + CD_READ_TIME * 3 / 2 + 1;
+    assert!(!cd.tick(first_due));
+    assert!(!cd.tick(first_due + 100));
+    assert_eq!(cd.late_sector_counts(), (1, 0), "one wait, counted once");
+    assert_eq!(cd.irq_flag, 0);
+
+    open.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(cd.tick(first_due + 200));
+    assert_eq!(cd.irq_flag, IrqType::DataReady as u8);
+    assert_eq!(cd.data_fifo.front().copied(), Some(0x5A));
+}
