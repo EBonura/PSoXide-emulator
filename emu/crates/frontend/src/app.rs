@@ -401,6 +401,9 @@ pub struct AppState {
     pub hud: HudState,
     /// Rolling frame-time breakdown, visible from the profiler toolbar button.
     pub profiler: ui::profiler::FrameProfiler,
+    /// Per-vblank PS1 telemetry behind the debug sidebar's guest
+    /// performance section. Records only while the sidebar is open.
+    pub guest_stats: psoxide_debug_ui::GuestStats,
     pub memory_view: MemoryView,
     /// When true, the shell advances emulation on each redraw. Toggled
     /// via the Menu's Run/Pause item.
@@ -577,6 +580,7 @@ impl AppState {
             menu: MenuState::with_running(autorun),
             hud: HudState::default(),
             profiler: ui::profiler::FrameProfiler::default(),
+            guest_stats: psoxide_debug_ui::GuestStats::new(),
             memory_view: MemoryView::default(),
             running: autorun,
             run_steps_per_frame: 1_000_000,
@@ -2541,6 +2545,40 @@ impl AppState {
         self.status_message = Some((msg.into(), STATUS_MESSAGE_TTL_SECS));
     }
 
+    /// Save a guest-performance CSV from the debug sidebar: next to the
+    /// game's saves on native, as a browser download on the web.
+    pub fn export_guest_stats_csv(&mut self, csv: &str, seconds: u32) {
+        let game_id = self
+            .current_game
+            .as_ref()
+            .map(|game| game.id.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        #[cfg(not(target_arch = "wasm32"))]
+        let result = {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let dir = self.paths.game_dir(&game_id).join("perf");
+            let path = dir.join(format!("guest-perf-{stamp}.csv"));
+            std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::write(&path, csv))
+                .map(|()| path.display().to_string())
+                .map_err(|error| format!("{}: {error}", path.display()))
+        };
+        #[cfg(target_arch = "wasm32")]
+        let result = crate::web_files::download_input_csv(&format!("psoxide-perf-{game_id}"), csv)
+            .map(|()| "download".to_string());
+        match result {
+            Ok(target) => self.status_message_set(format!(
+                "Saved the last {seconds} s of guest telemetry: {target}"
+            )),
+            Err(error) => {
+                self.status_message_set(format!("Guest telemetry export failed: {error}"))
+            }
+        }
+    }
+
     /// Current output gain after the mute latch is applied.
     pub fn effective_audio_volume(&self) -> f32 {
         if self.audio_muted {
@@ -2995,6 +3033,11 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     // per-instruction breakpoint probe entirely in the common
     // no-breakpoints case.
     let check_breakpoints = !state.breakpoints.is_empty();
+    // Guest telemetry (and the core's CPU cycle attribution it needs) runs
+    // only while the debug sidebar is open.
+    state
+        .guest_stats
+        .set_enabled(&mut state.cpu, state.panels.debug_sidebar);
     let cycles_before = bus.cycles();
     let tick_before = state.cpu.tick();
     let vblank_before = bus.irq().raise_counts()[0];
@@ -3035,6 +3078,7 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
         }
     }
 
+    state.guest_stats.record(&state.cpu, bus);
     let cycles_after = bus.cycles();
     let vblank_after = bus.irq().raise_counts()[0];
     StepFrameReport {

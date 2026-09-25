@@ -106,6 +106,13 @@ fn draw_contents(ui: &mut egui::Ui, state: &mut AppState, vram_tex: egui::Textur
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            let mut export = None;
+            collapsible(ui, "Guest performance (PS1)", true, |ui| {
+                export = psoxide_debug_ui::draw(ui, &mut state.guest_stats, Some(vram_tex));
+            });
+            if let Some(psoxide_debug_ui::PanelAction::ExportCsv { csv, seconds }) = export {
+                state.export_guest_stats_csv(&csv, seconds);
+            }
             collapsible(ui, "CPU Registers", state.panels.registers, |ui| {
                 registers::draw_contents(
                     ui,
@@ -127,7 +134,7 @@ fn draw_contents(ui: &mut egui::Ui, state: &mut AppState, vram_tex: egui::Textur
             collapsible(ui, "VRAM", state.panels.vram, |ui| {
                 vram::draw_contents(ui, vram_tex);
             });
-            collapsible(ui, "Frame Profiler", state.panels.profiler, |ui| {
+            collapsible(ui, "Host frame profiler", state.panels.profiler, |ui| {
                 profiler::draw_contents(ui, &mut state.profiler);
             });
         });

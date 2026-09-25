@@ -48,6 +48,7 @@ use crate::app::fast_boot_embedded_playtest_disc;
 
 use crate::playtest_input::read_input_tape;
 
+mod debug_ui_png;
 mod headless_log;
 mod iso_inspect;
 mod profile_report;
@@ -268,6 +269,24 @@ pub struct LaunchArgs {
     /// byte-comparable across hosts and runs.
     #[arg(long, requires = "route_log")]
     pub route_log_host_ns: bool,
+    /// Record guest telemetry every route tick and, when the run ends, render
+    /// the debug sidebar's guest performance panel to this PNG. Offscreen:
+    /// no window opens. Turns on CPU cycle attribution for the run.
+    #[arg(long)]
+    pub debug_ui_png: Option<PathBuf>,
+    /// Panel width in pixels for `--debug-ui-png`.
+    #[arg(long, default_value_t = 560, requires = "debug_ui_png")]
+    pub debug_ui_width: u32,
+    /// Chart time window in seconds for `--debug-ui-png`.
+    #[arg(long, default_value_t = 10, requires = "debug_ui_png")]
+    pub debug_ui_window_secs: u32,
+    /// Pointer position `X,Y` in panel pixels. Each one renders an extra PNG
+    /// (`<stem>-hoverN.png`) with that hover cursor and tooltip.
+    #[arg(long, requires = "debug_ui_png", value_parser = parse_debug_ui_point)]
+    pub debug_ui_pointer: Vec<(f32, f32)>,
+    /// Also write the recorded telemetry as CSV (the panel's export format).
+    #[arg(long, requires = "debug_ui_png")]
+    pub debug_ui_csv: Option<PathBuf>,
     /// Write an emulator-owned GP0 command census per route tick. Command
     /// capture is drained after every tick, so long input-tape replays can
     /// measure draw composition without retaining the whole command stream.
@@ -946,6 +965,11 @@ fn run_headless_launch(
     let mut route_tick_deadline = bus.cycles().saturating_add(route_vblank_period);
     let mut route_tick_steps = 0u64;
     let mut route_ticks = 0u64;
+    // The cycle profile is switched on with the other profilers below.
+    let mut debug_ui_stats = args
+        .debug_ui_png
+        .is_some()
+        .then(psoxide_debug_ui::GuestStats::new);
     let mut tape_cursor = 0usize;
     let mut tape_started = false;
     // Transcription state: the pad sample that was live during the route tick
@@ -1029,7 +1053,8 @@ fn run_headless_launch(
         args.cpu_cycle_profile_log.is_some()
             || args.mmio_stall_line_log.is_some()
             || args.ram_load_stall_line_log.is_some()
-            || args.icache_stall_line_log.is_some(),
+            || args.icache_stall_line_log.is_some()
+            || args.debug_ui_png.is_some(),
     );
     let mut cpu_cycle_profile_log = match args.cpu_cycle_profile_log.as_ref() {
         Some(path) => {
@@ -1395,6 +1420,10 @@ fn run_headless_launch(
             route_tick_deadline = bus.cycles().saturating_add(route_vblank_period);
             route_tick_steps = 0;
             route_ticks += 1;
+            if let Some(stats) = debug_ui_stats.as_mut() {
+                stats.set_enabled(&mut cpu, true);
+                stats.record(&cpu, &bus);
+            }
             if !scripted_presses.is_empty() {
                 // Re-derive the whole mask each tick rather than tracking
                 // press/release edges: overlapping presses then just OR
@@ -1930,6 +1959,32 @@ fn run_headless_launch(
 
     if let Some(writer) = route_log.as_mut() {
         writer.flush().map_err(|e| e.to_string())?;
+    }
+    if let (Some(stats), Some(out)) = (debug_ui_stats.as_mut(), args.debug_ui_png.as_ref()) {
+        if let Some(path) = args.debug_ui_csv.as_ref() {
+            std::fs::write(path, stats.csv(u32::MAX))
+                .map_err(|e| format!("write {}: {e}", path.display()))?;
+        }
+        stats.view.window = (f64::from(args.debug_ui_window_secs) * stats.refresh_hz())
+            .round()
+            .max(60.0) as u64;
+        let vram = bus.gpu.vram.to_rgba8(0, 0, 1024, 512);
+        debug_ui_png::render(stats, &vram, args.debug_ui_width, None, out)?;
+        for (index, &point) in args.debug_ui_pointer.iter().enumerate() {
+            let stem = out
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("debug-ui");
+            let hover_out = out.with_file_name(format!("{stem}-hover{}.png", index + 1));
+            debug_ui_png::render(stats, &vram, args.debug_ui_width, Some(point), &hover_out)?;
+        }
+        if emit_summary {
+            eprintln!(
+                "[cli] guest performance panel -> {} ({} vblanks recorded)",
+                out.display(),
+                stats.len()
+            );
+        }
     }
     if let Some(writer) = limit_log.as_mut() {
         writer.flush().map_err(|e| e.to_string())?;
@@ -2699,6 +2754,11 @@ fn validation_launch_args(
         route_log: None,
         route_watch_u32: Vec::new(),
         route_log_host_ns: false,
+        debug_ui_png: None,
+        debug_ui_width: 560,
+        debug_ui_window_secs: 10,
+        debug_ui_pointer: Vec::new(),
+        debug_ui_csv: None,
         gpu_frame_stats_log: None,
         route_screenshot_dir: None,
         route_screenshot_interval: 3_000,
@@ -2859,6 +2919,14 @@ fn parse_u32_auto(text: &str) -> Result<u32, String> {
         text.parse::<u32>()
             .map_err(|_| format!("invalid address `{text}`"))
     }
+}
+
+fn parse_debug_ui_point(text: &str) -> Result<(f32, f32), String> {
+    let (x, y) = text
+        .split_once(',')
+        .ok_or_else(|| format!("expected X,Y, got {text:?}"))?;
+    let parse = |v: &str| v.trim().parse::<f32>().map_err(|e| format!("{v:?}: {e}"));
+    Ok((parse(x)?, parse(y)?))
 }
 
 fn parse_ram_watch_address(text: &str) -> Result<u32, String> {
