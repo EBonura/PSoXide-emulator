@@ -310,6 +310,10 @@ pub struct Bus {
     /// the applied effects live in guest RAM.
     #[serde(skip)]
     hle_bios_patches: Vec<(String, u32)>,
+    /// Shift-JIS codes games asked B(51h) Krom2RawAdd for. Diagnostic
+    /// (which glyphs the HLE font must draw); excluded from save states.
+    #[serde(skip)]
+    hle_font_requests: std::collections::BTreeSet<u16>,
     /// Stop the CPU with [`crate::cpu::ExecutionError::HleUnimplemented`]
     /// on the first unimplemented HLE BIOS call instead of returning 0.
     /// Defaults to the `PSOXIDE_HLE_STRICT` environment switch; excluded
@@ -453,6 +457,7 @@ impl Bus {
             hle_bios_enabled: false,
             hle_bios_calls: [[0; 256]; 3],
             hle_bios_records: Vec::new(),
+            hle_font_requests: std::collections::BTreeSet::new(),
             hle_bios_patches: Vec::new(),
             hle_strict: hle_strict_from_env(),
             hsync_cycles: HSYNC_CYCLES_NTSC,
@@ -509,6 +514,8 @@ impl Bus {
     pub fn new_without_bios() -> Self {
         let mut bios = vec![0u8; memory::bios::SIZE];
         bios[..4].copy_from_slice(&0x3C08_0013u32.to_le_bytes());
+        // The HLE kernel's character font, where B(51h) points games.
+        crate::hle_font::install(&mut bios);
         Self::new(bios).expect("synthetic BIOS size is fixed")
     }
 
@@ -1023,6 +1030,16 @@ impl Bus {
     /// Internal: remember the first stubbed or unimplemented call of each
     /// BIOS function, and say so on stderr the first time an unimplemented
     /// one is reached.
+    /// Note a B(51h) Krom2RawAdd request (diagnostic).
+    pub(crate) fn hle_font_request(&mut self, code: u32) {
+        self.hle_font_requests.insert(code as u16);
+    }
+
+    /// Shift-JIS codes requested through B(51h) so far.
+    pub fn hle_font_requests(&self) -> &std::collections::BTreeSet<u16> {
+        &self.hle_font_requests
+    }
+
     pub(crate) fn hle_bios_record_call(
         &mut self,
         table: crate::hle_bios::Table,
