@@ -1167,6 +1167,36 @@ mod tests {
         );
     }
 
+    /// TestEvent through the B0 vector costs what the retail kernel's does
+    /// (black-box timing, vector to return: 43 cycles for a busy event, 48
+    /// for a ready one). Two cycles let Resident Evil 2 and 3 spin their
+    /// 250,000-iteration card timeout four times faster than on a console,
+    /// so the timeout fired before `_card_load` finished ("Access error"
+    /// on an empty card, where the retail kernel shows "no files").
+    #[test]
+    fn test_event_costs_the_measured_retail_cycles() {
+        use crate::Cpu;
+        let mut bus = hle_bus();
+        let handle = open_event(&mut bus, 0xF400_0001, 4, 0x2000, 0);
+        set_event_enabled(&mut bus, handle, true);
+        let mut cpu = Cpu::new();
+        bus.write32(0x8001_0000, 0x1000_FFFF);
+        let mut call = |bus: &mut Bus| {
+            cpu.gprs_mut_for_test()[4] = handle;
+            cpu.gprs_mut_for_test()[9] = 0x0B;
+            cpu.gprs_mut_for_test()[31] = 0x8001_0000;
+            cpu.set_pc_for_test(0xB0);
+            let before = bus.cycles();
+            cpu.step(bus).unwrap();
+            assert_eq!(cpu.pc(), 0x8001_0000);
+            (bus.cycles() - before, cpu.gpr(2))
+        };
+        assert_eq!(call(&mut bus), (43, 0));
+        let status = event_addr(&bus, handle) + 4;
+        poke32(&mut bus, status, EV_READY);
+        assert_eq!(call(&mut bus), (48, 1));
+    }
+
     #[test]
     fn timer_helpers_program_the_documented_registers() {
         let mut bus = hle_bus();

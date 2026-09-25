@@ -74,6 +74,7 @@ Update it in the same commit as any HLE change.
 | GetConf A(9Dh) as guest code starting with lui/lw on the stack word; config words in the order TCBs, EvCBs, stack | `hle_exceptions.rs`, `hle_kernel.rs` | inferred from how Metal Gear Solid decodes the A0[9Dh] entry (the game's own code, read locally for interoperability); no BIOS bytes |
 | memmove, memcmp, bcmp with their documented bugs | `hle_bios.rs` | psx-spx "BIOS Memory Fill/Copy/Compare" |
 | Krom2RawAdd B(51h) returns -1 for every character | `hle_bios.rs` | psx-spx B(51h); the Kanji font is Sony ROM data and is not shipped |
+| Cycle cost of TestEvent B(0Bh) through the vector: 43 cycles for a busy event, 48 for a ready one (every other call still costs 2) | `hle_bios.rs` (`call_cycles`), `cpu.rs` | black-box timing of the developer's own BIOS in the emulator: cycles from the B0 vector to the return address, median over Resident Evil 2's run (764,969 busy and 115 ready calls). Resident Evil 2 and 3 time out a memory card load after 250,000 rounds of four TestEvents. |
 
 ## Tooling
 
@@ -93,5 +94,9 @@ Update it in the same commit as any HLE change.
   devices other than the CD-ROM, and the retail broken-sector
   reallocation on write are unimplemented.
 - Cycle costs of the kernel routines (pad reader delays, handler
-  overhead) are estimates until plan phase P7 measures them.
+  overhead, every call but TestEvent) are estimates until plan phase P7
+  measures them. Measured retail medians from the same run, for P7:
+  DeliverEvent about 555, UnDeliverEvent about 390, bzero and memcpy
+  scale with the length (1126 and 4316 for Resident Evil 2's common
+  sizes), _card_read 117, _card_chan 65; the HLE charges 2.
 - The retail initial rand seed is not known; the HLE starts at 0.
