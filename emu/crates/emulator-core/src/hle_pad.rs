@@ -543,6 +543,49 @@ mod tests {
         (0..n).map(|k| bus.try_read8(addr + k).unwrap()).collect()
     }
 
+    /// StartPAD2, StopPAD2, StartCARD2, StopCARD2 and PAD_init2 end by
+    /// leaving the critical section (OpenBIOS `sio0/driver.c`, `pad.c`). Nightmare Creatures
+    /// calls StartPAD2 with interrupts off and then waits in a TestEvent
+    /// loop for a memory card event, which only interrupts can deliver.
+    #[test]
+    fn pad_and_card_start_stop_leave_the_critical_section() {
+        for (func, want) in [(0x13i16, 1), (0x14, 1), (0x4B, 1), (0x4C, 1), (0x15, 2)] {
+            let mut bus = hle_bus_with_pad(0);
+            let mut a = Asm::new(PROGRAM);
+            // PAD_init2(20000000h, 0, 0, 0); the others ignore arguments.
+            a.li(A0, 0x2000_0000);
+            a.li(A1, 0);
+            a.addiu(T2, ZERO, 0xB0);
+            a.jalr(T2);
+            a.addiu(T1, ZERO, func);
+            a.label("end");
+            a.b("end");
+            a.nop();
+            let words = a.finish();
+            for (i, w) in words.iter().enumerate() {
+                bus.write32(PROGRAM + 4 * i as u32, *w);
+            }
+            let end = PROGRAM + 4 * (words.len() as u32 - 2);
+            let mut cpu = Cpu::new();
+            cpu.gprs_mut_for_test()[29] = 0x801F_FF00;
+            cpu.set_pc_for_test(PROGRAM);
+            assert_eq!(cpu.cop0()[12] & 0x401, 0, "starts with interrupts off");
+            for _ in 0..10_000 {
+                if cpu.pc() == end {
+                    break;
+                }
+                cpu.step(&mut bus).unwrap();
+            }
+            assert_eq!(cpu.pc(), end, "B({func:02X}h) returned");
+            assert_eq!(cpu.gpr(2), want, "B({func:02X}h) return value");
+            assert_eq!(
+                cpu.cop0()[12] & 0x401,
+                0x401,
+                "B({func:02X}h) left the critical section"
+            );
+        }
+    }
+
     #[test]
     fn init_and_start_pad_read_both_ports_on_vblank() {
         let (buf1, buf2) = (0x8002_0000, 0x8002_0040);

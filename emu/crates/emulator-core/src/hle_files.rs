@@ -327,9 +327,14 @@ pub fn install(bus: &mut Bus) {
         poke32(bus, f + fcb::DCB, dcb_addr(0));
         poke32(bus, f + fcb::DEVICE_FLAGS, TTY.flags);
     }
-    // CD-ROM IRQ handlers at priority 0, in front of the SYSCALL handler
-    // (psx-spx order: CdromDmaIrq, CdromIoIrq, SyscallException), and the
-    // five CD-ROM events the kernel opens and enables for itself.
+    cd_install(bus);
+}
+
+/// The kernel CD-ROM driver's IRQ handlers at priority 0, in front of the
+/// SYSCALL handler (psx-spx order: CdromDmaIrq, CdromIoIrq,
+/// SyscallException), and the five CD-ROM events the kernel opens and
+/// enables for itself.
+fn cd_install(bus: &mut Bus) {
     for (hi, func) in [
         (HI_CD_IO, internal::CD_IO_IRQ),
         (HI_CD_DMA, internal::CD_DMA_IRQ),
@@ -344,6 +349,17 @@ pub fn install(bus: &mut Bus) {
         poke32(bus, kvar::CD_EVENTS + 4 * i as u32, ev);
     }
     poke32(bus, crate::hle_kernel::kvar::CD_KERNEL_ACTIVE, 1);
+}
+
+/// A(71h)/A(54h) _96_init: (re)install the kernel CD-ROM driver's
+/// handlers and events (OpenBIOS `initCDRom`). A driver still installed
+/// is removed first so the chain and the event table hold one set. The
+/// drive itself is already initialised by the boot, and the HLE CD-ROM
+/// device looks paths up on the disc directly, so the drive reset and
+/// path-table read of the retail routine have nothing to do here.
+pub fn cd_init(bus: &mut Bus) {
+    cd_remove(bus);
+    cd_install(bus);
 }
 
 /// A(72h)/A(56h) _96_remove: close the kernel's CD events and remove its
@@ -1304,6 +1320,51 @@ mod tests {
         assert_eq!(got, data);
         // The drive's own seek/read timing passed, not an instant copy.
         assert!(bus.cycles() - cycles > 100_000, "{}", bus.cycles() - cycles);
+    }
+
+    /// A(71h)/A(54h) _96_init installs the kernel's CD-ROM handlers and
+    /// events again (Nightmare Creatures calls it first thing; it used to
+    /// be unimplemented and the game never drew a frame). Calling it twice
+    /// or after _96_remove leaves one working set.
+    #[test]
+    fn cd_init_reinstalls_the_cd_driver_once() {
+        let data: Vec<u8> = (0..3000u32).map(|i| (i * 5) as u8).collect();
+        let mut iso = IsoBuilder::new();
+        iso.add_file("DATA.BIN", data.clone());
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        bus.cdrom.insert_disc(Some(Disc::from_bin(iso.build_bin())));
+        let results = 0x8004_0000;
+        let init = program_on(
+            0xA0,
+            &[
+                (0x72, [Some(0), Some(0), Some(0)]),
+                (0x71, [Some(0), Some(0), Some(0)]),
+                (0x54, [Some(0), Some(0), Some(0)]),
+            ],
+        );
+        let cpu = run(&mut bus, &init, results);
+        assert!(
+            bus.hle_bios_first_unimplemented().is_none(),
+            "_96_init is implemented"
+        );
+        // It ends by leaving the critical section (OpenBIOS initCDRom), so
+        // the kernel's CD reads that follow can take their interrupts.
+        assert_eq!(cpu.cop0()[12] & 0x401, 0x401);
+        let path = 0x8002_0000;
+        for (i, b) in b"cdrom:\\DATA.BIN;1\0".iter().enumerate() {
+            bus.write8_safe(path + i as u32, *b);
+        }
+        let dst = 0x8003_0000;
+        let words = program(&[
+            (0x32, [Some(path), Some(1), Some(0)]),
+            (0x34, [None, Some(dst), Some(3000)]),
+            (0x36, [Some(2), Some(0), Some(0)]),
+        ]);
+        run(&mut bus, &words, results);
+        assert_eq!(bus.read32(results + 0x10), 3000);
+        let got: Vec<u8> = (0..3000).map(|i| bus.try_read8(dst + i).unwrap()).collect();
+        assert_eq!(got, data);
     }
 
     #[test]

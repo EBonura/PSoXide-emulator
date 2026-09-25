@@ -200,6 +200,13 @@ pub struct Hle {
     pub retry: bool,
 }
 
+/// Finish a call with SYSCALL(2) ExitCriticalSection through the guest
+/// exception handler, which returns to the caller with `v0` as set.
+fn leave_critical_section(gprs: &mut [u32; 32]) -> Ret {
+    gprs[4] = 2;
+    Ret::Jump(crate::hle_exceptions::code().syscall_stub)
+}
+
 /// Cycles an HLE call takes from its vector to its return. Most calls
 /// still cost the two cycles of the dispatch. Calls that games poll in
 /// timing-sensitive loops take what the retail kernel takes, measured by
@@ -565,9 +572,17 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // instruction cache before this HLE handler returns.
         (Table::A, 0x44) => Done(0),
 
+        // A(54h)/A(71h) _96_init: reinstall the kernel CD-ROM driver, then
+        // leave the critical section as OpenBIOS initCDRom does (SYSCALL(2)
+        // through the guest exception handler), so the CD reads a game
+        // makes next can take their interrupts.
+        (Table::A, 0x54) | (Table::A, 0x71) => {
+            crate::hle_files::cd_init(bus);
+            leave_critical_section(gprs)
+        }
+
         // A(56h)/A(72h) _96_remove: the kernel's CD-ROM handlers and
-        // events are removed. Only the kernel flag exists so far; the
-        // handler chains and events arrive with the exception core.
+        // events are removed.
         (Table::A, 0x56) | (Table::A, 0x72) => {
             crate::hle_files::cd_remove(bus);
             Done(0)
@@ -690,11 +705,28 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         (Table::B, 0x12) => Done(crate::hle_pad::init_pad(
             bus, args[0], args[1], args[2], args[3],
         )),
-        (Table::B, 0x13) => Done(crate::hle_pad::start_pad(bus)),
-        (Table::B, 0x14) => Done(crate::hle_pad::stop_pad(bus)),
-        (Table::B, 0x15) => Done(crate::hle_pad::pad_init2(
-            bus, args[0], args[1], args[2], args[3], sp,
-        )),
+        // StartPAD2/StopPAD2 (and StartCARD2/StopCARD2 below) end by
+        // leaving the critical section, as OpenBIOS sio0/driver.c does:
+        // v0 = 1, then SYSCALL(2) through the guest exception handler.
+        (Table::B, 0x13) => {
+            gprs[2] = crate::hle_pad::start_pad(bus);
+            leave_critical_section(gprs)
+        }
+        (Table::B, 0x14) => {
+            gprs[2] = crate::hle_pad::stop_pad(bus);
+            leave_critical_section(gprs)
+        }
+        // PAD_init2 runs StartPAD2 for the types it accepts, so it leaves
+        // the critical section too (OpenBIOS initPadHighLevel).
+        (Table::B, 0x15) => {
+            let v0 = crate::hle_pad::pad_init2(bus, args[0], args[1], args[2], args[3], sp);
+            if v0 == 0 {
+                Done(0)
+            } else {
+                gprs[2] = v0;
+                leave_critical_section(gprs)
+            }
+        }
         (Table::B, 0x16) => Done(crate::hle_pad::pad_dr(bus)),
 
         // B(18h) ResetEntryInt: default exit buffer, returned.
@@ -803,8 +835,14 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             *flush = true;
             Done(card::init_card(bus, args[0]))
         }
-        (Table::B, 0x4B) => Done(card::start_card(bus)),
-        (Table::B, 0x4C) => Done(card::stop_card(bus)),
+        (Table::B, 0x4B) => {
+            gprs[2] = card::start_card(bus);
+            leave_critical_section(gprs)
+        }
+        (Table::B, 0x4C) => {
+            gprs[2] = card::stop_card(bus);
+            leave_critical_section(gprs)
+        }
         (Table::B, 0x4D) => Done(card::card_info_internal(bus, args[0])),
         (Table::B, 0x4E) => Done(card::card_write(bus, args[0], args[1], args[2])),
         (Table::B, 0x4F) => Done(card::card_read(bus, args[0], args[1], args[2])),
