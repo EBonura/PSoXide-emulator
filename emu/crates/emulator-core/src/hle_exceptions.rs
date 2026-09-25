@@ -1197,6 +1197,37 @@ mod tests {
         assert_eq!(call(&mut bus), (48, 1));
     }
 
+    /// memcpy, memset and bzero through the A0 vector cost what the retail
+    /// ROM routines do for the length (black-box fits; see
+    /// `hle_bios::call_cycles`).
+    #[test]
+    fn libc_copies_cost_the_measured_retail_cycles_per_byte() {
+        use crate::Cpu;
+        let mut bus = hle_bus();
+        let mut cpu = Cpu::new();
+        bus.write32(0x8001_0000, 0x1000_FFFF);
+        let mut call = |bus: &mut Bus, func: u32, a: [u32; 3]| {
+            cpu.gprs_mut_for_test()[4] = a[0];
+            cpu.gprs_mut_for_test()[5] = a[1];
+            cpu.gprs_mut_for_test()[6] = a[2];
+            cpu.gprs_mut_for_test()[9] = func;
+            cpu.gprs_mut_for_test()[31] = 0x8001_0000;
+            cpu.set_pc_for_test(0xA0);
+            let before = bus.cycles();
+            cpu.step(bus).unwrap();
+            assert_eq!(cpu.pc(), 0x8001_0000);
+            bus.cycles() - before
+        };
+        // Measured: memcpy 20 bytes 4299, 92 bytes 18875; memset 80 bytes
+        // 10887; bzero 480 bytes 63786.
+        assert_eq!(call(&mut bus, 0x2A, [0x8002_0000, 0x8003_0000, 20]), 4293);
+        assert_eq!(call(&mut bus, 0x2A, [0x8002_0000, 0x8003_0000, 92]), 18873);
+        assert_eq!(call(&mut bus, 0x2B, [0x8002_0000, 0, 80]), 10874);
+        assert_eq!(call(&mut bus, 0x28, [0x8002_0000, 480, 0]), 63682);
+        // Nothing to copy: the dispatch only.
+        assert_eq!(call(&mut bus, 0x2A, [0x8002_0000, 0x8003_0000, 0]), 2);
+    }
+
     #[test]
     fn timer_helpers_program_the_documented_registers() {
         let mut bus = hle_bus();

@@ -198,6 +198,8 @@ pub struct Hle {
     pub flush_icache: bool,
     /// The function is waiting and will be called again from the same PC.
     pub retry: bool,
+    /// Cycles the call takes, vector to return ([`call_cycles`]).
+    pub cycles: u32,
 }
 
 /// Finish a call with SYSCALL(2) ExitCriticalSection through the guest
@@ -208,20 +210,33 @@ fn leave_critical_section(gprs: &mut [u32; 32]) -> Ret {
 }
 
 /// Cycles an HLE call takes from its vector to its return. Most calls
-/// still cost the two cycles of the dispatch. Calls that games poll in
-/// timing-sensitive loops take what the retail kernel takes, measured by
-/// black-box timing in the emulator (vector to return, median over a
-/// game's run): TestEvent is 43 cycles for a busy event and 48 for a ready
-/// one. Resident Evil 2 and 3 count 250,000 rounds of four TestEvents as
-/// their memory card timeout.
-/// A call the guest redirected to its own code (no `v0`) costs the dispatch
-/// only.
-pub fn call_cycles(table: Table, func: u8, v0: Option<u32>) -> u32 {
-    match (table, func, v0) {
+/// still cost the two cycles of the dispatch. Calls that games make often
+/// or poll in timing-sensitive loops take what the retail kernel takes,
+/// measured by black-box timing in the emulator (vector to return, the
+/// fastest run of each argument over Resident Evil 2, CTR, Tekken 3,
+/// WipEout, Crash and Metal Gear Solid, so interrupts are left out):
+///
+/// * TestEvent: 43 cycles for a busy event, 48 for a ready one. Resident
+///   Evil 2 and 3 count 250,000 rounds of four TestEvents as their memory
+///   card timeout.
+/// * memcpy A(2Ah): 243 + 202.5 per byte; memset A(2Bh): 314 + 132 per
+///   byte; bzero A(28h): 322 + 132 per byte. The retail routines run
+///   from ROM, so they are slow; at two cycles games loaded tens of frames
+///   ahead of a real kernel.
+///
+/// `args` are the argument registers at the call.
+pub fn call_cycles(table: Table, func: u8, v0: Option<u32>, args: [u32; 4]) -> u32 {
+    // Lengths beyond RAM are refused or wrap; cap the charge there.
+    let len = |n: u32| u64::from(n.min(psx_hw::memory::ram::SIZE as u32));
+    let cycles = match (table, func, v0) {
         (Table::B, 0x0B, Some(1)) => 48,
         (Table::B, 0x0B, Some(_)) => 43,
+        (Table::A, 0x2A, Some(_)) if args[2] as i32 > 0 => 243 + len(args[2]) * 405 / 2,
+        (Table::A, 0x2B, Some(_)) if args[2] as i32 > 0 => 314 + len(args[2]) * 132,
+        (Table::A, 0x28, Some(_)) if args[1] as i32 > 0 => 322 + len(args[1]) * 132,
         _ => 2,
-    }
+    };
+    cycles as u32
 }
 
 /// Intercept a fetch at `pc` when it is a BIOS call.
@@ -268,6 +283,7 @@ pub fn dispatch(pc: u32, bus: &mut Bus, gprs: &mut [u32; 32]) -> Option<Hle> {
                     outcome: Outcome::Done,
                     flush_icache: false,
                     retry: false,
+                    cycles: 2,
                 })
             }
         }
@@ -276,6 +292,7 @@ pub fn dispatch(pc: u32, bus: &mut Bus, gprs: &mut [u32; 32]) -> Option<Hle> {
         (Table::from_index(t), f)
     };
     let mut flush = table == Table::A && func == 0x44;
+    let args = [gprs[4], gprs[5], gprs[6], gprs[7]];
     let ret = run(table, func, bus, gprs, &mut flush);
     let jump = match ret {
         // The function is waiting on hardware: leave the CPU at the call
@@ -296,12 +313,15 @@ pub fn dispatch(pc: u32, bus: &mut Bus, gprs: &mut [u32; 32]) -> Option<Hle> {
             outcome: Outcome::Done,
             flush_icache: flush,
             retry,
+            cycles: 2,
         });
     }
     if table != Table::Kernel {
         bus.hle_bios_log_call(table, func);
     }
-    Some(finish(bus, gprs, table, func, ret, flush))
+    let mut out = finish(bus, gprs, table, func, ret, flush);
+    out.cycles = call_cycles(table, func, out.v0, args);
+    Some(out)
 }
 
 fn finish(bus: &mut Bus, gprs: &[u32; 32], table: Table, func: u8, ret: Ret, flush: bool) -> Hle {
@@ -322,6 +342,7 @@ fn finish(bus: &mut Bus, gprs: &[u32; 32], table: Table, func: u8, ret: Ret, flu
         outcome,
         flush_icache: flush,
         retry: false,
+        cycles: 2,
     }
 }
 
