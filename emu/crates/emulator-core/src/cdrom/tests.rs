@@ -993,6 +993,32 @@ fn gettd_track_zero_reports_leadout_minute_second() {
     assert_eq!(cd.read8(BASE) & status_bit::RESPONSE_FIFO_NOT_EMPTY, 0);
 }
 
+/// LibCrypt sectors (from a .sbi file) carry subchannel Q with a bad CRC,
+/// which the controller ignores: GetlocP keeps reporting the position of
+/// the last good sector (psx-spx "CDROM Protection - LibCrypt").
+#[test]
+fn getlocp_skips_libcrypt_sectors_with_bad_subchannel_q() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 16])));
+    cd.set_bad_subq_sectors(vec![6, 7]);
+
+    let absolute_frame = |cd: &mut CdRom, lba: u32, at: u64| {
+        cd.read_lba = lba;
+        cd.cmd_get_loc_p();
+        cd.tick(at);
+        let reply: Vec<u8> = (0..8).map(|_| cd.read8(BASE + 1)).collect();
+        cd.irq_flag = 0;
+        reply[7]
+    };
+    assert_eq!(absolute_frame(&mut cd, 5, 10_000_000), 0x05);
+    assert_eq!(
+        absolute_frame(&mut cd, 7, 20_000_000),
+        0x05,
+        "6 and 7 are ignored"
+    );
+    assert_eq!(absolute_frame(&mut cd, 8, 30_000_000), 0x08);
+}
+
 #[test]
 fn getlocp_reports_index0_and_index1_for_pregap_tracks() {
     let mut cd = CdRom::new();

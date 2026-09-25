@@ -427,6 +427,10 @@ pub struct CdRom {
     /// INT1 goes out once the CPU acknowledges.
     #[serde(default)]
     deferred_data_ready: bool,
+    /// Sectors whose subchannel Q has a bad CRC (LibCrypt, from a `.sbi`
+    /// file), sorted. The controller ignores their Q data.
+    #[serde(default)]
+    bad_subq_sectors: Vec<u32>,
     /// Set while a read is in progress; controls whether new
     /// DataReady events chain into further sectors.
     reading: bool,
@@ -570,6 +574,7 @@ impl CdRom {
             last_sector_header_valid: false,
             seek_header_valid_at: None,
             deferred_data_ready: false,
+            bad_subq_sectors: Vec::new(),
             reading: false,
             read_rescheduled: false,
             read_lba: 0,
@@ -871,6 +876,24 @@ impl CdRom {
     /// changes the TOC belongs in [`Self::insert_disc`].
     pub fn disc_mut(&mut self) -> Option<&mut Disc> {
         self.disc.as_mut()
+    }
+
+    /// Mark sectors whose subchannel Q is deliberately corrupt (LibCrypt).
+    /// The list comes from the disc's `.sbi` file; the image itself has no
+    /// subchannel data. Kept until replaced, so insert the disc first.
+    pub fn set_bad_subq_sectors(&mut self, mut lbas: Vec<u32>) {
+        lbas.sort_unstable();
+        lbas.dedup();
+        self.bad_subq_sectors = lbas;
+    }
+
+    /// The sector whose Q data the controller last accepted at `lba`: bad
+    /// CRCs are ignored, so position reports stay on the sector before.
+    fn last_good_subq_lba(&self, mut lba: u32) -> u32 {
+        while lba > 0 && self.bad_subq_sectors.binary_search(&lba).is_ok() {
+            lba -= 1;
+        }
+        lba
     }
 
     /// Load a disc image. After this, GetID returns the licensed-disc
@@ -1970,6 +1993,7 @@ impl CdRom {
         } else {
             self.read_lba
         };
+        let lba = self.last_good_subq_lba(lba);
         let Some(pos) = disc.track_position_for_lba(lba) else {
             let stat = self.stat_byte() | drive_status_bit::ERROR;
             self.schedule_error_response(vec![stat]);
