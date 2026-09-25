@@ -551,6 +551,8 @@ impl AppState {
         out.menu
             .set_menu_opacity(out.settings.video.menu_opacity_pct);
         out.menu.set_ui_scale(out.settings.video.ui_scale_pct);
+        out.menu
+            .set_smooth_slow_host(out.settings.video.smooth_slow_host);
 
         out.sync_menu_settings_paths();
         out.sync_menu_controls();
@@ -568,6 +570,11 @@ impl AppState {
         #[cfg(target_arch = "wasm32")]
         if let Some(disc) = crate::web_bench::disc_param() {
             crate::web_files::fetch_game(&disc);
+        }
+        #[cfg(target_arch = "wasm32")]
+        if crate::web_bench::flag("smooth") {
+            out.settings.video.smooth_slow_host = true;
+            out.menu.set_smooth_slow_host(true);
         }
         // Both builds start on the open menu (bundled discs like Celeste are
         // launchable from the Games/Examples categories), rather than
@@ -2248,6 +2255,25 @@ impl AppState {
             Err(e) => {
                 eprintln!("[frontend] {e}");
                 self.status_message_set(format!("{msg} (settings save failed)"));
+            }
+        }
+    }
+
+    /// Flip `video.smooth_slow_host`, update its Settings row, and persist it.
+    pub fn toggle_smooth_slow_host(&mut self) {
+        let smooth = !self.settings.video.smooth_slow_host;
+        self.settings.video.smooth_slow_host = smooth;
+        self.menu.set_smooth_slow_host(smooth);
+        let message = if smooth {
+            "Slow computer: smooth picture, slower game"
+        } else {
+            "Slow computer: keep game speed"
+        };
+        match self.save_settings() {
+            Ok(()) => self.status_message_set(message.to_string()),
+            Err(error) => {
+                eprintln!("[frontend] {error}");
+                self.status_message_set(format!("{message} (settings save failed)"));
             }
         }
     }
