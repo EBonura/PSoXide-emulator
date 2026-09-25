@@ -1848,6 +1848,9 @@ impl AppState {
             self.menu.select_category("Games");
             self.status_message_set(format!("Found {n} game(s) in folder"));
         }
+        for error in crate::web_files::drain_load_errors() {
+            self.status_message_set(error);
+        }
         for loaded in crate::web_files::drain() {
             match loaded.kind {
                 crate::web_files::Upload::Game => {

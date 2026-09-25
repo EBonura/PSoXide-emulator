@@ -84,6 +84,19 @@ thread_local! {
     /// re-grant access (set async at startup); cleared once the user reconnects.
     /// When permission is still granted we auto-load instead and never set this.
     static SAVED: Cell<bool> = const { Cell::new(false) };
+    /// Game reads that failed since the last frame, for the status line.
+    static LOAD_ERRORS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Record a failed game read for the status line and the devtools console.
+fn report_load_error(message: String) {
+    web_sys::console::error_1(&JsValue::from_str(&format!("[psoxide] {message}")));
+    LOAD_ERRORS.with(|q| q.borrow_mut().push(message));
+}
+
+/// Drain game reads that failed since the last call.
+pub fn drain_load_errors() -> Vec<String> {
+    LOAD_ERRORS.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
 // ---- File System Access API + IndexedDB glue (Chrome/Edge) ----------------
@@ -397,10 +410,14 @@ pub fn read_game(id: &str) {
         let name = path.rsplit('/').next().unwrap_or(&path).to_string();
         let game_id = id.to_string();
         spawn_local(async move {
-            if let Ok(v) = JsFuture::from(fsa_read_game(&path)).await {
-                if let Ok(file) = v.dyn_into::<web_sys::Blob>() {
-                    read_blob_into_pending(file, Upload::Game, name, Some(game_id)).await;
-                }
+            match JsFuture::from(fsa_read_game(&path)).await {
+                Ok(v) => match v.dyn_into::<web_sys::Blob>() {
+                    Ok(file) => {
+                        read_blob_into_pending(file, Upload::Game, name, Some(game_id)).await
+                    }
+                    Err(_) => report_load_error(format!("reading {path}: no folder access")),
+                },
+                Err(error) => report_load_error(format!("reading {path}: {}", js_error(error))),
             }
         });
     }
@@ -412,10 +429,12 @@ pub fn fetch_game(url: &str) {
     let url = url.to_string();
     let name = url.rsplit('/').next().unwrap_or(&url).to_string();
     spawn_local(async move {
-        if let Ok(v) = JsFuture::from(js_fetch_game(&url)).await {
-            if let Ok(blob) = v.dyn_into::<web_sys::Blob>() {
-                read_blob_into_pending(blob, Upload::Game, name, None).await;
-            }
+        match JsFuture::from(js_fetch_game(&url)).await {
+            Ok(v) => match v.dyn_into::<web_sys::Blob>() {
+                Ok(blob) => read_blob_into_pending(blob, Upload::Game, name, None).await,
+                Err(_) => report_load_error(format!("fetching {url}: not found")),
+            },
+            Err(error) => report_load_error(format!("fetching {url}: {}", js_error(error))),
         }
     });
 }
@@ -646,9 +665,7 @@ async fn read_blob_into_pending(
                 bytes,
             });
         }),
-        Err(error) => web_sys::console::error_1(&JsValue::from_str(&format!(
-            "[psoxide] reading {name}: {error}"
-        ))),
+        Err(error) => report_load_error(format!("reading {name}: {error}")),
     }
 }
 
