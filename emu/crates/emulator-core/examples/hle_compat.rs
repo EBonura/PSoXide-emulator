@@ -32,6 +32,13 @@
 //! read only from that variable and never leaves this process; this mode
 //! is for private verification with your own BIOS dump and is not reachable
 //! from the frontend.
+//!
+//! Dev-only reference mode: `--reference` (also reading
+//! `PSOXIDE_PARITY_BIOS`) runs each disc a second time through that real
+//! BIOS with the same input and memory card, counting frames from the EXE
+//! entry so both runs line up, and reports its display hash next to the
+//! HLE one (with `--shots`, as `<id>.bios.ppm`). It shows how far the game
+//! gets with a real kernel, which is what the HLE run is judged against.
 
 #[path = "support/args.rs"]
 mod args_support;
@@ -100,6 +107,16 @@ struct GameResult {
     display_hash: Option<String>,
     distinct_display_hashes: usize,
     parity: Option<Vec<ParityField>>,
+    /// Real-BIOS run (dev-only `--reference`).
+    reference: Option<Reference>,
+}
+
+#[derive(serde::Serialize)]
+struct Reference {
+    stop_reason: String,
+    frames: u64,
+    display_hash: String,
+    distinct_display_hashes: usize,
 }
 
 #[derive(serde::Serialize)]
@@ -122,6 +139,7 @@ fn main() {
     let mut json = None;
     let mut strict = false;
     let mut parity = false;
+    let mut reference = false;
     let mut shots: Option<PathBuf> = None;
     let mut pulses: Option<String> = None;
     let mut args = std::env::args().skip(1);
@@ -136,14 +154,15 @@ fn main() {
             "--json" => json = Some(args_support::take_path(&mut args, "--json")),
             "--strict" => strict = true,
             "--parity" => parity = true,
+            "--reference" => reference = true,
             "--shots" => shots = Some(args_support::take_path(&mut args, "--shots")),
             other => panic!("unknown argument {other}; see the header of hle_compat.rs"),
         }
     }
     assert!(!dirs.is_empty(), "pass at least one --games-dir");
-    let parity_bios = parity.then(|| {
+    let parity_bios = (parity || reference).then(|| {
         let path = std::env::var_os("PSOXIDE_PARITY_BIOS")
-            .expect("--parity needs PSOXIDE_PARITY_BIOS=<path to your BIOS dump>");
+            .expect("--parity/--reference need PSOXIDE_PARITY_BIOS=<path to your BIOS dump>");
         std::fs::read(&path).expect("PSOXIDE_PARITY_BIOS readable")
     });
     // A scripted pulse list (mask@vblank+frames, the frontend's
@@ -194,7 +213,14 @@ fn main() {
                         strict,
                         shot,
                     );
-                    if let Some(bios) = parity_bios.as_ref() {
+                    if let (true, Some(bios)) = (reference, parity_bios.as_ref()) {
+                        let shot = shots
+                            .as_ref()
+                            .map(|dir| dir.join(format!("{}.bios.ppm", game.id)));
+                        result.reference =
+                            run_reference(bios, disc.clone(), frames, tape.as_deref(), shot);
+                    }
+                    if let (true, Some(bios)) = (parity, parity_bios.as_ref()) {
                         result.parity = parity_diff(bios, &disc);
                         if result.parity.is_none() {
                             eprintln!("[hle-compat] parity unavailable for {}", game.id);
@@ -351,39 +377,9 @@ fn run_hle(
     bus.cdrom.insert_disc(Some(disc));
     bus.attach_digital_pad_port1();
     bus.attach_memcard_port1(Vec::new());
-    apply_sample(&mut bus, tape, 0);
 
     let start = Instant::now();
-    let cap = frames
-        .saturating_mul(STEPS_PER_FRAME_CAP)
-        .saturating_add(10_000_000);
-    let mut hashes = std::collections::BTreeSet::new();
-    let mut last_vblank = 0u64;
-    let mut steps = 0u64;
-    let stop = loop {
-        if let Err(error) = cpu.step(&mut bus) {
-            break format!("cpu_error: {error}");
-        }
-        steps += 1;
-        bus.run_spu_to_current_cycle();
-        if bus.spu.audio_queue_len() != 0 {
-            let _ = bus.spu.drain_audio();
-        }
-        let vblank = bus.irq().raise_counts()[0];
-        if vblank != last_vblank {
-            last_vblank = vblank;
-            apply_sample(&mut bus, tape, vblank);
-            if vblank.is_multiple_of(HASH_EVERY) {
-                hashes.insert(bus.gpu.display_hash().0);
-            }
-            if vblank >= frames {
-                break "frames".to_string();
-            }
-        }
-        if steps >= cap {
-            break "step_cap".to_string();
-        }
-    };
+    let (stop, last_vblank, steps, hashes) = run_frames(&mut cpu, &mut bus, frames, tape);
     let host = start.elapsed().as_secs_f64();
 
     result.stop_reason = Some(stop);
@@ -421,6 +417,94 @@ fn run_hle(
             _ => result.stubbed.push(line),
         }
     }
+}
+
+/// Run `frames` VBlanks from the current state (counted from here),
+/// feeding the tape one sample per VBlank. Returns the stop reason, frames
+/// run, instructions, and the display hashes sampled every
+/// [`HASH_EVERY`] frames.
+fn run_frames(
+    cpu: &mut Cpu,
+    bus: &mut Bus,
+    frames: u64,
+    tape: Option<&[PadSample]>,
+) -> (String, u64, u64, std::collections::BTreeSet<u64>) {
+    apply_sample(bus, tape, 0);
+    let cap = frames
+        .saturating_mul(STEPS_PER_FRAME_CAP)
+        .saturating_add(10_000_000);
+    let mut hashes = std::collections::BTreeSet::new();
+    let base_vblank = bus.irq().raise_counts()[0];
+    let mut last_vblank = 0u64;
+    let mut steps = 0u64;
+    let stop = loop {
+        if let Err(error) = cpu.step(bus) {
+            break format!("cpu_error: {error}");
+        }
+        steps += 1;
+        bus.run_spu_to_current_cycle();
+        if bus.spu.audio_queue_len() != 0 {
+            let _ = bus.spu.drain_audio();
+        }
+        let vblank = bus.irq().raise_counts()[0] - base_vblank;
+        if vblank != last_vblank {
+            last_vblank = vblank;
+            apply_sample(bus, tape, vblank);
+            if vblank.is_multiple_of(HASH_EVERY) {
+                hashes.insert(bus.gpu.display_hash().0);
+            }
+            if vblank >= frames {
+                break "frames".to_string();
+            }
+        }
+        if steps >= cap {
+            break "step_cap".to_string();
+        }
+    };
+    (stop, last_vblank, steps, hashes)
+}
+
+/// Dev-only: cold-boot `disc` through the real BIOS to the EXE entry, then
+/// run the same frames and input as the HLE run.
+fn run_reference(
+    bios: &[u8],
+    disc: Disc,
+    frames: u64,
+    tape: Option<&[PadSample]>,
+    shot: Option<PathBuf>,
+) -> Option<Reference> {
+    let entry = load_disc_boot(&disc).ok()?.exe.initial_pc & 0x1FFF_FFFF;
+    let mut bus = Bus::new(bios.to_vec()).ok()?;
+    let mut cpu = Cpu::new();
+    bus.cdrom.insert_disc(Some(disc));
+    bus.attach_digital_pad_port1();
+    bus.attach_memcard_port1(Vec::new());
+    let mut reached = false;
+    for _ in 0..PARITY_BOOT_STEP_CAP {
+        if cpu.pc() & 0x1FFF_FFFF == entry {
+            reached = true;
+            break;
+        }
+        cpu.step(&mut bus).ok()?;
+        bus.run_spu_to_current_cycle();
+        if bus.spu.audio_queue_len() != 0 {
+            let _ = bus.spu.drain_audio();
+        }
+    }
+    if !reached {
+        eprintln!("[hle-compat] reference: real BIOS did not reach the EXE entry");
+        return None;
+    }
+    let (stop, frames_run, _, hashes) = run_frames(&mut cpu, &mut bus, frames, tape);
+    if let Some(path) = shot {
+        write_ppm(&bus, &path);
+    }
+    Some(Reference {
+        stop_reason: stop,
+        frames: frames_run,
+        display_hash: format!("0x{:016x}", bus.gpu.display_hash().0),
+        distinct_display_hashes: hashes.len(),
+    })
 }
 
 fn apply_sample(bus: &mut Bus, tape: Option<&[PadSample]>, frame: u64) {
@@ -533,6 +617,15 @@ fn print_table(results: &[GameResult]) {
                 .or(r.detail.as_deref())
                 .unwrap_or("-"),
         );
+        if let Some(reference) = &r.reference {
+            println!(
+                "    real BIOS: {} frames, display {}, {} hashes ({})",
+                reference.frames,
+                reference.display_hash,
+                reference.distinct_display_hashes,
+                reference.stop_reason
+            );
+        }
         if let Some(parity) = &r.parity {
             let matching = parity.iter().filter(|f| f.matches).count();
             println!("    parity: {matching}/{} entry fields match", parity.len());
