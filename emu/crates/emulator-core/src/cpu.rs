@@ -1072,8 +1072,27 @@ impl Cpu {
         addr < 0xA000_0000 && self.cache_control & CACHE_CONTROL_IS1 != 0
     }
 
-    #[inline]
+    #[inline(always)]
     fn fetch_instruction(&mut self, addr: u32, bus: &mut Bus) -> u32 {
+        // Hit fast path: cached region, no fill streaming, no diagnostics.
+        // Exactly the general path's hit case (no stall, no fill, the bus
+        // told it was a hit), without its bookkeeping.
+        if bus.code_stream_idle()
+            && self.instruction_cache_enabled_at(addr)
+            && !self.instruction_cache_event_profile_enabled
+            && !bus.limit(crate::limits::ICACHE)
+        {
+            if let Some(instruction) = self.instruction_cache.hit(memory::to_physical(addr)) {
+                bus.note_cached_fetch(true);
+                bus.add_zero_cycles();
+                return instruction;
+            }
+        }
+        self.fetch_instruction_slow(addr, bus)
+    }
+
+    #[inline(never)]
+    fn fetch_instruction_slow(&mut self, addr: u32, bus: &mut Bus) -> u32 {
         if self.instruction_cache_event_profile_enabled {
             self.last_instruction_cache_refill = None;
         }
@@ -1661,6 +1680,32 @@ impl Cpu {
         self.execute_one(bus).map(|_| ())
     }
 
+    /// Execute up to `max_steps` instructions, stopping after the first one
+    /// for which `stop_after` returns `true`, and return how many ran. The
+    /// same as `step` in a loop with that check after each instruction, but
+    /// one call for the whole run, so the interpreter's setup and teardown
+    /// are paid once rather than per instruction. Stops early, with the
+    /// count so far, on an execution error.
+    #[inline]
+    pub fn run(
+        &mut self,
+        bus: &mut Bus,
+        max_steps: u64,
+        mut stop_after: impl FnMut(&Bus) -> bool,
+    ) -> (u64, Result<(), ExecutionError>) {
+        let mut steps = 0;
+        while steps < max_steps {
+            if let Err(error) = self.execute_one(bus) {
+                return (steps, Err(error));
+            }
+            steps += 1;
+            if stop_after(bus) {
+                break;
+            }
+        }
+        (steps, Ok(()))
+    }
+
     /// Execute one instruction and return a full register snapshot
     /// after retirement. Allocates 404 bytes per call.
     #[inline]
@@ -1686,6 +1731,7 @@ impl Cpu {
     /// and the normal interpreter path). Both `step` and
     /// `step_traced` go through here, so the interpreter logic
     /// stays in one place.
+    #[inline(always)]
     fn execute_one(&mut self, bus: &mut Bus) -> Result<ExecutedInstruction, ExecutionError> {
         if !bus.limits.tracks_pc() {
             return self.execute_one_inner(bus);
@@ -1697,7 +1743,7 @@ impl Cpu {
         let cycles_before = bus.cycles();
         let skipped_before = bus.limits.skipped_cycles;
         let profile_before = self.cpu_cycle_profile;
-        let outcome = self.execute_one_inner(bus);
+        let outcome = self.execute_one_outlined(bus);
         let charged = bus.cycles().saturating_sub(cycles_before);
         let skipped = bus.limits.skipped_cycles - skipped_before;
         if bus.limits.end_instruction(pc, charged, skipped) && self.cpu_cycle_profile_enabled {
@@ -1714,6 +1760,17 @@ impl Cpu {
         outcome
     }
 
+    /// [`Self::execute_one_inner`] kept out of line, for the limit-oracle
+    /// path, so only the hot loops carry an inlined copy.
+    #[inline(never)]
+    fn execute_one_outlined(
+        &mut self,
+        bus: &mut Bus,
+    ) -> Result<ExecutedInstruction, ExecutionError> {
+        self.execute_one_inner(bus)
+    }
+
+    #[inline(always)]
     fn execute_one_inner(&mut self, bus: &mut Bus) -> Result<ExecutedInstruction, ExecutionError> {
         // Diagnostic only -- track how many steps the IRQ pin was high.
         // We deliberately do NOT mirror the pin into `cop0[13].IP[2]`:
@@ -1731,7 +1788,10 @@ impl Cpu {
         // addresses 0xA0 / 0xB0 / 0xC0. The caller's trampoline has
         // already loaded `$t1` with the function number and parked
         // the return address in `$ra`.
-        if bus.hle_bios_enabled {
+        // Both HLE hooks live in the kernel's first 64 KiB (the A0/B0/C0
+        // vectors, the exception-return stub, and trap words written there);
+        // `hle_bios::dispatch` answers `None` everywhere else.
+        if bus.hle_bios_enabled && memory::to_physical(self.pc) < 0x1_0000 {
             if self.hle_exception_active
                 && memory::to_physical(self.pc)
                     == memory::to_physical(crate::hle_bios::EXCEPTION_RETURN_STUB)

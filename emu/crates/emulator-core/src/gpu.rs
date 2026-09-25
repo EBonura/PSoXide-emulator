@@ -1361,6 +1361,11 @@ impl Gpu {
             self.decay_busy_fifo(cycles);
             return;
         }
+        // An idle GPU (all credits spent) is the common case; the
+        // subtractions below would store back the zeros they read.
+        if self.busy_credit | self.dma_busy_credit | self.cmd_ingest_credit == 0 {
+            return;
+        }
         self.busy_credit = self.busy_credit.saturating_sub(cycles);
         self.dma_busy_credit = self.dma_busy_credit.saturating_sub(cycles);
         self.cmd_ingest_credit = self.cmd_ingest_credit.saturating_sub(cycles);
