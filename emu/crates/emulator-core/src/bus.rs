@@ -1284,15 +1284,23 @@ impl Bus {
         self.drain_scheduler_events_inner(true, true);
     }
 
+    /// The early-out runs every instruction; keep it inlinable and the
+    /// dispatch body out of line.
+    #[inline]
     fn drain_scheduler_events_inner(&mut self, include_cdr_dma: bool, include_sio: bool) {
-        use crate::scheduler::EventSlot;
-        let now = self.cycles;
         // SPU clock edges are inclusive, unlike the legacy strict DMA slots.
         // Its existing serialized deadline also works for older saves that
         // never scheduled SpuAsync. Frontends only drain the produced samples.
-        if now < self.scheduler.lowest_target().min(self.spu_sample_deadline) {
+        if self.cycles < self.scheduler.lowest_target().min(self.spu_sample_deadline) {
             return;
         }
+        self.drain_due_scheduler_events(include_cdr_dma, include_sio);
+    }
+
+    #[inline(never)]
+    fn drain_due_scheduler_events(&mut self, include_cdr_dma: bool, include_sio: bool) {
+        use crate::scheduler::EventSlot;
+        let now = self.cycles;
         self.run_spu_to_current_cycle();
         let mut dma_edge = false;
         // NOTE: `service_timers()` is intentionally NOT called here.
@@ -1799,7 +1807,26 @@ impl Bus {
     /// Inner cycle-advancement helper shared by `tick` and `add_cycles`.
     /// Any cycle delta must flow through this function so the timer
     /// bank's accumulator matches Redux's lazy-read timer model.
+    ///
+    /// Runs for every instruction, so the common case (no limit oracle,
+    /// no GPU list walk, no GPU DMA waiting on a request) is kept small
+    /// enough to inline; everything else goes through
+    /// [`Bus::advance_cycles_slow`], which is the complete original logic.
+    #[inline]
     fn advance_cycles(&mut self, n: u32) {
+        if self.limits.frozen()
+            || self.experimental_gpu_list.is_some()
+            || self.gpu_dma_waiting_for_request
+        {
+            self.advance_cycles_slow(n);
+            return;
+        }
+        self.cycles = self.cycles.wrapping_add(n as u64);
+        self.gpu.decay_busy(n as u64);
+    }
+
+    #[inline(never)]
+    fn advance_cycles_slow(&mut self, n: u32) {
         if self.limits.frozen() {
             // Limit oracle: the instruction runs in a free code range.
             self.limits.skip(n as u64);
@@ -2103,37 +2130,46 @@ impl Bus {
     ///
     /// The caller is expected to also seed the CPU (see
     /// [`crate::Cpu::seed_from_exe`]) so execution begins at the
-    /// EXE's entry point. `load_addr` must point inside the 2 MiB
-    /// RAM window; addresses outside panic.
+    /// EXE's entry point.
+    ///
+    /// The header comes from the disc or file being booted, so it is
+    /// untrusted: a range running past the end of RAM wraps through the
+    /// 2 MiB RAM mirror, as CPU stores to those addresses do, instead of
+    /// panicking. A well-formed EXE never reaches the wrap.
     ///
     /// Used by `PSOXIDE_EXE` side-loading in the frontend / smoke
     /// harness to bypass the BIOS entirely and run homebrew directly.
     pub fn load_exe_payload(&mut self, load_addr: u32, payload: &[u8]) {
-        let base = load_addr & 0x001F_FFFF; // KSEG/KUSEG -> physical RAM
-        assert!(
-            (base as usize) + payload.len() <= self.ram.len(),
-            "EXE payload overflows RAM: load_addr={load_addr:#010x} len={}",
-            payload.len()
-        );
-        self.ram[base as usize..base as usize + payload.len()].copy_from_slice(payload);
+        let ram_len = self.ram.len();
+        // Only the last RAM-sized window of an oversized payload survives
+        // the wrap, exactly as sequential stores would leave it.
+        let skip = payload.len().saturating_sub(ram_len);
+        let mut at = (load_addr as usize).wrapping_add(skip) % ram_len;
+        let mut rest = &payload[skip..];
+        while !rest.is_empty() {
+            let n = rest.len().min(ram_len - at);
+            self.ram[at..at + n].copy_from_slice(&rest[..n]);
+            rest = &rest[n..];
+            at = 0;
+        }
     }
 
     /// Zero the optional BSS range declared by a PSX-EXE header.
     ///
     /// The BIOS clears this area before jumping to the executable;
     /// side-load and fast-boot paths need to do the same because they
-    /// bypass the BIOS loader.
+    /// bypass the BIOS loader. Like [`Bus::load_exe_payload`], an
+    /// untrusted range wraps through the RAM mirror rather than panicking.
     pub fn clear_exe_bss(&mut self, bss_addr: u32, bss_size: u32) {
-        if bss_size == 0 {
-            return;
+        let ram_len = self.ram.len();
+        let mut left = (bss_size as usize).min(ram_len);
+        let mut at = bss_addr as usize % ram_len;
+        while left > 0 {
+            let n = left.min(ram_len - at);
+            self.ram[at..at + n].fill(0);
+            left -= n;
+            at = 0;
         }
-        let base = bss_addr & 0x001F_FFFF; // KSEG/KUSEG -> physical RAM
-        let size = bss_size as usize;
-        assert!(
-            (base as usize) + size <= self.ram.len(),
-            "EXE BSS overflows RAM: bss_addr={bss_addr:#010x} len={size}",
-        );
-        self.ram[base as usize..base as usize + size].fill(0);
     }
 
     /// Zero an address range in main RAM after KSEG/KUSEG address
@@ -2144,10 +2180,7 @@ impl Bus {
         if end <= start {
             return;
         }
-        assert!(
-            end <= self.ram.len(),
-            "RAM clear range overflows: start={start_addr:#010x} end={end_addr:#010x}",
-        );
+        // Both ends are masked into the 2 MiB window, so `end` is in range.
         self.ram[start..end].fill(0);
     }
 
@@ -3964,8 +3997,11 @@ fn scratchpad_offset(virt: u32, phys: u32) -> Option<usize> {
     }
 }
 
+#[inline]
 fn read_u32_le(bytes: &[u8]) -> u32 {
-    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    // One bounds check and one load; indexing the four bytes separately
+    // compiled to four byte loads on the per-instruction fetch paths.
+    u32::from_le_bytes(bytes[..4].try_into().expect("four bytes"))
 }
 
 #[inline]

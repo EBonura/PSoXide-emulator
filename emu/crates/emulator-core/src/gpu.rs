@@ -1350,7 +1350,24 @@ impl Gpu {
     /// Drain busy credit over time. Called by the bus each tick
     /// so the busy flag settles back to "ready" as cycles advance.
     /// One elapsed CPU/bus cycle decays one unit of credit.
-    pub fn decay_busy(&mut self, mut cycles: u64) {
+    #[inline]
+    pub fn decay_busy(&mut self, cycles: u64) {
+        // Runs every instruction. Nothing queued and nothing deferred is
+        // the common case, where `fifo_quiet_cycles` is unbounded and the
+        // full path below reduces to the three subtractions.
+        if self.experimental_dma_fifo
+            && (!self.dma_input_fifo.is_empty() || self.deferred_irq_command.is_some())
+        {
+            self.decay_busy_fifo(cycles);
+            return;
+        }
+        self.busy_credit = self.busy_credit.saturating_sub(cycles);
+        self.dma_busy_credit = self.dma_busy_credit.saturating_sub(cycles);
+        self.cmd_ingest_credit = self.cmd_ingest_credit.saturating_sub(cycles);
+    }
+
+    #[inline(never)]
+    fn decay_busy_fifo(&mut self, mut cycles: u64) {
         // Host fast path: when the FIFO cannot make progress during these
         // cycles (nothing queued, or the head waits on a busy GPU that stays
         // busy throughout), the slow path below reduces to the three credit
