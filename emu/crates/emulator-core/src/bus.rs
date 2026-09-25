@@ -137,6 +137,10 @@ struct ExperimentalGpuList {
     headers: u32,
 }
 
+/// Start of the on-die I/O registers. Any CPU access at or above it may
+/// change GPU or DMA state.
+const IO_SPACE_START: u32 = 0x1F80_1000;
+
 /// The PS1 system bus.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Bus {
@@ -379,6 +383,14 @@ pub struct Bus {
     #[serde(skip, default = "check_gpu_request_after_restore")]
     gpu_dma_waiting_for_request: bool,
     experimental_gpu_list: Option<ExperimentalGpuList>,
+    /// While a linked-list walk is active: the bus cycle up to which every
+    /// clock advance is a quiet batch of `advance_cycles_slow` (the walk
+    /// only counts down its setup delay or waits, the GPU FIFO only decays
+    /// credit). 0 when unknown. Any access to I/O space, scheduler drain,
+    /// DMA start or limit change clears it; the slow path recomputes it.
+    /// Derived, not saved.
+    #[serde(skip)]
+    gpu_quiet_until: u64,
     #[serde(skip)]
     gpu_linked_list_transfer: u32,
     #[serde(skip)]
@@ -490,6 +502,7 @@ impl Bus {
             gpu_dma_overflow_drops: gpu_dma_overflow_drops_from_env(),
             gpu_dma_waiting_for_request: false,
             experimental_gpu_list: None,
+            gpu_quiet_until: 0,
             gpu_linked_list_transfer: 0,
             gpu_linked_list_log: Vec::new(),
         };
@@ -1311,6 +1324,7 @@ impl Bus {
 
     #[inline(never)]
     fn drain_due_scheduler_events(&mut self, include_cdr_dma: bool, include_sio: bool) {
+        self.gpu_quiet_until = 0;
         use crate::scheduler::EventSlot;
         let now = self.cycles;
         self.run_spu_to_current_cycle();
@@ -1856,6 +1870,19 @@ impl Bus {
             || self.experimental_gpu_list.is_some()
             || self.gpu_dma_waiting_for_request
         {
+            // A linked-list walk in a known quiet stretch: exactly the
+            // slow path's quiet batch.
+            if !self.limits.frozen()
+                && !self.gpu_dma_waiting_for_request
+                && self.cycles.wrapping_add(n as u64) <= self.gpu_quiet_until
+            {
+                self.cycles = self.cycles.wrapping_add(n as u64);
+                self.gpu.decay_busy_quiet(u64::from(n));
+                if let Some(list) = self.experimental_gpu_list.as_mut() {
+                    list.setup_cycles = list.setup_cycles.saturating_sub(n);
+                }
+                return;
+            }
             self.advance_cycles_slow(n);
             return;
         }
@@ -1924,6 +1951,7 @@ impl Bus {
                 self.run_dma_channel(2);
             }
         }
+        self.refresh_gpu_quiet_until();
     }
 
     /// Advance the timer bank to the current bus cycle and forward
@@ -1989,6 +2017,7 @@ impl Bus {
     /// Switch the configured limit oracles on once the guest has completed
     /// the start poll (see `limits.rs`).
     fn maybe_activate_limits(&mut self) {
+        self.gpu_quiet_until = 0;
         let polls = self.port1_completed_polls();
         if polls < self.limits.start_poll() || self.cycles < self.limits.start_cycle() {
             return;
@@ -2008,6 +2037,7 @@ impl Bus {
     /// read `PSOXIDE_LIMIT_*` at construction). Activates at once when the
     /// start poll has already been reached.
     pub fn set_limit_oracles(&mut self, limits: crate::limits::LimitOracles) {
+        self.gpu_quiet_until = 0;
         self.limits = limits;
         if self.limits.pending() {
             self.maybe_activate_limits();
@@ -2042,6 +2072,7 @@ impl Bus {
     /// only stops early if the channel is disabled or the GPU refuses a
     /// node, which a drawing-free GPU does not do.
     fn finish_gpu_list_now(&mut self) {
+        self.gpu_quiet_until = 0;
         let mut guard = 0u32;
         while self.experimental_gpu_list.is_some() && guard < 0x0400_0000 {
             if let Some(list) = self.experimental_gpu_list.as_mut() {
@@ -2269,6 +2300,7 @@ impl Bus {
     }
 
     fn run_dma_channel(&mut self, ch: usize) {
+        self.gpu_quiet_until = 0;
         if Self::dma_wedge_mask() & (1 << ch) != 0 {
             // No transfer, no scheduled completion: CHCR keeps its START
             // bit, so `is_busy` stays true and any later kick on this
@@ -2916,6 +2948,22 @@ impl Bus {
         }
     }
 
+    /// Recompute [`Bus::gpu_quiet_until`] from the current walk and FIFO.
+    fn refresh_gpu_quiet_until(&mut self) {
+        self.gpu_quiet_until = if self.experimental_gpu_list.is_some()
+            && !self.limits.frozen()
+            && !self.limits.on(crate::limits::GPU)
+            && !self.gpu_dma_waiting_for_request
+        {
+            match self.gpu_list_quiet_cycles(u32::MAX) {
+                0 => 0,
+                quiet => self.cycles.saturating_add(u64::from(quiet)),
+            }
+        } else {
+            0
+        };
+    }
+
     /// Cycles (at most `left`) over which `advance_experimental_gpu_list`
     /// would only count down its setup delay or keep waiting on a FIFO that
     /// cannot drain, and `Gpu::decay_busy(1)` would only decay credit.
@@ -3147,6 +3195,9 @@ impl Bus {
         if phys < memory::ram::MIRROR_END {
             return self.ram[(phys as usize) % memory::ram::SIZE];
         }
+        if phys >= IO_SPACE_START {
+            self.gpu_quiet_until = 0;
+        }
         if CdRom::contains(phys) {
             return self.cdrom.read8(phys);
         }
@@ -3245,6 +3296,9 @@ impl Bus {
         if phys < memory::ram::MIRROR_END {
             let off = (phys as usize) % memory::ram::SIZE;
             return u16::from_le_bytes([self.ram[off], self.ram[off + 1]]);
+        }
+        if phys >= IO_SPACE_START {
+            self.gpu_quiet_until = 0;
         }
         if CdRom::contains(phys) {
             let byte = self.cdrom.read8(phys) as u16;
@@ -3398,6 +3452,9 @@ impl Bus {
             let offset = (phys as usize) % memory::ram::SIZE;
             return read_u32_le(&self.ram[offset..]);
         }
+        if phys >= IO_SPACE_START {
+            self.gpu_quiet_until = 0;
+        }
 
         if let Some(offset) = scratchpad_offset(virt, phys) {
             return read_u32_le(&self.scratchpad[offset..]);
@@ -3527,6 +3584,7 @@ impl Bus {
             // The write buffer's drain time was set when the store was queued.
         }
         if to_physical(virt) == crate::gpu::GP0_ADDR {
+            self.gpu_quiet_until = 0;
             if !self.gpu.note_cpu_gp0_arrival() {
                 // Strict-FIFO mode: silicon loses the word outright, and a
                 // lost word stalls nothing.
@@ -3539,6 +3597,9 @@ impl Bus {
     }
 
     fn write32_impl(&mut self, virt: u32, phys: u32, value: u32) {
+        if phys >= IO_SPACE_START {
+            self.gpu_quiet_until = 0;
+        }
         if self.telemetry.observe_write32(phys, value, self.cycles) {
             return;
         }
@@ -3747,6 +3808,9 @@ impl Bus {
         // store data to the lanes the address selects, so a store to byte
         // 1..3 of a register arrives as the source word shifted by the byte
         // offset, with zero below it (DuckStation models the same).
+        if phys >= IO_SPACE_START {
+            self.gpu_quiet_until = 0;
+        }
         let word = source << ((phys & 3) * 8);
         // The SPU and both serial ports are 16-bit devices: an odd byte store
         // arrives on the high lane of its halfword.
@@ -3855,6 +3919,9 @@ impl Bus {
             self.ram[(phys as usize) % memory::ram::SIZE] = value;
             return;
         }
+        if phys >= IO_SPACE_START {
+            self.gpu_quiet_until = 0;
+        }
         // Expansion-2 debug console char-out (PCSX-Redux convention,
         // 0x1F802080): the port the public test suites print to
         // (JaCzekanski ps1-tests, Redux homebrew). Forward to stdout so
@@ -3946,6 +4013,9 @@ impl Bus {
             let off = (phys as usize) % memory::ram::SIZE;
             self.ram[off..off + 2].copy_from_slice(&bytes);
             return;
+        }
+        if phys >= IO_SPACE_START {
+            self.gpu_quiet_until = 0;
         }
         if let Some(off) = scratchpad_offset(virt, phys) {
             self.scratchpad[off..off + 2].copy_from_slice(&bytes);
