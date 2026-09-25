@@ -305,6 +305,9 @@ fn finish(bus: &mut Bus, gprs: &[u32; 32], table: Table, func: u8, ret: Ret, flu
 /// strict mode can stop before the call changes anything.
 enum Ret {
     Done(u32),
+    /// Accepted without the real effect. No function is serviced this way
+    /// at the moment; kept so a partial implementation stays visible.
+    #[allow(dead_code)]
     Stub(u32),
     Unimplemented,
     /// Not finished (waiting on hardware); call again. Must not have side
@@ -324,7 +327,7 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         files::FileCall::Jump(target) => Jump(target),
     };
     use crate::hle_kernel::{self as k, Heap};
-    use Ret::{Done, Jump, Retry, Stub, Unimplemented};
+    use Ret::{Done, Jump, Retry, Unimplemented};
     let args = [gprs[4], gprs[5], gprs[6], gprs[7]];
     let sp = gprs[29];
     match (table, func) {
@@ -573,9 +576,8 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
 
         // A(96h) AddCDROMDevice: the kernel CD-ROM device, if absent.
         (Table::A, 0x96) => Done(crate::hle_files::add_kernel_cdrom(bus)),
-        // A(97h) AddMemCardDevice -- the memory card device is not
-        // modelled yet; accept so the game moves on.
-        (Table::A, 0x97) => Stub(0),
+        // A(97h) AddMemCardDevice: the kernel "bu" device, if absent.
+        (Table::A, 0x97) => Done(files::add_kernel_memcard(bus)),
 
         // A(9Ch) SetConf(events, threads, stacktop): reallocate the
         // control blocks. A(9Dh) GetConf(&events, &threads, &stacktop).
@@ -699,6 +701,40 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         (Table::B, 0x47) => file_call(files::add_device(bus, gprs, args[0])),
         (Table::B, 0x48) => file_call(files::remove_device(bus, gprs, args[0])),
         (Table::B, 0x54) => Done(files::errno(bus)),
+        (Table::B, 0x41) => file_call(files::device_call(
+            bus,
+            gprs,
+            files::dcb::FORMAT,
+            args[0],
+            None,
+        )),
+        (Table::B, 0x42) => file_call(files::firstfile(bus, gprs, args[0], args[1])),
+        (Table::B, 0x43) => file_call(files::nextfile(bus, gprs, args[0])),
+        (Table::B, 0x44) => file_call(files::device_call(
+            bus,
+            gprs,
+            files::dcb::RENAME,
+            args[0],
+            Some(args[1]),
+        )),
+        (Table::B, 0x45) => file_call(files::device_call(
+            bus,
+            gprs,
+            files::dcb::ERASE,
+            args[0],
+            None,
+        )),
+        (Table::B, 0x46) => file_call(files::device_call(
+            bus,
+            gprs,
+            files::dcb::UNDELETE,
+            args[0],
+            None,
+        )),
+        // B(51h) Krom2RawAdd(sjis): the Kanji font lives in the Sony ROM,
+        // which the HLE kernel does not have (and must not ship); every
+        // character is reported as unsupported (-1, psx-spx).
+        (Table::B, 0x51) => Done(u32::MAX),
         (Table::B, 0x55) => Done(files::file_error(bus, args[0])),
 
         // B(3Dh) putchar -- same as A(3Ch).
@@ -819,13 +855,35 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
 
         // --- File layer continuations, kernel devices, CD-ROM driver ---
         (Table::Kernel, n)
-            if (files::internal::CONT_OPEN..=files::internal::CONT_PASS).contains(&n) =>
+            if (files::internal::CONT_OPEN..=files::internal::CONT_TEMP).contains(&n) =>
         {
             let v0 = gprs[2];
             let saved = files::pop_frame(bus, gprs);
             Done(files::continuation(bus, n, v0, saved))
         }
         (Table::Kernel, files::internal::NOP) => Done(0),
+        (Table::Kernel, n) if (0x21..=0x2C).contains(&n) && n != 0x28 && n != 0x29 => {
+            use crate::hle_bu as bu;
+            let result = match n {
+                bu::internal::OPEN => bu::open(bus, args[0], args[1], args[2]),
+                bu::internal::READ => bu::read_write(bus, args[0], args[1], args[2], false),
+                bu::internal::WRITE => bu::read_write(bus, args[0], args[1], args[2], true),
+                bu::internal::CLOSE => Some(bu::close(bus, args[0])),
+                bu::internal::ERASE => bu::erase(bus, args[0], args[1]),
+                bu::internal::FIRSTFILE => bu::firstfile(bus, args[0], args[1], args[2]),
+                bu::internal::NEXTFILE => Some(bu::nextfile(bus, args[0], args[1])),
+                bu::internal::FORMAT => bu::format(bus, args[0]),
+                bu::internal::RENAME => bu::rename(bus, args[0], args[1], args[3]),
+                _ => Some(bu::undelete(bus, args[0])),
+            };
+            match result {
+                Some(v) => match ex::flush_events_returning(bus, gprs, gprs[31], v) {
+                    Some(target) => Jump(target),
+                    None => Done(v),
+                },
+                None => Retry,
+            }
+        }
         (Table::Kernel, crate::hle_pad::internal::VERIFIER) => Done(crate::hle_pad::verifier(bus)),
         (Table::Kernel, crate::hle_pad::internal::HANDLER) => match crate::hle_pad::handler(bus) {
             Some(v) => match ex::flush_events(bus, gprs, gprs[31]) {
@@ -881,6 +939,14 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // C(0Ah) ChangeClearRCnt(t, flag): root-counter auto-ack; returns
         // the previous flag.
         (Table::C, 0x0A) => Done(ex::change_clear_rcnt(bus, args[0], args[1])),
+
+        // C(1Ah) set_card_find_mode / C(1Dh) get_card_find_mode: whether
+        // firstfile/nextfile list files (0) or deleted files (1).
+        (Table::C, 0x1A) => {
+            k::poke32(bus, crate::hle_bu::kvar::FIND_MODE, args[0]);
+            Done(0)
+        }
+        (Table::C, 0x1D) => Done(k::peek32(bus, crate::hle_bu::kvar::FIND_MODE)),
 
         // Default SYSCALL/exception verifier and root-counter handlers,
         // reached from the exception handler's chains.
@@ -1588,17 +1654,15 @@ mod tests {
     fn unimplemented_and_stubbed_calls_are_recorded_once_per_function() {
         let mut bus = hle_bus();
         assert!(bus.hle_bios_first_unimplemented().is_none());
-        // A(97h) is a stub; A(3Ah) abort is unimplemented.
-        assert_eq!(call(&mut bus, 0xA0, 0x97, [0, 0, 0, 0]), 0);
+        // A(3Ah) abort is unimplemented.
         assert_eq!(call(&mut bus, 0xA0, 0x3A, [0x40, 0, 0, 0]), 0);
         assert_eq!(call(&mut bus, 0xA0, 0x3A, [0x80, 0, 0, 0]), 0);
         // Implemented calls leave no record.
         call(&mut bus, 0xA0, 0x1B, [0, 0, 0, 0]);
 
         let records = bus.hle_bios_records();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].outcome, Outcome::Stub);
-        assert_eq!((records[0].table, records[0].func), (Table::A, 0x97));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].outcome, Outcome::Unimplemented);
         let first = bus.hle_bios_first_unimplemented().unwrap();
         assert_eq!((first.table, first.func), (Table::A, 0x3A));
         assert_eq!(first.args[0], 0x40);

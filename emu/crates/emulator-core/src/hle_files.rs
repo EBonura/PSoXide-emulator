@@ -173,6 +173,8 @@ pub mod kvar {
     pub const LD_LBA: u32 = 0x0B74;
     /// Executable file size.
     pub const LD_SIZE: u32 = 0x0B78;
+    /// firstfile/nextfile search FCB (0 = none yet).
+    pub const FIND_FCB: u32 = 0x0B7C;
 }
 
 /// Sector buffer for directory reads and partial sectors (2 KiB).
@@ -196,6 +198,9 @@ pub mod internal {
     pub const CONT_ONE: u8 = 0x14;
     /// Continuation returning the driver's v0 unchanged.
     pub const CONT_PASS: u8 = 0x15;
+    /// Continuation after a driver call on a hidden FCB (format, erase,
+    /// rename, undelete): free it, 1 on success (driver 0), else 0.
+    pub const CONT_TEMP: u8 = 0x16;
     /// Driver entry that does nothing and returns 0.
     pub const NOP: u8 = 0x1F;
     /// TTY in_out(fcb, cmd).
@@ -261,6 +266,25 @@ const TTY: KernelDevice = KernelDevice {
     entries: &[(dcb::INOUT, internal::TTY_INOUT)],
 };
 
+const BU: KernelDevice = KernelDevice {
+    name: "bu",
+    desc: "MEMORY CARD",
+    flags: 0x14,
+    block: 0x80,
+    entries: &[
+        (dcb::OPEN, crate::hle_bu::internal::OPEN),
+        (dcb::READ, crate::hle_bu::internal::READ),
+        (dcb::WRITE, crate::hle_bu::internal::WRITE),
+        (dcb::CLOSE, crate::hle_bu::internal::CLOSE),
+        (dcb::ERASE, crate::hle_bu::internal::ERASE),
+        (dcb::UNDELETE, crate::hle_bu::internal::UNDELETE),
+        (dcb::FIRSTFILE, crate::hle_bu::internal::FIRSTFILE),
+        (dcb::NEXTFILE, crate::hle_bu::internal::NEXTFILE),
+        (dcb::FORMAT, crate::hle_bu::internal::FORMAT),
+        (dcb::RENAME, crate::hle_bu::internal::RENAME),
+    ],
+};
+
 const CDROM: KernelDevice = KernelDevice {
     name: "cdrom",
     desc: "CD-ROM",
@@ -277,7 +301,7 @@ const CDROM: KernelDevice = KernelDevice {
 /// handlers and events, as the retail kernel sets them up before Exec.
 pub fn install(bus: &mut Bus) {
     let mut s = STRINGS;
-    for (slot, dev) in [TTY, CDROM].iter().enumerate() {
+    for (slot, dev) in [TTY, CDROM, BU].iter().enumerate() {
         let d = dcb_addr(slot as u32);
         let name = s;
         s = write_cstr(bus, s, dev.name);
@@ -571,6 +595,15 @@ pub fn continuation(bus: &mut Bus, which: u8, v0: u32, saved: u32) -> u32 {
             saved
         }
         internal::CONT_ONE => 1,
+        internal::CONT_TEMP => {
+            poke32(bus, f + fcb::STATUS, 0);
+            if v0 == 0 {
+                1
+            } else {
+                set_errno(bus, peek32(bus, f + fcb::ERROR));
+                0
+            }
+        }
         _ => v0,
     }
 }
@@ -608,9 +641,24 @@ pub fn remove_device(bus: &mut Bus, gprs: &mut [u32; 32], name: u32) -> FileCall
 
 /// A(96h) AddCDROMDevice: install the kernel CD-ROM device when absent.
 pub fn add_kernel_cdrom(bus: &mut Bus) -> u32 {
+    add_kernel_device(bus, 1)
+}
+
+/// A(97h) AddMemCardDevice: install the kernel memory card device when
+/// absent.
+pub fn add_kernel_memcard(bus: &mut Bus) -> u32 {
+    add_kernel_device(bus, 2)
+}
+
+/// Install boot device `which` (index into the boot list, whose name
+/// strings were written at boot) in the first free DCB unless a device of
+/// that name exists. Returns 1, or 0 when no DCB is free.
+fn add_kernel_device(bus: &mut Bus, which: usize) -> u32 {
+    let devices = [TTY, CDROM, BU];
+    let dev = &devices[which];
     let present = (0..DCB_COUNT).map(dcb_addr).any(|d| {
         let n = peek32(bus, d + dcb::NAME);
-        n != 0 && read_cstr(bus, n, 16) == "cdrom"
+        n != 0 && read_cstr(bus, n, 16) == dev.name
     });
     if present {
         return 1;
@@ -619,19 +667,106 @@ pub fn add_kernel_cdrom(bus: &mut Bus) -> u32 {
         return 0;
     };
     let d = dcb_addr(slot);
-    // Reuse the strings written at boot (second device name).
-    let name = STRINGS + TTY.name.len() as u32 + 1 + TTY.desc.len() as u32 + 1;
+    let name = devices[..which].iter().fold(STRINGS, |at, k| {
+        at + k.name.len() as u32 + 1 + k.desc.len() as u32 + 1
+    });
     poke32(bus, d + dcb::NAME, name);
-    poke32(bus, d + dcb::FLAGS, CDROM.flags);
-    poke32(bus, d + dcb::BLOCK, CDROM.block);
-    poke32(bus, d + dcb::DESC, name + CDROM.name.len() as u32 + 1);
+    poke32(bus, d + dcb::FLAGS, dev.flags);
+    poke32(bus, d + dcb::BLOCK, dev.block);
+    poke32(bus, d + dcb::DESC, name + dev.name.len() as u32 + 1);
     for off in (dcb::INIT..DCB_SIZE).step_by(4) {
         poke32(bus, d + off, stub_addr(3, internal::NOP));
     }
-    for (off, func) in CDROM.entries {
+    for (off, func) in dev.entries {
         poke32(bus, d + off, stub_addr(3, *func));
     }
     1
+}
+
+/// B(42h) firstfile(name, direntry): the search FCB is the first free one
+/// on the first call and is kept afterwards without being marked used
+/// (psx-spx documents both). Returns the driver's direntry or 0.
+pub fn firstfile(bus: &mut Bus, gprs: &mut [u32; 32], name: u32, direntry: u32) -> FileCall {
+    let mut f = peek32(bus, kvar::FIND_FCB);
+    if f == 0 {
+        let Some(fd) = free_fcb(bus) else {
+            set_errno(bus, errno::MFILE);
+            return FileCall::Return(0);
+        };
+        f = fcb_addr(fd);
+        poke32(bus, kvar::FIND_FCB, f);
+    }
+    let Some((d, id, rest)) = find_device(bus, name) else {
+        set_errno(bus, errno::NODEV);
+        poke32(bus, f + fcb::STATUS, 0);
+        return FileCall::Return(0);
+    };
+    poke32(bus, f + fcb::DEVICE_ID, id);
+    poke32(bus, f + fcb::DCB, d);
+    let target = peek32(bus, d + dcb::FIRSTFILE);
+    FileCall::Jump(call_then(
+        bus,
+        gprs,
+        target,
+        &[f, rest, direntry],
+        internal::CONT_PASS,
+        0,
+    ))
+}
+
+/// B(43h) nextfile(direntry): continue the firstfile search.
+pub fn nextfile(bus: &mut Bus, gprs: &mut [u32; 32], direntry: u32) -> FileCall {
+    let f = peek32(bus, kvar::FIND_FCB);
+    if f == 0 {
+        return FileCall::Return(0);
+    }
+    let target = peek32(bus, peek32(bus, f + fcb::DCB) + dcb::NEXTFILE);
+    FileCall::Jump(call_then(
+        bus,
+        gprs,
+        target,
+        &[f, direntry],
+        internal::CONT_PASS,
+        0,
+    ))
+}
+
+/// B(41h) format(device), B(45h) erase(name), B(46h) undelete(name) and
+/// B(44h) rename(old, new): the driver function at `entry` on a hidden
+/// FCB. Returns 1 on success, 0 with errno set on failure.
+pub fn device_call(
+    bus: &mut Bus,
+    gprs: &mut [u32; 32],
+    entry: u32,
+    name: u32,
+    new_name: Option<u32>,
+) -> FileCall {
+    let Some(fd) = free_fcb(bus) else {
+        set_errno(bus, errno::MFILE);
+        return FileCall::Return(0);
+    };
+    let Some((d, id, rest)) = find_device(bus, name) else {
+        set_errno(bus, errno::NODEV);
+        return FileCall::Return(0);
+    };
+    let f = fcb_addr(fd);
+    let mut args = vec![f, rest];
+    if let Some(new_name) = new_name {
+        match find_device(bus, new_name) {
+            Some((d2, id2, rest2)) if d2 == d && id2 == id => args.extend([f, rest2]),
+            _ => {
+                set_errno(bus, 0x12);
+                return FileCall::Return(0);
+            }
+        }
+    }
+    poke32(bus, f + fcb::STATUS, 1);
+    poke32(bus, f + fcb::DEVICE_ID, id);
+    poke32(bus, f + fcb::DCB, d);
+    poke32(bus, f + fcb::DEVICE_FLAGS, peek32(bus, d + dcb::FLAGS));
+    poke32(bus, f + fcb::ERROR, 0);
+    let target = peek32(bus, d + entry);
+    FileCall::Jump(call_then(bus, gprs, target, &args, internal::CONT_TEMP, fd))
 }
 
 /// TTY in_out(fcb, cmd): writes go to the host console; reads return 0

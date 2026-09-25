@@ -57,6 +57,8 @@ pub mod kvar {
     pub const DQ_COUNT: u32 = 0x0C00;
     /// Continuation after the last queued delivery.
     pub const DQ_RETURN: u32 = 0x0C04;
+    /// `v0` handed to that continuation.
+    pub const DQ_V0: u32 = 0x0C48;
     /// Queued (class, spec) pairs, [`super::DQ_MAX`] of them.
     pub const DQ_ITEMS: u32 = 0x0C08;
 }
@@ -946,10 +948,22 @@ pub fn queue_event(bus: &mut Bus, class: u32, spec: u32) {
 /// continuing at `then` afterwards. Returns the address to jump to, with
 /// `a0`, `a1` and `ra` set up, or `None` when nothing is queued.
 pub fn flush_events(bus: &mut Bus, gprs: &mut [u32; 32], then: u32) -> Option<u32> {
+    flush_events_returning(bus, gprs, then, gprs[2])
+}
+
+/// [`flush_events`] for a function returning `v0`: the value reaches
+/// `then` in `v0` after the deliveries.
+pub fn flush_events_returning(
+    bus: &mut Bus,
+    gprs: &mut [u32; 32],
+    then: u32,
+    v0: u32,
+) -> Option<u32> {
     if peek32(bus, kvar::DQ_COUNT) == 0 {
         return None;
     }
     poke32(bus, kvar::DQ_RETURN, then);
+    poke32(bus, kvar::DQ_V0, v0);
     Some(deliver_next(bus, gprs))
 }
 
@@ -958,6 +972,7 @@ pub fn flush_events(bus: &mut Bus, gprs: &mut [u32; 32], then: u32) -> Option<u3
 pub fn deliver_next(bus: &mut Bus, gprs: &mut [u32; 32]) -> u32 {
     let n = peek32(bus, kvar::DQ_COUNT);
     if n == 0 {
+        gprs[2] = peek32(bus, kvar::DQ_V0);
         return peek32(bus, kvar::DQ_RETURN);
     }
     gprs[4] = peek32(bus, kvar::DQ_ITEMS);

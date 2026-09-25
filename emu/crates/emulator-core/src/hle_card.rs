@@ -720,7 +720,8 @@ fn sector_checksum_ok(bus: &Bus, buf: u32) -> bool {
     bus.try_read8(buf + 0x7F).unwrap_or(0) == sum
 }
 
-fn bu_finish(bus: &mut Bus, slot: u32, spec: u32) {
+/// End the slot's backup-unit operation with SwCARD `spec`.
+pub(crate) fn bu_finish(bus: &mut Bus, slot: u32, spec: u32) {
     poke32(bus, var(kvar::BU_OP, slot), bu_op::NONE);
     poke32(bus, var(kvar::BU_STATE, slot), 0);
     poke32(bus, var(kvar::BU_INDEX, slot), 0);
@@ -737,6 +738,11 @@ pub fn low_level_completed(bus: &mut Bus) {
     match peek32(bus, var(kvar::BU_OP, slot)) {
         bu_op::INFO => bu_finish(bus, slot, 0x0004),
         bu_op::LOAD => load_step(bus, slot, device, buf),
+        op @ (crate::hle_bu::bu_op::READ
+        | crate::hle_bu::bu_op::WRITE
+        | crate::hle_bu::bu_op::WRITE_INFO) => {
+            crate::hle_bu::async_completed(bus, slot, device, op)
+        }
         _ => {}
     }
 }
