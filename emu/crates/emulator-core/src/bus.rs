@@ -3026,12 +3026,12 @@ impl Bus {
         if MemoryControl::contains(phys) {
             return self.memory_control.read(phys, AccessWidth::Byte) as u8;
         }
-        if phys == IRQ_STAT_ADDR {
+        if (IRQ_STAT_ADDR..IRQ_STAT_ADDR + 4).contains(&phys) {
             self.run_spu_to_current_cycle();
-            return self.irq.stat() as u8;
+            return (self.irq.stat() >> ((phys & 3) * 8)) as u8;
         }
-        if phys == IRQ_MASK_ADDR {
-            return self.irq.mask() as u8;
+        if (IRQ_MASK_ADDR..IRQ_MASK_ADDR + 4).contains(&phys) {
+            return (self.irq.mask() >> ((phys & 3) * 8)) as u8;
         }
         if Timers::contains(phys) {
             self.service_timers();
@@ -3130,12 +3130,12 @@ impl Bus {
         // Same rationale as in `write16_impl`: BIOS reads `I_STAT` /
         // `I_MASK` via `lhu` and would otherwise see the stale echo
         // buffer instead of the live interrupt-controller state.
-        if phys == IRQ_STAT_ADDR {
+        if (IRQ_STAT_ADDR..IRQ_STAT_ADDR + 4).contains(&phys) {
             self.run_spu_to_current_cycle();
-            return self.irq.stat() as u16;
+            return (self.irq.stat() >> ((phys & 2) * 8)) as u16;
         }
-        if phys == IRQ_MASK_ADDR {
-            return self.irq.mask() as u16;
+        if (IRQ_MASK_ADDR..IRQ_MASK_ADDR + 4).contains(&phys) {
+            return (self.irq.mask() >> ((phys & 2) * 8)) as u16;
         }
         // Timer registers are 16-bit on hardware; the BIOS's
         // counter-polling loop uses `lhu`. Without this dispatch the
@@ -4407,6 +4407,19 @@ mod tests {
         assert_eq!(bus.read8(Sio1::BASE + 0xF), 0x12);
         assert_eq!(bus.read16(Sio1::BASE + 0xA), 0x0300);
         assert_eq!(bus.read8(Sio1::BASE + 0xB), 0x03);
+    }
+
+    /// Byte and halfword loads from the upper lanes of I_STAT / I_MASK read
+    /// the register shifted down (DuckStation), instead of the I/O echo
+    /// buffer.
+    #[test]
+    fn narrow_irq_reads_select_the_addressed_byte_lanes() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.cpu_write16(IRQ_MASK_ADDR, 0x0000_0501);
+        bus.irq.raise(IrqSource::Sio);
+        assert_eq!(bus.read8(IRQ_MASK_ADDR + 1), 0x05);
+        assert_eq!(bus.read16(IRQ_MASK_ADDR + 2), 0);
+        assert_eq!(bus.read8(IRQ_STAT_ADDR + 1), 0x01);
     }
 
     #[test]
