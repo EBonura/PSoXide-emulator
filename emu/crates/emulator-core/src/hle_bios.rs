@@ -338,10 +338,10 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // specification only) after its `patchA0table`, which aliases
         // A(00h..09h) to B(32h..3Bh) and A(3Bh..3Eh) to B(3Ch..3Fh), and the
         // psx-spx "BIOS Memory Fill/Copy/Compare" and "BIOS String Functions"
-        // descriptions. Stateful libc (malloc, rand, strtok) and the
-        // functions psx-spx documents as buggy (memcmp/bcmp, memmove,
-        // strstr, strpbrk) are deliberately absent until the kernel RAM
-        // layout exists; they fall through to the unimplemented arm.
+        // descriptions. The functions psx-spx documents as buggy keep
+        // their bugs (memmove, memcmp/bcmp); strtok, strstr and strpbrk
+        // are not implemented yet and fall through to the unimplemented
+        // arm.
 
         // A(0Eh) abs / A(0Fh) labs.
         (Table::A, 0x0E) | (Table::A, 0x0F) => Done((args[0] as i32).wrapping_abs() as u32),
@@ -427,6 +427,13 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // A(28h) bzero(dst, len) / A(2Bh) memset(dst, fill, len).
         (Table::A, 0x28) => Done(libc::memset(bus, args[0], 0, args[1])),
         (Table::A, 0x2B) => Done(libc::memset(bus, args[0], args[1] as u8, args[2])),
+        // A(2Ch) memmove(dst, src, len), A(29h) bcmp / A(2Dh) memcmp:
+        // with the retail bugs psx-spx documents.
+        (Table::A, 0x2C) => {
+            libc::memmove(bus, args[0], args[1], args[2]);
+            Done(args[0])
+        }
+        (Table::A, 0x29) | (Table::A, 0x2D) => Done(libc::memcmp(bus, args[0], args[1], args[2])),
         // A(2Eh) memchr(src, byte, len).
         (Table::A, 0x2E) => Done(libc::memchr(bus, args[0], args[1] as u8, args[2])),
 
@@ -1044,6 +1051,42 @@ mod libc {
         }
     }
 
+    /// A(2Ch) memmove with its documented bug (psx-spx): when src < dst
+    /// and the regions do NOT overlap (dst >= src + len) it copies
+    /// backwards and moves len + 1 bytes, [src+len..src] down to
+    /// [dst+len..dst]; otherwise it is memcpy.
+    pub(super) fn memmove(bus: &mut Bus, dst: u32, src: u32, len: u32) {
+        if dst == 0 || len > MAX_LEN {
+            return;
+        }
+        if src < dst && dst >= src.wrapping_add(len) {
+            for i in (0..=len.min(MAX_BYTES)).rev() {
+                let b = rd(bus, src.wrapping_add(i));
+                let _ = bus.write8_safe(dst.wrapping_add(i), b);
+            }
+        } else {
+            memcpy(bus, dst, src, len, dst);
+        }
+    }
+
+    /// A(2Dh) memcmp / A(29h) bcmp with their documented bug (psx-spx):
+    /// on a mismatch at N the result is the difference of the bytes AFTER
+    /// it, [src1+N+1] - [src2+N+1]; 0 when equal or when either pointer
+    /// is null.
+    pub(super) fn memcmp(bus: &Bus, a: u32, b: u32, len: u32) -> u32 {
+        if a == 0 || b == 0 || len > MAX_LEN {
+            return 0;
+        }
+        let Some(n) = (0..len.min(MAX_BYTES))
+            .find(|&i| rd(bus, a.wrapping_add(i)) != rd(bus, b.wrapping_add(i)))
+        else {
+            return 0;
+        };
+        let x = i32::from(rd(bus, a.wrapping_add(n + 1)));
+        let y = i32::from(rd(bus, b.wrapping_add(n + 1)));
+        (x - y) as u32
+    }
+
     /// memset/bzero: returns `dst`, or 0 when the fill is refused or empty.
     pub(super) fn memset(bus: &mut Bus, dst: u32, fill: u8, len: u32) -> u32 {
         if dst == 0 || len == 0 || len > MAX_LEN {
@@ -1470,6 +1513,24 @@ mod tests {
 
     fn get_bytes(bus: &Bus, addr: u32, len: u32) -> Vec<u8> {
         (0..len).map(|i| bus.try_read8(addr + i).unwrap()).collect()
+    }
+
+    #[test]
+    fn memmove_and_memcmp_keep_the_documented_bugs() {
+        let mut bus = hle_bus();
+        put_str(&mut bus, 0x8002_0000, b"ABCDEFGH");
+        // Non-overlapping, src < dst: backwards, one byte too many.
+        call(&mut bus, 0xA0, 0x2C, [0x8002_0100, 0x8002_0000, 2, 0]);
+        assert_eq!(get_bytes(&bus, 0x8002_0100, 4), b"ABC\0");
+        // Overlapping forward move works like memcpy.
+        call(&mut bus, 0xA0, 0x2C, [0x8002_0000, 0x8002_0001, 3, 0]);
+        assert_eq!(get_bytes(&bus, 0x8002_0000, 4), b"BCDD");
+        put_str(&mut bus, 0x8002_0200, b"AXC\0");
+        put_str(&mut bus, 0x8002_0300, b"AYE\0");
+        // Mismatch at 1 reports the bytes after it: 'C' - 'E' = -2.
+        let v = call(&mut bus, 0xA0, 0x2D, [0x8002_0200, 0x8002_0300, 3, 0]);
+        assert_eq!(v as i32, -2);
+        assert_eq!(call(&mut bus, 0xA0, 0x29, [0, 0x8002_0300, 3, 0]), 0);
     }
 
     #[test]
