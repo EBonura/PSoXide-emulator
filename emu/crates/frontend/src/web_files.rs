@@ -231,11 +231,12 @@ export async function inspectQuickState(gameId) {
   const state = await _getState('quick:' + gameId);
   return state ? state.createdAt + '\n' + state.cpuTick : undefined;
 }
-export async function fetchGame(url) {
+export async function fetchOpen(url) {
   const r = await fetch(url);
-  if (!r.ok) return null;
-  return await r.blob();
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return [r.body.getReader(), Number(r.headers.get('content-length') || 0)];
 }
+export function readerNext(reader) { return reader.read(); }
 export function downloadCsv(filenameStem, csv) {
   const safeStem = String(filenameStem || 'psoxide-input')
     .replace(/[^a-zA-Z0-9._-]+/g, '-')
@@ -277,8 +278,10 @@ extern "C" {
     fn idb_load_quick_state(game_id: &str) -> js_sys::Promise;
     #[wasm_bindgen(js_name = inspectQuickState)]
     fn idb_inspect_quick_state(game_id: &str) -> js_sys::Promise;
-    #[wasm_bindgen(js_name = fetchGame)]
-    fn js_fetch_game(url: &str) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = fetchOpen)]
+    fn js_fetch_open(url: &str) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = readerNext)]
+    fn js_reader_next(reader: &JsValue) -> js_sys::Promise;
     #[wasm_bindgen(catch, js_name = downloadCsv)]
     fn download_csv(filename_stem: &str, csv: &str) -> Result<(), JsValue>;
 }
@@ -424,19 +427,61 @@ pub fn read_game(id: &str) {
 }
 
 /// Fetch a game served next to the page and queue it like a picked file
-/// (the `?disc=` measurement hook, see [`crate::web_bench`]).
+/// (the `?disc=` measurement hook, see [`crate::web_bench`]). The body is
+/// streamed straight into wasm memory, so no disc-sized buffer exists on
+/// the JS side (`Response.blob()` for a 669 MB image intermittently failed
+/// with "Failed to fetch" in headless Chrome on a nearly full disk).
 pub fn fetch_game(url: &str) {
     let url = url.to_string();
     let name = url.rsplit('/').next().unwrap_or(&url).to_string();
     spawn_local(async move {
-        match JsFuture::from(js_fetch_game(&url)).await {
-            Ok(v) => match v.dyn_into::<web_sys::Blob>() {
-                Ok(blob) => read_blob_into_pending(blob, Upload::Game, name, None).await,
-                Err(_) => report_load_error(format!("fetching {url}: not found")),
-            },
-            Err(error) => report_load_error(format!("fetching {url}: {}", js_error(error))),
+        match fetch_stream(&url).await {
+            Ok(bytes) => PENDING.with(|q| {
+                q.borrow_mut().push(LoadedFile {
+                    kind: Upload::Game,
+                    name,
+                    game_id: None,
+                    bytes,
+                });
+            }),
+            Err(error) => report_load_error(format!("fetching {url}: {error}")),
         }
     });
+}
+
+async fn fetch_stream(url: &str) -> Result<Vec<u8>, String> {
+    let opened = JsFuture::from(js_fetch_open(url)).await.map_err(js_error)?;
+    let opened = js_sys::Array::from(&opened);
+    let reader = opened.get(0);
+    let expected = opened.get(1).as_f64().unwrap_or(0.0) as usize;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(expected)
+        .map_err(|_| format!("not enough memory for a {} MB file", expected >> 20))?;
+    loop {
+        let step = JsFuture::from(js_reader_next(&reader))
+            .await
+            .map_err(js_error)?;
+        let done = js_sys::Reflect::get(&step, &JsValue::from_str("done"))
+            .map_err(js_error)?
+            .as_bool()
+            .unwrap_or(true);
+        if done {
+            return Ok(bytes);
+        }
+        let chunk = js_sys::Uint8Array::new(
+            &js_sys::Reflect::get(&step, &JsValue::from_str("value")).map_err(js_error)?,
+        );
+        let len = chunk.length() as usize;
+        bytes
+            .try_reserve(len)
+            .map_err(|_| "ran out of memory while downloading".to_string())?;
+        let start = bytes.len();
+        chunk.copy_to_uninit(&mut bytes.spare_capacity_mut()[..len]);
+        // SAFETY: `copy_to_uninit` initialised exactly `len` bytes past the
+        // current length, and `try_reserve` made room for them.
+        unsafe { bytes.set_len(start + len) };
+    }
 }
 
 /// Persist the current game's quick-save in origin-scoped IndexedDB.
