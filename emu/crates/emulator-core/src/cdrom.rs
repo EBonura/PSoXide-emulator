@@ -224,9 +224,26 @@ enum DriveState {
     PrepareCd,
 }
 
+/// Cumulative drive workload, for the debug UI. Observational only and
+/// excluded from save states.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CdWorkCounters {
+    /// Data sectors delivered to the sector buffer.
+    pub data_sectors: u64,
+    /// Real-time XA-ADPCM sectors routed to the audio decoder.
+    pub xa_audio_sectors: u64,
+    /// Red Book (CD-DA) sectors played.
+    pub cdda_sectors: u64,
+    /// Head seeks (SeekL/SeekP, and reads that follow a new SetLoc).
+    pub seeks: u64,
+}
+
 /// CD-ROM controller state.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct CdRom {
+    /// Drive workload counters. Diagnostic only.
+    #[serde(skip)]
+    work: CdWorkCounters,
     /// Index register low 2 bits -- selects the register visible at
     /// each sub-port for the next read/write.
     index: u8,
@@ -568,6 +585,7 @@ impl CdRom {
             cdrom_irq_log: Vec::new(),
             cdrom_irq_log_cap: 0,
             sector_events_scheduled: 0,
+            work: CdWorkCounters::default(),
             data_ready_suppressed: 0,
             dbg_suppressed_submode_or: 0,
             disc: None,
@@ -650,9 +668,15 @@ impl CdRom {
             if self.cdda_sample_index == CDDA_SAMPLES_PER_SECTOR {
                 self.cdda_sample_index = 0;
                 self.read_lba = self.read_lba.wrapping_add(1);
+                self.work.cdda_sectors = self.work.cdda_sectors.saturating_add(1);
             }
             sample_count -= count;
         }
+    }
+
+    /// Cumulative drive workload (sectors by kind, seeks).
+    pub fn work_counters(&self) -> CdWorkCounters {
+        self.work
     }
 
     /// Queue depth of the CD audio buffer -- diagnostic.
@@ -1752,6 +1776,7 @@ impl CdRom {
             msf_to_lba(m, s, f)
         };
         let delay = self.seek_travel_cycles(target_lba.abs_diff(self.read_lba));
+        self.work.seeks = self.work.seeks.saturating_add(1);
         // The drive confirms a logical seek by reading the target's
         // header; until then GetlocL has nothing to report.
         self.last_sector_header_valid = false;
@@ -1817,6 +1842,7 @@ impl CdRom {
             let (m, s, f) = self.setloc_msf;
             let target = msf_to_lba(m, s, f);
             travel = self.seek_travel_cycles(target.abs_diff(self.read_lba));
+            self.work.seeks = self.work.seeks.saturating_add(1);
             // The head is moving: no header to report until the first
             // sector at the target arrives (psx-spx GetlocL).
             self.last_sector_header_valid = false;
@@ -1898,6 +1924,7 @@ impl CdRom {
                 // stream.
                 if self.mode & 0x40 != 0 && raw[15] == 2 && submode & 0x44 == 0x44 {
                     self.dbg_suppressed_submode_or |= submode;
+                    self.work.xa_audio_sectors = self.work.xa_audio_sectors.saturating_add(1);
                     // `raw` borrows the disc; the decoder needs `&mut self`.
                     let mut sector = [0u8; psx_iso::SECTOR_BYTES];
                     sector.copy_from_slice(&raw[..psx_iso::SECTOR_BYTES]);
@@ -1915,6 +1942,7 @@ impl CdRom {
                     &raw[24..24 + 2048]
                 };
                 self.push_sector(lba, payload.to_vec());
+                self.work.data_sectors = self.work.data_sectors.saturating_add(1);
                 return true;
             }
 

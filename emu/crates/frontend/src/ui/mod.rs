@@ -32,6 +32,7 @@ pub fn draw_layout(
     dt: f32,
 ) {
     state.hud.update(dt, state.cpu.tick());
+    state.guest_stats.note_host_frame(f64::from(dt));
     state.tick_status(dt);
     let recording_input = state.input_recording_status().0;
     state.menu.sync_input_recording_label(recording_input);

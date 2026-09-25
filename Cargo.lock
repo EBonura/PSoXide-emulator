@@ -1436,6 +1436,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "pollster 0.3.0",
+ "psoxide-debug-ui",
  "psoxide-settings",
  "psoxide-validation",
  "psx-gpu",
@@ -3133,6 +3134,14 @@ name = "profiling"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
+
+[[package]]
+name = "psoxide-debug-ui"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "emulator-core",
+]
 
 [[package]]
 name = "psoxide-link"

@@ -1377,6 +1377,19 @@ impl Spu {
         (self.dbg_kon_count, self.dbg_voiced_samples)
     }
 
+    /// Per-voice ADSR envelope level (0..=0x7FFF), zero for a voice whose
+    /// envelope is off. For the debug UI's voice meters.
+    pub fn voice_envelope_levels(&self) -> [u16; NUM_VOICES] {
+        std::array::from_fn(|v| {
+            let voice = &self.voices[v];
+            if voice.phase == AdsrPhase::Off {
+                0
+            } else {
+                voice.envelope.clamp(0, 0x7FFF) as u16
+            }
+        })
+    }
+
     /// Diagnostic: per-voice note-end tally (key-off count, sample-stop count).
     pub fn voice_end_counts(&self) -> ([u32; NUM_VOICES], [u32; NUM_VOICES]) {
         (self.dbg_koff_count, self.dbg_sampstop_count)
