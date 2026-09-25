@@ -1125,6 +1125,31 @@ fn cdda_play_advances_one_lba_per_sector_frame() {
 }
 
 #[test]
+fn cdda_play_from_a_pregap_plays_silence_into_index_1() {
+    // Tomb Raider seeks into track 2's pregap (index 00), waits for GetlocP
+    // to say so, issues Play, then waits for index 01. The drive plays the
+    // pregap like any other audio sector (here silence: the pregap is not
+    // in the track file) and carries on into the track.
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(cdda_disc()));
+    cd.setloc_msf = (0x00, 0x02, 0x10); // BCD; LBA 10, the first pregap sector
+    cd.setloc_pending = true;
+    cd.cmd_play(&[]);
+    let arrives = cd.cdda_seek_done_at.expect("Play arms a seek");
+    cd.tick(arrives + 1);
+
+    cd.pump_cdda_samples(CDDA_SAMPLES_PER_SECTOR * 2);
+    assert_eq!(cd.read_lba, 12);
+    assert_ne!(cd.drive_status & drive_status_bit::PLAYING, 0);
+    let pregap: Vec<_> = cd.drain_cd_audio();
+    assert_eq!(pregap.len(), CDDA_SAMPLES_PER_SECTOR * 2);
+    assert!(pregap.iter().all(|&s| s == (0, 0)));
+
+    cd.pump_cdda_samples(1);
+    assert_eq!(cd.drain_cd_audio(), vec![(1000, -1000)]);
+}
+
+#[test]
 fn cdda_play_stops_at_audio_track_end() {
     let mut cd = CdRom::new();
     cd.insert_disc(Some(cdda_disc()));
