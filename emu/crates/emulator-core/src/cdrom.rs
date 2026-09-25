@@ -1777,59 +1777,21 @@ impl CdRom {
                 self.last_sector_subheader.copy_from_slice(&raw[16..20]);
                 self.last_sector_header_valid = true;
                 let submode = raw[18];
-                let suppress_data_ready = self.mode & 0x40 != 0 && submode & 0x04 != 0;
-                if suppress_data_ready {
+                // With XA-ADPCM enabled, a Mode 2 sector flagged audio and
+                // real-time belongs to the ADPCM decoder. It is never put in
+                // the host-side sector buffer and raises no DataReady,
+                // whether or not the filter lets it play (DuckStation does
+                // the same). Touching the buffer here would wipe a data
+                // sector the CPU was told about but has not read yet, which
+                // is every video sector ahead of an audio one in an STR
+                // stream.
+                if self.mode & 0x40 != 0 && raw[15] == 2 && submode & 0x44 == 0x44 {
                     self.dbg_suppressed_submode_or |= submode;
-                }
-
-                // If XA mode is on, only decode sectors that match the
-                // Redux gate: unmuted, audio submode set, matching
-                // file/channel filter, and a live first-sector state.
-                // Games with XA-streamed cutscenes use a single ReadN
-                // to pull both sector kinds; matching audio sectors go
-                // to the SPU and skip the CPU-visible data FIFO.
-                if !self.muted && self.mode & 0x40 != 0 && self.xa_first_sector != -1 {
-                    let file = raw[16];
-                    let channel = raw[17];
-
-                    if self.xa_first_sector == 1 && self.mode & 0x08 == 0 {
-                        self.xa_filter_file = file;
-                        self.xa_filter_channel = channel;
-                    }
-
-                    if submode & 0x04 != 0
-                        && file == self.xa_filter_file
-                        && channel == self.xa_filter_channel
-                        && channel != 0xFF
-                    {
-                        if self.xa_first_sector == 1 || self.xa_coding.is_none() {
-                            let Some(coding) = parse_xa_coding(raw[19]) else {
-                                self.xa_first_sector = -1;
-                                return !suppress_data_ready;
-                            };
-                            if self.xa_coding != Some(coding) {
-                                self.xa_left.reset();
-                                self.xa_right.reset();
-                                self.xa_coding = Some(coding);
-                            }
-                        }
-                        let coding = self.xa_coding.expect("XA coding seeded above");
-                        if let Some(mut samples) = decode_xa_audio_sector(
-                            raw,
-                            coding,
-                            &mut self.xa_left,
-                            &mut self.xa_right,
-                        ) {
-                            self.attenuate_cd_samples(&mut samples);
-                            self.append_cd_audio_samples(&samples);
-                            self.xa_first_sector = 0;
-                            self.data_fifo.clear();
-                            self.data_fifo_ready = false;
-                            self.data_transfer_active = false;
-                            return self.suppress_data_ready();
-                        }
-                        self.xa_first_sector = -1;
-                    }
+                    // `raw` borrows the disc; the decoder needs `&mut self`.
+                    let mut sector = [0u8; psx_iso::SECTOR_BYTES];
+                    sector.copy_from_slice(&raw[..psx_iso::SECTOR_BYTES]);
+                    self.play_xa_audio_sector(&sector);
+                    return self.suppress_data_ready();
                 }
 
                 let whole_sector = self.mode & 0x20 != 0;
@@ -1842,9 +1804,6 @@ impl CdRom {
                     &raw[24..24 + 2048]
                 };
                 self.push_sector(lba, payload.to_vec());
-                if suppress_data_ready {
-                    return self.suppress_data_ready();
-                }
                 return true;
             }
 
@@ -1858,6 +1817,43 @@ impl CdRom {
         self.data_fifo_ready = false;
         self.data_transfer_active = false;
         true
+    }
+
+    /// Feed one XA audio sector to the ADPCM decoder, applying the
+    /// file/channel filter. Only the SPU's CD input is affected.
+    fn play_xa_audio_sector(&mut self, raw: &[u8]) {
+        if self.muted || self.xa_first_sector == -1 {
+            return;
+        }
+        let file = raw[16];
+        let channel = raw[17];
+        if self.xa_first_sector == 1 && self.mode & 0x08 == 0 {
+            self.xa_filter_file = file;
+            self.xa_filter_channel = channel;
+        }
+        if file != self.xa_filter_file || channel != self.xa_filter_channel || channel == 0xFF {
+            return;
+        }
+        if self.xa_first_sector == 1 || self.xa_coding.is_none() {
+            let Some(coding) = parse_xa_coding(raw[19]) else {
+                self.xa_first_sector = -1;
+                return;
+            };
+            if self.xa_coding != Some(coding) {
+                self.xa_left.reset();
+                self.xa_right.reset();
+                self.xa_coding = Some(coding);
+            }
+        }
+        let coding = self.xa_coding.expect("XA coding seeded above");
+        match decode_xa_audio_sector(raw, coding, &mut self.xa_left, &mut self.xa_right) {
+            Some(mut samples) => {
+                self.attenuate_cd_samples(&mut samples);
+                self.append_cd_audio_samples(&samples);
+                self.xa_first_sector = 0;
+            }
+            None => self.xa_first_sector = -1,
+        }
     }
 
     /// CdlGetlocL (0x10) -- return the current logical position
