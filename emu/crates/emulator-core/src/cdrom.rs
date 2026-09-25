@@ -138,6 +138,8 @@ pub mod drive_status_bit {
 const SECTOR_BUFFERS: usize = 8;
 const PARAM_FIFO_DEPTH: usize = 16;
 const RESPONSE_FIFO_DEPTH: usize = 16;
+/// A declared-only pregap sector's audio.
+static SILENT_CDDA_SECTOR: [u8; psx_iso::SECTOR_BYTES] = [0; psx_iso::SECTOR_BYTES];
 /// GetlocP positions kept for diagnostics.
 const GETLOCP_LOG_CAP: usize = 4096;
 const CDDA_BYTES_PER_SAMPLE: usize = 4;
@@ -848,7 +850,22 @@ impl CdRom {
     }
 
     fn decode_cdda_chunk(&self, count: usize) -> Option<Vec<(i16, i16)>> {
-        let raw = self.disc.as_ref()?.read_cdda_sector(self.read_lba)?;
+        let disc = self.disc.as_ref()?;
+        let raw = match disc.read_cdda_sector(self.read_lba) {
+            Some(raw) => raw,
+            // An audio track's pregap (index 00) plays like the rest of the
+            // track: its sectors when the image holds them, silence when the
+            // sheet only declares it.
+            None => {
+                let track = disc.track_for_lba(self.read_lba)?;
+                if track.track_type != psx_iso::TrackType::Audio || self.read_lba >= track.start_lba
+                {
+                    return None;
+                }
+                disc.read_sector_raw(self.read_lba)
+                    .unwrap_or(&SILENT_CDDA_SECTOR)
+            }
+        };
         let start = self.cdda_sample_index * CDDA_BYTES_PER_SAMPLE;
         let end = start + count * CDDA_BYTES_PER_SAMPLE;
         let bytes = raw.get(start..end)?;
