@@ -245,6 +245,30 @@ fn display_rgba8_pans_by_gp1_06_horizontal_offset() {
     );
 }
 
+/// GP1(05h) gives the 24bpp display start in VRAM halfwords, not in 24bpp
+/// pixels: a picture starting at halfword 320 begins at byte 640 of the
+/// line. Scaling the start by 3/2 with the pixel index showed a second
+/// double-buffered FMV frame from the wrong place, so every other frame
+/// of Soul Reaver's and Gran Turismo 2's movies tore into two halves with
+/// a band of unrelated VRAM between them.
+#[test]
+fn display_24bpp_start_x_is_a_halfword_address() {
+    let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0500_0000 | 320); // display start (320, 0)
+    gpu.write32(GP1_ADDR, 0x0704_0010);
+    gpu.write32(GP1_ADDR, 0x0800_0011); // 320 wide, 24bpp
+    gpu.write32(GP1_ADDR, 0x0600_0000 | 0x260 | (0xC60 << 12)); // centred
+                                                                // Pixel 0 = (0x11, 0x22, 0x33), pixel 1 = (0x44, 0x55, 0x66) at
+                                                                // halfwords 320..322.
+    gpu.vram.set_pixel(320, 0, 0x2211);
+    gpu.vram.set_pixel(321, 0, 0x4433);
+    gpu.vram.set_pixel(322, 0, 0x6655);
+    let (rgba, w, _) = gpu.display_rgba8();
+    assert_eq!(w, 320);
+    assert_eq!(&rgba[..3], &[0x11, 0x22, 0x33]);
+    assert_eq!(&rgba[4..7], &[0x44, 0x55, 0x66]);
+}
+
 #[test]
 fn gp0_writes_are_accepted_without_effect() {
     let mut gpu = Gpu::new();

@@ -863,14 +863,18 @@ impl Gpu {
         let vram_w = crate::VRAM_WIDTH as u16;
         let vram_h = crate::VRAM_HEIGHT as u16;
         let effective_h = da.height.min(vram_h.saturating_sub(da.y));
-        let effective_w = da.width.min(vram_w.saturating_sub(da.x));
+        let effective_w = if da.bpp24 {
+            da.width.min(rgb24_pixels_left(da.x))
+        } else {
+            da.width.min(vram_w.saturating_sub(da.x))
+        };
         if da.bpp24 {
             // 24-bit mode: each pixel is 3 bytes packed in VRAM. A row
             // of W 24-bit pixels occupies W*3 bytes = 1.5 * W 16-bit
             // words. We read per-byte to span the straddles.
             for dy in 0..effective_h {
                 for dx in 0..effective_w {
-                    let (r, g, b) = self.read_pixel_rgb24(da.x + dx, da.y + dy);
+                    let (r, g, b) = self.read_pixel_rgb24(da.x, dx, da.y + dy);
                     h.update(&[r, g, b]);
                     byte_len += 3;
                 }
@@ -998,8 +1002,10 @@ impl Gpu {
     /// N lives at byte offsets `3*N..3*N+2` within a row, and each
     /// row is 2048 bytes (1024 × 16-bit). The three bytes may
     /// straddle two VRAM halfwords -- we read them individually.
-    fn read_pixel_rgb24(&self, x: u16, y: u16) -> (u8, u8, u8) {
-        let byte_x = (x as u32) * 3;
+    /// 24bpp pixel `px` of a display line starting at VRAM halfword
+    /// `start_x` (GP1(05h) addresses halfwords in every depth).
+    fn read_pixel_rgb24(&self, start_x: u16, px: u16, y: u16) -> (u8, u8, u8) {
+        let byte_x = (start_x as u32) * 2 + (px as u32) * 3;
         let word_x = (byte_x / 2) as u16;
         let even = byte_x & 1 == 0;
         let w0 = self.vram.get_pixel(word_x, y);
@@ -1059,7 +1065,11 @@ impl Gpu {
         let vram_w = crate::VRAM_WIDTH as u16;
         let vram_h = crate::VRAM_HEIGHT as u16;
         let eff_h = da.height.min(vram_h.saturating_sub(da.y));
-        let eff_w = da.width.min(vram_w.saturating_sub(da.x));
+        let eff_w = if da.bpp24 {
+            da.width.min(rgb24_pixels_left(da.x))
+        } else {
+            da.width.min(vram_w.saturating_sub(da.x))
+        };
         // GP1(06h)/(07h) screen positioning: slide the picture within the
         // output by the requested offset and black-fill the exposed edge, so a
         // screen-position setting is visible. Real hardware shifts the active
@@ -1083,7 +1093,7 @@ impl Gpu {
                 let sx = da.x + src_x as u16;
                 let sy = da.y + src_y as u16;
                 if da.bpp24 {
-                    let (r, g, b) = self.read_pixel_rgb24(sx, sy);
+                    let (r, g, b) = self.read_pixel_rgb24(da.x, src_x as u16, sy);
                     out.extend_from_slice(&[r, g, b, 0xFF]);
                 } else {
                     let pixel = self.vram.get_pixel(sx, sy);
@@ -4395,3 +4405,10 @@ impl Default for Gpu {
 
 #[cfg(test)]
 mod tests;
+
+/// 24bpp pixels that fit on a VRAM line after halfword `start_x`.
+fn rgb24_pixels_left(start_x: u16) -> u16 {
+    let halfwords = (crate::VRAM_WIDTH as u32).saturating_sub(u32::from(start_x));
+    // The last pixel reads the halfword after its first byte.
+    (halfwords.saturating_sub(1) * 2 / 3) as u16
+}
