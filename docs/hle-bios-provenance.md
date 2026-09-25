@@ -63,6 +63,17 @@ Update it in the same commit as any HLE change.
 | Threads: OpenTh (SR left as is), CloseTh, ChangeTh via SYSCALL(3) | `hle_exceptions.rs`, `hle_bios.rs` | psx-spx "BIOS Thread Functions"; OpenBIOS `kernel/threads.c` |
 | HookEntryInt, ResetEntryInt default exit buffer (ReturnFromException, exception stack top minus 4) | `hle_exceptions.rs` | psx-spx B(18h)/B(19h) |
 | Unresolved-exception hook for side-loaded homebrew, FlushCache | `hle_bios.rs`, `cpu.rs` | predates this file; to be re-derived from psx-spx and OpenBIOS when the kernel model replaces them |
+| Timer helpers B(02h)-B(06h) | `hle_exceptions.rs` | psx-spx "BIOS Timer Functions" (where OpenBIOS disagrees on the init_timer clock bit, psx-spx is followed) |
+| Exec A(43h) as guest code: saved registers in the header, memfill, stack, call with (a1, a2), return 1 | `hle_exceptions.rs` | psx-spx A(43h); register protocol from OpenBIOS `kernel/psxexec.s` (MIT) |
+| File layer: FCB/DCB layout, open, lseek, read, write, close, AddDevice, RemoveDevice, _get_errno, _get_error, firstfile, nextfile, format, erase, rename, undelete, error numbers, the unmarked firstfile search FCB | `hle_files.rs` | psx-spx "BIOS File Functions" and "BIOS Control Blocks"; call protocol between file functions and drivers from OpenBIOS `fileio/` (MIT) |
+| TTY and CD-ROM devices, kernel CD-ROM driver (SetMode, Setloc, ReadN, DMA per sector, Pause), kernel CD IRQ handlers and events, LoadTest, Load, LoadExec | `hle_files.rs`, `hle_bios.rs` | psx-spx "BIOS CDROM Functions" and "BIOS File Execute"; OpenBIOS `cdrom/` (MIT) |
+| Pad driver: InitPAD2, StartPAD2, StopPAD2, PAD_init2, PAD_dr, the priority-2 VBlank pad/card handler, the reader's byte sequence, delays and ACK timeout, effect of `_patch_pad`, `_remove_ChgclrPAD`, `_send_pad` | `hle_pad.rs` | psx-spx "BIOS Joypad Functions", "Priority Chains" and the pad patch notes; byte sequence and timeouts from OpenBIOS `sio0/driver.c` and `sio0/pad.c` (MIT). Delay and timeout lengths in cycles are estimates until measured (plan P7). |
+| Memory card low level: InitCARD2, StartCARD2, StopCARD2, _card_info, _card_read, _card_write, _new_card, _card_chan, _card_status, _card_wait, _card_load, _card_auto, bufs_cb A(A7h)-A(AAh), HwCARD and SwCARD events, command bytes, one command per VBlank with alternating slots, timeout on the next VBlank | `hle_card.rs` | psx-spx "BIOS Memory Card Functions", "Memory Card Read/Write Commands" and the event lists; order of flags, callbacks and events from OpenBIOS `sio0/card.c`, `sio0/driver.c`, `card/backupunit.c` (MIT) |
+| Early card IRQ routine in exception handler slot 1 (lui/ori/jalr layout, +28h replaceable, v1 = 1F800000h, continue at +3Ch) | `hle_exceptions.rs`, `hle_card.rs` | psx-spx "early_card_irq_patch" (what games write there); structure from OpenBIOS `sio0/cardfasttrack.s` (MIT) |
+| Memory card device "bu": open/create, read, write (sync and async), close, firstfile/nextfile wildcards, erase (A1h/A2h/A3h), rename, format, directory validation, broken-sector reallocation lookup | `hle_bu.rs` | psx-spx "BIOS Memory Card Functions" and "Memory Card Data Format"; write order and error codes from OpenBIOS `card/device.c` and `card/backupunit.c` (MIT). Retail bugs OpenBIOS documents as hangs or corruption are reported as failures instead. |
+| GetConf A(9Dh) as guest code starting with lui/lw on the stack word; config words in the order TCBs, EvCBs, stack | `hle_exceptions.rs`, `hle_kernel.rs` | inferred from how Metal Gear Solid decodes the A0[9Dh] entry (the game's own code, read locally for interoperability); no BIOS bytes |
+| memmove, memcmp, bcmp with their documented bugs | `hle_bios.rs` | psx-spx "BIOS Memory Fill/Copy/Compare" |
+| Krom2RawAdd B(51h) returns -1 for every character | `hle_bios.rs` | psx-spx B(51h); the Kanji font is Sony ROM data and is not shipped |
 
 ## Tooling
 
@@ -71,15 +82,16 @@ Update it in the same commit as any HLE change.
 | `emulator-core` example `bios_syscall_probe` (census) | Needs a real BIOS. Its output directory holds kernel RAM images (BIOS-written bytes) and game frames: private, never committed. |
 | `tools/kcall_scan.py` | Static scan of a disc image. Emits facts only (offsets, function numbers, hashes). Patch signature hash, masks and known-variant values from OpenBIOS `patches` (MIT). |
 | `compat/games.toml` | Facts only: titles, serials, regions, sha256 of the disc image and boot executable, BIOS functions and patch routines per game. |
-| `emulator-core` example `hle_compat` | Finds the developer's discs by hash, runs them under HLE with a formatted empty memory card and no BIOS. `--parity` (dev-only) additionally cold-boots a real BIOS from `PSOXIDE_PARITY_BIOS` and diffs the EXE-entry state; nothing from that BIOS is written out except the compared register values. |
+| `emulator-core` example `hle_compat` | Finds the developer's discs by hash, runs them under HLE with a formatted empty memory card and no BIOS. `--parity` (dev-only) additionally cold-boots a real BIOS from `PSOXIDE_PARITY_BIOS` and diffs the EXE-entry state; nothing from that BIOS is written out except the compared register values. `--reference` (dev-only, same variable) runs the game a second time through that BIOS with the same input and memory card and reports its display hash; with `--shots` its frames are written locally as game imagery, never committed. |
 
 ## Not yet done
 
 - The SYSTEM.CNF parser and ISO9660 file lookup live in `emulator-core` for
   now; they should move into `psx-iso` (SDK repository) with a BOOT parser
   that accepts an argument.
-- strtok, the functions psx-spx documents as buggy (memcmp, bcmp,
-  memmove, strstr, strpbrk), the timer helpers B(02h)-B(06h), file and
-  device I/O, memory card, CD and pad services (including the kernel's
-  CD-ROM and pad/card chain elements) are unimplemented and report loudly.
+- strtok, strstr and strpbrk, undelete on the memory card, LoadExec from
+  devices other than the CD-ROM, and the retail broken-sector
+  reallocation on write are unimplemented.
+- Cycle costs of the kernel routines (pad reader delays, handler
+  overhead) are estimates until plan phase P7 measures them.
 - The retail initial rand seed is not known; the HLE starts at 0.

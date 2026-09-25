@@ -453,7 +453,14 @@ fn run_frames(
     let mut steps = 0u64;
     let stop = loop {
         if let Err(error) = cpu.step(bus) {
-            break format!("cpu_error: {error}");
+            // With --strict this is usually the first unimplemented call;
+            // COP0 still holds the last exception (an unresolved one ends
+            // in A(40h)).
+            let c = cpu.cop0();
+            break format!(
+                "cpu_error: {error} (cause={:#010x} epc={:#010x} badvaddr={:#010x})",
+                c[13], c[14], c[8]
+            );
         }
         steps += 1;
         bus.run_spu_to_current_cycle();
