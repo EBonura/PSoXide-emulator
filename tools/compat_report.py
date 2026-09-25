@@ -61,12 +61,13 @@ game has none).
 
 ## How the runs are made
 
-`hle_compat` boots each disc for {frames} frames from the executable's entry
-with a formatted empty memory card, a digital pad pressing Start at frame
-600, Cross at 750 and then every 300 frames, and no frame limiter. The
-"real BIOS" column is the same run through the developer's own BIOS dump
-(dev-only `--reference`), counted from the same point. Frames were looked at
-for every tier below.
+`hle_compat --inputs compat/inputs.toml` boots each disc from the
+executable's entry with a formatted empty memory card, a digital pad and no
+frame limiter, for the run length and pad schedule `compat/inputs.toml`
+gives it (games without one: Start at frame 600, Cross at 750, alternating
+every 150 frames to 3450, for 3600 frames). The "real BIOS" column is the
+same run through the developer's own BIOS dump (dev-only `--reference`),
+counted from the same point. Frames were looked at for every tier below.
 
 Run on: {commits}
 """

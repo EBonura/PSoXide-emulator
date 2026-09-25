@@ -28,66 +28,58 @@ game has none).
 
 ## How the runs are made
 
-`hle_compat` boots each disc for 3600/7200 frames from the executable's entry
-with a formatted empty memory card, a digital pad pressing Start at frame
-600, Cross at 750 and then every 300 frames, and no frame limiter. The
-"real BIOS" column is the same run through the developer's own BIOS dump
-(dev-only `--reference`), counted from the same point. Frames were looked at
-for every tier below.
+`hle_compat --inputs compat/inputs.toml` boots each disc from the
+executable's entry with a formatted empty memory card, a digital pad and no
+frame limiter, for the run length and pad schedule `compat/inputs.toml`
+gives it (games without one: Start at frame 600, Cross at 750, alternating
+every 150 frames to 3450, for 3600 frames). The "real BIOS" column is the
+same run through the developer's own BIOS dump (dev-only `--reference`),
+counted from the same point. Frames were looked at for every tier below.
 
-Run on: 866d404ae
+Run on: ad71bcc2b
 
 ## Commercial discs
 
 | Game | Serial | Region | No BIOS (HLE) | Real BIOS | FMV | Known issues | Last frame = BIOS | Measured on | Evidence |
 |---|---|---|---|---|---|---|---|---|---|
-| Crash Bandicoot (USA) | SCUS-94900 | NTSC-U | in-game | in-game | n/a | none known | yes | 866d404ae | headless frames |
-| CTR - Crash Team Racing (USA) | SCUS-94426 | NTSC-U | menu | menu | n/a | 7200-frame run: ends on character select in both kernels (the scripted input does not start a race); the HLE is about 11 frames ahead of the real kernel early on | no | 866d404ae | headless frames |
-| Gran Turismo 2 (USA) (Arcade Mode) (Rev 1) | SCUS-94455 | NTSC-U | menu | menu | plays | none known | yes | 866d404ae | headless frames |
-| Metal Gear Solid (USA) (Disc 1) (Rev 1) | SLUS-00594 | NTSC-U | menu | menu | none seen | the title screen ignores the scripted Start presses under both kernels (not investigated) | no | 866d404ae | headless frames |
-| Metal Slug X (USA) | SLUS-01212 | NTSC-U | in-game | in-game | n/a | 7200-frame run: mission 1 in both kernels | no | 866d404ae | headless frames |
-| Marvel vs. Capcom - Clash of Super Heroes (USA) | SLUS-01059 | NTSC-U | menu | menu | plays | none known | no | 866d404ae | headless frames |
-| Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1) | SLUS-00748 | NTSC-U | menu | menu | plays | none known | yes | 866d404ae | headless frames |
-| Resident Evil 3 - Nemesis (USA) | SLUS-00923 | NTSC-U | menu | menu | plays | none known | no | 866d404ae | headless frames |
-| Street Fighter Collection - Street Fighter Alpha 2 Gold (USA) (Disc 2) | SLUS-00584 | NTSC-U | in-game | in-game | plays | 7200-frame run: first fight in both kernels | no | 866d404ae | headless frames |
-| Spider-Man (USA) | SLUS-00875 | NTSC-U | in-game | in-game | plays | none known | no | 866d404ae | headless frames |
-| Tekken 3 (USA) | SLUS-00402 | NTSC-U | in-game | in-game | plays | the HLE runs about 16 frames ahead of the real kernel, so the fight differs from the real-BIOS run | no | 866d404ae | headless frames |
-| Tomb Raider (USA) (Greatest Hits) | SLUS-00152 | NTSC-U | menu | menu | plays | 7200-frame run: black from Start Game on in both kernels (not investigated) | yes | 866d404ae | headless frames |
-| WipEout (Europe) (v1.1) | SCES-00010 | PAL | in-game | in-game | plays | 7200-frame run: on the starting grid in both kernels | no | 866d404ae | headless frames |
-| WipEout 2097 (Europe) | SLES-00327 | PAL | in-game | in-game | n/a | none known | no | 866d404ae | headless frames |
-| WipEout 3 - Special Edition (Europe) | SCES-02845 | PAL | in-game | in-game | plays | none known | no | 866d404ae | headless frames |
-| Chrono Cross (USA) (Disc 1) | SLUS-01041 | NTSC-U | menu | menu | plays | no BIOS: the name-entry letter grid and default name are missing; the game draws them from the BIOS ROM font through Krom2RawAdd B(51h), which the HLE cannot provide (no Sony font is shipped); identical to the real-BIOS run up to that screen | no | 866d404ae | headless frames |
-| Valkyrie Profile (USA) (Disc 1) | SLUS-01156 | NTSC-U | in-game | in-game | none seen | reaches the opening cutscene after New Game; battles not reached | no | 866d404ae | headless frames |
-| Nightmare Creatures (USA) | SLUS-00582 | NTSC-U | in-game | in-game | plays | none known | no | 866d404ae | headless frames |
-| Formula One 2001 (Europe) (En,Fi) | SCES-03404 | PAL | in-game | in-game | plays | 7200-frame run: practice session pit menu in the cockpit in both kernels; any LibCrypt effect not seen; LibCrypt disc, no .sbi next to it | no | 866d404ae | headless frames |
-| Legacy of Kain - Soul Reaver (Europe) | SLES-01301 | PAL | in-game | in-game | plays | LibCrypt: psx-spx says the game hangs later (after learning to glide) without the key; LibCrypt disc, no .sbi next to it | yes | 866d404ae | headless frames |
+| Crash Bandicoot (USA) | SCUS-94900 | NTSC-U | in-game | in-game | n/a | none known | yes | ad71bcc2b | headless frames |
+| CTR - Crash Team Racing (USA) | SCUS-94426 | NTSC-U | in-game | in-game | n/a | Adventure, New, a typed name, save to card 1, then the hub; about 0.04 s behind the real kernel after 20 s of loading (was 0.13 s before the CD head fix) | no | ad71bcc2b | headless frames |
+| Gran Turismo 2 (USA) (Arcade Mode) (Rev 1) | SCUS-94455 | NTSC-U | in-game | in-game | plays | none known | no | ad71bcc2b | headless frames |
+| Metal Gear Solid (USA) (Disc 1) (Rev 1) | SLUS-00594 | NTSC-U | in-game | in-game | none seen | Circle confirms in its menus and Cross cancels (the old 'Start ignored' was the scripted Cross backing out); FMV not reached in the run | no | ad71bcc2b | headless frames |
+| Metal Slug X (USA) | SLUS-01212 | NTSC-U | in-game | in-game | n/a | none known | no | ad71bcc2b | headless frames |
+| Marvel vs. Capcom - Clash of Super Heroes (USA) | SLUS-01059 | NTSC-U | in-game | in-game | plays | the arcade opponent is random, so the fight differs between the kernels | no | ad71bcc2b | headless frames |
+| Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1) | SLUS-00748 | NTSC-U | in-game | in-game | plays | none known | yes | ad71bcc2b | headless frames |
+| Resident Evil 3 - Nemesis (USA) | SLUS-00923 | NTSC-U | in-game | in-game | plays | none known | no | ad71bcc2b | headless frames |
+| Street Fighter Collection - Street Fighter Alpha 2 Gold (USA) (Disc 2) | SLUS-00584 | NTSC-U | in-game | in-game | plays | none known | yes | ad71bcc2b | headless frames |
+| Spider-Man (USA) | SLUS-00875 | NTSC-U | in-game | in-game | plays | none known | no | ad71bcc2b | headless frames |
+| Tekken 3 (USA) | SLUS-00402 | NTSC-U | in-game | in-game | plays | the arcade opponent differs between the kernels; the HLE is about 0.05 s ahead after the first 6 s of loading (was 0.22 s before the CD head fix) | no | ad71bcc2b | headless frames |
+| Tomb Raider (USA) (Greatest Hits) | SLUS-00152 | NTSC-U | in-game | in-game | plays | was black after Start Game under both kernels: the CloneCD loader put track 2's pregap in track 1, and CD-DA play could not start in a pregap; both fixed | no | ad71bcc2b | headless frames |
+| WipEout (Europe) (v1.1) | SCES-00010 | PAL | in-game | in-game | plays | none known | no | ad71bcc2b | headless frames |
+| WipEout 2097 (Europe) | SLES-00327 | PAL | in-game | in-game | n/a | none known | no | ad71bcc2b | headless frames |
+| WipEout 3 - Special Edition (Europe) | SCES-02845 | PAL | in-game | in-game | plays | none known | no | ad71bcc2b | headless frames |
+| Chrono Cross (USA) (Disc 1) | SLUS-01041 | NTSC-U | in-game | in-game | plays | no BIOS: the name-entry grid and default name come from the HLE kernel's own font (original glyphs, Latin and digits so far), so they look different from a console's | no | ad71bcc2b | headless frames |
+| Valkyrie Profile (USA) (Disc 1) | SLUS-01156 | NTSC-U | in-game | in-game | none seen | 3600-frame run: the opening cutscene; the first controllable scene is several minutes of cutscene later | no | ad71bcc2b | headless frames |
+| Nightmare Creatures (USA) | SLUS-00582 | NTSC-U | in-game | in-game | plays | the first fight differs between the kernels | no | ad71bcc2b | headless frames |
+| Formula One 2001 (Europe) (En,Fi) | SCES-03404 | PAL | in-game | in-game | plays | not LibCrypt-protected (only self-modifying code, which the I-cache model serves as the console does: 6 stale-cache executions at 80027F00h in 7200 frames, all matching the cached routine) | no | ad71bcc2b | headless frames |
+| Legacy of Kain - Soul Reaver (Europe) | SLES-01301 | PAL | in-game | in-game | plays | LibCrypt: the .sbi (32 sectors) is read; the game asks GetlocP about 16 of them at frame 886, and the run diverges from a no-.sbi run afterwards, so the key is consumed; the late-game hang without the key is not reachable headless | yes | ad71bcc2b | headless frames |
 
 ## Notes
 
-Six discs were black under both kernels before this round (Gran Turismo 2,
-Marvel vs. Capcom, Resident Evil 3, SF Alpha 2 Gold, Spider-Man, WipEout 3).
-The FMV fixes (byte-lane DMA stores, XA sectors kept out of the data buffer,
-MDEC end of decode) got all of them going; Gran Turismo 2 also needed GetlocL
-to fail while the drive seeks. WipEout divided by the SIO1 baud register,
-which a narrow read returned as 0 whatever was written.
+Every row reaches gameplay (or, for Valkyrie Profile, the game's engine
+running its opening cutscene) with no BIOS. The input schedules that get
+there are in compat/inputs.toml; games without one use the common schedule
+(Start at 600, Cross at 750, alternating every 150 frames to 3450). The
+"Real BIOS" column is the last real-BIOS reference run with the same input,
+made before BIOS support was removed and kept in compat/reference.toml
+(display hashes every 60 frames in compat/reference/).
 
-Differences between the no-BIOS and real-BIOS columns come from the HLE
-kernel being cheaper than the retail one in places: after the cycle costs
-added so far (TestEvent, memcpy, memset, bzero) it still reaches the same
-screens 11 to 17 frames early in the first seconds of CTR, Tekken 3 and
-WipEout, so fixed-time button presses can land on different screens.
-
-CTR, SF Alpha 2 Gold, WipEout, Tomb Raider, Metal Slug X and Formula One
-2001 end their 3600-frame runs on a loading screen, so they were also run for
-7200 frames; their rows describe that run.
+Emulator fixes behind this round: Tomb Raider (CloneCD pregaps, CD-DA
+through a pregap), Chrono Cross (an original HLE font for Krom2RawAdd), and
+the CD head position at the EXE entry, which removed most of the early lead
+the HLE kernel had over the real one in CTR and Tekken 3. The remaining
+lead (about 0.04 to 0.05 s after the first loads) is kernel call cost, left
+for the cycle-measurement phase.
 
 Tomb Raider's image is stored as .img.ecm; the disc loader decodes ECM in
-memory. The two PAL LibCrypt discs have no .sbi yet; the loader reads one
-from next to the .cue when it is there.
-
-Homebrew: the 16 PSoXide homebrew discs of the HLE gate (Cortex Ignition,
-Half-Life, Quake, Celeste Classic Collection, NitroXide, VoXide and others)
-run on both paths with route and visual-hash logs identical to the previous
-landing, except cs-psx, whose route log moves by a few cycles at one point
-under both kernels (a CD interrupt now delivered after its acknowledge);
-its frames are unchanged.
+memory. Soul Reaver's .sbi is next to its .cue; Formula One 2001 is not
+LibCrypt-protected.
