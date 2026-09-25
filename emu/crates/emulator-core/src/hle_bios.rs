@@ -1742,16 +1742,9 @@ mod tests {
         call(&mut bus, 0xA0, 0x39, [0x8010_0000, 0x1000, 0, 0]);
         let p = call(&mut bus, 0xA0, 0x33, [16, 0, 0, 0]);
         assert_eq!(p, 0x8010_0004);
-        call(
-            &mut bus,
-            0xA0,
-            0x9D,
-            [0x8002_0000, 0x8002_0004, 0x8002_0008, 0],
-        );
-        let conf: Vec<u32> = (0..3)
-            .map(|i| crate::hle_kernel::peek32(&bus, 0x8002_0000 + 4 * i))
-            .collect();
-        assert_eq!(conf, [0x10, 4, 0x801F_FF00]);
+        // A(9Dh) GetConf is guest code (see hle_kernel's tests); the
+        // words it reads hold the SYSTEM.CNF defaults.
+        assert_eq!(crate::hle_kernel::get_conf(&bus), (0x10, 4, 0x801F_FF00));
         // B(5Bh) returns the previous auto-ack setting.
         assert_eq!(call(&mut bus, 0xB0, 0x5B, [0, 0, 0, 0]), 1);
         assert_eq!(call(&mut bus, 0xB0, 0x5B, [1, 0, 0, 0]), 0);
