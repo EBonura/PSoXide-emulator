@@ -138,6 +138,8 @@ pub mod drive_status_bit {
 const SECTOR_BUFFERS: usize = 8;
 const PARAM_FIFO_DEPTH: usize = 16;
 const RESPONSE_FIFO_DEPTH: usize = 16;
+/// GetlocP positions kept for diagnostics.
+const GETLOCP_LOG_CAP: usize = 4096;
 const CDDA_BYTES_PER_SAMPLE: usize = 4;
 const CDDA_SAMPLES_PER_SECTOR: usize = psx_iso::SECTOR_BYTES / CDDA_BYTES_PER_SAMPLE;
 
@@ -431,6 +433,11 @@ pub struct CdRom {
     /// file), sorted. The controller ignores their Q data.
     #[serde(default)]
     bad_subq_sectors: Vec<u32>,
+    /// Sectors GetlocP was asked about (the first [`GETLOCP_LOG_CAP`]),
+    /// before bad-Q substitution. Diagnostic: shows whether and when a game
+    /// probes its LibCrypt sectors.
+    #[serde(skip)]
+    getlocp_lbas: Vec<u32>,
     /// Set while a read is in progress; controls whether new
     /// DataReady events chain into further sectors.
     reading: bool,
@@ -575,6 +582,7 @@ impl CdRom {
             seek_header_valid_at: None,
             deferred_data_ready: false,
             bad_subq_sectors: Vec::new(),
+            getlocp_lbas: Vec::new(),
             reading: false,
             read_rescheduled: false,
             read_lba: 0,
@@ -1993,6 +2001,9 @@ impl CdRom {
         } else {
             self.read_lba
         };
+        if self.getlocp_lbas.len() < GETLOCP_LOG_CAP {
+            self.getlocp_lbas.push(lba);
+        }
         let lba = self.last_good_subq_lba(lba);
         let Some(pos) = disc.track_position_for_lba(lba) else {
             let stat = self.stat_byte() | drive_status_bit::ERROR;
@@ -2610,6 +2621,12 @@ xa_filter=({},{}) sched_cycle={} read_lba={} now={} pending=[{}]",
             self.advance_to_next_sector();
         }
         byte
+    }
+
+    /// Sectors GetlocP reported on, in order, before bad-Q substitution
+    /// (the first [`GETLOCP_LOG_CAP`]; diagnostic).
+    pub fn getlocp_lbas(&self) -> &[u32] {
+        &self.getlocp_lbas
     }
 
     /// Sectors the controller read but software never collected, because it

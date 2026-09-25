@@ -20,6 +20,12 @@
 //! `<dir>/<id>.hle.txt` (and `<id>.bios.txt` for `--reference`), one
 //! `frame hash` line per VBlank, to find where two runs part.
 //!
+//! `--save-dir <dir> --save-at N[,M...]` writes the HLE run's state at
+//! those frames as `<dir>/<id>.<N>.state`; `--load-state <file>` starts the
+//! HLE run from one instead of booting (frames and pulses stay counted from
+//! the EXE entry). For finding an input schedule without replaying the boot
+//! each time; judge the final schedule from a cold run.
+//!
 //! `--shots` writes each game's final display as `<id>.ppm`, and with
 //! `--shot-every N` also every N frames as `<id>.<frame>.ppm`. That is game
 //! imagery: keep the directory local.
@@ -56,7 +62,11 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use emulator_core::system_cnf::{load_disc_boot, read_file};
-use emulator_core::{fast_boot_disc_with_hle, read_tape, Bus, ButtonState, Cpu, PadSample};
+use emulator_core::{
+    fast_boot_disc_with_hle, read_tape, Bus, ButtonState, Cpu, EmulatorState, EmulatorStateRef,
+    PadSample,
+};
+use psoxide_settings::savestate::SaveStateV1;
 use psx_iso::Disc;
 use sha2::{Digest, Sha256};
 
@@ -121,6 +131,10 @@ struct GameResult {
     /// LibCrypt sectors read from a `.sbi` next to the disc (`None`: no
     /// `.sbi` found).
     sbi_sectors: Option<usize>,
+    /// GetlocP queries that landed on a sector listed in the `.sbi`
+    /// (counted even with `--no-sbi`, which leaves the list unapplied), and
+    /// the frame of the first one.
+    libcrypt_getlocp: Option<(usize, Option<u64>)>,
     parity: Option<Vec<ParityField>>,
     /// Real-BIOS run (dev-only `--reference`).
     reference: Option<Reference>,
@@ -155,11 +169,13 @@ fn main() {
     let mut tape_path = None;
     let mut json = None;
     let mut strict = false;
+    let mut no_sbi = false;
     let mut parity = false;
     let mut reference = false;
     let mut shots: Option<PathBuf> = None;
     let mut shot_every = 0u64;
     let mut hash_log: Option<PathBuf> = None;
+    let mut states = States::default();
     let mut pulses: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -172,11 +188,23 @@ fn main() {
             "--pad-pulses" => pulses = Some(args_support::take_string(&mut args, "--pad-pulses")),
             "--json" => json = Some(args_support::take_path(&mut args, "--json")),
             "--strict" => strict = true,
+            "--no-sbi" => no_sbi = true,
             "--parity" => parity = true,
             "--reference" => reference = true,
             "--shots" => shots = Some(args_support::take_path(&mut args, "--shots")),
             "--shot-every" => shot_every = args_support::take_u64(&mut args, "--shot-every"),
             "--hash-log" => hash_log = Some(args_support::take_path(&mut args, "--hash-log")),
+            "--load-state" => {
+                states.load = Some(args_support::take_path(&mut args, "--load-state"))
+            }
+            "--save-dir" => states.dir = Some(args_support::take_path(&mut args, "--save-dir")),
+            "--save-at" => {
+                let text = args_support::take_string(&mut args, "--save-at");
+                states.save_at = text
+                    .split(',')
+                    .map(|f| f.trim().parse().expect("--save-at takes frame numbers"))
+                    .collect();
+            }
             other => panic!("unknown argument {other}; see the header of hle_compat.rs"),
         }
     }
@@ -237,7 +265,9 @@ fn main() {
                     let shot = shots
                         .as_ref()
                         .map(|dir| dir.join(format!("{}.ppm", game.id)));
-                    let sbi = sbi.unwrap_or_default();
+                    let mut sbi = sbi.unwrap_or_default();
+                    sbi.sort_unstable();
+                    let applied = if no_sbi { Vec::new() } else { sbi.clone() };
                     let hashes = |kind: &str| {
                         hash_log
                             .as_ref()
@@ -246,13 +276,14 @@ fn main() {
                     run_hle(
                         &mut result,
                         disc.clone(),
-                        &sbi,
+                        (&applied, &sbi),
                         hashes("hle"),
                         frames,
                         tape.as_deref(),
                         strict,
                         shot,
                         shot_every,
+                        &states,
                     );
                     if let (true, Some(bios)) = (reference, parity_bios.as_ref()) {
                         let shot = shots
@@ -261,7 +292,7 @@ fn main() {
                         result.reference = run_reference(
                             bios,
                             disc.clone(),
-                            &sbi,
+                            &applied,
                             hashes("bios"),
                             frames,
                             tape.as_deref(),
@@ -409,13 +440,15 @@ fn file_sha256(path: &Path) -> Option<String> {
 fn run_hle(
     result: &mut GameResult,
     disc: Disc,
-    sbi: &[u32],
+    // The `.sbi` sectors applied to the drive, and all of them listed.
+    (sbi, sbi_listed): (&[u32], &[u32]),
     hash_log: Option<PathBuf>,
     frames: u64,
     tape: Option<&[PadSample]>,
     strict: bool,
     shot: Option<PathBuf>,
     shot_every: u64,
+    states: &States,
 ) {
     let mut bus = Bus::new_without_bios();
     bus.set_hle_strict(strict);
@@ -431,17 +464,55 @@ fn run_hle(
     bus.cdrom.set_bad_subq_sectors(sbi.to_vec());
     bus.attach_digital_pad_port1();
     bus.attach_memcard_port1(Vec::new());
+    let mut start_frame = 0;
+    if let Some(path) = &states.load {
+        let loaded = SaveStateV1::<EmulatorState>::read_from(path)
+            .unwrap_or_else(|e| panic!("--load-state {}: {e}", path.display()));
+        start_frame = loaded
+            .header
+            .game_id
+            .rsplit(':')
+            .next()
+            .and_then(|f| f.parse().ok())
+            .expect("--load-state: not an hle_compat state (game id <id>:<frame>)");
+        let mut payload = loaded.payload;
+        payload.bus.restore_excluded_from(&mut bus);
+        payload.bus.set_hle_strict(strict);
+        payload.bus.cdrom.set_bad_subq_sectors(sbi.to_vec());
+        // Save states leave the memory card out; hle_compat keeps its
+        // in-memory card next to the state (absent: never written).
+        let card = std::fs::read(path.with_extension("mcd")).unwrap_or_default();
+        payload.bus.attach_memcard_port1(card);
+        cpu = payload.cpu;
+        bus = payload.bus;
+        eprintln!(
+            "[hle-compat] loaded {} at frame {start_frame}",
+            path.display()
+        );
+    }
+    let saves = states
+        .dir
+        .as_ref()
+        .map(|dir| (states.save_at.as_slice(), dir.join(&result.id)));
 
+    let mut watch = Watch {
+        lbas: sbi_listed,
+        seen: 0,
+        first: None,
+    };
     let start = Instant::now();
     let periodic = periodic_shots(shot.as_deref(), shot_every);
     let (stop, last_vblank, steps, hashes) = run_frames(
         &mut cpu,
         &mut bus,
-        frames,
+        (start_frame, frames),
         tape,
         periodic.as_ref(),
         hash_log,
+        saves,
+        &mut watch,
     );
+    let first_libcrypt_frame = watch.first;
     let host = start.elapsed().as_secs_f64();
 
     result.stop_reason = Some(stop);
@@ -459,6 +530,15 @@ fn run_hle(
     result.distinct_display_hashes = hashes.len();
     result.cd_sectors_dropped = bus.cdrom.dropped_sectors();
     result.mdec_macroblocks = bus.mdec.macroblocks_decoded();
+    if !sbi_listed.is_empty() {
+        let hits = bus
+            .cdrom
+            .getlocp_lbas()
+            .iter()
+            .filter(|lba| sbi_listed.binary_search(lba).is_ok())
+            .count();
+        result.libcrypt_getlocp = Some((hits, first_libcrypt_frame));
+    }
     result.first_unimplemented = bus.hle_bios_first_unimplemented().map(ToString::to_string);
     result.kernel_patches = bus
         .hle_bios_patches()
@@ -490,19 +570,24 @@ fn run_hle(
 fn run_frames(
     cpu: &mut Cpu,
     bus: &mut Bus,
-    frames: u64,
+    (start_frame, frames): (u64, u64),
     tape: Option<&[PadSample]>,
     periodic: Option<&(u64, PathBuf)>,
     hash_log: Option<PathBuf>,
+    saves: Option<(&[u64], PathBuf)>,
+    watch: &mut Watch<'_>,
 ) -> (String, u64, u64, std::collections::BTreeSet<u64>) {
-    apply_sample(bus, tape, 0);
+    apply_sample(bus, tape, start_frame);
     let mut frame_hashes = hash_log.as_ref().map(|_| String::new());
     let cap = frames
         .saturating_mul(STEPS_PER_FRAME_CAP)
         .saturating_add(10_000_000);
     let mut hashes = std::collections::BTreeSet::new();
-    let base_vblank = bus.irq().raise_counts()[0];
-    let mut last_vblank = 0u64;
+    let base_vblank = bus.irq().raise_counts()[0].wrapping_sub(start_frame);
+    let mut last_vblank = start_frame;
+    // Latest port-1 card image for save states (the snapshot only
+    // returns bytes written since the previous one).
+    let mut card: Option<Vec<u8>> = None;
     let mut steps = 0u64;
     let stop = loop {
         if let Err(error) = cpu.step(bus) {
@@ -523,6 +608,7 @@ fn run_frames(
         let vblank = bus.irq().raise_counts()[0] - base_vblank;
         if vblank != last_vblank {
             last_vblank = vblank;
+            watch.check(bus, vblank);
             apply_sample(bus, tape, vblank);
             if vblank.is_multiple_of(HASH_EVERY) {
                 hashes.insert(bus.gpu.display_hash().0);
@@ -534,6 +620,14 @@ fn run_frames(
                 if vblank.is_multiple_of(*every) && vblank < frames {
                     let name = format!("{}.{vblank}.ppm", base.display());
                     write_ppm(bus, Path::new(&name));
+                }
+            }
+            if let Some((at, base)) = saves.as_ref() {
+                if at.contains(&vblank) {
+                    if let Some(bytes) = bus.memcard_port1_snapshot() {
+                        card = Some(bytes);
+                    }
+                    save_state(cpu, bus, card.as_deref(), base, vblank);
                 }
             }
             if vblank >= frames {
@@ -592,10 +686,16 @@ fn run_reference(
     let (stop, frames_run, _, hashes) = run_frames(
         &mut cpu,
         &mut bus,
-        frames,
+        (0, frames),
         tape,
         periodic.as_ref(),
         hash_log,
+        None,
+        &mut Watch {
+            lbas: &[],
+            seen: 0,
+            first: None,
+        },
     );
     if let Some(path) = shot {
         write_ppm(&bus, &path);
@@ -608,6 +708,60 @@ fn run_reference(
         cd_sectors_dropped: bus.cdrom.dropped_sectors(),
         mdec_macroblocks: bus.mdec.macroblocks_decoded(),
     })
+}
+
+/// Finds the first frame a GetlocP lands on a `.sbi` sector.
+struct Watch<'a> {
+    lbas: &'a [u32],
+    seen: usize,
+    first: Option<u64>,
+}
+
+impl Watch<'_> {
+    fn check(&mut self, bus: &Bus, frame: u64) {
+        if self.lbas.is_empty() || self.first.is_some() {
+            return;
+        }
+        let log = bus.cdrom.getlocp_lbas();
+        if log[self.seen..]
+            .iter()
+            .any(|lba| self.lbas.binary_search(lba).is_ok())
+        {
+            self.first = Some(frame);
+        }
+        self.seen = log.len();
+    }
+}
+
+/// Save states for input exploration (`--save-dir`/`--save-at`, then
+/// `--load-state`): the HLE run only, frames counted from the EXE entry
+/// either way so pulse schedules stay absolute.
+#[derive(Default)]
+struct States {
+    load: Option<PathBuf>,
+    dir: Option<PathBuf>,
+    save_at: Vec<u64>,
+}
+
+/// Write `<base>.<frame>.state`; the game id records `<id>:<frame>`.
+fn save_state(cpu: &Cpu, bus: &Bus, card: Option<&[u8]>, base: &Path, frame: u64) {
+    let id = base
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let state = SaveStateV1::new(
+        EmulatorStateRef { cpu, bus },
+        format!("{id}:{frame}"),
+        bus.cycles(),
+    );
+    let path = PathBuf::from(format!("{}.{frame}.state", base.display()));
+    if let Some(card) = card {
+        let _ = std::fs::write(path.with_extension("mcd"), card);
+    }
+    match state.write_to(&path) {
+        Ok(()) => eprintln!("[hle-compat] saved {}", path.display()),
+        Err(error) => eprintln!("[hle-compat] save {}: {error}", path.display()),
+    }
 }
 
 /// `--shot-every`: the interval and the final shot's path without `.ppm`.
