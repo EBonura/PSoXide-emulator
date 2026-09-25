@@ -53,8 +53,8 @@ pub enum GameKind {
     /// A `.cue` playlist pointing at one or more BIN files.
     DiscCue,
     /// A CloneCD control sheet pointing at a raw `.img` image, with
-    /// optional `.sub` subchannel sidecar. `.img.ecm` sidecars can
-    /// be decoded at launch through an external converter.
+    /// optional `.sub` subchannel sidecar. An `.img.ecm` sidecar is
+    /// decoded in memory at launch.
     DiscCcd,
     /// A PSX-EXE homebrew binary (our SDK's output + many demos).
     Exe,
@@ -584,7 +584,7 @@ fn parse_ccd(path: &Path, size: u64, mtime: u64, fallback_title: &str) -> Librar
 
     let ecm_img = ecm_sidecar_path(&decoded_img);
     let diagnostic = if ecm_img.exists() {
-        Some("ECM-compressed CloneCD image; launch will decode via external unecm/ecm-uncompress if available".into())
+        Some("ECM-compressed CloneCD image; decoded in memory at launch".into())
     } else {
         Some(format!(
             "missing CloneCD image sidecar {}",
@@ -1082,21 +1082,11 @@ fn disc_from_cue_specs(
 }
 
 /// Load a full disc model from a CloneCD `.ccd` sheet and sibling
-/// `.img` image. If the decoded `.img` is absent but `.img.ecm`
-/// exists, this tries an external decoder (`PSOXIDE_UNECM`, `unecm`,
-/// then `ecm-uncompress`) and then loads the decoded image.
+/// `.img` image. If the `.img` is absent but `.img.ecm` exists, the ECM
+/// container is decoded in memory (nothing is written next to the disc).
 pub fn load_disc_from_ccd(ccd_path: &Path) -> Result<psx_iso::Disc, String> {
-    let candidates = ecm_decoder_candidates();
-    load_disc_from_ccd_with_decoders(ccd_path, &candidates)
-}
-
-fn load_disc_from_ccd_with_decoders(
-    ccd_path: &Path,
-    decoder_candidates: &[PathBuf],
-) -> Result<psx_iso::Disc, String> {
     let toc = parse_ccd_toc(ccd_path)?;
-    let img_path = resolve_ccd_img_for_load(ccd_path, decoder_candidates)?;
-    let image = fs::read(&img_path).map_err(|e| format!("{}: {e}", img_path.display()))?;
+    let (img_path, image) = read_ccd_image(ccd_path)?;
     let image_sectors = image.len() / psx_iso::SECTOR_BYTES;
     if image_sectors == 0 {
         return Err(format!(
@@ -1145,13 +1135,14 @@ fn load_disc_from_ccd_with_decoders(
     Ok(psx_iso::Disc::from_tracks(tracks))
 }
 
-fn resolve_ccd_img_for_load(
-    ccd_path: &Path,
-    decoder_candidates: &[PathBuf],
-) -> Result<PathBuf, String> {
+/// The raw image behind a `.ccd`: the `.img` when present, otherwise the
+/// decoded `.img.ecm`. Returns the path read (for messages) and the bytes.
+fn read_ccd_image(ccd_path: &Path) -> Result<(PathBuf, Vec<u8>), String> {
     let decoded_img = ccd_decoded_img_path(ccd_path);
     if decoded_img.exists() {
-        return Ok(decoded_img);
+        let image =
+            fs::read(&decoded_img).map_err(|e| format!("{}: {e}", decoded_img.display()))?;
+        return Ok((decoded_img, image));
     }
     let ecm_img = ecm_sidecar_path(&decoded_img);
     if !ecm_img.exists() {
@@ -1162,44 +1153,9 @@ fn resolve_ccd_img_for_load(
             ecm_img.display()
         ));
     }
-    decode_ecm_external(&ecm_img, &decoded_img, decoder_candidates)?;
-    Ok(decoded_img)
-}
-
-fn ecm_decoder_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(path) = std::env::var("PSOXIDE_UNECM") {
-        if !path.trim().is_empty() {
-            candidates.push(PathBuf::from(path));
-        }
-    }
-    candidates.push(PathBuf::from("unecm"));
-    candidates.push(PathBuf::from("ecm-uncompress"));
-    candidates
-}
-
-fn decode_ecm_external(
-    ecm_path: &Path,
-    decoded_img_path: &Path,
-    decoder_candidates: &[PathBuf],
-) -> Result<(), String> {
-    let mut failures = Vec::new();
-    for decoder in decoder_candidates {
-        match std::process::Command::new(decoder)
-            .arg(ecm_path)
-            .arg(decoded_img_path)
-            .status()
-        {
-            Ok(status) if status.success() && decoded_img_path.exists() => return Ok(()),
-            Ok(status) => failures.push(format!("{} exited with {status}", decoder.display())),
-            Err(e) => failures.push(format!("{}: {e}", decoder.display())),
-        }
-    }
-    Err(format!(
-        "{} is ECM-compressed and no external decoder succeeded; install unecm/ecm-uncompress or set PSOXIDE_UNECM. Tried: {}",
-        ecm_path.display(),
-        failures.join("; ")
-    ))
+    let packed = fs::read(&ecm_img).map_err(|e| format!("{}: {e}", ecm_img.display()))?;
+    let image = crate::ecm::decode(&packed).map_err(|e| format!("{}: {e}", ecm_img.display()))?;
+    Ok((ecm_img, image))
 }
 
 /// Parse a CUE sheet to find the path of its first data track's BIN.
@@ -1851,31 +1807,36 @@ mod tests {
         assert_eq!(toc.tracks[0].number, 10);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn load_disc_from_ccd_can_use_external_ecm_decoder() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn load_disc_from_ccd_decodes_an_ecm_sidecar_in_memory() {
         let tmp = TempDir::new().unwrap();
         let ccd_path = tmp.path().join("disc.ccd");
-        let ecm_path = tmp.path().join("disc.img.ecm");
-        let decoder_path = tmp.path().join("fake-unecm.sh");
         let mut image = vec![0u8; psx_iso::SECTOR_BYTES * 2];
         image[0] = 0xCD;
-        std::fs::write(&ecm_path, image).unwrap();
+        // A literal-only ECM stream: header, one type-0 record, end
+        // marker, checksum of the decoded bytes.
+        let mut ecm = b"ECM\0".to_vec();
+        let mut n = image.len() as u32 - 1;
+        ecm.push(((n & 0x1F) as u8) << 2);
+        n >>= 5;
+        while n != 0 {
+            *ecm.last_mut().unwrap() |= 0x80;
+            ecm.push((n & 0x7F) as u8);
+            n >>= 7;
+        }
+        ecm.extend_from_slice(&image);
+        ecm.extend_from_slice(&[0xFC, 0xFF, 0xFF, 0xFF, 0x3F]);
+        ecm.extend_from_slice(&crate::ecm::edc_update(0, &image).to_le_bytes());
+        std::fs::write(tmp.path().join("disc.img.ecm"), ecm).unwrap();
         std::fs::write(
             &ccd_path,
             "[Entry 0]\nPoint=0x01\nControl=0x04\nPLBA=0\n[Entry 1]\nPoint=0xa2\nPLBA=2\n",
         )
         .unwrap();
-        std::fs::write(&decoder_path, "#!/bin/sh\ncp \"$1\" \"$2\"\n").unwrap();
-        let mut perms = std::fs::metadata(&decoder_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&decoder_path, perms).unwrap();
 
-        let disc = load_disc_from_ccd_with_decoders(&ccd_path, &[decoder_path]).unwrap();
+        let disc = load_disc_from_ccd(&ccd_path).unwrap();
         assert_eq!(disc.read_sector_raw(0).unwrap()[0], 0xCD);
-        assert!(tmp.path().join("disc.img").exists());
+        assert!(!tmp.path().join("disc.img").exists());
     }
 
     #[test]
