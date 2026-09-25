@@ -555,7 +555,7 @@ fn a_handler_that_never_runs_loses_sectors_rather_than_stalling_the_drive() {
 #[test]
 fn xa_audio_sector_suppresses_dataready_irq_but_keeps_streaming() {
     let mut cd = CdRom::new();
-    let xa_sector = raw_sector([0x00, 0x02, 0x00, 0x02], [0x07, 0x02, 0x24, 0x01], 0);
+    let xa_sector = raw_sector([0x00, 0x02, 0x00, 0x02], [0x07, 0x02, 0x64, 0x01], 0);
     let data_sector = raw_sector([0x00, 0x02, 0x01, 0x02], [0x07, 0x02, 0x00, 0x00], 0x5A);
     let mut disc = xa_sector;
     disc.extend(data_sector);
@@ -588,6 +588,88 @@ fn xa_audio_sector_suppresses_dataready_irq_but_keeps_streaming() {
     assert_eq!(
         next_data_ready.deadline,
         1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2 + 1 + CD_READ_TIME / 2
+    );
+}
+
+/// An XA audio sector goes to the ADPCM decoder, never to the host-side
+/// sector buffer. A data sector that was delivered (INT1 acknowledged) but not
+/// yet read must survive the audio sector that lands behind it. STR movies
+/// interleave one audio sector every few video sectors, and wiping the pending
+/// video sector each time left Tekken 3's intro decoding zeros.
+#[test]
+fn xa_audio_sector_leaves_the_pending_data_sector_intact() {
+    let mut cd = CdRom::new();
+    let data_sector = raw_sector([0x00, 0x02, 0x00, 0x02], [0x01, 0x00, 0x48, 0x00], 0x5A);
+    let xa_sector = raw_sector([0x00, 0x02, 0x01, 0x02], [0x01, 0x01, 0x64, 0x01], 0);
+    let mut disc = data_sector;
+    disc.extend(xa_sector);
+    cd.insert_disc(Some(Disc::from_bin(disc)));
+    cd.mode = 0xC0; // double speed + XA-ADPCM, filter off
+    cd.setloc_msf = (0x00, 0x02, 0x00);
+    cd.scheduling_cycle = 1_000;
+
+    cd.cmd_read();
+    let ack = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1;
+    assert!(cd.tick(ack));
+    cd.irq_flag = 0;
+    let first_sector = ack + CD_READ_TIME * 3 / 2 + 1;
+    assert!(cd.tick(first_sector), "the data sector raises INT1");
+    assert_eq!(cd.irq_flag, IrqType::DataReady as u8);
+    cd.irq_flag = 0; // acknowledged, but software has not read it yet
+
+    assert!(
+        !cd.tick(first_sector + CD_READ_TIME / 2 + 1),
+        "audio raises nothing"
+    );
+    assert!(cd.cd_audio_queue_len() > 0, "the audio sector was decoded");
+    assert!(cd.data_fifo_ready, "the unread data sector is still there");
+    assert_eq!(cd.data_fifo_len(), 2048);
+    assert_eq!(cd.data_fifo.front().copied(), Some(0x5A));
+    assert!(
+        cd.waiting_sectors.is_empty(),
+        "audio never enters the sector ring"
+    );
+}
+
+/// With the XA filter on, audio sectors of other channels are skipped by the
+/// decoder and, like every XA audio sector, are not handed to the CPU. They
+/// must not be queued in the sector ring either, where they would overflow it
+/// and be counted as lost data.
+#[test]
+fn filtered_out_xa_audio_sectors_are_not_queued_as_data() {
+    let mut cd = CdRom::new();
+    let mut disc = Vec::new();
+    for i in 0..16u8 {
+        disc.extend(raw_sector(
+            [0x00, 0x02, i, 0x02],
+            [0x01, 0x02 + (i & 1), 0x64, 0x01],
+            0,
+        ));
+    }
+    cd.insert_disc(Some(Disc::from_bin(disc)));
+    cd.mode = 0xC8; // double speed + XA-ADPCM + filter
+    cd.xa_filter_file = 1;
+    cd.xa_filter_channel = 2;
+    cd.setloc_msf = (0x00, 0x02, 0x00);
+    cd.scheduling_cycle = 1_000;
+
+    cd.cmd_read();
+    let mut at = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1;
+    assert!(cd.tick(at));
+    cd.irq_flag = 0;
+    at += CD_READ_TIME * 3 / 2 + 1;
+    for _ in 0..16 {
+        cd.tick(at);
+        at += CD_READ_TIME / 2 + 1;
+    }
+
+    assert_eq!(cd.irq_type_counts[IrqType::DataReady as usize], 0);
+    assert!(cd.data_fifo.is_empty());
+    assert!(cd.waiting_sectors.is_empty());
+    assert_eq!(cd.dropped_sectors, 0);
+    assert!(
+        cd.cd_audio_queue_len() > 0,
+        "the matching channel still plays"
     );
 }
 
