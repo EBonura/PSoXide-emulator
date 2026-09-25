@@ -490,6 +490,13 @@ fn run_hle(
             path.display()
         );
     }
+    let cd_log = std::env::var("PSOXIDE_COMPAT_CDLOG")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    if let Some(cap) = cd_log {
+        bus.cdrom.enable_command_log(cap);
+        bus.cdrom.enable_response_log(cap);
+    }
     let saves = states
         .dir
         .as_ref()
@@ -547,6 +554,14 @@ fn run_hle(
         .collect();
     if let Some(path) = shot {
         write_ppm(&bus, &path);
+    }
+    if cd_log.is_some() {
+        print_cd_log(&bus);
+    }
+    if let Some(dir) = &states.dir {
+        // Main RAM at the end of the run, for disassembling a stall.
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(dir.join(format!("{}.ram", result.id)), bus.ram());
     }
     for record in bus.hle_bios_records() {
         let line = format!(
@@ -630,6 +645,19 @@ fn run_frames(
                     save_state(cpu, bus, card.as_deref(), base, vblank);
                 }
             }
+            if status_every() != 0 && vblank.is_multiple_of(status_every()) {
+                eprintln!(
+                    "[status] frame {vblank} pc={:08x} ra={:08x} cd_cmds={} cd_last={:02x} getlocp={:?} cd_pops={} mdec_mb={} hash={:016x}",
+                    cpu.pc(),
+                    cpu.gpr(31),
+                    bus.cdrom.commands_dispatched(),
+                    bus.cdrom.last_command(),
+                    bus.cdrom.getlocp_lbas().last(),
+                    bus.cdrom.data_fifo_pops(),
+                    bus.mdec.macroblocks_decoded(),
+                    bus.gpu.display_hash().0
+                );
+            }
             if vblank >= frames {
                 break "frames".to_string();
             }
@@ -707,6 +735,55 @@ fn run_reference(
         distinct_display_hashes: hashes.len(),
         cd_sectors_dropped: bus.cdrom.dropped_sectors(),
         mdec_macroblocks: bus.mdec.macroblocks_decoded(),
+    })
+}
+
+/// `PSOXIDE_COMPAT_CDLOG=N`: the first N CD commands and responses of the
+/// HLE run, interleaved by cycle, on stderr (runs of one command folded).
+fn print_cd_log(bus: &Bus) {
+    let mut lines: Vec<(u64, String)> = Vec::new();
+    for c in bus.cdrom.command_log() {
+        lines.push((
+            c.cycle,
+            format!(
+                "cmd {:02x} {:02x?}",
+                c.command,
+                &c.params[..c.param_len as usize]
+            ),
+        ));
+    }
+    for r in bus.cdrom.response_log() {
+        lines.push((
+            r.cycle,
+            format!("  resp {:?} {:02x?}", r.irq, &r.bytes[..r.len as usize]),
+        ));
+    }
+    lines.sort_by_key(|(cycle, _)| *cycle);
+    let mut last = String::new();
+    let mut repeat = 0;
+    for (cycle, text) in lines {
+        if text == last {
+            repeat += 1;
+            continue;
+        }
+        if repeat > 0 {
+            eprintln!("[cd]   (x{repeat} more)");
+        }
+        repeat = 0;
+        eprintln!("[cd] {:.3}s {text}", cycle as f64 / CPU_HZ);
+        last = text;
+    }
+}
+
+/// `PSOXIDE_COMPAT_STATUS=N`: one status line on stderr every N frames
+/// (PC, CD and MDEC progress) for telling a stall from a slow screen.
+fn status_every() -> u64 {
+    static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *EVERY.get_or_init(|| {
+        std::env::var("PSOXIDE_COMPAT_STATUS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
     })
 }
 
