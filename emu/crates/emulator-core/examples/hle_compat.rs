@@ -137,6 +137,8 @@ struct GameResult {
     sbi_sectors: Option<usize>,
     /// This game's own schedule from `--inputs`, when it has one.
     pad_pulses: Option<String>,
+    /// Shift-JIS codes the game asked B(51h) Krom2RawAdd for (HLE run).
+    font_requests: Vec<String>,
     /// GetlocP queries that landed on a sector listed in the `.sbi`
     /// (counted even with `--no-sbi`, which leaves the list unapplied), and
     /// the frame of the first one.
@@ -585,6 +587,11 @@ fn run_hle(
             .count();
         result.libcrypt_getlocp = Some((hits, first_libcrypt_frame));
     }
+    result.font_requests = bus
+        .hle_font_requests()
+        .iter()
+        .map(|code| format!("{code:04X}"))
+        .collect();
     result.first_unimplemented = bus.hle_bios_first_unimplemented().map(ToString::to_string);
     result.kernel_patches = bus
         .hle_bios_patches()

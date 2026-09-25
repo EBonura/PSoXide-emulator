@@ -34,6 +34,7 @@ pub mod hle_bu;
 pub mod hle_card;
 pub mod hle_exceptions;
 pub mod hle_files;
+pub mod hle_font;
 pub mod hle_kernel;
 pub mod hle_pad;
 pub mod input_tape;

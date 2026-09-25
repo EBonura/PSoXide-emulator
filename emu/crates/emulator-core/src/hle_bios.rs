@@ -808,10 +808,13 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             args[0],
             None,
         )),
-        // B(51h) Krom2RawAdd(sjis): the Kanji font lives in the Sony ROM,
-        // which the HLE kernel does not have (and must not ship); every
-        // character is reported as unsupported (-1, psx-spx).
-        (Table::B, 0x51) => Done(u32::MAX),
+        // B(51h) Krom2RawAdd(sjis) and B(53h) Krom2Offset(sjis): the HLE
+        // kernel's own font, installed in the ROM image (hle_font.rs).
+        (Table::B, 0x51) => {
+            bus.hle_font_request(args[0]);
+            Done(crate::hle_font::krom2_raw_add(args[0]))
+        }
+        (Table::B, 0x53) => Done(u32::from(crate::hle_font::krom2_offset(args[0]))),
         (Table::B, 0x55) => Done(files::file_error(bus, args[0])),
 
         // B(3Dh) putchar -- same as A(3Ch).
@@ -1589,6 +1592,19 @@ mod tests {
 
     fn get_bytes(bus: &Bus, addr: u32, len: u32) -> Vec<u8> {
         (0..len).map(|i| bus.try_read8(addr + i).unwrap()).collect()
+    }
+
+    #[test]
+    fn krom2rawadd_points_into_the_hle_font_in_rom() {
+        let mut bus = hle_bus();
+        // Full-width 'A' (JIS row 3, cell 33) is bank-1 cell 157.
+        let addr = call(&mut bus, 0xB0, 0x51, [0x8260, 0, 0, 0]);
+        assert_eq!(addr, 0xBFC6_6000 + 157 * 30);
+        let cell = get_bytes(&bus, addr, 30);
+        assert_eq!(cell, crate::hle_font::glyphs()[&0x8260].to_vec());
+        assert_eq!(call(&mut bus, 0xB0, 0x53, [0x8260, 0, 0, 0]), 157);
+        assert_eq!(call(&mut bus, 0xB0, 0x51, [0x0041, 0, 0, 0]), u32::MAX);
+        assert!(bus.hle_font_requests().contains(&0x8260));
     }
 
     #[test]
