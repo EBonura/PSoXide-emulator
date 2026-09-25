@@ -166,8 +166,30 @@ pub mod bundled {
         pub subtitle: &'static str,
         /// Disc image or PSX-EXE.
         pub kind: BundledKind,
-        /// Raw payload bytes.
+        /// Raw payload bytes (native: compiled in).
+        #[cfg(not(target_arch = "wasm32"))]
         pub bytes: &'static [u8],
+        /// Where the payload is served next to the page (web). Fetched when
+        /// launched rather than compiled into the wasm every visitor
+        /// downloads; Trunk copies `assets/examples` into the build.
+        #[cfg(target_arch = "wasm32")]
+        pub url: &'static str,
+    }
+
+    /// A baked-in example EXE from `assets/examples/<name>.exe`.
+    macro_rules! example {
+        ($name:literal, $subtitle:literal) => {
+            BundledDisc {
+                id: concat!("bundled:", $name),
+                title: $name,
+                subtitle: $subtitle,
+                kind: BundledKind::Exe,
+                #[cfg(not(target_arch = "wasm32"))]
+                bytes: include_bytes!(concat!("../assets/examples/", $name, ".exe")),
+                #[cfg(target_arch = "wasm32")]
+                url: concat!("examples/", $name, ".exe"),
+            }
+        };
     }
 
     /// The baked-in payloads in menu order. The first auto-boots on load.
@@ -176,146 +198,26 @@ pub mod bundled {
     /// tests. They are separate columns in the menu, so a sample never shows up
     /// beside a real game.
     pub static DISCS: &[BundledDisc] = &[
-        BundledDisc {
-            id: "bundled:game-breakout",
-            title: "game-breakout",
-            subtitle: "sample game",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/game-breakout.exe"),
-        },
-        BundledDisc {
-            id: "bundled:game-invaders",
-            title: "game-invaders",
-            subtitle: "sample game",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/game-invaders.exe"),
-        },
-        BundledDisc {
-            id: "bundled:game-magikaaaaaarp-pong",
-            title: "game-magikaaaaaarp-pong",
-            subtitle: "sample game",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/game-magikaaaaaarp-pong.exe"),
-        },
-        BundledDisc {
-            id: "bundled:game-pong",
-            title: "game-pong",
-            subtitle: "sample game",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/game-pong.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-audio",
-            title: "hello-audio",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-audio.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-cdda",
-            title: "hello-cdda",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-cdda.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-engine",
-            title: "hello-engine",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-engine.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-gte",
-            title: "hello-gte",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-gte.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-input",
-            title: "hello-input",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-input.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-memcard",
-            title: "hello-memcard",
-            subtitle: "hardware diagnostic",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-memcard.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-ot",
-            title: "hello-ot",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-ot.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-pack",
-            title: "hello-pack",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-pack.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-tex",
-            title: "hello-tex",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-tex.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-tri",
-            title: "hello-tri",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-tri.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-3d",
-            title: "showcase-3d",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-3d.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-fog",
-            title: "showcase-fog",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-fog.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-lights",
-            title: "showcase-lights",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-lights.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-model",
-            title: "showcase-model",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-model.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-particles",
-            title: "showcase-particles",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-particles.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-text",
-            title: "showcase-text",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-text.exe"),
-        },
+        example!("game-breakout", "sample game"),
+        example!("game-invaders", "sample game"),
+        example!("game-magikaaaaaarp-pong", "sample game"),
+        example!("game-pong", "sample game"),
+        example!("hello-audio", "sample"),
+        example!("hello-cdda", "sample"),
+        example!("hello-engine", "sample"),
+        example!("hello-gte", "sample"),
+        example!("hello-input", "sample"),
+        example!("hello-memcard", "hardware diagnostic"),
+        example!("hello-ot", "sample"),
+        example!("hello-pack", "sample"),
+        example!("hello-tex", "sample"),
+        example!("hello-tri", "sample"),
+        example!("showcase-3d", "engine showcase"),
+        example!("showcase-fog", "engine showcase"),
+        example!("showcase-lights", "engine showcase"),
+        example!("showcase-model", "engine showcase"),
+        example!("showcase-particles", "engine showcase"),
+        example!("showcase-text", "engine showcase"),
     ];
 
     /// Look up a baked-in disc by its menu launch id.
@@ -1182,6 +1084,14 @@ impl AppState {
         // Baked-in payloads boot via the no-BIOS HLE path, not the library.
         // Both targets: the download has no source tree, so its Examples come
         // from here too.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(disc) = bundled::find(id) {
+            // Fetched on demand; boots from `poll_web_uploads` when it lands,
+            // through the same path as a picked file.
+            crate::web_files::fetch_bundled(disc.url, disc.id);
+            return Ok(());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(disc) = bundled::find(id) {
             let kind = match disc.kind {
                 bundled::BundledKind::DiscBin => {
