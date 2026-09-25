@@ -225,7 +225,6 @@ fn draw_toolbar_controls(ui: &mut egui::Ui, state: &mut AppState, compact: bool)
     ui.add_space(group_gap);
     draw_audio_controls(ui, state);
     ui.add_space(group_gap);
-    draw_boot_toggle(ui, state);
     ui.add_space(group_gap);
     draw_debug_toggles(ui, state);
 }
@@ -419,21 +418,6 @@ fn draw_audio_controls(ui: &mut egui::Ui, state: &mut AppState) {
         if state.audio_volume > 0.0 && before <= 0.0 {
             state.audio_muted = false;
         }
-    }
-}
-
-/// Disc boot-mode toggle. Active means warm fast boot is used on the
-/// next disc launch; inactive means the full BIOS logo path.
-fn draw_boot_toggle(ui: &mut egui::Ui, state: &mut AppState) {
-    let enabled = state.settings.emulator.fast_boot_disc;
-    let tooltip = if enabled {
-        "Disc fast boot enabled - skips BIOS logo"
-    } else {
-        "Disc fast boot disabled - full BIOS logo boot"
-    };
-    let btn = toggle_button(icons::DISC, enabled);
-    if ui.add(btn).on_hover_text(tooltip).clicked() {
-        state.toggle_fast_boot_disc();
     }
 }
 

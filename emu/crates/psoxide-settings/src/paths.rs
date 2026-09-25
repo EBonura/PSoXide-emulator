@@ -224,14 +224,13 @@ impl ConfigPaths {
             .join(format!("memcard-{clamped}.mcd"))
     }
 
-    /// Memory-card file for a game booted on the HLE kernel instead of a
-    /// real BIOS. Kept apart from [`Self::memcard_file`] so an HLE run can
-    /// never overwrite saves made under the real BIOS while the HLE card
-    /// driver is still being validated.
-    pub fn hle_memcard_file(&self, game_id: &str, port: u8) -> PathBuf {
+    /// One-time copy of a game's card from before PSoXide dropped BIOS
+    /// support, made before the HLE kernel first writes to the card and
+    /// never overwritten.
+    pub fn pre_hle_memcard_file(&self, game_id: &str, port: u8) -> PathBuf {
         let clamped = port.clamp(1, 2);
         self.game_dir(game_id)
-            .join(format!("memcard-{clamped}.hle.mcd"))
+            .join(format!("memcard-{clamped}.pre-hle.mcd"))
     }
 
     /// Ensure `dir` exists as a directory, creating parents as
@@ -321,18 +320,18 @@ mod tests {
     }
 
     #[test]
-    fn hle_memcard_is_a_different_file_from_the_bios_card() {
+    fn pre_hle_backup_is_a_different_file_from_the_card() {
         let tmp = TempDir::new().unwrap();
         let p = ConfigPaths::rooted(tmp.path());
         for port in [1, 2] {
-            let hle = p.hle_memcard_file("g", port);
-            assert_ne!(hle, p.memcard_file("g", port));
-            assert_eq!(hle.parent(), p.memcard_file("g", port).parent());
+            let backup = p.pre_hle_memcard_file("g", port);
+            assert_ne!(backup, p.memcard_file("g", port));
+            assert_eq!(backup.parent(), p.memcard_file("g", port).parent());
         }
         assert!(p
-            .hle_memcard_file("g", 1)
+            .pre_hle_memcard_file("g", 1)
             .to_string_lossy()
-            .ends_with("memcard-1.hle.mcd"));
+            .ends_with("memcard-1.pre-hle.mcd"));
     }
 
     #[test]

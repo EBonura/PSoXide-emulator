@@ -14,7 +14,7 @@ mod app;
 mod app_icon;
 mod audio;
 mod burn;
-// Browser file upload (BIOS + game). wasm-only: the native build uses rfd.
+// Browser file upload (game). wasm-only: the native build uses rfd.
 #[cfg(target_arch = "wasm32")]
 mod web_files;
 // Same-origin streamed discs (the demo disc). wasm-only: native has a library.
@@ -955,7 +955,7 @@ impl ApplicationHandler for Shell {
                     eprintln!("[frontend] memcard flush on exit: {e}");
                 }
 
-                // Persist current settings (BIOS path, library
+                // Persist current settings (library
                 // root, etc.) so the next launch picks up any
                 // user tweaks without needing a manual save step.
                 if let Err(e) = self.state.save_settings() {
@@ -1828,7 +1828,7 @@ impl ApplicationHandler for Shell {
         {
             let _ = event_loop;
             self.install_pending_graphics();
-            // Apply any BIOS / game file the user picked since the last frame.
+            // Apply any game file the user picked since the last frame.
             self.state.poll_web_uploads();
             // winit on web does not auto-size the canvas to the page, so the
             // surface and egui's screen rect (both read from inner_size()) would

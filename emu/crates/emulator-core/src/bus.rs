@@ -389,10 +389,12 @@ fn default_spu_sample_deadline() -> u64 {
 }
 
 impl Bus {
-    /// Build a bus with the given BIOS image. RAM and scratchpad are
-    /// zero-initialised; hardware leaves them in an undefined state, but
-    /// zeroing is deterministic and adequate for a cold-boot harness.
-    pub fn new(bios: Vec<u8>) -> Result<Self, BusError> {
+    /// Build a bus around a 512 KiB ROM image. Crate-internal: PSoXide
+    /// loads no BIOS; the ROM is the HLE kernel's image
+    /// ([`Self::new_without_bios`]) or, in tests, code placed at the reset
+    /// vector. RAM and scratchpad are zero-initialised; hardware leaves them
+    /// in an undefined state, but zeroing is deterministic.
+    pub(crate) fn new(bios: Vec<u8>) -> Result<Self, BusError> {
         if bios.len() != memory::bios::SIZE {
             return Err(BusError::BiosSize {
                 expected: memory::bios::SIZE,

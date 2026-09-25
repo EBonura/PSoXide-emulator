@@ -1,22 +1,14 @@
 //! Disc fast boot helpers.
 //!
-//! This path mirrors the BIOS loader's `SYSTEM.CNF -> PSX-EXE` work
-//! without relying on the BIOS license-screen handoff. The disc stays
-//! mounted in the CD-ROM controller; only the initial executable load
-//! is short-circuited.
+//! PSoXide has no BIOS: every disc boots on the built-in HLE kernel. This
+//! path does the loader's `SYSTEM.CNF -> PSX-EXE` work, hands the executable
+//! the hardware state a retail boot leaves behind, and enables the kernel.
+//! The disc stays mounted in the CD-ROM controller.
 
 use psx_iso::{BootError, Disc};
 
-use crate::cpu::ExecutionError;
 use crate::system_cnf::{load_disc_boot, BOOT_ARG_ADDR};
 use crate::{gpu::GP1_ADDR, Bus, Cpu};
-
-/// Number of BIOS instructions to run before warm disc fast boot.
-///
-/// By this point SCPH1001 has installed the syscall tables, exception
-/// vectors, and interrupt mask state that retail games expect, but it
-/// has not spent time on the disc license path.
-pub const DISC_FAST_BOOT_WARMUP_STEPS: u64 = 10_000_000;
 
 /// Summary of a successful disc fast boot.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,7 +37,8 @@ pub struct DiscFastBootInfo {
     pub boot_arg: Option<String>,
 }
 
-/// Load a disc's boot EXE into RAM and seed the CPU at its entry point.
+/// Load a disc's boot EXE into RAM, seed the CPU at its entry point and
+/// start the HLE kernel.
 ///
 /// Callers should mount the same [`Disc`] in the CD-ROM controller
 /// after this returns, so the running game can continue issuing normal
@@ -54,20 +47,6 @@ pub fn fast_boot_disc(
     bus: &mut Bus,
     cpu: &mut Cpu,
     disc: &Disc,
-) -> Result<DiscFastBootInfo, BootError> {
-    fast_boot_disc_with_hle(bus, cpu, disc, true)
-}
-
-/// Variant of [`fast_boot_disc`] that lets callers choose whether to
-/// enable HLE BIOS dispatch after loading the EXE.
-///
-/// Set `enable_hle_bios` to `false` when the real BIOS has already run
-/// far enough to install its RAM syscall and exception handlers.
-pub fn fast_boot_disc_with_hle(
-    bus: &mut Bus,
-    cpu: &mut Cpu,
-    disc: &Disc,
-    enable_hle_bios: bool,
 ) -> Result<DiscFastBootInfo, BootError> {
     let boot = load_disc_boot(disc)?;
     let payload_len = boot.exe.payload.len();
@@ -85,28 +64,18 @@ pub fn fast_boot_disc_with_hle(
             bus.write8_safe(BOOT_ARG_ADDR + offset as u32, byte);
         }
     }
-    if enable_hle_bios {
-        apply_hle_entry_state(bus);
-    } else {
-        // The abbreviated BIOS warmup installs kernel state but intentionally
-        // stops before the license/shell path. PA5 silicon telemetry proves
-        // that disc executables normally inherit the shell's configured SPU
-        // reverb preset, so restore that observable handoff explicitly.
-        bus.apply_retail_bios_shell_audio_profile();
-    }
+    apply_hle_entry_state(bus);
     // OpenBIOS enables display immediately before Exec. Some retail
     // games rely on inheriting that shell state instead of issuing
     // GP1(03h) themselves during early startup.
     bus.write32(GP1_ADDR, 0x0300_0000);
     cpu.seed_from_exe_with_args(boot.exe.initial_pc, boot.exe.initial_gp, Some(sp), 1, 0);
     cpu.seed_frame_pointer(fp);
-    if enable_hle_bios {
-        bus.enable_hle_bios_with(crate::hle_kernel::KernelConfig {
-            tcb: boot.cnf.tcb,
-            event: boot.cnf.event,
-            stack: boot.cnf.stack,
-        });
-    }
+    bus.enable_hle_bios_with(crate::hle_kernel::KernelConfig {
+        tcb: boot.cnf.tcb,
+        event: boot.cnf.event,
+        stack: boot.cnf.stack,
+    });
 
     Ok(DiscFastBootInfo {
         boot_path: boot.cnf.boot_path,
@@ -130,10 +99,9 @@ const I_MASK_ADDR: u32 = 0x1F80_1074;
 const GP0_ADDR: u32 = 0x1F80_1810;
 
 /// Hardware state a disc executable inherits from a real boot, for the HLE
-/// path that never runs the BIOS. Every value was constant across the 38
-/// census runs (31 discs) captured at EXE entry under SCPH1001; see
-/// docs/hle-bios-provenance.md. The warm fast boot inherits the same state
-/// from the real BIOS instead.
+/// HLE boot. Every value was constant across the 38 census runs (31 discs)
+/// captured at EXE entry under a retail BIOS during development; see
+/// docs/hle-bios-provenance.md.
 ///
 /// Deliberately not reproduced: I_STAT (a VBlank latched while the BIOS
 /// held interrupts off, which the first emulated VBlank recreates), the CD
@@ -153,22 +121,6 @@ fn apply_hle_entry_state(bus: &mut Bus) {
     // field enabled.
     bus.write32(GP1_ADDR, 0x0800_0027);
     bus.write32(GP0_ADDR, 0xE100_0600);
-}
-
-/// Run the real BIOS long enough to install its RAM kernel state.
-pub fn warm_bios_for_disc_fast_boot(
-    bus: &mut Bus,
-    cpu: &mut Cpu,
-    steps: u64,
-) -> Result<(), ExecutionError> {
-    for _ in 0..steps {
-        cpu.step(bus)?;
-        bus.run_spu_to_current_cycle();
-        if bus.spu.audio_queue_len() != 0 {
-            let _ = bus.spu.drain_audio();
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

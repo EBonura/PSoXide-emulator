@@ -3,8 +3,8 @@
 //!
 //! Three kinds of data land on disk:
 //!
-//! - **`settings.ron`** -- user-editable preferences. BIOS paths,
-//!   input bindings, UI prefs. Written in RON (Rusty Object
+//! - **`settings.ron`** -- user-editable preferences. Library
+//!   path, input bindings, UI prefs. Written in RON (Rusty Object
 //!   Notation) so enums round-trip losslessly and humans can
 //!   still hand-edit it with comments.
 //! - **`library.ron`** -- machine-generated cache of the game

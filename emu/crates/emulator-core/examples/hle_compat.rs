@@ -17,7 +17,7 @@
 //! ```
 //!
 //! `--hash-log <dir>` writes the display hash of every frame to
-//! `<dir>/<id>.hle.txt` (and `<id>.bios.txt` for `--reference`), one
+//! `<dir>/<id>.hle.txt`, one
 //! `frame hash` line per VBlank, to find where two runs part.
 //!
 //! `--inputs compat/inputs.toml` gives games their own run length and pad
@@ -41,19 +41,9 @@
 //! missing; images the disc loader cannot read (for example `.img.ecm`) are
 //! skipped.
 //!
-//! Dev-only parity mode: with `--parity` and `PSOXIDE_PARITY_BIOS=<path>`
-//! set, each disc is also cold-booted through that real BIOS to its EXE
-//! entry, and the entry state is diffed against the HLE boot. The BIOS is
-//! read only from that variable and never leaves this process; this mode
-//! is for private verification with your own BIOS dump and is not reachable
-//! from the frontend.
-//!
-//! Dev-only reference mode: `--reference` (also reading
-//! `PSOXIDE_PARITY_BIOS`) runs each disc a second time through that real
-//! BIOS with the same input and memory card, counting frames from the EXE
-//! entry so both runs line up, and reports its display hash next to the
-//! HLE one (with `--shots`, as `<id>.bios.ppm`). It shows how far the game
-//! gets with a real kernel, which is what the HLE run is judged against.
+//! PSoXide has no BIOS path: every run is the HLE kernel. What a real
+//! kernel did with the same input, recorded before BIOS support was
+//! removed, is kept as data in `compat/reference/` and `compat/reference.toml`.
 
 #[path = "support/args.rs"]
 mod args_support;
@@ -67,8 +57,7 @@ use std::time::Instant;
 
 use emulator_core::system_cnf::{load_disc_boot, read_file};
 use emulator_core::{
-    fast_boot_disc_with_hle, read_tape, Bus, ButtonState, Cpu, EmulatorState, EmulatorStateRef,
-    PadSample,
+    fast_boot_disc, read_tape, Bus, ButtonState, Cpu, EmulatorState, EmulatorStateRef, PadSample,
 };
 use psoxide_settings::savestate::SaveStateV1;
 use psx_iso::Disc;
@@ -79,8 +68,6 @@ const CPU_HZ: f64 = 33_868_800.0;
 const HASH_EVERY: u64 = 60;
 /// Instruction budget per requested frame before a run is declared stuck.
 const STEPS_PER_FRAME_CAP: u64 = 1_000_000;
-/// Instruction budget for a real-BIOS cold boot to reach the EXE entry.
-const PARITY_BOOT_STEP_CAP: u64 = 800_000_000;
 
 struct Game {
     id: String,
@@ -143,27 +130,6 @@ struct GameResult {
     /// (counted even with `--no-sbi`, which leaves the list unapplied), and
     /// the frame of the first one.
     libcrypt_getlocp: Option<(usize, Option<u64>)>,
-    parity: Option<Vec<ParityField>>,
-    /// Real-BIOS run (dev-only `--reference`).
-    reference: Option<Reference>,
-}
-
-#[derive(serde::Serialize)]
-struct Reference {
-    stop_reason: String,
-    frames: u64,
-    display_hash: String,
-    distinct_display_hashes: usize,
-    cd_sectors_dropped: u64,
-    mdec_macroblocks: u64,
-}
-
-#[derive(serde::Serialize)]
-struct ParityField {
-    field: &'static str,
-    real_bios: String,
-    hle: String,
-    matches: bool,
 }
 
 fn main() {
@@ -178,8 +144,6 @@ fn main() {
     let mut json = None;
     let mut strict = false;
     let mut no_sbi = false;
-    let mut parity = false;
-    let mut reference = false;
     let mut shots: Option<PathBuf> = None;
     let mut shot_every = 0u64;
     let mut hash_log: Option<PathBuf> = None;
@@ -199,8 +163,6 @@ fn main() {
             "--json" => json = Some(args_support::take_path(&mut args, "--json")),
             "--strict" => strict = true,
             "--no-sbi" => no_sbi = true,
-            "--parity" => parity = true,
-            "--reference" => reference = true,
             "--shots" => shots = Some(args_support::take_path(&mut args, "--shots")),
             "--shot-every" => shot_every = args_support::take_u64(&mut args, "--shot-every"),
             "--hash-log" => hash_log = Some(args_support::take_path(&mut args, "--hash-log")),
@@ -219,11 +181,6 @@ fn main() {
         }
     }
     assert!(!dirs.is_empty(), "pass at least one --games-dir");
-    let parity_bios = (parity || reference).then(|| {
-        let path = std::env::var_os("PSOXIDE_PARITY_BIOS")
-            .expect("--parity/--reference need PSOXIDE_PARITY_BIOS=<path to your BIOS dump>");
-        std::fs::read(&path).expect("PSOXIDE_PARITY_BIOS readable")
-    });
     // A scripted pulse list (mask@vblank+frames, the frontend's
     // --pad-pulses format) becomes a one-sample-per-VBlank tape.
     let tape = match (&tape_path, &pulses) {
@@ -297,27 +254,6 @@ fn main() {
                         shot_every,
                         &states,
                     );
-                    if let (true, Some(bios)) = (reference, parity_bios.as_ref()) {
-                        let shot = shots
-                            .as_ref()
-                            .map(|dir| dir.join(format!("{}.bios.ppm", game.id)));
-                        result.reference = run_reference(
-                            bios,
-                            disc.clone(),
-                            &applied,
-                            hashes("bios"),
-                            frames,
-                            tape.as_deref(),
-                            shot,
-                            shot_every,
-                        );
-                    }
-                    if let (true, Some(bios)) = (parity, parity_bios.as_ref()) {
-                        result.parity = parity_diff(bios, &disc);
-                        if result.parity.is_none() {
-                            eprintln!("[hle-compat] parity unavailable for {}", game.id);
-                        }
-                    }
                 }
                 Err(error) => {
                     result.status = "skipped".into();
@@ -331,7 +267,7 @@ fn main() {
     print_table(&results);
     if let Some(path) = json {
         let report = Report {
-            schema: "psoxide-hle-compat/2",
+            schema: "psoxide-hle-compat/3",
             emulator_commit: emulator_commit(),
             frames,
             input_tape: tape_path.as_deref().map(file_name).or(pulses),
@@ -494,7 +430,7 @@ fn run_hle(
     let mut bus = Bus::new_without_bios();
     bus.set_hle_strict(strict);
     let mut cpu = Cpu::new();
-    if let Err(error) = fast_boot_disc_with_hle(&mut bus, &mut cpu, &disc, true) {
+    if let Err(error) = fast_boot_disc(&mut bus, &mut cpu, &disc) {
         result.status = "boot_failed".into();
         result.detail = Some(format!("{error:?}"));
         return;
@@ -720,78 +656,6 @@ fn run_frames(
     (stop, last_vblank, steps, hashes)
 }
 
-/// Dev-only: cold-boot `disc` through the real BIOS to the EXE entry, then
-/// run the same frames and input as the HLE run.
-fn run_reference(
-    bios: &[u8],
-    disc: Disc,
-    sbi: &[u32],
-    hash_log: Option<PathBuf>,
-    frames: u64,
-    tape: Option<&[PadSample]>,
-    shot: Option<PathBuf>,
-    shot_every: u64,
-) -> Option<Reference> {
-    let entry = load_disc_boot(&disc).ok()?.exe.initial_pc & 0x1FFF_FFFF;
-    let mut bus = Bus::new(bios.to_vec()).ok()?;
-    let mut cpu = Cpu::new();
-    bus.cdrom.insert_disc(Some(disc));
-    bus.cdrom.set_bad_subq_sectors(sbi.to_vec());
-    bus.attach_digital_pad_port1();
-    bus.attach_memcard_port1(Vec::new());
-    let mut reached = false;
-    for _ in 0..PARITY_BOOT_STEP_CAP {
-        if cpu.pc() & 0x1FFF_FFFF == entry {
-            reached = true;
-            break;
-        }
-        cpu.step(&mut bus).ok()?;
-        bus.run_spu_to_current_cycle();
-        if bus.spu.audio_queue_len() != 0 {
-            let _ = bus.spu.drain_audio();
-        }
-    }
-    if !reached {
-        eprintln!("[hle-compat] reference: real BIOS did not reach the EXE entry");
-        return None;
-    }
-    let cd_log = cd_log_cap();
-    if let Some(cap) = cd_log {
-        bus.cdrom.enable_command_log(cap);
-        bus.cdrom.enable_response_log(cap);
-    }
-    let entry_cycle = bus.cycles();
-    let periodic = periodic_shots(shot.as_deref(), shot_every);
-    let (stop, frames_run, _, hashes) = run_frames(
-        &mut cpu,
-        &mut bus,
-        (0, frames),
-        tape,
-        periodic.as_ref(),
-        hash_log,
-        None,
-        &mut Watch {
-            lbas: &[],
-            seen: 0,
-            first: None,
-        },
-    );
-    if let Some(path) = shot {
-        write_ppm(&bus, &path);
-    }
-    if cd_log.is_some() {
-        print_cd_log(&bus, "cd-bios", entry_cycle);
-    }
-    Some(Reference {
-        stop_reason: stop,
-        frames: frames_run,
-        display_hash: format!("0x{:016x}", bus.gpu.display_hash().0),
-        distinct_display_hashes: hashes.len(),
-        cd_sectors_dropped: bus.cdrom.dropped_sectors(),
-        mdec_macroblocks: bus.mdec.macroblocks_decoded(),
-    })
-}
-
 /// `PSOXIDE_COMPAT_CDLOG=N`: the first N CD commands and responses of the
 /// HLE run, interleaved by cycle, on stderr (runs of one command folded).
 fn cd_log_cap() -> Option<usize> {
@@ -800,8 +664,7 @@ fn cd_log_cap() -> Option<usize> {
         .and_then(|v| v.parse::<usize>().ok())
 }
 
-/// Times are seconds from the EXE entry (`entry_cycle`), so the HLE and
-/// `--reference` logs line up.
+/// Times are seconds from the EXE entry (`entry_cycle`).
 fn print_cd_log(bus: &Bus, tag: &str, entry_cycle: u64) {
     let mut lines: Vec<(u64, String)> = Vec::new();
     for c in bus.cdrom.command_log() {
@@ -921,91 +784,6 @@ fn apply_sample(bus: &mut Bus, tape: Option<&[PadSample]>, frame: u64) {
     bus.set_port1_sticks(sample.right_x, sample.right_y, sample.left_x, sample.left_y);
 }
 
-/// Entry-state fields compared in parity mode, with the mask applied
-/// before comparing (GPUSTAT keeps only the display-mode and draw bits).
-fn entry_state(cpu: &Cpu, bus: &mut Bus) -> Vec<(&'static str, u32, u32)> {
-    let spu = |bus: &Bus, addr: u32| u32::from(bus.spu.read16(addr));
-    let ram32 = |bus: &Bus, addr: u32| {
-        (0..4).fold(0u32, |acc, k| {
-            acc | u32::from(bus.try_read8(addr + k).unwrap_or(0)) << (8 * k)
-        })
-    };
-    vec![
-        ("pc", cpu.pc(), u32::MAX),
-        ("sp", cpu.gpr(29), u32::MAX),
-        ("fp", cpu.gpr(30), u32::MAX),
-        ("gp", cpu.gpr(28), u32::MAX),
-        ("a0", cpu.gpr(4), u32::MAX),
-        ("a1", cpu.gpr(5), u32::MAX),
-        ("sr", cpu.cop0()[12], u32::MAX),
-        ("i_mask", bus.read32(0x1F80_1074) & 0xFFFF, u32::MAX),
-        ("dpcr", bus.debug_dma_read32(0x1F80_10F0), u32::MAX),
-        ("dicr", bus.debug_dma_read32(0x1F80_10F4), u32::MAX),
-        ("gpustat", bus.read32(0x1F80_1814), 0x00FF_0600),
-        ("spucnt", spu(bus, 0x1F80_1DAA), u32::MAX),
-        ("main_vol_l", spu(bus, 0x1F80_1D80), u32::MAX),
-        ("main_vol_r", spu(bus, 0x1F80_1D82), u32::MAX),
-        ("reverb_vol_l", spu(bus, 0x1F80_1D84), u32::MAX),
-        ("reverb_vol_r", spu(bus, 0x1F80_1D86), u32::MAX),
-        ("eon_lo", spu(bus, 0x1F80_1D98), u32::MAX),
-        ("eon_hi", spu(bus, 0x1F80_1D9A), u32::MAX),
-        ("reverb_base", spu(bus, 0x1F80_1DA2), u32::MAX),
-        ("transfer_ctrl", spu(bus, 0x1F80_1DAC), u32::MAX),
-        ("cd_vol_l", spu(bus, 0x1F80_1DB0), u32::MAX),
-        ("cd_vol_r", spu(bus, 0x1F80_1DB2), u32::MAX),
-        ("ext_vol_l", spu(bus, 0x1F80_1DB4), u32::MAX),
-        ("ram_size_mb", ram32(bus, 0x60), u32::MAX),
-        ("sio1_mode", u32::from(bus.read16(0x1F80_1058)), u32::MAX),
-        ("sio1_ctrl", u32::from(bus.read16(0x1F80_105A)), u32::MAX),
-        ("sio1_baud", u32::from(bus.read16(0x1F80_105E)), u32::MAX),
-        ("cd_head_lba", bus.cdrom.debug_read_lba(), u32::MAX),
-    ]
-}
-
-fn parity_diff(bios: &[u8], disc: &Disc) -> Option<Vec<ParityField>> {
-    let entry = load_disc_boot(disc).ok()?.exe.initial_pc & 0x1FFF_FFFF;
-
-    let mut bus = Bus::new(bios.to_vec()).ok()?;
-    let mut cpu = Cpu::new();
-    bus.cdrom.insert_disc(Some(disc.clone()));
-    bus.attach_digital_pad_port1();
-    bus.attach_memcard_port1(Vec::new());
-    let mut reached = false;
-    for _ in 0..PARITY_BOOT_STEP_CAP {
-        if cpu.pc() & 0x1FFF_FFFF == entry {
-            reached = true;
-            break;
-        }
-        cpu.step(&mut bus).ok()?;
-        bus.run_spu_to_current_cycle();
-        if bus.spu.audio_queue_len() != 0 {
-            let _ = bus.spu.drain_audio();
-        }
-    }
-    if !reached {
-        eprintln!("[hle-compat] parity: real BIOS did not reach the EXE entry");
-        return None;
-    }
-    let real = entry_state(&cpu, &mut bus);
-
-    let mut bus = Bus::new_without_bios();
-    let mut cpu = Cpu::new();
-    fast_boot_disc_with_hle(&mut bus, &mut cpu, disc, true).ok()?;
-    let hle = entry_state(&cpu, &mut bus);
-
-    Some(
-        real.into_iter()
-            .zip(hle)
-            .map(|((field, real, mask), (_, hle, _))| ParityField {
-                field,
-                real_bios: format!("0x{real:08x}"),
-                hle: format!("0x{hle:08x}"),
-                matches: real & mask == hle & mask,
-            })
-            .collect(),
-    )
-}
-
 fn print_table(results: &[GameResult]) {
     println!(
         "{:<12} {:<11} {:<5} {:>6} {:>7} {:<18} {:>5} first unimplemented",
@@ -1031,27 +809,6 @@ fn print_table(results: &[GameResult]) {
                 "    mdec macroblocks {}, cd sectors dropped {}",
                 r.mdec_macroblocks, r.cd_sectors_dropped
             );
-        }
-        if let Some(reference) = &r.reference {
-            println!(
-                "    real BIOS: {} frames, display {}, {} hashes ({}), mdec {}, dropped {}",
-                reference.frames,
-                reference.display_hash,
-                reference.distinct_display_hashes,
-                reference.stop_reason,
-                reference.mdec_macroblocks,
-                reference.cd_sectors_dropped
-            );
-        }
-        if let Some(parity) = &r.parity {
-            let matching = parity.iter().filter(|f| f.matches).count();
-            println!("    parity: {matching}/{} entry fields match", parity.len());
-            for f in parity.iter().filter(|f| !f.matches) {
-                println!(
-                    "    parity {:<14} real={} hle={}",
-                    f.field, f.real_bios, f.hle
-                );
-            }
         }
     }
 }
