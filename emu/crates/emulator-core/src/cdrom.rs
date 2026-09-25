@@ -165,6 +165,14 @@ struct PendingFollowup {
     bytes: Vec<u8>,
 }
 
+/// `PendingEvent::command` of an INT1 that announces a sector which landed
+/// while the CPU held the previous interrupt (no sector is read for it).
+const DEFERRED_DATA_READY: u8 = 0xFF;
+
+/// Cycles from the acknowledge to the held INT1 (DuckStation's
+/// `INTERRUPT_DELAY_CYCLES`).
+const DEFERRED_DATA_READY_DELAY: u64 = 500;
+
 /// A deferred response: when `bus.cycles` passes `deadline` (an
 /// absolute bus-cycle count), the event's bytes land in the response
 /// FIFO and its IRQ type fires.
@@ -415,6 +423,10 @@ pub struct CdRom {
     /// read at the target (already in `last_sector_header`) is valid.
     #[serde(default)]
     seek_header_valid_at: Option<u64>,
+    /// A sector landed while the CPU still held the last interrupt; its
+    /// INT1 goes out once the CPU acknowledges.
+    #[serde(default)]
+    deferred_data_ready: bool,
     /// Set while a read is in progress; controls whether new
     /// DataReady events chain into further sectors.
     reading: bool,
@@ -557,6 +569,7 @@ impl CdRom {
             last_sector_subheader: [0; 4],
             last_sector_header_valid: false,
             seek_header_valid_at: None,
+            deferred_data_ready: false,
             reading: false,
             read_rescheduled: false,
             read_lba: 0,
@@ -1008,6 +1021,16 @@ impl CdRom {
             // clear on the low 5 bits; bit 6 resets the param FIFO too).
             (3, 1) => {
                 self.irq_flag &= !(value & 0x1F);
+                if self.irq_flag == 0 && self.deferred_data_ready && self.reading {
+                    self.deferred_data_ready = false;
+                    self.insert_pending_event(PendingEvent {
+                        command: DEFERRED_DATA_READY,
+                        deadline: now.saturating_add(DEFERRED_DATA_READY_DELAY),
+                        irq: IrqType::DataReady,
+                        bytes: vec![self.stat_byte()],
+                        followup: None,
+                    });
+                }
                 if value & 0x40 != 0 {
                     self.params.clear();
                 }
@@ -1352,6 +1375,7 @@ impl CdRom {
     /// this, stale sectors from an older stream can leak into the next
     /// command sequence.
     fn cancel_pending_data_ready_events(&mut self) {
+        self.deferred_data_ready = false;
         self.pending.retain(|ev| ev.irq != IrqType::DataReady);
         for ev in self.pending.iter_mut() {
             if ev
@@ -2267,7 +2291,14 @@ impl CdRom {
             // stream cadence after the PREVIOUS one, not from the
             // ancient `cmd_read` issue time).
             let mut should_raise_irq = true;
-            if ev.irq == IrqType::DataReady {
+            if ev.irq == IrqType::DataReady && ev.command == DEFERRED_DATA_READY {
+                // The held INT1: announce the newest sector now, or wait for
+                // the next acknowledge if another interrupt got in first.
+                if self.irq_flag != 0 {
+                    self.deferred_data_ready = true;
+                    continue;
+                }
+            } else if ev.irq == IrqType::DataReady {
                 should_raise_irq = self.load_next_sector();
                 // The sector has landed either way. Whether the CPU is told
                 // about it is a separate question: the interrupt line is still
@@ -2276,6 +2307,10 @@ impl CdRom {
                 // notification is simply never sent, which is exactly how a
                 // slow handler ends up stepping over data.
                 if self.irq_flag != 0 {
+                    // One INT1 is held for it and goes out after the ack.
+                    if should_raise_irq {
+                        self.deferred_data_ready = true;
+                    }
                     should_raise_irq = false;
                 }
                 self.read_rescheduled = false;
@@ -2316,6 +2351,7 @@ impl CdRom {
             // Raise IRQ. The flag-gate above already guaranteed
             // irq_flag was 0 on entry.
             if ev.irq == IrqType::DataReady {
+                self.deferred_data_ready = false;
                 self.snap_to_newest_sector();
             }
             self.irq_flag = ev.irq as u8;
