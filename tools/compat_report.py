@@ -80,7 +80,7 @@ Run on: {commits}
 """
 
 COLUMNS = (
-    "| Game | Serial | Region | PSoXide | Real BIOS (recorded) | FMV | Known issues | "
+    "| | Game | Serial | Region | PSoXide | Real BIOS (recorded) | FMV | Known issues | "
     "Last frame = BIOS | Measured on | Evidence |"
 )
 
@@ -167,8 +167,16 @@ def main(argv):
                 issues += f"; {r['detail']}"
         if r is not None and r.get("sbi_sectors") is None and o.get("libcrypt"):
             issues += "; LibCrypt disc, no .sbi next to it"
+        thumb = os.path.join("images", "games", gid + ".png")
+        shot = (
+            f'<img src="{thumb}" width="96" alt="">'
+            if os.path.exists(os.path.join(ROOT, "docs", thumb))
+            else ""
+        )
         rows.append(
             "| "
+            + shot
+            + " | "
             + " | ".join(
                 cell(x)
                 for x in (

@@ -8,6 +8,17 @@ here, alongside the desktop and browser frontends.
 repository. [The editor, engine and Cortex Ignition](https://github.com/EBonura/PSoXide-editor)
 live together in their own repository and consume this emulator core.
 
+## Runs without a BIOS
+
+PSoXide boots commercial discs and homebrew with its own clean-room HLE kernel;
+no BIOS is needed or accepted. All 20 commercial games in the compatibility
+list reach gameplay. Per-game status: [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+
+![Twenty commercial games and five homebrew games running in PSoXide](docs/images/compat-grid.png)
+
+Screenshots are headless captures from the compatibility runs. The games and
+their screenshots belong to their respective owners.
+
 ## Build and run
 
 Install Rust through rustup, Python 3, and your host's C/C++ build tools.
