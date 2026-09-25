@@ -111,8 +111,12 @@ pub fn function_name(table: Table, func: u8) -> &'static str {
             0x20 => "ttyInOut",
             0x28 => "cdOpen",
             0x29 => "cdRead",
+            crate::hle_exceptions::internal::DELIVER_NEXT => "deliverNext",
             crate::hle_pad::internal::VERIFIER => "padCardVerifier",
             crate::hle_pad::internal::HANDLER => "padCardHandler",
+            crate::hle_card::internal::VERIFIER => "cardVerifier",
+            crate::hle_card::internal::HANDLER => "cardHandler",
+            crate::hle_card::internal::FAST => "cardEarlyByte",
             0x38 => "cdromIoIrq",
             0x39 => "cdromDmaIrq",
             _ => "?",
@@ -312,6 +316,7 @@ enum Ret {
 }
 
 fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut bool) -> Ret {
+    use crate::hle_card as card;
     use crate::hle_exceptions as ex;
     use crate::hle_files as files;
     let file_call = |call: files::FileCall| match call {
@@ -541,8 +546,30 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             Done(0)
         }
 
-        // A(70h) _bu_init (memcard filesystem init) -- accept.
-        (Table::A, 0x70) => Stub(0),
+        // A(55h)/A(70h) _bu_init: load both slots' directories.
+        (Table::A, 0x55) | (Table::A, 0x70) => match card::bu_init(bus) {
+            Some(v) => Done(v),
+            None => Retry,
+        },
+
+        // Memory card (psx-spx "BIOS Memory Card Functions"): A(ABh)
+        // _card_info, A(ACh) _card_load, A(ADh) _card_auto, and the
+        // bufs_cb completion callbacks A(A7h)-A(AAh), which deliver
+        // SwCARD events.
+        (Table::A, 0xAB) => Done(card::card_info(bus, args[0])),
+        (Table::A, 0xAC) => Done(card::card_load(bus, args[0])),
+        (Table::A, 0xAD) => Done(card::set_auto_format(bus, args[0])),
+        (Table::A, 0xA7) | (Table::A, 0xA8) | (Table::A, 0xA9) | (Table::A, 0xAA) => {
+            if func == 0xA7 {
+                card::low_level_completed(bus);
+            } else {
+                card::low_level_error(bus, u32::from(func - 0xA8));
+            }
+            match ex::flush_events(bus, gprs, gprs[31]) {
+                Some(target) => Jump(target),
+                None => Done(0),
+            }
+        }
 
         // A(96h) AddCDROMDevice: the kernel CD-ROM device, if absent.
         (Table::A, 0x96) => Done(crate::hle_files::add_kernel_cdrom(bus)),
@@ -708,8 +735,29 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             Done(previous)
         }
 
-        // B(4Ah) InitCard, B(4Bh) StartCard, B(4Ch) StopCard.
-        (Table::B, 0x4A) | (Table::B, 0x4B) | (Table::B, 0x4C) => Stub(1),
+        // B(4Ah) InitCARD2, B(4Bh) StartCARD2, B(4Ch) StopCARD2, B(4Dh)
+        // _card_info_subfunc, B(4Eh) _card_write, B(4Fh) _card_read,
+        // B(50h) _new_card, B(58h) _card_chan, B(5Ch) _card_status,
+        // B(5Dh) _card_wait. The bytes move on IRQ7 (hle_card).
+        (Table::B, 0x4A) => {
+            *flush = true;
+            Done(card::init_card(bus, args[0]))
+        }
+        (Table::B, 0x4B) => Done(card::start_card(bus)),
+        (Table::B, 0x4C) => Done(card::stop_card(bus)),
+        (Table::B, 0x4D) => Done(card::card_info_internal(bus, args[0])),
+        (Table::B, 0x4E) => Done(card::card_write(bus, args[0], args[1], args[2])),
+        (Table::B, 0x4F) => Done(card::card_read(bus, args[0], args[1], args[2])),
+        (Table::B, 0x50) => {
+            card::new_card(bus);
+            Done(gprs[2])
+        }
+        (Table::B, 0x58) => Done(card::card_chan(bus)),
+        (Table::B, 0x5C) => Done(card::card_status(bus, args[0])),
+        (Table::B, 0x5D) => match card::card_wait(bus, args[0]) {
+            Some(v) => Done(v),
+            None => Retry,
+        },
 
         // --- C-table (kernel interrupt handlers) ---
 
@@ -780,9 +828,21 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         (Table::Kernel, files::internal::NOP) => Done(0),
         (Table::Kernel, crate::hle_pad::internal::VERIFIER) => Done(crate::hle_pad::verifier(bus)),
         (Table::Kernel, crate::hle_pad::internal::HANDLER) => match crate::hle_pad::handler(bus) {
-            Some(v) => Done(v),
+            Some(v) => match ex::flush_events(bus, gprs, gprs[31]) {
+                Some(target) => Jump(target),
+                None => Done(v),
+            },
             None => Retry,
         },
+        (Table::Kernel, card::internal::VERIFIER) => Done(card::verifier(bus)),
+        (Table::Kernel, card::internal::FAST) => Jump(card::fast(bus)),
+        (Table::Kernel, card::internal::HANDLER) => {
+            card::handler(bus);
+            match ex::flush_events(bus, gprs, gprs[31]) {
+                Some(target) => Jump(target),
+                None => Done(0),
+            }
+        }
         (Table::Kernel, files::internal::TTY_INOUT) => Done(files::tty_inout(
             bus,
             args[0],
@@ -824,6 +884,7 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
 
         // Default SYSCALL/exception verifier and root-counter handlers,
         // reached from the exception handler's chains.
+        (Table::Kernel, ex::internal::DELIVER_NEXT) => Jump(ex::deliver_next(bus, gprs)),
         (Table::Kernel, ex::internal::SYSCALL_VERIFIER) => match ex::syscall_verifier(bus) {
             ex::SyscallAction::Pass => Done(0),
             ex::SyscallAction::Return => Jump(ex::code().return_from_exception),
@@ -1527,8 +1588,8 @@ mod tests {
     fn unimplemented_and_stubbed_calls_are_recorded_once_per_function() {
         let mut bus = hle_bus();
         assert!(bus.hle_bios_first_unimplemented().is_none());
-        // A(70h) is a stub; A(3Ah) abort is unimplemented.
-        assert_eq!(call(&mut bus, 0xA0, 0x70, [0, 0, 0, 0]), 0);
+        // A(97h) is a stub; A(3Ah) abort is unimplemented.
+        assert_eq!(call(&mut bus, 0xA0, 0x97, [0, 0, 0, 0]), 0);
         assert_eq!(call(&mut bus, 0xA0, 0x3A, [0x40, 0, 0, 0]), 0);
         assert_eq!(call(&mut bus, 0xA0, 0x3A, [0x80, 0, 0, 0]), 0);
         // Implemented calls leave no record.
@@ -1537,7 +1598,7 @@ mod tests {
         let records = bus.hle_bios_records();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].outcome, Outcome::Stub);
-        assert_eq!((records[0].table, records[0].func), (Table::A, 0x70));
+        assert_eq!((records[0].table, records[0].func), (Table::A, 0x97));
         let first = bus.hle_bios_first_unimplemented().unwrap();
         assert_eq!((first.table, first.func), (Table::A, 0x3A));
         assert_eq!(first.args[0], 0x40);

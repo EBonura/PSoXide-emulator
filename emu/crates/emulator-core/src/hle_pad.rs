@@ -276,9 +276,10 @@ pub fn verifier(bus: &mut Bus) -> u32 {
 }
 
 /// Handler: read both pads when the pad driver is enabled, run PAD_dr for
-/// PAD_init2 users, then acknowledge VBlank when pad auto-ack is on (and
-/// `_remove_ChgclrPAD` has not removed that). `None` while a transfer is
-/// waiting on the port.
+/// PAD_init2 users, acknowledge VBlank when pad auto-ack is on (and
+/// `_remove_ChgclrPAD` has not removed that), then let the card driver
+/// schedule its next command. `None` while a transfer is waiting on the
+/// port.
 pub fn handler(bus: &mut Bus) -> Option<u32> {
     if peek32(bus, crate::hle_kernel::kvar::PAD_STARTED) != 0 {
         read_pads(bus)?;
@@ -289,6 +290,9 @@ pub fn handler(bus: &mut Bus) -> Option<u32> {
     let auto_ack = peek32(bus, crate::hle_kernel::kvar::SIO0_AUTO_ACK) != 0;
     if auto_ack && patches(bus) & PATCH_REMOVE_CHGCLRPAD == 0 {
         bus.write32(I_STAT, !IRQ_VBLANK);
+    }
+    if peek32(bus, crate::hle_card::kvar::STARTED) != 0 {
+        crate::hle_card::vblank(bus);
     }
     Some(0)
 }

@@ -189,6 +189,10 @@ impl Asm {
     pub fn b(&mut self, target: &'static str) {
         self.beq(ZERO, ZERO, target);
     }
+    /// `j` to an absolute address.
+    pub fn j_abs(&mut self, target: u32) {
+        self.word((0x02 << 26) | ((target >> 2) & 0x03FF_FFFF));
+    }
     /// `jal` to an absolute address.
     pub fn jal_abs(&mut self, target: u32) {
         self.word((0x03 << 26) | ((target >> 2) & 0x03FF_FFFF));
