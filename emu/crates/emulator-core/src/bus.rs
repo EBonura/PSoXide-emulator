@@ -2263,10 +2263,16 @@ impl Bus {
                 let fifo_len = self.cdrom.data_fifo_len();
                 let armed = self.cdrom.data_transfer_armed();
                 if let Some(cdrom_words) = self.run_dma_cdrom() {
-                    let label = format!(
+                    // Built only for the opt-in DMA log: formatting it on
+                    // every CD transfer allocated in ordinary play.
+                    let label = if self.dma_log_enabled {
+                        format!(
                         "CdrDma words={cdrom_words} fifo={fifo_len} armed={} madr=0x{:08x} bcr=0x{:08x} chcr=0x{:08x}",
                         armed as u8, ch.base, ch.block_control, ch.channel_control
-                    );
+                    )
+                    } else {
+                        String::new()
+                    };
                     if cdrom_words == 0 {
                         self.log_dma_schedule(&label, 0, self.cycles);
                         if self.complete_dma_channel(3) {
