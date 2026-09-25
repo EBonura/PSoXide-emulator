@@ -350,6 +350,13 @@ pub struct Bus {
     /// states.
     #[serde(skip)]
     dma_log_enabled: bool,
+    /// Per-channel cycle a transfer started, while it is in flight.
+    /// Diagnostic only (debug UI), excluded from save states.
+    #[serde(skip)]
+    dma_active_since: [Option<u64>; 7],
+    /// Per-channel cycles spent between transfer start and completion.
+    #[serde(skip)]
+    dma_busy_cycles: [u64; 7],
     #[serde(skip)]
     dma_log: Vec<(String, u64, u64, u64)>,
     /// Optional linked-list GPU DMA node trace used to diagnose ordering-table
@@ -468,6 +475,8 @@ impl Bus {
             unmapped_read_seen: std::collections::BTreeSet::new(),
             unmapped_write_seen: std::collections::BTreeSet::new(),
             dma_log_enabled: false,
+            dma_active_since: [None; 7],
+            dma_busy_cycles: [0; 7],
             dma_log: Vec::new(),
             gpu_linked_list_log_enabled: false,
             gpu_linked_list_fifo_guard: gpu_linked_list_fifo_guard_from_env(),
@@ -1458,6 +1467,10 @@ impl Bus {
     /// raises that IRQ once per tick if any channel was on the
     /// edge.
     fn complete_dma_channel(&mut self, ch: usize) -> bool {
+        if let Some(start) = self.dma_active_since.get_mut(ch).and_then(Option::take) {
+            self.dma_busy_cycles[ch] =
+                self.dma_busy_cycles[ch].saturating_add(self.cycles.saturating_sub(start));
+        }
         if ch == 6 {
             // OTC direction/decrement is hardwired to bit 1; both manual
             // trigger and busy clear when the transfer completes.
@@ -2058,6 +2071,17 @@ impl Bus {
         self.dma.start_trigger_counts
     }
 
+    /// Per-channel cycles each DMA channel has spent with a transfer in
+    /// flight (start to completion), including the running part of a
+    /// transfer still in progress. Diagnostic only.
+    pub fn dma_busy_cycles(&self) -> [u64; 7] {
+        std::array::from_fn(|ch| {
+            let running =
+                self.dma_active_since[ch].map_or(0, |start| self.cycles.saturating_sub(start));
+            self.dma_busy_cycles[ch].saturating_add(running)
+        })
+    }
+
     /// True when some source is both pending in `I_STAT` and enabled
     /// in `I_MASK`. The CPU mirrors this into `COP0.CAUSE.IP[2]`.
     pub fn external_interrupt_pending(&mut self) -> bool {
@@ -2185,6 +2209,9 @@ impl Bus {
                 channel.channel_control,
                 self.mdec.can_dma_out()
             );
+        }
+        if matches!(ch, 0..=4 | 6) && self.dma_active_since[ch].is_none() {
+            self.dma_active_since[ch] = Some(self.cycles);
         }
         // Run only the channel whose CHCR was just written.
         match ch {
@@ -3476,6 +3503,17 @@ impl Bus {
             if is_chcr_write && start_bit_set {
                 let channel = ((offset & 0x70) >> 4) as usize;
                 self.run_dma_channel(channel);
+            } else if is_chcr_write {
+                // A stop write ends any busy span the debug counters track.
+                let channel = ((offset & 0x70) >> 4) as usize;
+                if let Some(start) = self
+                    .dma_active_since
+                    .get_mut(channel)
+                    .and_then(Option::take)
+                {
+                    self.dma_busy_cycles[channel] = self.dma_busy_cycles[channel]
+                        .saturating_add(self.cycles.saturating_sub(start));
+                }
             }
             return;
         }
