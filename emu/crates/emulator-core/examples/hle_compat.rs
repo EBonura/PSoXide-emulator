@@ -13,10 +13,11 @@
 //!     --games-dir "/path/to/your/discs" --frames 1800 [--only crash] \
 //!     [--input-tape run.pxtape | --pad-pulses 0x0008@600+8,...] \
 //!     [--strict] [--json report.json] \
-//!     [--shots <dir>]
+//!     [--shots <dir> [--shot-every N]]
 //! ```
 //!
-//! `--shots` writes each game's final display as `<id>.ppm`. That is game
+//! `--shots` writes each game's final display as `<id>.ppm`, and with
+//! `--shot-every N` also every N frames as `<id>.<frame>.ppm`. That is game
 //! imagery: keep the directory local.
 //!
 //! Every run uses the same fixed setup so results compare across builds:
@@ -141,6 +142,7 @@ fn main() {
     let mut parity = false;
     let mut reference = false;
     let mut shots: Option<PathBuf> = None;
+    let mut shot_every = 0u64;
     let mut pulses: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -156,6 +158,7 @@ fn main() {
             "--parity" => parity = true,
             "--reference" => reference = true,
             "--shots" => shots = Some(args_support::take_path(&mut args, "--shots")),
+            "--shot-every" => shot_every = args_support::take_u64(&mut args, "--shot-every"),
             other => panic!("unknown argument {other}; see the header of hle_compat.rs"),
         }
     }
@@ -212,13 +215,20 @@ fn main() {
                         tape.as_deref(),
                         strict,
                         shot,
+                        shot_every,
                     );
                     if let (true, Some(bios)) = (reference, parity_bios.as_ref()) {
                         let shot = shots
                             .as_ref()
                             .map(|dir| dir.join(format!("{}.bios.ppm", game.id)));
-                        result.reference =
-                            run_reference(bios, disc.clone(), frames, tape.as_deref(), shot);
+                        result.reference = run_reference(
+                            bios,
+                            disc.clone(),
+                            frames,
+                            tape.as_deref(),
+                            shot,
+                            shot_every,
+                        );
                     }
                     if let (true, Some(bios)) = (parity, parity_bios.as_ref()) {
                         result.parity = parity_diff(bios, &disc);
@@ -363,6 +373,7 @@ fn run_hle(
     tape: Option<&[PadSample]>,
     strict: bool,
     shot: Option<PathBuf>,
+    shot_every: u64,
 ) {
     let mut bus = Bus::new_without_bios();
     bus.set_hle_strict(strict);
@@ -379,7 +390,9 @@ fn run_hle(
     bus.attach_memcard_port1(Vec::new());
 
     let start = Instant::now();
-    let (stop, last_vblank, steps, hashes) = run_frames(&mut cpu, &mut bus, frames, tape);
+    let periodic = periodic_shots(shot.as_deref(), shot_every);
+    let (stop, last_vblank, steps, hashes) =
+        run_frames(&mut cpu, &mut bus, frames, tape, periodic.as_ref());
     let host = start.elapsed().as_secs_f64();
 
     result.stop_reason = Some(stop);
@@ -428,6 +441,7 @@ fn run_frames(
     bus: &mut Bus,
     frames: u64,
     tape: Option<&[PadSample]>,
+    periodic: Option<&(u64, PathBuf)>,
 ) -> (String, u64, u64, std::collections::BTreeSet<u64>) {
     apply_sample(bus, tape, 0);
     let cap = frames
@@ -453,6 +467,12 @@ fn run_frames(
             if vblank.is_multiple_of(HASH_EVERY) {
                 hashes.insert(bus.gpu.display_hash().0);
             }
+            if let Some((every, base)) = periodic {
+                if vblank.is_multiple_of(*every) && vblank < frames {
+                    let name = format!("{}.{vblank}.ppm", base.display());
+                    write_ppm(bus, Path::new(&name));
+                }
+            }
             if vblank >= frames {
                 break "frames".to_string();
             }
@@ -472,6 +492,7 @@ fn run_reference(
     frames: u64,
     tape: Option<&[PadSample]>,
     shot: Option<PathBuf>,
+    shot_every: u64,
 ) -> Option<Reference> {
     let entry = load_disc_boot(&disc).ok()?.exe.initial_pc & 0x1FFF_FFFF;
     let mut bus = Bus::new(bios.to_vec()).ok()?;
@@ -495,7 +516,9 @@ fn run_reference(
         eprintln!("[hle-compat] reference: real BIOS did not reach the EXE entry");
         return None;
     }
-    let (stop, frames_run, _, hashes) = run_frames(&mut cpu, &mut bus, frames, tape);
+    let periodic = periodic_shots(shot.as_deref(), shot_every);
+    let (stop, frames_run, _, hashes) =
+        run_frames(&mut cpu, &mut bus, frames, tape, periodic.as_ref());
     if let Some(path) = shot {
         write_ppm(&bus, &path);
     }
@@ -505,6 +528,12 @@ fn run_reference(
         display_hash: format!("0x{:016x}", bus.gpu.display_hash().0),
         distinct_display_hashes: hashes.len(),
     })
+}
+
+/// `--shot-every`: the interval and the final shot's path without `.ppm`.
+fn periodic_shots(shot: Option<&Path>, every: u64) -> Option<(u64, PathBuf)> {
+    let path = shot?;
+    (every > 0).then(|| (every, path.with_extension("")))
 }
 
 fn apply_sample(bus: &mut Bus, tape: Option<&[PadSample]>, frame: u64) {
