@@ -1604,12 +1604,7 @@ impl Cpu {
                 self.branch_delay_next = false;
                 self.pending_load = None;
                 self.committing_load = None;
-                let call_cycles = if out.retry {
-                    2
-                } else {
-                    crate::hle_bios::call_cycles(out.table, out.func, out.v0)
-                };
-                bus.tick(call_cycles);
+                bus.tick(out.cycles);
                 if self.cpu_cycle_profile_enabled {
                     self.cpu_cycle_profile.issue_cycles =
                         self.cpu_cycle_profile.issue_cycles.saturating_add(2);
