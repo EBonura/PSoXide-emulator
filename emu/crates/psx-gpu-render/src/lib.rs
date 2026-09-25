@@ -562,12 +562,57 @@ impl HwRenderer {
         });
     }
 
+    /// Bring the sampler texture up to `vram_words`, sending the GPU only
+    /// what changed. `texture_words` always holds exactly what the GPU
+    /// texture holds (every write to it goes through here or
+    /// `upload_texture_words_rect`), so comparing against it finds the
+    /// changed rows; each run of them uploads as one rectangle spanning its
+    /// changed columns. A game redraws its framebuffer and little else, so
+    /// this is a fraction of the megabyte a full upload moved every frame,
+    /// with the same result.
     fn sync_texture_from_vram(&mut self, vram_words: &[u16]) {
         if vram_words.len() != self.texture_words.len() {
             return;
         }
-        self.texture_words.copy_from_slice(vram_words);
-        self.pipeline.upload_vram(&self.queue, &self.texture_words);
+        let width = VRAM_WIDTH as usize;
+        let rows = VRAM_HEIGHT as usize;
+        let mut y = 0;
+        while y < rows {
+            let row = y * width..(y + 1) * width;
+            if self.texture_words[row.clone()] == vram_words[row] {
+                y += 1;
+                continue;
+            }
+            let first = y;
+            let (mut x0, mut x1) = (width, 0);
+            while y < rows {
+                let row = y * width..(y + 1) * width;
+                let (old, new) = (&self.texture_words[row.clone()], &vram_words[row]);
+                let Some(lo) = old.iter().zip(new).position(|(a, b)| a != b) else {
+                    break;
+                };
+                let hi = width
+                    - old
+                        .iter()
+                        .rev()
+                        .zip(new.iter().rev())
+                        .position(|(a, b)| a != b)
+                        .unwrap_or(0);
+                x0 = x0.min(lo);
+                x1 = x1.max(hi);
+                y += 1;
+            }
+            for row in first..y {
+                let span = row * width + x0..row * width + x1;
+                self.texture_words[span.clone()].copy_from_slice(&vram_words[span]);
+            }
+            self.upload_texture_words_rect(
+                x0 as u32,
+                first as u32,
+                (x1 - x0) as u32,
+                (y - first) as u32,
+            );
+        }
     }
 
     fn copy_texture_words_wrapped(&mut self, sx: u32, sy: u32, dx: u32, dy: u32, w: u32, h: u32) {
