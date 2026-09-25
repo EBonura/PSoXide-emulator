@@ -1275,15 +1275,23 @@ impl Bus {
         self.drain_scheduler_events_inner(true, true);
     }
 
+    /// The early-out runs every instruction; keep it inlinable and the
+    /// dispatch body out of line.
+    #[inline]
     fn drain_scheduler_events_inner(&mut self, include_cdr_dma: bool, include_sio: bool) {
-        use crate::scheduler::EventSlot;
-        let now = self.cycles;
         // SPU clock edges are inclusive, unlike the legacy strict DMA slots.
         // Its existing serialized deadline also works for older saves that
         // never scheduled SpuAsync. Frontends only drain the produced samples.
-        if now < self.scheduler.lowest_target().min(self.spu_sample_deadline) {
+        if self.cycles < self.scheduler.lowest_target().min(self.spu_sample_deadline) {
             return;
         }
+        self.drain_due_scheduler_events(include_cdr_dma, include_sio);
+    }
+
+    #[inline(never)]
+    fn drain_due_scheduler_events(&mut self, include_cdr_dma: bool, include_sio: bool) {
+        use crate::scheduler::EventSlot;
+        let now = self.cycles;
         self.run_spu_to_current_cycle();
         let mut dma_edge = false;
         // NOTE: `service_timers()` is intentionally NOT called here.
@@ -1786,7 +1794,26 @@ impl Bus {
     /// Inner cycle-advancement helper shared by `tick` and `add_cycles`.
     /// Any cycle delta must flow through this function so the timer
     /// bank's accumulator matches Redux's lazy-read timer model.
+    ///
+    /// Runs for every instruction, so the common case (no limit oracle,
+    /// no GPU list walk, no GPU DMA waiting on a request) is kept small
+    /// enough to inline; everything else goes through
+    /// [`Bus::advance_cycles_slow`], which is the complete original logic.
+    #[inline]
     fn advance_cycles(&mut self, n: u32) {
+        if self.limits.frozen()
+            || self.experimental_gpu_list.is_some()
+            || self.gpu_dma_waiting_for_request
+        {
+            self.advance_cycles_slow(n);
+            return;
+        }
+        self.cycles = self.cycles.wrapping_add(n as u64);
+        self.gpu.decay_busy(n as u64);
+    }
+
+    #[inline(never)]
+    fn advance_cycles_slow(&mut self, n: u32) {
         if self.limits.frozen() {
             // Limit oracle: the instruction runs in a free code range.
             self.limits.skip(n as u64);
@@ -3920,8 +3947,11 @@ fn scratchpad_offset(virt: u32, phys: u32) -> Option<usize> {
     }
 }
 
+#[inline]
 fn read_u32_le(bytes: &[u8]) -> u32 {
-    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    // One bounds check and one load; indexing the four bytes separately
+    // compiled to four byte loads on the per-instruction fetch paths.
+    u32::from_le_bytes(bytes[..4].try_into().expect("four bytes"))
 }
 
 #[inline]
