@@ -28,6 +28,7 @@
 
 #![warn(missing_docs)]
 
+pub mod disc_image;
 mod ecm;
 pub mod library;
 pub mod paths;

@@ -107,6 +107,8 @@ pub enum MenuAction {
     CycleMenuOpacity,
     /// Cycle the DPI-aware host UI scale through compact and enlarged presets.
     CycleUiScale,
+    /// Switch what a slow host gives up: game speed or smooth painting.
+    ToggleSmoothSlowHost,
     /// Web: reconnect a previously-saved games folder.
     #[cfg(target_arch = "wasm32")]
     Reconnect,
@@ -675,6 +677,19 @@ impl MenuState {
                 .find(|item| item.action == MenuAction::CycleUiScale)
             {
                 item.value = Some(format!("{}%", pct.clamp(50, 150)));
+            }
+        }
+    }
+
+    /// Reflect the slow-host choice in its Settings row.
+    pub fn set_smooth_slow_host(&mut self, smooth: bool) {
+        if let Some(settings) = self.categories.iter_mut().find(|c| c.name == "Settings") {
+            if let Some(item) = settings
+                .items
+                .iter_mut()
+                .find(|item| item.action == MenuAction::ToggleSmoothSlowHost)
+            {
+                item.value = Some(slow_host_label(smooth).into());
             }
         }
     }
@@ -2472,6 +2487,13 @@ fn build_settings_category() -> Category {
                 burn_action: None,
                 value: Some("100%".into()),
             },
+            MenuItem {
+                depth: 0,
+                label: "On a slow computer".into(),
+                action: MenuAction::ToggleSmoothSlowHost,
+                burn_action: None,
+                value: Some(slow_host_label(false).into()),
+            },
             // Web only: reload the games folder remembered from a
             // previous visit (Chrome/Edge; no-op where unsupported).
             #[cfg(target_arch = "wasm32")]
@@ -2786,6 +2808,15 @@ fn build_system_category(running: bool, save_count: usize) -> Category {
         name: "System",
         icon: icons::CPU,
         items,
+    }
+}
+
+/// Settings-row value for `video.smooth_slow_host`.
+fn slow_host_label(smooth: bool) -> &'static str {
+    if smooth {
+        "Smooth picture, slower game"
+    } else {
+        "Keep game speed"
     }
 }
 

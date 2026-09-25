@@ -1,9 +1,11 @@
 //! Phosphor icon codepoints (subset used by PSoXide UI).
 //!
 //! Keep this file small -- add codepoints only when a panel actually uses
-//! them. The full Phosphor set is in `assets/fonts/Phosphor.ttf` (regular)
-//! and `Phosphor-Fill.ttf` (solid, used for active toggles). Both share the
-//! same codepoints. Names below match the upstream `ph-<name>` glyph.
+//! them. `assets/fonts/Phosphor.ttf` (regular) and `Phosphor-Fill.ttf`
+//! (solid, used for active toggles) are subsets holding exactly these
+//! codepoints, so a new icon also means re-running the subset command in
+//! `assets/fonts/PROVENANCE.md` (a test fails until it is there). Names below
+//! match the upstream `ph-<name>` glyph.
 
 #![allow(dead_code)]
 
@@ -67,4 +69,45 @@ pub fn font_fill(size: f32) -> FontId {
 /// Icon as RichText at a given size (regular weight).
 pub fn text(ch: char, size: f32) -> RichText {
     RichText::new(ch.to_string()).font(font(size))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every codepoint named in this file, read from its source.
+    fn codepoints() -> Vec<char> {
+        let source = include_str!("icons.rs");
+        source
+            .split("'\\u{")
+            .skip(1)
+            .filter_map(|rest| rest.split('}').next())
+            .filter_map(|hex| u32::from_str_radix(hex, 16).ok())
+            .filter_map(char::from_u32)
+            .collect()
+    }
+
+    /// The bundled icon fonts are subsets; this catches an icon added here
+    /// without re-running the subset.
+    #[test]
+    fn every_icon_is_in_both_subset_fonts() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = ctx.run(Default::default(), |_| {});
+        let icons = codepoints();
+        assert!(icons.len() > 20, "found {} icons", icons.len());
+        ctx.fonts(|fonts| {
+            for &icon in &icons {
+                for font in [super::font(14.0), super::font_fill(14.0)] {
+                    assert!(
+                        fonts.has_glyph(&font, icon),
+                        "{icon:?} missing from {font:?}"
+                    );
+                }
+                let text = egui::FontId::proportional(14.0);
+                assert!(
+                    fonts.has_glyph(&text, icon),
+                    "{icon:?} missing from text fallback"
+                );
+            }
+        });
+    }
 }

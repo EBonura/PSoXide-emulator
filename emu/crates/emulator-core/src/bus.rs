@@ -233,6 +233,11 @@ pub struct Bus {
     /// arrive. Ends when execution runs off the filled words or jumps away.
     #[serde(default)]
     code_stream_active: bool,
+    /// Bus cycle of the last branch-boundary drain (`drain_scheduler_events_post_op`),
+    /// where timers would have been advanced before they went lazy. A cache
+    /// for `settle_lazy_timers`; excluded from save states.
+    #[serde(skip)]
+    last_post_op_cycle: u64,
     /// Physical address of the next word the stream will deliver, and one
     /// past the last.
     #[serde(default)]
@@ -442,6 +447,7 @@ impl Bus {
             last_cpu_ram_access_cycle: 0,
             code_fill_busy_until: 0,
             code_stream_active: false,
+            last_post_op_cycle: 0,
             code_stream_next: 0,
             code_stream_end: 0,
             code_stream_next_ready: 0,
@@ -1239,8 +1245,13 @@ impl Bus {
         // step's exception dispatch. Per-instruction `Bus::tick`
         // doesn't touch timers anymore; this is the only path that
         // matters for IRQ visibility. Mirrors Redux's
-        // `Counters::update` call at the top of `branchTest`.
-        self.service_timers();
+        // `Counters::update` call at the top of `branchTest`. Skipped while
+        // no timer can cross anything (`Timers::quiet_until`): the next
+        // advance covers the interval with exactly the same result.
+        self.last_post_op_cycle = self.cycles;
+        if self.cycles >= self.timers.quiet_until() {
+            self.service_timers();
+        }
         self.drain_scheduler_events();
         let cdrom_irq_pending =
             self.irq.stat() & self.irq.mask() & (1 << (IrqSource::Cdrom as u32)) != 0;
@@ -1527,19 +1538,26 @@ impl Bus {
         // access-time suite. Counter phase differences in compound loops must
         // be modeled at their real CPU/bus dependency, not hidden in this
         // independently observable access cost.
-        let stalls = self.memory_control.read_stalls(virt, width);
         let phys = to_physical(virt);
-        let external_counter_overlap = (memory::expansion1::BASE
-            ..memory::expansion1::BASE + memory::expansion1::SIZE as u32)
-            .contains(&phys)
-            || (memory::expansion2::BASE
-                ..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
+        // Main RAM first: most loads, and none of the external-bus cases
+        // below apply to it. `read_stalls` answers six for every RAM width.
+        let stalls = if phys < memory::ram::MIRROR_END {
+            6
+        } else {
+            self.memory_control.read_stalls(virt, width)
+        };
+        let external_counter_overlap = phys >= memory::ram::MIRROR_END
+            && ((memory::expansion1::BASE
+                ..memory::expansion1::BASE + memory::expansion1::SIZE as u32)
                 .contains(&phys)
-            || (memory::expansion3::BASE
-                ..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
-                .contains(&phys)
-            || (0x1F80_1800..0x1F80_1804).contains(&phys)
-            || (0x1F80_1C00..0x1F80_2000).contains(&phys);
+                || (memory::expansion2::BASE
+                    ..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
+                    .contains(&phys)
+                || (memory::expansion3::BASE
+                    ..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
+                    .contains(&phys)
+                || (0x1F80_1800..0x1F80_1804).contains(&phys)
+                || (0x1F80_1C00..0x1F80_2000).contains(&phys));
         if external_counter_overlap {
             self.timers
                 .overlap_counter_write_with_external_read(self.cycles, stalls);
@@ -1667,6 +1685,25 @@ impl Bus {
         }
         self.code_stream_active = false;
         (settled - self.cycles) as u32
+    }
+
+    /// Whether an instruction fetch may skip [`Bus::streaming_fill_wait`]:
+    /// no code fill is streaming, the common case.
+    #[inline(always)]
+    pub(crate) fn code_stream_idle(&self) -> bool {
+        !self.code_stream_active
+    }
+
+    /// `add_cycles(0)`, which only has effects when the slow cycle path is
+    /// armed (limit oracle, GPU list walk, GPU DMA waiting on a request).
+    #[inline(always)]
+    pub(crate) fn add_zero_cycles(&mut self) {
+        if self.limits.frozen()
+            || self.experimental_gpu_list.is_some()
+            || self.gpu_dma_waiting_for_request
+        {
+            self.advance_cycles_slow(0);
+        }
     }
 
     /// The instruction about to execute came out of the I-cache, as a hit
@@ -1896,12 +1933,16 @@ impl Bus {
     /// observing timer state; the scheduler drain calls it once
     /// per branch-test boundary so IRQs fire on time.
     fn service_timers(&mut self) {
+        self.service_timers_at(self.cycles);
+    }
+
+    fn service_timers_at(&mut self, now: u64) {
         let next_vblank = self
             .scheduler
             .target(crate::scheduler::EventSlot::VBlank)
             .unwrap_or(u64::MAX);
         let fired = self.timers.advance_to_video(
-            self.cycles,
+            now,
             self.hsync_cycles,
             self.gpu.dot_clock_divisor(),
             next_vblank,
@@ -1916,6 +1957,17 @@ impl Bus {
         if fired & 4 != 0 {
             self.irq.raise(IrqSource::Timer2);
         }
+    }
+
+    /// Before video timing changes (any GP1 write), bring lazily advanced
+    /// timers up to the last branch boundary under the old timing, which is
+    /// where the per-boundary advance would have left them, and make the
+    /// next boundary advance under the new timing.
+    fn settle_lazy_timers(&mut self) {
+        if self.last_post_op_cycle > self.timers.last_advance_cycle() {
+            self.service_timers_at(self.last_post_op_cycle);
+        }
+        self.timers.clear_quiet();
     }
 
     fn service_spu_irq(&mut self) {
@@ -3556,6 +3608,9 @@ impl Bus {
             }
             return;
         }
+        if phys & !3 == crate::gpu::GP1_ADDR {
+            self.settle_lazy_timers();
+        }
         if self.gpu.write32_at(phys, value, self.cycles) {
             self.service_gpu_irq();
             if phys == crate::gpu::GP1_ADDR && (value >> 24) == 0x08 {
@@ -3762,6 +3817,9 @@ impl Bus {
             return true;
         }
         let aligned = phys & !3;
+        if aligned == crate::gpu::GP1_ADDR {
+            self.settle_lazy_timers();
+        }
         if self.gpu.write32_at(aligned, word, self.cycles) {
             self.service_gpu_irq();
             return true;
@@ -3942,6 +4000,9 @@ impl Bus {
         if Sio1::contains(phys) {
             self.sio1.write16(phys, value);
             return;
+        }
+        if phys & !3 == crate::gpu::GP1_ADDR {
+            self.settle_lazy_timers();
         }
         if self.gpu.write32_at(phys & !3, value as u32, self.cycles) {
             self.service_gpu_irq();

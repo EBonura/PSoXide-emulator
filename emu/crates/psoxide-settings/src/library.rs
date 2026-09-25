@@ -34,6 +34,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use psx_iso::TrackSource;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -955,11 +956,24 @@ fn parse_cue_tracks_str(contents: &str, dir: &Path) -> Result<Vec<CueTrackSpec>,
 
 /// Load a full multitrack disc model from a CUE sheet. Track timing
 /// comes from the CUE; per-track bytes come from the referenced files.
+///
+/// The referenced files stay on disk and are read a sector at a time as the
+/// drive asks for them (see [`crate::disc_image`]).
 pub fn load_disc_from_cue(cue_path: &Path) -> Result<psx_iso::Disc, String> {
     let specs = parse_cue_tracks(cue_path)?;
-    disc_from_cue_specs(&specs, &mut |path| {
-        fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
-    })
+    disc_from_cue_specs(&specs, &mut crate::disc_image::open_image)
+}
+
+/// Mount a raw single-file image (`.bin` / `.iso`, or an ECM-packed one)
+/// read from disk on demand. An image shorter than one sector mounts as an
+/// empty disc, as it did when images were read whole; callers that need a
+/// sector check the length.
+pub fn load_disc_from_bin(path: &Path) -> Result<psx_iso::Disc, String> {
+    let image = crate::disc_image::open_image(path)?;
+    let len = image.len();
+    Ok(psx_iso::Disc::from_source(Box::new(
+        crate::disc_image::ImageSlice::new(image, 0, len),
+    )))
 }
 
 /// Build a disc from a CUE sheet already in memory, reading the referenced
@@ -972,7 +986,10 @@ pub fn disc_from_cue_str(
     read_file: &mut dyn FnMut(&Path) -> Result<Vec<u8>, String>,
 ) -> Result<psx_iso::Disc, String> {
     let specs = parse_cue_tracks_str(contents, Path::new(""))?;
-    disc_from_cue_specs(&specs, read_file)
+    disc_from_cue_specs(&specs, &mut |path| {
+        let image: crate::disc_image::SharedImage = std::sync::Arc::new(read_file(path)?);
+        Ok(image)
+    })
 }
 
 /// Build a disc from a CUE sheet plus one byte buffer per track, each
@@ -1022,46 +1039,42 @@ pub fn disc_from_cue_pieces(
             sector_count,
             pregap,
             file_pregap,
-            bytes: track_bytes,
+            source: Box::new(track_bytes),
         });
     }
     Ok(psx_iso::Disc::from_tracks(tracks))
 }
 
-/// Shared back half of the CUE loaders: slice per-track bytes out of the
-/// referenced files and lay the tracks onto the disc LBA line.
-///
-/// A file's first track takes over the file's buffer (trimmed in place)
-/// instead of copying out of it, so a single-file disc is held once rather
-/// than twice while it loads. Later tracks of a multi-track file are copied.
+/// Shared back half of the CUE loaders: cut each track's extent out of the
+/// referenced files and lay the tracks onto the disc LBA line. Every track of
+/// one file shares one opened image.
 fn disc_from_cue_specs(
     specs: &[CueTrackSpec],
-    read_file: &mut dyn FnMut(&Path) -> Result<Vec<u8>, String>,
+    open: &mut dyn FnMut(&Path) -> Result<crate::disc_image::SharedImage, String>,
 ) -> Result<psx_iso::Disc, String> {
-    let mut file_cache: HashMap<PathBuf, Vec<u8>> = HashMap::new();
-    // Byte extent of each track inside its file, validated up front.
-    let mut extents = Vec::with_capacity(specs.len());
+    let mut images: HashMap<PathBuf, crate::disc_image::SharedImage> = HashMap::new();
+    let mut tracks = Vec::with_capacity(specs.len());
 
     for (index, spec) in specs.iter().enumerate() {
-        if !file_cache.contains_key(&spec.path) {
-            let bytes = read_file(&spec.path)?;
-            file_cache.insert(spec.path.clone(), bytes);
+        if !images.contains_key(&spec.path) {
+            images.insert(spec.path.clone(), open(&spec.path)?);
         }
-        let bytes = file_cache.get(&spec.path).expect("cached cue file bytes");
-        if !bytes.len().is_multiple_of(psx_iso::SECTOR_BYTES) {
+        let image = images.get(&spec.path).expect("opened cue file");
+        let len = image.len();
+        if !len.is_multiple_of(psx_iso::SECTOR_BYTES as u64) {
             return Err(format!(
                 "{} is not a whole number of raw 2352-byte sectors",
                 spec.path.display()
             ));
         }
-        let file_sectors = bytes.len() / psx_iso::SECTOR_BYTES;
+        let file_sectors = len / psx_iso::SECTOR_BYTES as u64;
         if file_sectors == 0 {
             return Err(format!(
                 "{} is too small to contain a raw PS1 sector",
                 spec.path.display()
             ));
         }
-        if spec.file_start_sector as usize >= file_sectors {
+        if u64::from(spec.file_start_sector) >= file_sectors {
             return Err(format!(
                 "{} track {} points outside {} sectors",
                 spec.path.display(),
@@ -1074,59 +1087,43 @@ fn disc_from_cue_specs(
             .iter()
             .skip(index + 1)
             .find(|next| next.path == spec.path)
-            .map(|next| next.file_start_sector)
-            .unwrap_or(file_sectors as u32)
-            .min(file_sectors as u32);
-        if next_file_start_sector <= spec.file_start_sector {
+            .map(|next| u64::from(next.file_start_sector))
+            .unwrap_or(file_sectors)
+            .min(file_sectors);
+        if next_file_start_sector <= u64::from(spec.file_start_sector) {
             return Err(format!(
                 "{} track {} has an invalid CUE extent",
                 spec.path.display(),
                 spec.number
             ));
         }
-        let file_start_byte = spec.file_start_sector as usize * psx_iso::SECTOR_BYTES;
-        let file_end_byte = next_file_start_sector as usize * psx_iso::SECTOR_BYTES;
-        extents.push(file_start_byte..file_end_byte);
-    }
+        let sector = psx_iso::SECTOR_BYTES as u64;
+        let start = u64::from(spec.file_start_sector) * sector;
+        let source = crate::disc_image::ImageSlice::new(
+            image.clone(),
+            start,
+            next_file_start_sector * sector - start,
+        );
 
-    // Copy out every track that is not its file's first, last to first, so
-    // each file's buffer is still whole when its first track takes it over.
-    let mut track_bytes: Vec<Option<Vec<u8>>> = vec![None; specs.len()];
-    for index in (0..specs.len()).rev() {
-        let spec = &specs[index];
-        let first_of_file = specs[..index].iter().all(|prev| prev.path != spec.path);
-        let extent = extents[index].clone();
-        track_bytes[index] = Some(if first_of_file {
-            let mut bytes = file_cache
-                .remove(&spec.path)
-                .expect("cached cue file bytes");
-            bytes.truncate(extent.end);
-            bytes.drain(..extent.start);
-            bytes.shrink_to_fit();
-            bytes
-        } else {
-            file_cache.get(&spec.path).expect("cached cue file bytes")[extent].to_vec()
-        });
-    }
-
-    let mut tracks = Vec::with_capacity(specs.len());
-    for (spec, bytes) in specs.iter().zip(track_bytes) {
-        let track_bytes = bytes.expect("every track extracted");
         let mut file_pregap = spec.file_pregap;
         let mut pregap = spec.pregap;
         if spec.number == 1 && file_pregap == 0 {
-            file_pregap = detect_track1_embedded_pregap(&track_bytes);
+            let mut first = [0u8; psx_iso::SECTOR_BYTES];
+            if source.read_at(0, &mut first) {
+                file_pregap = detect_track1_embedded_pregap(&first);
+            }
             pregap = pregap.max(file_pregap);
         }
-        let track_file_sectors = track_bytes.len() / psx_iso::SECTOR_BYTES;
-        if file_pregap as usize >= track_file_sectors {
+        let track_file_sectors = source.len() / sector;
+        if u64::from(file_pregap) >= track_file_sectors {
             return Err(format!(
                 "{} track {} has no INDEX 01 sectors",
                 spec.path.display(),
                 spec.number
             ));
         }
-        let sector_count = track_file_sectors.saturating_sub(file_pregap as usize) as u32;
+        let sector_count =
+            (track_file_sectors - u64::from(file_pregap)).min(u64::from(u32::MAX)) as u32;
         let start_lba = tracks
             .last()
             .map(|prev: &psx_iso::Track| {
@@ -1142,7 +1139,7 @@ fn disc_from_cue_specs(
             sector_count,
             pregap,
             file_pregap,
-            bytes: track_bytes,
+            source: Box::new(source),
         });
     }
 
@@ -1151,40 +1148,39 @@ fn disc_from_cue_specs(
 
 /// Load a full disc model from a CloneCD `.ccd` sheet and sibling
 /// `.img` image. If the `.img` is absent but `.img.ecm` exists, the ECM
-/// container is decoded in memory (nothing is written next to the disc).
+/// container is decoded on demand (nothing is written next to the disc).
 pub fn load_disc_from_ccd(ccd_path: &Path) -> Result<psx_iso::Disc, String> {
     let toc = parse_ccd_toc(ccd_path)?;
-    let (img_path, image) = read_ccd_image(ccd_path)?;
-    let image_sectors = image.len() / psx_iso::SECTOR_BYTES;
+    let (img_path, image) = open_ccd_image(ccd_path)?;
+    let sector = psx_iso::SECTOR_BYTES as u64;
+    let image_sectors = image.len() / sector;
     if image_sectors == 0 {
         return Err(format!(
             "{} is too small to contain a raw PS1 sector",
             img_path.display()
         ));
     }
-    if image.len() % psx_iso::SECTOR_BYTES != 0 {
+    if image.len() % sector != 0 {
         return Err(format!(
             "{} is not a whole number of raw 2352-byte sectors",
             img_path.display()
         ));
     }
 
-    // Validate every track's extent first, then copy the later tracks out
-    // and let the first one take over the image buffer, so the image is not
-    // held twice while it loads.
-    let mut extents = Vec::with_capacity(toc.tracks.len());
+    let mut tracks = Vec::with_capacity(toc.tracks.len());
     for (idx, spec) in toc.tracks.iter().enumerate() {
         // A pregap in the image (INDEX 0) belongs to its own track, so a
         // track's bytes run from its INDEX 0 to the next one's.
-        let start = spec.index0_lba.unwrap_or(spec.start_lba) as usize;
+        let start = u64::from(spec.index0_lba.unwrap_or(spec.start_lba));
         let next_lba = toc
             .tracks
             .get(idx + 1)
             .map(|track| track.index0_lba.unwrap_or(track.start_lba))
             .or(toc.leadout_lba)
-            .unwrap_or(image_sectors as u32);
-        let end = (next_lba as usize).min(image_sectors);
-        if start >= image_sectors || end <= spec.start_lba as usize {
+            .map(u64::from)
+            .unwrap_or(image_sectors);
+        let end = next_lba.min(image_sectors);
+        if start >= image_sectors || end <= u64::from(spec.start_lba) {
             return Err(format!(
                 "{} track {} points outside {} sectors",
                 ccd_path.display(),
@@ -1192,30 +1188,6 @@ pub fn load_disc_from_ccd(ccd_path: &Path) -> Result<psx_iso::Disc, String> {
                 image_sectors
             ));
         }
-        extents.push((start, end));
-    }
-    let mut image = Some(image);
-    let mut track_bytes: Vec<Vec<u8>> = extents
-        .iter()
-        .enumerate()
-        .rev()
-        .map(|(idx, &(start, end))| {
-            let range = start * psx_iso::SECTOR_BYTES..end * psx_iso::SECTOR_BYTES;
-            if idx == 0 {
-                let mut bytes = image.take().expect("image taken once");
-                bytes.truncate(range.end);
-                bytes.drain(..range.start);
-                bytes.shrink_to_fit();
-                bytes
-            } else {
-                image.as_ref().expect("image still whole")[range].to_vec()
-            }
-        })
-        .collect();
-    track_bytes.reverse();
-
-    let mut tracks = Vec::with_capacity(toc.tracks.len());
-    for ((spec, &(start, end)), bytes) in toc.tracks.iter().zip(&extents).zip(track_bytes) {
         let pregap = spec.start_lba - start as u32;
         tracks.push(psx_iso::Track {
             number: spec.number,
@@ -1224,7 +1196,11 @@ pub fn load_disc_from_ccd(ccd_path: &Path) -> Result<psx_iso::Disc, String> {
             sector_count: (end - start) as u32 - pregap,
             pregap,
             file_pregap: pregap,
-            bytes,
+            source: Box::new(crate::disc_image::ImageSlice::new(
+                image.clone(),
+                start * sector,
+                (end - start) * sector,
+            )),
         });
     }
 
@@ -1232,12 +1208,11 @@ pub fn load_disc_from_ccd(ccd_path: &Path) -> Result<psx_iso::Disc, String> {
 }
 
 /// The raw image behind a `.ccd`: the `.img` when present, otherwise the
-/// decoded `.img.ecm`. Returns the path read (for messages) and the bytes.
-fn read_ccd_image(ccd_path: &Path) -> Result<(PathBuf, Vec<u8>), String> {
+/// `.img.ecm` decoded on demand. Returns the path opened (for messages).
+fn open_ccd_image(ccd_path: &Path) -> Result<(PathBuf, crate::disc_image::SharedImage), String> {
     let decoded_img = ccd_decoded_img_path(ccd_path);
     if decoded_img.exists() {
-        let image =
-            fs::read(&decoded_img).map_err(|e| format!("{}: {e}", decoded_img.display()))?;
+        let image = crate::disc_image::open_image(&decoded_img)?;
         return Ok((decoded_img, image));
     }
     let ecm_img = ecm_sidecar_path(&decoded_img);
@@ -1249,8 +1224,7 @@ fn read_ccd_image(ccd_path: &Path) -> Result<(PathBuf, Vec<u8>), String> {
             ecm_img.display()
         ));
     }
-    let packed = fs::read(&ecm_img).map_err(|e| format!("{}: {e}", ecm_img.display()))?;
-    let image = crate::ecm::decode(&packed).map_err(|e| format!("{}: {e}", ecm_img.display()))?;
+    let image = crate::disc_image::open_ecm(&ecm_img)?;
     Ok((ecm_img, image))
 }
 
@@ -1875,8 +1849,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(reference.track_count(), pieces.track_count());
+        let summary = |t: &psx_iso::Track| {
+            let mut bytes = vec![0u8; t.source.len() as usize];
+            assert!(t.source.read_at(0, &mut bytes));
+            (
+                t.number,
+                t.track_type,
+                t.start_lba,
+                t.sector_count,
+                t.pregap,
+                t.file_pregap,
+                bytes,
+            )
+        };
         for n in 1..=2 {
-            assert_eq!(reference.track(n), pieces.track(n), "track {n}");
+            assert_eq!(
+                reference.track(n).map(summary),
+                pieces.track(n).map(summary),
+                "track {n}"
+            );
         }
     }
 

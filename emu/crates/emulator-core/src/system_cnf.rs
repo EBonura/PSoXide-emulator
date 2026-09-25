@@ -275,11 +275,16 @@ fn parse_dir_record(record: &[u8]) -> Option<DirEntry> {
 
 fn read_extent(disc: &Disc, extent_lba: u32, size: u32) -> Result<Vec<u8>, BootError> {
     let mut out = Vec::with_capacity(size as usize);
-    for sector in 0..size.div_ceil(SECTOR_USER_DATA_BYTES as u32) {
+    let sectors = size.div_ceil(SECTOR_USER_DATA_BYTES as u32);
+    // One request for the whole extent, so an image read asynchronously
+    // (the web build) fetches it in one go rather than a sector per retry.
+    // Capped at RAM-sized files; the loop below reads the rest either way.
+    disc.prefetch_sectors(extent_lba, sectors.min(1024));
+    for sector in 0..sectors {
         let data = disc
             .read_sector_user(extent_lba.saturating_add(sector))
             .ok_or(BootError::DirectoryExtentUnreadable { extent_lba, size })?;
-        out.extend_from_slice(data);
+        out.extend_from_slice(&data);
     }
     out.truncate(size as usize);
     Ok(out)

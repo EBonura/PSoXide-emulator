@@ -166,8 +166,30 @@ pub mod bundled {
         pub subtitle: &'static str,
         /// Disc image or PSX-EXE.
         pub kind: BundledKind,
-        /// Raw payload bytes.
+        /// Raw payload bytes (native: compiled in).
+        #[cfg(not(target_arch = "wasm32"))]
         pub bytes: &'static [u8],
+        /// Where the payload is served next to the page (web). Fetched when
+        /// launched rather than compiled into the wasm every visitor
+        /// downloads; Trunk copies `assets/examples` into the build.
+        #[cfg(target_arch = "wasm32")]
+        pub url: &'static str,
+    }
+
+    /// A baked-in example EXE from `assets/examples/<name>.exe`.
+    macro_rules! example {
+        ($name:literal, $subtitle:literal) => {
+            BundledDisc {
+                id: concat!("bundled:", $name),
+                title: $name,
+                subtitle: $subtitle,
+                kind: BundledKind::Exe,
+                #[cfg(not(target_arch = "wasm32"))]
+                bytes: include_bytes!(concat!("../assets/examples/", $name, ".exe")),
+                #[cfg(target_arch = "wasm32")]
+                url: concat!("examples/", $name, ".exe"),
+            }
+        };
     }
 
     /// The baked-in payloads in menu order. The first auto-boots on load.
@@ -176,146 +198,26 @@ pub mod bundled {
     /// tests. They are separate columns in the menu, so a sample never shows up
     /// beside a real game.
     pub static DISCS: &[BundledDisc] = &[
-        BundledDisc {
-            id: "bundled:game-breakout",
-            title: "game-breakout",
-            subtitle: "sample game",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/game-breakout.exe"),
-        },
-        BundledDisc {
-            id: "bundled:game-invaders",
-            title: "game-invaders",
-            subtitle: "sample game",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/game-invaders.exe"),
-        },
-        BundledDisc {
-            id: "bundled:game-magikaaaaaarp-pong",
-            title: "game-magikaaaaaarp-pong",
-            subtitle: "sample game",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/game-magikaaaaaarp-pong.exe"),
-        },
-        BundledDisc {
-            id: "bundled:game-pong",
-            title: "game-pong",
-            subtitle: "sample game",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/game-pong.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-audio",
-            title: "hello-audio",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-audio.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-cdda",
-            title: "hello-cdda",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-cdda.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-engine",
-            title: "hello-engine",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-engine.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-gte",
-            title: "hello-gte",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-gte.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-input",
-            title: "hello-input",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-input.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-memcard",
-            title: "hello-memcard",
-            subtitle: "hardware diagnostic",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-memcard.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-ot",
-            title: "hello-ot",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-ot.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-pack",
-            title: "hello-pack",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-pack.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-tex",
-            title: "hello-tex",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-tex.exe"),
-        },
-        BundledDisc {
-            id: "bundled:hello-tri",
-            title: "hello-tri",
-            subtitle: "sample",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/hello-tri.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-3d",
-            title: "showcase-3d",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-3d.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-fog",
-            title: "showcase-fog",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-fog.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-lights",
-            title: "showcase-lights",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-lights.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-model",
-            title: "showcase-model",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-model.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-particles",
-            title: "showcase-particles",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-particles.exe"),
-        },
-        BundledDisc {
-            id: "bundled:showcase-text",
-            title: "showcase-text",
-            subtitle: "engine showcase",
-            kind: BundledKind::Exe,
-            bytes: include_bytes!("../assets/examples/showcase-text.exe"),
-        },
+        example!("game-breakout", "sample game"),
+        example!("game-invaders", "sample game"),
+        example!("game-magikaaaaaarp-pong", "sample game"),
+        example!("game-pong", "sample game"),
+        example!("hello-audio", "sample"),
+        example!("hello-cdda", "sample"),
+        example!("hello-engine", "sample"),
+        example!("hello-gte", "sample"),
+        example!("hello-input", "sample"),
+        example!("hello-memcard", "hardware diagnostic"),
+        example!("hello-ot", "sample"),
+        example!("hello-pack", "sample"),
+        example!("hello-tex", "sample"),
+        example!("hello-tri", "sample"),
+        example!("showcase-3d", "engine showcase"),
+        example!("showcase-fog", "engine showcase"),
+        example!("showcase-lights", "engine showcase"),
+        example!("showcase-model", "engine showcase"),
+        example!("showcase-particles", "engine showcase"),
+        example!("showcase-text", "engine showcase"),
     ];
 
     /// Look up a baked-in disc by its menu launch id.
@@ -477,11 +379,28 @@ pub struct AppState {
     /// with poll 0 of a fresh machine.
     #[cfg(target_arch = "wasm32")]
     web_boot: Option<WebBoot>,
+    /// Web: a disc read on demand whose boot is waiting for its boot files
+    /// (volume descriptor, directories, SYSTEM.CNF, executable) to arrive.
+    #[cfg(target_arch = "wasm32")]
+    web_pending_boot: Option<PendingWebBoot>,
     /// [`emulator_core::game_image_hash`] of the current game image, both
     /// targets. Recorded into browser tape CSVs; compared when a replay
     /// loads so a changed build gets flagged to the user. `None` when the
     /// image bytes were never in hand (e.g. a bundled example boot).
     current_game_hash: Option<u64>,
+}
+
+/// A web disc waiting to boot (see `AppState::web_pending_boot`).
+#[cfg(target_arch = "wasm32")]
+struct PendingWebBoot {
+    disc: Disc,
+    image_id: u32,
+    game_id: String,
+    title: String,
+    name: String,
+    size: u64,
+    hash: u64,
+    attempts: u32,
 }
 
 /// How the web build booted the current game (see `AppState::web_boot`).
@@ -599,6 +518,8 @@ impl AppState {
             web_track_patches: Vec::new(),
             #[cfg(target_arch = "wasm32")]
             web_boot: None,
+            #[cfg(target_arch = "wasm32")]
+            web_pending_boot: None,
             current_game_hash: None,
         };
         // Startup auto-rescan: always run when a developer-facing build dir
@@ -630,6 +551,8 @@ impl AppState {
         out.menu
             .set_menu_opacity(out.settings.video.menu_opacity_pct);
         out.menu.set_ui_scale(out.settings.video.ui_scale_pct);
+        out.menu
+            .set_smooth_slow_host(out.settings.video.smooth_slow_host);
 
         out.sync_menu_settings_paths();
         out.sync_menu_controls();
@@ -647,6 +570,11 @@ impl AppState {
         #[cfg(target_arch = "wasm32")]
         if let Some(disc) = crate::web_bench::disc_param() {
             crate::web_files::fetch_game(&disc);
+        }
+        #[cfg(target_arch = "wasm32")]
+        if crate::web_bench::flag("smooth") {
+            out.settings.video.smooth_slow_host = true;
+            out.menu.set_smooth_slow_host(true);
         }
         // Both builds start on the open menu (bundled discs like Celeste are
         // launchable from the Games/Examples categories), rather than
@@ -683,9 +611,17 @@ impl AppState {
     /// of [`Self::boot_disc_bytes`] so the web build's streamed CUE+BIN discs
     /// (multi-track, CD-DA) reach the identical boot sequence.
     pub fn boot_disc(&mut self, disc: Disc) -> Result<(), String> {
+        self.try_boot_disc(disc).map_err(|(_, error)| error)
+    }
+
+    /// [`Self::boot_disc`], handing the disc back when the boot fails so it
+    /// can be tried again (a web disc whose boot files are still arriving).
+    pub fn try_boot_disc(&mut self, disc: Disc) -> Result<(), (Disc, String)> {
         let mut bus = Bus::new_without_bios();
         let mut cpu = Cpu::new();
-        fast_boot_disc(&mut bus, &mut cpu, &disc).map_err(|e| format!("boot disc: {e:?}"))?;
+        if let Err(e) = fast_boot_disc(&mut bus, &mut cpu, &disc) {
+            return Err((disc, format!("boot disc: {e:?}")));
+        }
         bus.cdrom.insert_disc(Some(disc));
         bus.attach_digital_pad_port1();
         self.memcard_port1_path = None;
@@ -743,16 +679,14 @@ impl AppState {
             }
             GameKind::DiscBin | GameKind::DiscIso => {
                 let mut bus = Bus::new_without_bios();
-                let bytes = std::fs::read(&entry.path)
-                    .map_err(|e| format!("{}: {e}", entry.path.display()))?;
-                if bytes.len() < SECTOR_BYTES {
+                let disc = psoxide_settings::library::load_disc_from_bin(&entry.path)?;
+                if disc.tracks().iter().map(|t| t.source.len()).sum::<u64>() < SECTOR_BYTES as u64 {
                     return Err(format!(
                         "{} is too small to be a valid disc image",
                         entry.path.display()
                     ));
                 }
-                game_hash = Some(emulator_core::game_image_hash(&bytes));
-                let disc = Disc::from_bin(bytes);
+                game_hash = Some(disc_image_hash(&disc));
                 fast_boot_disc(&mut bus, &mut cpu, &disc)
                     .map_err(|e| format!("{}: boot failed: {e:?}", entry.path.display()))?;
                 boot_mode = "HLE kernel";
@@ -1157,6 +1091,14 @@ impl AppState {
         // Baked-in payloads boot via the no-BIOS HLE path, not the library.
         // Both targets: the download has no source tree, so its Examples come
         // from here too.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(disc) = bundled::find(id) {
+            // Fetched on demand; boots from `poll_web_uploads` when it lands,
+            // through the same path as a picked file.
+            crate::web_files::fetch_bundled(disc.url, disc.id);
+            return Ok(());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(disc) = bundled::find(id) {
             let kind = match disc.kind {
                 bundled::BundledKind::DiscBin => {
@@ -1856,6 +1798,28 @@ impl AppState {
                     // native launch path holds the same rule): download the
                     // outgoing recording before replacing the machine.
                     self.stop_input_recording_if_active();
+                    if let Some(opened) = loaded.disc {
+                        let title = Path::new(&loaded.name)
+                            .file_stem()
+                            .and_then(|stem| stem.to_str())
+                            .unwrap_or(&loaded.name)
+                            .to_string();
+                        let image_id = opened.image.id();
+                        let size = psx_iso::TrackSource::len(&opened.image);
+                        self.web_pending_boot = Some(PendingWebBoot {
+                            disc: Disc::from_source(Box::new(opened.image)),
+                            image_id,
+                            game_id: loaded
+                                .game_id
+                                .unwrap_or_else(|| format!("web:{}", loaded.name)),
+                            title,
+                            name: loaded.name,
+                            size,
+                            hash: opened.hash,
+                            attempts: 0,
+                        });
+                        continue;
+                    }
                     let size = loaded.bytes.len() as u64;
                     let kind = if loaded.bytes.starts_with(b"PS-X EXE") {
                         GameKind::Exe
@@ -1899,6 +1863,46 @@ impl AppState {
         }
         for event in crate::web_files::drain_quick_states() {
             self.apply_web_quick_state_event(event);
+        }
+        self.poll_pending_web_boot();
+    }
+
+    /// Try the waiting web disc boot again once the reads its last attempt
+    /// asked for have landed. Each attempt gets further (volume descriptor,
+    /// directories, SYSTEM.CNF, the executable), so a boot takes a handful
+    /// of frames.
+    #[cfg(target_arch = "wasm32")]
+    fn poll_pending_web_boot(&mut self) {
+        let Some(pending) = self.web_pending_boot.as_ref() else {
+            return;
+        };
+        if crate::web_disc::busy(pending.image_id) {
+            return;
+        }
+        let mut pending = self.web_pending_boot.take().expect("checked above");
+        match self.try_boot_disc(pending.disc) {
+            Ok(()) => {
+                crate::web_disc::pin_resident(pending.image_id);
+                self.web_boot = Some(WebBoot::DiscHle);
+                self.current_game_hash = Some(pending.hash);
+                self.set_web_current_game(
+                    pending.game_id,
+                    pending.title,
+                    GameKind::DiscBin,
+                    pending.size,
+                );
+                self.status_message_set(format!("Launched: {}", pending.name));
+            }
+            Err((disc, error)) => {
+                // A boot that asked for nothing new has failed for real.
+                pending.attempts += 1;
+                if crate::web_disc::busy(pending.image_id) && pending.attempts < 64 {
+                    pending.disc = disc;
+                    self.web_pending_boot = Some(pending);
+                } else {
+                    self.status_message_set(format!("{}: {error}", pending.name));
+                }
+            }
         }
     }
 
@@ -2251,6 +2255,25 @@ impl AppState {
             Err(e) => {
                 eprintln!("[frontend] {e}");
                 self.status_message_set(format!("{msg} (settings save failed)"));
+            }
+        }
+    }
+
+    /// Flip `video.smooth_slow_host`, update its Settings row, and persist it.
+    pub fn toggle_smooth_slow_host(&mut self) {
+        let smooth = !self.settings.video.smooth_slow_host;
+        self.settings.video.smooth_slow_host = smooth;
+        self.menu.set_smooth_slow_host(smooth);
+        let message = if smooth {
+            "Slow computer: smooth picture, slower game"
+        } else {
+            "Slow computer: keep game speed"
+        };
+        match self.save_settings() {
+            Ok(()) => self.status_message_set(message.to_string()),
+            Err(error) => {
+                eprintln!("[frontend] {error}");
+                self.status_message_set(format!("{message} (settings save failed)"));
             }
         }
     }
@@ -3020,6 +3043,17 @@ mod freelook_projection_tests {
     }
 }
 
+/// Whether the mounted disc can supply what the drive may read during the
+/// next frame. Always true for a local image; a web image read on demand may
+/// need a frame or two to fetch ahead (see `CdRom::prefetch_upcoming`), and
+/// the frame waits for it rather than make the drive wait mid-frame.
+pub fn disc_ready_for_frame(state: &AppState) -> bool {
+    state
+        .bus
+        .as_ref()
+        .is_none_or(|bus| bus.cdrom.prefetch_upcoming())
+}
+
 pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     let guest_panel_visible = state.guest_panel_visible();
     let max_steps = state.run_steps_per_frame.max(1);
@@ -3056,7 +3090,26 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     let frame_budget = bus.vblank_period().max(1);
     let target_cycles = cycles_before.saturating_add(frame_budget);
     let mut steps_run = 0;
-    for _ in 0..max_steps {
+    if !trace && !check_breakpoints {
+        // Nothing to look at between instructions: run the frame in one call.
+        if bus.cycles() < target_cycles {
+            let (ran, result) = state.cpu.run(bus, u64::from(max_steps), |bus| {
+                bus.cycles() >= target_cycles
+            });
+            steps_run = ran as u32;
+            if result.is_err() {
+                steps_run += 1;
+                state.running = false;
+                state.menu.sync_run_label(false);
+                state.menu.open = true;
+            }
+        }
+    }
+    for _ in 0..if trace || check_breakpoints {
+        max_steps
+    } else {
+        0
+    } {
         if bus.cycles() >= target_cycles {
             break;
         }
@@ -3119,10 +3172,15 @@ pub(crate) fn fast_boot_embedded_playtest_disc(
 /// Input-tape change-detection hash for a modelled disc: every track's raw
 /// bytes in order, hashed as one stream. A single-track bin matches
 /// [`emulator_core::game_image_hash`] of the raw file.
+///
+/// The image is read through in megabyte pieces, so hashing it holds no
+/// more of it than that.
 fn disc_image_hash(disc: &Disc) -> u64 {
-    emulator_core::game_image_hash_parts(
-        (0u8..=99).filter_map(|number| disc.track(number).map(|track| track.bytes.as_slice())),
-    )
+    let mut hasher = emulator_core::GameImageHasher::new();
+    for track in disc.tracks() {
+        psoxide_settings::disc_image::for_each_chunk(&*track.source, |bytes| hasher.update(bytes));
+    }
+    hasher.finish()
 }
 
 /// The settings field a rebind target reads from. Kept as a pair of
@@ -3285,14 +3343,13 @@ fn load_authored_disc(path: &Path) -> Result<Disc, String> {
     if ext == "cue" {
         psoxide_settings::library::load_disc_from_cue(path).map_err(|error| error.to_string())
     } else {
-        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-        if bytes.len() < SECTOR_BYTES {
+        let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+        if len < SECTOR_BYTES as u64 {
             return Err(format!(
-                "too small ({} bytes, need at least {SECTOR_BYTES})",
-                bytes.len()
+                "too small ({len} bytes, need at least {SECTOR_BYTES})"
             ));
         }
-        Ok(Disc::from_bin(bytes))
+        psoxide_settings::library::load_disc_from_bin(path)
     }
 }
 
