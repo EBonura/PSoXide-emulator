@@ -398,6 +398,13 @@ pub struct EmulatorSettings {
     /// flip this on so the SPU stays in sync.
     #[serde(default)]
     pub real_time_pacing: bool,
+    /// Let a disc booted on the HLE kernel (no BIOS configured) load and
+    /// save the same per-game memory card a real-BIOS boot uses. Off by
+    /// default: an HLE boot works on its own card copy
+    /// (`memcard-N.hle.mcd`, seeded once from the real card) so a bug in
+    /// the HLE card driver cannot damage existing saves.
+    #[serde(default)]
+    pub hle_saves_to_real_memcard: bool,
 }
 
 fn default_hle_for_side_load() -> bool {
@@ -414,6 +421,7 @@ impl Default for EmulatorSettings {
             hle_bios_for_side_load: default_hle_for_side_load(),
             fast_boot_disc: default_fast_boot_disc(),
             real_time_pacing: false,
+            hle_saves_to_real_memcard: false,
         }
     }
 }
