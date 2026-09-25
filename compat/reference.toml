@@ -1,0 +1,286 @@
+# The last real-BIOS reference runs (hle_compat --reference and --parity,
+# before BIOS support was removed), kept as data so HLE results stay
+# checkable against a real kernel. Facts only: counts and display hashes;
+# frames were looked at but are not stored. Per-frame hashes every 60
+# frames are in compat/reference/<id>.txt. `reaches` is what the last frame
+# of the real-BIOS run shows (filled in from frames looked at).
+
+[chronocross]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: the opening dream at the fort, Serge's party"
+frames = 6000
+bios_stop = "frames"
+bios_final_hash = "0x0e5d72302b39bebb"
+bios_distinct_hashes = 58
+bios_mdec_macroblocks = 24080
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0x652bd34a0f838a59"
+frames_with_equal_display = 3041
+frames_compared = 6000
+entry_parity = "28/28"
+
+[crash]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: Crash on N. Sanity Beach, first crates"
+frames = 3600
+bios_stop = "frames"
+bios_final_hash = "0x31c078d2ba5aedbf"
+bios_distinct_hashes = 22
+bios_mdec_macroblocks = 0
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0x31c078d2ba5aedbf"
+frames_with_equal_display = 2330
+frames_compared = 3598
+entry_parity = "28/28"
+
+[ctr]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: adventure hub after naming and saving, Crash driving"
+frames = 9000
+bios_stop = "frames"
+bios_final_hash = "0x4b009f4e64024bd6"
+bios_distinct_hashes = 127
+bios_mdec_macroblocks = 0
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0xc610f0508da76eb7"
+frames_with_equal_display = 2153
+frames_compared = 8997
+entry_parity = "28/28"
+
+[f12001]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: practice, car leaving the pit lane"
+frames = 7200
+bios_stop = "frames"
+bios_final_hash = "0xb8a050565fb23d4d"
+bios_distinct_hashes = 93
+bios_mdec_macroblocks = 880
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0xa9c4e76b7a87d531"
+frames_with_equal_display = 4782
+frames_compared = 7200
+entry_parity = "28/28"
+
+[gt2]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: Arcade race on the first course, car at 84 mph"
+frames = 5500
+bios_stop = "frames"
+bios_final_hash = "0x285d25f900b6afb0"
+bios_distinct_hashes = 56
+bios_mdec_macroblocks = 4392
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0x864ac3f37769c6aa"
+frames_with_equal_display = 3769
+frames_compared = 5500
+entry_parity = "28/28"
+
+[mgs]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: Snake at the dock with the radar, a guard in view"
+frames = 9000
+bios_stop = "frames"
+bios_final_hash = "0x166249f326e0d402"
+bios_distinct_hashes = 126
+bios_mdec_macroblocks = 0
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0x06bf94779aa84ec3"
+frames_with_equal_display = 1893
+frames_compared = 9000
+entry_parity = "28/28"
+
+[mslugx]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: mission 1"
+frames = 7200
+bios_stop = "frames"
+bios_final_hash = "0x730f4f7b511afc05"
+bios_distinct_hashes = 70
+bios_mdec_macroblocks = 0
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0xeb07f882a6697f20"
+frames_with_equal_display = 5045
+frames_compared = 7178
+entry_parity = "28/28"
+
+[mvc]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: arcade fight (the opponent differs between kernels)"
+frames = 7200
+bios_stop = "frames"
+bios_final_hash = "0xaf352eb970e4f4b9"
+bios_distinct_hashes = 90
+bios_mdec_macroblocks = 65700
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0x7ce07e8475fca799"
+frames_with_equal_display = 1836
+frames_compared = 7165
+entry_parity = "28/28"
+
+[nightmare]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: first level in the graveyard (the fight differs between kernels)"
+frames = 3600
+bios_stop = "frames"
+bios_final_hash = "0xd2a646f221d3b982"
+bios_distinct_hashes = 43
+bios_mdec_macroblocks = 25200
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0xc024eb9c6ef174b5"
+frames_with_equal_display = 1100
+frames_compared = 3600
+entry_parity = "28/28"
+
+[re2]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: Leon in the burning street with zombies"
+frames = 10800
+bios_stop = "frames"
+bios_final_hash = "0x998da4abb5188593"
+bios_distinct_hashes = 137
+bios_mdec_macroblocks = 417500
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0x998da4abb5188593"
+frames_with_equal_display = 9989
+frames_compared = 10800
+entry_parity = "28/28"
+
+[re3]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: Jill in the first alley with zombies"
+frames = 11400
+bios_stop = "frames"
+bios_final_hash = "0x5c03dad61fdfd815"
+bios_distinct_hashes = 153
+bios_mdec_macroblocks = 193000
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0x5ceb83a27cc265f6"
+frames_with_equal_display = 9078
+frames_compared = 11400
+entry_parity = "28/28"
+
+[sfa2g]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: first fight, Ryu against Rose"
+frames = 7200
+bios_stop = "frames"
+bios_final_hash = "0x45391ae69d5054b4"
+bios_distinct_hashes = 91
+bios_mdec_macroblocks = 51600
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0x45391ae69d5054b4"
+frames_with_equal_display = 6820
+frames_compared = 7200
+entry_parity = "28/28"
+
+[soulreaver]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: Raziel in the Underworld (last frame is a transition screen)"
+frames = 3600
+bios_stop = "frames"
+bios_final_hash = "0xec3a9b5c3fa2b539"
+bios_distinct_hashes = 37
+bios_mdec_macroblocks = 29100
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0xec3a9b5c3fa2b539"
+frames_with_equal_display = 2381
+frames_compared = 3600
+entry_parity = "28/28"
+
+[spiderman]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: first level, Follow the Spidey compass"
+frames = 3600
+bios_stop = "frames"
+bios_final_hash = "0x5fd26a366bd8d6b0"
+bios_distinct_hashes = 38
+bios_mdec_macroblocks = 31440
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0xfeb0a56ce8f91790"
+frames_with_equal_display = 2303
+frames_compared = 3600
+entry_parity = "28/28"
+
+[tekken3]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: arcade fight (the opponent differs between kernels)"
+frames = 3600
+bios_stop = "frames"
+bios_final_hash = "0xf346e8a80b59a599"
+bios_distinct_hashes = 49
+bios_mdec_macroblocks = 15456
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0x7a55a1181bab43e3"
+frames_with_equal_display = 602
+frames_compared = 3600
+entry_parity = "28/28"
+
+[tombraider]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: Lara in the Caves"
+frames = 6000
+bios_stop = "frames"
+bios_final_hash = "0xa027eb6252f4d5ee"
+bios_distinct_hashes = 61
+bios_mdec_macroblocks = 11660
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0x80fc26675f351296"
+frames_with_equal_display = 3770
+frames_compared = 6000
+entry_parity = "28/28"
+
+[valkyrie]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: the opening cutscene in the cathedral"
+frames = 3600
+bios_stop = "frames"
+bios_final_hash = "0x679b62275a6c47b8"
+bios_distinct_hashes = 54
+bios_mdec_macroblocks = 0
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0x175a1a0489b36f9b"
+frames_with_equal_display = 2722
+frames_compared = 3600
+entry_parity = "28/28"
+
+[wipeout]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: starting grid, lap 0 of 3"
+frames = 7200
+bios_stop = "frames"
+bios_final_hash = "0xd16559d105be2f90"
+bios_distinct_hashes = 103
+bios_mdec_macroblocks = 41520
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0xaad5076474e3a0f2"
+frames_with_equal_display = 1344
+frames_compared = 7187
+entry_parity = "28/28"
+
+[wipeout2097]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: race in progress"
+frames = 3600
+bios_stop = "frames"
+bios_final_hash = "0xcd065b064e2295e8"
+bios_distinct_hashes = 33
+bios_mdec_macroblocks = 10080
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0xeef0c4ac7cf7ba1e"
+frames_with_equal_display = 1824
+frames_compared = 3600
+entry_parity = "28/28"
+
+[wipeout3]
+recorded_on = "ad71bcc2b"
+reaches = "in-game: race in progress"
+frames = 3600
+bios_stop = "frames"
+bios_final_hash = "0xa6b475d3c7923b9c"
+bios_distinct_hashes = 26
+bios_mdec_macroblocks = 70920
+bios_cd_sectors_dropped = 0
+hle_final_hash = "0xb824ce2fec06e75d"
+frames_with_equal_display = 2836
+frames_compared = 3542
+entry_parity = "28/28"
