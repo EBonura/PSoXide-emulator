@@ -10,7 +10,10 @@
 //!   redraw profile as JSON; `psoxideBenchReset()` zeroes them so a script can
 //!   measure a steady-state window.
 //!
-//! Both are inert unless called: no URL parameter, no work.
+//! - `?smooth=1` turns on `video.smooth_slow_host` for the session, so the
+//!   slow-host alternative can be measured without clicking the menu.
+//!
+//! All are inert unless called: no URL parameter, no work.
 
 use std::cell::RefCell;
 
@@ -124,4 +127,16 @@ pub fn disc_param() -> Option<String> {
         && !path.starts_with('/')
         && !path.contains('\\');
     relative.then_some(path)
+}
+
+/// Whether the page URL carries `name=1`.
+pub fn flag(name: &str) -> bool {
+    web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .is_some_and(|search| {
+            search
+                .trim_start_matches('?')
+                .split('&')
+                .any(|pair| pair == format!("{name}=1"))
+        })
 }

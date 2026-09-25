@@ -199,6 +199,10 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.cycle_ui_scale();
             MenuOutcome::None
         }
+        ToggleSmoothSlowHost => {
+            state.toggle_smooth_slow_host();
+            MenuOutcome::None
+        }
         #[cfg(target_arch = "wasm32")]
         Reconnect => {
             state.reconnect_web_files();

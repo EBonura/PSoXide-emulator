@@ -85,6 +85,12 @@ pub struct VideoSettings {
     /// same one-physical-pixel-per-point density as a native 4K capture.
     #[serde(default = "default_ui_scale_pct")]
     pub ui_scale_pct: u8,
+    /// What to give up when the host cannot run the game at full speed.
+    /// Off (the default) keeps game speed and audio by running several
+    /// frames per paint, so the picture updates less often. On paints every
+    /// frame it runs and lets the game itself slow down instead.
+    #[serde(default)]
+    pub smooth_slow_host: bool,
 }
 
 fn default_menu_opacity_pct() -> u8 {
@@ -102,6 +108,7 @@ impl Default for VideoSettings {
             scanline_filter: false,
             menu_opacity_pct: default_menu_opacity_pct(),
             ui_scale_pct: default_ui_scale_pct(),
+            smooth_slow_host: false,
         }
     }
 }
