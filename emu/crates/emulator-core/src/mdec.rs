@@ -1558,7 +1558,7 @@ mod tests {
         for _ in 0..6 {
             hw.extend([0x0400, MDEC_END_OF_DATA]);
         }
-        while hw.len() % 64 != 0 {
+        while !hw.len().is_multiple_of(64) {
             hw.push(MDEC_END_OF_DATA);
         }
         let words: Vec<u32> = hw
