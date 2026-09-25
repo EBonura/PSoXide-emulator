@@ -582,6 +582,53 @@ fn dataready_arrives_on_schedule_even_with_the_cpu_irq_still_pending() {
     assert_eq!(cd.irq_flag, IrqType::DataReady as u8);
 }
 
+/// A sector that lands while the CPU still holds the previous INT1 is
+/// announced once the CPU acknowledges, instead of never: the controller
+/// keeps one pending INT1 and delivers it after the ack (psx-spx "Sector
+/// Buffer VS GetlocL Response Tests", where a delayed handler still gets
+/// the next INT1; DuckStation delivers the pending async interrupt about
+/// 500 cycles after the ack). Without this a handler that acked a little
+/// late waited a whole sector for the next INT1, and the snap to the newest
+/// sector then dropped the one it was never told about (Spider-Man lost
+/// sectors this way under both kernels).
+#[test]
+fn a_sector_landing_during_an_unacked_int1_is_announced_after_the_ack() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 16])));
+    cd.scheduling_cycle = 1_000;
+    cd.mode = 0x80;
+
+    cd.cmd_read();
+    let ack_cycle = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1;
+    assert!(cd.tick(ack_cycle));
+    cd.irq_flag = 0;
+    cd.responses.clear();
+
+    // First sector: INT1, which software is slow to acknowledge.
+    let first_due = ack_cycle + CD_READ_TIME * 3 / 2 + 1;
+    assert!(cd.tick(first_due));
+    assert_eq!(cd.irq_flag, IrqType::DataReady as u8);
+    // Drain it as a DMA would.
+    cd.data_transfer_active = true;
+    while cd.data_fifo_len() != 0 {
+        cd.pop_data_fifo_byte();
+    }
+    // Second sector lands while INT1 is still held: no new interrupt yet.
+    let second_due = first_due + CD_READ_TIME / 2 + 1;
+    assert!(!cd.tick(second_due));
+    // Software acknowledges shortly after.
+    let ack = second_due + 2_000;
+    cd.write8_at(BASE, 1, ack);
+    cd.write8_at(BASE + 3, 0x1F, ack);
+    assert_eq!(cd.irq_flag, 0);
+    assert!(
+        cd.tick(ack + 1_000),
+        "the held INT1 is delivered after the ack"
+    );
+    assert_eq!(cd.irq_flag, IrqType::DataReady as u8);
+    assert_eq!(cd.dropped_sectors, 0);
+}
+
 /// Software that never acknowledges keeps getting sectors read at it, and
 /// once the ring is full the oldest are lost. This is the failure the whole
 /// model exists to expose: nothing stalls, nothing errors, the stream just
