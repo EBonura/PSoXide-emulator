@@ -48,11 +48,6 @@ use emulator_core::{Bus, Cpu};
 use psx_iso::Exe;
 use std::path::{Path, PathBuf};
 
-/// Default BIOS for side-load runs. The EXE side-load bypasses BIOS
-/// execution, but `Bus::new` still requires a valid BIOS image for
-/// its memory map -- any SCPH image of the right size will do.
-const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
-
 /// Resolve the repo-root path from `CARGO_MANIFEST_DIR`. We're at
 /// `emu/crates/emulator-core/` so three `..`s land at the root.
 fn repo_root() -> PathBuf {
@@ -60,12 +55,6 @@ fn repo_root() -> PathBuf {
         .join("..")
         .join("..")
         .join("..")
-}
-
-fn bios_path() -> PathBuf {
-    std::env::var("PSOXIDE_BIOS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_BIOS))
 }
 
 /// Where cargo dumps the built SDK example binaries. Must match
@@ -140,11 +129,6 @@ pub struct SdkGolden {
 /// caller should early-return. Writes a descriptive skip reason to
 /// stderr in the `false` case.
 fn check_prereqs(exe_path: &Path) -> bool {
-    let bios = bios_path();
-    if !bios.exists() {
-        eprintln!("skip: BIOS not found at {}", bios.display());
-        return false;
-    }
     if !exe_path.exists() {
         eprintln!(
             "skip: SDK example not built at {}\n\
@@ -170,7 +154,6 @@ pub fn side_load_and_hash(exe_path: &Path, vblanks: u64) -> Option<SdkExampleSta
         return None;
     }
 
-    let bios = std::fs::read(bios_path()).expect("BIOS");
     let exe_bytes = std::fs::read(exe_path).unwrap_or_else(|e| {
         panic!("read {}: {e}", exe_path.display());
     });
@@ -178,7 +161,7 @@ pub fn side_load_and_hash(exe_path: &Path, vblanks: u64) -> Option<SdkExampleSta
         panic!("parse {}: {e:?}", exe_path.display());
     });
 
-    let mut bus = Bus::new(bios).expect("bus");
+    let mut bus = Bus::new_without_bios();
     bus.load_exe_payload(exe.load_addr, &exe.payload);
     bus.enable_hle_bios();
     bus.attach_digital_pad_port1();

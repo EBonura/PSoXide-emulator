@@ -331,8 +331,74 @@ fn getlocl_without_prior_sector_returns_error_even_with_disc() {
     assert_ne!(first & drive_status_bit::ERROR, 0);
     assert_eq!(
         cd.read8(BASE + 1),
-        0,
-        "invalid-header error should be a 1-byte reply"
+        0x80,
+        "psx-spx: GetlocL fails with error code 80h"
+    );
+}
+
+/// A disc whose sectors carry their own MSF in the header, like a real one.
+fn addressed_disc(sectors: u32) -> Disc {
+    let bcd = |v: u32| ((v / 10) << 4 | (v % 10)) as u8;
+    let mut bin = Vec::new();
+    for lba in 0..sectors {
+        let at = lba + 150;
+        let header = [bcd(at / 4500), bcd(at / 75 % 60), bcd(at % 75), 2];
+        bin.extend(raw_sector(header, [0x01, 0x00, 0x08, 0x00], 0));
+    }
+    Disc::from_bin(bin)
+}
+
+/// psx-spx: GetlocL fails with error 80h while the drive is still seeking
+/// after a new ReadN, and the caller is expected to retry. Returning the
+/// header of the sector read before the seek instead made Gran Turismo 2
+/// believe its stream had landed in the wrong place, and it paused, sought
+/// and restarted the read forever after skipping the intro.
+#[test]
+fn getlocl_fails_with_80h_while_a_read_is_still_seeking() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(addressed_disc(64)));
+    cd.load_next_sector();
+    assert!(cd.last_sector_header_valid);
+    cd.scheduling_cycle = 1_000;
+    cd.setloc_msf = (0x00, 0x02, 0x40);
+    cd.setloc_pending = true;
+    cd.cmd_read();
+    cd.cmd_get_loc_l();
+    let error = cd
+        .pending
+        .iter()
+        .find(|ev| ev.irq == IrqType::Error)
+        .expect("GetlocL fails during the seek");
+    assert_ne!(error.bytes[0] & drive_status_bit::ERROR, 0);
+    assert_eq!(error.bytes[1..], [0x80]);
+}
+
+/// SeekL: GetlocL fails during the seek, then reports the target sector's
+/// header, as the drive has read it to confirm the seek (DuckStation).
+#[test]
+fn getlocl_reports_the_seekl_target_once_the_seek_is_over() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(addressed_disc(64)));
+    cd.load_next_sector();
+    cd.scheduling_cycle = 1_000;
+    cd.setloc_msf = (0x00, 0x02, 0x40);
+    cd.setloc_pending = true;
+    cd.cmd_seek();
+    cd.pending.clear();
+    cd.cmd_get_loc_l();
+    assert!(cd.pending.iter().any(|ev| ev.irq == IrqType::Error));
+
+    cd.pending.clear();
+    cd.scheduling_cycle = 1_000 + 100_000_000;
+    cd.cmd_get_loc_l();
+    let reply = cd
+        .pending
+        .iter()
+        .find(|ev| ev.irq != IrqType::Error)
+        .expect("GetlocL answers after the seek");
+    assert_eq!(
+        reply.bytes,
+        [0x00, 0x02, 0x40, 0x02, 0x01, 0x00, 0x08, 0x00]
     );
 }
 
@@ -516,6 +582,53 @@ fn dataready_arrives_on_schedule_even_with_the_cpu_irq_still_pending() {
     assert_eq!(cd.irq_flag, IrqType::DataReady as u8);
 }
 
+/// A sector that lands while the CPU still holds the previous INT1 is
+/// announced once the CPU acknowledges, instead of never: the controller
+/// keeps one pending INT1 and delivers it after the ack (psx-spx "Sector
+/// Buffer VS GetlocL Response Tests", where a delayed handler still gets
+/// the next INT1; DuckStation delivers the pending async interrupt about
+/// 500 cycles after the ack). Without this a handler that acked a little
+/// late waited a whole sector for the next INT1, and the snap to the newest
+/// sector then dropped the one it was never told about (Spider-Man lost
+/// sectors this way under both kernels).
+#[test]
+fn a_sector_landing_during_an_unacked_int1_is_announced_after_the_ack() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 16])));
+    cd.scheduling_cycle = 1_000;
+    cd.mode = 0x80;
+
+    cd.cmd_read();
+    let ack_cycle = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1;
+    assert!(cd.tick(ack_cycle));
+    cd.irq_flag = 0;
+    cd.responses.clear();
+
+    // First sector: INT1, which software is slow to acknowledge.
+    let first_due = ack_cycle + CD_READ_TIME * 3 / 2 + 1;
+    assert!(cd.tick(first_due));
+    assert_eq!(cd.irq_flag, IrqType::DataReady as u8);
+    // Drain it as a DMA would.
+    cd.data_transfer_active = true;
+    while cd.data_fifo_len() != 0 {
+        cd.pop_data_fifo_byte();
+    }
+    // Second sector lands while INT1 is still held: no new interrupt yet.
+    let second_due = first_due + CD_READ_TIME / 2 + 1;
+    assert!(!cd.tick(second_due));
+    // Software acknowledges shortly after.
+    let ack = second_due + 2_000;
+    cd.write8_at(BASE, 1, ack);
+    cd.write8_at(BASE + 3, 0x1F, ack);
+    assert_eq!(cd.irq_flag, 0);
+    assert!(
+        cd.tick(ack + 1_000),
+        "the held INT1 is delivered after the ack"
+    );
+    assert_eq!(cd.irq_flag, IrqType::DataReady as u8);
+    assert_eq!(cd.dropped_sectors, 0);
+}
+
 /// Software that never acknowledges keeps getting sectors read at it, and
 /// once the ring is full the oldest are lost. This is the failure the whole
 /// model exists to expose: nothing stalls, nothing errors, the stream just
@@ -555,7 +668,7 @@ fn a_handler_that_never_runs_loses_sectors_rather_than_stalling_the_drive() {
 #[test]
 fn xa_audio_sector_suppresses_dataready_irq_but_keeps_streaming() {
     let mut cd = CdRom::new();
-    let xa_sector = raw_sector([0x00, 0x02, 0x00, 0x02], [0x07, 0x02, 0x24, 0x01], 0);
+    let xa_sector = raw_sector([0x00, 0x02, 0x00, 0x02], [0x07, 0x02, 0x64, 0x01], 0);
     let data_sector = raw_sector([0x00, 0x02, 0x01, 0x02], [0x07, 0x02, 0x00, 0x00], 0x5A);
     let mut disc = xa_sector;
     disc.extend(data_sector);
@@ -588,6 +701,88 @@ fn xa_audio_sector_suppresses_dataready_irq_but_keeps_streaming() {
     assert_eq!(
         next_data_ready.deadline,
         1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2 + 1 + CD_READ_TIME / 2
+    );
+}
+
+/// An XA audio sector goes to the ADPCM decoder, never to the host-side
+/// sector buffer. A data sector that was delivered (INT1 acknowledged) but not
+/// yet read must survive the audio sector that lands behind it. STR movies
+/// interleave one audio sector every few video sectors, and wiping the pending
+/// video sector each time left Tekken 3's intro decoding zeros.
+#[test]
+fn xa_audio_sector_leaves_the_pending_data_sector_intact() {
+    let mut cd = CdRom::new();
+    let data_sector = raw_sector([0x00, 0x02, 0x00, 0x02], [0x01, 0x00, 0x48, 0x00], 0x5A);
+    let xa_sector = raw_sector([0x00, 0x02, 0x01, 0x02], [0x01, 0x01, 0x64, 0x01], 0);
+    let mut disc = data_sector;
+    disc.extend(xa_sector);
+    cd.insert_disc(Some(Disc::from_bin(disc)));
+    cd.mode = 0xC0; // double speed + XA-ADPCM, filter off
+    cd.setloc_msf = (0x00, 0x02, 0x00);
+    cd.scheduling_cycle = 1_000;
+
+    cd.cmd_read();
+    let ack = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1;
+    assert!(cd.tick(ack));
+    cd.irq_flag = 0;
+    let first_sector = ack + CD_READ_TIME * 3 / 2 + 1;
+    assert!(cd.tick(first_sector), "the data sector raises INT1");
+    assert_eq!(cd.irq_flag, IrqType::DataReady as u8);
+    cd.irq_flag = 0; // acknowledged, but software has not read it yet
+
+    assert!(
+        !cd.tick(first_sector + CD_READ_TIME / 2 + 1),
+        "audio raises nothing"
+    );
+    assert!(cd.cd_audio_queue_len() > 0, "the audio sector was decoded");
+    assert!(cd.data_fifo_ready, "the unread data sector is still there");
+    assert_eq!(cd.data_fifo_len(), 2048);
+    assert_eq!(cd.data_fifo.front().copied(), Some(0x5A));
+    assert!(
+        cd.waiting_sectors.is_empty(),
+        "audio never enters the sector ring"
+    );
+}
+
+/// With the XA filter on, audio sectors of other channels are skipped by the
+/// decoder and, like every XA audio sector, are not handed to the CPU. They
+/// must not be queued in the sector ring either, where they would overflow it
+/// and be counted as lost data.
+#[test]
+fn filtered_out_xa_audio_sectors_are_not_queued_as_data() {
+    let mut cd = CdRom::new();
+    let mut disc = Vec::new();
+    for i in 0..16u8 {
+        disc.extend(raw_sector(
+            [0x00, 0x02, i, 0x02],
+            [0x01, 0x02 + (i & 1), 0x64, 0x01],
+            0,
+        ));
+    }
+    cd.insert_disc(Some(Disc::from_bin(disc)));
+    cd.mode = 0xC8; // double speed + XA-ADPCM + filter
+    cd.xa_filter_file = 1;
+    cd.xa_filter_channel = 2;
+    cd.setloc_msf = (0x00, 0x02, 0x00);
+    cd.scheduling_cycle = 1_000;
+
+    cd.cmd_read();
+    let mut at = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1;
+    assert!(cd.tick(at));
+    cd.irq_flag = 0;
+    at += CD_READ_TIME * 3 / 2 + 1;
+    for _ in 0..16 {
+        cd.tick(at);
+        at += CD_READ_TIME / 2 + 1;
+    }
+
+    assert_eq!(cd.irq_type_counts[IrqType::DataReady as usize], 0);
+    assert!(cd.data_fifo.is_empty());
+    assert!(cd.waiting_sectors.is_empty());
+    assert_eq!(cd.dropped_sectors, 0);
+    assert!(
+        cd.cd_audio_queue_len() > 0,
+        "the matching channel still plays"
     );
 }
 
@@ -798,6 +993,32 @@ fn gettd_track_zero_reports_leadout_minute_second() {
     assert_eq!(cd.read8(BASE) & status_bit::RESPONSE_FIFO_NOT_EMPTY, 0);
 }
 
+/// LibCrypt sectors (from a .sbi file) carry subchannel Q with a bad CRC,
+/// which the controller ignores: GetlocP keeps reporting the position of
+/// the last good sector (psx-spx "CDROM Protection - LibCrypt").
+#[test]
+fn getlocp_skips_libcrypt_sectors_with_bad_subchannel_q() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 16])));
+    cd.set_bad_subq_sectors(vec![6, 7]);
+
+    let absolute_frame = |cd: &mut CdRom, lba: u32, at: u64| {
+        cd.read_lba = lba;
+        cd.cmd_get_loc_p();
+        cd.tick(at);
+        let reply: Vec<u8> = (0..8).map(|_| cd.read8(BASE + 1)).collect();
+        cd.irq_flag = 0;
+        reply[7]
+    };
+    assert_eq!(absolute_frame(&mut cd, 5, 10_000_000), 0x05);
+    assert_eq!(
+        absolute_frame(&mut cd, 7, 20_000_000),
+        0x05,
+        "6 and 7 are ignored"
+    );
+    assert_eq!(absolute_frame(&mut cd, 8, 30_000_000), 0x08);
+}
+
 #[test]
 fn getlocp_reports_index0_and_index1_for_pregap_tracks() {
     let mut cd = CdRom::new();
@@ -901,6 +1122,31 @@ fn cdda_play_advances_one_lba_per_sector_frame() {
     assert_eq!(cd.read_lba, 13);
     assert_eq!(cd.cdda_sample_index, 0);
     assert_eq!(cd.cd_audio_queue_len(), CDDA_SAMPLES_PER_SECTOR);
+}
+
+#[test]
+fn cdda_play_from_a_pregap_plays_silence_into_index_1() {
+    // Tomb Raider seeks into track 2's pregap (index 00), waits for GetlocP
+    // to say so, issues Play, then waits for index 01. The drive plays the
+    // pregap like any other audio sector (here silence: the pregap is not
+    // in the track file) and carries on into the track.
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(cdda_disc()));
+    cd.setloc_msf = (0x00, 0x02, 0x10); // BCD; LBA 10, the first pregap sector
+    cd.setloc_pending = true;
+    cd.cmd_play(&[]);
+    let arrives = cd.cdda_seek_done_at.expect("Play arms a seek");
+    cd.tick(arrives + 1);
+
+    cd.pump_cdda_samples(CDDA_SAMPLES_PER_SECTOR * 2);
+    assert_eq!(cd.read_lba, 12);
+    assert_ne!(cd.drive_status & drive_status_bit::PLAYING, 0);
+    let pregap: Vec<_> = cd.drain_cd_audio();
+    assert_eq!(pregap.len(), CDDA_SAMPLES_PER_SECTOR * 2);
+    assert!(pregap.iter().all(|&s| s == (0, 0)));
+
+    cd.pump_cdda_samples(1);
+    assert_eq!(cd.drain_cd_audio(), vec![(1000, -1000)]);
 }
 
 #[test]

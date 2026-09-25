@@ -391,14 +391,16 @@ impl Mdec {
     /// `true` exactly when channel 0 may be completed alongside
     /// channel 1.
     pub fn complete_dma_out(&mut self) -> bool {
+        // The frame is finished only when every halfword still queued is
+        // FE00 padding. A leading FE00 alone is not enough: a block that
+        // fills all 64 coefficients completes without its end-of-block
+        // code, so the encoder's trailing FE00 is still queued when a DMA1
+        // slice ends exactly on that macroblock, with the rest of the frame
+        // behind it.
         if self.command_code() == 1
             && self.reg1 & MDEC1_BUSY != 0
             && self.out_queue.is_empty()
-            && (self.rl_queue.is_empty()
-                || self
-                    .rl_queue
-                    .front()
-                    .is_some_and(|&word| word == MDEC_END_OF_DATA))
+            && self.rl_queue.iter().all(|&word| word == MDEC_END_OF_DATA)
         {
             self.reg1 &= !(MDEC1_BUSY | MDEC1_STP);
             self.rl_queue.clear();
@@ -1536,6 +1538,45 @@ mod tests {
 
         assert!(!decode_block(&mut rl, &mut block, &iqtab));
         assert!(rl.is_empty());
+    }
+
+    #[test]
+    fn full_block_end_marker_at_slice_boundary_does_not_end_the_frame() {
+        let mut m = Mdec::new();
+        m.write32(MDEC_CMD_DATA, 0x4000_0001);
+        m.dma_write_in(&[0x01_01_01_01; 32]);
+        // Macroblock 1: blocks 0..4 are DC-only; its last block (Y4) fills
+        // all 64 coefficients and still carries the encoder's FE00.
+        // Macroblock 2 follows.
+        let mut hw: Vec<u16> = Vec::new();
+        for _ in 0..5 {
+            hw.extend([0x0400, MDEC_END_OF_DATA]);
+        }
+        hw.push(0x0400);
+        hw.extend(std::iter::repeat_n(0x0001u16, 63));
+        hw.push(MDEC_END_OF_DATA);
+        for _ in 0..6 {
+            hw.extend([0x0400, MDEC_END_OF_DATA]);
+        }
+        while !hw.len().is_multiple_of(64) {
+            hw.push(MDEC_END_OF_DATA);
+        }
+        let words: Vec<u32> = hw
+            .chunks_exact(2)
+            .map(|p| p[0] as u32 | (p[1] as u32) << 16)
+            .collect();
+        m.write32(MDEC_CMD_DATA, 0x3800_0000 | words.len() as u32);
+        m.dma_write_in(&words);
+        // One 15bpp macroblock is 128 words; read the first as its own slice.
+        let mut out = [0u32; 128];
+        m.dma_read_out(&mut out);
+        assert!(
+            !m.complete_dma_out(),
+            "frame ended with a macroblock still queued"
+        );
+        m.dma_read_out(&mut out);
+        assert_eq!(m.macroblocks_decoded(), 2);
+        assert!(m.complete_dma_out());
     }
 
     #[test]

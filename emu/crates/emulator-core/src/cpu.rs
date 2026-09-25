@@ -82,6 +82,21 @@ pub enum ExecutionError {
         /// Raw 32-bit instruction word.
         instr: u32,
     },
+
+    /// Strict HLE mode (see [`Bus::set_hle_strict`]) reached a BIOS
+    /// function the HLE does not implement. The CPU stops at the dispatch
+    /// vector before the call has any effect.
+    #[error("unimplemented HLE BIOS call {table}({func:02X}h) {name} (ra={ra:#010x})")]
+    HleUnimplemented {
+        /// Dispatch table letter, `A`, `B` or `C`.
+        table: char,
+        /// Function number from `$t1`.
+        func: u8,
+        /// Conventional function name, or `"?"`.
+        name: &'static str,
+        /// Caller's return address.
+        ra: u32,
+    },
 }
 
 /// Lightweight return value of `Cpu::execute_one`. Carries just
@@ -94,24 +109,6 @@ pub enum ExecutionError {
 struct ExecutedInstruction {
     record_pc: u32,
     record_instr: u32,
-}
-
-/// Architectural state hidden by the retail BIOS while a custom
-/// `HookEntryInt` handler runs. The HLE path needs the same preservation so
-/// the guest ISR may freely clobber caller-saved registers before invoking
-/// B(17h) `ReturnFromException`.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct HleIrqFrame {
-    pc: u32,
-    gprs: [u32; 32],
-    cop0: [u32; 32],
-    hi: u32,
-    lo: u32,
-    pending_pc: Option<u32>,
-    pending_load: Option<(u8, u32)>,
-    committing_load: Option<(u8, u32)>,
-    isr_depth: u32,
-    clean_irq_entry: bool,
 }
 
 /// Emulator-owned instruction-cache counters.
@@ -518,11 +515,6 @@ pub struct Cpu {
     /// A side-loaded EXE entered its guest-installed unresolved-exception
     /// callback through the synthetic HLE kernel frame.
     hle_exception_active: bool,
-    /// Interrupted frame for a side-loaded guest's `HookEntryInt` handler.
-    /// `Some` only between hardware IRQ entry and B(17h)
-    /// `ReturnFromException`.
-    #[serde(default)]
-    hle_irq_frame: Option<Box<HleIrqFrame>>,
     /// Per-ExcCode (0..=31) count of exception entries. Diagnostic only.
     /// Excluded from save states.
     #[serde(skip)]
@@ -679,7 +671,6 @@ impl Cpu {
             lo: 0,
             pending_exception_pc: None,
             hle_exception_active: false,
-            hle_irq_frame: None,
             exception_counts: [0; 32],
             irq_line_high_steps: 0,
             should_take_interrupt_steps: 0,
@@ -801,7 +792,6 @@ impl Cpu {
         self.hilo_busy_until = 0;
         self.pending_exception_pc = None;
         self.hle_exception_active = false;
-        self.hle_irq_frame = None;
         self.set_gpr(28, initial_gp);
         // PSX-EXEs with a zero SP header (common in test homebrew like
         // ps1-tests/amidog) expect the BIOS-default stack; a fresh CPU's
@@ -832,6 +822,24 @@ impl Cpu {
         self.seed_from_exe(initial_pc, initial_gp, initial_sp);
         self.set_gpr(4, argc);
         self.set_gpr(5, argv);
+    }
+
+    /// Set `$fp` after [`Self::seed_from_exe_with_args`], for the disc boot
+    /// case where the BIOS leaves it different from `$sp`.
+    pub(crate) fn seed_frame_pointer(&mut self, fp: u32) {
+        self.set_gpr(30, fp);
+    }
+
+    /// Test hook: mutable register file.
+    #[cfg(test)]
+    pub(crate) fn gprs_mut_for_test(&mut self) -> &mut [u32; 32] {
+        &mut self.gprs
+    }
+
+    /// Test hook: set the PC.
+    #[cfg(test)]
+    pub(crate) fn set_pc_for_test(&mut self, pc: u32) {
+        self.pc = pc;
     }
 
     /// Current program counter.
@@ -1570,32 +1578,33 @@ impl Cpu {
                     record_instr: 0,
                 });
             }
-            let args = [self.gpr(4), self.gpr(5), self.gpr(6), self.gpr(7)];
-            let sp = self.gpr(29);
-            let t1 = self.gpr(9);
             let ra = self.gpr(31);
             let hle_cycles_before = bus.cycles();
-            if let Some(out) = crate::hle_bios::dispatch(self.pc, bus, args, sp, t1, ra) {
+            if let Some(out) = crate::hle_bios::dispatch(self.pc, bus, &mut self.gprs) {
+                if out.outcome == crate::hle_bios::Outcome::Unimplemented && bus.hle_strict() {
+                    return Err(ExecutionError::HleUnimplemented {
+                        table: out.table.letter(),
+                        func: out.func,
+                        name: crate::hle_bios::function_name(out.table, out.func),
+                        ra,
+                    });
+                }
                 // A(44h) FlushCache normally executes the BIOS's isolated
-                // tag-clear loop. HLE skips that code, so preserve the
-                // observable architectural result here.
-                if memory::to_physical(self.pc) == 0xA0 && t1 & 0xFF == 0x44 {
+                // tag-clear loop, and kernel-patch counterpatches rewrite
+                // guest code. HLE skips the loop, so preserve the
+                // architectural result here.
+                if out.flush_icache {
                     self.instruction_cache.invalidate_all();
                 }
-                let returning_from_hle_irq = memory::to_physical(self.pc) == 0xB0
-                    && t1 & 0xFF == 0x17
-                    && self.hle_irq_frame.is_some();
-                if returning_from_hle_irq {
-                    self.finish_hle_irq();
-                } else {
-                    self.set_gpr(2, out.v0);
-                    self.pc = out.next_pc;
+                if let Some(v0) = out.v0 {
+                    self.set_gpr(2, v0);
                 }
+                self.pc = out.next_pc;
                 self.pending_pc = None;
                 self.branch_delay_next = false;
                 self.pending_load = None;
                 self.committing_load = None;
-                bus.tick(2);
+                bus.tick(out.cycles);
                 if self.cpu_cycle_profile_enabled {
                     self.cpu_cycle_profile.issue_cycles =
                         self.cpu_cycle_profile.issue_cycles.saturating_add(2);
@@ -1606,8 +1615,22 @@ impl Cpu {
                         );
                 }
                 self.tick += 1;
+                let record_pc = self.pc;
+                // A waiting HLE call (WaitEvent, gpu_sync) is retried from
+                // the same PC; take pending interrupts between attempts, as
+                // the retail wait loops do, or nothing could end the wait.
+                if out.retry {
+                    bus.drain_scheduler_events_post_op();
+                    if self.should_take_interrupt(bus) {
+                        self.enter_exception(ExceptionCode::Interrupt, self.pc, false);
+                        self.pc = self
+                            .pending_exception_pc
+                            .take()
+                            .expect("enter_exception staged a vector");
+                    }
+                }
                 return Ok(ExecutedInstruction {
-                    record_pc: self.pc,
+                    record_pc,
                     record_instr: 0,
                 });
             }
@@ -1777,23 +1800,11 @@ impl Cpu {
             // Redux passes `bd=0` to `exception(0x400, 0)`: the IRQ
             // is taken cleanly between instructions, not in a delay
             // slot of its own.
-            if bus.hle_bios_enabled && self.hle_irq_frame.is_none() {
-                if let Some(jump_buffer) = bus.hle_irq_jump_buffer() {
-                    self.enter_hle_irq(bus, jump_buffer);
-                } else {
-                    self.enter_exception(ExceptionCode::Interrupt, self.pc, false);
-                    self.pc = self
-                        .pending_exception_pc
-                        .take()
-                        .expect("enter_exception staged a vector");
-                }
-            } else {
-                self.enter_exception(ExceptionCode::Interrupt, self.pc, false);
-                self.pc = self
-                    .pending_exception_pc
-                    .take()
-                    .expect("enter_exception staged a vector");
-            }
+            self.enter_exception(ExceptionCode::Interrupt, self.pc, false);
+            self.pc = self
+                .pending_exception_pc
+                .take()
+                .expect("enter_exception staged a vector");
         }
 
         self.tick += 1;
@@ -2403,7 +2414,7 @@ impl Cpu {
             0x07 => self.op_srav(instr),
             0x08 => self.op_jr(instr, pc),
             0x09 => self.op_jalr(instr, pc),
-            0x0C => self.op_syscall(pc, in_delay_slot, bus),
+            0x0C => self.op_syscall(pc, in_delay_slot),
             0x0D => self.op_break(pc, in_delay_slot),
             // MFHI/MFLO read the multiply/divide unit; stall until an
             // in-flight MULT/DIV has retired (the R3000A HI/LO interlock).
@@ -3228,11 +3239,6 @@ impl Cpu {
     /// commands.
     #[inline(never)]
     fn gte_irq_sample(&mut self, watched: bool, next_gte: Option<u32>, bus: &mut Bus) -> bool {
-        if bus.hle_bios_enabled && bus.hle_irq_jump_buffer().is_some() {
-            // The HLE BIOS stands in for the kernel's own handler, which
-            // steps EPC over a GTE command: keep the deferral.
-            return false;
-        }
         bus.drain_scheduler_events_post_op();
         let pending = bus.external_interrupt_pending();
         if watched && self.pending_pc.is_none() && !self.branch_delay_next && pending {
@@ -3280,34 +3286,9 @@ impl Cpu {
     }
 
     /// `SYSCALL` -- raise a syscall exception (CAUSE.ExcCode = 8). The
-    /// BIOS uses this for every kernel-mode thunk: A/B/C-table calls,
-    /// memcpy, printf, event handling, etc.
-    fn op_syscall(
-        &mut self,
-        pc: u32,
-        in_delay_slot: bool,
-        bus: &mut Bus,
-    ) -> Result<(), ExecutionError> {
-        // BIOS syscalls 1/2 are the interrupt critical-section primitives.
-        // A side-loaded EXE has no kernel exception vector to service them,
-        // but their architectural effect is small and exact: disable or
-        // enable IEc+IM2. Handling them here avoids falling through the empty
-        // low-RAM vector and, crucially, lets guest HookEntryInt handlers run.
-        if bus.hle_bios_enabled {
-            match self.gpr(4) {
-                0x01 => {
-                    let was_enabled = (self.cop0[12] & 0x401) == 0x401;
-                    self.cop0[12] &= !0x401;
-                    self.set_gpr(2, was_enabled as u32);
-                    return Ok(());
-                }
-                0x02 => {
-                    self.cop0[12] |= 0x401;
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
+    /// kernel's exception handler services it (critical sections, thread
+    /// switches); with the HLE BIOS that handler is guest code in RAM too.
+    fn op_syscall(&mut self, pc: u32, in_delay_slot: bool) -> Result<(), ExecutionError> {
         self.enter_exception(ExceptionCode::Syscall, pc, in_delay_slot);
         Ok(())
     }
@@ -3401,26 +3382,30 @@ impl Cpu {
     }
 
     /// Route a side-loaded EXE's address error through the unresolved-handler
-    /// pointer that the retail kernel exposes at low RAM 0x300. The frame
-    /// layout matches psn00bsdk's `Thread::registers`, so existing homebrew
-    /// handlers can inspect CAUSE, change the saved return PC, and return.
+    /// slot A(40h) of the RAM A0 table, when the guest has replaced it. The
+    /// interrupted frame goes to the current thread's TCB (`[[0x108]]`),
+    /// whose layout matches psn00bsdk's `Thread::registers`, so existing
+    /// homebrew handlers can inspect CAUSE, change the saved return PC, and
+    /// return.
     fn stage_hle_unresolved_exception(&mut self, bus: &mut Bus) {
         if !bus.hle_bios_enabled || self.hle_exception_active {
             return;
         }
-        let handler = bus.read32(crate::hle_bios::UNRESOLVED_HANDLER_PTR);
-        if handler == 0 {
+        let handler = crate::hle_kernel::peek32(bus, crate::hle_bios::UNRESOLVED_HANDLER_PTR);
+        let tcb = crate::hle_kernel::current_tcb(bus);
+        if handler == 0 || handler == crate::hle_kernel::stub_addr(0, 0x40) || tcb == 0 {
             return;
         }
-
+        use crate::hle_bios::{TCB_CAUSE, TCB_HI, TCB_LO, TCB_REGISTERS, TCB_RETURN_PC, TCB_SR};
+        use crate::hle_kernel::poke32;
         for (index, value) in self.gprs.iter().copied().enumerate() {
-            bus.write32(crate::hle_bios::THREAD_REGISTERS + index as u32 * 4, value);
+            poke32(bus, tcb + TCB_REGISTERS + index as u32 * 4, value);
         }
-        bus.write32(crate::hle_bios::THREAD_RETURN_PC, self.cop0[14]);
-        bus.write32(crate::hle_bios::THREAD_HI, self.hi);
-        bus.write32(crate::hle_bios::THREAD_LO, self.lo);
-        bus.write32(crate::hle_bios::THREAD_SR, self.cop0[12]);
-        bus.write32(crate::hle_bios::THREAD_CAUSE, self.cop0[13]);
+        poke32(bus, tcb + TCB_RETURN_PC, self.cop0[14]);
+        poke32(bus, tcb + TCB_HI, self.hi);
+        poke32(bus, tcb + TCB_LO, self.lo);
+        poke32(bus, tcb + TCB_SR, self.cop0[12]);
+        poke32(bus, tcb + TCB_CAUSE, self.cop0[13]);
 
         self.gprs[31] = crate::hle_bios::EXCEPTION_RETURN_STUB;
         self.pending_exception_pc = Some(handler);
@@ -3431,16 +3416,19 @@ impl Cpu {
     }
 
     fn finish_hle_exception(&mut self, bus: &mut Bus) {
+        use crate::hle_bios::{TCB_CAUSE, TCB_HI, TCB_LO, TCB_REGISTERS, TCB_RETURN_PC, TCB_SR};
+        use crate::hle_kernel::peek32;
+        let tcb = crate::hle_kernel::current_tcb(bus);
         for index in 0..32 {
-            self.gprs[index] = bus.read32(crate::hle_bios::THREAD_REGISTERS + index as u32 * 4);
+            self.gprs[index] = peek32(bus, tcb + TCB_REGISTERS + index as u32 * 4);
         }
         self.gprs[0] = 0;
-        self.hi = bus.read32(crate::hle_bios::THREAD_HI);
-        self.lo = bus.read32(crate::hle_bios::THREAD_LO);
-        self.cop0[13] = bus.read32(crate::hle_bios::THREAD_CAUSE);
-        let saved_sr = bus.read32(crate::hle_bios::THREAD_SR);
+        self.hi = peek32(bus, tcb + TCB_HI);
+        self.lo = peek32(bus, tcb + TCB_LO);
+        self.cop0[13] = peek32(bus, tcb + TCB_CAUSE);
+        let saved_sr = peek32(bus, tcb + TCB_SR);
         self.cop0[12] = (saved_sr & !0x0F) | ((saved_sr >> 2) & 0x0F);
-        self.pc = bus.read32(crate::hle_bios::THREAD_RETURN_PC);
+        self.pc = peek32(bus, tcb + TCB_RETURN_PC);
         self.pending_pc = None;
         self.branch_delay_next = false;
         self.pending_load = None;
@@ -3451,61 +3439,6 @@ impl Cpu {
         if self.isr_depth == 0 {
             self.clean_irq_entry = false;
         }
-    }
-
-    /// Enter the BIOS-compatible guest ISR installed by B(19h)
-    /// `HookEntryInt`. The jump-buffer layout is the twelve-word PsyQ /
-    /// PSn00bSDK ABI: `ra, sp, fp, s0..s7, gp`.
-    fn enter_hle_irq(&mut self, bus: &mut Bus, jump_buffer: u32) {
-        let frame = HleIrqFrame {
-            pc: self.pc,
-            gprs: self.gprs,
-            cop0: self.cop0,
-            hi: self.hi,
-            lo: self.lo,
-            pending_pc: self.pending_pc,
-            pending_load: self.pending_load,
-            committing_load: self.committing_load,
-            isr_depth: self.isr_depth,
-            clean_irq_entry: self.clean_irq_entry,
-        };
-
-        self.enter_exception(ExceptionCode::Interrupt, self.pc, false);
-        self.pending_exception_pc = None;
-        self.pending_pc = None;
-        self.branch_delay_next = false;
-        self.pending_load = None;
-        self.committing_load = None;
-
-        let ra = bus.read32(jump_buffer);
-        self.gprs[31] = ra;
-        self.gprs[29] = bus.read32(jump_buffer.wrapping_add(4));
-        self.gprs[30] = bus.read32(jump_buffer.wrapping_add(8));
-        for register in 16..=23 {
-            let offset = 12 + (register - 16) * 4;
-            self.gprs[register as usize] = bus.read32(jump_buffer.wrapping_add(offset));
-        }
-        self.gprs[28] = bus.read32(jump_buffer.wrapping_add(44));
-        self.pc = ra;
-        self.hle_irq_frame = Some(Box::new(frame));
-    }
-
-    fn finish_hle_irq(&mut self) {
-        let frame = *self
-            .hle_irq_frame
-            .take()
-            .expect("HLE IRQ return requires an interrupted frame");
-        self.pc = frame.pc;
-        self.gprs = frame.gprs;
-        self.cop0 = frame.cop0;
-        self.hi = frame.hi;
-        self.lo = frame.lo;
-        self.pending_pc = frame.pending_pc;
-        self.pending_load = frame.pending_load;
-        self.committing_load = frame.committing_load;
-        self.pending_exception_pc = None;
-        self.isr_depth = frame.isr_depth;
-        self.clean_irq_entry = frame.clean_irq_entry;
     }
 }
 
@@ -3939,19 +3872,51 @@ mod tests {
     fn hle_flush_cache_invalidates_stale_code() {
         let mut cpu = Cpu::new();
         let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
-        bus.hle_bios_enabled = true;
-        bus.write32(0x4000, 0x7777_7777);
+        bus.enable_hle_bios();
+        bus.write32(0x2_4000, 0x7777_7777);
         cpu.cache_control = CACHE_CONTROL_IS1 | (3 << CACHE_CONTROL_IBLKSZ_SHIFT);
-        cpu.pc = 0x8000_4000;
+        cpu.pc = 0x8002_4000;
         assert_eq!(cpu.fetch(&mut bus), 0x7777_7777);
-        bus.write32(0xA000_4000, 0x8888_8888);
+        bus.write32(0xA002_4000, 0x8888_8888);
 
         cpu.pc = 0xA0;
         cpu.gprs[9] = 0x44;
-        cpu.gprs[31] = 0x8000_4000;
+        cpu.gprs[31] = 0x8002_4000;
         cpu.step(&mut bus).unwrap();
-        assert_eq!(cpu.pc(), 0x8000_4000);
+        assert_eq!(cpu.pc(), 0x8002_4000);
         assert_eq!(cpu.fetch(&mut bus), 0x8888_8888);
+    }
+
+    #[test]
+    fn strict_hle_stops_at_an_unimplemented_call_without_side_effects() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        bus.set_hle_strict(true);
+        cpu.pc = 0xA0;
+        cpu.gprs[2] = 0x1234_5678;
+        cpu.gprs[9] = 0x3A; // abort
+        cpu.gprs[31] = 0x8001_0000;
+        let cycles = bus.cycles();
+        let err = cpu.step(&mut bus).unwrap_err();
+        assert_eq!(
+            err,
+            ExecutionError::HleUnimplemented {
+                table: 'A',
+                func: 0x3A,
+                name: "abort",
+                ra: 0x8001_0000,
+            }
+        );
+        assert_eq!(cpu.pc(), 0xA0);
+        assert_eq!(cpu.gprs[2], 0x1234_5678);
+        assert_eq!(bus.cycles(), cycles);
+
+        // Without strict mode the same call returns 0 and resumes at $ra.
+        bus.set_hle_strict(false);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc(), 0x8001_0000);
+        assert_eq!(cpu.gprs[2], 0);
     }
 
     #[test]
@@ -5012,18 +4977,19 @@ mod tests {
         cpu.raise_address_error(ExceptionCode::AddressErrorStore, 0x1F80_104A, &mut bus);
         assert_eq!(cpu.pending_exception_pc, Some(0x8001_2340));
         assert!(cpu.hle_exception_active);
+        // The frame lands in the current thread's TCB, found via [[0x108]].
+        let tcb = crate::hle_kernel::current_tcb(&bus);
+        assert_ne!(tcb, 0);
+        use crate::hle_bios::{TCB_CAUSE, TCB_REGISTERS, TCB_RETURN_PC};
+        assert_eq!(bus.read32(tcb + TCB_REGISTERS + 5 * 4), 0xCAFE_BABE);
+        assert_eq!(bus.read32(tcb + TCB_RETURN_PC), 0x8001_0000);
         assert_eq!(
-            bus.read32(crate::hle_bios::THREAD_REGISTERS + 5 * 4),
-            0xCAFE_BABE
-        );
-        assert_eq!(bus.read32(crate::hle_bios::THREAD_RETURN_PC), 0x8001_0000);
-        assert_eq!(
-            (bus.read32(crate::hle_bios::THREAD_CAUSE) >> 2) & 0x1F,
+            (bus.read32(tcb + TCB_CAUSE) >> 2) & 0x1F,
             ExceptionCode::AddressErrorStore as u32
         );
 
         // The guest handler skips the faulting instruction before returning.
-        bus.write32(crate::hle_bios::THREAD_RETURN_PC, 0x8001_0004);
+        bus.write32(tcb + TCB_RETURN_PC, 0x8001_0004);
         cpu.gprs[5] = 0;
         cpu.finish_hle_exception(&mut bus);
         assert_eq!(cpu.pc, 0x8001_0004);
@@ -5033,58 +4999,153 @@ mod tests {
     }
 
     #[test]
-    fn hle_critical_section_syscalls_gate_hardware_irqs() {
+    fn hle_unresolved_exception_ignores_the_default_a40_slot() {
         let mut bus = Bus::new_without_bios();
         bus.enable_hle_bios();
         let mut cpu = Cpu::new();
-        cpu.cop0[12] = 0x401;
-
-        cpu.gprs[4] = 1;
-        cpu.op_syscall(0x8001_0000, false, &mut bus).unwrap();
-        assert_eq!(cpu.cop0[12] & 0x401, 0);
-        assert_eq!(cpu.gprs[2], 1, "enter reports that IRQs were enabled");
-        assert_eq!(cpu.exception_counts()[ExceptionCode::Syscall as usize], 0);
-
-        cpu.gprs[4] = 2;
-        cpu.op_syscall(0x8001_0004, false, &mut bus).unwrap();
-        assert_eq!(cpu.cop0[12] & 0x401, 0x401);
-        assert_eq!(cpu.exception_counts()[ExceptionCode::Syscall as usize], 0);
+        cpu.pc = 0x8001_0000;
+        cpu.raise_address_error(ExceptionCode::AddressErrorStore, 0x1F80_104A, &mut bus);
+        assert!(!cpu.hle_exception_active);
+        assert_eq!(cpu.pending_exception_pc, Some(0x8000_0080));
     }
 
     #[test]
-    fn hle_hook_entry_int_loads_jump_buffer_and_restores_interrupted_frame() {
+    fn hle_table_entries_dispatch_to_traps_or_guest_code() {
         let mut bus = Bus::new_without_bios();
         bus.enable_hle_bios();
-        let jump_buffer = 0x8001_4000;
-        let handler = 0x8001_5000;
-        bus.write32(jump_buffer, handler);
-        bus.write32(jump_buffer + 4, 0x801F_E000);
-        bus.write32(jump_buffer + 8, 0x801F_D000);
-        for index in 0..8 {
-            bus.write32(jump_buffer + 12 + index * 4, 0x5100_0000 + index);
-        }
-        bus.write32(jump_buffer + 44, 0x8001_8000);
-
         let mut cpu = Cpu::new();
-        cpu.pc = 0x8001_1234;
+        // Direct call of the RAM table entry for A(1Bh) strlen.
+        bus.write32(0x8002_0000, u32::from_le_bytes(*b"abc\0"));
+        let entry = bus.read32(crate::hle_kernel::A0_TABLE + 4 * 0x1B);
+        cpu.pc = entry;
+        cpu.gprs[4] = 0x8002_0000;
+        cpu.gprs[31] = 0x8001_0000;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!((cpu.pc(), cpu.gprs[2]), (0x8001_0000, 3));
+
+        // A guest replacement of an entry is jumped to by the vector.
+        bus.write32(crate::hle_kernel::A0_TABLE + 4 * 0x1B, 0x8003_0000);
+        cpu.pc = 0xA0;
+        cpu.gprs[9] = 0x1B;
+        cpu.gprs[2] = 0x55;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(
+            (cpu.pc(), cpu.gprs[2], cpu.gprs[31]),
+            (0x8003_0000, 0x55, 0x8001_0000)
+        );
+    }
+
+    #[test]
+    fn hle_longjmp_restores_callee_saved_registers_and_returns_value() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let mut cpu = Cpu::new();
+        for r in [16usize, 23, 28, 29, 30] {
+            cpu.gprs[r] = 0x1000 + r as u32;
+        }
+        cpu.pc = 0xA0;
+        cpu.gprs[9] = 0x13;
+        cpu.gprs[4] = 0x8002_0000;
+        cpu.gprs[31] = 0x8001_0040;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!((cpu.pc(), cpu.gprs[2]), (0x8001_0040, 0));
+
+        for r in [16usize, 23, 28, 29, 30] {
+            cpu.gprs[r] = 0;
+        }
+        cpu.pc = 0xA0;
+        cpu.gprs[9] = 0x14;
+        cpu.gprs[4] = 0x8002_0000;
+        cpu.gprs[5] = 0;
+        cpu.gprs[31] = 0x8005_0000;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(
+            (cpu.pc(), cpu.gprs[2]),
+            (0x8001_0040, 0),
+            "0 is not bumped to 1"
+        );
+        for r in [16usize, 23, 28, 29, 30] {
+            assert_eq!(cpu.gprs[r], 0x1000 + r as u32);
+        }
+    }
+
+    /// Run the CPU until `pc` reaches `stop` (or a step budget ends).
+    fn run_until(cpu: &mut Cpu, bus: &mut Bus, stop: u32, budget: u32) {
+        for _ in 0..budget {
+            if cpu.pc == stop {
+                return;
+            }
+            cpu.step(bus).unwrap();
+        }
+        panic!("pc {:#010x} never reached {stop:#010x}", cpu.pc);
+    }
+
+    fn put_code(bus: &mut Bus, base: u32, words: &[u32]) {
+        for (i, w) in words.iter().enumerate() {
+            bus.write32(base + 4 * i as u32, *w);
+        }
+    }
+
+    #[test]
+    fn hle_critical_section_syscalls_go_through_the_guest_exception_handler() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let mut cpu = Cpu::new();
+        cpu.cop0[12] = 0x401;
+        // li a0,1; syscall; nop; li a0,2; syscall; nop; b .; nop
+        put_code(
+            &mut bus,
+            0x8001_0000,
+            &[0x2404_0001, 0x0C, 0, 0x2404_0002, 0x0C, 0, 0x1000_FFFF, 0],
+        );
+        cpu.pc = 0x8001_0000;
+        run_until(&mut cpu, &mut bus, 0x8001_000C, 2000);
+        assert_eq!(cpu.cop0[12] & 0x401, 0, "EnterCriticalSection");
+        assert_eq!(cpu.gprs[2], 1, "IRQs were enabled");
+        assert_eq!(cpu.exception_counts()[ExceptionCode::Syscall as usize], 1);
+        run_until(&mut cpu, &mut bus, 0x8001_0018, 2000);
+        assert_eq!(cpu.cop0[12] & 0x401, 0x401, "ExitCriticalSection");
+    }
+
+    #[test]
+    fn hle_vblank_irq_delivers_the_root_counter_event_and_returns() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let mut cpu = Cpu::new();
+        let ex = crate::hle_exceptions::code();
+        // Open and enable a mark-ready event for F2000003h/2 (VBlank).
+        let ev = crate::hle_exceptions::open_event(&mut bus, 0xF200_0003, 2, 0x2000, 0);
+        crate::hle_exceptions::set_event_enabled(&mut bus, ev, true);
+        bus.write32(0x1F80_1074, 1); // I_MASK: VBlank
+                                     // Spin with IRQs enabled until the event is ready.
+        put_code(&mut bus, 0x8001_0000, &[0x1000_FFFF, 0]);
+        cpu.pc = 0x8001_0000;
         cpu.gprs[5] = 0xCAFE_BABE;
         cpu.cop0[12] = 0x401;
-        cpu.enter_hle_irq(&mut bus, jump_buffer);
-
-        assert_eq!(cpu.pc, handler);
-        assert_eq!(cpu.gprs[29], 0x801F_E000);
-        assert_eq!(cpu.gprs[30], 0x801F_D000);
-        assert_eq!(cpu.gprs[16], 0x5100_0000);
-        assert_eq!(cpu.gprs[23], 0x5100_0007);
-        assert_eq!(cpu.gprs[28], 0x8001_8000);
-        assert!(cpu.hle_irq_frame.is_some());
-
-        cpu.gprs[5] = 0;
-        cpu.finish_hle_irq();
-        assert_eq!(cpu.pc, 0x8001_1234);
+        let mut delivered = false;
+        for _ in 0..3_000_000 {
+            cpu.step(&mut bus).unwrap();
+            if crate::hle_exceptions::test_event(&mut bus, ev) {
+                delivered = true;
+                break;
+            }
+        }
+        assert!(delivered, "VBlank event delivered");
+        // Back in the loop through ReturnFromException, with the frame
+        // restored and the IRQ acknowledged.
+        let mut left_through_rfe = false;
+        for _ in 0..5000 {
+            if cpu.pc == 0x8001_0000 {
+                break;
+            }
+            left_through_rfe |= cpu.pc == ex.return_from_exception;
+            cpu.step(&mut bus).unwrap();
+        }
+        assert!(left_through_rfe);
+        assert_eq!(cpu.pc, 0x8001_0000);
         assert_eq!(cpu.gprs[5], 0xCAFE_BABE);
-        assert_eq!(cpu.cop0[12], 0x401);
-        assert!(cpu.hle_irq_frame.is_none());
+        assert_eq!(cpu.cop0[12] & 0x401, 0x401);
+        assert_eq!(bus.read32(0x1F80_1070) & 1, 0, "VBlank acknowledged");
     }
 
     #[test]

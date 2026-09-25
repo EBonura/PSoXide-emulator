@@ -53,8 +53,8 @@ pub enum GameKind {
     /// A `.cue` playlist pointing at one or more BIN files.
     DiscCue,
     /// A CloneCD control sheet pointing at a raw `.img` image, with
-    /// optional `.sub` subchannel sidecar. `.img.ecm` sidecars can
-    /// be decoded at launch through an external converter.
+    /// optional `.sub` subchannel sidecar. An `.img.ecm` sidecar is
+    /// decoded in memory at launch.
     DiscCcd,
     /// A PSX-EXE homebrew binary (our SDK's output + many demos).
     Exe,
@@ -584,7 +584,7 @@ fn parse_ccd(path: &Path, size: u64, mtime: u64, fallback_title: &str) -> Librar
 
     let ecm_img = ecm_sidecar_path(&decoded_img);
     let diagnostic = if ecm_img.exists() {
-        Some("ECM-compressed CloneCD image; launch will decode via external unecm/ecm-uncompress if available".into())
+        Some("ECM-compressed CloneCD image; decoded in memory at launch".into())
     } else {
         Some(format!(
             "missing CloneCD image sidecar {}",
@@ -688,6 +688,9 @@ struct CcdTrackSpec {
     number: u8,
     track_type: psx_iso::TrackType,
     start_lba: u32,
+    /// `INDEX 0` from the track's `[TRACK n]` section: where its pregap
+    /// starts, when it has one in the image.
+    index0_lba: Option<u32>,
 }
 
 #[derive(Default)]
@@ -746,6 +749,9 @@ fn parse_ccd_toc(ccd_path: &Path) -> Result<CcdToc, String> {
     let mut tracks: Vec<CcdTrackSpec> = Vec::new();
     let mut leadout_lba = None;
     let mut current: Option<CcdEntry> = None;
+    // `[TRACK n]` sections: track number and its INDEX 0.
+    let mut index0: Vec<(u8, u32)> = Vec::new();
+    let mut section_track: Option<u8> = None;
 
     let flush_entry =
         |entry: CcdEntry, tracks: &mut Vec<CcdTrackSpec>, leadout_lba: &mut Option<u32>| {
@@ -775,16 +781,33 @@ fn parse_ccd_toc(ccd_path: &Path) -> Result<CcdToc, String> {
                 number: track_number,
                 track_type,
                 start_lba: plba as u32,
+                index0_lba: None,
             });
         };
 
     for line in contents.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("[Entry ") {
+        if trimmed.starts_with('[') {
             if let Some(entry) = current.take() {
                 flush_entry(entry, &mut tracks, &mut leadout_lba);
             }
-            current = Some(CcdEntry::default());
+            section_track = trimmed
+                .strip_prefix("[TRACK ")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .and_then(|n| n.trim().parse().ok());
+            if trimmed.starts_with("[Entry ") {
+                current = Some(CcdEntry::default());
+            }
+            continue;
+        }
+        if let Some(number) = section_track {
+            if let Some((key, value)) = trimmed.split_once('=') {
+                if key.trim().eq_ignore_ascii_case("INDEX 0") {
+                    if let Some(lba) = parse_ccd_int(value).filter(|lba| *lba >= 0) {
+                        index0.push((number, lba as u32));
+                    }
+                }
+            }
             continue;
         }
         let Some(entry) = current.as_mut() else {
@@ -806,6 +829,11 @@ fn parse_ccd_toc(ccd_path: &Path) -> Result<CcdToc, String> {
 
     tracks.sort_by_key(|track| track.number);
     tracks.dedup_by_key(|track| track.number);
+    for (number, lba) in index0 {
+        if let Some(track) = tracks.iter_mut().find(|t| t.number == number) {
+            track.index0_lba = Some(lba).filter(|lba| *lba < track.start_lba);
+        }
+    }
     if tracks.is_empty() {
         Err(format!("{} contains no track entries", ccd_path.display()))
     } else {
@@ -1082,21 +1110,11 @@ fn disc_from_cue_specs(
 }
 
 /// Load a full disc model from a CloneCD `.ccd` sheet and sibling
-/// `.img` image. If the decoded `.img` is absent but `.img.ecm`
-/// exists, this tries an external decoder (`PSOXIDE_UNECM`, `unecm`,
-/// then `ecm-uncompress`) and then loads the decoded image.
+/// `.img` image. If the `.img` is absent but `.img.ecm` exists, the ECM
+/// container is decoded in memory (nothing is written next to the disc).
 pub fn load_disc_from_ccd(ccd_path: &Path) -> Result<psx_iso::Disc, String> {
-    let candidates = ecm_decoder_candidates();
-    load_disc_from_ccd_with_decoders(ccd_path, &candidates)
-}
-
-fn load_disc_from_ccd_with_decoders(
-    ccd_path: &Path,
-    decoder_candidates: &[PathBuf],
-) -> Result<psx_iso::Disc, String> {
     let toc = parse_ccd_toc(ccd_path)?;
-    let img_path = resolve_ccd_img_for_load(ccd_path, decoder_candidates)?;
-    let image = fs::read(&img_path).map_err(|e| format!("{}: {e}", img_path.display()))?;
+    let (img_path, image) = read_ccd_image(ccd_path)?;
     let image_sectors = image.len() / psx_iso::SECTOR_BYTES;
     if image_sectors == 0 {
         return Err(format!(
@@ -1113,15 +1131,18 @@ fn load_disc_from_ccd_with_decoders(
 
     let mut tracks = Vec::with_capacity(toc.tracks.len());
     for (idx, spec) in toc.tracks.iter().enumerate() {
-        let start = spec.start_lba as usize;
+        // A pregap in the image (INDEX 0) belongs to its own track, so a
+        // track's bytes run from its INDEX 0 to the next one's.
+        let start = spec.index0_lba.unwrap_or(spec.start_lba) as usize;
+        let pregap = spec.start_lba - start as u32;
         let next_lba = toc
             .tracks
             .get(idx + 1)
-            .map(|track| track.start_lba)
+            .map(|track| track.index0_lba.unwrap_or(track.start_lba))
             .or(toc.leadout_lba)
             .unwrap_or(image_sectors as u32);
         let end = (next_lba as usize).min(image_sectors);
-        if start >= image_sectors || end <= start {
+        if start >= image_sectors || end <= spec.start_lba as usize {
             return Err(format!(
                 "{} track {} points outside {} sectors",
                 ccd_path.display(),
@@ -1135,9 +1156,9 @@ fn load_disc_from_ccd_with_decoders(
             number: spec.number,
             track_type: spec.track_type,
             start_lba: spec.start_lba,
-            sector_count: (end - start) as u32,
-            pregap: 0,
-            file_pregap: 0,
+            sector_count: (end - start) as u32 - pregap,
+            pregap,
+            file_pregap: pregap,
             bytes: image[byte_start..byte_end].to_vec(),
         });
     }
@@ -1145,13 +1166,14 @@ fn load_disc_from_ccd_with_decoders(
     Ok(psx_iso::Disc::from_tracks(tracks))
 }
 
-fn resolve_ccd_img_for_load(
-    ccd_path: &Path,
-    decoder_candidates: &[PathBuf],
-) -> Result<PathBuf, String> {
+/// The raw image behind a `.ccd`: the `.img` when present, otherwise the
+/// decoded `.img.ecm`. Returns the path read (for messages) and the bytes.
+fn read_ccd_image(ccd_path: &Path) -> Result<(PathBuf, Vec<u8>), String> {
     let decoded_img = ccd_decoded_img_path(ccd_path);
     if decoded_img.exists() {
-        return Ok(decoded_img);
+        let image =
+            fs::read(&decoded_img).map_err(|e| format!("{}: {e}", decoded_img.display()))?;
+        return Ok((decoded_img, image));
     }
     let ecm_img = ecm_sidecar_path(&decoded_img);
     if !ecm_img.exists() {
@@ -1162,44 +1184,67 @@ fn resolve_ccd_img_for_load(
             ecm_img.display()
         ));
     }
-    decode_ecm_external(&ecm_img, &decoded_img, decoder_candidates)?;
-    Ok(decoded_img)
+    let packed = fs::read(&ecm_img).map_err(|e| format!("{}: {e}", ecm_img.display()))?;
+    let image = crate::ecm::decode(&packed).map_err(|e| format!("{}: {e}", ecm_img.display()))?;
+    Ok((ecm_img, image))
 }
 
-fn ecm_decoder_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(path) = std::env::var("PSOXIDE_UNECM") {
-        if !path.trim().is_empty() {
-            candidates.push(PathBuf::from(path));
-        }
-    }
-    candidates.push(PathBuf::from("unecm"));
-    candidates.push(PathBuf::from("ecm-uncompress"));
-    candidates
+/// The LibCrypt subchannel file for a disc sheet: `<stem>.sbi` next to it.
+pub fn sbi_path_for(sheet: &Path) -> PathBuf {
+    sheet.with_extension("sbi")
 }
 
-fn decode_ecm_external(
-    ecm_path: &Path,
-    decoded_img_path: &Path,
-    decoder_candidates: &[PathBuf],
-) -> Result<(), String> {
-    let mut failures = Vec::new();
-    for decoder in decoder_candidates {
-        match std::process::Command::new(decoder)
-            .arg(ecm_path)
-            .arg(decoded_img_path)
-            .status()
-        {
-            Ok(status) if status.success() && decoded_img_path.exists() => return Ok(()),
-            Ok(status) => failures.push(format!("{} exited with {status}", decoder.display())),
-            Err(e) => failures.push(format!("{}: {e}", decoder.display())),
-        }
+/// Sectors listed in an `.sbi` file (PSX LibCrypt subchannel patches), as
+/// LBAs counted from 00:02:00. The file is `"SBI\0"` followed by records of
+/// a BCD absolute MSF, a type byte and the replacement Q data: 10 bytes for
+/// type 1, 3 bytes (a relative or absolute MSF) for types 2 and 3. Every
+/// listed sector has a deliberately bad Q CRC, so only the positions matter.
+pub fn parse_sbi(bytes: &[u8]) -> Result<Vec<u32>, String> {
+    if bytes.len() < 4 || &bytes[..4] != b"SBI\0" {
+        return Err("not an SBI file (missing SBI header)".into());
     }
-    Err(format!(
-        "{} is ECM-compressed and no external decoder succeeded; install unecm/ecm-uncompress or set PSOXIDE_UNECM. Tried: {}",
-        ecm_path.display(),
-        failures.join("; ")
-    ))
+    let bcd = |b: u8| -> Result<u32, String> {
+        let (hi, lo) = (u32::from(b >> 4), u32::from(b & 0x0F));
+        if hi > 9 || lo > 9 {
+            return Err(format!("SBI position byte {b:#04x} is not BCD"));
+        }
+        Ok(hi * 10 + lo)
+    };
+    let mut lbas = Vec::new();
+    let mut at = 4;
+    while at < bytes.len() {
+        let record = bytes
+            .get(at..at + 4)
+            .ok_or_else(|| format!("SBI record at byte {at} is truncated"))?;
+        let frames = (bcd(record[0])? * 60 + bcd(record[1])?) * 75 + bcd(record[2])?;
+        let payload = match record[3] {
+            1 => 10,
+            2 | 3 => 3,
+            other => return Err(format!("SBI record at byte {at} has unknown type {other}")),
+        };
+        if bytes.len() < at + 4 + payload {
+            return Err(format!("SBI record at byte {at} is truncated"));
+        }
+        lbas.push(
+            frames
+                .checked_sub(150)
+                .ok_or_else(|| format!("SBI record at byte {at} lies before 00:02:00"))?,
+        );
+        at += 4 + payload;
+    }
+    Ok(lbas)
+}
+
+/// Read the `.sbi` next to `sheet`, if there is one.
+pub fn load_sbi_for(sheet: &Path) -> Result<Option<Vec<u32>>, String> {
+    let path = sbi_path_for(sheet);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    parse_sbi(&bytes)
+        .map(Some)
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Parse a CUE sheet to find the path of its first data track's BIN.
@@ -1841,6 +1886,45 @@ mod tests {
     }
 
     #[test]
+    fn load_disc_from_ccd_keeps_an_index_0_pregap_in_its_own_track() {
+        // Tomb Raider's CloneCD sheet: [TRACK 2] has INDEX 0 before INDEX 1.
+        // The pregap sectors are in the image and belong to track 2 (index
+        // 00, relative time counting down), not to the end of track 1.
+        let tmp = TempDir::new().unwrap();
+        let ccd_path = tmp.path().join("disc.ccd");
+        let mut image = vec![0u8; psx_iso::SECTOR_BYTES * 14];
+        image[7 * psx_iso::SECTOR_BYTES] = 0x77;
+        image[10 * psx_iso::SECTOR_BYTES] = 0xAB;
+        std::fs::write(tmp.path().join("disc.img"), image).unwrap();
+        std::fs::write(
+            &ccd_path,
+            concat!(
+                "[Entry 0]\nPoint=0x01\nControl=0x04\nPLBA=0\n",
+                "[Entry 1]\nPoint=0x02\nControl=0x00\nPLBA=10\n",
+                "[Entry 2]\nPoint=0xa2\nControl=0x00\nPLBA=14\n",
+                "[TRACK 1]\nMODE=2\nINDEX 1=0\n",
+                "[TRACK 2]\nMODE=0\nINDEX 0=7\nINDEX 1=10\n",
+            ),
+        )
+        .unwrap();
+
+        let disc = load_disc_from_ccd(&ccd_path).unwrap();
+        assert_eq!(disc.track(1).unwrap().sector_count, 7);
+        let track2 = disc.track(2).unwrap();
+        assert_eq!(
+            (track2.start_lba, track2.pregap, track2.sector_count),
+            (10, 3, 4)
+        );
+        let pos = disc.track_position_for_lba(8).unwrap();
+        assert_eq!((pos.track_number, pos.index_number), (2, 0));
+        assert_eq!(pos.relative_msf, (0, 0, 1));
+        let pos = disc.track_position_for_lba(6).unwrap();
+        assert_eq!((pos.track_number, pos.index_number), (1, 1));
+        assert_eq!(disc.read_sector_raw(10).unwrap()[0], 0xAB);
+        assert_eq!(disc.read_cdda_sector(10).unwrap()[0], 0xAB);
+    }
+
+    #[test]
     fn parse_ccd_toc_decodes_bcd_track_numbers() {
         let tmp = TempDir::new().unwrap();
         let ccd_path = tmp.path().join("many.ccd");
@@ -1851,31 +1935,73 @@ mod tests {
         assert_eq!(toc.tracks[0].number, 10);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn load_disc_from_ccd_can_use_external_ecm_decoder() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn load_disc_from_ccd_decodes_an_ecm_sidecar_in_memory() {
         let tmp = TempDir::new().unwrap();
         let ccd_path = tmp.path().join("disc.ccd");
-        let ecm_path = tmp.path().join("disc.img.ecm");
-        let decoder_path = tmp.path().join("fake-unecm.sh");
         let mut image = vec![0u8; psx_iso::SECTOR_BYTES * 2];
         image[0] = 0xCD;
-        std::fs::write(&ecm_path, image).unwrap();
+        // A literal-only ECM stream: header, one type-0 record, end
+        // marker, checksum of the decoded bytes.
+        let mut ecm = b"ECM\0".to_vec();
+        let mut n = image.len() as u32 - 1;
+        ecm.push(((n & 0x1F) as u8) << 2);
+        n >>= 5;
+        while n != 0 {
+            *ecm.last_mut().unwrap() |= 0x80;
+            ecm.push((n & 0x7F) as u8);
+            n >>= 7;
+        }
+        ecm.extend_from_slice(&image);
+        ecm.extend_from_slice(&[0xFC, 0xFF, 0xFF, 0xFF, 0x3F]);
+        ecm.extend_from_slice(&crate::ecm::edc_update(0, &image).to_le_bytes());
+        std::fs::write(tmp.path().join("disc.img.ecm"), ecm).unwrap();
         std::fs::write(
             &ccd_path,
             "[Entry 0]\nPoint=0x01\nControl=0x04\nPLBA=0\n[Entry 1]\nPoint=0xa2\nPLBA=2\n",
         )
         .unwrap();
-        std::fs::write(&decoder_path, "#!/bin/sh\ncp \"$1\" \"$2\"\n").unwrap();
-        let mut perms = std::fs::metadata(&decoder_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&decoder_path, perms).unwrap();
 
-        let disc = load_disc_from_ccd_with_decoders(&ccd_path, &[decoder_path]).unwrap();
+        let disc = load_disc_from_ccd(&ccd_path).unwrap();
         assert_eq!(disc.read_sector_raw(0).unwrap()[0], 0xCD);
-        assert!(tmp.path().join("disc.img").exists());
+        assert!(!tmp.path().join("disc.img").exists());
+    }
+
+    #[test]
+    fn sbi_records_become_lbas_for_every_record_type() {
+        let mut sbi = b"SBI\0".to_vec();
+        // 03:08:05 type 1 (10 bytes of Q), 03:08:10 type 3, 09:20:45 type 2.
+        sbi.extend([0x03, 0x08, 0x05, 1]);
+        sbi.extend([0u8; 10]);
+        sbi.extend([0x03, 0x08, 0x10, 3, 0x03, 0x08, 0x10]);
+        sbi.extend([0x09, 0x20, 0x45, 2, 0x00, 0x00, 0x00]);
+        // psx-spx lists these LibCrypt sectors as 14105, 14110 and 42045 in
+        // absolute frames; LBAs start at 00:02:00.
+        assert_eq!(
+            parse_sbi(&sbi).unwrap(),
+            vec![14105 - 150, 14110 - 150, 42045 - 150]
+        );
+    }
+
+    #[test]
+    fn sbi_rejects_bad_headers_types_and_truncation() {
+        assert!(parse_sbi(b"XYZ\0").is_err());
+        assert!(parse_sbi(b"SBI\0\x03\x08\x05\x07").is_err());
+        assert!(parse_sbi(b"SBI\0\x03\x08\x05\x01\x00").is_err());
+        assert!(parse_sbi(b"SBI\0\x03\x08\x5A\x02\x00\x00\x00").is_err());
+    }
+
+    #[test]
+    fn sbi_is_found_next_to_the_sheet() {
+        let tmp = TempDir::new().unwrap();
+        let cue = tmp.path().join("Game (Europe).cue");
+        assert_eq!(load_sbi_for(&cue).unwrap(), None);
+        std::fs::write(
+            tmp.path().join("Game (Europe).sbi"),
+            b"SBI\0\x03\x09\x56\x02\x00\x00\x00",
+        )
+        .unwrap();
+        assert_eq!(load_sbi_for(&cue).unwrap(), Some(vec![14231 - 150]));
     }
 
     #[test]

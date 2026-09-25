@@ -19,32 +19,33 @@
 //! `PC` hits one of the three entry addresses, running the requested
 //! service in host Rust, and "returning" by setting `PC = $ra`.
 //!
-//! Scope for the first pass: TTY output, `FlushCache`, and the event
-//! system in "always-ready" mode so homebrew that polls `TestEvent`
-//! doesn't spin forever. Games that use richer BIOS facilities
-//! (file I/O, memory cards, controllers) can land their handlers
-//! here incrementally as we exercise them.
+//! Scope so far: TTY output, `FlushCache`, the stateless memory and
+//! string helpers, `SetMem`, and the event system in "always-ready" mode
+//! so homebrew that polls `TestEvent` doesn't spin forever. Games that
+//! use richer BIOS facilities (file I/O, memory cards, controllers) land
+//! their handlers here as the kernel model grows.
 
 use crate::Bus;
 use psx_hw::memory::to_physical;
 
-/// Minimal low-RAM kernel objects used by side-loaded EXEs. Retail BIOS owns
-/// this area; keeping the synthetic objects here lets homebrew that hooks the
-/// unresolved-exception callback use the documented process/thread pointers.
-pub(crate) const PROCESS_LIST_PTR: u32 = 0x0000_0108;
-pub(crate) const UNRESOLVED_HANDLER_PTR: u32 = 0x0000_0300;
-pub(crate) const SYNTHETIC_PROCESS: u32 = 0x8000_0400;
-pub(crate) const SYNTHETIC_THREAD: u32 = 0x8000_0500;
+/// A0 table slot for A(40h) SystemErrorUnresolvedException. Homebrew
+/// replaces this entry to hook unresolved exceptions.
+pub(crate) const UNRESOLVED_HANDLER_PTR: u32 = crate::hle_kernel::A0_TABLE + 4 * 0x40;
+/// Return address given to a guest unresolved-exception handler; reaching
+/// it restores the saved thread frame.
 pub(crate) const EXCEPTION_RETURN_STUB: u32 = 0x8000_00D0;
 
-pub(crate) const THREAD_REGISTERS: u32 = SYNTHETIC_THREAD + 8;
-pub(crate) const THREAD_RETURN_PC: u32 = THREAD_REGISTERS + 32 * 4;
-pub(crate) const THREAD_HI: u32 = THREAD_RETURN_PC + 4;
-pub(crate) const THREAD_LO: u32 = THREAD_HI + 4;
-pub(crate) const THREAD_SR: u32 = THREAD_LO + 4;
-pub(crate) const THREAD_CAUSE: u32 = THREAD_SR + 4;
+/// Offsets inside a TCB (psx-spx "Thread Control Blocks"): registers r0..r31
+/// from +08h, then return PC, HI, LO, SR and CAUSE.
+pub(crate) const TCB_REGISTERS: u32 = 0x08;
+pub(crate) const TCB_RETURN_PC: u32 = 0x88;
+pub(crate) const TCB_HI: u32 = 0x8C;
+pub(crate) const TCB_LO: u32 = 0x90;
+pub(crate) const TCB_SR: u32 = 0x94;
+pub(crate) const TCB_CAUSE: u32 = 0x98;
 
-/// One of the three BIOS dispatcher tables.
+/// One of the three BIOS dispatcher tables, or the HLE kernel's own
+/// internal functions (reached only through pointers the kernel hands out).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Table {
     /// Entry point at physical `0xA0`.
@@ -53,9 +54,39 @@ pub enum Table {
     B,
     /// Entry point at physical `0xC0`.
     C,
+    /// Kernel-internal functions ([`crate::hle_kernel::internal`]).
+    Kernel,
 }
 
 impl Table {
+    /// Table index as used by [`crate::bios_names`]: 0 = A, 1 = B, 2 = C,
+    /// 3 = kernel-internal.
+    pub fn index(self) -> u8 {
+        match self {
+            Table::A => 0,
+            Table::B => 1,
+            Table::C => 2,
+            Table::Kernel => 3,
+        }
+    }
+
+    /// Single-letter label, `'A'`, `'B'`, `'C'`, or `'K'` for internal.
+    pub fn letter(self) -> char {
+        match self {
+            Table::Kernel => 'K',
+            other => (b'A' + other.index()) as char,
+        }
+    }
+
+    fn from_index(index: u8) -> Self {
+        match index {
+            0 => Table::A,
+            1 => Table::B,
+            2 => Table::C,
+            _ => Table::Kernel,
+        }
+    }
+
     fn from_phys(phys: u32) -> Option<Self> {
         match phys {
             0xA0 => Some(Table::A),
@@ -66,70 +97,428 @@ impl Table {
     }
 }
 
-/// Result of one HLE dispatch: `$v0` return value and the updated PC.
+/// Conventional name of `(table, func)`, including the internal functions.
+pub fn function_name(table: Table, func: u8) -> &'static str {
+    match table {
+        Table::Kernel => match func {
+            crate::hle_kernel::internal::START_PAD => "startPad",
+            crate::hle_kernel::internal::STOP_PAD => "stopPad",
+            crate::hle_kernel::internal::SET_PAD_OUTPUT_DATA => "setPadOutputData",
+            crate::hle_exceptions::internal::SYSCALL_VERIFIER => "syscallVerifier",
+            0x04..=0x07 => "rcntHandler",
+            0x10..=0x15 => "fileContinuation",
+            0x1F => "nop",
+            0x20 => "ttyInOut",
+            0x28 => "cdOpen",
+            0x29 => "cdRead",
+            crate::hle_exceptions::internal::DELIVER_NEXT => "deliverNext",
+            crate::hle_pad::internal::VERIFIER => "padCardVerifier",
+            crate::hle_pad::internal::HANDLER => "padCardHandler",
+            crate::hle_card::internal::VERIFIER => "cardVerifier",
+            crate::hle_card::internal::HANDLER => "cardHandler",
+            crate::hle_card::internal::FAST => "cardEarlyByte",
+            0x38 => "cdromIoIrq",
+            0x39 => "cdromDmaIrq",
+            _ => "?",
+        },
+        t => crate::bios_names::function_name(t.index(), u32::from(func)),
+    }
+}
+
+/// How a BIOS function was serviced.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// Implemented with the documented semantics.
+    Done,
+    /// Accepted without the real effect (events are always ready, device
+    /// registration is ignored, ...). The guest proceeds, but may rely on
+    /// state the kernel never produced.
+    Stub,
+    /// Not implemented. Returns 0 without touching guest state, logs once
+    /// per function, and stops the CPU when strict mode is on.
+    Unimplemented,
+}
+
+/// First occurrence of a stubbed or unimplemented BIOS function.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallRecord {
+    /// Dispatch table.
+    pub table: Table,
+    /// Function number.
+    pub func: u8,
+    /// Conventional name from [`crate::bios_names`], or `"?"`.
+    pub name: &'static str,
+    /// How the call was serviced.
+    pub outcome: Outcome,
+    /// `$a0..$a3` at the first call.
+    pub args: [u32; 4],
+    /// Caller's `$ra` at the first call.
+    pub ra: u32,
+    /// Bus cycle of the first call.
+    pub cycle: u64,
+    /// Calls so far.
+    pub count: u64,
+}
+
+impl std::fmt::Display for CallRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}({:02X}h) {} a0={:#010x} a1={:#010x} a2={:#010x} a3={:#010x} ra={:#010x} cycle={}",
+            self.table.letter(),
+            self.func,
+            self.name,
+            self.args[0],
+            self.args[1],
+            self.args[2],
+            self.args[3],
+            self.ra,
+            self.cycle
+        )
+    }
+}
+
+/// Result of one HLE dispatch.
 #[derive(Copy, Clone, Debug)]
 pub struct Hle {
-    /// Value to write into `$r2 ($v0)`. `0` if the syscall doesn't
-    /// return a meaningful value.
-    pub v0: u32,
-    /// Value to set PC to after the call. Normally `$ra`, so the CPU
-    /// resumes right after the caller's `jalr` (or, in the BIOS-stub
-    /// pattern, right after the `jr $t0 ; li $t1, N` pair).
+    /// Value for `$v0`, or `None` when the table entry was guest code and
+    /// the CPU only jumps there.
+    pub v0: Option<u32>,
+    /// PC to continue at: `$ra` after an HLE call (as left by the handler,
+    /// so longjmp can redirect it), or the guest entry for a guest jump.
     pub next_pc: u32,
+    /// Which table was called.
+    pub table: Table,
+    /// Function number.
+    pub func: u8,
+    /// How the call was serviced.
+    pub outcome: Outcome,
+    /// The handler changed code in RAM; the instruction cache must be
+    /// invalidated (FlushCache, kernel patch counterpatches).
+    pub flush_icache: bool,
+    /// The function is waiting and will be called again from the same PC.
+    pub retry: bool,
+    /// Cycles the call takes, vector to return ([`call_cycles`]).
+    pub cycles: u32,
 }
 
-/// Look at `cpu_pc`; if it matches a BIOS table entry, run the
-/// service that `$t1 ($r9)` selects and return the post-call state.
-/// Otherwise return `None` and let the CPU fetch normally.
+/// Finish a call with SYSCALL(2) ExitCriticalSection through the guest
+/// exception handler, which returns to the caller with `v0` as set.
+fn leave_critical_section(gprs: &mut [u32; 32]) -> Ret {
+    gprs[4] = 2;
+    Ret::Jump(crate::hle_exceptions::code().syscall_stub)
+}
+
+/// Cycles an HLE call takes from its vector to its return. Most calls
+/// still cost the two cycles of the dispatch. Calls that games make often
+/// or poll in timing-sensitive loops take what the retail kernel takes,
+/// measured by black-box timing in the emulator (vector to return, the
+/// fastest run of each argument over Resident Evil 2, CTR, Tekken 3,
+/// WipEout, Crash and Metal Gear Solid, so interrupts are left out):
 ///
-/// `args` is the four argument registers `$a0..$a3` (`$r4..$r7`),
-/// `t1_func_num` is `$r9` (the function selector set by the caller's
-/// delay-slot load), and `ra` is `$r31`.
-pub fn dispatch(
-    cpu_pc: u32,
-    bus: &mut Bus,
-    args: [u32; 4],
-    sp: u32,
-    t1_func_num: u32,
-    ra: u32,
-) -> Option<Hle> {
-    let phys = to_physical(cpu_pc);
-    let table = Table::from_phys(phys)?;
-    let func = (t1_func_num & 0xFF) as u8;
-    let v0 = run(table, func, bus, args, sp);
-    Some(Hle { v0, next_pc: ra })
+/// * TestEvent: 43 cycles for a busy event, 48 for a ready one. Resident
+///   Evil 2 and 3 count 250,000 rounds of four TestEvents as their memory
+///   card timeout.
+/// * memcpy A(2Ah): 243 + 202.5 per byte; memset A(2Bh): 314 + 132 per
+///   byte; bzero A(28h): 322 + 132 per byte. The retail routines run
+///   from ROM, so they are slow; at two cycles games loaded tens of frames
+///   ahead of a real kernel.
+///
+/// `args` are the argument registers at the call.
+pub fn call_cycles(table: Table, func: u8, v0: Option<u32>, args: [u32; 4]) -> u32 {
+    // Lengths beyond RAM are refused or wrap; cap the charge there.
+    let len = |n: u32| u64::from(n.min(psx_hw::memory::ram::SIZE as u32));
+    let cycles = match (table, func, v0) {
+        (Table::B, 0x0B, Some(1)) => 48,
+        (Table::B, 0x0B, Some(_)) => 43,
+        (Table::A, 0x2A, Some(_)) if args[2] as i32 > 0 => 243 + len(args[2]) * 405 / 2,
+        (Table::A, 0x2B, Some(_)) if args[2] as i32 > 0 => 314 + len(args[2]) * 132,
+        (Table::A, 0x28, Some(_)) if args[1] as i32 > 0 => 322 + len(args[1]) * 132,
+        _ => 2,
+    };
+    cycles as u32
 }
 
-fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> u32 {
-    bus.hle_bios_log_call(table, func);
+/// Intercept a fetch at `pc` when it is a BIOS call.
+///
+/// Two forms are recognised, both only below 64 KiB of RAM:
+///
+/// * the `0xA0`/`0xB0`/`0xC0` vectors: the function number is in `$t1`;
+///   the RAM table entry is looked up like the retail dispatcher does. An
+///   entry pointing at an HLE trap word runs that function; an entry the
+///   guest replaced with its own code is jumped to.
+/// * a trap word itself (see [`crate::hle_kernel::trap_word`]), reached by
+///   calling a table entry directly or through a pointer the kernel handed
+///   out.
+///
+/// `gprs` is the CPU register file: handlers read their arguments from it
+/// and may change callee-saved registers (longjmp).
+pub fn dispatch(pc: u32, bus: &mut Bus, gprs: &mut [u32; 32]) -> Option<Hle> {
+    let phys = to_physical(pc);
+    if phys >= 0x1_0000 {
+        return None;
+    }
+    let (table, func) = if let Some(vector) = Table::from_phys(phys) {
+        let t1 = gprs[9];
+        let (base, len) = crate::hle_kernel::table(vector.index());
+        if t1 >= len {
+            return Some(finish(
+                bus,
+                gprs,
+                vector,
+                t1 as u8,
+                Ret::Unimplemented,
+                false,
+            ));
+        }
+        let entry = crate::hle_kernel::peek32(bus, base + 4 * t1);
+        match crate::hle_kernel::decode_trap(crate::hle_kernel::peek32(bus, entry)) {
+            Some((t, f)) => (Table::from_index(t), f),
+            None => {
+                return Some(Hle {
+                    v0: None,
+                    next_pc: entry,
+                    table: vector,
+                    func: t1 as u8,
+                    outcome: Outcome::Done,
+                    flush_icache: false,
+                    retry: false,
+                    cycles: 2,
+                })
+            }
+        }
+    } else {
+        let (t, f) = crate::hle_kernel::decode_trap(bus.peek_instruction(pc)?)?;
+        (Table::from_index(t), f)
+    };
+    let mut flush = table == Table::A && func == 0x44;
+    let args = [gprs[4], gprs[5], gprs[6], gprs[7]];
+    let ret = run(table, func, bus, gprs, &mut flush);
+    let jump = match ret {
+        // The function is waiting on hardware: leave the CPU at the call
+        // so emulated time passes and the call is made again.
+        Ret::Retry => Some((pc, true)),
+        Ret::Jump(target) => Some((target, false)),
+        _ => None,
+    };
+    if let Some((next_pc, retry)) = jump {
+        if table != Table::Kernel && !retry {
+            bus.hle_bios_log_call(table, func);
+        }
+        return Some(Hle {
+            v0: None,
+            next_pc,
+            table,
+            func,
+            outcome: Outcome::Done,
+            flush_icache: flush,
+            retry,
+            cycles: 2,
+        });
+    }
+    if table != Table::Kernel {
+        bus.hle_bios_log_call(table, func);
+    }
+    let mut out = finish(bus, gprs, table, func, ret, flush);
+    out.cycles = call_cycles(table, func, out.v0, args);
+    Some(out)
+}
+
+fn finish(bus: &mut Bus, gprs: &[u32; 32], table: Table, func: u8, ret: Ret, flush: bool) -> Hle {
+    let (outcome, v0) = match ret {
+        Ret::Done(v0) => (Outcome::Done, v0),
+        Ret::Stub(v0) => (Outcome::Stub, v0),
+        Ret::Unimplemented | Ret::Retry | Ret::Jump(_) => (Outcome::Unimplemented, 0),
+    };
+    if outcome != Outcome::Done {
+        let args = [gprs[4], gprs[5], gprs[6], gprs[7]];
+        bus.hle_bios_record_call(table, func, outcome, args, gprs[31]);
+    }
+    Hle {
+        v0: Some(v0),
+        next_pc: gprs[31],
+        table,
+        func,
+        outcome,
+        flush_icache: flush,
+        retry: false,
+        cycles: 2,
+    }
+}
+
+/// Handler result. `Unimplemented` arms must not have side effects, so
+/// strict mode can stop before the call changes anything.
+enum Ret {
+    Done(u32),
+    /// Accepted without the real effect. No function is serviced this way
+    /// at the moment; kept so a partial implementation stays visible.
+    #[allow(dead_code)]
+    Stub(u32),
+    Unimplemented,
+    /// Not finished (waiting on hardware); call again. Must not have side
+    /// effects before the wait condition is met.
+    Retry,
+    /// Continue at this guest address (a tail call into kernel code; the
+    /// handler has set any argument registers and `$ra`).
+    Jump(u32),
+}
+
+fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut bool) -> Ret {
+    use crate::hle_card as card;
+    use crate::hle_exceptions as ex;
+    use crate::hle_files as files;
+    let file_call = |call: files::FileCall| match call {
+        files::FileCall::Return(v) => Done(v),
+        files::FileCall::Jump(target) => Jump(target),
+    };
+    use crate::hle_kernel::{self as k, Heap};
+    use Ret::{Done, Jump, Retry, Unimplemented};
+    let args = [gprs[4], gprs[5], gprs[6], gprs[7]];
+    let sp = gprs[29];
     match (table, func) {
         // --- A-table ---
+        //
+        // Numbering and semantics follow the OpenBIOS `romA0table`
+        // (pcsx-redux src/mips/openbios/kernel/handlers.c, MIT, used as a
+        // specification only) after its `patchA0table`, which aliases
+        // A(00h..09h) to B(32h..3Bh) and A(3Bh..3Eh) to B(3Ch..3Fh), and the
+        // psx-spx "BIOS Memory Fill/Copy/Compare" and "BIOS String Functions"
+        // descriptions. The functions psx-spx documents as buggy keep
+        // their bugs (memmove, memcmp/bcmp); strtok, strstr and strpbrk
+        // are not implemented yet and fall through to the unimplemented
+        // arm.
 
-        // A(0x2A) malloc / A(0x33) memset / similar memory helpers.
-        // Most commercial games roll their own allocator; these
-        // fallthroughs prevent a jump-to-zero on a stray call.
-        (Table::A, 0x2A) => 0,
-        (Table::A, 0x33) => {
-            // memset(dest, val, n) -- write `n` bytes of `val` to `dest`.
-            let (dest, val, n) = (args[0], args[1] as u8, args[2]);
-            for i in 0..n.min(0x20_0000) {
-                let _ = bus.write8_safe(dest.wrapping_add(i), val);
+        // A(0Eh) abs / A(0Fh) labs.
+        (Table::A, 0x0E) | (Table::A, 0x0F) => Done((args[0] as i32).wrapping_abs() as u32),
+
+        // A(0Ch) strtoul / A(0Dh) strtol(src, &end, base), A(10h) atoi /
+        // A(11h) atol(src), A(12h) atob(src, &value): psx-spx "Number/
+        // String/Character Conversion", quirks included.
+        (Table::A, 0x0C) | (Table::A, 0x0D) => {
+            let (src, end_dst, base) = (args[0], args[1], args[2]);
+            if src == 0 {
+                return Done(0);
             }
-            dest
+            let (value, end) = libc::strtol(bus, src, base, func == 0x0D, false);
+            if end_dst != 0 {
+                k::poke32(bus, end_dst, end);
+            }
+            Done(value)
+        }
+        (Table::A, 0x10) | (Table::A, 0x11) => {
+            if args[0] == 0 {
+                return Done(0);
+            }
+            Done(libc::strtol(bus, args[0], 10, true, true).0)
+        }
+        (Table::A, 0x12) => {
+            if args[0] == 0 {
+                return Done(0);
+            }
+            let (value, end) = libc::strtol(bus, args[0], 10, true, false);
+            k::poke32(bus, args[1], value);
+            Done(end)
         }
 
-        // A(0x3C) putchar / A(0x3D) getchar.
+        // A(13h) setjmp(buf) / A(14h) longjmp(buf, value). Buffer layout
+        // (psx-spx): ra, sp, fp, s0..s7, gp. longjmp returns `value`
+        // unchanged (0 is not bumped to 1) at the restored ra.
+        (Table::A, 0x13) => {
+            let buf = args[0];
+            for (slot, reg) in JMPBUF_REGS.iter().enumerate() {
+                k::poke32(bus, buf.wrapping_add(4 * slot as u32), gprs[*reg]);
+            }
+            Done(0)
+        }
+        (Table::A, 0x14) => {
+            let buf = args[0];
+            for (slot, reg) in JMPBUF_REGS.iter().enumerate() {
+                gprs[*reg] = k::peek32(bus, buf.wrapping_add(4 * slot as u32));
+            }
+            Done(args[1])
+        }
+
+        // A(15h) strcat(dst, src).
+        (Table::A, 0x15) => Done(libc::strcat(bus, args[0], args[1])),
+        // A(17h) strcmp(s1, s2) / A(18h) strncmp(s1, s2, maxlen).
+        (Table::A, 0x17) => Done(libc::strncmp(bus, args[0], args[1], None)),
+        (Table::A, 0x18) => Done(libc::strncmp(bus, args[0], args[1], Some(args[2]))),
+        // A(19h) strcpy(dst, src) / A(1Ah) strncpy(dst, src, maxlen).
+        (Table::A, 0x19) => Done(libc::strcpy(bus, args[0], args[1])),
+        (Table::A, 0x1A) => Done(libc::strncpy(bus, args[0], args[1], args[2])),
+        // A(1Bh) strlen(s).
+        (Table::A, 0x1B) => Done(libc::strlen(bus, args[0])),
+        // A(1Ch) index / A(1Eh) strchr, A(1Dh) rindex / A(1Fh) strrchr.
+        (Table::A, 0x1C) | (Table::A, 0x1E) => {
+            Done(libc::strchr(bus, args[0], args[1] as u8, false))
+        }
+        (Table::A, 0x1D) | (Table::A, 0x1F) => {
+            Done(libc::strchr(bus, args[0], args[1] as u8, true))
+        }
+        // A(25h) toupper / A(26h) tolower. psx-spx documents 00h..7Fh only;
+        // bytes 80h..FFh come back unchanged here.
+        (Table::A, 0x25) => Done(u32::from((args[0] as u8).to_ascii_uppercase())),
+        (Table::A, 0x26) => Done(u32::from((args[0] as u8).to_ascii_lowercase())),
+
+        // A(27h) bcopy(src, dst, len) / A(2Ah) memcpy(dst, src, len).
+        (Table::A, 0x27) => {
+            libc::memcpy(bus, args[1], args[0], args[2], args[0]);
+            Done(args[0])
+        }
+        (Table::A, 0x2A) => {
+            libc::memcpy(bus, args[0], args[1], args[2], args[0]);
+            Done(args[0])
+        }
+        // A(28h) bzero(dst, len) / A(2Bh) memset(dst, fill, len).
+        (Table::A, 0x28) => Done(libc::memset(bus, args[0], 0, args[1])),
+        (Table::A, 0x2B) => Done(libc::memset(bus, args[0], args[1] as u8, args[2])),
+        // A(2Ch) memmove(dst, src, len), A(29h) bcmp / A(2Dh) memcmp:
+        // with the retail bugs psx-spx documents.
+        (Table::A, 0x2C) => {
+            libc::memmove(bus, args[0], args[1], args[2]);
+            Done(args[0])
+        }
+        (Table::A, 0x29) | (Table::A, 0x2D) => Done(libc::memcmp(bus, args[0], args[1], args[2])),
+        // A(2Eh) memchr(src, byte, len).
+        (Table::A, 0x2E) => Done(libc::memchr(bus, args[0], args[1] as u8, args[2])),
+
+        // A(2Fh) rand / A(30h) srand(seed): x = x*41C64E6Dh + 3039h,
+        // result (x >> 16) & 7FFFh (psx-spx). The seed lives in kernel RAM.
+        (Table::A, 0x2F) => {
+            let x = k::peek32(bus, k::kvar::RAND_SEED)
+                .wrapping_mul(0x41C6_4E6D)
+                .wrapping_add(0x3039);
+            k::poke32(bus, k::kvar::RAND_SEED, x);
+            Done((x >> 16) & 0x7FFF)
+        }
+        (Table::A, 0x30) => {
+            k::poke32(bus, k::kvar::RAND_SEED, args[0]);
+            Done(0)
+        }
+
+        // A(33h) malloc / A(34h) free / A(37h) calloc / A(38h) realloc /
+        // A(39h) InitHeap (psx-spx "BIOS Memory Allocation").
+        (Table::A, 0x33) => Done(k::malloc(bus, Heap::User, args[0])),
+        (Table::A, 0x34) => {
+            k::free(bus, args[0]);
+            Done(0)
+        }
+        (Table::A, 0x37) => Done(k::calloc(bus, args[0], args[1])),
+        (Table::A, 0x38) => Done(k::realloc(bus, args[0], args[1])),
+        (Table::A, 0x39) => {
+            k::init_heap(bus, Heap::User, args[0], args[1]);
+            Done(0)
+        }
+
+        // A(3Ch) putchar.
         (Table::A, 0x3C) => {
             write_byte_to_stdout(args[0] as u8);
-            0
+            Done(0)
         }
-        // A(0x3D) getchar -- no stdin source yet; return -1 (EOF).
-        (Table::A, 0x3D) => u32::MAX,
-
-        // A(0x3E) puts(*s) / A(0x3F) printf.
+        // A(3Eh) puts(s) / A(3Fh) printf.
         (Table::A, 0x3E) => {
-            write_cstring_to_stdout(bus, args[0]);
-            0
+            write_puts_to_stdout(bus, args[0]);
+            Done(0)
         }
         (Table::A, 0x3F) => {
             // printf varargs follow the MIPS o32 ABI: a1-a3 first, then the
@@ -137,101 +526,830 @@ fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> u32 {
             // both sources lets public hardware suites print complete rows
             // instead of losing their fourth and later values.
             hle_printf(bus, args[0], &[args[1], args[2], args[3]], sp);
-            0
+            Done(0)
         }
 
-        // A(0x44) FlushCache -- the CPU intercept invalidates its
+        // A(48h) SendGP1Command, A(49h) GPU_cw, A(4Ah) GPU_cwp,
+        // A(4Dh) GetGPUStatus, A(4Eh) gpu_sync (psx-spx "BIOS GPU
+        // Functions"). gpu_sync waits by returning to the call until the
+        // GPU is ready, so emulated time passes as it would in the loop.
+        (Table::A, 0x48) => {
+            bus.write32(crate::gpu::GP1_ADDR, args[0]);
+            Done(gprs[2])
+        }
+        (Table::A, 0x49) | (Table::A, 0x4A) | (Table::A, 0x4E) => {
+            if !gpu_sync(bus) {
+                return Retry;
+            }
+            match func {
+                0x49 => bus.write32(crate::gpu::GP0_ADDR, args[0]),
+                0x4A => {
+                    for i in 0..args[1].min(0x10_0000) {
+                        let word = k::peek32(bus, args[0].wrapping_add(4 * i));
+                        bus.write32(crate::gpu::GP0_ADDR, word);
+                    }
+                }
+                _ => {}
+            }
+            Done(0)
+        }
+        (Table::A, 0x4D) => Done(bus.read32(crate::gpu::GP1_ADDR)),
+
+        // A(41h) LoadTest(name, header), A(42h) Load(name, header) and
+        // A(51h) LoadExec(name, stackbase, stackoffset) (psx-spx "BIOS File
+        // Execute"), for executables on the kernel CD-ROM device.
+        (Table::A, 0x41) | (Table::A, 0x42) | (Table::A, 0x51) => {
+            let header = if func == 0x51 {
+                files::EXEC_HEADER
+            } else {
+                args[1]
+            };
+            match files::load_step(bus, args[0], header, func != 0x41) {
+                files::LoadStep::Pending => Retry,
+                files::LoadStep::Unsupported => Unimplemented,
+                files::LoadStep::Done(ok) if func != 0x51 => {
+                    *flush |= func == 0x42 && ok == 1;
+                    Done(ok)
+                }
+                files::LoadStep::Done(0) => Jump(ex::code().hang),
+                files::LoadStep::Done(_) => {
+                    // Part 2: the caller's stack values, then Exec(header,
+                    // 1, 0). A returning executable ends in the "JMP $"
+                    // lockup of part 4 (reloading the boot file, part 3,
+                    // is not attempted).
+                    k::poke32(bus, files::EXEC_HEADER + 0x20, args[1]);
+                    k::poke32(bus, files::EXEC_HEADER + 0x24, args[2]);
+                    *flush = true;
+                    gprs[4] = files::EXEC_HEADER;
+                    gprs[5] = 1;
+                    gprs[6] = 0;
+                    gprs[31] = ex::code().hang;
+                    Jump(ex::code().exec)
+                }
+            }
+        }
+
+        // A(44h) FlushCache -- the CPU intercept invalidates its
         // instruction cache before this HLE handler returns.
-        (Table::A, 0x44) => 0,
+        (Table::A, 0x44) => Done(0),
 
-        // A(0x70) _bu_init (memcard filesystem init) -- accept.
-        (Table::A, 0x70) => 0,
+        // A(54h)/A(71h) _96_init: reinstall the kernel CD-ROM driver, then
+        // leave the critical section as OpenBIOS initCDRom does (SYSCALL(2)
+        // through the guest exception handler), so the CD reads a game
+        // makes next can take their interrupts.
+        (Table::A, 0x54) | (Table::A, 0x71) => {
+            crate::hle_files::cd_init(bus);
+            leave_critical_section(gprs)
+        }
 
-        // A(0x96) AddCDROMDevice / A(0x97) AddMemCardDevice -- games
-        // call these during init to register filesystem drivers.
-        // We don't model the device table; accept so the game moves on.
-        (Table::A, 0x96) | (Table::A, 0x97) => 0,
+        // A(56h)/A(72h) _96_remove: the kernel's CD-ROM handlers and
+        // events are removed.
+        (Table::A, 0x56) | (Table::A, 0x72) => {
+            crate::hle_files::cd_remove(bus);
+            Done(0)
+        }
 
-        // A(0x9F) EnterCriticalSection / A(0xA0) ExitCriticalSection.
-        // On hardware these manipulate SR.IE. HLE BIOS can't safely
-        // forge IE-manipulation, but games use them as bracket
-        // scopes -- as long as pairs balance and both return plausibly,
-        // the game proceeds. EnterCriticalSection returns 1.
-        (Table::A, 0x9F) => 1,
-        (Table::A, 0xA0) => 0,
+        // A(55h)/A(70h) _bu_init: load both slots' directories.
+        (Table::A, 0x55) | (Table::A, 0x70) => match card::bu_init(bus) {
+            Some(v) => Done(v),
+            None => Retry,
+        },
+
+        // Memory card (psx-spx "BIOS Memory Card Functions"): A(ABh)
+        // _card_info, A(ACh) _card_load, A(ADh) _card_auto, and the
+        // bufs_cb completion callbacks A(A7h)-A(AAh), which deliver
+        // SwCARD events.
+        (Table::A, 0xAB) => Done(card::card_info(bus, args[0])),
+        (Table::A, 0xAC) => Done(card::card_load(bus, args[0])),
+        (Table::A, 0xAD) => Done(card::set_auto_format(bus, args[0])),
+        (Table::A, 0xA7) | (Table::A, 0xA8) | (Table::A, 0xA9) | (Table::A, 0xAA) => {
+            if func == 0xA7 {
+                card::low_level_completed(bus);
+            } else {
+                card::low_level_error(bus, u32::from(func - 0xA8));
+            }
+            match ex::flush_events(bus, gprs, gprs[31]) {
+                Some(target) => Jump(target),
+                None => Done(0),
+            }
+        }
+
+        // A(96h) AddCDROMDevice: the kernel CD-ROM device, if absent.
+        (Table::A, 0x96) => Done(crate::hle_files::add_kernel_cdrom(bus)),
+        // A(97h) AddMemCardDevice: the kernel "bu" device, if absent.
+        (Table::A, 0x97) => Done(files::add_kernel_memcard(bus)),
+
+        // A(9Ch) SetConf(events, threads, stacktop): reallocate the
+        // control blocks. A(9Dh) GetConf(&events, &threads, &stacktop).
+        (Table::A, 0x9C) => {
+            k::set_conf(bus, args[0], args[1], args[2]);
+            Done(0)
+        }
+        (Table::A, 0x9D) => {
+            let (event, tcb, stack) = k::get_conf(bus);
+            k::poke32(bus, args[0], event);
+            k::poke32(bus, args[1], tcb);
+            k::poke32(bus, args[2], stack);
+            Done(0)
+        }
+
+        // A(9Fh) SetMem(megabytes): 2 clears RAM_SIZE bits 8-9, 8 sets them,
+        // and the size is recorded at [0x60] (psx-spx; OpenBIOS
+        // kernel/misc.c setMemSize). Other values change nothing.
+        (Table::A, 0x9F) => {
+            set_mem_size(bus, args[0]);
+            Done(0)
+        }
 
         // --- B-table ---
 
-        // B(0x00) SysMalloc -- not a real malloc; many games replace
-        // the kernel heap with their own and never call this.
-        (Table::B, 0x00) => 0,
+        // B(00h) alloc_kernel_memory / B(01h) free_kernel_memory: the same
+        // allocator over the kernel heap set up by SysInitMemory.
+        (Table::B, 0x00) => Done(k::malloc(bus, Heap::Kernel, args[0])),
+        (Table::B, 0x01) => {
+            k::free(bus, args[0]);
+            Done(0)
+        }
 
-        // B(0x07) DeliverEvent -- accept; our event system is always-
-        // ready so there's nothing to deliver.
-        (Table::B, 0x07) => 0,
+        // B(02h) init_timer, B(03h) get_timer, B(04h)/B(05h) enable/
+        // disable_timer_irq, B(06h) restart_timer (psx-spx "BIOS Timer
+        // Functions").
+        (Table::B, 0x02) => Done(ex::init_timer(bus, args[0], args[1], args[2])),
+        (Table::B, 0x03) => Done(ex::get_timer(bus, args[0])),
+        (Table::B, 0x04) => Done(ex::set_timer_irq(bus, args[0], true)),
+        (Table::B, 0x05) => Done(ex::set_timer_irq(bus, args[0], false)),
+        (Table::B, 0x06) => Done(ex::restart_timer(bus, args[0])),
 
-        // B(0x08) OpenEvent: return a synthetic handle. We accept
-        // everything; the handle encodes table + slot for debug.
-        (Table::B, 0x08) => 0xF400_0000 | (args[0] & 0xFFFF),
+        // B(07h) DeliverEvent and B(17h) ReturnFromException are guest
+        // code in kernel RAM (see hle_exceptions); their table entries
+        // point there, so they only reach this match through a stale
+        // trap stub.
 
-        // B(0x09) CloseEvent, B(0x0A) WaitEvent, B(0x0B) TestEvent,
-        // B(0x0C) EnableEvent, B(0x0D) DisableEvent -- always-ready.
-        (Table::B, 0x09)
-        | (Table::B, 0x0A)
-        | (Table::B, 0x0B)
-        | (Table::B, 0x0C)
-        | (Table::B, 0x0D) => 1,
+        // Events over the EvCBs in kernel RAM (psx-spx "BIOS Event
+        // Functions"): OpenEvent, CloseEvent, WaitEvent, TestEvent,
+        // EnableEvent, DisableEvent, UnDeliverEvent.
+        (Table::B, 0x08) => Done(ex::open_event(bus, args[0], args[1], args[2], args[3])),
+        (Table::B, 0x09) => {
+            ex::close_event(bus, args[0]);
+            Done(1)
+        }
+        (Table::B, 0x0A) => match ex::wait_event(bus, args[0]) {
+            Some(v) => Done(v),
+            None => Retry,
+        },
+        (Table::B, 0x0B) => Done(u32::from(ex::test_event(bus, args[0]))),
+        (Table::B, 0x0C) | (Table::B, 0x0D) => {
+            ex::set_event_enabled(bus, args[0], func == 0x0C);
+            Done(1)
+        }
+        (Table::B, 0x20) => {
+            ex::undeliver_event(bus, args[0], args[1]);
+            Done(0)
+        }
 
-        // B(0x12) InitPad(buf1, siz1, buf2, siz2): tell the kernel
-        // where to stash pad state. Since we poll the hardware
-        // directly via psx-pad there's nothing for us to do.
-        (Table::B, 0x12) => 1,
+        // Threads (psx-spx "BIOS Thread Functions"): OpenTh, CloseTh, and
+        // ChangeTh, which is SYSCALL(3) with the new TCB in a1.
+        (Table::B, 0x0E) => Done(ex::open_thread(bus, args[0], args[1], args[2])),
+        (Table::B, 0x0F) => {
+            ex::close_thread(bus, args[0]);
+            Done(1)
+        }
+        (Table::B, 0x10) => {
+            gprs[4] = 3;
+            gprs[5] = ex::thread_tcb(bus, args[0]);
+            Jump(ex::code().syscall_stub)
+        }
 
-        // B(0x13) StartPad, B(0x14) StopPad -- accept.
-        (Table::B, 0x13) | (Table::B, 0x14) => 1,
+        // Pad driver (psx-spx "BIOS Joypad Functions"): B(12h) InitPAD2,
+        // B(13h) StartPAD2, B(14h) StopPAD2, B(15h) PAD_init2, B(16h)
+        // PAD_dr. The VBlank reader itself is a kernel handler (hle_pad).
+        (Table::B, 0x12) => Done(crate::hle_pad::init_pad(
+            bus, args[0], args[1], args[2], args[3],
+        )),
+        // StartPAD2/StopPAD2 (and StartCARD2/StopCARD2 below) end by
+        // leaving the critical section, as OpenBIOS sio0/driver.c does:
+        // v0 = 1, then SYSCALL(2) through the guest exception handler.
+        (Table::B, 0x13) => {
+            gprs[2] = crate::hle_pad::start_pad(bus);
+            leave_critical_section(gprs)
+        }
+        (Table::B, 0x14) => {
+            gprs[2] = crate::hle_pad::stop_pad(bus);
+            leave_critical_section(gprs)
+        }
+        // PAD_init2 runs StartPAD2 for the types it accepts, so it leaves
+        // the critical section too (OpenBIOS initPadHighLevel).
+        (Table::B, 0x15) => {
+            let v0 = crate::hle_pad::pad_init2(bus, args[0], args[1], args[2], args[3], sp);
+            if v0 == 0 {
+                Done(0)
+            } else {
+                gprs[2] = v0;
+                leave_critical_section(gprs)
+            }
+        }
+        (Table::B, 0x16) => Done(crate::hle_pad::pad_dr(bus)),
 
-        // B(0x17) ReturnFromException is completed by Cpu::execute_one:
-        // when a side-loaded guest IRQ hook is active it restores the
-        // interrupted CPU frame instead of returning to this call's `$ra`.
-        (Table::B, 0x17) => 0,
-
-        // B(0x18) ResetEntryInt / B(0x19) HookEntryInt. The latter receives
-        // a BIOS-compatible JumpBuffer pointer (ra, sp, fp, s0..s7, gp).
-        // Retaining it lets side-loaded EXEs use their real guest ISR rather
-        // than relying on a synthetic VBlank callback.
+        // B(18h) ResetEntryInt: default exit buffer, returned.
+        // B(19h) HookEntryInt(buf): exit through `buf` after the chains.
         (Table::B, 0x18) => {
-            bus.set_hle_irq_jump_buffer(None);
-            0
+            ex::set_exit_jmpbuf(bus, ex::DEFAULT_JMPBUF);
+            Done(ex::DEFAULT_JMPBUF)
         }
         (Table::B, 0x19) => {
-            bus.set_hle_irq_jump_buffer(Some(args[0]));
-            0
+            ex::set_exit_jmpbuf(bus, args[0]);
+            Done(0)
         }
 
-        // B(0x3D) std_out_putchar -- same as A(0x3C).
+        // B(35h) write(fd, src, len): only the TTY (fd 0/1) exists so far;
+        // its bytes go to the host console. Returns the length written.
+        // File functions (psx-spx "BIOS File Functions"): B(32h)..B(36h)
+        // and their A(00h)..A(04h) aliases, driver calls through the DCBs
+        // in RAM, AddDevice/RemoveDevice, _get_errno/_get_error.
+        (Table::B, 0x32) | (Table::A, 0x00) => file_call(files::open(bus, gprs, args[0], args[1])),
+        (Table::B, 0x33) | (Table::A, 0x01) => Done(files::lseek(bus, args[0], args[1], args[2])),
+        (Table::B, 0x34) | (Table::A, 0x02) => {
+            file_call(files::read_write(bus, gprs, args[0], args[1], args[2], 1))
+        }
+        (Table::B, 0x35) | (Table::A, 0x03) => {
+            file_call(files::read_write(bus, gprs, args[0], args[1], args[2], 2))
+        }
+        (Table::B, 0x36) | (Table::A, 0x04) => file_call(files::close(bus, gprs, args[0])),
+        (Table::B, 0x47) => file_call(files::add_device(bus, gprs, args[0])),
+        (Table::B, 0x48) => file_call(files::remove_device(bus, gprs, args[0])),
+        (Table::B, 0x54) => Done(files::errno(bus)),
+        (Table::B, 0x41) => file_call(files::device_call(
+            bus,
+            gprs,
+            files::dcb::FORMAT,
+            args[0],
+            None,
+        )),
+        (Table::B, 0x42) => file_call(files::firstfile(bus, gprs, args[0], args[1])),
+        (Table::B, 0x43) => file_call(files::nextfile(bus, gprs, args[0])),
+        (Table::B, 0x44) => file_call(files::device_call(
+            bus,
+            gprs,
+            files::dcb::RENAME,
+            args[0],
+            Some(args[1]),
+        )),
+        (Table::B, 0x45) => file_call(files::device_call(
+            bus,
+            gprs,
+            files::dcb::ERASE,
+            args[0],
+            None,
+        )),
+        (Table::B, 0x46) => file_call(files::device_call(
+            bus,
+            gprs,
+            files::dcb::UNDELETE,
+            args[0],
+            None,
+        )),
+        // B(51h) Krom2RawAdd(sjis) and B(53h) Krom2Offset(sjis): the HLE
+        // kernel's own font, installed in the ROM image (hle_font.rs).
+        (Table::B, 0x51) => {
+            bus.hle_font_request(args[0]);
+            Done(crate::hle_font::krom2_raw_add(args[0]))
+        }
+        (Table::B, 0x53) => Done(u32::from(crate::hle_font::krom2_offset(args[0]))),
+        (Table::B, 0x55) => Done(files::file_error(bus, args[0])),
+
+        // B(3Dh) putchar -- same as A(3Ch).
         (Table::B, 0x3D) => {
             write_byte_to_stdout(args[0] as u8);
-            0
+            Done(0)
+        }
+        // B(3Fh) puts -- same as A(3Eh).
+        (Table::B, 0x3F) => {
+            write_puts_to_stdout(bus, args[0]);
+            Done(0)
         }
 
-        // B(0x4A) InitCard, B(0x4B) StartCard, B(0x4C) StopCard.
-        (Table::B, 0x4A) | (Table::B, 0x4B) | (Table::B, 0x4C) => 1,
+        // B(56h) GetC0Table / B(57h) GetB0Table. Psy-Q libraries call
+        // these only to patch the kernel; the code after the call is
+        // hashed and known variants are handled as OpenBIOS does.
+        (Table::B, 0x56) | (Table::B, 0x57) => {
+            let (patch_table, base) = if func == 0x56 {
+                (2, k::C0_TABLE)
+            } else {
+                (1, k::B0_TABLE)
+            };
+            let (site, rewrote) = k::handle_patch_site(bus, patch_table, gprs[31]);
+            *flush |= rewrote;
+            bus.hle_bios_record_patch(site, gprs[31]);
+            Done(base)
+        }
+
+        // B(5Bh) ChangeClearPAD(flag): pad/card handler VBlank auto-ack.
+        // Returns the previous setting (OpenBIOS setSIO0AutoAck).
+        (Table::B, 0x5B) => {
+            let previous = k::peek32(bus, k::kvar::SIO0_AUTO_ACK);
+            k::poke32(bus, k::kvar::SIO0_AUTO_ACK, args[0]);
+            Done(previous)
+        }
+
+        // B(4Ah) InitCARD2, B(4Bh) StartCARD2, B(4Ch) StopCARD2, B(4Dh)
+        // _card_info_subfunc, B(4Eh) _card_write, B(4Fh) _card_read,
+        // B(50h) _new_card, B(58h) _card_chan, B(5Ch) _card_status,
+        // B(5Dh) _card_wait. The bytes move on IRQ7 (hle_card).
+        (Table::B, 0x4A) => {
+            *flush = true;
+            Done(card::init_card(bus, args[0]))
+        }
+        (Table::B, 0x4B) => {
+            gprs[2] = card::start_card(bus);
+            leave_critical_section(gprs)
+        }
+        (Table::B, 0x4C) => {
+            gprs[2] = card::stop_card(bus);
+            leave_critical_section(gprs)
+        }
+        (Table::B, 0x4D) => Done(card::card_info_internal(bus, args[0])),
+        (Table::B, 0x4E) => Done(card::card_write(bus, args[0], args[1], args[2])),
+        (Table::B, 0x4F) => Done(card::card_read(bus, args[0], args[1], args[2])),
+        (Table::B, 0x50) => {
+            card::new_card(bus);
+            Done(gprs[2])
+        }
+        (Table::B, 0x58) => Done(card::card_chan(bus)),
+        (Table::B, 0x5C) => Done(card::card_status(bus, args[0])),
+        (Table::B, 0x5D) => match card::card_wait(bus, args[0]) {
+            Some(v) => Done(v),
+            None => Retry,
+        },
 
         // --- C-table (kernel interrupt handlers) ---
 
-        // C(0x00) EnqueueTimerAndVblankIrqs / C(0x01) EnqueueSyscallHandler.
-        // Install canned handlers. We never actually invoke them --
-        // but accepting the registration lets games proceed.
-        (Table::C, 0x00) | (Table::C, 0x01) | (Table::C, 0x02) | (Table::C, 0x03) => 0,
+        // Exception chains (psx-spx "Priority Chains"):
+        // C(00h) EnqueueTimerAndVblankIrqs, C(01h) EnqueueSyscallHandler,
+        // C(02h) SysEnqIntRP, C(03h) SysDeqIntRP, C(04h)/C(05h) free
+        // EvCB/TCB slot, C(07h) InstallExceptionHandlers, C(0Ch)
+        // InitDefInt, C(0Dh) SetIrqAutoAck.
+        (Table::C, 0x00) => {
+            ex::enqueue_rcnt(bus, args[0], true);
+            Done(0)
+        }
+        (Table::C, 0x01) => {
+            ex::enqueue_syscall_handler(bus, args[0]);
+            Done(0)
+        }
+        (Table::C, 0x02) => {
+            ex::enq_int(bus, args[0], args[1]);
+            Done(0)
+        }
+        (Table::C, 0x03) => Done(ex::deq_int(bus, args[0], args[1])),
+        (Table::C, 0x04) => Done(ex::free_evcb(bus).unwrap_or(u32::MAX)),
+        (Table::C, 0x05) => Done(ex::free_tcb(bus).unwrap_or(u32::MAX)),
+        (Table::C, 0x07) => {
+            ex::install_vector(bus);
+            *flush = true;
+            Done(0)
+        }
+        (Table::C, 0x0C) => {
+            ex::enqueue_defint(bus, args[0]);
+            Done(0)
+        }
+        (Table::C, 0x0D) => {
+            ex::set_irq_autoack(bus, args[0], args[1]);
+            Done(0)
+        }
 
-        // C(0x0A) ChangeClearRCnt -- affects how the kernel's
-        // root-counter handler clears flags. No-op.
-        (Table::C, 0x0A) => args[1],
+        // C(08h) SysInitMemory(addr, size): new kernel heap.
+        (Table::C, 0x08) => {
+            k::init_heap(bus, Heap::Kernel, args[0], args[1]);
+            Done(0)
+        }
 
-        // Everything else: zero. Games that trip a real missing
-        // syscall will show up in the HLE call histogram and we
-        // can fill them in one at a time.
-        _ => 0,
+        // --- Kernel-internal functions handed out by counterpatches ---
+        (Table::Kernel, k::internal::START_PAD) => {
+            k::poke32(bus, k::kvar::PAD_STARTED, 1);
+            Done(0)
+        }
+        (Table::Kernel, k::internal::STOP_PAD) => {
+            k::poke32(bus, k::kvar::PAD_STARTED, 0);
+            Done(0)
+        }
+        (Table::Kernel, k::internal::SET_PAD_OUTPUT_DATA) => {
+            for (i, value) in args.iter().enumerate() {
+                k::poke32(bus, k::kvar::PAD_OUTPUT + 4 * i as u32, *value);
+            }
+            Done(0)
+        }
+
+        // --- File layer continuations, kernel devices, CD-ROM driver ---
+        (Table::Kernel, n)
+            if (files::internal::CONT_OPEN..=files::internal::CONT_TEMP).contains(&n) =>
+        {
+            let v0 = gprs[2];
+            let saved = files::pop_frame(bus, gprs);
+            Done(files::continuation(bus, n, v0, saved))
+        }
+        (Table::Kernel, files::internal::NOP) => Done(0),
+        (Table::Kernel, n) if (0x21..=0x2C).contains(&n) && n != 0x28 && n != 0x29 => {
+            use crate::hle_bu as bu;
+            let result = match n {
+                bu::internal::OPEN => bu::open(bus, args[0], args[1], args[2]),
+                bu::internal::READ => bu::read_write(bus, args[0], args[1], args[2], false),
+                bu::internal::WRITE => bu::read_write(bus, args[0], args[1], args[2], true),
+                bu::internal::CLOSE => Some(bu::close(bus, args[0])),
+                bu::internal::ERASE => bu::erase(bus, args[0], args[1]),
+                bu::internal::FIRSTFILE => bu::firstfile(bus, args[0], args[1], args[2]),
+                bu::internal::NEXTFILE => Some(bu::nextfile(bus, args[0], args[1])),
+                bu::internal::FORMAT => bu::format(bus, args[0]),
+                bu::internal::RENAME => bu::rename(bus, args[0], args[1], args[3]),
+                _ => Some(bu::undelete(bus, args[0])),
+            };
+            match result {
+                Some(v) => match ex::flush_events_returning(bus, gprs, gprs[31], v) {
+                    Some(target) => Jump(target),
+                    None => Done(v),
+                },
+                None => Retry,
+            }
+        }
+        (Table::Kernel, crate::hle_pad::internal::VERIFIER) => Done(crate::hle_pad::verifier(bus)),
+        (Table::Kernel, crate::hle_pad::internal::HANDLER) => match crate::hle_pad::handler(bus) {
+            Some(v) => match ex::flush_events(bus, gprs, gprs[31]) {
+                Some(target) => Jump(target),
+                None => Done(v),
+            },
+            None => Retry,
+        },
+        (Table::Kernel, card::internal::VERIFIER) => Done(card::verifier(bus)),
+        (Table::Kernel, card::internal::FAST) => Jump(card::fast(bus)),
+        (Table::Kernel, card::internal::HANDLER) => {
+            card::handler(bus);
+            match ex::flush_events(bus, gprs, gprs[31]) {
+                Some(target) => Jump(target),
+                None => Done(0),
+            }
+        }
+        (Table::Kernel, files::internal::TTY_INOUT) => Done(files::tty_inout(
+            bus,
+            args[0],
+            args[1],
+            &mut write_byte_to_stdout,
+        )),
+        (Table::Kernel, files::internal::CD_OPEN) => {
+            match files::cd_open_step(bus, args[0], args[1]) {
+                Some(v) => Done(v),
+                None => Retry,
+            }
+        }
+        (Table::Kernel, files::internal::CD_READ) => {
+            match files::cd_read_file_step(bus, args[0], args[1], args[2]) {
+                Some(v) => Done(v),
+                None => Retry,
+            }
+        }
+        (Table::Kernel, files::internal::CD_IO_IRQ) => match files::cd_io_irq(bus) {
+            Some(spec) => {
+                gprs[4] = 0xF000_0003;
+                gprs[5] = spec;
+                gprs[31] = ex::code().return_from_exception;
+                Jump(ex::code().deliver_event)
+            }
+            None => Done(0),
+        },
+        (Table::Kernel, files::internal::CD_DMA_IRQ) => {
+            if files::cd_dma_irq(bus) {
+                Jump(ex::code().return_from_exception)
+            } else {
+                Done(0)
+            }
+        }
+
+        // C(0Ah) ChangeClearRCnt(t, flag): root-counter auto-ack; returns
+        // the previous flag.
+        (Table::C, 0x0A) => Done(ex::change_clear_rcnt(bus, args[0], args[1])),
+
+        // C(1Ah) set_card_find_mode / C(1Dh) get_card_find_mode: whether
+        // firstfile/nextfile list files (0) or deleted files (1).
+        (Table::C, 0x1A) => {
+            k::poke32(bus, crate::hle_bu::kvar::FIND_MODE, args[0]);
+            Done(0)
+        }
+        (Table::C, 0x1D) => Done(k::peek32(bus, crate::hle_bu::kvar::FIND_MODE)),
+
+        // Default SYSCALL/exception verifier and root-counter handlers,
+        // reached from the exception handler's chains.
+        (Table::Kernel, ex::internal::DELIVER_NEXT) => Jump(ex::deliver_next(bus, gprs)),
+        (Table::Kernel, ex::internal::SYSCALL_VERIFIER) => match ex::syscall_verifier(bus) {
+            ex::SyscallAction::Pass => Done(0),
+            ex::SyscallAction::Return => Jump(ex::code().return_from_exception),
+            ex::SyscallAction::Deliver(class, spec, then) => {
+                gprs[4] = class;
+                gprs[5] = spec;
+                gprs[31] = then;
+                Jump(ex::code().deliver_event)
+            }
+        },
+        (Table::Kernel, n)
+            if (ex::internal::RCNT_HANDLER..ex::internal::RCNT_HANDLER + 4).contains(&n) =>
+        {
+            if ex::rcnt_handler(bus, n - ex::internal::RCNT_HANDLER) {
+                Jump(ex::code().return_from_exception)
+            } else {
+                Done(0)
+            }
+        }
+
+        // Everything else is loud: logged once per function with its
+        // arguments and caller, and a stop in strict mode.
+        _ => Unimplemented,
+    }
+}
+
+/// DMA channel 2 (GPU) control register.
+const D2_CHCR: u32 = 0x1F80_10A8;
+
+/// One pass of gpu_sync. With GPU DMA off: ready once GPUSTAT bit 28 is set.
+/// With DMA on: wait for D2_CHCR bit 24 to clear, then bit 28, then turn
+/// DMA off with GP1(04h). Returns false while still waiting.
+fn gpu_sync(bus: &mut Bus) -> bool {
+    let stat = bus.read32(crate::gpu::GP1_ADDR);
+    let dma_on = stat & 0x6000_0000 != 0;
+    if dma_on && bus.read32(D2_CHCR) & (1 << 24) != 0 {
+        return false;
+    }
+    if stat & (1 << 28) == 0 {
+        return false;
+    }
+    if dma_on {
+        bus.write32(crate::gpu::GP1_ADDR, 0x0400_0000);
+    }
+    true
+}
+
+/// Registers saved by setjmp, in buffer order: ra, sp, fp, s0..s7, gp.
+const JMPBUF_REGS: [usize; 12] = [31, 29, 30, 16, 17, 18, 19, 20, 21, 22, 23, 28];
+
+/// RAM_SIZE memory-control register.
+const RAM_SIZE_PORT: u32 = 0x1F80_1060;
+/// Kernel variable holding the effective RAM size in megabytes.
+pub(crate) const RAM_SIZE_MB_VAR: u32 = 0x0000_0060;
+
+fn set_mem_size(bus: &mut Bus, megabytes: u32) {
+    let current = bus.read32(RAM_SIZE_PORT);
+    let value = match megabytes {
+        2 => current & !0x300,
+        8 => current | 0x300,
+        _ => return,
+    };
+    bus.write32(RAM_SIZE_PORT, value);
+    bus.write32(RAM_SIZE_MB_VAR, megabytes);
+}
+
+/// Stateless BIOS memory and string helpers. Behaviour, including the
+/// null-pointer and length refusals, follows psx-spx. Every loop is capped
+/// at the size of main RAM so a bad guest pointer cannot hang the host.
+mod libc {
+    use crate::Bus;
+
+    /// Largest transfer or scan one call performs (2 MiB, the RAM size).
+    const MAX_BYTES: u32 = 0x20_0000;
+    /// Lengths above this are refused by the BIOS memory functions.
+    const MAX_LEN: u32 = 0x7FFF_FFFF;
+
+    fn rd(bus: &Bus, addr: u32) -> u8 {
+        bus.try_read8(addr).unwrap_or(0)
+    }
+
+    /// Forward byte copy shared by memcpy and bcopy. `guard` is the pointer
+    /// the BIOS refuses when null: `dst` for memcpy, `src` for bcopy.
+    pub(super) fn memcpy(bus: &mut Bus, dst: u32, src: u32, len: u32, guard: u32) {
+        if guard == 0 || len > MAX_LEN {
+            return;
+        }
+        for i in 0..len.min(MAX_BYTES) {
+            let b = rd(bus, src.wrapping_add(i));
+            let _ = bus.write8_safe(dst.wrapping_add(i), b);
+        }
+    }
+
+    /// A(2Ch) memmove with its documented bug (psx-spx): when src < dst
+    /// and the regions do NOT overlap (dst >= src + len) it copies
+    /// backwards and moves len + 1 bytes, [src+len..src] down to
+    /// [dst+len..dst]; otherwise it is memcpy.
+    pub(super) fn memmove(bus: &mut Bus, dst: u32, src: u32, len: u32) {
+        if dst == 0 || len > MAX_LEN {
+            return;
+        }
+        if src < dst && dst >= src.wrapping_add(len) {
+            for i in (0..=len.min(MAX_BYTES)).rev() {
+                let b = rd(bus, src.wrapping_add(i));
+                let _ = bus.write8_safe(dst.wrapping_add(i), b);
+            }
+        } else {
+            memcpy(bus, dst, src, len, dst);
+        }
+    }
+
+    /// A(2Dh) memcmp / A(29h) bcmp with their documented bug (psx-spx):
+    /// on a mismatch at N the result is the difference of the bytes AFTER
+    /// it, [src1+N+1] - [src2+N+1]; 0 when equal or when either pointer
+    /// is null.
+    pub(super) fn memcmp(bus: &Bus, a: u32, b: u32, len: u32) -> u32 {
+        if a == 0 || b == 0 || len > MAX_LEN {
+            return 0;
+        }
+        let Some(n) = (0..len.min(MAX_BYTES))
+            .find(|&i| rd(bus, a.wrapping_add(i)) != rd(bus, b.wrapping_add(i)))
+        else {
+            return 0;
+        };
+        let x = i32::from(rd(bus, a.wrapping_add(n + 1)));
+        let y = i32::from(rd(bus, b.wrapping_add(n + 1)));
+        (x - y) as u32
+    }
+
+    /// memset/bzero: returns `dst`, or 0 when the fill is refused or empty.
+    pub(super) fn memset(bus: &mut Bus, dst: u32, fill: u8, len: u32) -> u32 {
+        if dst == 0 || len == 0 || len > MAX_LEN {
+            return 0;
+        }
+        for i in 0..len.min(MAX_BYTES) {
+            let _ = bus.write8_safe(dst.wrapping_add(i), fill);
+        }
+        dst
+    }
+
+    pub(super) fn memchr(bus: &Bus, src: u32, byte: u8, len: u32) -> u32 {
+        if src == 0 || len > MAX_LEN {
+            return 0;
+        }
+        (0..len.min(MAX_BYTES))
+            .map(|i| src.wrapping_add(i))
+            .find(|&addr| rd(bus, addr) == byte)
+            .unwrap_or(0)
+    }
+
+    pub(super) fn strlen(bus: &Bus, src: u32) -> u32 {
+        if src == 0 {
+            return 0;
+        }
+        (0..MAX_BYTES)
+            .find(|&i| rd(bus, src.wrapping_add(i)) == 0)
+            .unwrap_or(MAX_BYTES)
+    }
+
+    /// strcmp (`maxlen` = None) and strncmp. Mismatching bytes are
+    /// sign-extended before subtracting; null pointers give 0 (both), -1
+    /// (first) or +1 (second).
+    pub(super) fn strncmp(bus: &Bus, s1: u32, s2: u32, maxlen: Option<u32>) -> u32 {
+        match (s1, s2) {
+            (0, 0) => return 0,
+            (0, _) => return u32::MAX,
+            (_, 0) => return 1,
+            _ => {}
+        }
+        for i in 0..maxlen.unwrap_or(MAX_BYTES).min(MAX_BYTES) {
+            let a = rd(bus, s1.wrapping_add(i));
+            let b = rd(bus, s2.wrapping_add(i));
+            if a != b {
+                return (i32::from(a as i8) - i32::from(b as i8)) as u32;
+            }
+            if a == 0 {
+                break;
+            }
+        }
+        0
+    }
+
+    /// strcpy: copies up to and including the terminator; returns `dst`,
+    /// or 0 when either pointer is null.
+    pub(super) fn strcpy(bus: &mut Bus, dst: u32, src: u32) -> u32 {
+        if dst == 0 || src == 0 {
+            return 0;
+        }
+        for i in 0..MAX_BYTES {
+            let b = rd(bus, src.wrapping_add(i));
+            let _ = bus.write8_safe(dst.wrapping_add(i), b);
+            if b == 0 {
+                break;
+            }
+        }
+        dst
+    }
+
+    /// strncpy: at most `maxlen` bytes. A source of `maxlen` or more
+    /// characters gets no terminator; a shorter one is zero padded.
+    pub(super) fn strncpy(bus: &mut Bus, dst: u32, src: u32, maxlen: u32) -> u32 {
+        if dst == 0 || src == 0 {
+            return 0;
+        }
+        let limit = maxlen.min(MAX_BYTES);
+        let mut i = 0;
+        while i < limit {
+            let b = rd(bus, src.wrapping_add(i));
+            let _ = bus.write8_safe(dst.wrapping_add(i), b);
+            i += 1;
+            if b == 0 {
+                break;
+            }
+        }
+        while i < limit {
+            let _ = bus.write8_safe(dst.wrapping_add(i), 0);
+            i += 1;
+        }
+        dst
+    }
+
+    /// strcat: appends `src` at the terminator of `dst`; returns `dst`, or
+    /// 0 when either pointer is null.
+    pub(super) fn strcat(bus: &mut Bus, dst: u32, src: u32) -> u32 {
+        if dst == 0 || src == 0 {
+            return 0;
+        }
+        let end = dst.wrapping_add(strlen(bus, dst));
+        strcpy(bus, end, src);
+        dst
+    }
+
+    /// strtol family. Skips blanks (09h..0Dh, 20h), then an optional "-"
+    /// (when `signed`), then a prefix overriding `base`: "0b" binary, "0x"
+    /// hex, and "o" octal, or for atoi (`atoi_octal`) a leading "0" octal.
+    /// Bases outside 2..=36 mean 10. Digits accumulate without overflow
+    /// checks until a non-digit. Returns `(value, end address)`.
+    pub(super) fn strtol(
+        bus: &Bus,
+        src: u32,
+        base: u32,
+        signed: bool,
+        atoi_octal: bool,
+    ) -> (u32, u32) {
+        let mut p = src;
+        let at = |p: u32| rd(bus, p).to_ascii_lowercase();
+        while matches!(at(p), 0x09..=0x0D | b' ') {
+            p = p.wrapping_add(1);
+        }
+        let negative = signed && at(p) == b'-';
+        if negative {
+            p = p.wrapping_add(1);
+        }
+        let mut base = if (2..=36).contains(&base) { base } else { 10 };
+        match (at(p), at(p.wrapping_add(1))) {
+            (b'0', b'b') => {
+                base = 2;
+                p = p.wrapping_add(2);
+            }
+            (b'0', b'x') => {
+                base = 16;
+                p = p.wrapping_add(2);
+            }
+            (b'o', _) if !atoi_octal => {
+                base = 8;
+                p = p.wrapping_add(1);
+            }
+            (b'0', _) if atoi_octal => {
+                base = 8;
+                p = p.wrapping_add(1);
+            }
+            _ => {}
+        }
+        let mut value: u32 = 0;
+        for _ in 0..MAX_BYTES {
+            let digit = match (at(p) as char).to_digit(36) {
+                Some(d) if d < base => d,
+                _ => break,
+            };
+            value = value.wrapping_mul(base).wrapping_add(digit);
+            p = p.wrapping_add(1);
+        }
+        (
+            if negative {
+                value.wrapping_neg()
+            } else {
+                value
+            },
+            p,
+        )
+    }
+
+    /// index/strchr (`last` = false) and rindex/strrchr. Returns an
+    /// address, never an offset; searching for 0 finds the terminator.
+    pub(super) fn strchr(bus: &Bus, src: u32, ch: u8, last: bool) -> u32 {
+        if src == 0 {
+            return 0;
+        }
+        let mut found = 0;
+        for i in 0..MAX_BYTES {
+            let addr = src.wrapping_add(i);
+            let b = rd(bus, addr);
+            if b == ch {
+                found = addr;
+                if !last {
+                    break;
+                }
+            }
+            if b == 0 {
+                break;
+            }
+        }
+        found
     }
 }
 
@@ -240,6 +1358,17 @@ fn write_byte_to_stdout(byte: u8) {
     let mut out = std::io::stdout().lock();
     let _ = out.write_all(&[byte]);
     let _ = out.flush();
+}
+
+/// A(3Eh)/B(3Fh) puts: a null pointer prints `<NULL>` (psx-spx).
+fn write_puts_to_stdout(bus: &mut Bus, addr: u32) {
+    if addr == 0 {
+        for &b in b"<NULL>" {
+            write_byte_to_stdout(b);
+        }
+        return;
+    }
+    write_cstring_to_stdout(bus, addr);
 }
 
 fn write_cstring_to_stdout(bus: &mut Bus, addr: u32) {
@@ -432,8 +1561,234 @@ fn pad_existing_field(out: &mut Vec<u8>, start: usize, width: usize, pad: u8, le
 
 #[cfg(test)]
 mod tests {
-    use super::{append_padded, dispatch, pad_existing_field};
+    use super::{append_padded, dispatch, pad_existing_field, Outcome, Table};
     use crate::Bus;
+
+    const RA: u32 = 0x8001_0100;
+
+    fn hle_bus() -> Bus {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        bus
+    }
+
+    fn call(bus: &mut Bus, vector: u32, func: u32, args: [u32; 4]) -> u32 {
+        let mut gprs = [0u32; 32];
+        gprs[4..8].copy_from_slice(&args);
+        gprs[9] = func;
+        gprs[29] = 0x801F_FF00;
+        gprs[31] = RA;
+        dispatch(vector, bus, &mut gprs)
+            .expect("BIOS vector dispatch")
+            .v0
+            .expect("HLE function, not a guest jump")
+    }
+
+    fn put_str(bus: &mut Bus, addr: u32, bytes: &[u8]) {
+        for (i, &b) in bytes.iter().enumerate() {
+            bus.write8_safe(addr + i as u32, b);
+        }
+    }
+
+    fn get_bytes(bus: &Bus, addr: u32, len: u32) -> Vec<u8> {
+        (0..len).map(|i| bus.try_read8(addr + i).unwrap()).collect()
+    }
+
+    #[test]
+    fn krom2rawadd_points_into_the_hle_font_in_rom() {
+        let mut bus = hle_bus();
+        // Full-width 'A' (JIS row 3, cell 33) is bank-1 cell 157.
+        let addr = call(&mut bus, 0xB0, 0x51, [0x8260, 0, 0, 0]);
+        assert_eq!(addr, 0xBFC6_6000 + 157 * 30);
+        let cell = get_bytes(&bus, addr, 30);
+        assert_eq!(cell, crate::hle_font::glyphs()[&0x8260].to_vec());
+        assert_eq!(call(&mut bus, 0xB0, 0x53, [0x8260, 0, 0, 0]), 157);
+        assert_eq!(call(&mut bus, 0xB0, 0x51, [0x0041, 0, 0, 0]), u32::MAX);
+        assert!(bus.hle_font_requests().contains(&0x8260));
+    }
+
+    #[test]
+    fn memmove_and_memcmp_keep_the_documented_bugs() {
+        let mut bus = hle_bus();
+        put_str(&mut bus, 0x8002_0000, b"ABCDEFGH");
+        // Non-overlapping, src < dst: backwards, one byte too many.
+        call(&mut bus, 0xA0, 0x2C, [0x8002_0100, 0x8002_0000, 2, 0]);
+        assert_eq!(get_bytes(&bus, 0x8002_0100, 4), b"ABC\0");
+        // Overlapping forward move works like memcpy.
+        call(&mut bus, 0xA0, 0x2C, [0x8002_0000, 0x8002_0001, 3, 0]);
+        assert_eq!(get_bytes(&bus, 0x8002_0000, 4), b"BCDD");
+        put_str(&mut bus, 0x8002_0200, b"AXC\0");
+        put_str(&mut bus, 0x8002_0300, b"AYE\0");
+        // Mismatch at 1 reports the bytes after it: 'C' - 'E' = -2.
+        let v = call(&mut bus, 0xA0, 0x2D, [0x8002_0200, 0x8002_0300, 3, 0]);
+        assert_eq!(v as i32, -2);
+        assert_eq!(call(&mut bus, 0xA0, 0x29, [0, 0x8002_0300, 3, 0]), 0);
+    }
+
+    #[test]
+    fn memcpy_and_bcopy_return_their_guarded_pointer() {
+        let mut bus = hle_bus();
+        put_str(&mut bus, 0x8002_0000, b"abcd");
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x2A, [0x8003_0000, 0x8002_0000, 4, 0]),
+            0x8003_0000
+        );
+        assert_eq!(get_bytes(&bus, 0x8003_0000, 4), b"abcd");
+        // bcopy swaps the operands and returns src.
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x27, [0x8002_0000, 0x8003_1000, 3, 0]),
+            0x8002_0000
+        );
+        assert_eq!(get_bytes(&bus, 0x8003_1000, 3), b"abc");
+        // memcpy refuses dst=0 and huge lengths but still returns dst.
+        assert_eq!(call(&mut bus, 0xA0, 0x2A, [0, 0x8002_0000, 4, 0]), 0);
+        assert_eq!(
+            call(
+                &mut bus,
+                0xA0,
+                0x2A,
+                [0x8003_2000, 0x8002_0000, 0x8000_0000, 0]
+            ),
+            0x8003_2000
+        );
+        assert_eq!(get_bytes(&bus, 0x8003_2000, 1), [0]);
+    }
+
+    #[test]
+    fn memset_and_bzero_follow_the_documented_return_values() {
+        let mut bus = hle_bus();
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x2B, [0x8002_0000, 0x5A, 3, 0]),
+            0x8002_0000
+        );
+        assert_eq!(get_bytes(&bus, 0x8002_0000, 4), [0x5A, 0x5A, 0x5A, 0]);
+        assert_eq!(call(&mut bus, 0xA0, 0x2B, [0x8002_0000, 0x11, 0, 0]), 0);
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x28, [0x8002_0000, 2, 0, 0]),
+            0x8002_0000
+        );
+        assert_eq!(get_bytes(&bus, 0x8002_0000, 3), [0, 0, 0x5A]);
+    }
+
+    #[test]
+    fn malloc_slot_no_longer_writes_memory() {
+        let mut bus = hle_bus();
+        put_str(&mut bus, 0x8002_0000, b"keep");
+        // A(33h) is malloc; it used to run memset over its arguments.
+        call(&mut bus, 0xA0, 0x33, [0x8002_0000, 0, 4, 0]);
+        assert_eq!(get_bytes(&bus, 0x8002_0000, 4), b"keep");
+    }
+
+    #[test]
+    fn string_compare_sign_extends_and_handles_null_pointers() {
+        let mut bus = hle_bus();
+        put_str(&mut bus, 0x8002_0000, b"abc\0");
+        put_str(&mut bus, 0x8002_0100, b"abd\0");
+        put_str(&mut bus, 0x8002_0200, &[0x80, 0]);
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x17, [0x8002_0000, 0x8002_0000, 0, 0]),
+            0
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x17, [0x8002_0000, 0x8002_0100, 0, 0]) as i32,
+            -1
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x18, [0x8002_0000, 0x8002_0100, 2, 0]),
+            0
+        );
+        // 0x80 sign-extends to -128, so it sorts below 'a'.
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x17, [0x8002_0200, 0x8002_0000, 0, 0]) as i32,
+            -128 - 0x61
+        );
+        assert_eq!(call(&mut bus, 0xA0, 0x17, [0, 0, 0, 0]), 0);
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x17, [0, 0x8002_0000, 0, 0]) as i32,
+            -1
+        );
+        assert_eq!(call(&mut bus, 0xA0, 0x17, [0x8002_0000, 0, 0, 0]), 1);
+    }
+
+    #[test]
+    fn string_copy_length_and_search() {
+        let mut bus = hle_bus();
+        put_str(&mut bus, 0x8002_0000, b"hello\0");
+        assert_eq!(call(&mut bus, 0xA0, 0x1B, [0x8002_0000, 0, 0, 0]), 5);
+        assert_eq!(call(&mut bus, 0xA0, 0x1B, [0, 0, 0, 0]), 0);
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x19, [0x8003_0000, 0x8002_0000, 0, 0]),
+            0x8003_0000
+        );
+        assert_eq!(get_bytes(&bus, 0x8003_0000, 6), b"hello\0");
+        assert_eq!(call(&mut bus, 0xA0, 0x19, [0, 0x8002_0000, 0, 0]), 0);
+
+        // strncpy: short source is zero padded, long source gets no terminator.
+        put_str(&mut bus, 0x8003_1000, &[0xEE; 8]);
+        call(&mut bus, 0xA0, 0x1A, [0x8003_1000, 0x8002_0000, 7, 0]);
+        assert_eq!(get_bytes(&bus, 0x8003_1000, 8), b"hello\0\0\xEE");
+        put_str(&mut bus, 0x8003_2000, &[0xEE; 4]);
+        call(&mut bus, 0xA0, 0x1A, [0x8003_2000, 0x8002_0000, 3, 0]);
+        assert_eq!(get_bytes(&bus, 0x8003_2000, 4), b"hel\xEE");
+
+        put_str(&mut bus, 0x8003_3000, b"ab\0");
+        call(&mut bus, 0xA0, 0x15, [0x8003_3000, 0x8002_0000, 0, 0]);
+        assert_eq!(get_bytes(&bus, 0x8003_3000, 8), b"abhello\0");
+
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x1E, [0x8002_0000, u32::from(b'l'), 0, 0]),
+            0x8002_0002
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x1F, [0x8002_0000, u32::from(b'l'), 0, 0]),
+            0x8002_0003
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x1C, [0x8002_0000, 0, 0, 0]),
+            0x8002_0005
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x1C, [0x8002_0000, u32::from(b'z'), 0, 0]),
+            0
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x2E, [0x8002_0000, u32::from(b'o'), 5, 0]),
+            0x8002_0004
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x2E, [0x8002_0000, u32::from(b'o'), 4, 0]),
+            0
+        );
+    }
+
+    #[test]
+    fn set_mem_updates_ram_size_port_and_kernel_variable() {
+        let mut bus = hle_bus();
+        call(&mut bus, 0xA0, 0x9F, [8, 0, 0, 0]);
+        assert_eq!(bus.read32(0x1F80_1060) & 0x300, 0x300);
+        assert_eq!(bus.read32(0x60), 8);
+        call(&mut bus, 0xA0, 0x9F, [2, 0, 0, 0]);
+        assert_eq!(bus.read32(0x1F80_1060) & 0x300, 0);
+        assert_eq!(bus.read32(0x60), 2);
+        // Anything else is ignored.
+        call(&mut bus, 0xA0, 0x9F, [4, 0, 0, 0]);
+        assert_eq!(bus.read32(0x60), 2);
+    }
+
+    #[test]
+    fn abs_and_case_conversion() {
+        let mut bus = hle_bus();
+        assert_eq!(call(&mut bus, 0xA0, 0x0E, [(-5i32) as u32, 0, 0, 0]), 5);
+        assert_eq!(call(&mut bus, 0xA0, 0x0F, [7, 0, 0, 0]), 7);
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x25, [u32::from(b'q'), 0, 0, 0]),
+            u32::from(b'Q')
+        );
+        assert_eq!(
+            call(&mut bus, 0xA0, 0x26, [0x141, 0, 0, 0]),
+            u32::from(b'a')
+        );
+    }
 
     #[test]
     fn printf_field_padding_handles_both_alignments() {
@@ -449,16 +1804,105 @@ mod tests {
     }
 
     #[test]
+    fn unimplemented_and_stubbed_calls_are_recorded_once_per_function() {
+        let mut bus = hle_bus();
+        assert!(bus.hle_bios_first_unimplemented().is_none());
+        // A(3Ah) abort is unimplemented.
+        assert_eq!(call(&mut bus, 0xA0, 0x3A, [0x40, 0, 0, 0]), 0);
+        assert_eq!(call(&mut bus, 0xA0, 0x3A, [0x80, 0, 0, 0]), 0);
+        // Implemented calls leave no record.
+        call(&mut bus, 0xA0, 0x1B, [0, 0, 0, 0]);
+
+        let records = bus.hle_bios_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].outcome, Outcome::Unimplemented);
+        let first = bus.hle_bios_first_unimplemented().unwrap();
+        assert_eq!((first.table, first.func), (Table::A, 0x3A));
+        assert_eq!(first.args[0], 0x40);
+        assert_eq!(first.ra, RA);
+        assert_eq!(first.count, 2);
+        assert_eq!(
+            first.to_string().split(" a1=").next(),
+            Some("A(3Ah) abort a0=0x00000040")
+        );
+    }
+
+    #[test]
+    fn number_conversion_follows_the_documented_quirks() {
+        let mut bus = hle_bus();
+        put_str(&mut bus, 0x8002_0000, b" \t-0x1Fz\0");
+        let v = call(&mut bus, 0xA0, 0x0D, [0x8002_0000, 0x8002_0100, 10, 0]);
+        assert_eq!(v as i32, -31);
+        assert_eq!(crate::hle_kernel::peek32(&bus, 0x8002_0100), 0x8002_0007);
+        // strtoul has no sign: it stops at the "-".
+        assert_eq!(call(&mut bus, 0xA0, 0x0C, [0x8002_0000, 0, 10, 0]), 0);
+        // strtol's "o" prefix is octal; atoi treats a leading 0 as octal.
+        put_str(&mut bus, 0x8002_0200, b"o17\0");
+        assert_eq!(call(&mut bus, 0xA0, 0x0D, [0x8002_0200, 0, 10, 0]), 15);
+        put_str(&mut bus, 0x8002_0300, b"010\0");
+        assert_eq!(call(&mut bus, 0xA0, 0x10, [0x8002_0300, 0, 0, 0]), 8);
+        assert_eq!(call(&mut bus, 0xA0, 0x0D, [0x8002_0300, 0, 10, 0]), 10);
+        // atob swaps the results.
+        let end = call(&mut bus, 0xA0, 0x12, [0x8002_0300, 0x8002_0400, 0, 0]);
+        assert_eq!(end, 0x8002_0303);
+        assert_eq!(crate::hle_kernel::peek32(&bus, 0x8002_0400), 10);
+        assert_eq!(call(&mut bus, 0xA0, 0x10, [0, 0, 0, 0]), 0);
+    }
+
+    #[test]
+    fn rand_uses_the_documented_generator_with_state_in_ram() {
+        let mut bus = hle_bus();
+        call(&mut bus, 0xA0, 0x30, [1, 0, 0, 0]);
+        assert_eq!(call(&mut bus, 0xA0, 0x2F, [0; 4]), 0x41C6);
+        let x = 0x41C6_7EA6u32
+            .wrapping_mul(0x41C6_4E6D)
+            .wrapping_add(0x3039);
+        assert_eq!(call(&mut bus, 0xA0, 0x2F, [0; 4]), (x >> 16) & 0x7FFF);
+        assert_eq!(
+            crate::hle_kernel::peek32(&bus, crate::hle_kernel::kvar::RAND_SEED),
+            x
+        );
+    }
+
+    #[test]
     fn hook_entry_int_tracks_and_resets_guest_jump_buffer() {
-        let mut bus = Bus::new_without_bios();
+        let mut bus = hle_bus();
         let hook = 0x8001_4000;
+        call(&mut bus, 0xB0, 0x19, [hook, 0, 0, 0]);
+        assert_eq!(crate::hle_exceptions::exit_jmpbuf(&bus), hook);
+        let default = call(&mut bus, 0xB0, 0x18, [0; 4]);
+        assert_eq!(default, crate::hle_exceptions::DEFAULT_JMPBUF);
+        assert_eq!(crate::hle_exceptions::exit_jmpbuf(&bus), default);
+    }
 
-        let installed =
-            dispatch(0xB0, &mut bus, [hook, 0, 0, 0], 0, 0x19, 0x8001_0100).expect("B0 dispatch");
-        assert_eq!(installed.next_pc, 0x8001_0100);
-        assert_eq!(bus.hle_irq_jump_buffer(), Some(hook));
+    #[test]
+    fn get_table_calls_return_the_retail_table_addresses_and_report_patches() {
+        let mut bus = hle_bus();
+        // Code after the call that matches no known patch routine.
+        for i in 0..16u32 {
+            crate::hle_kernel::poke32(&mut bus, RA + 4 * i, 0x2400_0000 | i);
+        }
+        assert_eq!(call(&mut bus, 0xB0, 0x56, [0; 4]), 0x674);
+        assert_eq!(call(&mut bus, 0xB0, 0x57, [0; 4]), 0x874);
+        assert_eq!(bus.hle_bios_patches().len(), 2);
+        assert!(bus.hle_bios_patches()[0].0.starts_with("unknown:"));
+    }
 
-        dispatch(0xB0, &mut bus, [0; 4], 0, 0x18, 0x8001_0200).expect("B0 dispatch");
-        assert_eq!(bus.hle_irq_jump_buffer(), None);
+    #[test]
+    fn user_heap_calls_and_conf() {
+        let mut bus = hle_bus();
+        assert_eq!(call(&mut bus, 0xA0, 0x33, [16, 0, 0, 0]), 0, "no heap yet");
+        call(&mut bus, 0xA0, 0x39, [0x8010_0000, 0x1000, 0, 0]);
+        let p = call(&mut bus, 0xA0, 0x33, [16, 0, 0, 0]);
+        assert_eq!(p, 0x8010_0004);
+        // A(9Dh) GetConf is guest code (see hle_kernel's tests); the
+        // words it reads hold the SYSTEM.CNF defaults.
+        assert_eq!(crate::hle_kernel::get_conf(&bus), (0x10, 4, 0x801F_FF00));
+        // B(5Bh) returns the previous auto-ack setting.
+        assert_eq!(call(&mut bus, 0xB0, 0x5B, [0, 0, 0, 0]), 1);
+        assert_eq!(call(&mut bus, 0xB0, 0x5B, [1, 0, 0, 0]), 0);
+        // B(00h) allocates from the kernel heap set up at boot.
+        let k = call(&mut bus, 0xB0, 0x00, [8, 0, 0, 0]);
+        assert!((0xA000_E000..0xA001_0000).contains(&k), "{k:#x}");
     }
 }

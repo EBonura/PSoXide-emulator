@@ -9,8 +9,8 @@
 //! and starts being "did parity drop on fixture N".
 //!
 //! Usage:
-//!   parity <BIOS> <EXE> <STEPS> [OUT_DIR] [TOLERANCE]
-//!   parity <BIOS> all   <STEPS> [OUT_DIR] [TOLERANCE]
+//!   parity <EXE> <STEPS> [OUT_DIR] [TOLERANCE]
+//!   parity all   <STEPS> [OUT_DIR] [TOLERANCE]
 //!
 //! `all` runs every standard fixture (hello-tex + the showcases) from
 //! `build/examples/mipsel-sony-psx/release/`, one output subdir per
@@ -41,7 +41,7 @@ use psx_iso::Exe;
 const DEFAULT_TOLERANCE: u8 = 8;
 const PASS_THRESHOLD_PCT: f64 = 1.0;
 
-/// The standard sweep set for `parity <BIOS> all <STEPS>`.
+/// The standard sweep set for `parity all <STEPS>`.
 const ALL_FIXTURES: &[&str] = &[
     "hello-tex",
     "showcase-3d",
@@ -53,33 +53,25 @@ const ALL_FIXTURES: &[&str] = &[
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 4 {
+    if args.len() < 3 {
         eprintln!(
-            "usage: {} <BIOS> <EXE>|all <STEPS> [OUT_DIR] [TOLERANCE]",
+            "usage: {} <EXE>|all <STEPS> [OUT_DIR] [TOLERANCE]",
             args.first().map(String::as_str).unwrap_or("parity")
         );
         std::process::exit(2);
     }
-    let bios = PathBuf::from(&args[1]);
-    let steps: u64 = args[3].parse().expect("STEPS must be u64");
+    let steps: u64 = args[2].parse().expect("STEPS must be u64");
     let out_dir = args
-        .get(4)
+        .get(3)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp/psx-parity"));
     let tolerance: u8 = args
-        .get(5)
+        .get(4)
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_TOLERANCE);
-    let bios_bytes = std::fs::read(&bios).expect("read BIOS");
 
-    if args[2] != "all" {
-        let pass = run_fixture(
-            &bios_bytes,
-            &PathBuf::from(&args[2]),
-            steps,
-            &out_dir,
-            tolerance,
-        );
+    if args[1] != "all" {
+        let pass = run_fixture(&PathBuf::from(&args[1]), steps, &out_dir, tolerance);
         std::process::exit(if pass { 0 } else { 1 });
     }
 
@@ -102,7 +94,7 @@ fn main() {
             missing += 1;
             continue;
         }
-        if run_fixture(&bios_bytes, &exe, steps, &out_dir.join(fixture), tolerance) {
+        if run_fixture(&exe, steps, &out_dir.join(fixture), tolerance) {
             pass += 1;
         } else {
             fail += 1;
@@ -115,7 +107,6 @@ fn main() {
 /// Run one fixture end to end; returns `true` on parity PASS. Writes
 /// cpu/hw/diff PPMs + report.txt into `out_dir`.
 fn run_fixture(
-    bios_bytes: &[u8],
     exe_path: &std::path::Path,
     steps: u64,
     out_dir: &std::path::Path,
@@ -124,7 +115,7 @@ fn run_fixture(
     std::fs::create_dir_all(out_dir).expect("create out dir");
 
     // ---- Boot + run ---------------------------------------------------------
-    let mut bus = Bus::new(bios_bytes.to_vec()).expect("BIOS rejected");
+    let mut bus = Bus::new_without_bios();
     bus.gpu.enable_cmd_log();
     bus.enable_hle_bios();
     bus.attach_digital_pad_port1();

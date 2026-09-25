@@ -301,12 +301,25 @@ pub struct Bus {
     /// save states.
     #[serde(skip, default = "default_hle_bios_calls")]
     hle_bios_calls: [[u32; 256]; 3],
-    /// Guest `JumpBuffer` registered through BIOS B(19h) `HookEntryInt`.
-    /// Side-loaded executables do not have a retail kernel to remember and
-    /// invoke this hook, so the HLE path retains the guest pointer and the CPU
-    /// uses it when a real emulated hardware IRQ is taken.
-    #[serde(default)]
-    hle_irq_jump_buffer: Option<u32>,
+    /// First-occurrence records of HLE BIOS calls that were stubbed or not
+    /// implemented, in first-call order. Diagnostic only; excluded from
+    /// save states.
+    #[serde(skip)]
+    hle_bios_records: Vec<crate::hle_bios::CallRecord>,
+    /// Kernel patch routines seen at B(56h)/B(57h). Diagnostic only;
+    /// the applied effects live in guest RAM.
+    #[serde(skip)]
+    hle_bios_patches: Vec<(String, u32)>,
+    /// Shift-JIS codes games asked B(51h) Krom2RawAdd for. Diagnostic
+    /// (which glyphs the HLE font must draw); excluded from save states.
+    #[serde(skip)]
+    hle_font_requests: std::collections::BTreeSet<u16>,
+    /// Stop the CPU with [`crate::cpu::ExecutionError::HleUnimplemented`]
+    /// on the first unimplemented HLE BIOS call instead of returning 0.
+    /// Defaults to the `PSOXIDE_HLE_STRICT` environment switch; excluded
+    /// from save states (a restored bus re-reads the environment).
+    #[serde(skip, default = "hle_strict_from_env")]
+    hle_strict: bool,
     /// HSync cycles for the current video region (NTSC = 2172,
     /// PAL = 2167). Used by the timer bank's HBlank source and by
     /// the VBlank scheduler. Flipped by [`Bus::set_pal_mode`];
@@ -363,6 +376,10 @@ pub struct Bus {
 /// [`Bus::hle_bios_calls`] field -- the outer `[T; 3]` would satisfy
 /// `Default` on its own, but `T = [u32; 256]` doesn't, so the whole
 /// nested array needs an explicit zeroed literal.
+fn hle_strict_from_env() -> bool {
+    std::env::var("PSOXIDE_HLE_STRICT").is_ok_and(|value| value != "0" && !value.is_empty())
+}
+
 fn default_hle_bios_calls() -> [[u32; 256]; 3] {
     [[0; 256]; 3]
 }
@@ -372,10 +389,12 @@ fn default_spu_sample_deadline() -> u64 {
 }
 
 impl Bus {
-    /// Build a bus with the given BIOS image. RAM and scratchpad are
-    /// zero-initialised; hardware leaves them in an undefined state, but
-    /// zeroing is deterministic and adequate for a cold-boot harness.
-    pub fn new(bios: Vec<u8>) -> Result<Self, BusError> {
+    /// Build a bus around a 512 KiB ROM image. Crate-internal: PSoXide
+    /// loads no BIOS; the ROM is the HLE kernel's image
+    /// ([`Self::new_without_bios`]) or, in tests, code placed at the reset
+    /// vector. RAM and scratchpad are zero-initialised; hardware leaves them
+    /// in an undefined state, but zeroing is deterministic.
+    pub(crate) fn new(bios: Vec<u8>) -> Result<Self, BusError> {
         if bios.len() != memory::bios::SIZE {
             return Err(BusError::BiosSize {
                 expected: memory::bios::SIZE,
@@ -439,7 +458,10 @@ impl Bus {
             telemetry: GuestTelemetry::new(),
             hle_bios_enabled: false,
             hle_bios_calls: [[0; 256]; 3],
-            hle_irq_jump_buffer: None,
+            hle_bios_records: Vec::new(),
+            hle_font_requests: std::collections::BTreeSet::new(),
+            hle_bios_patches: Vec::new(),
+            hle_strict: hle_strict_from_env(),
             hsync_cycles: HSYNC_CYCLES_NTSC,
             vblank_hsync_cycles: HSYNC_CYCLES_NTSC,
             vblank_period: VBLANK_PERIOD_CYCLES_NTSC,
@@ -494,6 +516,8 @@ impl Bus {
     pub fn new_without_bios() -> Self {
         let mut bios = vec![0u8; memory::bios::SIZE];
         bios[..4].copy_from_slice(&0x3C08_0013u32.to_le_bytes());
+        // The HLE kernel's character font, where B(51h) points games.
+        crate::hle_font::install(&mut bios);
         Self::new(bios).expect("synthetic BIOS size is fixed")
     }
 
@@ -631,6 +655,19 @@ impl Bus {
         self.spu.apply_retail_bios_shell_audio_profile();
     }
 
+    /// Apply the SPU state a disc executable finds after a real boot, for
+    /// the HLE path that has no BIOS shell to program it.
+    pub fn apply_hle_entry_audio_profile(&mut self) {
+        self.spu.apply_hle_entry_audio_profile();
+    }
+
+    /// Load DICR verbatim, including the write-1-to-clear flag bits a
+    /// guest store cannot set. Used to reproduce the DMA interrupt state
+    /// the BIOS leaves at EXE entry; it raises no interrupt.
+    pub(crate) fn set_dicr_raw(&mut self, value: u32) {
+        self.dma.dicr = value;
+    }
+
     /// Current VBlank period -- one frame in cycles.
     pub fn vblank_period(&self) -> u64 {
         self.vblank_period
@@ -641,28 +678,18 @@ impl Bus {
     /// BIOS boot sequence. Never enable when validating parity -- the
     /// oracle emulator runs the real BIOS ROM and will diverge.
     pub fn enable_hle_bios(&mut self) {
+        self.enable_hle_bios_with(crate::hle_kernel::KernelConfig::default());
+    }
+
+    /// [`Bus::enable_hle_bios`] with the kernel sized from a disc's
+    /// SYSTEM.CNF. Lays out the HLE kernel in low RAM: dispatch tables and
+    /// trap stubs, kernel heap with the ExCB/EvCB/PCB/TCB control blocks,
+    /// and the table of tables at 0x100 (so homebrew exception hooks find
+    /// the documented process/thread pointers). The guest remains free to
+    /// replace table entries, such as the unresolved-exception slot A(40h).
+    pub fn enable_hle_bios_with(&mut self, config: crate::hle_kernel::KernelConfig) {
         self.hle_bios_enabled = true;
-        self.hle_irq_jump_buffer = None;
-        // The retail kernel publishes a Process** at 0x108. Side-loading an
-        // EXE skips that initialization, so provide a reserved low-RAM
-        // process/thread pair for homebrew exception hooks. The guest remains
-        // free to replace the unresolved-handler pointer at 0x300.
-        self.write32(
-            crate::hle_bios::PROCESS_LIST_PTR,
-            crate::hle_bios::SYNTHETIC_PROCESS,
-        );
-        self.write32(
-            crate::hle_bios::SYNTHETIC_PROCESS,
-            crate::hle_bios::SYNTHETIC_THREAD,
-        );
-    }
-
-    pub(crate) fn set_hle_irq_jump_buffer(&mut self, pointer: Option<u32>) {
-        self.hle_irq_jump_buffer = pointer.filter(|pointer| *pointer != 0);
-    }
-
-    pub(crate) fn hle_irq_jump_buffer(&self) -> Option<u32> {
-        self.hle_irq_jump_buffer
+        crate::hle_kernel::install(self, config);
     }
 
     /// Plug a digital controller into port 1 so homebrew / commercial
@@ -993,12 +1020,111 @@ impl Bus {
             crate::hle_bios::Table::A => 0,
             crate::hle_bios::Table::B => 1,
             crate::hle_bios::Table::C => 2,
+            crate::hle_bios::Table::Kernel => return,
         };
         self.hle_bios_calls[idx][func as usize] =
             self.hle_bios_calls[idx][func as usize].saturating_add(1);
         if crate::env_flag!("PSOXIDE_TRACE_HLE_BIOS") {
             eprintln!("[hle-bios] {table:?}({func:02x}h)");
         }
+    }
+
+    /// Internal: remember the first stubbed or unimplemented call of each
+    /// BIOS function, and say so on stderr the first time an unimplemented
+    /// one is reached.
+    /// Note a B(51h) Krom2RawAdd request (diagnostic).
+    pub(crate) fn hle_font_request(&mut self, code: u32) {
+        self.hle_font_requests.insert(code as u16);
+    }
+
+    /// Shift-JIS codes requested through B(51h) so far.
+    pub fn hle_font_requests(&self) -> &std::collections::BTreeSet<u16> {
+        &self.hle_font_requests
+    }
+
+    pub(crate) fn hle_bios_record_call(
+        &mut self,
+        table: crate::hle_bios::Table,
+        func: u8,
+        outcome: crate::hle_bios::Outcome,
+        args: [u32; 4],
+        ra: u32,
+    ) {
+        if let Some(record) = self
+            .hle_bios_records
+            .iter_mut()
+            .find(|record| record.table == table && record.func == func)
+        {
+            record.count = record.count.saturating_add(1);
+            return;
+        }
+        let record = crate::hle_bios::CallRecord {
+            table,
+            func,
+            name: crate::hle_bios::function_name(table, func),
+            outcome,
+            args,
+            ra,
+            cycle: self.cycles,
+            count: 1,
+        };
+        if outcome == crate::hle_bios::Outcome::Unimplemented {
+            eprintln!("[hle-bios] unimplemented {record}");
+        }
+        self.hle_bios_records.push(record);
+    }
+
+    /// Internal: remember a B(56h)/B(57h) kernel-patch call site, and say
+    /// so on stderr when the routine is not recognised.
+    pub(crate) fn hle_bios_record_patch(&mut self, site: crate::hle_kernel::PatchSite, ra: u32) {
+        let name = match site {
+            crate::hle_kernel::PatchSite::AlreadyApplied => return,
+            crate::hle_kernel::PatchSite::Known(patch) => patch.name.to_string(),
+            crate::hle_kernel::PatchSite::Unknown(hash) => {
+                eprintln!("[hle-bios] unknown kernel patch hash {hash:08x} at ra={ra:#010x}");
+                format!("unknown:{hash:08x}")
+            }
+        };
+        if !self.hle_bios_patches.iter().any(|(n, _)| *n == name) {
+            self.hle_bios_patches.push((name, ra));
+        }
+    }
+
+    /// Kernel patch routines seen at B(56h)/B(57h) call sites, as
+    /// `(name, $ra)` in first-seen order; unrecognised ones are named
+    /// `unknown:<hash>`.
+    pub fn hle_bios_patches(&self) -> &[(String, u32)] {
+        &self.hle_bios_patches
+    }
+
+    /// Stubbed and unimplemented HLE BIOS calls seen so far, one record per
+    /// function in first-call order.
+    pub fn hle_bios_records(&self) -> &[crate::hle_bios::CallRecord] {
+        &self.hle_bios_records
+    }
+
+    /// First unimplemented HLE BIOS call, if any.
+    pub fn hle_bios_first_unimplemented(&self) -> Option<&crate::hle_bios::CallRecord> {
+        self.hle_bios_records
+            .iter()
+            .find(|record| record.outcome == crate::hle_bios::Outcome::Unimplemented)
+    }
+
+    /// Make unimplemented HLE BIOS calls stop the CPU (see
+    /// [`crate::cpu::ExecutionError::HleUnimplemented`]).
+    pub fn set_hle_strict(&mut self, strict: bool) {
+        self.hle_strict = strict;
+    }
+
+    /// Whether unimplemented HLE BIOS calls stop the CPU.
+    pub fn hle_strict(&self) -> bool {
+        self.hle_strict
+    }
+
+    /// Side-effect-free DMA register read (DPCR/DICR/channel regs).
+    /// Diagnostic only; used by the BIOS census probe.
+    pub fn debug_dma_read32(&self, phys: u32) -> u32 {
+        self.dma.read32(phys)
     }
 
     /// Snapshot of HLE BIOS call counts: `[A, B, C]` tables × 256
@@ -2919,12 +3045,12 @@ impl Bus {
         if MemoryControl::contains(phys) {
             return self.memory_control.read(phys, AccessWidth::Byte) as u8;
         }
-        if phys == IRQ_STAT_ADDR {
+        if (IRQ_STAT_ADDR..IRQ_STAT_ADDR + 4).contains(&phys) {
             self.run_spu_to_current_cycle();
-            return self.irq.stat() as u8;
+            return (self.irq.stat() >> ((phys & 3) * 8)) as u8;
         }
-        if phys == IRQ_MASK_ADDR {
-            return self.irq.mask() as u8;
+        if (IRQ_MASK_ADDR..IRQ_MASK_ADDR + 4).contains(&phys) {
+            return (self.irq.mask() >> ((phys & 3) * 8)) as u8;
         }
         if Timers::contains(phys) {
             self.service_timers();
@@ -2948,8 +3074,8 @@ impl Bus {
             return self.sio0.read8(phys).unwrap_or(0);
         }
         if Sio1::contains(phys) {
-            let aligned = phys & !3;
-            return (self.sio1.read32(aligned) >> ((phys & 3) * 8)) as u8;
+            // Halfword registers: pick the one holding this byte.
+            return (self.sio1.read32(phys & !1) >> ((phys & 1) * 8)) as u8;
         }
         if crate::mdec::Mdec::contains(phys) {
             let aligned = phys & !3;
@@ -3023,12 +3149,12 @@ impl Bus {
         // Same rationale as in `write16_impl`: BIOS reads `I_STAT` /
         // `I_MASK` via `lhu` and would otherwise see the stale echo
         // buffer instead of the live interrupt-controller state.
-        if phys == IRQ_STAT_ADDR {
+        if (IRQ_STAT_ADDR..IRQ_STAT_ADDR + 4).contains(&phys) {
             self.run_spu_to_current_cycle();
-            return self.irq.stat() as u16;
+            return (self.irq.stat() >> ((phys & 2) * 8)) as u16;
         }
-        if phys == IRQ_MASK_ADDR {
-            return self.irq.mask() as u16;
+        if (IRQ_MASK_ADDR..IRQ_MASK_ADDR + 4).contains(&phys) {
+            return (self.irq.mask() >> ((phys & 2) * 8)) as u16;
         }
         // Timer registers are 16-bit on hardware; the BIOS's
         // counter-polling loop uses `lhu`. Without this dispatch the
@@ -3054,7 +3180,7 @@ impl Bus {
             return self.sio0.read16(phys).unwrap_or(0);
         }
         if Sio1::contains(phys) {
-            return (self.sio1.read32(phys & !3) >> ((phys & 2) * 8)) as u16;
+            return self.sio1.read32(phys) as u16;
         }
         if crate::mdec::Mdec::contains(phys) {
             return (self.mdec.read32(phys & !3) >> ((phys & 2) * 8)) as u16;
@@ -3483,13 +3609,22 @@ impl Bus {
         source: u32,
         width: AccessWidth,
     ) -> bool {
-        if phys == IRQ_STAT_ADDR {
+        // On-die 32-bit registers ignore byte enables and latch the complete
+        // CPU data bus (silicon: `cpu/io-access-bitwidth`). The CPU aligns
+        // store data to the lanes the address selects, so a store to byte
+        // 1..3 of a register arrives as the source word shifted by the byte
+        // offset, with zero below it (DuckStation models the same).
+        let word = source << ((phys & 3) * 8);
+        // The SPU and both serial ports are 16-bit devices: an odd byte store
+        // arrives on the high lane of its halfword.
+        let half = (source << ((phys & 1) * 8)) as u16;
+        if (IRQ_STAT_ADDR..IRQ_STAT_ADDR + 4).contains(&phys) {
             self.run_spu_to_current_cycle();
-            self.irq.write_stat_at(source, self.cycles);
+            self.irq.write_stat_at(word, self.cycles);
             return true;
         }
-        if phys == IRQ_MASK_ADDR {
-            self.irq.write_mask_at(source, self.cycles);
+        if (IRQ_MASK_ADDR..IRQ_MASK_ADDR + 4).contains(&phys) {
+            self.irq.write_mask_at(word, self.cycles);
             return true;
         }
         if Timers::contains(phys) {
@@ -3500,23 +3635,36 @@ impl Bus {
                 eprintln!(
                     "[timers] mode-write t{} value={:04x} cycle={} next-vblank={} period={}",
                     (phys - Timers::BASE) / Timers::STRIDE,
-                    source & 0xFFFF,
+                    word & 0xFFFF,
                     self.cycles,
                     self.next_vblank_cycle(),
                     self.vblank_period
                 );
             }
-            self.timers.write32(phys & !3, source, self.cycles);
+            self.timers.write32(phys & !3, word, self.cycles);
             return true;
         }
         if Dma::contains(phys) {
-            // DMA registers ignore byte enables and observe the complete CPU
-            // source word. Reuse the normal word path so CHCR side effects and
-            // IRQ behavior remain centralized.
-            self.write32_impl(virt, phys & !3, source);
+            // Reuse the normal word path so CHCR side effects and IRQ
+            // behavior remain centralized.
+            self.write32_impl(virt, phys & !3, word);
+            return true;
+        }
+        if MemoryControl::contains(phys) {
+            self.memory_control
+                .write(phys & !3, AccessWidth::Word, word);
+            return true;
+        }
+        if phys == memory_timing::RAM_SIZE_ADDR {
+            self.memory_control.set_ram_size(source);
             return true;
         }
         if Spu::contains(phys) {
+            // psx-spx "SPU Bus-Width": byte stores to odd addresses are
+            // ignored; even ones write the low source halfword.
+            if width == AccessWidth::Byte && phys & 1 != 0 {
+                return true;
+            }
             self.run_spu_to_current_cycle();
             self.spu.write16_at(phys & !1, source as u16, self.cycles);
             self.service_spu_irq();
@@ -3524,12 +3672,12 @@ impl Bus {
         }
         if Sio0::contains(phys) {
             self.service_sio0();
-            self.sio0.write16_at(phys & !1, source as u16, self.cycles);
+            self.sio0.write16_at(phys & !1, half, self.cycles);
             self.service_sio0();
             return true;
         }
         if Sio1::contains(phys) {
-            self.sio1.write16(phys & !1, source as u16);
+            self.sio1.write16(phys & !1, half);
             return true;
         }
         if CdRom::contains(phys) {
@@ -3537,12 +3685,12 @@ impl Bus {
             return true;
         }
         let aligned = phys & !3;
-        if self.gpu.write32_at(aligned, source, self.cycles) {
+        if self.gpu.write32_at(aligned, word, self.cycles) {
             self.service_gpu_irq();
             return true;
         }
         if crate::mdec::Mdec::contains(phys) {
-            self.mdec.write32(aligned, source);
+            self.mdec.write32(aligned, word);
             return true;
         }
         false
@@ -4175,6 +4323,122 @@ mod tests {
 
         bus.cpu_write16(Dma::BASE + Dma::DPCR_OFFSET, 0x1234_5678);
         assert_eq!(bus.read32(Dma::BASE + Dma::DPCR_OFFSET), 0x1234_5678);
+    }
+
+    /// A byte or halfword store lands on the byte lanes its address selects:
+    /// `sb` to DICR+2 writes bits 16..23 (the channel IRQ enables), with the
+    /// rest of the register taken from the shifted source word. libcd's
+    /// streaming reader enables the DMA3 IRQ exactly this way on the last
+    /// sector of each movie frame; landing the byte in bits 0..7 instead
+    /// meant the completion IRQ never fired and no frame was ever handed to
+    /// the MDEC (Tekken 3, Spider-Man intros).
+    #[test]
+    fn cpu_narrow_dma_stores_land_on_the_addressed_byte_lanes() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        let dicr = Dma::BASE + Dma::DICR_OFFSET;
+        bus.cpu_write8(dicr + 2, 0x0000_0088);
+        assert_eq!(bus.read32(dicr) & 0x00FF_00FF, 0x0088_0000);
+
+        bus.cpu_write16(Dma::BASE + Dma::DPCR_OFFSET + 2, 0x0000_1234);
+        assert_eq!(bus.read32(Dma::BASE + Dma::DPCR_OFFSET), 0x1234_0000);
+    }
+
+    /// The other on-die 32-bit registers latch the complete data bus like
+    /// DMA does (silicon: `cpu/io-access-bitwidth` reads the whole source
+    /// word back from I_MASK and T0_TARGET after an aligned `sb`), so a
+    /// store to byte 1..3 of one of them lands shifted onto its lanes, as
+    /// DuckStation models. Before, the timers took the unshifted word, the
+    /// interrupt controller ignored the store entirely, GPU and MDEC took
+    /// the unshifted word, and memory control kept only the addressed byte.
+    #[test]
+    fn cpu_narrow_on_die_stores_land_on_the_addressed_byte_lanes() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+
+        // T0_TARGET + 1.
+        bus.cpu_write8(Timers::BASE + 0x9, 0x0000_0012);
+        assert_eq!(bus.read16(Timers::BASE + 0x8), 0x1200);
+
+        // I_MASK + 1 sets IRQ 8..10 enables.
+        bus.cpu_write8(IRQ_MASK_ADDR + 1, 0x0000_0005);
+        assert_eq!(bus.irq.mask(), 0x0500);
+
+        // I_STAT + 1: the zero low lanes acknowledge IRQ 0..7 too.
+        bus.irq.raise(IrqSource::VBlank);
+        bus.irq.raise(IrqSource::Sio);
+        bus.cpu_write8(IRQ_STAT_ADDR + 1, 0x0000_00FF);
+        assert_eq!(bus.irq.stat(), 1 << 8);
+
+        // GP1 + 3 = 03h: display enable, not GP1(00h) reset.
+        assert_ne!(bus.read32(crate::gpu::GP1_ADDR) & (1 << 23), 0);
+        bus.cpu_write8(crate::gpu::GP1_ADDR + 3, 0x0000_0003);
+        assert_eq!(bus.read32(crate::gpu::GP1_ADDR) & (1 << 23), 0);
+
+        // MDEC1 + 3 = 60h: enable both DMA requests.
+        bus.cpu_write8(crate::mdec::MDEC_CTRL_STAT + 3, 0x0000_0060);
+        assert!(bus.mdec.dma_in_enabled());
+        assert!(bus.mdec.dma_out_enabled());
+
+        // COM_DELAY + 1 replaces the whole register with the shifted word.
+        let com_delay = 0x1F80_1020;
+        bus.write32(com_delay, 0x0000_1325);
+        bus.cpu_write8(com_delay + 1, 0x0000_0022);
+        assert_eq!(bus.read32(com_delay), 0x0000_2200);
+        // An aligned byte store drives the full source word.
+        bus.cpu_write8(com_delay, 0x0003_1125);
+        assert_eq!(bus.read32(com_delay), 0x0003_1125);
+    }
+
+    /// The SPU and the two serial ports sit on a 16-bit bus. A byte store
+    /// to an odd address is shifted onto the high byte lane of its
+    /// halfword (DuckStation), except on the SPU, which ignores it
+    /// (psx-spx "SPU Bus-Width": 8-bit writes to odd addresses are ignored,
+    /// even ones act as 16-bit writes of the low source halfword).
+    #[test]
+    fn cpu_narrow_halfword_bus_stores_land_on_the_addressed_byte_lane() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+
+        // SIO0 baud + 1, SIO1 control + 1.
+        bus.cpu_write8(Sio0::BASE + 0xF, 0x0000_0001);
+        assert_eq!(bus.read16(Sio0::BASE + 0xE), 0x0100);
+        bus.cpu_write8(Sio1::BASE + 0xB, 0x0000_0005);
+        assert_eq!(bus.sio1.read32(Sio1::BASE + 0xA), 0x0500);
+
+        // SPU voice 0 ADSR low: even byte store writes the low halfword,
+        // odd byte store is dropped.
+        let adsr = Spu::BASE + 0x08;
+        bus.cpu_write8(adsr, 0x1234_5678);
+        assert_eq!(bus.read16(adsr), 0x5678);
+        bus.cpu_write8(adsr + 1, 0x0000_00AB);
+        assert_eq!(bus.read16(adsr), 0x5678);
+    }
+
+    /// SIO1's registers are halfwords at +8, +A and +E. A narrow read of the
+    /// upper halfword of a word (CTRL, BAUD) used to shift the aligned word's
+    /// register instead, so `lhu SIO1_BAUD` always read 0 and WipEout's SIO1
+    /// setup divided by it (BREAK 7 at VBlank ~935, with or without a BIOS).
+    #[test]
+    fn narrow_sio1_reads_select_the_addressed_halfword_register() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.cpu_write16(Sio1::BASE + 0xE, 0x0000_1234);
+        bus.cpu_write16(Sio1::BASE + 0xA, 0x0000_0300);
+        assert_eq!(bus.read16(Sio1::BASE + 0xE), 0x1234);
+        assert_eq!(bus.read8(Sio1::BASE + 0xE), 0x34);
+        assert_eq!(bus.read8(Sio1::BASE + 0xF), 0x12);
+        assert_eq!(bus.read16(Sio1::BASE + 0xA), 0x0300);
+        assert_eq!(bus.read8(Sio1::BASE + 0xB), 0x03);
+    }
+
+    /// Byte and halfword loads from the upper lanes of I_STAT / I_MASK read
+    /// the register shifted down (DuckStation), instead of the I/O echo
+    /// buffer.
+    #[test]
+    fn narrow_irq_reads_select_the_addressed_byte_lanes() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.cpu_write16(IRQ_MASK_ADDR, 0x0000_0501);
+        bus.irq.raise(IrqSource::Sio);
+        assert_eq!(bus.read8(IRQ_MASK_ADDR + 1), 0x05);
+        assert_eq!(bus.read16(IRQ_MASK_ADDR + 2), 0);
+        assert_eq!(bus.read8(IRQ_STAT_ADDR + 1), 0x01);
     }
 
     #[test]

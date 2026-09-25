@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! PSoXide emulator core.
 //!
-//! At this stage the core exposes just enough to load a BIOS, seat a
-//! CPU at the reset vector, and fetch its first instruction. No
-//! execution yet -- this is the thin wire along which the rest of the
-//! emulator will be strung.
+//! CPU, peripherals and a built-in runtime for homebrew executables and discs.
+//! No external firmware images are accepted by the public bus API.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
@@ -20,6 +18,7 @@ macro_rules! env_flag {
     }};
 }
 
+pub mod bios_names;
 pub mod bus;
 pub mod cdrom;
 pub mod cpu;
@@ -27,7 +26,15 @@ pub mod dma;
 pub mod fastboot;
 pub mod freelook;
 pub mod gpu;
+pub mod hle_asm;
 pub mod hle_bios;
+pub mod hle_bu;
+pub mod hle_card;
+pub mod hle_exceptions;
+pub mod hle_files;
+pub mod hle_font;
+pub mod hle_kernel;
+pub mod hle_pad;
 pub mod input_tape;
 pub mod irq;
 pub mod limits;
@@ -40,6 +47,7 @@ pub mod sio;
 mod sio1;
 pub mod snapshot;
 pub mod spu;
+pub mod system_cnf;
 pub mod telemetry;
 pub mod timers;
 pub mod vram;
@@ -52,10 +60,7 @@ pub use cpu::{
     Cpu, CpuCycleProfileSnapshot, InstructionCacheMissKind, InstructionCacheProfileSnapshot,
     InstructionCacheRefillEvent, InstructionClassProfileSnapshot,
 };
-pub use fastboot::{
-    fast_boot_disc, fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot,
-    DISC_FAST_BOOT_WARMUP_STEPS,
-};
+pub use fastboot::fast_boot_disc;
 pub use freelook::FreelookState;
 pub use gpu::{DisplayArea, Gpu};
 pub use input_tape::{
