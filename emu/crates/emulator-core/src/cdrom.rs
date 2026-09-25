@@ -403,6 +403,23 @@ pub struct CdRom {
     /// before the restored `CdRom` is used.
     #[serde(skip)]
     disc: Option<Disc>,
+    /// The CD-DA sector being played, read once and decoded in pieces as the
+    /// SPU asks for samples. A cache of `disc`, so excluded from save states
+    /// and dropped whenever the disc changes.
+    #[serde(skip)]
+    cdda_sector: Option<(u32, Box<[u8; psx_iso::SECTOR_BYTES]>)>,
+    /// Sector deliveries held back because the image had not supplied the
+    /// sector yet, and CD-DA pieces played as silence for the same reason.
+    /// Only a disc read asynchronously (the web build) can get here; the
+    /// frontend's per-frame [`CdRom::prefetch_upcoming`] exists to keep both
+    /// at zero. Diagnostic, excluded from save states.
+    #[serde(skip)]
+    late_sector_waits: u64,
+    #[serde(skip)]
+    late_cdda_pieces: u64,
+    /// Set while a due delivery waits on its sector, so it counts once.
+    #[serde(skip)]
+    waiting_for_sector: bool,
     /// Data FIFO -- 2048 bytes of sector user data, drained by MMIO
     /// reads at `0x1F80_1802` or by DMA channel 3. Filled by each
     /// DataReady event during an active ReadN / ReadS.
@@ -589,6 +606,10 @@ impl CdRom {
             data_ready_suppressed: 0,
             dbg_suppressed_submode_or: 0,
             disc: None,
+            cdda_sector: None,
+            late_sector_waits: 0,
+            late_cdda_pieces: 0,
+            waiting_for_sector: false,
             data_fifo: VecDeque::new(),
             waiting_sectors: VecDeque::new(),
             dropped_sectors: 0,
@@ -873,23 +894,37 @@ impl CdRom {
         self.cd_audio.extend(samples.iter().copied());
     }
 
-    fn decode_cdda_chunk(&self, count: usize) -> Option<Vec<(i16, i16)>> {
-        let disc = self.disc.as_ref()?;
-        let raw = match disc.read_cdda_sector(self.read_lba) {
-            Some(raw) => raw,
-            // An audio track's pregap (index 00) plays like the rest of the
-            // track: its sectors when the image holds them, silence when the
-            // sheet only declares it.
-            None => {
-                let track = disc.track_for_lba(self.read_lba)?;
-                if track.track_type != psx_iso::TrackType::Audio || self.read_lba >= track.start_lba
-                {
-                    return None;
+    fn decode_cdda_chunk(&mut self, count: usize) -> Option<Vec<(i16, i16)>> {
+        let lba = self.read_lba;
+        if self.cdda_sector.as_ref().map(|(at, _)| *at) != Some(lba) {
+            let disc = self.disc.as_ref()?;
+            let raw = match disc.read_cdda_sector(lba) {
+                Some(raw) => raw,
+                None => {
+                    let track = disc.track_for_lba(lba)?;
+                    if track.track_type != psx_iso::TrackType::Audio {
+                        return None;
+                    }
+                    if !disc.sectors_ready(lba, 1) {
+                        // A web image whose bytes are still on their way:
+                        // play this piece as silence and try the sector
+                        // again for the next one, rather than ending the
+                        // track. Local images are always ready.
+                        self.late_cdda_pieces += 1;
+                        return Some(vec![(0, 0); count]);
+                    }
+                    // An audio track's pregap (index 00) plays like the rest
+                    // of the track: its sectors when the image holds them,
+                    // silence when the sheet only declares it.
+                    if lba >= track.start_lba {
+                        return None;
+                    }
+                    disc.read_sector_raw(lba).unwrap_or(SILENT_CDDA_SECTOR)
                 }
-                disc.read_sector_raw(self.read_lba)
-                    .unwrap_or(&SILENT_CDDA_SECTOR)
-            }
-        };
+            };
+            self.cdda_sector = Some((lba, Box::new(raw)));
+        }
+        let raw = &self.cdda_sector.as_ref()?.1;
         let start = self.cdda_sample_index * CDDA_BYTES_PER_SAMPLE;
         let end = start + count * CDDA_BYTES_PER_SAMPLE;
         let bytes = raw.get(start..end)?;
@@ -924,7 +959,41 @@ impl CdRom {
     /// after the fact. Geometry-preserving byte patches only; anything that
     /// changes the TOC belongs in [`Self::insert_disc`].
     pub fn disc_mut(&mut self) -> Option<&mut Disc> {
+        // The caller may patch the bytes under the cached CD-DA sector.
+        self.cdda_sector = None;
         self.disc.as_mut()
+    }
+
+    /// Ask the disc for the sectors the drive will want soon, and report
+    /// whether the ones it can want before the next video frame are readable
+    /// now. A frontend whose image arrives asynchronously (the web build)
+    /// calls this before each frame and holds the frame back while it says
+    /// `false`, so the drive never waits on a sector. The guarantee rests on
+    /// the drive model: a read starts at least one initial-sector delay
+    /// (about 20 ms) after its command, longer than a frame, and a running
+    /// stream moves a few sectors per frame. Local images are always ready.
+    pub fn prefetch_upcoming(&self) -> bool {
+        /// Sectors that must be in hand: several frames of streaming.
+        const NEAR: u32 = 8;
+        /// Sectors worth asking for ahead of the head: about half a second
+        /// at double speed.
+        const AHEAD: u32 = 64;
+        let Some(disc) = self.disc.as_ref() else {
+            return true;
+        };
+        disc.prefetch_sectors(self.read_lba, AHEAD);
+        if self.setloc_pending {
+            let (m, s, f) = self.setloc_msf;
+            disc.prefetch_sectors(msf_to_lba(m, s, f), AHEAD);
+        }
+        disc.sectors_ready(self.read_lba, NEAR)
+    }
+
+    /// `(held sector deliveries, CD-DA pieces played as silence)` because an
+    /// asynchronous image had not supplied the sector in time. See
+    /// [`CdRom::prefetch_upcoming`].
+    pub fn late_sector_counts(&self) -> (u64, u64) {
+        (self.late_sector_waits, self.late_cdda_pieces)
     }
 
     /// Mark sectors whose subchannel Q is deliberately corrupt (LibCrypt).
@@ -961,6 +1030,7 @@ impl CdRom {
     /// `GetID` returns the no-disc response again.
     pub fn insert_disc(&mut self, disc: Option<Disc>) {
         self.disc = disc;
+        self.cdda_sector = None;
         self.disc_present = self.disc.is_some();
         self.motor_on = self.disc_present;
         self.drive_state = if self.disc_present {
@@ -996,6 +1066,7 @@ impl CdRom {
     /// [`CdRom::disc`] deliberately excludes from serialization.
     pub fn restore_disc_for_savestate(&mut self, disc: Option<Disc>) {
         self.disc = disc;
+        self.cdda_sector = None;
     }
 
     /// Move the mounted disc out, leaving `None` behind. Used to hand
@@ -1003,6 +1074,7 @@ impl CdRom {
     /// [`CdRom::restore_disc_for_savestate`]) without cloning the
     /// image, which can run past 700 MB for a full CD dump.
     pub fn take_disc(&mut self) -> Option<Disc> {
+        self.cdda_sector = None;
         self.disc.take()
     }
 
@@ -1784,18 +1856,15 @@ impl CdRom {
         let data_target = self.disc.as_ref().is_some_and(|d| {
             d.track_for_lba(target_lba).map(|t| t.track_type) == Some(psx_iso::TrackType::Data)
         });
-        if let Some(raw) = self
+        if let Some(header) = self
             .disc
             .as_ref()
             .filter(|_| data_target)
-            .and_then(|d| d.read_sector_raw(target_lba))
+            .and_then(|d| d.read_sector_header(target_lba))
         {
-            if raw.len() >= 20 {
-                self.last_sector_header.copy_from_slice(&raw[12..16]);
-                self.last_sector_subheader.copy_from_slice(&raw[16..20]);
-                self.seek_header_valid_at =
-                    Some(self.first_response_deadline().saturating_add(delay));
-            }
+            self.last_sector_header.copy_from_slice(&header[..4]);
+            self.last_sector_subheader.copy_from_slice(&header[4..]);
+            self.seek_header_valid_at = Some(self.first_response_deadline().saturating_add(delay));
         }
         self.read_lba = target_lba;
         self.setloc_pending = false;
@@ -2352,6 +2421,26 @@ impl CdRom {
             // sector lands on time and takes its chances in the ring.
             let _ = cdrom_irq_pending;
 
+            // A sector delivery whose sector the image cannot supply yet (a
+            // web image still fetching it) waits here, event untouched,
+            // rather than hand the guest wrong data. Local images are always
+            // ready, so this never fires for them.
+            if front.irq == IrqType::DataReady
+                && front.command != DEFERRED_DATA_READY
+                && self.reading
+                && !self
+                    .disc
+                    .as_ref()
+                    .is_none_or(|disc| disc.sectors_ready(self.read_lba, 1))
+            {
+                if !self.waiting_for_sector {
+                    self.waiting_for_sector = true;
+                    self.late_sector_waits += 1;
+                }
+                break;
+            }
+            self.waiting_for_sector = false;
+
             let ev = self.pending.pop_front().unwrap();
 
             // If the drive was paused/reset between this event's
@@ -2730,7 +2819,7 @@ fn disc_region_code(disc: &Disc) -> [u8; 4] {
     let Some(user) = disc.read_sector_user(4) else {
         return *b"SCEA";
     };
-    let text = String::from_utf8_lossy(user);
+    let text = String::from_utf8_lossy(&user);
     if text.contains("Sony Computer Entertainment Amer") {
         *b"SCEA"
     } else if text.contains("Sony Computer Entertainment Euro")

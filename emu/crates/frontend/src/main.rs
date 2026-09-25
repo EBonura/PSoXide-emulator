@@ -16,6 +16,8 @@ mod audio;
 mod burn;
 // Browser file upload (game). wasm-only: the native build uses rfd.
 #[cfg(target_arch = "wasm32")]
+mod web_disc;
+#[cfg(target_arch = "wasm32")]
 mod web_files;
 // Same-origin streamed discs (the demo disc). wasm-only: native has a library.
 #[cfg(target_arch = "wasm32")]
@@ -1475,7 +1477,17 @@ impl ApplicationHandler for Shell {
                         Port1PadSample::from_host(port1.mask, port1.right_stick, port1.left_stick);
                     let live_port2_sample =
                         Port1PadSample::from_host(port2.mask, port2.right_stick, port2.left_stick);
+                    let mut frames_run = 0u32;
                     for _ in 0..frames_to_run {
+                        // A disc read on demand (web) fetches ahead of the
+                        // drive; if the next frame could want a sector that has
+                        // not arrived, hold the frame back until it has. The
+                        // time owed stays in the accumulator.
+                        if !app::disc_ready_for_frame(&self.state) {
+                            profile.disc_waits += 1.0;
+                            break;
+                        }
+                        frames_run += 1;
                         // Recording/replay happens at one authoritative video-
                         // frame port-1 boundary for emulator, editor and headless
                         // runs alike.
@@ -1575,7 +1587,7 @@ impl ApplicationHandler for Shell {
                         profile.add_guest_profile(guest_profile);
                         profile.audio_ms += elapsed_ms(audio_start);
                     }
-                    self.emu_frame_accum -= (frames_to_run as f32) * active_frame_dt;
+                    self.emu_frame_accum -= (frames_run as f32) * active_frame_dt;
                 } else {
                     self.emu_frame_accum = 0.0;
                 }
@@ -1823,6 +1835,10 @@ impl ApplicationHandler for Shell {
                     &profile,
                     self.audio.as_ref().map_or(0, |a| a.underrun_frames()),
                     self.audio.as_ref().map_or(0, |a| a.queue_len()),
+                    state
+                        .bus
+                        .as_ref()
+                        .map_or((0, 0), |bus| bus.cdrom.late_sector_counts()),
                 );
                 if let Some(line) = state.profiler.record(profile) {
                     eprintln!("{line}");

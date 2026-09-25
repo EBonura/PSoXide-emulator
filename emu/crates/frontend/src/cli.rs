@@ -796,8 +796,7 @@ fn run_headless_launch(
             if capture_gpu_commands {
                 bus.gpu.enable_cmd_log();
             }
-            let bytes = std::fs::read(&game_path).map_err(|e| e.to_string())?;
-            let disc = Disc::from_bin(bytes);
+            let disc = psoxide_settings::library::load_disc_from_bin(&game_path)?;
             if args.embedded_playtest {
                 fast_boot_embedded_playtest_disc(&mut bus, &mut cpu, &disc, &game_path)?;
             } else {
@@ -2846,9 +2845,7 @@ fn load_headless_disc(path: &Path) -> Result<Disc, String> {
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
     match ext.as_str() {
-        "bin" | "iso" => std::fs::read(path)
-            .map(Disc::from_bin)
-            .map_err(|error| error.to_string()),
+        "bin" | "iso" => psoxide_settings::library::load_disc_from_bin(path),
         "cue" => psoxide_settings::library::load_disc_from_cue(path),
         "ccd" => psoxide_settings::library::load_disc_from_ccd(path),
         other => Err(format!("unsupported auxiliary disc extension: .{other}")),

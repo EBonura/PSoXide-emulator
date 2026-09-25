@@ -18,6 +18,11 @@
 //! ECC is the ECMA-130 Reed-Solomon product code (P and Q parity), as the
 //! Yellow Book defines them. Decoding happens in memory so a read-only
 //! games folder is never written to.
+//!
+//! [`EcmImage`] decodes on demand: one pass over the record headers at open
+//! builds a checkpoint every [`CHUNK_SECTORS`] output sectors, and a read
+//! decodes only the chunks it touches. The whole-stream EDC is not checked
+//! then (that would mean decoding everything); [`decode`] still does.
 
 /// Header of every ECM stream.
 const MAGIC: &[u8; 4] = b"ECM\0";
@@ -135,11 +140,13 @@ fn regenerate(sector: &mut [u8; SECTOR_BYTES], kind: u8) {
     }
 }
 
+#[cfg(test)]
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
 }
 
+#[cfg(test)]
 impl Reader<'_> {
     fn take(&mut self, n: usize) -> Result<&[u8], String> {
         let end = self
@@ -157,7 +164,9 @@ impl Reader<'_> {
     }
 }
 
-/// Decode a complete ECM stream into the raw image it was made from.
+/// Decode a complete ECM stream into the raw image it was made from, and
+/// check its EDC. The reference the on-demand [`EcmImage`] is tested against.
+#[cfg(test)]
 pub fn decode(ecm: &[u8]) -> Result<Vec<u8>, String> {
     if ecm.len() < MAGIC.len() || &ecm[..4] != MAGIC {
         return Err("not an ECM stream (missing ECM header)".into());
@@ -219,6 +228,293 @@ pub fn decode(ecm: &[u8]) -> Result<Vec<u8>, String> {
         ));
     }
     Ok(out)
+}
+
+/// Output sectors per decoded chunk (and between index checkpoints).
+pub const CHUNK_SECTORS: u64 = 16;
+const CHUNK_BYTES: u64 = CHUNK_SECTORS * SECTOR_BYTES as u64;
+/// Decoded chunks kept for reuse (sequential reads hit these).
+const CACHED_CHUNKS: usize = 8;
+
+/// `(input bytes, output bytes)` of one unit of a record type: a literal
+/// byte, or one packed sector.
+fn unit_sizes(kind: u8) -> (u64, u64) {
+    match kind {
+        0 => (1, 1),
+        1 => (3 + 0x800, SECTOR_BYTES as u64),
+        2 => (0x804, MODE2_BYTES as u64),
+        _ => (0x918, MODE2_BYTES as u64),
+    }
+}
+
+/// Where the record stream stands at an output position: `remaining` units
+/// of `kind` start at input `in_pos` and output `out_pos`. With nothing
+/// remaining, the next record header is at `in_pos`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Cursor {
+    in_pos: u64,
+    out_pos: u64,
+    kind: u8,
+    remaining: u64,
+}
+
+/// Parse a record header from `bytes`: `(kind, count, header length)`, with
+/// `None` for the end marker.
+fn parse_header(bytes: &[u8]) -> Result<(Option<(u8, u64)>, usize), String> {
+    let mut at = 0usize;
+    let mut next = || -> Result<u8, String> {
+        let b = *bytes
+            .get(at)
+            .ok_or("ECM stream truncated in a record header")?;
+        at += 1;
+        Ok(b)
+    };
+    let mut c = next()?;
+    let kind = c & 3;
+    let mut num = u64::from((c >> 2) & 0x1F);
+    let mut bits = 5;
+    while c & 0x80 != 0 {
+        c = next()?;
+        if bits > 31 {
+            return Err("ECM record count is too long".into());
+        }
+        num |= u64::from(c & 0x7F) << bits;
+        bits += 7;
+    }
+    if num == 0xFFFF_FFFF {
+        return Ok((None, at));
+    }
+    if num >= 0x8000_0000 {
+        return Err("ECM record count is out of range".into());
+    }
+    Ok((Some((kind, num + 1)), at))
+}
+
+/// Decode one packed sector (`kind` 1..=3) from `input` into `sector`; the
+/// returned range of `sector` is the unit's output.
+fn decode_unit(kind: u8, input: &[u8], sector: &mut [u8; SECTOR_BYTES]) -> core::ops::Range<usize> {
+    sector.fill(0);
+    sector[0x01..0x0B].fill(0xFF);
+    if kind == 1 {
+        sector[0x0F] = 1;
+        sector[0x0C..0x0F].copy_from_slice(&input[..3]);
+        sector[0x10..0x810].copy_from_slice(&input[3..3 + 0x800]);
+        regenerate(sector, 1);
+        0..SECTOR_BYTES
+    } else {
+        let payload = if kind == 2 { 0x804 } else { 0x918 };
+        sector[0x0F] = 2;
+        sector[0x14..0x14 + payload].copy_from_slice(&input[..payload]);
+        regenerate(sector, kind);
+        0x10..0x10 + MODE2_BYTES
+    }
+}
+
+/// An ECM-packed image decoded a chunk at a time on demand.
+pub struct EcmImage {
+    packed: crate::disc_image::SharedImage,
+    len: u64,
+    /// Stream position at the start of every chunk.
+    checkpoints: Vec<Cursor>,
+    cache: std::sync::Mutex<Vec<(u64, Box<[u8]>)>>,
+}
+
+impl EcmImage {
+    /// Index the ECM stream in `packed`: one sequential pass over its record
+    /// headers, skipping the payloads.
+    pub fn open(packed: crate::disc_image::SharedImage) -> Result<Self, String> {
+        let total = packed.len();
+        let mut magic = [0u8; 4];
+        if !packed.read_at(0, &mut magic) || &magic != MAGIC {
+            return Err("not an ECM stream (missing ECM header)".into());
+        }
+        let mut window = Window::new(&*packed, 1 << 20);
+        let mut in_pos = 4u64;
+        let mut out_pos = 0u64;
+        let mut next_checkpoint = 0u64;
+        let mut checkpoints = Vec::new();
+        loop {
+            let (record, header_len) = parse_header(window.at(in_pos, 5)?)?;
+            let payload = in_pos + header_len as u64;
+            let Some((kind, count)) = record else {
+                if payload + 4 > total {
+                    return Err(format!("ECM stream truncated at byte {payload}"));
+                }
+                break;
+            };
+            let (unit_in, unit_out) = unit_sizes(kind);
+            // The payload must be in the file before the count is trusted
+            // for anything: a corrupt header can claim billions of units.
+            let next = payload + count * unit_in;
+            if next > total {
+                return Err(format!("ECM stream truncated at byte {total}"));
+            }
+            let record_out = count * unit_out;
+            while next_checkpoint < out_pos + record_out {
+                let unit = (next_checkpoint - out_pos) / unit_out;
+                checkpoints.push(Cursor {
+                    in_pos: payload + unit * unit_in,
+                    out_pos: out_pos + unit * unit_out,
+                    kind,
+                    remaining: count - unit,
+                });
+                next_checkpoint += CHUNK_BYTES;
+            }
+            out_pos += record_out;
+            in_pos = next;
+        }
+        Ok(Self {
+            packed,
+            len: out_pos,
+            checkpoints,
+            cache: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Decode output chunk `index`.
+    fn decode_chunk(&self, index: u64) -> Option<Box<[u8]>> {
+        let start = index * CHUNK_BYTES;
+        let end = (start + CHUNK_BYTES).min(self.len);
+        let mut cursor = *self.checkpoints.get(index as usize)?;
+        let mut out = vec![0u8; (end - start) as usize].into_boxed_slice();
+        // A chunk's input is at most its output plus one straddling unit and
+        // a few record headers.
+        let mut window = Window::new(
+            &*self.packed,
+            (CHUNK_BYTES as usize) + 2 * SECTOR_BYTES + 1024,
+        );
+        let mut sector = [0u8; SECTOR_BYTES];
+        let mut emit = |bytes: &[u8], at: u64| {
+            let lo = at.max(start);
+            let hi = (at + bytes.len() as u64).min(end);
+            if lo < hi {
+                out[(lo - start) as usize..(hi - start) as usize]
+                    .copy_from_slice(&bytes[(lo - at) as usize..(hi - at) as usize]);
+            }
+        };
+        while cursor.out_pos < end {
+            if cursor.remaining == 0 {
+                let (record, header_len) = parse_header(window.at(cursor.in_pos, 5).ok()?).ok()?;
+                let (kind, count) = record?;
+                cursor = Cursor {
+                    in_pos: cursor.in_pos + header_len as u64,
+                    out_pos: cursor.out_pos,
+                    kind,
+                    remaining: count,
+                };
+                continue;
+            }
+            let (unit_in, unit_out) = unit_sizes(cursor.kind);
+            if cursor.kind == 0 {
+                let n = cursor.remaining.min(end - cursor.out_pos);
+                emit(window.at(cursor.in_pos, n as usize).ok()?, cursor.out_pos);
+                cursor.in_pos += n;
+                cursor.out_pos += n;
+                cursor.remaining -= n;
+            } else {
+                let input = window.at(cursor.in_pos, unit_in as usize).ok()?;
+                let range = decode_unit(cursor.kind, input, &mut sector);
+                emit(&sector[range], cursor.out_pos);
+                cursor.in_pos += unit_in;
+                cursor.out_pos += unit_out;
+                cursor.remaining -= 1;
+            }
+        }
+        Some(out)
+    }
+
+    /// Copy the overlap of chunk `index` with `[offset, offset + out.len())`.
+    fn copy_from_chunk(&self, index: u64, offset: u64, out: &mut [u8]) -> bool {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let hit = cache.iter().position(|(i, _)| *i == index);
+        let slot = match hit {
+            Some(i) => {
+                let entry = cache.remove(i);
+                cache.push(entry);
+                cache.len() - 1
+            }
+            None => {
+                let Some(chunk) = self.decode_chunk(index) else {
+                    return false;
+                };
+                if cache.len() == CACHED_CHUNKS {
+                    cache.remove(0);
+                }
+                cache.push((index, chunk));
+                cache.len() - 1
+            }
+        };
+        let chunk = &cache[slot].1;
+        let chunk_start = index * CHUNK_BYTES;
+        let lo = offset.max(chunk_start);
+        let hi = (offset + out.len() as u64).min(chunk_start + chunk.len() as u64);
+        out[(lo - offset) as usize..(hi - offset) as usize]
+            .copy_from_slice(&chunk[(lo - chunk_start) as usize..(hi - chunk_start) as usize]);
+        true
+    }
+}
+
+impl psx_iso::TrackSource for EcmImage {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read_at(&self, offset: u64, out: &mut [u8]) -> bool {
+        let Some(end) = offset
+            .checked_add(out.len() as u64)
+            .filter(|&e| e <= self.len)
+        else {
+            return false;
+        };
+        if out.is_empty() {
+            return true;
+        }
+        (offset / CHUNK_BYTES..=(end - 1) / CHUNK_BYTES)
+            .all(|index| self.copy_from_chunk(index, offset, out))
+    }
+}
+
+/// A read-ahead window over a packed stream, refilled on demand.
+struct Window<'a> {
+    src: &'a dyn psx_iso::TrackSource,
+    size: usize,
+    start: u64,
+    buf: Vec<u8>,
+}
+
+impl<'a> Window<'a> {
+    fn new(src: &'a dyn psx_iso::TrackSource, size: usize) -> Self {
+        Self {
+            src,
+            size,
+            start: 0,
+            buf: Vec::new(),
+        }
+    }
+
+    /// Up to `n` bytes at `pos` (fewer only at the end of the stream).
+    fn at(&mut self, pos: u64, n: usize) -> Result<&[u8], String> {
+        let total = self.src.len();
+        if pos >= total {
+            return Err(format!("ECM stream truncated at byte {pos}"));
+        }
+        let want_end = (pos + n as u64).min(total);
+        let have_end = self.start + self.buf.len() as u64;
+        if pos < self.start || want_end > have_end {
+            let len = (self.size.max(n) as u64).min(total - pos) as usize;
+            self.buf.resize(len, 0);
+            if !self.src.read_at(pos, &mut self.buf) {
+                return Err(format!("ECM stream unreadable at byte {pos}"));
+            }
+            self.start = pos;
+        }
+        let from = (pos - self.start) as usize;
+        let to = (want_end - self.start) as usize;
+        if to - from < n && n > 5 {
+            return Err(format!("ECM stream truncated at byte {pos}"));
+        }
+        Ok(&self.buf[from..to])
+    }
 }
 
 #[cfg(test)]
@@ -355,6 +651,83 @@ mod tests {
         decoded.extend(edc_bitwise(&decoded).to_le_bytes());
         let stream = finish(stream, &decoded);
         assert_eq!(decode(&stream).unwrap(), decoded);
+    }
+
+    /// A stream mixing every record type: a long literal run, a Mode 1 run
+    /// spanning several index checkpoints, and Mode 2 sectors split the way
+    /// real encoders split them (16 literal bytes, then one packed unit).
+    fn mixed_stream() -> (Vec<u8>, Vec<u8>) {
+        let mut rng = 0x1234_5678u32;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            rng as u8
+        };
+        let mut stream = MAGIC.to_vec();
+        let mut decoded = Vec::new();
+        let literal: Vec<u8> = (0..SECTOR_BYTES * 20 + 77).map(|_| next()).collect();
+        stream.extend(record_header(0, literal.len() as u32));
+        stream.extend(&literal);
+        decoded.extend(&literal);
+        stream.extend(record_header(1, 40));
+        for i in 0..40u32 {
+            let address = [0x00, 0x02 + (i / 75) as u8, (i % 75) as u8];
+            let data: Vec<u8> = (0..0x800).map(|_| next()).collect();
+            stream.extend(address);
+            stream.extend(&data);
+            let mut sector = [0u8; SECTOR_BYTES];
+            decode_unit(1, &[&address[..], &data[..]].concat(), &mut sector);
+            decoded.extend(sector);
+        }
+        for i in 0..50u32 {
+            let head: Vec<u8> = (0..16).map(|_| next()).collect();
+            stream.extend(record_header(0, 16));
+            stream.extend(&head);
+            decoded.extend(&head);
+            let kind = if i % 3 == 0 { 3 } else { 2 };
+            let payload = if kind == 2 { 0x804 } else { 0x918 };
+            let input: Vec<u8> = (0..payload).map(|_| next()).collect();
+            stream.extend(record_header(kind, 1));
+            stream.extend(&input);
+            let mut sector = [0u8; SECTOR_BYTES];
+            let range = decode_unit(kind, &input, &mut sector);
+            decoded.extend(&sector[range]);
+        }
+        let stream = finish(stream, &decoded);
+        (stream, decoded)
+    }
+
+    #[test]
+    fn on_demand_reads_match_the_whole_stream_decode() {
+        let (stream, decoded) = mixed_stream();
+        assert_eq!(decode(&stream).unwrap(), decoded);
+        let image = EcmImage::open(std::sync::Arc::new(stream)).unwrap();
+        use psx_iso::TrackSource;
+        assert_eq!(image.len(), decoded.len() as u64);
+        let mut whole = vec![0u8; decoded.len()];
+        assert!(image.read_at(0, &mut whole));
+        assert_eq!(whole, decoded);
+        // Reads at awkward offsets and lengths, out of order, crossing chunk
+        // and record boundaries.
+        for (at, step) in (7u64..).zip(0..200u64) {
+            let len = ((step * 7919) % (3 * SECTOR_BYTES as u64)) as usize + 1;
+            let offset = (at * 104_729) % (decoded.len() as u64 - len as u64);
+            let mut out = vec![0u8; len];
+            assert!(image.read_at(offset, &mut out), "read {offset}+{len}");
+            assert_eq!(out, decoded[offset as usize..offset as usize + len]);
+        }
+        let mut past = [0u8; 2];
+        assert!(!image.read_at(decoded.len() as u64 - 1, &mut past));
+    }
+
+    #[test]
+    fn index_rejects_bad_magic_and_truncation() {
+        assert!(EcmImage::open(std::sync::Arc::new(b"NOPE".to_vec())).is_err());
+        let mut stream = MAGIC.to_vec();
+        stream.extend(record_header(0, 10));
+        stream.extend([1, 2, 3]);
+        assert!(EcmImage::open(std::sync::Arc::new(stream)).is_err());
     }
 
     #[test]

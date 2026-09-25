@@ -549,6 +549,9 @@ pub struct FrameProfileSample {
     pub egui: EguiRenderProfile,
     /// Number of emulated frames stepped during this redraw.
     pub frames_run: f32,
+    /// Frames held back this redraw waiting for disc sectors (web images
+    /// read on demand).
+    pub disc_waits: f32,
     /// Retired CPU ticks during this redraw.
     pub cpu_ticks: f32,
     /// Emulated bus cycles during this redraw.
