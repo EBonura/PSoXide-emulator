@@ -586,6 +586,9 @@ fn entry_state(cpu: &Cpu, bus: &mut Bus) -> Vec<(&'static str, u32, u32)> {
         ("cd_vol_r", spu(bus, 0x1F80_1DB2), u32::MAX),
         ("ext_vol_l", spu(bus, 0x1F80_1DB4), u32::MAX),
         ("ram_size_mb", ram32(bus, 0x60), u32::MAX),
+        ("sio1_mode", u32::from(bus.read16(0x1F80_1058)), u32::MAX),
+        ("sio1_ctrl", u32::from(bus.read16(0x1F80_105A)), u32::MAX),
+        ("sio1_baud", u32::from(bus.read16(0x1F80_105E)), u32::MAX),
     ]
 }
 
