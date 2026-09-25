@@ -586,7 +586,15 @@ fn run_frames(
     let mut card: Option<Vec<u8>> = None;
     let mut steps = 0u64;
     let stop = loop {
-        if let Err(error) = cpu.step(bus) {
+        // Run to the next VBlank (or the step cap) in one call; the checks
+        // below only act on a VBlank, and the SPU catch-up they did after
+        // every instruction the next instruction does first anyway.
+        let (ran, result) = cpu.run(bus, cap.saturating_sub(steps).max(1), |bus| {
+            bus.irq().raise_counts()[0].wrapping_sub(base_vblank) != last_vblank
+        });
+        steps += ran;
+        if let Err(error) = result {
+            bus.run_spu_to_current_cycle();
             // With --strict this is usually the first unimplemented call;
             // COP0 still holds the last exception (an unresolved one ends
             // in A(40h)).
@@ -596,11 +604,8 @@ fn run_frames(
                 c[13], c[14], c[8]
             );
         }
-        steps += 1;
         bus.run_spu_to_current_cycle();
-        if bus.spu.audio_queue_len() != 0 {
-            let _ = bus.spu.drain_audio();
-        }
+        bus.spu.discard_audio();
         let vblank = bus.irq().raise_counts()[0] - base_vblank;
         if vblank != last_vblank {
             last_vblank = vblank;
