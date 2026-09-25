@@ -25,7 +25,7 @@
 #![cfg_attr(target_arch = "wasm32", allow(rustdoc::broken_intra_doc_links))]
 
 use std::sync::{
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicU32, AtomicU64, Ordering},
     Arc, Mutex,
 };
 
@@ -75,6 +75,9 @@ pub struct AudioOut {
     /// Host-output gain. Stored atomically so the UI can adjust it
     /// without locking the CPAL callback.
     volume: VolumeControl,
+    /// Output frames the callback had to fill with silence because the
+    /// queue was empty (cumulative). Diagnostic for underruns.
+    underrun_frames: Arc<AtomicU64>,
     trace: bool,
     trace_stats: Mutex<AudioTraceStats>,
 }
@@ -153,6 +156,7 @@ impl AudioOut {
             16_384,
         )));
         let volume: VolumeControl = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let underrun_frames = Arc::new(AtomicU64::new(0));
         let trace = env_flag("PSOXIDE_AUDIO_TRACE");
         if trace {
             eprintln!("[audio] trace enabled");
@@ -165,6 +169,7 @@ impl AudioOut {
 
         let queue_cb = Arc::clone(&queue);
         let volume_cb = Arc::clone(&volume);
+        let underrun_cb = Arc::clone(&underrun_frames);
         let err_fn = |e| eprintln!("[audio] stream error: {e}");
 
         let stream = match sample_format {
@@ -183,6 +188,7 @@ impl AudioOut {
                                     frame[1] = apply_gain_f32(r, gain);
                                 }
                             }
+                            underrun_cb.store(resampler.starved, Ordering::Relaxed);
                         }
                     },
                     err_fn,
@@ -192,6 +198,7 @@ impl AudioOut {
             cpal::SampleFormat::I16 => {
                 let queue_cb = Arc::clone(&queue);
                 let volume_cb = Arc::clone(&volume);
+                let underrun_cb = Arc::clone(&underrun_frames);
                 device
                     .build_output_stream(
                         &stream_config,
@@ -207,6 +214,7 @@ impl AudioOut {
                                         frame[1] = apply_gain_i16(r, gain);
                                     }
                                 }
+                                underrun_cb.store(resampler.starved, Ordering::Relaxed);
                             }
                         },
                         err_fn,
@@ -225,6 +233,7 @@ impl AudioOut {
             _stream: stream,
             host_sample_rate,
             volume,
+            underrun_frames,
             trace,
             trace_stats: Mutex::new(AudioTraceStats::default()),
         })
@@ -273,6 +282,11 @@ impl AudioOut {
             .store(volume.clamp(0.0, 1.5).to_bits(), Ordering::Relaxed);
     }
 
+    /// Output frames filled with silence for lack of samples, since open.
+    pub fn underrun_frames(&self) -> u64 {
+        self.underrun_frames.load(Ordering::Relaxed)
+    }
+
     /// Current queue depth in stereo samples. Diagnostic -- very
     /// high values mean the CPU is overrunning real-time; very low
     /// means we're starving the callback.
@@ -290,6 +304,8 @@ struct LinearResampler {
     prev: (i16, i16),
     next: (i16, i16),
     primed: bool,
+    /// Source samples that were due but missing (queue empty), cumulative.
+    starved: u64,
 }
 
 impl LinearResampler {
@@ -299,6 +315,7 @@ impl LinearResampler {
             prev: (0, 0),
             next: (0, 0),
             primed: false,
+            starved: 0,
         }
     }
 
@@ -317,7 +334,10 @@ impl LinearResampler {
         self.phase += pull_rate;
         while self.phase >= 1.0 {
             self.prev = self.next;
-            self.next = queue.pop_front().unwrap_or((0, 0));
+            self.next = queue.pop_front().unwrap_or_else(|| {
+                self.starved += 1;
+                (0, 0)
+            });
             self.phase -= 1.0;
         }
         out

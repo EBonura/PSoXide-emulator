@@ -78,7 +78,7 @@ wasm-bindgen-futures = "0.4"
 # Lossless FLAC decode for the streamed demo disc audio tracks; pure Rust.
 claxon = "0.4"
 console_error_panic_hook = "0.1"
-web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement", "Element", "Navigator", "Gamepad", "GamepadButton", "HtmlInputElement", "HtmlElement", "File", "FileList", "FileReader", "Blob"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement", "Element", "Navigator", "Gamepad", "GamepadButton", "HtmlInputElement", "HtmlElement", "File", "FileList", "FileReader", "Blob", "Location", "console"] }
 js-sys = "0.3"
 wgpu = { workspace = true, features = ["webgl"] }
 

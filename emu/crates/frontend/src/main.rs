@@ -20,6 +20,9 @@ mod web_files;
 // Same-origin streamed discs (the demo disc). wasm-only: native has a library.
 #[cfg(target_arch = "wasm32")]
 mod web_stream;
+// Headless-browser measurement hooks (`?disc=`, `psoxideBenchStats()`).
+#[cfg(target_arch = "wasm32")]
+mod web_bench;
 // The headless CLI (`scan`/`list`/`launch`/...) is a native developer tool:
 // it reads argv, the filesystem, and spins up its own offscreen wgpu device.
 // None of that applies in the browser, so it is compiled out on wasm and the
@@ -235,6 +238,10 @@ impl FreelookChord {
 struct Shell {
     graphics: Option<Graphics>,
     state: AppState,
+    /// Reused buffer for the frame-start VRAM snapshot the hardware
+    /// renderer replays from, so a running game does not allocate and free
+    /// a 1 MiB copy every redraw.
+    hw_vram_scratch: Vec<u16>,
     pending_input: MenuInput,
     last_frame: Instant,
     /// Every piece of pad state the shell derives from keyboard events
@@ -363,6 +370,7 @@ impl Shell {
         Self {
             graphics: None,
             state,
+            hw_vram_scratch: Vec::new(),
             pending_input: MenuInput::default(),
             last_frame: Instant::now(),
             host_input: HostKeyboardInput::default(),
@@ -1415,10 +1423,12 @@ impl ApplicationHandler for Shell {
                     0
                 };
                 let hw_frame_start_vram = if frames_to_run > 0 {
-                    self.state
-                        .bus
-                        .as_ref()
-                        .map(|bus| bus.gpu.vram.words().to_vec())
+                    self.state.bus.as_ref().map(|bus| {
+                        let mut snapshot = std::mem::take(&mut self.hw_vram_scratch);
+                        snapshot.clear();
+                        snapshot.extend_from_slice(bus.gpu.vram.words());
+                        snapshot
+                    })
                 } else {
                     None
                 };
@@ -1726,6 +1736,9 @@ impl ApplicationHandler for Shell {
                     }
                 }
                 self.vram_synced_stamp = vram_stamp;
+                if let Some(snapshot) = hw_frame_start_vram {
+                    self.hw_vram_scratch = snapshot;
+                }
 
                 // VRAM debug view: GPU-side expand of the HW renderer's
                 // R16Uint VRAM mirror (kept current by the block above)
@@ -1802,6 +1815,12 @@ impl ApplicationHandler for Shell {
                 }
 
                 profile.total_ms = elapsed_ms(profile_start);
+                #[cfg(target_arch = "wasm32")]
+                web_bench::note_redraw(
+                    &profile,
+                    self.audio.as_ref().map_or(0, |a| a.underrun_frames()),
+                    self.audio.as_ref().map_or(0, |a| a.queue_len()),
+                );
                 if let Some(line) = state.profiler.record(profile) {
                     eprintln!("{line}");
                 }
@@ -1827,7 +1846,14 @@ impl ApplicationHandler for Shell {
         // rAF-driven redraws itself, so the web shell keeps redrawing per tick.
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = event_loop;
+            // `Poll` spins the browser event loop between animation frames
+            // (winit re-posts a task as soon as one finishes), which kept the
+            // main thread ~100% busy even on the idle menu. Poll only until
+            // the async GPU init lands; after that every tick ends in
+            // `request_redraw`, so `Wait` still wakes once per rAF.
+            if self.graphics.is_some() {
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
             self.install_pending_graphics();
             // Apply any game file the user picked since the last frame.
             self.state.poll_web_uploads();
