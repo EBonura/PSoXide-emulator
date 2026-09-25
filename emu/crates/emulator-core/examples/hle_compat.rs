@@ -16,6 +16,10 @@
 //!     [--shots <dir> [--shot-every N]]
 //! ```
 //!
+//! `--hash-log <dir>` writes the display hash of every frame to
+//! `<dir>/<id>.hle.txt` (and `<id>.bios.txt` for `--reference`), one
+//! `frame hash` line per VBlank, to find where two runs part.
+//!
 //! `--shots` writes each game's final display as `<id>.ppm`, and with
 //! `--shot-every N` also every N frames as `<id>.<frame>.ppm`. That is game
 //! imagery: keep the directory local.
@@ -155,6 +159,7 @@ fn main() {
     let mut reference = false;
     let mut shots: Option<PathBuf> = None;
     let mut shot_every = 0u64;
+    let mut hash_log: Option<PathBuf> = None;
     let mut pulses: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -171,6 +176,7 @@ fn main() {
             "--reference" => reference = true,
             "--shots" => shots = Some(args_support::take_path(&mut args, "--shots")),
             "--shot-every" => shot_every = args_support::take_u64(&mut args, "--shot-every"),
+            "--hash-log" => hash_log = Some(args_support::take_path(&mut args, "--hash-log")),
             other => panic!("unknown argument {other}; see the header of hle_compat.rs"),
         }
     }
@@ -232,10 +238,16 @@ fn main() {
                         .as_ref()
                         .map(|dir| dir.join(format!("{}.ppm", game.id)));
                     let sbi = sbi.unwrap_or_default();
+                    let hashes = |kind: &str| {
+                        hash_log
+                            .as_ref()
+                            .map(|dir| dir.join(format!("{}.{kind}.txt", game.id)))
+                    };
                     run_hle(
                         &mut result,
                         disc.clone(),
                         &sbi,
+                        hashes("hle"),
                         frames,
                         tape.as_deref(),
                         strict,
@@ -250,6 +262,7 @@ fn main() {
                             bios,
                             disc.clone(),
                             &sbi,
+                            hashes("bios"),
                             frames,
                             tape.as_deref(),
                             shot,
@@ -397,6 +410,7 @@ fn run_hle(
     result: &mut GameResult,
     disc: Disc,
     sbi: &[u32],
+    hash_log: Option<PathBuf>,
     frames: u64,
     tape: Option<&[PadSample]>,
     strict: bool,
@@ -420,8 +434,14 @@ fn run_hle(
 
     let start = Instant::now();
     let periodic = periodic_shots(shot.as_deref(), shot_every);
-    let (stop, last_vblank, steps, hashes) =
-        run_frames(&mut cpu, &mut bus, frames, tape, periodic.as_ref());
+    let (stop, last_vblank, steps, hashes) = run_frames(
+        &mut cpu,
+        &mut bus,
+        frames,
+        tape,
+        periodic.as_ref(),
+        hash_log,
+    );
     let host = start.elapsed().as_secs_f64();
 
     result.stop_reason = Some(stop);
@@ -473,8 +493,10 @@ fn run_frames(
     frames: u64,
     tape: Option<&[PadSample]>,
     periodic: Option<&(u64, PathBuf)>,
+    hash_log: Option<PathBuf>,
 ) -> (String, u64, u64, std::collections::BTreeSet<u64>) {
     apply_sample(bus, tape, 0);
+    let mut frame_hashes = hash_log.as_ref().map(|_| String::new());
     let cap = frames
         .saturating_mul(STEPS_PER_FRAME_CAP)
         .saturating_add(10_000_000);
@@ -505,6 +527,9 @@ fn run_frames(
             if vblank.is_multiple_of(HASH_EVERY) {
                 hashes.insert(bus.gpu.display_hash().0);
             }
+            if let Some(log) = frame_hashes.as_mut() {
+                log.push_str(&format!("{vblank} {:016x}\n", bus.gpu.display_hash().0));
+            }
             if let Some((every, base)) = periodic {
                 if vblank.is_multiple_of(*every) && vblank < frames {
                     let name = format!("{}.{vblank}.ppm", base.display());
@@ -519,6 +544,12 @@ fn run_frames(
             break "step_cap".to_string();
         }
     };
+    if let (Some(path), Some(log)) = (hash_log, frame_hashes) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, log);
+    }
     (stop, last_vblank, steps, hashes)
 }
 
@@ -528,6 +559,7 @@ fn run_reference(
     bios: &[u8],
     disc: Disc,
     sbi: &[u32],
+    hash_log: Option<PathBuf>,
     frames: u64,
     tape: Option<&[PadSample]>,
     shot: Option<PathBuf>,
@@ -557,8 +589,14 @@ fn run_reference(
         return None;
     }
     let periodic = periodic_shots(shot.as_deref(), shot_every);
-    let (stop, frames_run, _, hashes) =
-        run_frames(&mut cpu, &mut bus, frames, tape, periodic.as_ref());
+    let (stop, frames_run, _, hashes) = run_frames(
+        &mut cpu,
+        &mut bus,
+        frames,
+        tape,
+        periodic.as_ref(),
+        hash_log,
+    );
     if let Some(path) = shot {
         write_ppm(&bus, &path);
     }
