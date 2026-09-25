@@ -3511,9 +3511,13 @@ impl Bus {
         }
         if Dma::contains(phys) {
             // DMA registers ignore byte enables and observe the complete CPU
-            // source word. Reuse the normal word path so CHCR side effects and
-            // IRQ behavior remain centralized.
-            self.write32_impl(virt, phys & !3, source);
+            // data bus. The CPU aligns store data to the lanes the address
+            // selects, so the register sees the source word shifted by the
+            // byte offset (DuckStation models the same). Reuse the normal
+            // word path so CHCR side effects and IRQ behavior remain
+            // centralized.
+            let lane_shift = (phys & 3) * 8;
+            self.write32_impl(virt, phys & !3, source << lane_shift);
             return true;
         }
         if Spu::contains(phys) {
@@ -4175,6 +4179,24 @@ mod tests {
 
         bus.cpu_write16(Dma::BASE + Dma::DPCR_OFFSET, 0x1234_5678);
         assert_eq!(bus.read32(Dma::BASE + Dma::DPCR_OFFSET), 0x1234_5678);
+    }
+
+    /// A byte or halfword store lands on the byte lanes its address selects:
+    /// `sb` to DICR+2 writes bits 16..23 (the channel IRQ enables), with the
+    /// rest of the register taken from the shifted source word. libcd's
+    /// streaming reader enables the DMA3 IRQ exactly this way on the last
+    /// sector of each movie frame; landing the byte in bits 0..7 instead
+    /// meant the completion IRQ never fired and no frame was ever handed to
+    /// the MDEC (Tekken 3, Spider-Man intros).
+    #[test]
+    fn cpu_narrow_dma_stores_land_on_the_addressed_byte_lanes() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        let dicr = Dma::BASE + Dma::DICR_OFFSET;
+        bus.cpu_write8(dicr + 2, 0x0000_0088);
+        assert_eq!(bus.read32(dicr) & 0x00FF_00FF, 0x0088_0000);
+
+        bus.cpu_write16(Dma::BASE + Dma::DPCR_OFFSET + 2, 0x0000_1234);
+        assert_eq!(bus.read32(Dma::BASE + Dma::DPCR_OFFSET), 0x1234_0000);
     }
 
     #[test]
