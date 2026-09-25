@@ -70,6 +70,24 @@ fn default_u64_256() -> [u64; 256] {
     [0; 256]
 }
 
+/// Cumulative GPU drawing workload, for the debug UI.
+///
+/// Pixel areas come from the same clipped extents the draw-time model
+/// charges, so they describe the work the timing model saw. Observational
+/// only and excluded from save states.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuWorkCounters {
+    /// Clipped pixel area of every drawing packet (fills, copies, polygons
+    /// and rectangles; lines are not counted).
+    pub pixels: u64,
+    /// Subset of `pixels` drawn by textured primitives.
+    pub texture_pixels: u64,
+    /// Textured pixels by source texture page, `x / 64 + (y / 256) * 16`.
+    pub texpage_pixels: [u64; 32],
+    /// Pixels written by CPU-to-VRAM transfers.
+    pub vram_upload_pixels: u64,
+}
+
 /// GPU state.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Gpu {
@@ -425,6 +443,14 @@ pub struct Gpu {
     /// Subset of `gp0_timing_hist` submitted through DMA channel 2.
     #[serde(skip, default = "default_u64_256")]
     gp0_dma_timing_hist: [u64; 256],
+    /// Cumulative drawing workload for the debug UI. Diagnostic only.
+    #[serde(skip)]
+    work: GpuWorkCounters,
+    /// Pixel area of the packet being costed, handed from the timing model
+    /// (which only borrows `self`) to `execute_gp0_packet`. An atomic only
+    /// so `Gpu` stays `Sync`; it is written with plain relaxed loads/stores.
+    #[serde(skip)]
+    timing_pixels: std::sync::atomic::AtomicU64,
     /// Count of GP1 writes by opcode byte. Same diagnostic role as
     /// gp0_opcode_hist but for the display / control port. Excluded
     /// from save states.
@@ -746,6 +772,8 @@ impl Gpu {
             gp0_opcode_hist: [0; 256],
             gp0_timing_hist: [0; 256],
             gp0_dma_timing_hist: [0; 256],
+            work: GpuWorkCounters::default(),
+            timing_pixels: std::sync::atomic::AtomicU64::new(0),
             gp1_opcode_hist: [0; 256],
             display_start_history: std::collections::BTreeSet::new(),
             display_mode_history: std::collections::BTreeSet::new(),
@@ -807,6 +835,11 @@ impl Gpu {
     /// Snapshot of accumulated GPU DMA cycles grouped by GP0 opcode.
     pub fn gp0_dma_timing_histogram(&self) -> [u64; 256] {
         self.gp0_dma_timing_hist
+    }
+
+    /// Cumulative drawing workload (pixels, texture pages, VRAM transfers).
+    pub fn work_counters(&self) -> &GpuWorkCounters {
+        &self.work
     }
 
     /// Snapshot of the GP1 opcode histogram. Diagnostic.
@@ -1637,6 +1670,7 @@ impl Gpu {
                 let size = self.gp0_fifo[2];
                 let w = ((size & 0x3FF) + 0x0F) & !0x0F;
                 let h = (size >> 16) & 0x1FF;
+                self.note_timing_pixels(u64::from(w) * u64::from(h));
                 DRAW_FILL_SETUP + scale_gpu_pixels(u64::from(w) * u64::from(h), 41, 512)
             }
             // VRAM-to-VRAM uses the slower internal read/modify/write path.
@@ -1646,6 +1680,7 @@ impl Gpu {
                 let raw_h = (size >> 16) & 0x1FF;
                 let w = if raw_w == 0 { 1024 } else { raw_w };
                 let h = if raw_h == 0 { 512 } else { raw_h };
+                self.note_timing_pixels(u64::from(w) * u64::from(h));
                 DRAW_COPY_SETUP + scale_gpu_pixels(u64::from(w) * u64::from(h), 171, 128)
             }
             0x20..=0x23 => {
@@ -1786,6 +1821,7 @@ impl Gpu {
             return setup;
         }
         let pixels = self.timing_polygon_pixels(vertices);
+        self.note_timing_pixels(pixels);
         let top = vertices.iter().map(|v| v.1).min().unwrap_or(0);
         let bottom = vertices.iter().map(|v| v.1).max().unwrap_or(0);
         let clip_top = (self.draw_area_top as i32).max(0);
@@ -1803,6 +1839,7 @@ impl Gpu {
         (pixel_q8, line_q8): (u64, u64),
     ) -> u64 {
         let (pixels, lines) = self.timing_rect_extent(pos, w, h);
+        self.note_timing_pixels(pixels);
         setup.max((pixels * pixel_q8 + lines * line_q8).div_ceil(256))
     }
 
@@ -1828,6 +1865,14 @@ impl Gpu {
                 (bottom - top) as u64,
             )
         }
+    }
+
+    fn note_timing_pixels(&self, pixels: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.timing_pixels.store(
+            self.timing_pixels.load(Relaxed).saturating_add(pixels),
+            Relaxed,
+        );
     }
 
     fn timing_polygon_pixels(&self, vertices: &[(i32, i32)]) -> u64 {
@@ -2495,6 +2540,8 @@ impl Gpu {
         let op = (self.gp0_fifo[0] >> 24) & 0xFF;
         // Setup is part of the fitted per-primitive cost.
         let timing_cost = self.gp0_packet_timing_cost(op as u8);
+        let pixels = std::mem::take(self.timing_pixels.get_mut());
+        self.work.pixels = self.work.pixels.saturating_add(pixels);
         self.gp0_opcode_hist[op as usize] = self.gp0_opcode_hist[op as usize].saturating_add(1);
         self.gp0_timing_hist[op as usize] =
             self.gp0_timing_hist[op as usize].saturating_add(timing_cost);
@@ -2570,6 +2617,13 @@ impl Gpu {
             // VRAM→VRAM copy -- source rect blitted to dest rect.
             0x80..=0x9F => self.vram_to_vram_copy(),
             _ => {}
+        }
+        // Textured primitives have latched their page by now.
+        if matches!(op, 0x20..=0x3F | 0x60..=0x7F) && op & 0x04 != 0 {
+            let page = usize::from(self.tex_page_x / 64) + usize::from(self.tex_page_y >= 256) * 16;
+            self.work.texture_pixels = self.work.texture_pixels.saturating_add(pixels);
+            self.work.texpage_pixels[page & 31] =
+                self.work.texpage_pixels[page & 31].saturating_add(pixels);
         }
         if from_dma {
             self.charge_dma_busy(timing_cost);
@@ -3980,6 +4034,10 @@ impl Gpu {
         // means 1024 / 512 respectively. Matches Redux.
         let (w, h) = vram_transfer_size(wh);
         let remaining = vram_transfer_words(wh);
+        self.work.vram_upload_pixels = self
+            .work
+            .vram_upload_pixels
+            .saturating_add(u64::from(w) * u64::from(h));
         self.vram_upload = Some(VramTransfer {
             x,
             y,
