@@ -411,6 +411,10 @@ pub struct CdRom {
     /// Whether `last_sector_header` / `last_sector_subheader`
     /// currently hold real sector data.
     last_sector_header_valid: bool,
+    /// A SeekL in flight: the cycle it lands, after which the header it
+    /// read at the target (already in `last_sector_header`) is valid.
+    #[serde(default)]
+    seek_header_valid_at: Option<u64>,
     /// Set while a read is in progress; controls whether new
     /// DataReady events chain into further sectors.
     reading: bool,
@@ -552,6 +556,7 @@ impl CdRom {
             last_sector_header: [0; 4],
             last_sector_subheader: [0; 4],
             last_sector_header_valid: false,
+            seek_header_valid_at: None,
             reading: false,
             read_rescheduled: false,
             read_lba: 0,
@@ -889,6 +894,7 @@ impl CdRom {
         self.last_sector_header = [0; 4];
         self.last_sector_subheader = [0; 4];
         self.last_sector_header_valid = false;
+        self.seek_header_valid_at = None;
         self.xa_first_sector = 0;
         self.xa_left.reset();
         self.xa_right.reset();
@@ -1582,6 +1588,7 @@ impl CdRom {
         self.last_sector_header = [0; 4];
         self.last_sector_subheader = [0; 4];
         self.last_sector_header_valid = false;
+        self.seek_header_valid_at = None;
         // Redux returns only the pre-init ACK here; the later 20480
         // cycle work happens on the lid/rescan state machine, not as a
         // second CPU-visible CDROM completion IRQ.
@@ -1625,6 +1632,7 @@ impl CdRom {
         self.last_sector_header = [0; 4];
         self.last_sector_subheader = [0; 4];
         self.last_sector_header_valid = false;
+        self.seek_header_valid_at = None;
         self.mode = 0x20;
         self.motor_on = true;
         self.drive_state = DriveState::Standby;
@@ -1672,6 +1680,26 @@ impl CdRom {
             msf_to_lba(m, s, f)
         };
         let delay = self.seek_travel_cycles(target_lba.abs_diff(self.read_lba));
+        // The drive confirms a logical seek by reading the target's
+        // header; until then GetlocL has nothing to report.
+        self.last_sector_header_valid = false;
+        self.seek_header_valid_at = None;
+        let data_target = self.disc.as_ref().is_some_and(|d| {
+            d.track_for_lba(target_lba).map(|t| t.track_type) == Some(psx_iso::TrackType::Data)
+        });
+        if let Some(raw) = self
+            .disc
+            .as_ref()
+            .filter(|_| data_target)
+            .and_then(|d| d.read_sector_raw(target_lba))
+        {
+            if raw.len() >= 20 {
+                self.last_sector_header.copy_from_slice(&raw[12..16]);
+                self.last_sector_subheader.copy_from_slice(&raw[16..20]);
+                self.seek_header_valid_at =
+                    Some(self.first_response_deadline().saturating_add(delay));
+            }
+        }
         self.read_lba = target_lba;
         self.setloc_pending = false;
         self.schedule_second_response(vec![stat], delay);
@@ -1717,6 +1745,10 @@ impl CdRom {
             let (m, s, f) = self.setloc_msf;
             let target = msf_to_lba(m, s, f);
             travel = self.seek_travel_cycles(target.abs_diff(self.read_lba));
+            // The head is moving: no header to report until the first
+            // sector at the target arrives (psx-spx GetlocL).
+            self.last_sector_header_valid = false;
+            self.seek_header_valid_at = None;
             self.read_lba = target;
             self.setloc_pending = false;
             self.location_changed = true;
@@ -1782,6 +1814,7 @@ impl CdRom {
                 self.last_sector_header.copy_from_slice(&raw[12..16]);
                 self.last_sector_subheader.copy_from_slice(&raw[16..20]);
                 self.last_sector_header_valid = true;
+                self.seek_header_valid_at = None;
                 let submode = raw[18];
                 // With XA-ADPCM enabled, a Mode 2 sector flagged audio and
                 // real-time belongs to the ADPCM decoder. It is never put in
@@ -1874,9 +1907,17 @@ impl CdRom {
             self.schedule_error_response(vec![stat, 0x80]);
             return;
         }
+        if let Some(at) = self.seek_header_valid_at {
+            if self.scheduling_cycle >= at {
+                self.seek_header_valid_at = None;
+                self.last_sector_header_valid = true;
+            }
+        }
         if !self.last_sector_header_valid {
+            // psx-spx: error 80h with no header yet, including while the
+            // drive seeks after a new ReadN/SeekL (software retries).
             let stat = self.stat_byte() | drive_status_bit::ERROR;
-            self.schedule_error_response(vec![stat]);
+            self.schedule_error_response(vec![stat, 0x80]);
             return;
         }
         let mut resp = Vec::with_capacity(8);
