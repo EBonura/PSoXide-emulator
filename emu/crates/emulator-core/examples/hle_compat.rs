@@ -80,6 +80,9 @@ enum Found {
 #[derive(serde::Serialize)]
 struct Report {
     schema: &'static str,
+    /// `git rev-parse --short HEAD` of the emulator tree the runner was
+    /// started from, with `-dirty` for uncommitted tracked changes.
+    emulator_commit: Option<String>,
     frames: u64,
     input_tape: Option<String>,
     frame_limiter: bool,
@@ -107,6 +110,10 @@ struct GameResult {
     speed_x_realtime: f64,
     display_hash: Option<String>,
     distinct_display_hashes: usize,
+    /// Sectors the drive delivered that the game never collected.
+    cd_sectors_dropped: u64,
+    /// MDEC macroblocks decoded (nonzero means FMV or MDEC images played).
+    mdec_macroblocks: u64,
     parity: Option<Vec<ParityField>>,
     /// Real-BIOS run (dev-only `--reference`).
     reference: Option<Reference>,
@@ -118,6 +125,8 @@ struct Reference {
     frames: u64,
     display_hash: String,
     distinct_display_hashes: usize,
+    cd_sectors_dropped: u64,
+    mdec_macroblocks: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -249,7 +258,8 @@ fn main() {
     print_table(&results);
     if let Some(path) = json {
         let report = Report {
-            schema: "psoxide-hle-compat/1",
+            schema: "psoxide-hle-compat/2",
+            emulator_commit: emulator_commit(),
             frames,
             input_tape: tape_path.as_deref().map(file_name).or(pulses),
             frame_limiter: false,
@@ -408,6 +418,8 @@ fn run_hle(
     };
     result.display_hash = Some(format!("0x{:016x}", bus.gpu.display_hash().0));
     result.distinct_display_hashes = hashes.len();
+    result.cd_sectors_dropped = bus.cdrom.dropped_sectors();
+    result.mdec_macroblocks = bus.mdec.macroblocks_decoded();
     result.first_unimplemented = bus.hle_bios_first_unimplemented().map(ToString::to_string);
     result.kernel_patches = bus
         .hle_bios_patches()
@@ -534,6 +546,8 @@ fn run_reference(
         frames: frames_run,
         display_hash: format!("0x{:016x}", bus.gpu.display_hash().0),
         distinct_display_hashes: hashes.len(),
+        cd_sectors_dropped: bus.cdrom.dropped_sectors(),
+        mdec_macroblocks: bus.mdec.macroblocks_decoded(),
     })
 }
 
@@ -656,13 +670,21 @@ fn print_table(results: &[GameResult]) {
                 .or(r.detail.as_deref())
                 .unwrap_or("-"),
         );
+        if r.status == "ran" {
+            println!(
+                "    mdec macroblocks {}, cd sectors dropped {}",
+                r.mdec_macroblocks, r.cd_sectors_dropped
+            );
+        }
         if let Some(reference) = &r.reference {
             println!(
-                "    real BIOS: {} frames, display {}, {} hashes ({})",
+                "    real BIOS: {} frames, display {}, {} hashes ({}), mdec {}, dropped {}",
                 reference.frames,
                 reference.display_hash,
                 reference.distinct_display_hashes,
-                reference.stop_reason
+                reference.stop_reason,
+                reference.mdec_macroblocks,
+                reference.cd_sectors_dropped
             );
         }
         if let Some(parity) = &r.parity {
@@ -691,6 +713,26 @@ fn write_ppm(bus: &Bus, path: &Path) {
         let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::write(path, ppm);
+}
+
+/// The emulator commit the runner was built from, read from the source
+/// tree next to this example (dev tool: needs `git` on PATH).
+fn emulator_commit() -> Option<String> {
+    let dir = env!("CARGO_MANIFEST_DIR");
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let sha = git(&["rev-parse", "--short=9", "HEAD"])?;
+    let dirty =
+        git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|out| !out.is_empty());
+    Some(if dirty { format!("{sha}-dirty") } else { sha })
 }
 
 fn file_name(path: &Path) -> String {
