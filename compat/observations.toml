@@ -1,16 +1,19 @@
 # Human judgement behind docs/COMPATIBILITY.md, one table per compat/games.toml
-# id. tools/compat_report.py merges this with an hle_compat --reference run.
+# id. tools/compat_report.py merges this with compat/reference.toml and an
+# hle_compat run.
 #
-# hle, bios    status tier with no BIOS and with a real BIOS: none, boots,
-#              intro, menu, in-game, playable, perfect (defined in the doc)
+# hle          status tier on PSoXide: none, boots, intro, menu, in-game,
+#              playable, perfect (defined in the doc)
+# bios         the tier the recorded real-BIOS run reached (compat/reference.toml)
 # fmv          plays, partial, broken, none seen, n/a
 # issues       known problems, with a short cause when known
 # evidence     "headless frames" (hle_compat shots looked at) or
 #              "Manny, console" / "Manny, GUI"
 # libcrypt     true for LibCrypt-protected discs (they need a .sbi)
-# hle_hash,    final display hashes of the run the tiers were judged on;
-# bios_hash    when a new run ends elsewhere the report asks for a re-check
-# measured_on  emulator commit of that run
+# hle_hash     final display hash of the run the tier was judged on; when a
+#              new run ends elsewhere the report asks for a re-check
+# bios_hash    final display hash of the recorded real-BIOS run
+# measured_on  emulator commit of the judged run
 #
 # Facts about the emulator's results only: no game data.
 
@@ -50,7 +53,7 @@ measured_on = "ad71bcc2b"
 hle = "in-game"
 bios = "in-game"
 fmv = "n/a"
-issues = ["Adventure, New, a typed name, save to card 1, then the hub; about 0.04 s behind the real kernel after 20 s of loading (was 0.13 s before the CD head fix)"]
+issues = ["Adventure, New, a typed name, save to card 1, then the hub; the HLE is about 0.04 s ahead of the real kernel after 20 s of loading (was 0.13 s before the CD head fix)"]
 evidence = "headless frames"
 hle_hash = "0xc610f0508da76eb7"
 bios_hash = "0x4b009f4e64024bd6"

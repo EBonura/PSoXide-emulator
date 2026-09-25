@@ -1911,7 +1911,10 @@ mod tests {
         let disc = load_disc_from_ccd(&ccd_path).unwrap();
         assert_eq!(disc.track(1).unwrap().sector_count, 7);
         let track2 = disc.track(2).unwrap();
-        assert_eq!((track2.start_lba, track2.pregap, track2.sector_count), (10, 3, 4));
+        assert_eq!(
+            (track2.start_lba, track2.pregap, track2.sector_count),
+            (10, 3, 4)
+        );
         let pos = disc.track_position_for_lba(8).unwrap();
         assert_eq!((pos.track_number, pos.index_number), (2, 0));
         assert_eq!(pos.relative_msf, (0, 0, 1));

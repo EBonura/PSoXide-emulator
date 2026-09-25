@@ -1,9 +1,11 @@
 # Firmware cleanup, 2026-09-15
 
-Update, later the same day: firmware loading was restored (user-supplied
-BIOS path via settings or `PSOXIDE_BIOS`) because retail discs need it. The
-audit tool, the zero-filled example headers and the no-bundled-firmware
-policy below still apply.
+Update, 2026-09-25: firmware loading was restored later on 2026-09-15 for
+retail discs, and is now removed for good. The HLE kernel boots retail discs
+itself (docs/COMPATIBILITY.md); the BIOS path setting, `PSOXIDE_BIOS`, the
+BIOS options of `frontend launch`, the web BIOS upload and the real-BIOS
+modes of `hle_compat` are gone, together with the examples that needed a
+BIOS.
 
 ## Repository ownership
 

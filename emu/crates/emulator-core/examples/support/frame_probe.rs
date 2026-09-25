@@ -5,7 +5,6 @@ use psx_iso::Exe;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const EXAMPLE_OUT: &str = "build/examples/mipsel-sony-psx/release";
 const SPU_PUMP_CYCLES: u64 = 560_000;
 
@@ -22,12 +21,11 @@ impl SideLoadedExe {
     }
 
     pub fn from_exe_path(exe_path: &Path, attach_digital_pad: bool) -> Self {
-        let bios = read_bios();
         let exe_bytes = std::fs::read(exe_path)
             .unwrap_or_else(|error| panic!("read {}: {error}", exe_path.display()));
         let exe = Exe::parse(&exe_bytes).expect("parse PS1 EXE");
 
-        let mut bus = Bus::new(bios).expect("bus");
+        let mut bus = Bus::new_without_bios();
         bus.load_exe_payload(exe.load_addr, &exe.payload);
         bus.enable_hle_bios();
         if attach_digital_pad {
@@ -153,14 +151,4 @@ pub fn repo_root() -> PathBuf {
         .and_then(Path::parent)
         .expect("repo root")
         .to_path_buf()
-}
-
-pub fn read_bios() -> Vec<u8> {
-    std::fs::read(bios_path()).expect("BIOS readable")
-}
-
-pub fn bios_path() -> PathBuf {
-    std::env::var("PSOXIDE_BIOS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_BIOS))
 }

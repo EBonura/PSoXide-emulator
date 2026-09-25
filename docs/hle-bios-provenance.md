@@ -14,10 +14,12 @@ Update it in the same commit as any HLE change.
   `patches/*.c` disassembly comments), and from black-box observation of a
   real BIOS: register and memory values, call arguments and return values,
   timing. Only those derived facts are committed.
-- A real BIOS dump is used only by private development tooling, supplied by
-  the developer from their own console, and read from an explicit path:
-  `PSOXIDE_BIOS` for the census probe and `PSOXIDE_PARITY_BIOS` for
-  `hle_compat --parity`. Outputs of those runs stay local.
+- PSoXide has no BIOS path at all (removed 2026-09-25). During development
+  a real BIOS dump from the developer's own console was read by private
+  tooling only (the census probe, and `hle_compat --parity`/`--reference`),
+  and only derived facts were kept: the measured values cited below, and
+  the display hashes and frame positions in `compat/reference/` and
+  `compat/reference.toml`. That tooling is deleted; git history has it.
 - Interface facts (table numbers, function names, RAM addresses, register
   layouts) are used freely.
 
@@ -82,10 +84,11 @@ Update it in the same commit as any HLE change.
 
 | Tool | Notes |
 |---|---|
-| `emulator-core` example `bios_syscall_probe` (census) | Needs a real BIOS. Its output directory holds kernel RAM images (BIOS-written bytes) and game frames: private, never committed. |
+| `emulator-core` example `bios_syscall_probe` (census) | Deleted with BIOS support. It needed a real BIOS; its output (kernel RAM images, game frames) stayed private and was never committed. |
 | `tools/kcall_scan.py` | Static scan of a disc image. Emits facts only (offsets, function numbers, hashes). Patch signature hash, masks and known-variant values from OpenBIOS `patches` (MIT). |
 | `compat/games.toml` | Facts only: titles, serials, regions, sha256 of the disc image and boot executable, BIOS functions and patch routines per game. |
-| `emulator-core` example `hle_compat` | Finds the developer's discs by hash, runs them under HLE with a formatted empty memory card and no BIOS. `--parity` (dev-only) additionally cold-boots a real BIOS from `PSOXIDE_PARITY_BIOS` and diffs the EXE-entry state; nothing from that BIOS is written out except the compared register values. `--reference` (dev-only, same variable) runs the game a second time through that BIOS with the same input and memory card and reports its display hash; with `--shots` its frames are written locally as game imagery, never committed. |
+| `emulator-core` example `hle_compat` | Finds the developer's discs by hash and runs them on the HLE kernel with a formatted empty memory card. Its `--parity` and `--reference` modes, which booted a real BIOS from `PSOXIDE_PARITY_BIOS` for comparison, are deleted; their last results are recorded as display hashes and descriptions only (`compat/reference/`, `compat/reference.toml`). |
+| `compat/reference/`, `compat/reference.toml` | Facts only: display hashes every 60 frames and final-screen descriptions of the last real-BIOS reference runs, next to the HLE run of the same commit. No frames, no BIOS bytes. |
 
 ## Not yet done
 

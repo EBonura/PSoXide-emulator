@@ -38,7 +38,10 @@ map transitions from slow gameplay without filtering by frame rate.
 
 The optional `mcp` feature enables the native debugging server. Browser code
 remains under `emu/crates/frontend`; it does not depend on the editor.
-BIOS and game images are supplied locally and are not included.
+PSoXide boots every disc, commercial games included, and every homebrew EXE
+with its own clean-room HLE kernel. It needs no BIOS, and none can be
+supplied. What runs, and how far, is in
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
 ## Game library
 
@@ -70,7 +73,7 @@ substitute for original-console validation of SDK or game behavior.
 ## License
 
 [GPL-2.0-or-later](LICENSE). Existing source and asset attribution is preserved.
-Where the BIOS replacement's behaviour comes from is recorded in
+Where the HLE kernel's behaviour comes from is recorded in
 [docs/hle-bios-provenance.md](docs/hle-bios-provenance.md).
 
 PlayStation is a trademark of Sony Interactive Entertainment Inc.; PSoXide is not affiliated with or endorsed by Sony.
@@ -79,3 +82,10 @@ PlayStation is a trademark of Sony Interactive Entertainment Inc.; PSoXide is no
 
 Source snapshot **2026.09.05**: Moved the emulator core and desktop/browser frontends into their own repository.
 See the [changelog](CHANGELOG.md) for the remaining changes.
+
+## Firmware policy
+
+PSoXide does not bundle or load console firmware. Discs and homebrew run
+on its own HLE kernel, written from public documentation and black-box
+observation (see [docs/hle-bios-provenance.md](docs/hle-bios-provenance.md)). See the [cleanup audit](docs/firmware-cleanup.md)
+for the source, binary-header and history checks.
