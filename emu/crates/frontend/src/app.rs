@@ -3090,7 +3090,26 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     let frame_budget = bus.vblank_period().max(1);
     let target_cycles = cycles_before.saturating_add(frame_budget);
     let mut steps_run = 0;
-    for _ in 0..max_steps {
+    if !trace && !check_breakpoints {
+        // Nothing to look at between instructions: run the frame in one call.
+        if bus.cycles() < target_cycles {
+            let (ran, result) = state.cpu.run(bus, u64::from(max_steps), |bus| {
+                bus.cycles() >= target_cycles
+            });
+            steps_run = ran as u32;
+            if result.is_err() {
+                steps_run += 1;
+                state.running = false;
+                state.menu.sync_run_label(false);
+                state.menu.open = true;
+            }
+        }
+    }
+    for _ in 0..if trace || check_breakpoints {
+        max_steps
+    } else {
+        0
+    } {
         if bus.cycles() >= target_cycles {
             break;
         }

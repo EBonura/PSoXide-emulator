@@ -1238,7 +1238,25 @@ fn run_headless_launch(
     let mut stop_poll_display_start = (0u16, 0u16);
     let mut audio_capture: Vec<(i16, i16)> = Vec::new();
     let gte_profile_before = cpu.cop2().profile_snapshot();
-    for i in 0..args.steps {
+    // Options that look at every instruction. Without any of them the loop
+    // below runs the CPU in batches that end exactly where the per-step
+    // loop would next act: a route tick, a guest telemetry frame, the
+    // tape's 64-step poll stride, or the step budget.
+    let per_step = trace_exception
+        || pc_line_histogram.is_some()
+        || stack_high_water_profile.is_some()
+        || pc_samples.is_some()
+        || pc_callsite_samples.is_some()
+        || pc_window_samples.is_some()
+        || mmio_stall_lines.is_some()
+        || ram_load_stall_lines.is_some()
+        || icache_stall_lines.is_some()
+        || icache_event_log.is_some()
+        || args.stop_at_poll.is_some()
+        || args.guest_debug_log;
+    let mut next_step = 0u64;
+    while next_step < args.steps {
+        let mut i = next_step;
         if trace_exception {
             recent_pcs[recent_pc_cursor] = cpu.pc();
             recent_pc_cursor = (recent_pc_cursor + 1) % recent_pcs.len();
@@ -1311,7 +1329,36 @@ fn run_headless_launch(
         let mmio_attribution_pc = mmio_stall_lines.as_ref().map(|_| cpu.pc());
         let ram_load_attribution_pc = ram_load_stall_lines.as_ref().map(|_| cpu.pc());
         let icache_attribution_pc = icache_stall_lines.as_ref().map(|_| cpu.pc());
-        if let Err(e) = cpu.step(&mut bus) {
+        let batch = if per_step || tape_exhausted {
+            1
+        } else {
+            let mut n = (args.steps - i).min(ROUTE_RUN_STEPS_PER_FRAME - route_tick_steps);
+            if tape_poll_bound {
+                n = n.min(64 - (i & 0x3F));
+            }
+            n.max(1)
+        };
+        let (ran, result) = if batch == 1 {
+            match cpu.step(&mut bus) {
+                Ok(()) => (1, Ok(())),
+                Err(error) => (0, Err(error)),
+            }
+        } else {
+            let deadline = route_tick_deadline;
+            let frames = observed_guest_frames;
+            let visual = observed_visual_frames;
+            cpu.run(&mut bus, batch, |bus| {
+                bus.cycles() >= deadline
+                    || bus.telemetry.frames_seen() != frames
+                    || bus
+                        .telemetry
+                        .counter_total(telemetry::counter::VISUAL_FRAMES)
+                        != visual
+            })
+        };
+        // `i` is now the step that failed, or else the last one that ran.
+        i += ran;
+        if let Err(e) = result {
             eprintln!("[cli] step {i} failed: {e:?}");
             eprintln!(
                 "[cli] regs: ra=0x{:08x} sp=0x{:08x} gp=0x{:08x} fp=0x{:08x} a0=0x{:08x} a1=0x{:08x} v0=0x{:08x} v1=0x{:08x} t9=0x{:08x}",
@@ -1321,6 +1368,8 @@ fn run_headless_launch(
             stopped_at = Some(i);
             break;
         }
+        i -= 1;
+        next_step = i + 1;
         if trace_exception && cpu.cop0()[13] & 0x7c != 0 {
             eprintln!(
                 "[cli] guest exception at step {i}: cause=0x{:08x} epc=0x{:08x} badvaddr=0x{:08x}",
@@ -1414,7 +1463,7 @@ fn run_headless_launch(
         // Advance on the editor's tick clock (see setup above), not on
         // `frames_seen`: one sample/pulse window per vblank-period cycle
         // budget, capped at the same instruction budget `step_one_frame` uses.
-        route_tick_steps += 1;
+        route_tick_steps += ran;
         if bus.cycles() >= route_tick_deadline || route_tick_steps >= ROUTE_RUN_STEPS_PER_FRAME {
             route_tick_deadline = bus.cycles().saturating_add(route_vblank_period);
             route_tick_steps = 0;
