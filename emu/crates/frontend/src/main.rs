@@ -6,7 +6,7 @@
 //! - `icons`   -- Lucide codepoint constants.
 //! - `gfx`     -- winit window + wgpu surface + egui-wgpu plumbing.
 //! - `app`     -- top-level state, UI orchestration entry point.
-//! - `ui/*`    -- individual panels (central, registers, vram, menu, hud).
+//! - `ui/*`    -- individual panels (central, registers, vram, menu).
 
 #![warn(missing_docs)]
 
@@ -1545,8 +1545,11 @@ impl ApplicationHandler for Shell {
                                     if !samples.is_empty() {
                                         audio.push_samples(&samples);
                                     }
-                                    // Surface the cpal ring depth in the HUD.
-                                    self.state.hud.set_audio_queue_len(audio.queue_len());
+                                    // Audio underruns go on the guest panel's host line.
+                                    self.state.guest_stats.note_audio_underruns(
+                                        audio.underrun_frames(),
+                                        audio.host_sample_rate(),
+                                    );
                                 } else {
                                     // No output device -- drain and discard so the
                                     // SPU's internal queue doesn't grow unbounded.

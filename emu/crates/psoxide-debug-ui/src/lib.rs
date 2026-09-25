@@ -340,10 +340,30 @@ impl GuestStats {
             self.host.speed = Some(emulated / self.host.window_seconds);
             self.host.frame_ms =
                 self.host.window_seconds * 1000.0 / f64::from(self.host.window_frames.max(1));
+            self.host.audio_gap_ms = self.host.window_underrun_frames as f64 * 1000.0
+                / f64::from(self.host.sample_rate.max(1));
             self.host.window_seconds = 0.0;
             self.host.window_vblanks = 0;
             self.host.window_frames = 0;
+            self.host.window_underrun_frames = 0;
         }
+    }
+
+    /// Account the host audio output's cumulative underrun count (output
+    /// frames it filled with silence) at `sample_rate`. Shown on the host
+    /// line as time the audio ran dry.
+    pub fn note_audio_underruns(&mut self, total_frames: u64, sample_rate: u32) {
+        if let Some(previous) = self.host.underrun_total {
+            self.host.window_underrun_frames += total_frames.saturating_sub(previous);
+        }
+        self.host.underrun_total = Some(total_frames);
+        self.host.sample_rate = sample_rate;
+    }
+
+    /// Milliseconds of host audio silence (underruns) in the last half
+    /// second, when the frontend reports them.
+    pub fn audio_gap_ms(&self) -> f64 {
+        self.host.audio_gap_ms
     }
 
     /// Emulated seconds per host second over the last half second, and the
@@ -597,6 +617,10 @@ struct HostSpeed {
     window_frames: u32,
     speed: Option<f64>,
     frame_ms: f64,
+    underrun_total: Option<u64>,
+    sample_rate: u32,
+    window_underrun_frames: u64,
+    audio_gap_ms: f64,
 }
 
 /// DMA channel names, index = channel.

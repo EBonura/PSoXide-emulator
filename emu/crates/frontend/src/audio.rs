@@ -289,7 +289,8 @@ impl AudioOut {
 
     /// Current queue depth in stereo samples. Diagnostic -- very
     /// high values mean the CPU is overrunning real-time; very low
-    /// means we're starving the callback.
+    /// means we're starving the callback. Read by the web bench hooks.
+    #[cfg(target_arch = "wasm32")]
     pub fn queue_len(&self) -> usize {
         self.queue.lock().map(|q| q.len()).unwrap_or(0)
     }
