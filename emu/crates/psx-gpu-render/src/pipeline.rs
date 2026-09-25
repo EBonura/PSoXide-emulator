@@ -411,37 +411,6 @@ impl HwPipeline {
         );
     }
 
-    /// Mirror CPU VRAM into the GPU-side `R16Uint` texture used by
-    /// the fragment shader. Cheap full-frame upload (1 MiB / frame)
-    /// -- same cost the existing `Graphics::prepare_vram` already
-    /// pays for the VRAM viewer panel. Phase 7 may dirty-track
-    /// regions to skip unchanged frames; for now full-upload keeps
-    /// the renderer obviously correct.
-    pub fn upload_vram(&self, queue: &wgpu::Queue, words: &[u16]) {
-        if words.len() != (VRAM_WIDTH * VRAM_HEIGHT) as usize {
-            return;
-        }
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.vram_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(words),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(VRAM_WIDTH * 2),
-                rows_per_image: Some(VRAM_HEIGHT),
-            },
-            wgpu::Extent3d {
-                width: VRAM_WIDTH,
-                height: VRAM_HEIGHT,
-                depth_or_array_layers: 1,
-            },
-        );
-    }
-
     /// Upload a wrapped sub-rect into the GPU-side `R16Uint` VRAM
     /// texture. Used by the live renderer's command-ordered VRAM
     /// mirror so texture reads see CPU→VRAM uploads and VRAM copies

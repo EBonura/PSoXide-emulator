@@ -132,6 +132,15 @@ pub struct Timers {
     /// from save states.
     #[serde(skip)]
     pub dbg_timer2_fires: u64,
+    /// First bus cycle at which a lazy advance could do anything but add to
+    /// a counter: a target or wrap crossing, or any mode whose ticks depend
+    /// on the video beam. Before it, skipping a branch-boundary advance and
+    /// covering the interval in a later one gives exactly the same state,
+    /// because every per-timer step is additive while nothing crosses (see
+    /// [`Timers::quiet_until`]). Zero means "advance at the next chance".
+    /// A cache: excluded from save states.
+    #[serde(skip)]
+    quiet_until: u64,
 }
 
 impl Timers {
@@ -157,14 +166,17 @@ impl Timers {
 
     /// Select the Timer 1 vertical-blank sync phase for a hardware profile.
     pub(crate) fn set_vblank_sync_offset_lines(&mut self, lines: u8) {
+        self.quiet_until = 0;
         self.vblank_sync_offset_lines = lines;
     }
 
     pub(crate) fn set_counter_read_extra_hold(&mut self, index: usize, cycles: u8) {
+        self.quiet_until = 0;
         self.counter_read_extra_hold[index] = cycles;
     }
 
     pub(crate) fn set_timer0_dot_read_extra_hold(&mut self, cycles: u8) {
+        self.quiet_until = 0;
         self.timer0_dot_read_extra_hold = cycles;
     }
 
@@ -175,6 +187,7 @@ impl Timers {
 
     /// Read a 32-bit word. `phys` must be inside `BASE..BASE+SIZE`.
     pub fn read32(&mut self, phys: u32) -> u32 {
+        self.quiet_until = 0;
         let (idx, off) = decode(phys);
         match off {
             0x0 => self.timers[idx].counter,
@@ -195,6 +208,7 @@ impl Timers {
     /// `now` is the current bus cycle; used only for diagnostics
     /// (records when mode writes reset the counter).
     pub fn write32(&mut self, phys: u32, value: u32, now: u64) {
+        self.quiet_until = 0;
         let (idx, off) = decode(phys);
         let t = &mut self.timers[idx];
         let v16 = value & 0xFFFF;
@@ -249,6 +263,7 @@ impl Timers {
     /// Returns a 3-bit mask of timers that fired an IRQ this tick.
     /// The caller (Bus) uses it to call `Irq::raise(IrqSource::Timer0/1/2)`.
     pub fn tick(&mut self, cycles: u64, hsync_period: u64, dot_clock_divisor: u64) -> u8 {
+        self.quiet_until = 0;
         let mut fired: u8 = 0;
         for i in 0..3 {
             if self.advance_timer(
@@ -331,7 +346,97 @@ impl Timers {
             }
         }
         self.last_advance_cycle = now;
+        self.quiet_until = self.compute_quiet_until(hsync_period);
         fired
+    }
+
+    /// Bus cycle of the last advance.
+    #[inline(always)]
+    pub fn last_advance_cycle(&self) -> u64 {
+        self.last_advance_cycle
+    }
+
+    /// Force the next branch-boundary advance (after video timing changes).
+    pub fn clear_quiet(&mut self) {
+        self.quiet_until = 0;
+    }
+
+    /// See the `quiet_until` field. A branch-boundary advance may be skipped
+    /// while the bus clock is below this.
+    #[inline(always)]
+    pub fn quiet_until(&self) -> u64 {
+        self.quiet_until
+    }
+
+    /// The earliest cycle, from `last_advance_cycle`, at which any timer
+    /// could cross its target or wrap. Counters whose ticks over an interval
+    /// are a sum over its parts can be quiet: the system clock, Timer 2's /8,
+    /// and Timer 1's HBlank source when free-running (no sync, or sync mode 3
+    /// after its release, which then only counts). HBlank ticks also depend
+    /// on the video timing, which the bus settles before any GP1 write (see
+    /// `Bus::settle_lazy_timers`). Timer 0's dot clock and every other sync
+    /// mode, or a counter hold in progress, keep the bank advancing at every
+    /// branch boundary exactly as before.
+    fn compute_quiet_until(&self, hsync_period: u64) -> u64 {
+        let mut quiet = u64::MAX;
+        for idx in 0..3 {
+            let t = &self.timers[idx];
+            if t.counter_hold_cycles != 0 {
+                return 0;
+            }
+            if t.mode & MODE_SYNC_ENABLE != 0 {
+                if self.is_timer_paused(idx) {
+                    continue;
+                }
+                let released = idx == 1 && (t.mode & MODE_SYNC_MODE_MASK) >> 1 == 3 && t.sync_seen;
+                if idx != 2 && !released {
+                    return 0;
+                }
+            }
+            let source = (t.mode >> 8) & 0x3;
+            enum Rate {
+                Cycles,
+                Eighths,
+                Lines,
+            }
+            let rate = match (idx, source) {
+                (0, 1) | (0, 3) => return 0,
+                (1, 1) | (1, 3) => Rate::Lines,
+                (2, 2) | (2, 3) => Rate::Eighths,
+                _ => Rate::Cycles,
+            };
+            // Source ticks until `advance_counter` would see a crossing.
+            let old = u64::from(t.counter);
+            let target = u64::from(t.target & 0xFFFF);
+            let ticks = if t.mode & MODE_RESET_AT_TARGET != 0 && target != 0 {
+                let raw_old = if t.target_reset_hold {
+                    target + 1
+                } else {
+                    old.min(target)
+                };
+                if raw_old < target {
+                    target - raw_old
+                } else {
+                    target + 2 - raw_old + target
+                }
+            } else {
+                let to_wrap = 0x1_0000u64.saturating_sub(old).max(1);
+                if old < target {
+                    (target - old).min(to_wrap)
+                } else {
+                    to_wrap
+                }
+            };
+            let cycles = match rate {
+                Rate::Cycles => ticks,
+                Rate::Eighths => (ticks * 8).saturating_sub(t.accum),
+                // At most one HBlank edge per line plus one for the phase
+                // the interval starts in.
+                Rate::Lines => ticks.saturating_sub(1).saturating_mul(hsync_period.max(1)),
+            };
+            quiet = quiet.min(cycles);
+        }
+        self.last_advance_cycle.saturating_add(quiet)
     }
 
     /// Sync the lazy clock to `now` without advancing any state.
@@ -341,6 +446,7 @@ impl Timers {
     /// to fast-forward through millions of cycles in one go.
     #[allow(dead_code)]
     pub fn sync_clock_to(&mut self, now: u64) {
+        self.quiet_until = 0;
         self.last_advance_cycle = now;
     }
 
@@ -348,6 +454,7 @@ impl Timers {
     /// Other root counters continue running and can therefore measure the
     /// complete access time of this register.
     pub fn hold_counter_for_read(&mut self, phys: u32, cycles: u32) {
+        self.quiet_until = 0;
         let (idx, off) = decode(phys);
         let mode = self.timers[idx].mode;
         // Both of the zero cases hold no extra cycles: an IRQ-configured
@@ -385,6 +492,7 @@ impl Timers {
     /// root counter. Silicon timing sweeps expose this as one missing setup
     /// wait on the first of 64 otherwise-identical accesses.
     pub(crate) fn overlap_counter_write_with_external_read(&mut self, now: u64, stalls: u32) {
+        self.quiet_until = 0;
         for timer in &mut self.timers {
             if !timer.counter_bus_overlap_pending {
                 continue;

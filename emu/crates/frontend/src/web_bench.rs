@@ -10,7 +10,10 @@
 //!   redraw profile as JSON; `psoxideBenchReset()` zeroes them so a script can
 //!   measure a steady-state window.
 //!
-//! Both are inert unless called: no URL parameter, no work.
+//! - `?smooth=1` turns on `video.smooth_slow_host` for the session, so the
+//!   slow-host alternative can be measured without clicking the menu.
+//!
+//! All are inert unless called: no URL parameter, no work.
 
 use std::cell::RefCell;
 
@@ -33,6 +36,12 @@ struct Totals {
     long_redraws: u64,
     audio_underrun_frames: u64,
     audio_queue_len: usize,
+    /// Guest frames held back waiting for disc sectors.
+    disc_waits: u64,
+    /// Drive-side counts since boot: sector deliveries that had to wait, and
+    /// CD-DA pieces played as silence (see `CdRom::late_sector_counts`).
+    late_sectors: u64,
+    late_cdda: u64,
 }
 
 thread_local! {
@@ -40,7 +49,12 @@ thread_local! {
 }
 
 /// Fold one redraw's profile into the totals.
-pub fn note_redraw(sample: &FrameProfileSample, underrun_frames: u64, audio_queue_len: usize) {
+pub fn note_redraw(
+    sample: &FrameProfileSample,
+    underrun_frames: u64,
+    audio_queue_len: usize,
+    late_sectors: (u64, u64),
+) {
     TOTALS.with(|t| {
         let mut t = t.borrow_mut();
         t.redraws += 1;
@@ -57,6 +71,8 @@ pub fn note_redraw(sample: &FrameProfileSample, underrun_frames: u64, audio_queu
         }
         t.audio_underrun_frames = underrun_frames;
         t.audio_queue_len = audio_queue_len;
+        t.disc_waits += sample.disc_waits as u64;
+        (t.late_sectors, t.late_cdda) = late_sectors;
     });
 }
 
@@ -69,7 +85,8 @@ pub fn bench_stats() -> String {
             "{{\"redraws\":{},\"guest_frames\":{},\"total_ms\":{:.3},\"emu_ms\":{:.3},\
              \"audio_ms\":{:.3},\"hw_render_ms\":{:.3},\"hw_vram_clone_ms\":{:.3},\
              \"egui_ms\":{:.3},\"max_total_ms\":{:.3},\"long_redraws\":{},\
-             \"audio_underrun_frames\":{},\"audio_queue_len\":{}}}",
+             \"audio_underrun_frames\":{},\"audio_queue_len\":{},\"disc_waits\":{},\
+             \"late_sectors\":{},\"late_cdda\":{}}}",
             t.redraws,
             t.guest_frames,
             t.total_ms,
@@ -81,7 +98,10 @@ pub fn bench_stats() -> String {
             t.max_total_ms,
             t.long_redraws,
             t.audio_underrun_frames,
-            t.audio_queue_len
+            t.audio_queue_len,
+            t.disc_waits,
+            t.late_sectors,
+            t.late_cdda
         )
     })
 }
@@ -107,4 +127,16 @@ pub fn disc_param() -> Option<String> {
         && !path.starts_with('/')
         && !path.contains('\\');
     relative.then_some(path)
+}
+
+/// Whether the page URL carries `name=1`.
+pub fn flag(name: &str) -> bool {
+    web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .is_some_and(|search| {
+            search
+                .trim_start_matches('?')
+                .split('&')
+                .any(|pair| pair == format!("{name}=1"))
+        })
 }

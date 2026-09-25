@@ -19,8 +19,7 @@ pub fn load_disc_path(path: &Path) -> Result<Disc, String> {
     {
         psoxide_settings::library::load_disc_from_ccd(path)
     } else {
-        let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(Disc::from_bin(bytes))
+        psoxide_settings::library::load_disc_from_bin(path)
     }
 }
 

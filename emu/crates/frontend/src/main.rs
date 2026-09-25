@@ -16,6 +16,8 @@ mod audio;
 mod burn;
 // Browser file upload (game). wasm-only: the native build uses rfd.
 #[cfg(target_arch = "wasm32")]
+mod web_disc;
+#[cfg(target_arch = "wasm32")]
 mod web_files;
 // Same-origin streamed discs (the demo disc). wasm-only: native has a library.
 #[cfg(target_arch = "wasm32")]
@@ -89,6 +91,41 @@ const FALLBACK_FRAME_DT: f32 = 1.0 / 60.0;
 /// cap the burst so a debugger stop or window drag doesn't spend
 /// seconds chewing through delayed emu frames.
 const MAX_CATCHUP_FRAMES: u32 = 4;
+
+/// Measured redraw costs, for pacing a host too slow to keep up (see
+/// `video.smooth_slow_host`).
+#[derive(Clone, Copy, Default)]
+struct HostPace {
+    /// Emulation + audio per guest frame, ms.
+    frame_ms: f32,
+    /// Everything else in a redraw (rendering, UI), ms.
+    other_ms: f32,
+}
+
+impl HostPace {
+    fn note(&mut self, profile: &FrameProfileSample) {
+        fn ewma(avg: &mut f32, sample: f32) {
+            *avg += (sample - *avg) * 0.1;
+        }
+        let emulation = profile.emu_ms + profile.audio_ms;
+        if profile.frames_run > 0.0 {
+            ewma(&mut self.frame_ms, emulation / profile.frames_run);
+        }
+        ewma(&mut self.other_ms, (profile.total_ms - emulation).max(0.0));
+    }
+
+    /// Guest frames whose emulation fits in one guest frame period next to
+    /// the rest of a redraw, at least one. Measured against the guest
+    /// period rather than the redraw interval: on a slow host the interval
+    /// is the overrun itself.
+    fn frames_per_paint(&self, frame_dt: f32) -> u32 {
+        if self.frame_ms <= 0.0 {
+            return MAX_CATCHUP_FRAMES;
+        }
+        let room = (frame_dt * 1000.0 - self.other_ms).max(0.0);
+        ((room / self.frame_ms) as u32).clamp(1, MAX_CATCHUP_FRAMES)
+    }
+}
 
 fn guest_frame_dt(vblank_period: Option<u64>) -> f32 {
     vblank_period
@@ -275,6 +312,9 @@ struct Shell {
     /// massively overfills the audio queue and produces crackle
     /// from dropped samples.
     emu_frame_accum: f32,
+    /// Running averages for `video.smooth_slow_host`: milliseconds one
+    /// guest frame costs to emulate, and the rest of a redraw's work.
+    pace: HostPace,
     /// Phase C -- when `Some`, the experimental compute-shader
     /// rasterizer is shadowing the CPU rasterizer: each frame the
     /// CPU's `cmd_log` is drained and replayed onto the GPU compute
@@ -381,6 +421,7 @@ impl Shell {
             input,
             controller_layout_stamp: None,
             emu_frame_accum: 0.0,
+            pace: HostPace::default(),
             compute_backend,
             display_gpu_compute: gpu_compute,
             hw_seen_gpu_resync_generation: 0,
@@ -1418,7 +1459,19 @@ impl ApplicationHandler for Shell {
                     guest_frame_dt(self.state.bus.as_ref().map(|bus| bus.vblank_period()));
                 let frames_to_run = if self.state.running {
                     self.emu_frame_accum = (self.emu_frame_accum + dt).min(0.25);
-                    ((self.emu_frame_accum / active_frame_dt) as u32).min(MAX_CATCHUP_FRAMES)
+                    let owed =
+                        ((self.emu_frame_accum / active_frame_dt) as u32).min(MAX_CATCHUP_FRAMES);
+                    if self.state.settings.video.smooth_slow_host {
+                        // Run only what fits in one paint and forgive the
+                        // rest: the game slows down, the picture does not.
+                        let fit = self.pace.frames_per_paint(active_frame_dt);
+                        if owed > fit {
+                            self.emu_frame_accum = fit as f32 * active_frame_dt;
+                        }
+                        owed.min(fit)
+                    } else {
+                        owed
+                    }
                 } else {
                     0
                 };
@@ -1475,7 +1528,17 @@ impl ApplicationHandler for Shell {
                         Port1PadSample::from_host(port1.mask, port1.right_stick, port1.left_stick);
                     let live_port2_sample =
                         Port1PadSample::from_host(port2.mask, port2.right_stick, port2.left_stick);
+                    let mut frames_run = 0u32;
                     for _ in 0..frames_to_run {
+                        // A disc read on demand (web) fetches ahead of the
+                        // drive; if the next frame could want a sector that has
+                        // not arrived, hold the frame back until it has. The
+                        // time owed stays in the accumulator.
+                        if !app::disc_ready_for_frame(&self.state) {
+                            profile.disc_waits += 1.0;
+                            break;
+                        }
+                        frames_run += 1;
                         // Recording/replay happens at one authoritative video-
                         // frame port-1 boundary for emulator, editor and headless
                         // runs alike.
@@ -1575,7 +1638,7 @@ impl ApplicationHandler for Shell {
                         profile.add_guest_profile(guest_profile);
                         profile.audio_ms += elapsed_ms(audio_start);
                     }
-                    self.emu_frame_accum -= (frames_to_run as f32) * active_frame_dt;
+                    self.emu_frame_accum -= (frames_run as f32) * active_frame_dt;
                 } else {
                     self.emu_frame_accum = 0.0;
                 }
@@ -1818,11 +1881,16 @@ impl ApplicationHandler for Shell {
                 }
 
                 profile.total_ms = elapsed_ms(profile_start);
+                self.pace.note(&profile);
                 #[cfg(target_arch = "wasm32")]
                 web_bench::note_redraw(
                     &profile,
                     self.audio.as_ref().map_or(0, |a| a.underrun_frames()),
                     self.audio.as_ref().map_or(0, |a| a.queue_len()),
+                    state
+                        .bus
+                        .as_ref()
+                        .map_or((0, 0), |bus| bus.cdrom.late_sector_counts()),
                 );
                 if let Some(line) = state.profiler.record(profile) {
                     eprintln!("{line}");
@@ -2083,6 +2151,23 @@ fn hw_display_uv(area: emulator_core::DisplayArea) -> egui::Rect {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn slow_host_pacing_runs_what_fits_in_a_frame_period() {
+        let dt = 1.0 / 60.0;
+        let unmeasured = super::HostPace::default();
+        assert_eq!(unmeasured.frames_per_paint(dt), super::MAX_CATCHUP_FRAMES);
+        let fast = super::HostPace {
+            frame_ms: 5.0,
+            other_ms: 1.0,
+        };
+        assert_eq!(fast.frames_per_paint(dt), 3);
+        let slow = super::HostPace {
+            frame_ms: 25.0,
+            other_ms: 3.0,
+        };
+        assert_eq!(slow.frames_per_paint(dt), 1, "always at least one frame");
+    }
+
     use super::*;
 
     #[test]

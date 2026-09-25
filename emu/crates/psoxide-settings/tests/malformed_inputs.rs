@@ -279,6 +279,9 @@ fn cue_tracks_hold_exactly_their_file_extents() {
         (4, &b[..]),
     ];
     for (number, bytes) in expect {
-        assert_eq!(disc.track(number).unwrap().bytes, bytes, "track {number}");
+        let source = &disc.track(number).unwrap().source;
+        let mut held = vec![0u8; source.len() as usize];
+        assert!(source.read_at(0, &mut held));
+        assert_eq!(held, bytes, "track {number}");
     }
 }

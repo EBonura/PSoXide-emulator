@@ -19,15 +19,21 @@
 - **Used for**: emulator UI iconography (codepoints listed in
   `emu/crates/frontend/src/icons.rs`). Regular is the default weight;
   fill is used for active toggle buttons.
+- **Subset**: both files hold only the codepoints in `icons.rs` (about
+  8 KB each instead of 450-490 KB, which every web visitor downloaded).
+  Outlines are unchanged. To add an icon, subset the upstream TTFs again
+  with fontTools, listing every codepoint in `icons.rs`:
 
-## lucide.ttf
+  ```sh
+  U=$(grep -o '\\u{e[0-9a-f]*}' emu/crates/frontend/src/icons.rs \
+      | sed 's/\\u{\(.*\)}/U+\1/' | sort -u | paste -sd, -)
+  pyftsubset Phosphor.ttf --unicodes="$U" --output-file=Phosphor.subset.ttf \
+      --no-hinting --desubroutinize --layout-features='' \
+      --name-IDs='*' --name-languages='*' --notdef-outline
+  ```
 
-- **Source**: https://lucide.dev/ (icon font build of the Lucide icon
-  set).
-- **License**: ISC
-  (https://github.com/lucide-icons/lucide/blob/main/LICENSE).
-- **Used for**: editor UI iconography (codepoints listed in
-  `editor/crates/psxed-ui/src/icons.rs`).
+  (same for `Phosphor-Fill.ttf`). A frontend test fails while an icon is
+  missing from either file.
 
 All fonts are bundled as binary `.ttf` files. Their licenses are
 GPL-compatible: the SIL Open Font License is explicitly compatible
