@@ -8,7 +8,7 @@ use egui::{Align, Layout, Rect, RichText, SidePanel, UiBuilder};
 use crate::app::AppState;
 use crate::theme;
 
-use super::{memory, profiler, registers, vram};
+use super::{memory, registers, vram};
 
 const SIDEBAR_MIN_WIDTH: f32 = 320.0;
 const SIDEBAR_MAX_WIDTH: f32 = 900.0;
@@ -106,6 +106,13 @@ fn draw_contents(ui: &mut egui::Ui, state: &mut AppState, vram_tex: egui::Textur
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            let mut export = None;
+            collapsible(ui, "Guest performance (PS1)", true, |ui| {
+                export = psoxide_debug_ui::draw(ui, &mut state.guest_stats, Some(vram_tex));
+            });
+            if let Some(psoxide_debug_ui::PanelAction::ExportCsv { csv, seconds }) = export {
+                state.export_guest_stats_csv(&csv, seconds);
+            }
             collapsible(ui, "CPU Registers", state.panels.registers, |ui| {
                 registers::draw_contents(
                     ui,
@@ -126,9 +133,6 @@ fn draw_contents(ui: &mut egui::Ui, state: &mut AppState, vram_tex: egui::Textur
             });
             collapsible(ui, "VRAM", state.panels.vram, |ui| {
                 vram::draw_contents(ui, vram_tex);
-            });
-            collapsible(ui, "Frame Profiler", state.panels.profiler, |ui| {
-                profiler::draw_contents(ui, &mut state.profiler);
             });
         });
 }

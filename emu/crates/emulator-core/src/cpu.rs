@@ -239,6 +239,92 @@ impl CpuCycleProfileSnapshot {
                 .saturating_sub(earlier.other_stall_cycles),
         }
     }
+
+    /// Saturating per-field sum with another snapshot.
+    pub fn saturating_add(self, other: Self) -> Self {
+        Self {
+            issue_cycles: self.issue_cycles.saturating_add(other.issue_cycles),
+            ram_load_stall_cycles: self
+                .ram_load_stall_cycles
+                .saturating_add(other.ram_load_stall_cycles),
+            stack_ram_load_stall_cycles: self
+                .stack_ram_load_stall_cycles
+                .saturating_add(other.stack_ram_load_stall_cycles),
+            ram_store_stall_cycles: self
+                .ram_store_stall_cycles
+                .saturating_add(other.ram_store_stall_cycles),
+            mmio_stall_cycles: self
+                .mmio_stall_cycles
+                .saturating_add(other.mmio_stall_cycles),
+            icache_refill_stall_cycles: self
+                .icache_refill_stall_cycles
+                .saturating_add(other.icache_refill_stall_cycles),
+            uncached_fetch_stall_cycles: self
+                .uncached_fetch_stall_cycles
+                .saturating_add(other.uncached_fetch_stall_cycles),
+            gte_busy_stall_cycles: self
+                .gte_busy_stall_cycles
+                .saturating_add(other.gte_busy_stall_cycles),
+            muldiv_interlock_stall_cycles: self
+                .muldiv_interlock_stall_cycles
+                .saturating_add(other.muldiv_interlock_stall_cycles),
+            other_stall_cycles: self
+                .other_stall_cycles
+                .saturating_add(other.other_stall_cycles),
+        }
+    }
+}
+
+/// Where the CPU waited rather than worked, plus its main-RAM data traffic.
+///
+/// Collected alongside [`CpuCycleProfileSnapshot`] (same enable flag) and
+/// just as observational: it never changes guest state or timing.
+///
+/// A wait loop is a short backward branch (at most
+/// [`WAIT_LOOP_MAX_SPAN`] bytes) taken again to the same target without any
+/// store in between, other than stores through `$sp`: the shape of
+/// `while (!flag) {}` polling, including Sony's libetc `VSync`, which counts
+/// a volatile timeout local down on the stack every iteration. The first
+/// iteration arms the detector, every later one is charged here, split by
+/// what the loop reads. It is a heuristic: a loop that does real work
+/// without storing outside its stack frame (a checksum over memory, say) is
+/// counted as waiting too.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CpuWaitProfileSnapshot {
+    /// Wait loops that read an I/O register (GPUSTAT, DMA, CD, timers, IRQ).
+    pub hardware_poll: CpuCycleProfileSnapshot,
+    /// Wait loops that only read memory (vblank counters, event flags).
+    pub memory_poll: CpuCycleProfileSnapshot,
+    /// Cycles an HLE kernel call spent retrying a wait (WaitEvent, DrawSync).
+    pub hle_wait_cycles: u64,
+    /// Main-RAM data loads retired while profiling.
+    pub ram_loads: u64,
+    /// Main-RAM data stores retired while profiling.
+    pub ram_stores: u64,
+}
+
+impl CpuWaitProfileSnapshot {
+    /// Every cycle charged to waiting: both poll kinds plus HLE waits.
+    pub fn total_wait_cycles(self) -> u64 {
+        self.hardware_poll
+            .total_profiled_cycles()
+            .saturating_add(self.memory_poll.total_profiled_cycles())
+            .saturating_add(self.hle_wait_cycles)
+    }
+}
+
+/// Longest loop body, in bytes from the branch target to the delay slot,
+/// the wait-loop detector treats as polling.
+pub const WAIT_LOOP_MAX_SPAN: u32 = 128;
+
+/// Per-iteration state of the wait-loop detector.
+#[derive(Clone, Copy, Debug, Default)]
+struct WaitLoopTracker {
+    armed: bool,
+    target: u32,
+    stored: bool,
+    polled_io: bool,
+    start: CpuCycleProfileSnapshot,
 }
 
 /// Emulator-owned exact dynamic instruction-class counts.
@@ -565,6 +651,11 @@ pub struct Cpu {
     /// Emulator-owned CPU cycle attribution history. Diagnostic only.
     #[serde(skip)]
     cpu_cycle_profile: CpuCycleProfileSnapshot,
+    /// Wait-loop and RAM-traffic attribution, enabled with the cycle profile.
+    #[serde(skip)]
+    cpu_wait_profile: CpuWaitProfileSnapshot,
+    #[serde(skip)]
+    wait_loop: WaitLoopTracker,
     /// Opt-in exact instruction-class profiler.
     #[serde(skip)]
     instruction_class_profile_enabled: bool,
@@ -682,6 +773,8 @@ impl Cpu {
             last_instruction_cache_refill: None,
             cpu_cycle_profile_enabled: false,
             cpu_cycle_profile: CpuCycleProfileSnapshot::default(),
+            cpu_wait_profile: CpuWaitProfileSnapshot::default(),
+            wait_loop: WaitLoopTracker::default(),
             instruction_class_profile_enabled: false,
             instruction_class_profile: InstructionClassProfileSnapshot::default(),
             cop2: Gte::new(),
@@ -907,6 +1000,21 @@ impl Cpu {
     pub fn set_cpu_cycle_profile_enabled(&mut self, enabled: bool) {
         self.cpu_cycle_profile_enabled = enabled;
         self.cpu_cycle_profile = CpuCycleProfileSnapshot::default();
+        self.cpu_wait_profile = CpuWaitProfileSnapshot::default();
+        self.wait_loop = WaitLoopTracker::default();
+    }
+
+    /// True while CPU cycle attribution is being collected.
+    #[inline]
+    pub fn cpu_cycle_profile_enabled(&self) -> bool {
+        self.cpu_cycle_profile_enabled
+    }
+
+    /// Snapshot the wait-loop and RAM-traffic counters collected with the
+    /// cycle profile.
+    #[inline]
+    pub fn cpu_wait_profile(&self) -> CpuWaitProfileSnapshot {
+        self.cpu_wait_profile
     }
 
     /// Snapshot emulator-owned CPU cycle attribution counters.
@@ -1192,6 +1300,69 @@ impl Cpu {
             },
             _ => {}
         }
+    }
+
+    /// Wait-loop detector and RAM-traffic count; see
+    /// [`CpuWaitProfileSnapshot`]. Runs only while the cycle profile is on,
+    /// after the instruction retired and `self.pc` holds the next PC.
+    fn observe_wait_loop(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        taken_branch: Option<u32>,
+        access: Option<ProfiledDataAccess>,
+    ) {
+        let opcode = (instr >> 26) & 0x3f;
+        let base = (instr >> 21) & 0x1f;
+        if matches!(opcode, 0x28 | 0x29 | 0x2a | 0x2b | 0x2e | 0x3a) && base != 29 {
+            self.wait_loop.stored = true;
+        }
+        match access {
+            Some(ProfiledDataAccess::RamLoad { .. }) => {
+                self.cpu_wait_profile.ram_loads = self.cpu_wait_profile.ram_loads.saturating_add(1);
+            }
+            Some(ProfiledDataAccess::RamStore) => {
+                self.cpu_wait_profile.ram_stores =
+                    self.cpu_wait_profile.ram_stores.saturating_add(1);
+            }
+            Some(ProfiledDataAccess::Mmio) => self.wait_loop.polled_io = true,
+            Some(ProfiledDataAccess::Other) | None => {}
+        }
+        let Some(target) = taken_branch else {
+            return;
+        };
+        // `pc` is the delay slot; an exception may have redirected past the
+        // branch, which ends any loop in progress. Forward branches (an `if`
+        // inside the loop body) and calls leave it armed; only the loop's
+        // own backward branch closes an iteration.
+        if self.pc != target {
+            self.wait_loop.armed = false;
+            return;
+        }
+        if target > pc {
+            return;
+        }
+        if pc - target > WAIT_LOOP_MAX_SPAN {
+            self.wait_loop.armed = false;
+            return;
+        }
+        let tracker = self.wait_loop;
+        if tracker.armed && tracker.target == target && !tracker.stored {
+            let spent = self.cpu_cycle_profile.delta_since(tracker.start);
+            let bucket = if tracker.polled_io {
+                &mut self.cpu_wait_profile.hardware_poll
+            } else {
+                &mut self.cpu_wait_profile.memory_poll
+            };
+            *bucket = bucket.saturating_add(spent);
+        }
+        self.wait_loop = WaitLoopTracker {
+            armed: true,
+            target,
+            stored: false,
+            polled_io: false,
+            start: self.cpu_cycle_profile,
+        };
     }
 
     #[inline]
@@ -1620,6 +1791,12 @@ impl Cpu {
                 // the same PC; take pending interrupts between attempts, as
                 // the retail wait loops do, or nothing could end the wait.
                 if out.retry {
+                    if self.cpu_cycle_profile_enabled {
+                        self.cpu_wait_profile.hle_wait_cycles = self
+                            .cpu_wait_profile
+                            .hle_wait_cycles
+                            .saturating_add(bus.cycles().saturating_sub(hle_cycles_before));
+                    }
                     bus.drain_scheduler_events_post_op();
                     if self.should_take_interrupt(bus) {
                         self.enter_exception(ExceptionCode::Interrupt, self.pc, false);
@@ -1764,6 +1941,9 @@ impl Cpu {
                 None => self.pc.wrapping_add(4),
             }
         };
+        if self.cpu_cycle_profile_enabled {
+            self.observe_wait_loop(instr, pc_before, branch_after_this, profiled_access);
+        }
 
         // Hardware-IRQ check, end-of-step. Mirrors Redux's `branchTest`,
         // which only runs when the just-retired instruction was a delay

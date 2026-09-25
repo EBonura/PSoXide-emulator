@@ -53,46 +53,10 @@ impl HudState {
         self.tick_samples.push_back(delta);
     }
 
-    /// Average frame time over the rolling window, in seconds.
-    pub fn average_dt(&self) -> f32 {
-        if self.dt_samples.is_empty() {
-            return 0.0;
-        }
-        let sum: f32 = self.dt_samples.iter().sum();
-        sum / self.dt_samples.len() as f32
-    }
-
-    /// Frames per second, averaged over the rolling window.
-    pub fn fps(&self) -> f32 {
-        let avg = self.average_dt();
-        if avg > 0.0 {
-            1.0 / avg
-        } else {
-            0.0
-        }
-    }
-
-    /// CPU instructions per second, averaged over the rolling window.
-    /// Returns 0 when paused or when the window has no data yet.
-    pub fn ips(&self) -> f32 {
-        let total_ticks: u64 = self.tick_samples.iter().sum();
-        let total_dt: f32 = self.dt_samples.iter().sum();
-        if total_dt > 0.0 {
-            total_ticks as f32 / total_dt
-        } else {
-            0.0
-        }
-    }
-
     /// Snapshot the current audio ring depth. Called by the shell
     /// after it pushes freshly-drained SPU samples into cpal's
     /// queue; surfaced in the toolbar as an "AUDIO" metric.
     pub fn set_audio_queue_len(&mut self, len: usize) {
         self.audio_queue_len = len;
-    }
-
-    /// Current cached audio backlog (stereo samples).
-    pub fn audio_queue_len(&self) -> usize {
-        self.audio_queue_len
     }
 }
