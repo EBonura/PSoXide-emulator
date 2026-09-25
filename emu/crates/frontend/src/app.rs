@@ -477,11 +477,28 @@ pub struct AppState {
     /// with poll 0 of a fresh machine.
     #[cfg(target_arch = "wasm32")]
     web_boot: Option<WebBoot>,
+    /// Web: a disc read on demand whose boot is waiting for its boot files
+    /// (volume descriptor, directories, SYSTEM.CNF, executable) to arrive.
+    #[cfg(target_arch = "wasm32")]
+    web_pending_boot: Option<PendingWebBoot>,
     /// [`emulator_core::game_image_hash`] of the current game image, both
     /// targets. Recorded into browser tape CSVs; compared when a replay
     /// loads so a changed build gets flagged to the user. `None` when the
     /// image bytes were never in hand (e.g. a bundled example boot).
     current_game_hash: Option<u64>,
+}
+
+/// A web disc waiting to boot (see `AppState::web_pending_boot`).
+#[cfg(target_arch = "wasm32")]
+struct PendingWebBoot {
+    disc: Disc,
+    image_id: u32,
+    game_id: String,
+    title: String,
+    name: String,
+    size: u64,
+    hash: u64,
+    attempts: u32,
 }
 
 /// How the web build booted the current game (see `AppState::web_boot`).
@@ -599,6 +616,8 @@ impl AppState {
             web_track_patches: Vec::new(),
             #[cfg(target_arch = "wasm32")]
             web_boot: None,
+            #[cfg(target_arch = "wasm32")]
+            web_pending_boot: None,
             current_game_hash: None,
         };
         // Startup auto-rescan: always run when a developer-facing build dir
@@ -683,9 +702,17 @@ impl AppState {
     /// of [`Self::boot_disc_bytes`] so the web build's streamed CUE+BIN discs
     /// (multi-track, CD-DA) reach the identical boot sequence.
     pub fn boot_disc(&mut self, disc: Disc) -> Result<(), String> {
+        self.try_boot_disc(disc).map_err(|(_, error)| error)
+    }
+
+    /// [`Self::boot_disc`], handing the disc back when the boot fails so it
+    /// can be tried again (a web disc whose boot files are still arriving).
+    pub fn try_boot_disc(&mut self, disc: Disc) -> Result<(), (Disc, String)> {
         let mut bus = Bus::new_without_bios();
         let mut cpu = Cpu::new();
-        fast_boot_disc(&mut bus, &mut cpu, &disc).map_err(|e| format!("boot disc: {e:?}"))?;
+        if let Err(e) = fast_boot_disc(&mut bus, &mut cpu, &disc) {
+            return Err((disc, format!("boot disc: {e:?}")));
+        }
         bus.cdrom.insert_disc(Some(disc));
         bus.attach_digital_pad_port1();
         self.memcard_port1_path = None;
@@ -743,16 +770,14 @@ impl AppState {
             }
             GameKind::DiscBin | GameKind::DiscIso => {
                 let mut bus = Bus::new_without_bios();
-                let bytes = std::fs::read(&entry.path)
-                    .map_err(|e| format!("{}: {e}", entry.path.display()))?;
-                if bytes.len() < SECTOR_BYTES {
+                let disc = psoxide_settings::library::load_disc_from_bin(&entry.path)?;
+                if disc.tracks().iter().map(|t| t.source.len()).sum::<u64>() < SECTOR_BYTES as u64 {
                     return Err(format!(
                         "{} is too small to be a valid disc image",
                         entry.path.display()
                     ));
                 }
-                game_hash = Some(emulator_core::game_image_hash(&bytes));
-                let disc = Disc::from_bin(bytes);
+                game_hash = Some(disc_image_hash(&disc));
                 fast_boot_disc(&mut bus, &mut cpu, &disc)
                     .map_err(|e| format!("{}: boot failed: {e:?}", entry.path.display()))?;
                 boot_mode = "HLE kernel";
@@ -1856,6 +1881,28 @@ impl AppState {
                     // native launch path holds the same rule): download the
                     // outgoing recording before replacing the machine.
                     self.stop_input_recording_if_active();
+                    if let Some(opened) = loaded.disc {
+                        let title = Path::new(&loaded.name)
+                            .file_stem()
+                            .and_then(|stem| stem.to_str())
+                            .unwrap_or(&loaded.name)
+                            .to_string();
+                        let image_id = opened.image.id();
+                        let size = psx_iso::TrackSource::len(&opened.image);
+                        self.web_pending_boot = Some(PendingWebBoot {
+                            disc: Disc::from_source(Box::new(opened.image)),
+                            image_id,
+                            game_id: loaded
+                                .game_id
+                                .unwrap_or_else(|| format!("web:{}", loaded.name)),
+                            title,
+                            name: loaded.name,
+                            size,
+                            hash: opened.hash,
+                            attempts: 0,
+                        });
+                        continue;
+                    }
                     let size = loaded.bytes.len() as u64;
                     let kind = if loaded.bytes.starts_with(b"PS-X EXE") {
                         GameKind::Exe
@@ -1899,6 +1946,46 @@ impl AppState {
         }
         for event in crate::web_files::drain_quick_states() {
             self.apply_web_quick_state_event(event);
+        }
+        self.poll_pending_web_boot();
+    }
+
+    /// Try the waiting web disc boot again once the reads its last attempt
+    /// asked for have landed. Each attempt gets further (volume descriptor,
+    /// directories, SYSTEM.CNF, the executable), so a boot takes a handful
+    /// of frames.
+    #[cfg(target_arch = "wasm32")]
+    fn poll_pending_web_boot(&mut self) {
+        let Some(pending) = self.web_pending_boot.as_ref() else {
+            return;
+        };
+        if crate::web_disc::busy(pending.image_id) {
+            return;
+        }
+        let mut pending = self.web_pending_boot.take().expect("checked above");
+        match self.try_boot_disc(pending.disc) {
+            Ok(()) => {
+                crate::web_disc::pin_resident(pending.image_id);
+                self.web_boot = Some(WebBoot::DiscHle);
+                self.current_game_hash = Some(pending.hash);
+                self.set_web_current_game(
+                    pending.game_id,
+                    pending.title,
+                    GameKind::DiscBin,
+                    pending.size,
+                );
+                self.status_message_set(format!("Launched: {}", pending.name));
+            }
+            Err((disc, error)) => {
+                // A boot that asked for nothing new has failed for real.
+                pending.attempts += 1;
+                if crate::web_disc::busy(pending.image_id) && pending.attempts < 64 {
+                    pending.disc = disc;
+                    self.web_pending_boot = Some(pending);
+                } else {
+                    self.status_message_set(format!("{}: {error}", pending.name));
+                }
+            }
         }
     }
 
@@ -3020,6 +3107,17 @@ mod freelook_projection_tests {
     }
 }
 
+/// Whether the mounted disc can supply what the drive may read during the
+/// next frame. Always true for a local image; a web image read on demand may
+/// need a frame or two to fetch ahead (see `CdRom::prefetch_upcoming`), and
+/// the frame waits for it rather than make the drive wait mid-frame.
+pub fn disc_ready_for_frame(state: &AppState) -> bool {
+    state
+        .bus
+        .as_ref()
+        .is_none_or(|bus| bus.cdrom.prefetch_upcoming())
+}
+
 pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     let guest_panel_visible = state.guest_panel_visible();
     let max_steps = state.run_steps_per_frame.max(1);
@@ -3119,10 +3217,15 @@ pub(crate) fn fast_boot_embedded_playtest_disc(
 /// Input-tape change-detection hash for a modelled disc: every track's raw
 /// bytes in order, hashed as one stream. A single-track bin matches
 /// [`emulator_core::game_image_hash`] of the raw file.
+///
+/// The image is read through in megabyte pieces, so hashing it holds no
+/// more of it than that.
 fn disc_image_hash(disc: &Disc) -> u64 {
-    emulator_core::game_image_hash_parts(
-        (0u8..=99).filter_map(|number| disc.track(number).map(|track| track.bytes.as_slice())),
-    )
+    let mut hasher = emulator_core::GameImageHasher::new();
+    for track in disc.tracks() {
+        psoxide_settings::disc_image::for_each_chunk(&*track.source, |bytes| hasher.update(bytes));
+    }
+    hasher.finish()
 }
 
 /// The settings field a rebind target reads from. Kept as a pair of
@@ -3285,14 +3388,13 @@ fn load_authored_disc(path: &Path) -> Result<Disc, String> {
     if ext == "cue" {
         psoxide_settings::library::load_disc_from_cue(path).map_err(|error| error.to_string())
     } else {
-        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-        if bytes.len() < SECTOR_BYTES {
+        let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+        if len < SECTOR_BYTES as u64 {
             return Err(format!(
-                "too small ({} bytes, need at least {SECTOR_BYTES})",
-                bytes.len()
+                "too small ({len} bytes, need at least {SECTOR_BYTES})"
             ));
         }
-        Ok(Disc::from_bin(bytes))
+        psoxide_settings::library::load_disc_from_bin(path)
     }
 }
 

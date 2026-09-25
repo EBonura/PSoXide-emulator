@@ -78,14 +78,44 @@ pub fn game_image_hash(bytes: &[u8]) -> u64 {
 /// [`game_image_hash`] over several buffers, hashed as if concatenated.
 /// Multi-track (cue/ccd) discs hash their tracks in order through this.
 pub fn game_image_hash_parts<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut hasher = GameImageHasher::new();
     for part in parts {
-        for &byte in part {
+        hasher.update(part);
+    }
+    hasher.finish()
+}
+
+/// [`game_image_hash`] fed a piece at a time, for images read in chunks
+/// rather than held whole.
+#[derive(Clone, Copy, Debug)]
+pub struct GameImageHasher(u64);
+
+impl GameImageHasher {
+    /// A hasher over no bytes yet.
+    pub fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    /// Continue the hash over `bytes`.
+    pub fn update(&mut self, bytes: &[u8]) {
+        let mut hash = self.0;
+        for &byte in bytes {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
+        self.0 = hash;
     }
-    hash
+
+    /// The hash of everything fed so far.
+    pub fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for GameImageHasher {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// One emulated frame's port-1 DualShock state.

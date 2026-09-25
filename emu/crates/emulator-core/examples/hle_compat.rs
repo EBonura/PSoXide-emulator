@@ -244,7 +244,7 @@ fn main() {
                     };
                     run_hle(
                         &mut result,
-                        disc.clone(),
+                        disc,
                         (&applied, &sbi),
                         hashes("hle"),
                         frames,

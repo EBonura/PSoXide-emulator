@@ -49,7 +49,10 @@ pub struct LoadedFile {
     pub name: String,
     /// Stable launch token for games.
     pub game_id: Option<String>,
+    /// The file's bytes, for everything but a disc image.
     pub bytes: Vec<u8>,
+    /// A disc image, opened to be read on demand instead of copied in.
+    pub disc: Option<crate::web_disc::Opened>,
 }
 
 /// Completion from the browser quick-save store.
@@ -431,10 +434,35 @@ pub fn read_game(id: &str) {
 /// streamed straight into wasm memory, so no disc-sized buffer exists on
 /// the JS side (`Response.blob()` for a 669 MB image intermittently failed
 /// with "Failed to fetch" in headless Chrome on a nearly full disk).
+///
+/// A disc image is read on demand with range requests instead (see
+/// [`crate::web_disc`]); a server that does not answer them gets the plain
+/// download, as does a `.exe`.
 pub fn fetch_game(url: &str) {
     let url = url.to_string();
     let name = url.rsplit('/').next().unwrap_or(&url).to_string();
     spawn_local(async move {
+        if !name.to_ascii_lowercase().ends_with(".exe") {
+            match crate::web_disc::open_url(&url).await {
+                Ok(Some(opened)) => {
+                    PENDING.with(|q| {
+                        q.borrow_mut().push(LoadedFile {
+                            kind: Upload::Game,
+                            name,
+                            game_id: None,
+                            bytes: Vec::new(),
+                            disc: Some(opened),
+                        });
+                    });
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    report_load_error(format!("fetching {url}: {error}"));
+                    return;
+                }
+            }
+        }
         match fetch_stream(&url).await {
             Ok(bytes) => PENDING.with(|q| {
                 q.borrow_mut().push(LoadedFile {
@@ -442,6 +470,7 @@ pub fn fetch_game(url: &str) {
                     name,
                     game_id: None,
                     bytes,
+                    disc: None,
                 });
             }),
             Err(error) => report_load_error(format!("fetching {url}: {error}")),
@@ -695,22 +724,45 @@ const READ_CHUNK_BYTES: usize = 32 << 20;
 /// load peak was well over twice the disc. Here the only full-size buffer is
 /// the destination `Vec`, reserved up front so a disc too large for the tab
 /// fails with a message instead of aborting the module.
+///
+/// A game that is not a PS-EXE is a disc image, and is not copied in at
+/// all: it is opened to be read a chunk at a time (see [`crate::web_disc`]).
 async fn read_blob_into_pending(
     blob: web_sys::Blob,
     kind: Upload,
     name: String,
     game_id: Option<String>,
 ) {
-    match read_blob(&blob).await {
-        Ok(bytes) => PENDING.with(|q| {
+    let disc = matches!(kind, Upload::Game) && !is_exe(&blob).await;
+    let loaded = if disc {
+        crate::web_disc::open_blob(&blob)
+            .await
+            .map(|opened| (Vec::new(), Some(opened)))
+    } else {
+        read_blob(&blob).await.map(|bytes| (bytes, None))
+    };
+    match loaded {
+        Ok((bytes, disc)) => PENDING.with(|q| {
             q.borrow_mut().push(LoadedFile {
                 kind,
                 name,
                 game_id,
                 bytes,
+                disc,
             });
         }),
         Err(error) => report_load_error(format!("reading {name}: {error}")),
+    }
+}
+
+/// Whether a file starts with the PS-EXE magic.
+async fn is_exe(blob: &web_sys::Blob) -> bool {
+    let Ok(head) = blob.slice_with_f64_and_f64(0.0, 8.0) else {
+        return false;
+    };
+    match JsFuture::from(head.array_buffer()).await {
+        Ok(buf) => js_sys::Uint8Array::new(&buf).to_vec() == b"PS-X EXE",
+        Err(_) => false,
     }
 }
 

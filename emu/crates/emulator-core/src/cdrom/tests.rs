@@ -28,7 +28,7 @@ fn multitrack_disc_with_pregap() -> Disc {
             sector_count: 10,
             pregap: 0,
             file_pregap: 0,
-            bytes: vec![0u8; psx_iso::SECTOR_BYTES * 10],
+            source: Box::new(vec![0u8; psx_iso::SECTOR_BYTES * 10]),
         },
         psx_iso::Track {
             number: 2,
@@ -37,7 +37,7 @@ fn multitrack_disc_with_pregap() -> Disc {
             sector_count: 4,
             pregap: 2,
             file_pregap: 0,
-            bytes: vec![0u8; psx_iso::SECTOR_BYTES * 4],
+            source: Box::new(vec![0u8; psx_iso::SECTOR_BYTES * 4]),
         },
     ])
 }
@@ -60,7 +60,7 @@ fn cdda_disc() -> Disc {
             sector_count: 10,
             pregap: 0,
             file_pregap: 0,
-            bytes: vec![0u8; psx_iso::SECTOR_BYTES * 10],
+            source: Box::new(vec![0u8; psx_iso::SECTOR_BYTES * 10]),
         },
         psx_iso::Track {
             number: 2,
@@ -69,7 +69,7 @@ fn cdda_disc() -> Disc {
             sector_count: 2,
             pregap: 2,
             file_pregap: 0,
-            bytes: audio,
+            source: Box::new(audio),
         },
     ])
 }
