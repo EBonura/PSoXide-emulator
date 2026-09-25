@@ -114,6 +114,9 @@ struct GameResult {
     cd_sectors_dropped: u64,
     /// MDEC macroblocks decoded (nonzero means FMV or MDEC images played).
     mdec_macroblocks: u64,
+    /// LibCrypt sectors read from a `.sbi` next to the disc (`None`: no
+    /// `.sbi` found).
+    sbi_sectors: Option<usize>,
     parity: Option<Vec<ParityField>>,
     /// Real-BIOS run (dev-only `--reference`).
     reference: Option<Reference>,
@@ -213,13 +216,26 @@ fn main() {
             }
             Some(Found::Disc(path)) => match disc_support::load_disc_path(&path) {
                 Ok(disc) => {
+                    // LibCrypt discs need their .sbi; record whether one was
+                    // found so a protected game without it is not mistaken
+                    // for an emulator failure.
+                    let sbi = match psoxide_settings::library::load_sbi_for(&path) {
+                        Ok(lbas) => lbas,
+                        Err(error) => {
+                            eprintln!("[hle-compat] ignoring {error}");
+                            None
+                        }
+                    };
+                    result.sbi_sectors = sbi.as_ref().map(Vec::len);
                     eprintln!("[hle-compat] {} <- {}", game.id, file_name(&path));
                     let shot = shots
                         .as_ref()
                         .map(|dir| dir.join(format!("{}.ppm", game.id)));
+                    let sbi = sbi.unwrap_or_default();
                     run_hle(
                         &mut result,
                         disc.clone(),
+                        &sbi,
                         frames,
                         tape.as_deref(),
                         strict,
@@ -233,6 +249,7 @@ fn main() {
                         result.reference = run_reference(
                             bios,
                             disc.clone(),
+                            &sbi,
                             frames,
                             tape.as_deref(),
                             shot,
@@ -379,6 +396,7 @@ fn file_sha256(path: &Path) -> Option<String> {
 fn run_hle(
     result: &mut GameResult,
     disc: Disc,
+    sbi: &[u32],
     frames: u64,
     tape: Option<&[PadSample]>,
     strict: bool,
@@ -396,6 +414,7 @@ fn run_hle(
     result.status = "ran".into();
     result.reached_entry = true;
     bus.cdrom.insert_disc(Some(disc));
+    bus.cdrom.set_bad_subq_sectors(sbi.to_vec());
     bus.attach_digital_pad_port1();
     bus.attach_memcard_port1(Vec::new());
 
@@ -508,6 +527,7 @@ fn run_frames(
 fn run_reference(
     bios: &[u8],
     disc: Disc,
+    sbi: &[u32],
     frames: u64,
     tape: Option<&[PadSample]>,
     shot: Option<PathBuf>,
@@ -517,6 +537,7 @@ fn run_reference(
     let mut bus = Bus::new(bios.to_vec()).ok()?;
     let mut cpu = Cpu::new();
     bus.cdrom.insert_disc(Some(disc));
+    bus.cdrom.set_bad_subq_sectors(sbi.to_vec());
     bus.attach_digital_pad_port1();
     bus.attach_memcard_port1(Vec::new());
     let mut reached = false;

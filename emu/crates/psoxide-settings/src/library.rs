@@ -1158,6 +1158,64 @@ fn read_ccd_image(ccd_path: &Path) -> Result<(PathBuf, Vec<u8>), String> {
     Ok((ecm_img, image))
 }
 
+/// The LibCrypt subchannel file for a disc sheet: `<stem>.sbi` next to it.
+pub fn sbi_path_for(sheet: &Path) -> PathBuf {
+    sheet.with_extension("sbi")
+}
+
+/// Sectors listed in an `.sbi` file (PSX LibCrypt subchannel patches), as
+/// LBAs counted from 00:02:00. The file is `"SBI\0"` followed by records of
+/// a BCD absolute MSF, a type byte and the replacement Q data: 10 bytes for
+/// type 1, 3 bytes (a relative or absolute MSF) for types 2 and 3. Every
+/// listed sector has a deliberately bad Q CRC, so only the positions matter.
+pub fn parse_sbi(bytes: &[u8]) -> Result<Vec<u32>, String> {
+    if bytes.len() < 4 || &bytes[..4] != b"SBI\0" {
+        return Err("not an SBI file (missing SBI header)".into());
+    }
+    let bcd = |b: u8| -> Result<u32, String> {
+        let (hi, lo) = (u32::from(b >> 4), u32::from(b & 0x0F));
+        if hi > 9 || lo > 9 {
+            return Err(format!("SBI position byte {b:#04x} is not BCD"));
+        }
+        Ok(hi * 10 + lo)
+    };
+    let mut lbas = Vec::new();
+    let mut at = 4;
+    while at < bytes.len() {
+        let record = bytes
+            .get(at..at + 4)
+            .ok_or_else(|| format!("SBI record at byte {at} is truncated"))?;
+        let frames = (bcd(record[0])? * 60 + bcd(record[1])?) * 75 + bcd(record[2])?;
+        let payload = match record[3] {
+            1 => 10,
+            2 | 3 => 3,
+            other => return Err(format!("SBI record at byte {at} has unknown type {other}")),
+        };
+        if bytes.len() < at + 4 + payload {
+            return Err(format!("SBI record at byte {at} is truncated"));
+        }
+        lbas.push(
+            frames
+                .checked_sub(150)
+                .ok_or_else(|| format!("SBI record at byte {at} lies before 00:02:00"))?,
+        );
+        at += 4 + payload;
+    }
+    Ok(lbas)
+}
+
+/// Read the `.sbi` next to `sheet`, if there is one.
+pub fn load_sbi_for(sheet: &Path) -> Result<Option<Vec<u32>>, String> {
+    let path = sbi_path_for(sheet);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    parse_sbi(&bytes)
+        .map(Some)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// Parse a CUE sheet to find the path of its first data track's BIN.
 /// Used to collapse CUE + BIN pairs in the UI and to inherit region
 /// metadata from the bootable track during library scans.
@@ -1837,6 +1895,43 @@ mod tests {
         let disc = load_disc_from_ccd(&ccd_path).unwrap();
         assert_eq!(disc.read_sector_raw(0).unwrap()[0], 0xCD);
         assert!(!tmp.path().join("disc.img").exists());
+    }
+
+    #[test]
+    fn sbi_records_become_lbas_for_every_record_type() {
+        let mut sbi = b"SBI\0".to_vec();
+        // 03:08:05 type 1 (10 bytes of Q), 03:08:10 type 3, 09:20:45 type 2.
+        sbi.extend([0x03, 0x08, 0x05, 1]);
+        sbi.extend([0u8; 10]);
+        sbi.extend([0x03, 0x08, 0x10, 3, 0x03, 0x08, 0x10]);
+        sbi.extend([0x09, 0x20, 0x45, 2, 0x00, 0x00, 0x00]);
+        // psx-spx lists these LibCrypt sectors as 14105, 14110 and 42045 in
+        // absolute frames; LBAs start at 00:02:00.
+        assert_eq!(
+            parse_sbi(&sbi).unwrap(),
+            vec![14105 - 150, 14110 - 150, 42045 - 150]
+        );
+    }
+
+    #[test]
+    fn sbi_rejects_bad_headers_types_and_truncation() {
+        assert!(parse_sbi(b"XYZ\0").is_err());
+        assert!(parse_sbi(b"SBI\0\x03\x08\x05\x07").is_err());
+        assert!(parse_sbi(b"SBI\0\x03\x08\x05\x01\x00").is_err());
+        assert!(parse_sbi(b"SBI\0\x03\x08\x5A\x02\x00\x00\x00").is_err());
+    }
+
+    #[test]
+    fn sbi_is_found_next_to_the_sheet() {
+        let tmp = TempDir::new().unwrap();
+        let cue = tmp.path().join("Game (Europe).cue");
+        assert_eq!(load_sbi_for(&cue).unwrap(), None);
+        std::fs::write(
+            tmp.path().join("Game (Europe).sbi"),
+            b"SBI\0\x03\x09\x56\x02\x00\x00\x00",
+        )
+        .unwrap();
+        assert_eq!(load_sbi_for(&cue).unwrap(), Some(vec![14231 - 150]));
     }
 
     #[test]

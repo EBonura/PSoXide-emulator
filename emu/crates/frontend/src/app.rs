@@ -807,6 +807,7 @@ impl AppState {
                     self.settings.emulator.fast_boot_disc,
                 )?;
                 bus.cdrom.insert_disc(Some(disc));
+                apply_libcrypt_sbi(&mut bus, &entry.path);
                 bus.attach_digital_pad_port1();
                 let mc_path = self.port1_memcard_for_launch(&entry.id, hle)?;
                 let mc_bytes = std::fs::read(&mc_path).unwrap_or_default();
@@ -3033,6 +3034,23 @@ fn boot_disc_on(
                 entry.path.display()
             )
         })
+}
+
+/// Load the LibCrypt `.sbi` next to a disc sheet, if any, into the mounted
+/// disc's controller. A malformed file is reported and ignored.
+pub(crate) fn apply_libcrypt_sbi(bus: &mut Bus, sheet: &Path) {
+    match psoxide_settings::library::load_sbi_for(sheet) {
+        Ok(Some(lbas)) => {
+            eprintln!(
+                "[frontend] LibCrypt: {} subchannel sectors from {}",
+                lbas.len(),
+                psoxide_settings::library::sbi_path_for(sheet).display()
+            );
+            bus.cdrom.set_bad_subq_sectors(lbas);
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("[frontend] ignoring {e}"),
+    }
 }
 
 /// Port 1's card for an HLE boot: `memcard-1.hle.mcd`, created on first use

@@ -847,6 +847,7 @@ fn run_headless_launch(
                 );
             }
             bus.cdrom.insert_disc(Some(disc));
+            crate::app::apply_libcrypt_sbi(&mut bus, &game_path);
             attach_headless_playtest_pad(&mut bus, args.digital_pad);
             if emit_summary {
                 eprintln!("[cli] mounted cue-backed disc {}", game_path.display());
@@ -872,6 +873,7 @@ fn run_headless_launch(
                     .unwrap_or(DISC_FAST_BOOT_WARMUP_STEPS),
             );
             bus.cdrom.insert_disc(Some(disc));
+            crate::app::apply_libcrypt_sbi(&mut bus, &game_path);
             attach_headless_playtest_pad(&mut bus, args.digital_pad);
             if emit_summary {
                 eprintln!("[cli] mounted ccd-backed disc {}", game_path.display());
