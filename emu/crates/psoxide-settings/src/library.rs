@@ -688,6 +688,9 @@ struct CcdTrackSpec {
     number: u8,
     track_type: psx_iso::TrackType,
     start_lba: u32,
+    /// `INDEX 0` from the track's `[TRACK n]` section: where its pregap
+    /// starts, when it has one in the image.
+    index0_lba: Option<u32>,
 }
 
 #[derive(Default)]
@@ -746,6 +749,9 @@ fn parse_ccd_toc(ccd_path: &Path) -> Result<CcdToc, String> {
     let mut tracks: Vec<CcdTrackSpec> = Vec::new();
     let mut leadout_lba = None;
     let mut current: Option<CcdEntry> = None;
+    // `[TRACK n]` sections: track number and its INDEX 0.
+    let mut index0: Vec<(u8, u32)> = Vec::new();
+    let mut section_track: Option<u8> = None;
 
     let flush_entry =
         |entry: CcdEntry, tracks: &mut Vec<CcdTrackSpec>, leadout_lba: &mut Option<u32>| {
@@ -775,16 +781,33 @@ fn parse_ccd_toc(ccd_path: &Path) -> Result<CcdToc, String> {
                 number: track_number,
                 track_type,
                 start_lba: plba as u32,
+                index0_lba: None,
             });
         };
 
     for line in contents.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("[Entry ") {
+        if trimmed.starts_with('[') {
             if let Some(entry) = current.take() {
                 flush_entry(entry, &mut tracks, &mut leadout_lba);
             }
-            current = Some(CcdEntry::default());
+            section_track = trimmed
+                .strip_prefix("[TRACK ")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .and_then(|n| n.trim().parse().ok());
+            if trimmed.starts_with("[Entry ") {
+                current = Some(CcdEntry::default());
+            }
+            continue;
+        }
+        if let Some(number) = section_track {
+            if let Some((key, value)) = trimmed.split_once('=') {
+                if key.trim().eq_ignore_ascii_case("INDEX 0") {
+                    if let Some(lba) = parse_ccd_int(value).filter(|lba| *lba >= 0) {
+                        index0.push((number, lba as u32));
+                    }
+                }
+            }
             continue;
         }
         let Some(entry) = current.as_mut() else {
@@ -806,6 +829,11 @@ fn parse_ccd_toc(ccd_path: &Path) -> Result<CcdToc, String> {
 
     tracks.sort_by_key(|track| track.number);
     tracks.dedup_by_key(|track| track.number);
+    for (number, lba) in index0 {
+        if let Some(track) = tracks.iter_mut().find(|t| t.number == number) {
+            track.index0_lba = Some(lba).filter(|lba| *lba < track.start_lba);
+        }
+    }
     if tracks.is_empty() {
         Err(format!("{} contains no track entries", ccd_path.display()))
     } else {
@@ -1103,15 +1131,18 @@ pub fn load_disc_from_ccd(ccd_path: &Path) -> Result<psx_iso::Disc, String> {
 
     let mut tracks = Vec::with_capacity(toc.tracks.len());
     for (idx, spec) in toc.tracks.iter().enumerate() {
-        let start = spec.start_lba as usize;
+        // A pregap in the image (INDEX 0) belongs to its own track, so a
+        // track's bytes run from its INDEX 0 to the next one's.
+        let start = spec.index0_lba.unwrap_or(spec.start_lba) as usize;
+        let pregap = spec.start_lba - start as u32;
         let next_lba = toc
             .tracks
             .get(idx + 1)
-            .map(|track| track.start_lba)
+            .map(|track| track.index0_lba.unwrap_or(track.start_lba))
             .or(toc.leadout_lba)
             .unwrap_or(image_sectors as u32);
         let end = (next_lba as usize).min(image_sectors);
-        if start >= image_sectors || end <= start {
+        if start >= image_sectors || end <= spec.start_lba as usize {
             return Err(format!(
                 "{} track {} points outside {} sectors",
                 ccd_path.display(),
@@ -1125,9 +1156,9 @@ pub fn load_disc_from_ccd(ccd_path: &Path) -> Result<psx_iso::Disc, String> {
             number: spec.number,
             track_type: spec.track_type,
             start_lba: spec.start_lba,
-            sector_count: (end - start) as u32,
-            pregap: 0,
-            file_pregap: 0,
+            sector_count: (end - start) as u32 - pregap,
+            pregap,
+            file_pregap: pregap,
             bytes: image[byte_start..byte_end].to_vec(),
         });
     }
@@ -1852,6 +1883,42 @@ mod tests {
         let pos = disc.track_position_for_lba(10).unwrap();
         assert_eq!(pos.track_number, 2);
         assert_eq!(pos.index_number, 1);
+    }
+
+    #[test]
+    fn load_disc_from_ccd_keeps_an_index_0_pregap_in_its_own_track() {
+        // Tomb Raider's CloneCD sheet: [TRACK 2] has INDEX 0 before INDEX 1.
+        // The pregap sectors are in the image and belong to track 2 (index
+        // 00, relative time counting down), not to the end of track 1.
+        let tmp = TempDir::new().unwrap();
+        let ccd_path = tmp.path().join("disc.ccd");
+        let mut image = vec![0u8; psx_iso::SECTOR_BYTES * 14];
+        image[7 * psx_iso::SECTOR_BYTES] = 0x77;
+        image[10 * psx_iso::SECTOR_BYTES] = 0xAB;
+        std::fs::write(tmp.path().join("disc.img"), image).unwrap();
+        std::fs::write(
+            &ccd_path,
+            concat!(
+                "[Entry 0]\nPoint=0x01\nControl=0x04\nPLBA=0\n",
+                "[Entry 1]\nPoint=0x02\nControl=0x00\nPLBA=10\n",
+                "[Entry 2]\nPoint=0xa2\nControl=0x00\nPLBA=14\n",
+                "[TRACK 1]\nMODE=2\nINDEX 1=0\n",
+                "[TRACK 2]\nMODE=0\nINDEX 0=7\nINDEX 1=10\n",
+            ),
+        )
+        .unwrap();
+
+        let disc = load_disc_from_ccd(&ccd_path).unwrap();
+        assert_eq!(disc.track(1).unwrap().sector_count, 7);
+        let track2 = disc.track(2).unwrap();
+        assert_eq!((track2.start_lba, track2.pregap, track2.sector_count), (10, 3, 4));
+        let pos = disc.track_position_for_lba(8).unwrap();
+        assert_eq!((pos.track_number, pos.index_number), (2, 0));
+        assert_eq!(pos.relative_msf, (0, 0, 1));
+        let pos = disc.track_position_for_lba(6).unwrap();
+        assert_eq!((pos.track_number, pos.index_number), (1, 1));
+        assert_eq!(disc.read_sector_raw(10).unwrap()[0], 0xAB);
+        assert_eq!(disc.read_cdda_sector(10).unwrap()[0], 0xAB);
     }
 
     #[test]
