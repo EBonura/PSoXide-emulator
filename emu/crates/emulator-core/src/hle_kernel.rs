@@ -290,9 +290,14 @@ fn allocate_control_blocks(bus: &mut Bus, cfg: KernelConfig) {
     if pcb != 0 {
         poke32(bus, pcb, tcb);
     }
-    for i in 0..cfg.tcb {
-        let status = if i == 0 { TCB_USED } else { TCB_FREE };
-        poke32(bus, tcb + i * TCB_SIZE, status);
+    // TCB counts come from SYSTEM.CNF or A(9Ch), so they are untrusted. A
+    // count whose blocks did not fit the heap leaves `tcb` at 0; walking it
+    // anyway overflowed `i * TCB_SIZE` and, in release, spun ~4G pokes.
+    if tcb != 0 {
+        for i in 0..cfg.tcb {
+            let status = if i == 0 { TCB_USED } else { TCB_FREE };
+            poke32(bus, tcb + i * TCB_SIZE, status);
+        }
     }
     poke32(bus, kvar::CONF_EVENT, cfg.event);
     poke32(bus, kvar::CONF_TCB, cfg.tcb);

@@ -731,7 +731,10 @@ fn parse_cue_msf(s: &str) -> u32 {
     if parts.next().is_some() {
         return 0;
     }
-    m * 60 * 75 + s * 75 + f
+    // The sheet is untrusted: saturate rather than overflow on absurd fields.
+    m.saturating_mul(60 * 75)
+        .saturating_add(s.saturating_mul(75))
+        .saturating_add(f)
 }
 
 fn parse_ccd_int(s: &str) -> Option<i32> {
@@ -1006,7 +1009,11 @@ pub fn disc_from_cue_pieces(
         let sector_count = track_file_sectors.saturating_sub(file_pregap as usize) as u32;
         let start_lba = tracks
             .last()
-            .map(|prev: &psx_iso::Track| prev.start_lba + prev.sector_count + pregap)
+            .map(|prev: &psx_iso::Track| {
+                prev.start_lba
+                    .saturating_add(prev.sector_count)
+                    .saturating_add(pregap)
+            })
             .unwrap_or(0);
         tracks.push(psx_iso::Track {
             number: spec.number,
@@ -1093,7 +1100,11 @@ fn disc_from_cue_specs(
         let sector_count = track_file_sectors.saturating_sub(file_pregap as usize) as u32;
         let start_lba = tracks
             .last()
-            .map(|prev: &psx_iso::Track| prev.start_lba + prev.sector_count + pregap)
+            .map(|prev: &psx_iso::Track| {
+                prev.start_lba
+                    .saturating_add(prev.sector_count)
+                    .saturating_add(pregap)
+            })
             .unwrap_or(0);
         tracks.push(psx_iso::Track {
             number: spec.number,

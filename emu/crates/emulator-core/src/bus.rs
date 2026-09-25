@@ -2106,37 +2106,46 @@ impl Bus {
     ///
     /// The caller is expected to also seed the CPU (see
     /// [`crate::Cpu::seed_from_exe`]) so execution begins at the
-    /// EXE's entry point. `load_addr` must point inside the 2 MiB
-    /// RAM window; addresses outside panic.
+    /// EXE's entry point.
+    ///
+    /// The header comes from the disc or file being booted, so it is
+    /// untrusted: a range running past the end of RAM wraps through the
+    /// 2 MiB RAM mirror, as CPU stores to those addresses do, instead of
+    /// panicking. A well-formed EXE never reaches the wrap.
     ///
     /// Used by `PSOXIDE_EXE` side-loading in the frontend / smoke
     /// harness to bypass the BIOS entirely and run homebrew directly.
     pub fn load_exe_payload(&mut self, load_addr: u32, payload: &[u8]) {
-        let base = load_addr & 0x001F_FFFF; // KSEG/KUSEG -> physical RAM
-        assert!(
-            (base as usize) + payload.len() <= self.ram.len(),
-            "EXE payload overflows RAM: load_addr={load_addr:#010x} len={}",
-            payload.len()
-        );
-        self.ram[base as usize..base as usize + payload.len()].copy_from_slice(payload);
+        let ram_len = self.ram.len();
+        // Only the last RAM-sized window of an oversized payload survives
+        // the wrap, exactly as sequential stores would leave it.
+        let skip = payload.len().saturating_sub(ram_len);
+        let mut at = (load_addr as usize).wrapping_add(skip) % ram_len;
+        let mut rest = &payload[skip..];
+        while !rest.is_empty() {
+            let n = rest.len().min(ram_len - at);
+            self.ram[at..at + n].copy_from_slice(&rest[..n]);
+            rest = &rest[n..];
+            at = 0;
+        }
     }
 
     /// Zero the optional BSS range declared by a PSX-EXE header.
     ///
     /// The BIOS clears this area before jumping to the executable;
     /// side-load and fast-boot paths need to do the same because they
-    /// bypass the BIOS loader.
+    /// bypass the BIOS loader. Like [`Bus::load_exe_payload`], an
+    /// untrusted range wraps through the RAM mirror rather than panicking.
     pub fn clear_exe_bss(&mut self, bss_addr: u32, bss_size: u32) {
-        if bss_size == 0 {
-            return;
+        let ram_len = self.ram.len();
+        let mut left = (bss_size as usize).min(ram_len);
+        let mut at = bss_addr as usize % ram_len;
+        while left > 0 {
+            let n = left.min(ram_len - at);
+            self.ram[at..at + n].fill(0);
+            left -= n;
+            at = 0;
         }
-        let base = bss_addr & 0x001F_FFFF; // KSEG/KUSEG -> physical RAM
-        let size = bss_size as usize;
-        assert!(
-            (base as usize) + size <= self.ram.len(),
-            "EXE BSS overflows RAM: bss_addr={bss_addr:#010x} len={size}",
-        );
-        self.ram[base as usize..base as usize + size].fill(0);
     }
 
     /// Zero an address range in main RAM after KSEG/KUSEG address
@@ -2147,10 +2156,7 @@ impl Bus {
         if end <= start {
             return;
         }
-        assert!(
-            end <= self.ram.len(),
-            "RAM clear range overflows: start={start_addr:#010x} end={end_addr:#010x}",
-        );
+        // Both ends are masked into the 2 MiB window, so `end` is in range.
         self.ram[start..end].fill(0);
     }
 
