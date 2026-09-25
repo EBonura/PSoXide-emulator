@@ -146,6 +146,12 @@ pub fn load_disc_boot(disc: &Disc) -> Result<DiscBoot, BootError> {
 /// Read a file from the disc's ISO9660 tree. `path` may carry a `cdrom:`
 /// prefix, `\` or `/` separators and an optional `;1` version.
 pub fn read_file(disc: &Disc, path: &str) -> Result<Vec<u8>, BootError> {
+    let (extent_lba, size) = file_extent(disc, path)?;
+    read_extent(disc, extent_lba, size)
+}
+
+/// Where a file lives on the disc: its first sector and its size in bytes.
+pub fn file_extent(disc: &Disc, path: &str) -> Result<(u32, u32), BootError> {
     let components = normalize_path(path);
     let Some((last, parents)) = components.split_last() else {
         return Err(BootError::FileNotFound(path.to_string()));
@@ -160,7 +166,7 @@ pub fn read_file(disc: &Disc, path: &str) -> Result<Vec<u8>, BootError> {
     }
     let file =
         find_child(disc, &dir, last)?.ok_or_else(|| BootError::FileNotFound(path.to_string()))?;
-    read_extent(disc, file.extent_lba, file.size)
+    Ok((file.extent_lba, file.size))
 }
 
 fn parse_hex_prefix(value: &[u8]) -> u32 {
