@@ -1538,19 +1538,26 @@ impl Bus {
         // access-time suite. Counter phase differences in compound loops must
         // be modeled at their real CPU/bus dependency, not hidden in this
         // independently observable access cost.
-        let stalls = self.memory_control.read_stalls(virt, width);
         let phys = to_physical(virt);
-        let external_counter_overlap = (memory::expansion1::BASE
-            ..memory::expansion1::BASE + memory::expansion1::SIZE as u32)
-            .contains(&phys)
-            || (memory::expansion2::BASE
-                ..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
+        // Main RAM first: most loads, and none of the external-bus cases
+        // below apply to it. `read_stalls` answers six for every RAM width.
+        let stalls = if phys < memory::ram::MIRROR_END {
+            6
+        } else {
+            self.memory_control.read_stalls(virt, width)
+        };
+        let external_counter_overlap = phys >= memory::ram::MIRROR_END
+            && ((memory::expansion1::BASE
+                ..memory::expansion1::BASE + memory::expansion1::SIZE as u32)
                 .contains(&phys)
-            || (memory::expansion3::BASE
-                ..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
-                .contains(&phys)
-            || (0x1F80_1800..0x1F80_1804).contains(&phys)
-            || (0x1F80_1C00..0x1F80_2000).contains(&phys);
+                || (memory::expansion2::BASE
+                    ..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
+                    .contains(&phys)
+                || (memory::expansion3::BASE
+                    ..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
+                    .contains(&phys)
+                || (0x1F80_1800..0x1F80_1804).contains(&phys)
+                || (0x1F80_1C00..0x1F80_2000).contains(&phys));
         if external_counter_overlap {
             self.timers
                 .overlap_counter_write_with_external_read(self.cycles, stalls);
