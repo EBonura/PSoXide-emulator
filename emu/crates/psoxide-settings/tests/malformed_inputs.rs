@@ -252,3 +252,33 @@ fn ecm_containers_never_panic() {
         });
     }
 }
+
+/// The loader hands each file's buffer to its first track instead of
+/// copying; every track must still hold exactly its slice of its file.
+#[test]
+fn cue_tracks_hold_exactly_their_file_extents() {
+    let mut rng = Rng(0x7ac5);
+    let a: Vec<u8> = rng.bytes(10 * SECTOR);
+    let b: Vec<u8> = rng.bytes(4 * SECTOR);
+    let cue = "FILE \"a.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n\
+               TRACK 02 AUDIO\n    INDEX 00 00:00:05\n    INDEX 01 00:00:06\n\
+               TRACK 03 AUDIO\n    INDEX 01 00:00:08\n\
+               FILE \"b.bin\" BINARY\n  TRACK 04 AUDIO\n    INDEX 01 00:00:00\n";
+    let disc = disc_from_cue_str(cue, &mut |path| {
+        Ok(if path.ends_with("a.bin") {
+            a.clone()
+        } else {
+            b.clone()
+        })
+    })
+    .unwrap();
+    let expect: [(u8, &[u8]); 4] = [
+        (1, &a[..5 * SECTOR]),
+        (2, &a[5 * SECTOR..8 * SECTOR]),
+        (3, &a[8 * SECTOR..]),
+        (4, &b[..]),
+    ];
+    for (number, bytes) in expect {
+        assert_eq!(disc.track(number).unwrap().bytes, bytes, "track {number}");
+    }
+}
