@@ -3055,8 +3055,8 @@ impl Bus {
             return self.sio0.read8(phys).unwrap_or(0);
         }
         if Sio1::contains(phys) {
-            let aligned = phys & !3;
-            return (self.sio1.read32(aligned) >> ((phys & 3) * 8)) as u8;
+            // Halfword registers: pick the one holding this byte.
+            return (self.sio1.read32(phys & !1) >> ((phys & 1) * 8)) as u8;
         }
         if crate::mdec::Mdec::contains(phys) {
             let aligned = phys & !3;
@@ -3161,7 +3161,7 @@ impl Bus {
             return self.sio0.read16(phys).unwrap_or(0);
         }
         if Sio1::contains(phys) {
-            return (self.sio1.read32(phys & !3) >> ((phys & 2) * 8)) as u16;
+            return self.sio1.read32(phys) as u16;
         }
         if crate::mdec::Mdec::contains(phys) {
             return (self.mdec.read32(phys & !3) >> ((phys & 2) * 8)) as u16;
@@ -4391,6 +4391,22 @@ mod tests {
         assert_eq!(bus.read16(adsr), 0x5678);
         bus.cpu_write8(adsr + 1, 0x0000_00AB);
         assert_eq!(bus.read16(adsr), 0x5678);
+    }
+
+    /// SIO1's registers are halfwords at +8, +A and +E. A narrow read of the
+    /// upper halfword of a word (CTRL, BAUD) used to shift the aligned word's
+    /// register instead, so `lhu SIO1_BAUD` always read 0 and WipEout's SIO1
+    /// setup divided by it (BREAK 7 at VBlank ~935, with or without a BIOS).
+    #[test]
+    fn narrow_sio1_reads_select_the_addressed_halfword_register() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.cpu_write16(Sio1::BASE + 0xE, 0x0000_1234);
+        bus.cpu_write16(Sio1::BASE + 0xA, 0x0000_0300);
+        assert_eq!(bus.read16(Sio1::BASE + 0xE), 0x1234);
+        assert_eq!(bus.read8(Sio1::BASE + 0xE), 0x34);
+        assert_eq!(bus.read8(Sio1::BASE + 0xF), 0x12);
+        assert_eq!(bus.read16(Sio1::BASE + 0xA), 0x0300);
+        assert_eq!(bus.read8(Sio1::BASE + 0xB), 0x03);
     }
 
     #[test]
