@@ -41,6 +41,7 @@ use std::collections::VecDeque;
 
 use psx_iso::{bcd_to_bin, msf_to_lba, Disc};
 
+mod idle;
 mod timing;
 use timing::*;
 

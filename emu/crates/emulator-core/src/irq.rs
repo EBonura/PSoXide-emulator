@@ -161,6 +161,16 @@ impl Irq {
         p
     }
 
+    /// [`Irq::pending_tick`] called `n` times with nothing changing in
+    /// between (an idle skip). Diagnostic count only.
+    pub(crate) fn pending_ticks(&mut self, n: u64) -> bool {
+        let p = (self.stat & self.mask & Self::VALID_BITS) != 0;
+        if p {
+            self.pending_true_calls = self.pending_true_calls.saturating_add(n);
+        }
+        p
+    }
+
     /// How many times `pending_tick` returned `true`. Diagnostic.
     pub fn pending_true_calls(&self) -> u64 {
         self.pending_true_calls

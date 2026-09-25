@@ -1020,6 +1020,18 @@ pub fn bu_init(bus: &mut Bus) -> Option<u32> {
     None
 }
 
+/// Whether [`bu_init`] would wait again without changing anything: it is
+/// in a phase that starts with [`wait_status`], and no transfer has
+/// finished or failed.
+pub(crate) fn bu_init_waiting(bus: &Bus) -> bool {
+    use init_phase::*;
+    matches!(
+        peek32(bus, kvar::INIT_PHASE),
+        READ0 | WRITE3F | DIR | BROKEN_LIST
+    ) && peek32(bus, kvar::SUCCESS) == 0
+        && (0..4).all(|i| peek32(bus, kvar::ERRORS + 4 * i) == 0)
+}
+
 /// `_bu_init` phases.
 mod init_phase {
     pub const START: u32 = 0;
