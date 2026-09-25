@@ -139,7 +139,7 @@ fn draw_header(
             ("RAM", Some(0x8000_0000)),
             ("Scratch", Some(0x1F80_0000)),
             ("MMIO", Some(0x1F80_1000)),
-            ("BIOS", Some(0xBFC0_0000)),
+            ("ROM", Some(0xBFC0_0000)),
             ("PC", None),
         ] {
             if ui.small_button(label).clicked() {
@@ -169,7 +169,7 @@ fn draw_hex_dump(
     pc: u32,
 ) {
     let Some(bus) = bus else {
-        ui.monospace("(no BIOS loaded - Bus unavailable)");
+        ui.monospace("(no game loaded - Bus unavailable)");
         return;
     };
 
@@ -224,7 +224,7 @@ fn draw_visual_map(
     pc: u32,
 ) {
     let Some(bus) = bus else {
-        ui.monospace("(no BIOS loaded - Bus unavailable)");
+        ui.monospace("(no game loaded - Bus unavailable)");
         return;
     };
 
@@ -583,7 +583,7 @@ fn draw_disasm(
     pc: u32,
 ) {
     let Some(bus) = bus else {
-        ui.monospace("(no BIOS loaded - Bus unavailable)");
+        ui.monospace("(no game loaded - Bus unavailable)");
         return;
     };
 

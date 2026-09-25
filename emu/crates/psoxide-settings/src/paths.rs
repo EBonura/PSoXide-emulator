@@ -224,6 +224,15 @@ impl ConfigPaths {
             .join(format!("memcard-{clamped}.mcd"))
     }
 
+    /// One-time copy of a game's card from before PSoXide dropped BIOS
+    /// support, made before the HLE kernel first writes to the card and
+    /// never overwritten.
+    pub fn pre_hle_memcard_file(&self, game_id: &str, port: u8) -> PathBuf {
+        let clamped = port.clamp(1, 2);
+        self.game_dir(game_id)
+            .join(format!("memcard-{clamped}.pre-hle.mcd"))
+    }
+
     /// Ensure `dir` exists as a directory, creating parents as
     /// needed. Idempotent. Errors are wrapped with the path so
     /// callers can include it in user messages.
@@ -308,6 +317,21 @@ mod tests {
             .memcard_file("g", 7)
             .to_string_lossy()
             .ends_with("memcard-2.mcd"));
+    }
+
+    #[test]
+    fn pre_hle_backup_is_a_different_file_from_the_card() {
+        let tmp = TempDir::new().unwrap();
+        let p = ConfigPaths::rooted(tmp.path());
+        for port in [1, 2] {
+            let backup = p.pre_hle_memcard_file("g", port);
+            assert_ne!(backup, p.memcard_file("g", port));
+            assert_eq!(backup.parent(), p.memcard_file("g", port).parent());
+        }
+        assert!(p
+            .pre_hle_memcard_file("g", 1)
+            .to_string_lossy()
+            .ends_with("memcard-1.pre-hle.mcd"));
     }
 
     #[test]

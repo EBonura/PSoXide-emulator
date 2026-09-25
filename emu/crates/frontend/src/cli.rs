@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 use emulator_core::{
-    button, fast_boot_disc_with_hle, telemetry, warm_bios_for_disc_fast_boot, Bus, ButtonState,
-    Cpu, EmulatorState, InstructionCacheMissKind, DISC_FAST_BOOT_WARMUP_STEPS,
+    button, fast_boot_disc, telemetry, Bus, ButtonState, Cpu, EmulatorState,
+    InstructionCacheMissKind,
 };
 use psx_hw::memory;
 // `Gpu` is only constructed for the editor 3D preview dump.
@@ -44,7 +44,7 @@ use psoxide_validation::{
 };
 use psx_iso::{Disc, Exe, TrackType};
 
-use crate::app::{bus_from_configured_bios, fast_boot_embedded_playtest_disc};
+use crate::app::fast_boot_embedded_playtest_disc;
 
 use crate::playtest_input::read_input_tape;
 
@@ -141,9 +141,6 @@ pub struct LaunchArgs {
     /// profiler without navigating there again in the GUI.
     #[arg(long, value_name = "PATH")]
     pub savestate: Option<PathBuf>,
-    /// Override the configured BIOS for this headless launch.
-    #[arg(long)]
-    pub bios: Option<PathBuf>,
     /// Mount a disc alongside a side-loaded executable without booting from
     /// that disc. This is useful for hardware probes and homebrew that use
     /// the HLE BIOS entry path but still exercise the CD-ROM controller.
@@ -213,16 +210,8 @@ pub struct LaunchArgs {
     /// through the same no-BIOS HLE path used by the editor viewport.
     #[arg(long)]
     pub embedded_playtest: bool,
-    /// Force the real BIOS disc boot path instead of direct
-    /// SYSTEM.CNF fast boot.
-    #[arg(long)]
-    pub bios_boot: bool,
-    /// Override how many real-BIOS instructions run before warm disc fast
-    /// boot. Longer warmups retain later BIOS-initialised peripheral state.
-    #[arg(long)]
-    pub bios_warmup_steps: Option<u64>,
-    /// Apply the late PAL PSone SCPH-9902 memory-controller profile after
-    /// BIOS warmup. Useful with an earlier PAL BIOS used as a substitute ROM.
+    /// Apply the late PAL PSone SCPH-9902 memory-controller profile (console
+    /// timing model) before the run starts.
     #[arg(long)]
     pub scph_9902: bool,
     /// Print an FNV-1a-64 VRAM hash at the end. Same algorithm the
@@ -551,17 +540,12 @@ fn cmd_info(paths: &ConfigPaths) -> Result<(), String> {
     println!();
     println!("Settings:");
     println!("  version          : {}", settings.version);
-    println!("  paths.bios       : {}", fmt_empty(&settings.paths.bios));
     println!(
         "  paths.library    : {}",
         fmt_empty(&settings.paths.game_library)
     );
     println!("  video.int.scale  : {}", settings.video.integer_scale);
     println!("  video.ui.scale   : {}%", settings.video.ui_scale_pct);
-    println!(
-        "  emu.hle-bios-exe : {}",
-        settings.emulator.hle_bios_for_side_load
-    );
     println!(
         "  input.port1.cross: {}",
         settings.input.port1.cross.label()
@@ -677,10 +661,6 @@ fn run_headless_launch(
     args: LaunchArgs,
     emit_summary: bool,
 ) -> Result<HeadlessLaunchResult, String> {
-    let mut settings = Settings::load(&paths.settings_file()).unwrap_or_default();
-    if let Some(bios) = args.bios.as_ref() {
-        settings.paths.bios = bios.to_string_lossy().into_owned();
-    }
     let pad_pulses = args
         .pad_pulses
         .as_deref()
@@ -793,28 +773,16 @@ fn run_headless_launch(
             bus
         }
         "bin" | "iso" => {
-            let mut bus = if args.embedded_playtest {
-                Bus::new_without_bios()
-            } else {
-                bus_from_configured_bios(&settings)?
-            };
+            let mut bus = Bus::new_without_bios();
             if capture_gpu_commands {
                 bus.gpu.enable_cmd_log();
             }
             let bytes = std::fs::read(&game_path).map_err(|e| e.to_string())?;
             let disc = Disc::from_bin(bytes);
             if args.embedded_playtest {
-                fast_boot_embedded_playtest_disc(&mut bus, &mut cpu, &disc, &game_path);
+                fast_boot_embedded_playtest_disc(&mut bus, &mut cpu, &disc, &game_path)?;
             } else {
-                maybe_fast_boot_disc(
-                    &mut bus,
-                    &mut cpu,
-                    &disc,
-                    &game_path,
-                    settings.emulator.fast_boot_disc && !args.bios_boot,
-                    args.bios_warmup_steps
-                        .unwrap_or(DISC_FAST_BOOT_WARMUP_STEPS),
-                );
+                maybe_fast_boot_disc(&mut bus, &mut cpu, &disc, &game_path)?;
             }
             bus.cdrom.insert_disc(Some(disc));
             attach_headless_playtest_pad(&mut bus, args.digital_pad);
@@ -824,29 +792,18 @@ fn run_headless_launch(
             bus
         }
         "cue" => {
-            let mut bus = if args.embedded_playtest {
-                Bus::new_without_bios()
-            } else {
-                bus_from_configured_bios(&settings)?
-            };
+            let mut bus = Bus::new_without_bios();
             if capture_gpu_commands {
                 bus.gpu.enable_cmd_log();
             }
             let disc = psoxide_settings::library::load_disc_from_cue(&game_path)?;
             if args.embedded_playtest {
-                fast_boot_embedded_playtest_disc(&mut bus, &mut cpu, &disc, &game_path);
+                fast_boot_embedded_playtest_disc(&mut bus, &mut cpu, &disc, &game_path)?;
             } else {
-                maybe_fast_boot_disc(
-                    &mut bus,
-                    &mut cpu,
-                    &disc,
-                    &game_path,
-                    settings.emulator.fast_boot_disc && !args.bios_boot,
-                    args.bios_warmup_steps
-                        .unwrap_or(DISC_FAST_BOOT_WARMUP_STEPS),
-                );
+                maybe_fast_boot_disc(&mut bus, &mut cpu, &disc, &game_path)?;
             }
             bus.cdrom.insert_disc(Some(disc));
+            crate::app::apply_libcrypt_sbi(&mut bus, &game_path);
             attach_headless_playtest_pad(&mut bus, args.digital_pad);
             if emit_summary {
                 eprintln!("[cli] mounted cue-backed disc {}", game_path.display());
@@ -857,21 +814,14 @@ fn run_headless_launch(
             if args.embedded_playtest {
                 return Err("--embedded-playtest does not support .ccd".to_string());
             }
-            let mut bus = bus_from_configured_bios(&settings)?;
+            let mut bus = Bus::new_without_bios();
             if capture_gpu_commands {
                 bus.gpu.enable_cmd_log();
             }
             let disc = psoxide_settings::library::load_disc_from_ccd(&game_path)?;
-            maybe_fast_boot_disc(
-                &mut bus,
-                &mut cpu,
-                &disc,
-                &game_path,
-                settings.emulator.fast_boot_disc && !args.bios_boot,
-                args.bios_warmup_steps
-                    .unwrap_or(DISC_FAST_BOOT_WARMUP_STEPS),
-            );
+            maybe_fast_boot_disc(&mut bus, &mut cpu, &disc, &game_path)?;
             bus.cdrom.insert_disc(Some(disc));
+            crate::app::apply_libcrypt_sbi(&mut bus, &game_path);
             attach_headless_playtest_pad(&mut bus, args.digital_pad);
             if emit_summary {
                 eprintln!("[cli] mounted ccd-backed disc {}", game_path.display());
@@ -2676,7 +2626,6 @@ fn sanitize_artifact_segment(value: &str) -> String {
 struct ResolvedValidationArtifact {
     path: PathBuf,
     embedded_playtest: bool,
-    bios_boot: bool,
 }
 
 fn resolve_validation_artifact(
@@ -2684,7 +2633,7 @@ fn resolve_validation_artifact(
     manifest_dir: &Path,
     artifact: &ValidationArtifact,
 ) -> Result<ResolvedValidationArtifact, String> {
-    let (path, embedded_playtest, bios_boot) = match artifact {
+    let (path, embedded_playtest) = match artifact {
         ValidationArtifact::Project { project } => {
             // Project artifacts are cooked + built through the editor's
             // disc-build pipeline, which is absent in emulator-only builds.
@@ -2697,22 +2646,17 @@ fn resolve_validation_artifact(
         ValidationArtifact::Disc {
             path,
             embedded_playtest,
-            bios_boot,
         } => (
             resolve_manifest_path(repo_root, manifest_dir, path),
             *embedded_playtest,
-            *bios_boot,
         ),
-        ValidationArtifact::Example { path } | ValidationArtifact::Commercial { path } => (
-            resolve_manifest_path(repo_root, manifest_dir, path),
-            false,
-            false,
-        ),
+        ValidationArtifact::Example { path } | ValidationArtifact::Commercial { path } => {
+            (resolve_manifest_path(repo_root, manifest_dir, path), false)
+        }
     };
     Ok(ResolvedValidationArtifact {
         path,
         embedded_playtest,
-        bios_boot,
     })
 }
 
@@ -2730,7 +2674,6 @@ fn validation_launch_args(
         path: Some(artifact.path.clone()),
         game_id: None,
         savestate: None,
-        bios: None,
         disc: None,
         memcard: None,
         memcard2: None,
@@ -2744,8 +2687,6 @@ fn validation_launch_args(
         pad_pulses: checkpoint.pad_pulses.clone(),
         digital_pad: false,
         embedded_playtest: artifact.embedded_playtest,
-        bios_boot: artifact.bios_boot,
-        bios_warmup_steps: None,
         scph_9902: false,
         dump_hash: false,
         guest_debug_log: false,
@@ -2992,38 +2933,10 @@ fn maybe_fast_boot_disc(
     cpu: &mut Cpu,
     disc: &Disc,
     path: &std::path::Path,
-    enabled: bool,
-    warmup_steps: u64,
-) {
-    if !enabled {
-        return;
-    }
-    // Warm the firmware with the tray closed and the target disc already
-    // present. Retail BIOS startup configures the CD path and uploads its
-    // shell audio banks before Exec; warming an empty drive loses that
-    // observable peripheral state even if the executable is loaded later.
-    bus.cdrom.insert_disc(Some(disc.clone()));
-    if let Err(e) = warm_bios_for_disc_fast_boot(bus, cpu, warmup_steps) {
-        eprintln!(
-            "[cli] BIOS warmup failed for {} ({e:?}); leaving BIOS boot fallback in place",
-            path.display()
-        );
-        return;
-    }
-    match fast_boot_disc_with_hle(bus, cpu, disc, false) {
-        Ok(info) => eprintln!(
-            "[cli] warm-fast-booted {} via {} entry=0x{:08x} load=0x{:08x} payload={}B",
-            path.display(),
-            info.boot_path,
-            info.initial_pc,
-            info.load_addr,
-            info.payload_len
-        ),
-        Err(e) => eprintln!(
-            "[cli] fast boot unavailable for {} ({e:?}); falling back to BIOS boot",
-            path.display()
-        ),
-    }
+) -> Result<(), String> {
+    fast_boot_disc(bus, cpu, disc)
+        .map_err(|error| format!("boot {}: {error:?}", path.display()))?;
+    Ok(())
 }
 
 fn fmt_empty(s: &str) -> String {
@@ -3932,5 +3845,37 @@ mod press_script_tests {
         ));
         assert!(csv.contains("0x800b5608,0x800b622c,0x800b622c,0x80094ce8,3,75.000000"));
         assert!(csv.contains("0x800b560c,0x800b622c,0x800b622c,0x8007e5ec,1,25.000000"));
+    }
+    #[test]
+    fn external_firmware_options_are_rejected() {
+        for args in [
+            vec![
+                "frontend",
+                "launch",
+                "--path",
+                "game.cue",
+                "--bios",
+                "firmware.bin",
+            ],
+            vec!["frontend", "launch", "--path", "game.cue", "--bios-boot"],
+            vec![
+                "frontend",
+                "launch",
+                "--path",
+                "game.cue",
+                "--bios-warmup-steps",
+                "100",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_disc_returns_boot_error() {
+        let mut bus = Bus::new_without_bios();
+        let mut cpu = Cpu::new();
+        let disc = Disc::from_bin(vec![0; 2352]);
+        assert!(maybe_fast_boot_disc(&mut bus, &mut cpu, &disc, Path::new("bad.bin")).is_err());
     }
 }

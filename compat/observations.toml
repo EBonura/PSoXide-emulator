@@ -1,0 +1,241 @@
+# Human judgement behind docs/COMPATIBILITY.md, one table per compat/games.toml
+# id. tools/compat_report.py merges this with compat/reference.toml and an
+# hle_compat run.
+#
+# hle          status tier on PSoXide: none, boots, intro, menu, in-game,
+#              playable, perfect (defined in the doc)
+# bios         the tier the recorded real-BIOS run reached (compat/reference.toml)
+# fmv          plays, partial, broken, none seen, n/a
+# issues       known problems, with a short cause when known
+# evidence     "headless frames" (hle_compat shots looked at) or
+#              "Manny, console" / "Manny, GUI"
+# libcrypt     true for LibCrypt-protected discs (they need a .sbi)
+# hle_hash     final display hash of the run the tier was judged on; when a
+#              new run ends elsewhere the report asks for a re-check
+# bios_hash    final display hash of the recorded real-BIOS run
+# measured_on  emulator commit of the judged run
+#
+# Facts about the emulator's results only: no game data.
+
+[_notes]
+text = """
+Every row reaches gameplay (or, for Valkyrie Profile, the game's engine
+running its opening cutscene) with no BIOS. The input schedules that get
+there are in compat/inputs.toml; games without one use the common schedule
+(Start at 600, Cross at 750, alternating every 150 frames to 3450). The
+"Real BIOS" column is the last real-BIOS reference run with the same input,
+made before BIOS support was removed and kept in compat/reference.toml
+(display hashes every 60 frames in compat/reference/).
+
+Emulator fixes behind this round: Tomb Raider (CloneCD pregaps, CD-DA
+through a pregap), Chrono Cross (an original HLE font for Krom2RawAdd), and
+the CD head position at the EXE entry, which removed most of the early lead
+the HLE kernel had over the real one in CTR and Tekken 3. The remaining
+lead (about 0.04 to 0.05 s after the first loads) is kernel call cost, left
+for the cycle-measurement phase.
+
+Tomb Raider's image is stored as .img.ecm; the disc loader decodes ECM in
+memory. Soul Reaver's .sbi is next to its .cue; Formula One 2001 is not
+LibCrypt-protected.
+"""
+
+[crash]
+hle = "in-game"
+bios = "in-game"
+fmv = "n/a"
+issues = []
+evidence = "headless frames"
+hle_hash = "0x31c078d2ba5aedbf"
+bios_hash = "0x31c078d2ba5aedbf"
+measured_on = "ad71bcc2b"
+
+[ctr]
+hle = "in-game"
+bios = "in-game"
+fmv = "n/a"
+issues = ["Adventure, New, a typed name, save to card 1, then the hub; the HLE is about 0.04 s ahead of the real kernel after 20 s of loading (was 0.13 s before the CD head fix)"]
+evidence = "headless frames"
+hle_hash = "0xc610f0508da76eb7"
+bios_hash = "0x4b009f4e64024bd6"
+measured_on = "ad71bcc2b"
+
+[gt2]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = []
+evidence = "headless frames"
+hle_hash = "0x864ac3f37769c6aa"
+bios_hash = "0x285d25f900b6afb0"
+measured_on = "ad71bcc2b"
+
+[mgs]
+hle = "in-game"
+bios = "in-game"
+fmv = "none seen"
+issues = ["Circle confirms in its menus and Cross cancels (the old 'Start ignored' was the scripted Cross backing out); FMV not reached in the run"]
+evidence = "headless frames"
+hle_hash = "0x06bf94779aa84ec3"
+bios_hash = "0x166249f326e0d402"
+measured_on = "ad71bcc2b"
+
+[mslugx]
+hle = "in-game"
+bios = "in-game"
+fmv = "n/a"
+issues = []
+evidence = "headless frames"
+hle_hash = "0xeb07f882a6697f20"
+bios_hash = "0x730f4f7b511afc05"
+measured_on = "ad71bcc2b"
+
+[mvc]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = ["the arcade opponent is random, so the fight differs between the kernels"]
+evidence = "headless frames"
+hle_hash = "0x7ce07e8475fca799"
+bios_hash = "0xaf352eb970e4f4b9"
+measured_on = "ad71bcc2b"
+
+[re2]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = []
+evidence = "headless frames"
+hle_hash = "0x998da4abb5188593"
+bios_hash = "0x998da4abb5188593"
+measured_on = "ad71bcc2b"
+
+[re3]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = []
+evidence = "headless frames"
+hle_hash = "0x5ceb83a27cc265f6"
+bios_hash = "0x5c03dad61fdfd815"
+measured_on = "ad71bcc2b"
+
+[sfa2g]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = []
+evidence = "headless frames"
+hle_hash = "0x45391ae69d5054b4"
+bios_hash = "0x45391ae69d5054b4"
+measured_on = "ad71bcc2b"
+
+[spiderman]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = []
+evidence = "headless frames"
+hle_hash = "0xfeb0a56ce8f91790"
+bios_hash = "0x5fd26a366bd8d6b0"
+measured_on = "ad71bcc2b"
+
+[tekken3]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = ["the arcade opponent differs between the kernels; the HLE is about 0.05 s ahead after the first 6 s of loading (was 0.22 s before the CD head fix)"]
+evidence = "headless frames"
+hle_hash = "0x7a55a1181bab43e3"
+bios_hash = "0xf346e8a80b59a599"
+measured_on = "ad71bcc2b"
+
+[tombraider]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = ["was black after Start Game under both kernels: the CloneCD loader put track 2's pregap in track 1, and CD-DA play could not start in a pregap; both fixed"]
+evidence = "headless frames"
+hle_hash = "0x80fc26675f351296"
+bios_hash = "0xa027eb6252f4d5ee"
+measured_on = "ad71bcc2b"
+
+[wipeout]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = []
+evidence = "headless frames"
+hle_hash = "0xaad5076474e3a0f2"
+bios_hash = "0xd16559d105be2f90"
+measured_on = "ad71bcc2b"
+
+[wipeout2097]
+hle = "in-game"
+bios = "in-game"
+fmv = "n/a"
+issues = []
+evidence = "headless frames"
+hle_hash = "0xeef0c4ac7cf7ba1e"
+bios_hash = "0xcd065b064e2295e8"
+measured_on = "ad71bcc2b"
+
+[wipeout3]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = []
+evidence = "headless frames"
+hle_hash = "0xb824ce2fec06e75d"
+bios_hash = "0xa6b475d3c7923b9c"
+measured_on = "ad71bcc2b"
+
+[chronocross]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = ["no BIOS: the name-entry grid and default name come from the HLE kernel's own font (original glyphs, Latin and digits so far), so they look different from a console's"]
+evidence = "headless frames"
+hle_hash = "0x652bd34a0f838a59"
+bios_hash = "0x0e5d72302b39bebb"
+measured_on = "ad71bcc2b"
+
+[valkyrie]
+hle = "in-game"
+bios = "in-game"
+fmv = "none seen"
+issues = ["3600-frame run: the opening cutscene; the first controllable scene is several minutes of cutscene later"]
+evidence = "headless frames"
+hle_hash = "0x175a1a0489b36f9b"
+bios_hash = "0x679b62275a6c47b8"
+measured_on = "ad71bcc2b"
+
+[nightmare]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = ["the first fight differs between the kernels"]
+evidence = "headless frames"
+hle_hash = "0xc024eb9c6ef174b5"
+bios_hash = "0xd2a646f221d3b982"
+measured_on = "ad71bcc2b"
+
+[f12001]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+issues = ["not LibCrypt-protected (only self-modifying code, which the I-cache model serves as the console does: 6 stale-cache executions at 80027F00h in 7200 frames, all matching the cached routine)"]
+evidence = "headless frames"
+hle_hash = "0xa9c4e76b7a87d531"
+bios_hash = "0xb8a050565fb23d4d"
+measured_on = "ad71bcc2b"
+
+[soulreaver]
+hle = "in-game"
+bios = "in-game"
+fmv = "plays"
+libcrypt = true
+issues = ["LibCrypt: the .sbi (32 sectors) is read; the game asks GetlocP about 16 of them at frame 886, and the run diverges from a no-.sbi run afterwards, so the key is consumed; the late-game hang without the key is not reachable headless"]
+evidence = "headless frames"
+hle_hash = "0xec3a9b5c3fa2b539"
+bios_hash = "0xec3a9b5c3fa2b539"
+measured_on = "ad71bcc2b"

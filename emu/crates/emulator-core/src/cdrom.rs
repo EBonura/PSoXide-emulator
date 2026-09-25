@@ -138,6 +138,10 @@ pub mod drive_status_bit {
 const SECTOR_BUFFERS: usize = 8;
 const PARAM_FIFO_DEPTH: usize = 16;
 const RESPONSE_FIFO_DEPTH: usize = 16;
+/// A declared-only pregap sector's audio.
+static SILENT_CDDA_SECTOR: [u8; psx_iso::SECTOR_BYTES] = [0; psx_iso::SECTOR_BYTES];
+/// GetlocP positions kept for diagnostics.
+const GETLOCP_LOG_CAP: usize = 4096;
 const CDDA_BYTES_PER_SAMPLE: usize = 4;
 const CDDA_SAMPLES_PER_SECTOR: usize = psx_iso::SECTOR_BYTES / CDDA_BYTES_PER_SAMPLE;
 
@@ -164,6 +168,14 @@ struct PendingFollowup {
     irq: IrqType,
     bytes: Vec<u8>,
 }
+
+/// `PendingEvent::command` of an INT1 that announces a sector which landed
+/// while the CPU held the previous interrupt (no sector is read for it).
+const DEFERRED_DATA_READY: u8 = 0xFF;
+
+/// Cycles from the acknowledge to the held INT1 (DuckStation's
+/// `INTERRUPT_DELAY_CYCLES`).
+const DEFERRED_DATA_READY_DELAY: u64 = 500;
 
 /// A deferred response: when `bus.cycles` passes `deadline` (an
 /// absolute bus-cycle count), the event's bytes land in the response
@@ -411,6 +423,23 @@ pub struct CdRom {
     /// Whether `last_sector_header` / `last_sector_subheader`
     /// currently hold real sector data.
     last_sector_header_valid: bool,
+    /// A SeekL in flight: the cycle it lands, after which the header it
+    /// read at the target (already in `last_sector_header`) is valid.
+    #[serde(default)]
+    seek_header_valid_at: Option<u64>,
+    /// A sector landed while the CPU still held the last interrupt; its
+    /// INT1 goes out once the CPU acknowledges.
+    #[serde(default)]
+    deferred_data_ready: bool,
+    /// Sectors whose subchannel Q has a bad CRC (LibCrypt, from a `.sbi`
+    /// file), sorted. The controller ignores their Q data.
+    #[serde(default)]
+    bad_subq_sectors: Vec<u32>,
+    /// Sectors GetlocP was asked about (the first [`GETLOCP_LOG_CAP`]),
+    /// before bad-Q substitution. Diagnostic: shows whether and when a game
+    /// probes its LibCrypt sectors.
+    #[serde(skip)]
+    getlocp_lbas: Vec<u32>,
     /// Set while a read is in progress; controls whether new
     /// DataReady events chain into further sectors.
     reading: bool,
@@ -552,6 +581,10 @@ impl CdRom {
             last_sector_header: [0; 4],
             last_sector_subheader: [0; 4],
             last_sector_header_valid: false,
+            seek_header_valid_at: None,
+            deferred_data_ready: false,
+            bad_subq_sectors: Vec::new(),
+            getlocp_lbas: Vec::new(),
             reading: false,
             read_rescheduled: false,
             read_lba: 0,
@@ -625,6 +658,12 @@ impl CdRom {
     /// Queue depth of the CD audio buffer -- diagnostic.
     pub fn cd_audio_queue_len(&self) -> usize {
         self.cd_audio.len()
+    }
+
+    /// Current drive status byte as a GetStat would report it.
+    /// Diagnostic only; used by the BIOS census probe.
+    pub fn debug_stat_byte(&self) -> u8 {
+        self.stat_byte()
     }
 
     /// Live SetMode byte -- diagnostic for XA / raw-sector streaming.
@@ -811,7 +850,22 @@ impl CdRom {
     }
 
     fn decode_cdda_chunk(&self, count: usize) -> Option<Vec<(i16, i16)>> {
-        let raw = self.disc.as_ref()?.read_cdda_sector(self.read_lba)?;
+        let disc = self.disc.as_ref()?;
+        let raw = match disc.read_cdda_sector(self.read_lba) {
+            Some(raw) => raw,
+            // An audio track's pregap (index 00) plays like the rest of the
+            // track: its sectors when the image holds them, silence when the
+            // sheet only declares it.
+            None => {
+                let track = disc.track_for_lba(self.read_lba)?;
+                if track.track_type != psx_iso::TrackType::Audio || self.read_lba >= track.start_lba
+                {
+                    return None;
+                }
+                disc.read_sector_raw(self.read_lba)
+                    .unwrap_or(&SILENT_CDDA_SECTOR)
+            }
+        };
         let start = self.cdda_sample_index * CDDA_BYTES_PER_SAMPLE;
         let end = start + count * CDDA_BYTES_PER_SAMPLE;
         let bytes = raw.get(start..end)?;
@@ -849,6 +903,24 @@ impl CdRom {
         self.disc.as_mut()
     }
 
+    /// Mark sectors whose subchannel Q is deliberately corrupt (LibCrypt).
+    /// The list comes from the disc's `.sbi` file; the image itself has no
+    /// subchannel data. Kept until replaced, so insert the disc first.
+    pub fn set_bad_subq_sectors(&mut self, mut lbas: Vec<u32>) {
+        lbas.sort_unstable();
+        lbas.dedup();
+        self.bad_subq_sectors = lbas;
+    }
+
+    /// The sector whose Q data the controller last accepted at `lba`: bad
+    /// CRCs are ignored, so position reports stay on the sector before.
+    fn last_good_subq_lba(&self, mut lba: u32) -> u32 {
+        while lba > 0 && self.bad_subq_sectors.binary_search(&lba).is_ok() {
+            lba -= 1;
+        }
+        lba
+    }
+
     /// Load a disc image. After this, GetID returns the licensed-disc
     /// response and ReadN streams real sector data through the
     /// DataReady event chain.
@@ -883,6 +955,7 @@ impl CdRom {
         self.last_sector_header = [0; 4];
         self.last_sector_subheader = [0; 4];
         self.last_sector_header_valid = false;
+        self.seek_header_valid_at = None;
         self.xa_first_sector = 0;
         self.xa_left.reset();
         self.xa_right.reset();
@@ -996,6 +1069,16 @@ impl CdRom {
             // clear on the low 5 bits; bit 6 resets the param FIFO too).
             (3, 1) => {
                 self.irq_flag &= !(value & 0x1F);
+                if self.irq_flag == 0 && self.deferred_data_ready && self.reading {
+                    self.deferred_data_ready = false;
+                    self.insert_pending_event(PendingEvent {
+                        command: DEFERRED_DATA_READY,
+                        deadline: now.saturating_add(DEFERRED_DATA_READY_DELAY),
+                        irq: IrqType::DataReady,
+                        bytes: vec![self.stat_byte()],
+                        followup: None,
+                    });
+                }
                 if value & 0x40 != 0 {
                     self.params.clear();
                 }
@@ -1340,6 +1423,7 @@ impl CdRom {
     /// this, stale sectors from an older stream can leak into the next
     /// command sequence.
     fn cancel_pending_data_ready_events(&mut self) {
+        self.deferred_data_ready = false;
         self.pending.retain(|ev| ev.irq != IrqType::DataReady);
         for ev in self.pending.iter_mut() {
             if ev
@@ -1576,6 +1660,7 @@ impl CdRom {
         self.last_sector_header = [0; 4];
         self.last_sector_subheader = [0; 4];
         self.last_sector_header_valid = false;
+        self.seek_header_valid_at = None;
         // Redux returns only the pre-init ACK here; the later 20480
         // cycle work happens on the lid/rescan state machine, not as a
         // second CPU-visible CDROM completion IRQ.
@@ -1619,6 +1704,7 @@ impl CdRom {
         self.last_sector_header = [0; 4];
         self.last_sector_subheader = [0; 4];
         self.last_sector_header_valid = false;
+        self.seek_header_valid_at = None;
         self.mode = 0x20;
         self.motor_on = true;
         self.drive_state = DriveState::Standby;
@@ -1666,6 +1752,26 @@ impl CdRom {
             msf_to_lba(m, s, f)
         };
         let delay = self.seek_travel_cycles(target_lba.abs_diff(self.read_lba));
+        // The drive confirms a logical seek by reading the target's
+        // header; until then GetlocL has nothing to report.
+        self.last_sector_header_valid = false;
+        self.seek_header_valid_at = None;
+        let data_target = self.disc.as_ref().is_some_and(|d| {
+            d.track_for_lba(target_lba).map(|t| t.track_type) == Some(psx_iso::TrackType::Data)
+        });
+        if let Some(raw) = self
+            .disc
+            .as_ref()
+            .filter(|_| data_target)
+            .and_then(|d| d.read_sector_raw(target_lba))
+        {
+            if raw.len() >= 20 {
+                self.last_sector_header.copy_from_slice(&raw[12..16]);
+                self.last_sector_subheader.copy_from_slice(&raw[16..20]);
+                self.seek_header_valid_at =
+                    Some(self.first_response_deadline().saturating_add(delay));
+            }
+        }
         self.read_lba = target_lba;
         self.setloc_pending = false;
         self.schedule_second_response(vec![stat], delay);
@@ -1711,6 +1817,10 @@ impl CdRom {
             let (m, s, f) = self.setloc_msf;
             let target = msf_to_lba(m, s, f);
             travel = self.seek_travel_cycles(target.abs_diff(self.read_lba));
+            // The head is moving: no header to report until the first
+            // sector at the target arrives (psx-spx GetlocL).
+            self.last_sector_header_valid = false;
+            self.seek_header_valid_at = None;
             self.read_lba = target;
             self.setloc_pending = false;
             self.location_changed = true;
@@ -1776,60 +1886,23 @@ impl CdRom {
                 self.last_sector_header.copy_from_slice(&raw[12..16]);
                 self.last_sector_subheader.copy_from_slice(&raw[16..20]);
                 self.last_sector_header_valid = true;
+                self.seek_header_valid_at = None;
                 let submode = raw[18];
-                let suppress_data_ready = self.mode & 0x40 != 0 && submode & 0x04 != 0;
-                if suppress_data_ready {
+                // With XA-ADPCM enabled, a Mode 2 sector flagged audio and
+                // real-time belongs to the ADPCM decoder. It is never put in
+                // the host-side sector buffer and raises no DataReady,
+                // whether or not the filter lets it play (DuckStation does
+                // the same). Touching the buffer here would wipe a data
+                // sector the CPU was told about but has not read yet, which
+                // is every video sector ahead of an audio one in an STR
+                // stream.
+                if self.mode & 0x40 != 0 && raw[15] == 2 && submode & 0x44 == 0x44 {
                     self.dbg_suppressed_submode_or |= submode;
-                }
-
-                // If XA mode is on, only decode sectors that match the
-                // Redux gate: unmuted, audio submode set, matching
-                // file/channel filter, and a live first-sector state.
-                // Games with XA-streamed cutscenes use a single ReadN
-                // to pull both sector kinds; matching audio sectors go
-                // to the SPU and skip the CPU-visible data FIFO.
-                if !self.muted && self.mode & 0x40 != 0 && self.xa_first_sector != -1 {
-                    let file = raw[16];
-                    let channel = raw[17];
-
-                    if self.xa_first_sector == 1 && self.mode & 0x08 == 0 {
-                        self.xa_filter_file = file;
-                        self.xa_filter_channel = channel;
-                    }
-
-                    if submode & 0x04 != 0
-                        && file == self.xa_filter_file
-                        && channel == self.xa_filter_channel
-                        && channel != 0xFF
-                    {
-                        if self.xa_first_sector == 1 || self.xa_coding.is_none() {
-                            let Some(coding) = parse_xa_coding(raw[19]) else {
-                                self.xa_first_sector = -1;
-                                return !suppress_data_ready;
-                            };
-                            if self.xa_coding != Some(coding) {
-                                self.xa_left.reset();
-                                self.xa_right.reset();
-                                self.xa_coding = Some(coding);
-                            }
-                        }
-                        let coding = self.xa_coding.expect("XA coding seeded above");
-                        if let Some(mut samples) = decode_xa_audio_sector(
-                            raw,
-                            coding,
-                            &mut self.xa_left,
-                            &mut self.xa_right,
-                        ) {
-                            self.attenuate_cd_samples(&mut samples);
-                            self.append_cd_audio_samples(&samples);
-                            self.xa_first_sector = 0;
-                            self.data_fifo.clear();
-                            self.data_fifo_ready = false;
-                            self.data_transfer_active = false;
-                            return self.suppress_data_ready();
-                        }
-                        self.xa_first_sector = -1;
-                    }
+                    // `raw` borrows the disc; the decoder needs `&mut self`.
+                    let mut sector = [0u8; psx_iso::SECTOR_BYTES];
+                    sector.copy_from_slice(&raw[..psx_iso::SECTOR_BYTES]);
+                    self.play_xa_audio_sector(&sector);
+                    return self.suppress_data_ready();
                 }
 
                 let whole_sector = self.mode & 0x20 != 0;
@@ -1842,9 +1915,6 @@ impl CdRom {
                     &raw[24..24 + 2048]
                 };
                 self.push_sector(lba, payload.to_vec());
-                if suppress_data_ready {
-                    return self.suppress_data_ready();
-                }
                 return true;
             }
 
@@ -1860,6 +1930,43 @@ impl CdRom {
         true
     }
 
+    /// Feed one XA audio sector to the ADPCM decoder, applying the
+    /// file/channel filter. Only the SPU's CD input is affected.
+    fn play_xa_audio_sector(&mut self, raw: &[u8]) {
+        if self.muted || self.xa_first_sector == -1 {
+            return;
+        }
+        let file = raw[16];
+        let channel = raw[17];
+        if self.xa_first_sector == 1 && self.mode & 0x08 == 0 {
+            self.xa_filter_file = file;
+            self.xa_filter_channel = channel;
+        }
+        if file != self.xa_filter_file || channel != self.xa_filter_channel || channel == 0xFF {
+            return;
+        }
+        if self.xa_first_sector == 1 || self.xa_coding.is_none() {
+            let Some(coding) = parse_xa_coding(raw[19]) else {
+                self.xa_first_sector = -1;
+                return;
+            };
+            if self.xa_coding != Some(coding) {
+                self.xa_left.reset();
+                self.xa_right.reset();
+                self.xa_coding = Some(coding);
+            }
+        }
+        let coding = self.xa_coding.expect("XA coding seeded above");
+        match decode_xa_audio_sector(raw, coding, &mut self.xa_left, &mut self.xa_right) {
+            Some(mut samples) => {
+                self.attenuate_cd_samples(&mut samples);
+                self.append_cd_audio_samples(&samples);
+                self.xa_first_sector = 0;
+            }
+            None => self.xa_first_sector = -1,
+        }
+    }
+
     /// CdlGetlocL (0x10) -- return the current logical position
     /// and sector-header info. 8-byte reply:
     /// `[MM, SS, FF, Mode, File, Channel, Submode, Coding]` from the
@@ -1872,9 +1979,17 @@ impl CdRom {
             self.schedule_error_response(vec![stat, 0x80]);
             return;
         }
+        if let Some(at) = self.seek_header_valid_at {
+            if self.scheduling_cycle >= at {
+                self.seek_header_valid_at = None;
+                self.last_sector_header_valid = true;
+            }
+        }
         if !self.last_sector_header_valid {
+            // psx-spx: error 80h with no header yet, including while the
+            // drive seeks after a new ReadN/SeekL (software retries).
             let stat = self.stat_byte() | drive_status_bit::ERROR;
-            self.schedule_error_response(vec![stat]);
+            self.schedule_error_response(vec![stat, 0x80]);
             return;
         }
         let mut resp = Vec::with_capacity(8);
@@ -1903,6 +2018,10 @@ impl CdRom {
         } else {
             self.read_lba
         };
+        if self.getlocp_lbas.len() < GETLOCP_LOG_CAP {
+            self.getlocp_lbas.push(lba);
+        }
+        let lba = self.last_good_subq_lba(lba);
         let Some(pos) = disc.track_position_for_lba(lba) else {
             let stat = self.stat_byte() | drive_status_bit::ERROR;
             self.schedule_error_response(vec![stat]);
@@ -2224,7 +2343,14 @@ impl CdRom {
             // stream cadence after the PREVIOUS one, not from the
             // ancient `cmd_read` issue time).
             let mut should_raise_irq = true;
-            if ev.irq == IrqType::DataReady {
+            if ev.irq == IrqType::DataReady && ev.command == DEFERRED_DATA_READY {
+                // The held INT1: announce the newest sector now, or wait for
+                // the next acknowledge if another interrupt got in first.
+                if self.irq_flag != 0 {
+                    self.deferred_data_ready = true;
+                    continue;
+                }
+            } else if ev.irq == IrqType::DataReady {
                 should_raise_irq = self.load_next_sector();
                 // The sector has landed either way. Whether the CPU is told
                 // about it is a separate question: the interrupt line is still
@@ -2233,6 +2359,10 @@ impl CdRom {
                 // notification is simply never sent, which is exactly how a
                 // slow handler ends up stepping over data.
                 if self.irq_flag != 0 {
+                    // One INT1 is held for it and goes out after the ack.
+                    if should_raise_irq {
+                        self.deferred_data_ready = true;
+                    }
                     should_raise_irq = false;
                 }
                 self.read_rescheduled = false;
@@ -2273,6 +2403,7 @@ impl CdRom {
             // Raise IRQ. The flag-gate above already guaranteed
             // irq_flag was 0 on entry.
             if ev.irq == IrqType::DataReady {
+                self.deferred_data_ready = false;
                 self.snap_to_newest_sector();
             }
             self.irq_flag = ev.irq as u8;
@@ -2507,6 +2638,18 @@ xa_filter=({},{}) sched_cycle={} read_lba={} now={} pending=[{}]",
             self.advance_to_next_sector();
         }
         byte
+    }
+
+    /// Put the head on `lba` without reading: where a boot loader left the
+    /// drive when the executable it loaded starts.
+    pub fn park_head(&mut self, lba: u32) {
+        self.read_lba = lba;
+    }
+
+    /// Sectors GetlocP reported on, in order, before bad-Q substitution
+    /// (the first [`GETLOCP_LOG_CAP`]; diagnostic).
+    pub fn getlocp_lbas(&self) -> &[u32] {
+        &self.getlocp_lbas
     }
 
     /// Sectors the controller read but software never collected, because it

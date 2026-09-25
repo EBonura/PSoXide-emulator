@@ -1,0 +1,242 @@
+# Commercial PS1 discs used to track HLE BIOS compatibility.
+#
+# Facts only: titles, serials, regions, hashes, and which BIOS functions and
+# Psy-Q kernel patch routines each game uses. No disc bytes, images or file
+# paths belong here; the compat runner finds the owner's own discs by hash.
+#
+# disc_sha256      sha256 of the raw data image: the first FILE of a cue
+#                  sheet, or a clone-CD .img (decoded, when stored as ECM).
+# ecm_sha256       sha256 of the .img.ecm container, for discs stored that
+#                  way, so a runner without an ECM decoder can still tell
+#                  the disc is present.
+# boot_exe_sha256  sha256 of the boot executable named by SYSTEM.CNF, so a
+#                  disc is recognised whatever image format it is stored in.
+# kernel_functions          runtime calls plus every call site that
+#                           tools/kcall_scan.py finds on the disc.
+# kernel_functions_runtime  functions called from game code after EXE entry
+#                           during the census run under the retail BIOS
+#                           (attract mode plus scripted START and CROSS).
+# kernel_patches            B(56h)/B(57h) patch routines identified by their
+#                           OpenBIOS signature hash.
+#
+# Entries without kernel_functions_runtime were added after the census
+# (tools/kcall_scan.py only): their lists are static call sites.
+#
+# Source: BIOS usage census of 2026-09-24 (bios_syscall_probe with
+# PSOXIDE_CENSUS_OUT, plus tools/kcall_scan.py).
+
+[[game]]
+id = "crash"
+title = "Crash Bandicoot (USA)"
+serial = "SCUS-94900"
+region = "NTSC-U"
+disc_sha256 = "35d4b837108adc4c5313a45c0f203aa76bc0911873204e908512187379eb98ec"
+boot_exe_sha256 = "aabf1464f90b2e0b81e712b77aebbdb88f303b16ce830535e2b0cd886ee280f2"
+kernel_functions = ["A(10h)", "A(13h)", "A(15h)", "A(17h)", "A(18h)", "A(19h)", "A(1Bh)", "A(27h)", "A(28h)", "A(2Ah)", "A(2Bh)", "A(2Eh)", "A(3Fh)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(14h)", "B(15h)", "B(16h)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(34h)", "B(35h)", "B(36h)", "B(38h)", "B(3Fh)", "B(41h)", "B(42h)", "B(43h)", "B(45h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(4Fh)", "B(50h)", "B(56h)", "B(5Bh)", "C(0Ah)"]
+kernel_functions_runtime = ["A(13h)", "A(18h)", "A(19h)", "A(1Bh)", "A(28h)", "A(2Ah)", "A(2Bh)", "A(3Fh)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "B(07h)", "B(08h)", "B(0Bh)", "B(0Ch)", "B(15h)", "B(16h)", "B(17h)", "B(19h)", "B(3Fh)", "B(4Ah)", "B(4Bh)", "B(56h)", "B(5Bh)", "C(0Ah)"]
+kernel_patches = ["_patch_gte#2"]
+
+[[game]]
+id = "ctr"
+title = "CTR - Crash Team Racing (USA)"
+serial = "SCUS-94426"
+region = "NTSC-U"
+disc_sha256 = "f780bf2331476aabfc00772fa758b12dd95ebfbc907968132cbd3cdd4e2c07c0"
+boot_exe_sha256 = "7b4aac0bf2f6310984e599295df17b457da5a23b270c20200cefef6079efb838"
+kernel_functions = ["A(13h)", "A(15h)", "A(17h)", "A(18h)", "A(19h)", "A(1Ah)", "A(1Bh)", "A(28h)", "A(2Ah)", "A(2Bh)", "A(2Eh)", "A(2Fh)", "A(39h)", "A(3Fh)", "A(44h)", "A(49h)", "A(51h)", "A(70h)", "A(71h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(33h)", "B(34h)", "B(35h)", "B(36h)", "B(3Fh)", "B(41h)", "B(42h)", "B(43h)", "B(45h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_functions_runtime = ["A(13h)", "A(17h)", "A(18h)", "A(19h)", "A(1Ah)", "A(1Bh)", "A(28h)", "A(2Ah)", "A(2Bh)", "A(39h)", "A(3Fh)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(17h)", "B(19h)", "B(32h)", "B(3Fh)", "B(42h)", "B(4Ah)", "B(4Bh)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_clear_card#1", "_patch_card#2", "_patch_card2#2", "_patch_gte#1"]
+
+[[game]]
+id = "gt2"
+title = "Gran Turismo 2 (USA) (Arcade Mode) (Rev 1)"
+serial = "SCUS-94455"
+region = "NTSC-U"
+disc_sha256 = "a24523e990340fdf5a7ad29d38d0fc0fe845e0a79d203b8b708e032b24a33909"
+boot_exe_sha256 = "43ebc26665d088ad87af1aea67c7f359a6c0a9ed9809d1f143e268b350ad69cc"
+kernel_functions = ["A(18h)", "A(27h)", "A(28h)", "A(3Ah)", "A(3Fh)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ch)", "B(12h)", "B(13h)", "B(15h)", "B(17h)", "B(18h)", "B(19h)", "B(3Fh)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(4Fh)", "B(50h)", "B(51h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_functions_runtime = ["A(18h)", "A(27h)", "A(28h)", "A(3Fh)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "B(08h)", "B(0Ch)", "B(17h)", "B(19h)", "B(3Fh)", "B(4Ah)", "B(4Bh)", "B(4Fh)", "B(51h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_clear_card#1", "_patch_card#2", "_patch_card2#2", "_patch_card_info#1", "_patch_gte#1", "_patch_pad#1", "_remove_ChgclrPAD#1"]
+
+[[game]]
+id = "mgs"
+title = "Metal Gear Solid (USA) (Disc 1) (Rev 1)"
+serial = "SLUS-00594"
+region = "NTSC-U"
+disc_sha256 = "74ff560b775ba49718beb1c524dc105125872bf3b7f56af1b49a226d1c79edf9"
+boot_exe_sha256 = "615e136083336957ed0b9b3805145bf5bbb35f7a16c2f160dba8f17bb71cc640"
+kernel_functions = ["A(39h)", "A(44h)", "A(49h)", "A(51h)", "A(70h)", "A(71h)", "A(72h)", "A(9Fh)", "A(ABh)", "A(ACh)", "B(00h)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(0Eh)", "B(0Fh)", "B(10h)", "B(12h)", "B(13h)", "B(14h)", "B(15h)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(33h)", "B(34h)", "B(35h)", "B(36h)", "B(41h)", "B(42h)", "B(43h)", "B(45h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(4Fh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(00h)", "C(01h)", "C(02h)", "C(03h)", "C(08h)", "C(0Ah)", "C(0Ch)"]
+kernel_functions_runtime = ["A(39h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(9Fh)", "A(ABh)", "A(ACh)", "B(00h)", "B(07h)", "B(08h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Eh)", "B(10h)", "B(17h)", "B(18h)", "B(19h)", "B(35h)", "B(42h)", "B(4Ah)", "B(4Bh)", "B(4Eh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(00h)", "C(01h)", "C(02h)", "C(03h)", "C(08h)", "C(0Ah)", "C(0Ch)"]
+kernel_patches = ["_clear_card#1", "_patch_card#2", "_patch_card2#2", "_patch_gte#1", "_patch_pad#1", "_remove_ChgclrPAD#1"]
+
+[[game]]
+id = "mslugx"
+title = "Metal Slug X (USA)"
+serial = "SLUS-01212"
+region = "NTSC-U"
+disc_sha256 = "45cde149878fe945d0219fd0f61ca09856aee66bdcc9119de21c0583f1d0667d"
+boot_exe_sha256 = "0c36eb1775c844e991fe136d6e1a66dad8d79eeda4be1bdd577715fc35af98e0"
+kernel_functions = ["A(10h)", "A(13h)", "A(15h)", "A(17h)", "A(18h)", "A(19h)", "A(1Ah)", "A(1Bh)", "A(28h)", "A(2Ah)", "A(2Bh)", "A(2Eh)", "A(2Fh)", "A(30h)", "A(39h)", "A(3Fh)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(12h)", "B(13h)", "B(15h)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(33h)", "B(34h)", "B(35h)", "B(36h)", "B(3Fh)", "B(42h)", "B(43h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(4Fh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_functions_runtime = ["A(13h)", "A(15h)", "A(17h)", "A(18h)", "A(19h)", "A(1Bh)", "A(28h)", "A(2Ah)", "A(2Bh)", "A(39h)", "A(3Fh)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(17h)", "B(19h)", "B(32h)", "B(3Fh)", "B(42h)", "B(4Ah)", "B(4Bh)", "B(4Eh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_clear_card#1", "_patch_card#2", "_patch_card2#2", "_patch_card_info#1", "_patch_gte#1", "_patch_pad#1", "_remove_ChgclrPAD#1"]
+
+[[game]]
+id = "mvc"
+title = "Marvel vs. Capcom - Clash of Super Heroes (USA)"
+serial = "SLUS-01059"
+region = "NTSC-U"
+disc_sha256 = "84611bc8aca2b628a8e423976db68c050c9c4899f7028512236045ec44c76970"
+boot_exe_sha256 = "5cb29c2d15fab4164ef1a6c6a5b56f52b475da903944b89e96613724e3d4d3ce"
+kernel_functions = ["A(13h)", "A(17h)", "A(18h)", "A(1Bh)", "A(27h)", "A(28h)", "A(2Ah)", "A(2Bh)", "A(39h)", "A(3Fh)", "A(43h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(09h)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(0Eh)", "B(0Fh)", "B(10h)", "B(12h)", "B(13h)", "B(14h)", "B(15h)", "B(16h)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(34h)", "B(35h)", "B(36h)", "B(38h)", "B(3Fh)", "B(41h)", "B(45h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(50h)", "B(51h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_functions_runtime = ["A(13h)", "A(3Fh)", "A(43h)", "A(44h)", "A(49h)", "A(72h)", "B(07h)", "B(08h)", "B(0Ch)", "B(15h)", "B(17h)", "B(18h)", "B(19h)", "B(35h)", "B(3Fh)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_clear_card#1", "_patch_card#2", "_patch_card2#2", "_patch_gte#2", "_patch_pad#1", "_patch_pad#2", "_remove_ChgclrPAD#1", "_remove_ChgclrPAD#2", "_send_pad#2"]
+
+[[game]]
+id = "re2"
+title = "Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)"
+serial = "SLUS-00748"
+region = "NTSC-U"
+disc_sha256 = "3eee42c8f920ed3d4cb5ab1a4271e3ae8c32efcbe511115bc7752eb3d00aaf87"
+boot_exe_sha256 = "e576348f64d015ecff6e1ce875a8924ee252ba7f3f9478b0917cbbdeb97db441"
+kernel_functions = ["A(13h)", "A(17h)", "A(19h)", "A(28h)", "A(2Ah)", "A(2Bh)", "A(39h)", "A(3Fh)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(0Eh)", "B(0Fh)", "B(10h)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(33h)", "B(34h)", "B(35h)", "B(36h)", "B(3Fh)", "B(41h)", "B(42h)", "B(43h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_functions_runtime = ["A(13h)", "A(17h)", "A(19h)", "A(28h)", "A(2Ah)", "A(2Bh)", "A(39h)", "A(3Fh)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Eh)", "B(0Fh)", "B(10h)", "B(17h)", "B(19h)", "B(3Fh)", "B(42h)", "B(4Ah)", "B(4Bh)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_patch_card#1", "_patch_card2#1", "_patch_gte#2"]
+
+[[game]]
+id = "re3"
+title = "Resident Evil 3 - Nemesis (USA)"
+serial = "SLUS-00923"
+region = "NTSC-U"
+disc_sha256 = "94bb40a2480e39b71a16330dc914f0fe6c40563d61a0f783bcb6c368144ed703"
+boot_exe_sha256 = "2e143418e358b2c99995cdc1a88c387163fb751912c723b755614f38e236bd29"
+kernel_functions = ["A(0Dh)", "A(13h)", "A(15h)", "A(17h)", "A(18h)", "A(19h)", "A(1Bh)", "A(1Eh)", "A(24h)", "A(28h)", "A(2Ah)", "A(2Bh)", "A(2Eh)", "A(39h)", "A(3Fh)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Eh)", "B(0Fh)", "B(10h)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(33h)", "B(34h)", "B(35h)", "B(36h)", "B(38h)", "B(3Fh)", "B(41h)", "B(42h)", "B(43h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(50h)", "B(51h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_functions_runtime = ["A(13h)", "A(28h)", "A(2Ah)", "A(3Fh)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "B(07h)", "B(08h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Eh)", "B(0Fh)", "B(10h)", "B(17h)", "B(19h)", "B(3Fh)", "B(4Ah)", "B(4Bh)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_patch_card#1", "_patch_card2#1", "_patch_gte#1", "_patch_gte#2"]
+
+[[game]]
+id = "sfa2g"
+title = "Street Fighter Collection - Street Fighter Alpha 2 Gold (USA) (Disc 2)"
+serial = "SLUS-00584"
+region = "NTSC-U"
+disc_sha256 = "61b1e0e5d9ee4152c31c37f2fa4889109d09cb38ab80832fe5c842744910dd2a"
+boot_exe_sha256 = "1000d0a18065b2eee30828401bdd4fa640bf347468acd60785a3eaeae680dc93"
+kernel_functions = ["A(39h)", "A(43h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(0Eh)", "B(0Fh)", "B(10h)", "B(12h)", "B(13h)", "B(14h)", "B(15h)", "B(16h)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(34h)", "B(35h)", "B(36h)", "B(41h)", "B(42h)", "B(43h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_functions_runtime = ["A(39h)", "A(43h)", "A(44h)", "A(49h)", "A(72h)", "B(07h)", "B(15h)", "B(17h)", "B(18h)", "B(19h)", "B(35h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_patch_card#1", "_patch_card2#1", "_patch_gte#2", "_patch_pad#2"]
+
+[[game]]
+id = "spiderman"
+title = "Spider-Man (USA)"
+serial = "SLUS-00875"
+region = "NTSC-U"
+disc_sha256 = "1c6d2b7e36ef30c707415dff4324a75eab9672a0c943e21ee33ea2f381b5ce2c"
+boot_exe_sha256 = "d2270e35581ba083d9441166e9a45ead4f869ab07e890f9a512ad7ee4cc0b15b"
+kernel_functions = ["A(13h)", "A(17h)", "A(18h)", "A(19h)", "A(1Bh)", "A(28h)", "A(2Ah)", "A(2Bh)", "A(2Eh)", "A(39h)", "A(3Fh)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(34h)", "B(35h)", "B(36h)", "B(3Fh)", "B(41h)", "B(42h)", "B(43h)", "B(4Ah)", "B(4Bh)", "B(4Eh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_functions_runtime = ["A(13h)", "A(17h)", "A(18h)", "A(28h)", "A(2Ah)", "A(39h)", "A(3Fh)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "B(07h)", "B(08h)", "B(0Bh)", "B(0Ch)", "B(17h)", "B(19h)", "B(3Fh)", "B(4Ah)", "B(4Bh)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_patch_card#2", "_patch_card2#2", "_patch_card_info#1", "_patch_gte#1"]
+
+[[game]]
+id = "tekken3"
+title = "Tekken 3 (USA)"
+serial = "SLUS-00402"
+region = "NTSC-U"
+disc_sha256 = "6b660e62748d02779e9e08362a5ed202540af7fad134de2ec0a2184ad78bb496"
+boot_exe_sha256 = "fbda8b68e5799dbef4af39a161783bc670c15b0aa0e87dce65e210717da19b8c"
+kernel_functions = ["A(39h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ACh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(12h)", "B(13h)", "B(14h)", "B(15h)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(34h)", "B(35h)", "B(36h)", "B(38h)", "B(41h)", "B(42h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_functions_runtime = ["A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ACh)", "B(07h)", "B(08h)", "B(0Bh)", "B(0Ch)", "B(17h)", "B(19h)", "B(32h)", "B(34h)", "B(35h)", "B(36h)", "B(4Ah)", "B(4Bh)", "B(4Eh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_clear_card#1", "_patch_card#2", "_patch_card2#2", "_patch_gte#1", "_patch_pad#1", "_remove_ChgclrPAD#1"]
+
+[[game]]
+id = "tombraider"
+title = "Tomb Raider (USA) (Greatest Hits)"
+serial = "SLUS-00152"
+region = "NTSC-U"
+disc_sha256 = "23e17fa32dae6e32884083aed3cbc5748caebd7b23a21020f3e2cb16747595ea"
+ecm_sha256 = "84402e905481e853d70200a3c20ed6f818a64113a9629714988c43743a1b4068"
+boot_exe_sha256 = "3dfaaddda7155b97dd6cc1b63cf17762a4601c2a898b7141e8db37c704527c10"
+kernel_functions = ["A(10h)", "A(13h)", "A(17h)", "A(18h)", "A(19h)", "A(1Bh)", "A(1Eh)", "A(25h)", "A(28h)", "A(2Ah)", "A(2Bh)", "A(2Eh)", "A(2Fh)", "A(30h)", "A(39h)", "A(3Fh)", "A(43h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(9Fh)", "A(A0h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(12h)", "B(13h)", "B(14h)", "B(15h)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(34h)", "B(35h)", "B(36h)", "B(38h)", "B(3Dh)", "B(3Fh)", "B(41h)", "B(42h)", "B(43h)", "B(4Ah)", "B(4Bh)", "B(4Eh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_functions_runtime = ["A(10h)", "A(13h)", "A(17h)", "A(18h)", "A(1Bh)", "A(1Eh)", "A(28h)", "A(2Ah)", "A(2Bh)", "A(39h)", "A(3Fh)", "A(43h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(9Fh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(12h)", "B(13h)", "B(17h)", "B(18h)", "B(19h)", "B(3Dh)", "B(3Fh)", "B(4Ah)", "B(4Bh)", "B(56h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_initgun#1", "_patch_gte#2", "_patch_pad#2", "_remove_ChgclrPAD#2", "_send_pad#2"]
+
+[[game]]
+id = "wipeout"
+title = "WipEout (Europe) (v1.1)"
+serial = "SCES-00010"
+region = "PAL"
+disc_sha256 = "81b0e8aa5eabf48d736ef56031cdeb8f81e091cbdeec2543085d29ed691367b2"
+boot_exe_sha256 = "1cfc2fcc1a87e71d1a506a7dc55975538ebfef44e1850f577da780398d93ae50"
+kernel_functions = ["A(13h)", "A(15h)", "A(17h)", "A(18h)", "A(19h)", "A(1Bh)", "A(25h)", "A(2Ah)", "A(2Bh)", "A(2Ch)", "A(2Eh)", "A(2Fh)", "A(30h)", "A(34h)", "A(39h)", "A(3Fh)", "A(43h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(9Fh)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(12h)", "B(13h)", "B(14h)", "B(17h)", "B(19h)", "B(32h)", "B(34h)", "B(35h)", "B(36h)", "B(38h)", "B(41h)", "B(42h)", "B(43h)", "B(44h)", "B(47h)", "B(48h)", "B(4Ah)", "B(4Bh)", "B(4Eh)", "B(50h)", "B(5Bh)", "C(02h)", "C(0Ah)", "C(19h)"]
+kernel_functions_runtime = ["A(13h)", "A(17h)", "A(18h)", "A(19h)", "A(1Bh)", "A(25h)", "A(2Bh)", "A(2Fh)", "A(30h)", "A(34h)", "A(39h)", "A(3Fh)", "A(43h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(9Fh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(12h)", "B(13h)", "B(14h)", "B(17h)", "B(19h)", "B(32h)", "B(47h)", "B(4Ah)", "B(4Bh)", "B(5Bh)", "C(02h)", "C(0Ah)"]
+kernel_patches = []
+
+[[game]]
+id = "wipeout2097"
+title = "WipEout 2097 (Europe)"
+serial = "SLES-00327"
+region = "PAL"
+disc_sha256 = "311942d75b0cee0322c91c47c20d1bb6cb6530dd8e4c5266cee16bcbea62e7b9"
+boot_exe_sha256 = "d88cda4869cbb080cdb3d081813f2bf1987484ea9a4520fdf7b195487dc7d0b1"
+kernel_functions = ["A(13h)", "A(15h)", "A(17h)", "A(18h)", "A(19h)", "A(1Bh)", "A(25h)", "A(2Ah)", "A(2Bh)", "A(2Ch)", "A(2Eh)", "A(30h)", "A(34h)", "A(39h)", "A(3Fh)", "A(43h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(9Fh)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(12h)", "B(13h)", "B(14h)", "B(17h)", "B(19h)", "B(32h)", "B(34h)", "B(35h)", "B(36h)", "B(38h)", "B(41h)", "B(42h)", "B(43h)", "B(44h)", "B(45h)", "B(47h)", "B(48h)", "B(4Ah)", "B(4Bh)", "B(4Eh)", "B(50h)", "B(5Bh)", "C(02h)", "C(0Ah)", "C(19h)"]
+kernel_functions_runtime = ["A(13h)", "A(15h)", "A(18h)", "A(19h)", "A(1Bh)", "A(25h)", "A(2Ah)", "A(2Bh)", "A(2Ch)", "A(30h)", "A(34h)", "A(39h)", "A(3Fh)", "A(43h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(9Fh)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(12h)", "B(13h)", "B(14h)", "B(17h)", "B(19h)", "B(32h)", "B(42h)", "B(47h)", "B(4Ah)", "B(4Bh)", "B(4Eh)", "B(50h)", "B(5Bh)", "C(02h)", "C(0Ah)"]
+kernel_patches = []
+
+[[game]]
+id = "wipeout3"
+title = "WipEout 3 - Special Edition (Europe)"
+serial = "SCES-02845"
+region = "PAL"
+disc_sha256 = "003bdc41068252e791ea7dd99ba1b94814dc48b967e57a7cdc4bf6e1cf4cb1e9"
+boot_exe_sha256 = "0213f5292fa1d995ebe61f42d5dbdb6614e481cb3840ac5f1521c2dfdccc0a4d"
+kernel_functions = ["A(10h)", "A(13h)", "A(15h)", "A(17h)", "A(18h)", "A(19h)", "A(1Bh)", "A(25h)", "A(28h)", "A(2Ah)", "A(2Bh)", "A(2Eh)", "A(2Fh)", "A(30h)", "A(39h)", "A(3Fh)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(14h)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(34h)", "B(35h)", "B(36h)", "B(38h)", "B(3Fh)", "B(41h)", "B(42h)", "B(43h)", "B(45h)", "B(47h)", "B(4Ah)", "B(4Bh)", "B(4Eh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_functions_runtime = ["A(13h)", "A(17h)", "A(18h)", "A(28h)", "A(2Ah)", "A(39h)", "A(3Fh)", "A(44h)", "A(49h)", "A(72h)", "B(07h)", "B(08h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(17h)", "B(19h)", "B(3Fh)", "B(56h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_patch_card#2", "_patch_card2#2", "_patch_card_info#1", "_patch_gte#1"]
+
+[[game]]
+id = "chronocross"
+title = "Chrono Cross (USA) (Disc 1)"
+serial = "SLUS-01041"
+region = "NTSC-U"
+disc_sha256 = "01a0716ed46b6bce7717be1f9220f9bf323cee52404c9cd7fd4ef747d41a98da"
+boot_exe_sha256 = "9a5453bf09d7f5c71a6451d255471374fb2d7cc5f3dfb1ea51223a5c88cdda47"
+kernel_functions = ["A(39h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "A(ADh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(12h)", "B(13h)", "B(14h)", "B(15h)", "B(17h)", "B(18h)", "B(19h)", "B(20h)", "B(32h)", "B(33h)", "B(34h)", "B(35h)", "B(36h)", "B(38h)", "B(42h)", "B(43h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(4Fh)", "B(50h)", "B(51h)", "B(56h)", "B(57h)", "B(5Bh)", "B(5Ch)", "B(5Dh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_clear_card#1", "_patch_card#2", "_patch_card2#2", "_patch_card_info#1", "_patch_gte#1", "_patch_pad#1", "_remove_ChgclrPAD#1"]
+
+[[game]]
+id = "valkyrie"
+title = "Valkyrie Profile (USA) (Disc 1)"
+serial = "SLUS-01156"
+region = "NTSC-U"
+disc_sha256 = "4c988bac4dcdbfafdf2ae710c6fea7b19c004f50ffd675b9c664ab4dda3d2a78"
+boot_exe_sha256 = "78ad0f390a1aec6b4528c4115a566336a643b0263c3e3f1f59ceafefb7792358"
+kernel_functions = ["A(3Ah)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(12h)", "B(13h)", "B(14h)", "B(15h)", "B(17h)", "B(18h)", "B(19h)", "B(35h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_clear_card#1", "_patch_card#2", "_patch_card2#2", "_patch_card_info#1", "_patch_pad#1", "_remove_ChgclrPAD#1"]
+
+[[game]]
+id = "nightmare"
+title = "Nightmare Creatures (USA)"
+serial = "SLUS-00582"
+region = "NTSC-U"
+disc_sha256 = "18fd76beb3cb7050cc719b2dd58e71a7a25f7a9921f687ff849cad8205b7f7fb"
+boot_exe_sha256 = "e4fbdef854e64f25cf326e9f060449cbe075c7f48ed54d16a25df3a401acaafd"
+kernel_functions = ["A(39h)", "A(42h)", "A(43h)", "A(44h)", "A(49h)", "A(70h)", "A(71h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(09h)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(12h)", "B(13h)", "B(14h)", "B(15h)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(34h)", "B(35h)", "B(36h)", "B(41h)", "B(42h)", "B(43h)", "B(45h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(4Fh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(0Ah)"]
+kernel_patches = ["_patch_card#1", "_patch_card2#1", "_patch_gte#2", "_patch_pad#3"]
+
+[[game]]
+id = "f12001"
+title = "Formula One 2001 (Europe) (En,Fi)"
+serial = "SCES-03404"
+region = "PAL"
+disc_sha256 = "059b627df34a506ddd6690a520a796274cbefdb92fae02094705329534c829ae"
+boot_exe_sha256 = "b31a3bdfb9b2af61ee1edd3d550415d3c097bd4103f67aff0fe2d469607bfb64"
+kernel_functions = ["A(13h)", "A(39h)", "A(3Fh)", "A(43h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "B(07h)", "B(08h)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(17h)", "B(18h)", "B(19h)", "B(35h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(4Fh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_clear_card#1", "_patch_card#2", "_patch_card2#2", "_patch_card_info#1", "_patch_gte#1"]
+
+[[game]]
+id = "soulreaver"
+title = "Legacy of Kain - Soul Reaver (Europe)"
+serial = "SLES-01301"
+region = "PAL"
+disc_sha256 = "9ac300d56b879699d15331aab395fa57a137752dfdc2aa5569874445a0b933df"
+boot_exe_sha256 = "c83aa1f7c78ff4e09b1d6f92bc8f63c065c2d867ee4d87531dcce4fd9bf7ba03"
+kernel_functions = ["A(39h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(33h)", "B(34h)", "B(35h)", "B(36h)", "B(42h)", "B(43h)", "B(45h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(4Fh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_clear_card#1", "_patch_card#2", "_patch_card2#2", "_patch_card_info#1", "_patch_gte#1"]

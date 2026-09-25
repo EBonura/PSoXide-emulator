@@ -17,20 +17,15 @@ keeps the tools, so everything listed here is maintained.
 
 | Example | Purpose |
 |---------|---------|
-| `boot_disc` | Disc boot harness entry point. |
 | `verify_disc_reads` | Verifies disc sector delivery end to end. |
-| `cdrom_probe` | CD-ROM command/state probe; used by the cortex preburn suite. |
 | `probe_cdda_wav` | Captures CD-DA/SPU audio output to WAV; used by the preburn suite and the audio example targets. |
-| `probe_disc_pad_trace` | Disc boot + pad input flow trace; used by the preburn boot-flow gate. |
+| `hle_compat` | Runs the commercial discs listed in `compat/games.toml` (found by hash in `--games-dir`) on the HLE kernel, each with its schedule from `compat/inputs.toml`, and reports the first unimplemented kernel call, speed, display hash, FMV and CD statistics; feeds `tools/compat_report.py`. Save states (`--save-dir`, `--save-at`, `--load-state`) and stall diagnostics (`PSOXIDE_COMPAT_STATUS`, `PSOXIDE_COMPAT_CDLOG`) help find input schedules and bugs. |
 
 ## Performance and internals
 
 | Example | Purpose |
 |---------|---------|
-| `bench_frame_paths` | Frame-path benchmark harness. |
 | `cache_inspect`, `cache_diff` | I-cache model inspection and comparison. |
-| `dma3_audit` | DMA channel 3 (CD-ROM) transfer audit. |
-| `bios_syscall_probe` | BIOS A/B/C-table call instrumentation. |
 | `smoke_draw` | Minimal first-instructions GPU smoke test. |
 | `texwarp` | Measures affine texture warping in **texels**, per pixel, against an analytic perspective-correct ground truth, and ranks every mitigation (subdivision schemes, diagonal choice, UV scale) by error per primitive. See [`docs/texture-warping-2026-07-27.md`](../../../../docs/texture-warping-2026-07-27.md). |
 

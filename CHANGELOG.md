@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- BIOS support is gone: every disc and EXE boots on the built-in HLE kernel.
+  The BIOS path setting, `PSOXIDE_BIOS`, the `--bios`, `--bios-boot` and
+  `--bios-warmup-steps` options, the web BIOS upload and the real-BIOS
+  compatibility modes are removed. A game's `memcard-1.mcd` is used directly;
+  a card that existed before is first copied once to `memcard-1.pre-hle.mcd`.
+- The HLE kernel serves an original font for Krom2RawAdd (Chrono Cross's
+  name entry), plays CD-DA through track pregaps, reads CloneCD pregaps,
+  and leaves the drive head where a boot loader does.
 - GPU DMA now walks linked lists through the GPU's input FIFO by default, as
   a console measured it (hwtest v1.24). `PSOXIDE_EXPERIMENTAL_DMA_FIFO=0`
   restores the old word-count timing. Save states move to format 7 and keep
