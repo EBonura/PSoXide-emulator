@@ -248,6 +248,7 @@ pub fn install(bus: &mut Bus, cfg: KernelConfig) {
     crate::hle_exceptions::install(bus);
     crate::hle_files::install(bus);
     crate::hle_pad::install(bus);
+    crate::hle_card::install(bus);
 }
 
 /// Initialise the kernel heap and allocate ExCB, EvCB, PCB and TCB in the

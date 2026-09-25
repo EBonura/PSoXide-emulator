@@ -52,7 +52,17 @@ pub mod kvar {
     pub const RCNT_AUTOACK: u32 = 0x0A50;
     /// SetIrqAutoAck flags for IRQ 0..10 (11 words).
     pub const IRQ_AUTOACK: u32 = 0x0A60;
+    /// Events queued by HLE handlers for the guest DeliverEvent: count,
+    /// then the address to continue at when the queue is empty.
+    pub const DQ_COUNT: u32 = 0x0C00;
+    /// Continuation after the last queued delivery.
+    pub const DQ_RETURN: u32 = 0x0C04;
+    /// Queued (class, spec) pairs, [`super::DQ_MAX`] of them.
+    pub const DQ_ITEMS: u32 = 0x0C08;
 }
+
+/// Capacity of the delivery queue.
+pub const DQ_MAX: u32 = 8;
 
 /// Kernel-internal trap functions used by the exception core.
 pub mod internal {
@@ -60,6 +70,8 @@ pub mod internal {
     pub const SYSCALL_VERIFIER: u8 = 0x03;
     /// Root-counter handlers for timers 0..2 and VBlank (4 entries).
     pub const RCNT_HANDLER: u8 = 0x04;
+    /// Delivers the next queued event, or continues after the queue.
+    pub const DELIVER_NEXT: u8 = 0x3E;
 }
 
 const I_STAT: i16 = 0x1070;
@@ -87,6 +99,12 @@ pub struct KernelCode {
     pub syscall_stub: u32,
     /// A(43h) Exec.
     pub exec: u32,
+    /// Early memory card IRQ routine, called from exception handler slot
+    /// 1 (installed by InitCARD2).
+    pub card_early: u32,
+    /// Return from the exception after the early card routine moved a
+    /// data byte.
+    pub card_fast_rfe: u32,
     /// Endless loop.
     pub hang: u32,
 }
@@ -333,6 +351,46 @@ fn assemble() -> KernelCode {
     a.jr(RA);
     a.addiu(V0, ZERO, 1);
 
+    // Early memory card IRQ routine (psx-spx "early_card_irq_patch";
+    // structure from OpenBIOS sio0/cardfasttrack.s, MIT). Called with
+    // at/v0/v1/ra saved and k0 = the current frame. While a sector's data
+    // bytes move and IRQ7 is pending and enabled, it moves one byte and
+    // returns from the exception directly. Games replace the five words
+    // at +28h with a jump to their own code that expects v1 = 1F800000h,
+    // re-checks I_MASK bit 7 and continues at +3Ch, so that layout is kept.
+    a.label("card_early");
+    a.lw(V0, crate::hle_card::kvar::DATA_PHASE as i16, ZERO);
+    a.lui(V1, IO_HI);
+    a.beqz(V0, "card_early_exit");
+    a.nop();
+    a.lw(V0, I_STAT, V1);
+    a.nop();
+    a.andi(V0, V0, 0x80);
+    a.beqz(V0, "card_early_exit");
+    a.nop();
+    a.nop();
+    // +28h: the words games replace.
+    a.lw(V0, I_MASK, V1);
+    a.nop();
+    a.andi(V0, V0, 0x80);
+    a.beqz(V0, "card_early_exit");
+    a.nop();
+    // +3Ch
+    a.j_abs(stub_addr(3, crate::hle_card::internal::FAST));
+    a.nop();
+    a.label("card_early_exit");
+    a.jr(RA);
+    a.nop();
+    a.label("card_fast_rfe");
+    a.lw(AT, 0x04, K0);
+    a.lw(V0, 0x08, K0);
+    a.lw(V1, 0x0C, K0);
+    a.lw(RA, 0x7C, K0);
+    a.lw(K0, 0x80, K0);
+    a.nop();
+    a.jr(K0);
+    a.rfe();
+
     // "JMP $" lockup (LoadExec part 4).
     a.label("hang");
     a.b("hang");
@@ -342,6 +400,9 @@ fn assemble() -> KernelCode {
     let deliver_event = a.addr("deliver_event");
     let exec = a.addr("exec");
     let hang = a.addr("hang");
+    let card_early = a.addr("card_early");
+    let card_fast_rfe = a.addr("card_fast_rfe");
+    debug_assert_eq!(a.addr("card_early_exit") - card_early, 0x44);
     let rcnt_verifier = [
         a.addr("rcnt0"),
         a.addr("rcnt1"),
@@ -369,6 +430,8 @@ fn assemble() -> KernelCode {
         unresolved_glue,
         syscall_stub,
         exec,
+        card_early,
+        card_fast_rfe,
         hang,
     }
 }
@@ -863,6 +926,51 @@ pub fn change_clear_rcnt(bus: &mut Bus, t: u32, flag: u32) -> u32 {
     let old = peek32(bus, var);
     poke32(bus, var, flag);
     old
+}
+
+/// Queue DeliverEvent(class, spec) for [`flush_events`]. HLE handlers use
+/// this instead of delivering directly because a delivery can call a
+/// guest callback. Deliveries past [`DQ_MAX`] are dropped (none of the
+/// kernel's handlers queues more than three).
+pub fn queue_event(bus: &mut Bus, class: u32, spec: u32) {
+    let n = peek32(bus, kvar::DQ_COUNT);
+    if n >= DQ_MAX {
+        return;
+    }
+    poke32(bus, kvar::DQ_ITEMS + 8 * n, class);
+    poke32(bus, kvar::DQ_ITEMS + 8 * n + 4, spec);
+    poke32(bus, kvar::DQ_COUNT, n + 1);
+}
+
+/// Start delivering the queued events through the guest DeliverEvent,
+/// continuing at `then` afterwards. Returns the address to jump to, with
+/// `a0`, `a1` and `ra` set up, or `None` when nothing is queued.
+pub fn flush_events(bus: &mut Bus, gprs: &mut [u32; 32], then: u32) -> Option<u32> {
+    if peek32(bus, kvar::DQ_COUNT) == 0 {
+        return None;
+    }
+    poke32(bus, kvar::DQ_RETURN, then);
+    Some(deliver_next(bus, gprs))
+}
+
+/// DELIVER_NEXT: pop the first queued event into DeliverEvent, or
+/// continue at the saved address when the queue is empty.
+pub fn deliver_next(bus: &mut Bus, gprs: &mut [u32; 32]) -> u32 {
+    let n = peek32(bus, kvar::DQ_COUNT);
+    if n == 0 {
+        return peek32(bus, kvar::DQ_RETURN);
+    }
+    gprs[4] = peek32(bus, kvar::DQ_ITEMS);
+    gprs[5] = peek32(bus, kvar::DQ_ITEMS + 4);
+    for i in 1..n {
+        let class = peek32(bus, kvar::DQ_ITEMS + 8 * i);
+        let spec = peek32(bus, kvar::DQ_ITEMS + 8 * i + 4);
+        poke32(bus, kvar::DQ_ITEMS + 8 * (i - 1), class);
+        poke32(bus, kvar::DQ_ITEMS + 8 * (i - 1) + 4, spec);
+    }
+    poke32(bus, kvar::DQ_COUNT, n - 1);
+    gprs[31] = stub_addr(3, internal::DELIVER_NEXT);
+    code().deliver_event
 }
 
 // ------------------------------------------------------------------ timers
