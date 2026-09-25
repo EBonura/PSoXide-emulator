@@ -30,12 +30,13 @@ pub fn draw(
 ) -> Option<PanelAction> {
     let mut action = None;
     toolbar(ui, stats, &mut action);
+    host_line(ui, stats);
     let (Some(newest), Some(_)) = (stats.newest_vblank(), stats.oldest_vblank()) else {
         ui.add_space(6.0);
         ui.label(
             RichText::new(
-                "No guest telemetry yet. Run a game with this panel open: every emulated vblank \
-                 is sampled from the PS1 hardware counters.",
+                "No guest telemetry yet. Run a game: every emulated vblank is sampled from the \
+                 PS1 hardware counters.",
             )
             .color(plot::TEXT_DIM),
         );
@@ -296,6 +297,36 @@ fn legend_row(ui: &mut Ui, items: &[(Color32, &str, bool)]) {
             ui.add_space(6.0);
         }
     });
+}
+
+/// The one host-side number worth showing: whether this machine keeps up.
+/// Every other figure in the panel is in emulated time.
+fn host_line(ui: &mut Ui, stats: &GuestStats) {
+    let Some((speed, frame_ms)) = stats.host_speed() else {
+        return;
+    };
+    let behind = speed < 0.97;
+    let text = if behind {
+        format!(
+            "Host: {frame_ms:.1} ms per redraw, emulating at {:.0}% of real time. \
+             The host is behind, so the game runs slower than the figures below.",
+            speed * 100.0
+        )
+    } else {
+        format!(
+            "Host: {frame_ms:.1} ms per redraw, emulating at {:.0}% of real time.",
+            speed * 100.0
+        )
+    };
+    ui.label(
+        RichText::new(text)
+            .color(if behind {
+                plot::CRITICAL
+            } else {
+                plot::TEXT_MUTED
+            })
+            .size(10.5),
+    );
 }
 
 fn fps_label(refresh: f64, interval: u16) -> String {
@@ -836,7 +867,7 @@ fn cpu_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx) {
     let any_profiled = stats.range(ctx.first, ctx.last).any(|s| s.cpu_profiled);
     if !any_profiled {
         ui.label(
-            RichText::new("CPU cycle attribution starts when this panel opens.")
+            RichText::new("CPU cycle attribution runs while this panel is open; it starts now.")
                 .color(plot::TEXT_DIM),
         );
         return;

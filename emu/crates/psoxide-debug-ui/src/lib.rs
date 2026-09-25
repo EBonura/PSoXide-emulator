@@ -7,10 +7,13 @@
 //! Wiring, for any frontend:
 //!
 //! 1. Keep one [`GuestStats`] next to the emulator.
-//! 2. Once per host frame call [`GuestStats::set_enabled`] with whether the
-//!    panel is visible. Enabling turns on the core's CPU cycle attribution
-//!    (the only per-instruction cost); disabled, recording is a no-op.
-//! 3. After every emulated vblank step call [`GuestStats::record`].
+//! 2. Once per host frame call [`GuestStats::set_cpu_attribution`] with
+//!    whether the panel is visible (it turns the core's CPU cycle
+//!    attribution, the only per-instruction cost, on or off), and
+//!    [`GuestStats::note_host_frame`] with the host frame time.
+//! 3. After every emulated vblank step call [`GuestStats::record`]. It
+//!    always records (a counter copy per vblank), so the frame rate and
+//!    hardware history are there the moment the panel opens.
 //! 4. Draw with [`draw`] and handle the returned [`PanelAction`].
 //!
 //! Recording copies the core's cumulative counters
@@ -257,8 +260,11 @@ impl Default for ViewState {
 
 /// Per-vblank guest telemetry history plus the panel's view state.
 pub struct GuestStats {
-    enabled: bool,
+    cpu_attribution: bool,
+    /// The core's CPU profile restarted; the next delta must not use it.
+    cpu_baseline_stale: bool,
     prev: Option<GuestCounters>,
+    host: HostSpeed,
     ring: Vec<FrameSample>,
     head: usize,
     len: usize,
@@ -283,8 +289,10 @@ impl GuestStats {
     /// Empty history with its ring allocated up front.
     pub fn new() -> Self {
         Self {
-            enabled: false,
+            cpu_attribution: false,
+            cpu_baseline_stale: false,
             prev: None,
+            host: HostSpeed::default(),
             ring: vec![FrameSample::default(); HISTORY_VBLANKS],
             head: 0,
             len: 0,
@@ -299,27 +307,61 @@ impl GuestStats {
         }
     }
 
-    /// Whether samples are being recorded.
-    pub fn enabled(&self) -> bool {
-        self.enabled
+    /// Whether CPU cycle attribution is being collected.
+    pub fn cpu_attribution(&self) -> bool {
+        self.cpu_attribution
     }
 
-    /// Turn recording (and the core's CPU cycle attribution) on or off.
-    /// Cheap to call every host frame.
-    pub fn set_enabled(&mut self, cpu: &mut Cpu, enabled: bool) {
+    /// Turn the core's CPU cycle attribution on or off (on while the panel
+    /// is visible). Cheap to call every host frame.
+    pub fn set_cpu_attribution(&mut self, cpu: &mut Cpu, enabled: bool) {
+        self.cpu_attribution = enabled;
         if enabled != cpu.cpu_cycle_profile_enabled() {
             cpu.set_cpu_cycle_profile_enabled(enabled);
-            // The profile restarted from zero; start a fresh baseline so
-            // the next delta is not taken across the reset.
-            self.prev = None;
+            // The profile restarted from zero: the next delta would span it.
+            self.cpu_baseline_stale = true;
         }
-        if enabled != self.enabled {
-            self.enabled = enabled;
-            self.prev = None;
-            // Vblanks while disabled are not in the history, so an interval
-            // across the gap would be wrong.
-            self.last_present = None;
+    }
+
+    /// Account one host frame of `seconds` for the emulation-speed line.
+    /// The emulated time comes from the vblanks recorded since the last
+    /// call; a frame that emulated nothing (paused) is not counted.
+    pub fn note_host_frame(&mut self, seconds: f64) {
+        let vblanks = self.next_vblank.saturating_sub(self.host.last_vblank);
+        self.host.last_vblank = self.next_vblank;
+        if vblanks == 0 || !seconds.is_finite() || seconds <= 0.0 {
+            return;
         }
+        self.host.window_seconds += seconds;
+        self.host.window_vblanks += vblanks;
+        self.host.window_frames += 1;
+        if self.host.window_seconds >= 0.5 {
+            let emulated = self.host.window_vblanks as f64 / self.refresh_hz.max(1.0);
+            self.host.speed = Some(emulated / self.host.window_seconds);
+            self.host.frame_ms =
+                self.host.window_seconds * 1000.0 / f64::from(self.host.window_frames.max(1));
+            self.host.window_seconds = 0.0;
+            self.host.window_vblanks = 0;
+            self.host.window_frames = 0;
+        }
+    }
+
+    /// Emulated seconds per host second over the last half second, and the
+    /// host frame time in ms. `None` until the emulator has run a while.
+    pub fn host_speed(&self) -> Option<(f64, f64)> {
+        self.host.speed.map(|speed| (speed, self.host.frame_ms))
+    }
+
+    /// Frames the game presented in the last emulated second.
+    pub fn recent_fps(&self) -> Option<f64> {
+        let newest = self.newest_vblank()?;
+        let span = self.refresh_hz.round().max(1.0) as u64;
+        if (self.len as u64) < span {
+            return None;
+        }
+        let first = newest + 1 - span;
+        let frames = self.range(first, newest).filter(|s| s.presented).count();
+        Some(frames as f64 * self.refresh_hz / span as f64)
     }
 
     /// Forget all history (a different game was loaded, or reset).
@@ -333,17 +375,19 @@ impl GuestStats {
         self.voice_peaks = [0.0; VOICES];
         self.voice_keyed = [0; VOICES];
         self.texpage_heat = [0.0; 32];
+        self.host = HostSpeed::default();
         self.view.paused_at = None;
         self.view.hover = None;
     }
 
     /// Record one emulated vblank step. Call after the emulator ran one
-    /// vblank period; a no-op while disabled.
+    /// vblank period.
     pub fn record(&mut self, cpu: &Cpu, bus: &Bus) {
-        if !self.enabled {
-            return;
+        let mut now = GuestCounters::sample(cpu, bus);
+        if std::mem::take(&mut self.cpu_baseline_stale) {
+            // Rebase the CPU classes: this sample carries none.
+            now.cpu_profiled = false;
         }
-        let now = GuestCounters::sample(cpu, bus);
         let Some(prev) = self.prev.replace(now) else {
             return;
         };
@@ -542,6 +586,17 @@ impl GuestStats {
         }
         out
     }
+}
+
+/// Host frame time and emulation speed, averaged over half a second.
+#[derive(Clone, Copy, Debug, Default)]
+struct HostSpeed {
+    last_vblank: u64,
+    window_seconds: f64,
+    window_vblanks: u64,
+    window_frames: u32,
+    speed: Option<f64>,
+    frame_ms: f64,
 }
 
 /// DMA channel names, index = channel.
