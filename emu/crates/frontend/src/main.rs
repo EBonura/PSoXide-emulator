@@ -235,6 +235,10 @@ impl FreelookChord {
 struct Shell {
     graphics: Option<Graphics>,
     state: AppState,
+    /// Reused buffer for the frame-start VRAM snapshot the hardware
+    /// renderer replays from, so a running game does not allocate and free
+    /// a 1 MiB copy every redraw.
+    hw_vram_scratch: Vec<u16>,
     pending_input: MenuInput,
     last_frame: Instant,
     /// Every piece of pad state the shell derives from keyboard events
@@ -363,6 +367,7 @@ impl Shell {
         Self {
             graphics: None,
             state,
+            hw_vram_scratch: Vec::new(),
             pending_input: MenuInput::default(),
             last_frame: Instant::now(),
             host_input: HostKeyboardInput::default(),
@@ -1414,10 +1419,12 @@ impl ApplicationHandler for Shell {
                     0
                 };
                 let hw_frame_start_vram = if frames_to_run > 0 {
-                    self.state
-                        .bus
-                        .as_ref()
-                        .map(|bus| bus.gpu.vram.words().to_vec())
+                    self.state.bus.as_ref().map(|bus| {
+                        let mut snapshot = std::mem::take(&mut self.hw_vram_scratch);
+                        snapshot.clear();
+                        snapshot.extend_from_slice(bus.gpu.vram.words());
+                        snapshot
+                    })
                 } else {
                     None
                 };
@@ -1725,6 +1732,9 @@ impl ApplicationHandler for Shell {
                     }
                 }
                 self.vram_synced_stamp = vram_stamp;
+                if let Some(snapshot) = hw_frame_start_vram {
+                    self.hw_vram_scratch = snapshot;
+                }
 
                 // VRAM debug view: GPU-side expand of the HW renderer's
                 // R16Uint VRAM mirror (kept current by the block above)
