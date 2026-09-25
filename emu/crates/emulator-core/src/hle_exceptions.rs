@@ -823,6 +823,11 @@ pub fn wait_event(bus: &mut Bus, event: u32) -> Option<u32> {
     }
 }
 
+/// Whether [`wait_event`] would wait again without changing anything.
+pub(crate) fn wait_event_waiting(bus: &Bus, event: u32) -> bool {
+    peek32(bus, event_addr(bus, event) + 4) == EV_BUSY
+}
+
 /// B(20h) UnDeliverEvent: ready mark-ready events of this class and spec
 /// go back to busy.
 pub fn undeliver_event(bus: &mut Bus, class: u32, spec: u32) {

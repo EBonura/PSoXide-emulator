@@ -27,6 +27,7 @@ use crate::spu::Spu;
 use crate::telemetry::GuestTelemetry;
 use crate::timers::Timers;
 
+mod idle;
 mod memory_timing;
 mod timing;
 

@@ -25,6 +25,7 @@ use psx_gte_core::Gte;
 
 mod branch;
 mod icache;
+mod idle;
 mod timing;
 
 use branch::branch_target;

@@ -22,6 +22,7 @@
 
 mod blend;
 mod commands;
+mod idle;
 mod raster;
 mod status;
 
