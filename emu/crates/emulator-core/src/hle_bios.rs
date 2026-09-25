@@ -200,6 +200,23 @@ pub struct Hle {
     pub retry: bool,
 }
 
+/// Cycles an HLE call takes from its vector to its return. Most calls
+/// still cost the two cycles of the dispatch. Calls that games poll in
+/// timing-sensitive loops take what the retail kernel takes, measured by
+/// black-box timing in the emulator (vector to return, median over a
+/// game's run): TestEvent is 43 cycles for a busy event and 48 for a ready
+/// one. Resident Evil 2 and 3 count 250,000 rounds of four TestEvents as
+/// their memory card timeout.
+/// A call the guest redirected to its own code (no `v0`) costs the dispatch
+/// only.
+pub fn call_cycles(table: Table, func: u8, v0: Option<u32>) -> u32 {
+    match (table, func, v0) {
+        (Table::B, 0x0B, Some(1)) => 48,
+        (Table::B, 0x0B, Some(_)) => 43,
+        _ => 2,
+    }
+}
+
 /// Intercept a fetch at `pc` when it is a BIOS call.
 ///
 /// Two forms are recognised, both only below 64 KiB of RAM:
