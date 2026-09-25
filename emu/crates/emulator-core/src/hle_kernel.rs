@@ -16,13 +16,15 @@
 //! | `0x0200..0x04FF` | A0 table, 0xC0 entries (retail address) |
 //! | `0x0674..0x06F3` | C0 table, 0x20 entries (retail address) |
 //! | `0x0874..0x09F3` | B0 table, 0x60 entries (retail address) |
-//! | `0x0A00..0x0AFF` | HLE kernel variables ([`kvar`], [`crate::hle_exceptions::kvar`]) |
+//! | `0x0A00..0x0C4F` | HLE kernel variables ([`kvar`], [`crate::hle_exceptions::kvar`], [`crate::hle_files::kvar`], [`crate::hle_pad::kvar`] with the PAD_init2 buffers) |
 //! | `0x0000..0x000F`, `0x0080..0x008F` | exception vector (and its copy) |
 //! | `0x0C80..0x0EFF` | C(06h) exception handler (retail address) |
 //! | `0x1000..0x15FF` | trap stubs, one word per function |
 //! | `0x1600..0x25FF` | exception stack |
 //! | `0x2600..0x2FFF` | kernel routines (ReturnFromException, DeliverEvent, ...) |
-//! | `0x3000..0x31FF` | kernel data (exit buffer, chain elements, IRQ table) |
+//! | `0x3000..0x31FF` | kernel data (exit buffer, chain elements, IRQ table, device names) |
+//! | `0x3200..0x3A4F` | CD sector buffer, Exec header |
+//! | `0x3B00..0x4175` | memory card: [`crate::hle_card::kvar`], [`crate::hle_bu::kvar`], sector buffers, directory cache, broken-sector lists, find pattern |
 //! | `0x43D0..0x5DFF` | B(5Bh) entry and patch zone (retail address) |
 //! | `0x6EE0..0x71FF` | DCBs, `0x8648..0x8907` FCBs (retail addresses) |
 //! | `0xDF80..0xDFFF` | left to games (psx-spx: "used for BIOS patches") |
