@@ -103,10 +103,13 @@ pub mod kvar {
     pub const KERNEL_HEAP_START: u32 = 0x0A08;
     /// Kernel heap: end address (exclusive).
     pub const KERNEL_HEAP_END: u32 = 0x0A0C;
+    /// Number of TCBs (SYSTEM.CNF TCB / SetConf). The three config words
+    /// are in the retail order (TCBs, EvCBs, stack): Metal Gear Solid
+    /// finds them by decoding the first two instructions of GetConf (its
+    /// `lui`/`lw` pair addresses the stack word) and writes all three.
+    pub const CONF_TCB: u32 = 0x0A10;
     /// Number of EvCBs (SYSTEM.CNF EVENT / SetConf).
-    pub const CONF_EVENT: u32 = 0x0A10;
-    /// Number of TCBs (SYSTEM.CNF TCB / SetConf).
-    pub const CONF_TCB: u32 = 0x0A14;
+    pub const CONF_EVENT: u32 = 0x0A14;
     /// Stack top (SYSTEM.CNF STACK / SetConf).
     pub const CONF_STACK: u32 = 0x0A18;
     /// B(5Bh) pad/card VBlank auto-acknowledge flag.
@@ -879,5 +882,23 @@ mod tests {
         assert_eq!(peek32(&bus, kvar::PATCH_FLAGS), 1 << patch.bit);
         let (site, rewrote) = handle_patch_site(&mut bus, 1, ra);
         assert_eq!((site, rewrote), (PatchSite::AlreadyApplied, false));
+    }
+
+    #[test]
+    fn get_conf_code_leads_to_the_config_words_the_way_games_decode_it() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        // Metal Gear Solid: entry = A0[9Dh]; addr = (lhu [entry] << 16) +
+        // (lh [entry + 4]) - 8; then [addr] = tcbs, [addr + 4] = events,
+        // [addr + 8] = stack.
+        let entry = peek32(&bus, A0_TABLE + 4 * 0x9D);
+        let hi = peek32(&bus, entry) & 0xFFFF;
+        let lo = (peek32(&bus, entry + 4) & 0xFFFF) as u16 as i16 as i32;
+        let addr = ((hi << 16) as i32 + lo - 8) as u32;
+        assert_eq!(addr, kvar::CONF_TCB);
+        poke32(&mut bus, addr, 7);
+        poke32(&mut bus, addr + 4, 9);
+        poke32(&mut bus, addr + 8, 0x801F_0000);
+        assert_eq!(get_conf(&bus), (9, 7, 0x801F_0000));
     }
 }

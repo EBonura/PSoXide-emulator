@@ -101,6 +101,8 @@ pub struct KernelCode {
     pub syscall_stub: u32,
     /// A(43h) Exec.
     pub exec: u32,
+    /// A(9Dh) GetConf.
+    pub get_conf: u32,
     /// Early memory card IRQ routine, called from exception handler slot
     /// 1 (installed by InitCARD2).
     pub card_early: u32,
@@ -353,6 +355,21 @@ fn assemble() -> KernelCode {
     a.jr(RA);
     a.addiu(V0, ZERO, 1);
 
+    // A(9Dh) GetConf(&events, &tcbs, &stack). Guest code because games
+    // read this entry's first two instructions to find the config words:
+    // Metal Gear Solid takes the `lui` immediate and the `lw` offset as
+    // the address of the stack word and writes the TCB, EvCB and stack
+    // words at -8, -4 and 0 from it.
+    a.label("get_conf");
+    a.lui(T0, (crate::hle_kernel::kvar::CONF_STACK >> 16) as u16);
+    a.lw(T1, crate::hle_kernel::kvar::CONF_STACK as i16, T0);
+    a.lw(T2, crate::hle_kernel::kvar::CONF_EVENT as i16, T0);
+    a.lw(T3, crate::hle_kernel::kvar::CONF_TCB as i16, T0);
+    a.sw(T2, 0, A0);
+    a.sw(T3, 0, A1);
+    a.jr(RA);
+    a.sw(T1, 0, A2);
+
     // Early memory card IRQ routine (psx-spx "early_card_irq_patch";
     // structure from OpenBIOS sio0/cardfasttrack.s, MIT). Called with
     // at/v0/v1/ra saved and k0 = the current frame. While a sector's data
@@ -403,6 +420,7 @@ fn assemble() -> KernelCode {
     let exec = a.addr("exec");
     let hang = a.addr("hang");
     let card_early = a.addr("card_early");
+    let get_conf = a.addr("get_conf");
     let card_fast_rfe = a.addr("card_fast_rfe");
     debug_assert_eq!(a.addr("card_early_exit") - card_early, 0x44);
     let rcnt_verifier = [
@@ -432,6 +450,7 @@ fn assemble() -> KernelCode {
         unresolved_glue,
         syscall_stub,
         exec,
+        get_conf,
         card_early,
         card_fast_rfe,
         hang,
@@ -612,6 +631,7 @@ pub fn install(bus: &mut Bus) {
     poke32(bus, b0 + 4 * 0x07, code.deliver_event);
     poke32(bus, b0 + 4 * 0x17, code.return_from_exception);
     poke32(bus, crate::hle_kernel::A0_TABLE + 4 * 0x43, code.exec);
+    poke32(bus, crate::hle_kernel::A0_TABLE + 4 * 0x9D, code.get_conf);
 
     // Default exit buffer: ReturnFromException on the exception stack
     // (stack top minus 4, psx-spx), other registers 0.
