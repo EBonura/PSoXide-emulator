@@ -9,6 +9,7 @@ members = [
     "crates/psxed-format",
     "emu/crates/emulator-core",
     "emu/crates/frontend",
+    "emu/crates/psoxide-debug-ui",
     "emu/crates/psoxide-settings",
     "emu/crates/psoxide-validation",
     "emu/crates/psx-gpu-render",
@@ -48,6 +49,7 @@ psx-hw       = { path = "crates/psx-hw" }
 psx-iso      = { path = "crates/psx-iso" }
 psx-trace    = { path = "crates/psx-trace" }
 emulator-core      = { path = "emu/crates/emulator-core" }
+psoxide-debug-ui   = { path = "emu/crates/psoxide-debug-ui" }
 psoxide-settings   = { path = "emu/crates/psoxide-settings" }
 psoxide-validation = { path = "emu/crates/psoxide-validation" }
 psx-gpu-render     = { path = "emu/crates/psx-gpu-render" }
