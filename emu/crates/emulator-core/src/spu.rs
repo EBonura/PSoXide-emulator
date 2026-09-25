@@ -1365,6 +1365,13 @@ impl Spu {
         self.audio_out.drain(..).collect()
     }
 
+    /// Drop the queued host-output samples, for callers with nowhere to play
+    /// them (headless runs). The output queue is host-side only: what it
+    /// holds never feeds back into the emulated SPU.
+    pub fn discard_audio(&mut self) {
+        self.audio_out.clear();
+    }
+
     /// How many stereo samples are queued but not yet drained.
     pub fn audio_queue_len(&self) -> usize {
         self.audio_out.len()

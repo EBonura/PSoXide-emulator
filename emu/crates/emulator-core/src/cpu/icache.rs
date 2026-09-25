@@ -68,6 +68,16 @@ impl InstructionCache {
         (line, word, tag)
     }
 
+    /// The cached word at `phys` if the fetch would hit: tag matches and the
+    /// word is valid. A hit changes no cache state, so this is exactly the
+    /// hit case of [`Self::fetch`].
+    #[inline(always)]
+    pub(super) fn hit(&self, phys: u32) -> Option<u32> {
+        let (line_index, word_index, tag) = Self::coordinates(phys);
+        let line = &self.lines[line_index];
+        (line.tag == tag && line.valid & (1 << word_index) != 0).then_some(line.words[word_index])
+    }
+
     /// Fetch one instruction, filling according to the CXD8606Q's
     /// documented per-word-valid behaviour.
     pub(super) fn fetch(
