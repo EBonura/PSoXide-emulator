@@ -230,8 +230,14 @@ fn toolbar(ui: &mut Ui, stats: &mut GuestStats, action: &mut Option<PanelAction>
                 stats.view.window = span;
             }
         }
+    });
+    // Second row, so a narrow column (the editor's Inspector) never squeezes
+    // the combo box into a sliver.
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let refresh_hz = stats.refresh_hz();
         egui::ComboBox::from_id_salt("guest-perf-target")
-            .width(86.0)
+            .width(110.0)
             .selected_text(match stats.view.target {
                 FrameTarget::Auto => "Target: auto".to_string(),
                 FrameTarget::Vblanks(n) => format!("Target: {}", fps_label(stats.refresh_hz(), n)),
@@ -430,7 +436,13 @@ fn kpi_tiles(ui: &mut Ui, stats: &GuestStats, ctx: &Ctx, s: &Summary) {
     let _ = stats;
     let spacing = 4.0;
     let avail = ui.available_width();
-    let columns = if avail > 520.0 { 5 } else { 3 };
+    let columns = if avail > 520.0 {
+        5
+    } else if avail > 340.0 {
+        3
+    } else {
+        2
+    };
     let width = ((avail - spacing * (columns as f32 - 1.0)) / columns as f32).floor();
     for row in tiles.chunks(columns) {
         ui.horizontal(|ui| {
