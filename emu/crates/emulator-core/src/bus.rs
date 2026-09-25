@@ -3590,13 +3590,22 @@ impl Bus {
         source: u32,
         width: AccessWidth,
     ) -> bool {
-        if phys == IRQ_STAT_ADDR {
+        // On-die 32-bit registers ignore byte enables and latch the complete
+        // CPU data bus (silicon: `cpu/io-access-bitwidth`). The CPU aligns
+        // store data to the lanes the address selects, so a store to byte
+        // 1..3 of a register arrives as the source word shifted by the byte
+        // offset, with zero below it (DuckStation models the same).
+        let word = source << ((phys & 3) * 8);
+        // The SPU and both serial ports are 16-bit devices: an odd byte store
+        // arrives on the high lane of its halfword.
+        let half = (source << ((phys & 1) * 8)) as u16;
+        if (IRQ_STAT_ADDR..IRQ_STAT_ADDR + 4).contains(&phys) {
             self.run_spu_to_current_cycle();
-            self.irq.write_stat_at(source, self.cycles);
+            self.irq.write_stat_at(word, self.cycles);
             return true;
         }
-        if phys == IRQ_MASK_ADDR {
-            self.irq.write_mask_at(source, self.cycles);
+        if (IRQ_MASK_ADDR..IRQ_MASK_ADDR + 4).contains(&phys) {
+            self.irq.write_mask_at(word, self.cycles);
             return true;
         }
         if Timers::contains(phys) {
@@ -3607,27 +3616,36 @@ impl Bus {
                 eprintln!(
                     "[timers] mode-write t{} value={:04x} cycle={} next-vblank={} period={}",
                     (phys - Timers::BASE) / Timers::STRIDE,
-                    source & 0xFFFF,
+                    word & 0xFFFF,
                     self.cycles,
                     self.next_vblank_cycle(),
                     self.vblank_period
                 );
             }
-            self.timers.write32(phys & !3, source, self.cycles);
+            self.timers.write32(phys & !3, word, self.cycles);
             return true;
         }
         if Dma::contains(phys) {
-            // DMA registers ignore byte enables and observe the complete CPU
-            // data bus. The CPU aligns store data to the lanes the address
-            // selects, so the register sees the source word shifted by the
-            // byte offset (DuckStation models the same). Reuse the normal
-            // word path so CHCR side effects and IRQ behavior remain
-            // centralized.
-            let lane_shift = (phys & 3) * 8;
-            self.write32_impl(virt, phys & !3, source << lane_shift);
+            // Reuse the normal word path so CHCR side effects and IRQ
+            // behavior remain centralized.
+            self.write32_impl(virt, phys & !3, word);
+            return true;
+        }
+        if MemoryControl::contains(phys) {
+            self.memory_control
+                .write(phys & !3, AccessWidth::Word, word);
+            return true;
+        }
+        if phys == memory_timing::RAM_SIZE_ADDR {
+            self.memory_control.set_ram_size(source);
             return true;
         }
         if Spu::contains(phys) {
+            // psx-spx "SPU Bus-Width": byte stores to odd addresses are
+            // ignored; even ones write the low source halfword.
+            if width == AccessWidth::Byte && phys & 1 != 0 {
+                return true;
+            }
             self.run_spu_to_current_cycle();
             self.spu.write16_at(phys & !1, source as u16, self.cycles);
             self.service_spu_irq();
@@ -3635,12 +3653,12 @@ impl Bus {
         }
         if Sio0::contains(phys) {
             self.service_sio0();
-            self.sio0.write16_at(phys & !1, source as u16, self.cycles);
+            self.sio0.write16_at(phys & !1, half, self.cycles);
             self.service_sio0();
             return true;
         }
         if Sio1::contains(phys) {
-            self.sio1.write16(phys & !1, source as u16);
+            self.sio1.write16(phys & !1, half);
             return true;
         }
         if CdRom::contains(phys) {
@@ -3648,12 +3666,12 @@ impl Bus {
             return true;
         }
         let aligned = phys & !3;
-        if self.gpu.write32_at(aligned, source, self.cycles) {
+        if self.gpu.write32_at(aligned, word, self.cycles) {
             self.service_gpu_irq();
             return true;
         }
         if crate::mdec::Mdec::contains(phys) {
-            self.mdec.write32(aligned, source);
+            self.mdec.write32(aligned, word);
             return true;
         }
         false
@@ -4304,6 +4322,75 @@ mod tests {
 
         bus.cpu_write16(Dma::BASE + Dma::DPCR_OFFSET + 2, 0x0000_1234);
         assert_eq!(bus.read32(Dma::BASE + Dma::DPCR_OFFSET), 0x1234_0000);
+    }
+
+    /// The other on-die 32-bit registers latch the complete data bus like
+    /// DMA does (silicon: `cpu/io-access-bitwidth` reads the whole source
+    /// word back from I_MASK and T0_TARGET after an aligned `sb`), so a
+    /// store to byte 1..3 of one of them lands shifted onto its lanes, as
+    /// DuckStation models. Before, the timers took the unshifted word, the
+    /// interrupt controller ignored the store entirely, GPU and MDEC took
+    /// the unshifted word, and memory control kept only the addressed byte.
+    #[test]
+    fn cpu_narrow_on_die_stores_land_on_the_addressed_byte_lanes() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+
+        // T0_TARGET + 1.
+        bus.cpu_write8(Timers::BASE + 0x9, 0x0000_0012);
+        assert_eq!(bus.read16(Timers::BASE + 0x8), 0x1200);
+
+        // I_MASK + 1 sets IRQ 8..10 enables.
+        bus.cpu_write8(IRQ_MASK_ADDR + 1, 0x0000_0005);
+        assert_eq!(bus.irq.mask(), 0x0500);
+
+        // I_STAT + 1: the zero low lanes acknowledge IRQ 0..7 too.
+        bus.irq.raise(IrqSource::VBlank);
+        bus.irq.raise(IrqSource::Sio);
+        bus.cpu_write8(IRQ_STAT_ADDR + 1, 0x0000_00FF);
+        assert_eq!(bus.irq.stat(), 1 << 8);
+
+        // GP1 + 3 = 03h: display enable, not GP1(00h) reset.
+        assert_ne!(bus.read32(crate::gpu::GP1_ADDR) & (1 << 23), 0);
+        bus.cpu_write8(crate::gpu::GP1_ADDR + 3, 0x0000_0003);
+        assert_eq!(bus.read32(crate::gpu::GP1_ADDR) & (1 << 23), 0);
+
+        // MDEC1 + 3 = 60h: enable both DMA requests.
+        bus.cpu_write8(crate::mdec::MDEC_CTRL_STAT + 3, 0x0000_0060);
+        assert!(bus.mdec.dma_in_enabled());
+        assert!(bus.mdec.dma_out_enabled());
+
+        // COM_DELAY + 1 replaces the whole register with the shifted word.
+        let com_delay = 0x1F80_1020;
+        bus.write32(com_delay, 0x0000_1325);
+        bus.cpu_write8(com_delay + 1, 0x0000_0022);
+        assert_eq!(bus.read32(com_delay), 0x0000_2200);
+        // An aligned byte store drives the full source word.
+        bus.cpu_write8(com_delay, 0x0003_1125);
+        assert_eq!(bus.read32(com_delay), 0x0003_1125);
+    }
+
+    /// The SPU and the two serial ports sit on a 16-bit bus. A byte store
+    /// to an odd address is shifted onto the high byte lane of its
+    /// halfword (DuckStation), except on the SPU, which ignores it
+    /// (psx-spx "SPU Bus-Width": 8-bit writes to odd addresses are ignored,
+    /// even ones act as 16-bit writes of the low source halfword).
+    #[test]
+    fn cpu_narrow_halfword_bus_stores_land_on_the_addressed_byte_lane() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+
+        // SIO0 baud + 1, SIO1 control + 1.
+        bus.cpu_write8(Sio0::BASE + 0xF, 0x0000_0001);
+        assert_eq!(bus.read16(Sio0::BASE + 0xE), 0x0100);
+        bus.cpu_write8(Sio1::BASE + 0xB, 0x0000_0005);
+        assert_eq!(bus.sio1.read32(Sio1::BASE + 0xA), 0x0500);
+
+        // SPU voice 0 ADSR low: even byte store writes the low halfword,
+        // odd byte store is dropped.
+        let adsr = Spu::BASE + 0x08;
+        bus.cpu_write8(adsr, 0x1234_5678);
+        assert_eq!(bus.read16(adsr), 0x5678);
+        bus.cpu_write8(adsr + 1, 0x0000_00AB);
+        assert_eq!(bus.read16(adsr), 0x5678);
     }
 
     #[test]
