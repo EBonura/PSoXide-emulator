@@ -816,7 +816,6 @@ fn keycode_to_binding(code: KeyCode) -> Option<InputBinding> {
         KeyCode::Tab => named("Tab"),
         KeyCode::F1 => named("F1"),
         KeyCode::F2 => named("F2"),
-        KeyCode::F3 => named("F3"),
         KeyCode::F4 => named("F4"),
         KeyCode::F6 => named("F6"),
         KeyCode::F9 => named("F9"),
@@ -855,8 +854,9 @@ fn keycode_to_binding(code: KeyCode) -> Option<InputBinding> {
         KeyCode::Backquote => named("Backquote"),
         KeyCode::IntlRo => named("IntlRo"),
         KeyCode::IntlBackslash => named("IntlBackslash"),
-        // Escape toggles the menu, F5/F7 save/load, F8 records input, and
-        // F12 toggles the renderer display source. Keeping host commands out
+        // Escape toggles the menu, F3 the guest performance panel, F5/F7
+        // save/load, F8 records input, and F12 toggles the renderer display
+        // source. Keeping host commands out
         // of pad bindings prevents one key press from firing both actions.
         _ => None,
     }
@@ -1087,6 +1087,7 @@ impl ApplicationHandler for Shell {
                 // records from cold boot; stopping downloads a CSV tape).
                 if state == ElementState::Pressed && !repeat {
                     match &logical_key {
+                        Key::Named(NamedKey::F3) => self.state.toggle_performance_panel(),
                         Key::Named(NamedKey::F5) => self.state.save_state(),
                         Key::Named(NamedKey::F7) => self.state.load_latest_state(false),
                         Key::Named(NamedKey::F8) => self.state.toggle_input_recording(),
@@ -2343,6 +2344,7 @@ mod tests {
         // Host commands are deliberately unavailable as pad bindings.
         for code in [
             KeyCode::Escape,
+            KeyCode::F3,
             KeyCode::F5,
             KeyCode::F7,
             KeyCode::F8,

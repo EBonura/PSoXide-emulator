@@ -1421,7 +1421,7 @@ fn run_headless_launch(
             route_tick_steps = 0;
             route_ticks += 1;
             if let Some(stats) = debug_ui_stats.as_mut() {
-                stats.set_enabled(&mut cpu, true);
+                stats.set_cpu_attribution(&mut cpu, true);
                 stats.record(&cpu, &bus);
             }
             if !scripted_presses.is_empty() {

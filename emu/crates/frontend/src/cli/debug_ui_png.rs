@@ -97,11 +97,20 @@ fn panel(ctx: &egui::Context, stats: &mut GuestStats, vram: egui::TextureId) -> 
                     let _ = psoxide_debug_ui::draw(ui, stats, Some(vram));
                 });
             });
-            used = section
+            let mut bottom = section
                 .body_response
                 .map_or(section.header_response.rect.bottom(), |body| {
                     body.rect.bottom()
                 });
+            // The sidebar's other sections, collapsed as they start.
+            for title in ["CPU Registers", "Memory", "VRAM"] {
+                let header =
+                    egui::CollapsingHeader::new(RichText::new(title).color(theme::TEXT).strong())
+                        .default_open(false)
+                        .show(ui, |_| {});
+                bottom = header.header_response.rect.bottom();
+            }
+            used = bottom;
         });
     used
 }
