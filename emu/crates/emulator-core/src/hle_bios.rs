@@ -111,6 +111,8 @@ pub fn function_name(table: Table, func: u8) -> &'static str {
             0x20 => "ttyInOut",
             0x28 => "cdOpen",
             0x29 => "cdRead",
+            crate::hle_pad::internal::VERIFIER => "padCardVerifier",
+            crate::hle_pad::internal::HANDLER => "padCardHandler",
             0x38 => "cdromIoIrq",
             0x39 => "cdromDmaIrq",
             _ => "?",
@@ -629,13 +631,18 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             Jump(ex::code().syscall_stub)
         }
 
-        // B(12h) InitPad(buf1, siz1, buf2, siz2): tell the kernel
-        // where to stash pad state. Since we poll the hardware
-        // directly via psx-pad there's nothing for us to do.
-        (Table::B, 0x12) => Stub(1),
-
-        // B(13h) StartPad, B(14h) StopPad -- accept.
-        (Table::B, 0x13) | (Table::B, 0x14) => Stub(1),
+        // Pad driver (psx-spx "BIOS Joypad Functions"): B(12h) InitPAD2,
+        // B(13h) StartPAD2, B(14h) StopPAD2, B(15h) PAD_init2, B(16h)
+        // PAD_dr. The VBlank reader itself is a kernel handler (hle_pad).
+        (Table::B, 0x12) => Done(crate::hle_pad::init_pad(
+            bus, args[0], args[1], args[2], args[3],
+        )),
+        (Table::B, 0x13) => Done(crate::hle_pad::start_pad(bus)),
+        (Table::B, 0x14) => Done(crate::hle_pad::stop_pad(bus)),
+        (Table::B, 0x15) => Done(crate::hle_pad::pad_init2(
+            bus, args[0], args[1], args[2], args[3], sp,
+        )),
+        (Table::B, 0x16) => Done(crate::hle_pad::pad_dr(bus)),
 
         // B(18h) ResetEntryInt: default exit buffer, returned.
         // B(19h) HookEntryInt(buf): exit through `buf` after the chains.
@@ -771,6 +778,11 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             Done(files::continuation(bus, n, v0, saved))
         }
         (Table::Kernel, files::internal::NOP) => Done(0),
+        (Table::Kernel, crate::hle_pad::internal::VERIFIER) => Done(crate::hle_pad::verifier(bus)),
+        (Table::Kernel, crate::hle_pad::internal::HANDLER) => match crate::hle_pad::handler(bus) {
+            Some(v) => Done(v),
+            None => Retry,
+        },
         (Table::Kernel, files::internal::TTY_INOUT) => Done(files::tty_inout(
             bus,
             args[0],
@@ -1515,8 +1527,8 @@ mod tests {
     fn unimplemented_and_stubbed_calls_are_recorded_once_per_function() {
         let mut bus = hle_bus();
         assert!(bus.hle_bios_first_unimplemented().is_none());
-        // B(12h) InitPad is a stub; A(3Ah) abort is unimplemented.
-        assert_eq!(call(&mut bus, 0xB0, 0x12, [0, 0, 0, 0]), 1);
+        // A(70h) is a stub; A(3Ah) abort is unimplemented.
+        assert_eq!(call(&mut bus, 0xA0, 0x70, [0, 0, 0, 0]), 0);
         assert_eq!(call(&mut bus, 0xA0, 0x3A, [0x40, 0, 0, 0]), 0);
         assert_eq!(call(&mut bus, 0xA0, 0x3A, [0x80, 0, 0, 0]), 0);
         // Implemented calls leave no record.
@@ -1525,7 +1537,7 @@ mod tests {
         let records = bus.hle_bios_records();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].outcome, Outcome::Stub);
-        assert_eq!(records[0].name, "initPad");
+        assert_eq!((records[0].table, records[0].func), (Table::A, 0x70));
         let first = bus.hle_bios_first_unimplemented().unwrap();
         assert_eq!((first.table, first.func), (Table::A, 0x3A));
         assert_eq!(first.args[0], 0x40);

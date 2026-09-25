@@ -33,6 +33,7 @@ pub mod hle_bios;
 pub mod hle_exceptions;
 pub mod hle_files;
 pub mod hle_kernel;
+pub mod hle_pad;
 pub mod input_tape;
 pub mod irq;
 pub mod limits;
