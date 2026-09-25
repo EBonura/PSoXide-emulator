@@ -6,6 +6,8 @@
 //! `C0names` tables in pcsx-redux `src/core/kernellog.cc` (GPL-2.0-or-later,
 //! compatible with this crate's licence), which follow the nocash psx-spx
 //! "BIOS Function Summary". Index = the function number passed in `$t1`.
+//! A(70h) and A(71h) are swapped relative to kernellog.cc to match psx-spx
+//! and OpenBIOS (`_bu_init` is 70h, `_96_init` is 71h).
 //! Names are interface identifiers only; no BIOS code or data is involved.
 
 /// Name of function `func` in table 0 (A), 1 (B) or 2 (C), or `"?"`.
@@ -132,8 +134,8 @@ pub const A0_NAMES: &[Option<&str>] = &[
     None,
     None,
     Some("clearFileError"),
-    Some("initCDRom"),
     Some("initMC"),
+    Some("initCDRom"),
     Some("deinitCDRom"),
     None,
     None,
