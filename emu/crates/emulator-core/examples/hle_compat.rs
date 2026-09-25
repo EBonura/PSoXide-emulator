@@ -20,6 +20,10 @@
 //! `<dir>/<id>.hle.txt` (and `<id>.bios.txt` for `--reference`), one
 //! `frame hash` line per VBlank, to find where two runs part.
 //!
+//! `--inputs compat/inputs.toml` gives games their own run length and pad
+//! schedule (the one that reaches gameplay); the others use `--frames` and
+//! `--pad-pulses`/`--input-tape`.
+//!
 //! `--save-dir <dir> --save-at N[,M...]` writes the HLE run's state at
 //! those frames as `<dir>/<id>.<N>.state`; `--load-state <file>` starts the
 //! HLE run from one instead of booting (frames and pulses stay counted from
@@ -131,6 +135,8 @@ struct GameResult {
     /// LibCrypt sectors read from a `.sbi` next to the disc (`None`: no
     /// `.sbi` found).
     sbi_sectors: Option<usize>,
+    /// This game's own schedule from `--inputs`, when it has one.
+    pad_pulses: Option<String>,
     /// GetlocP queries that landed on a sector listed in the `.sbi`
     /// (counted even with `--no-sbi`, which leaves the list unapplied), and
     /// the frame of the first one.
@@ -177,6 +183,7 @@ fn main() {
     let mut hash_log: Option<PathBuf> = None;
     let mut states = States::default();
     let mut pulses: Option<String> = None;
+    let mut inputs: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -186,6 +193,7 @@ fn main() {
             "--only" => only.push(args_support::take_string(&mut args, "--only")),
             "--input-tape" => tape_path = Some(args_support::take_path(&mut args, "--input-tape")),
             "--pad-pulses" => pulses = Some(args_support::take_string(&mut args, "--pad-pulses")),
+            "--inputs" => inputs = Some(args_support::take_path(&mut args, "--inputs")),
             "--json" => json = Some(args_support::take_path(&mut args, "--json")),
             "--strict" => strict = true,
             "--no-sbi" => no_sbi = true,
@@ -218,16 +226,10 @@ fn main() {
     // --pad-pulses format) becomes a one-sample-per-VBlank tape.
     let tape = match (&tape_path, &pulses) {
         (Some(path), _) => Some(read_tape(path).unwrap_or_else(|e| panic!("{e}"))),
-        (None, Some(text)) => {
-            let pulses = pad_support::parse_pad_pulses(text).unwrap_or_else(|e| panic!("{e}"));
-            Some(
-                (0..frames)
-                    .map(|vb| PadSample::from_buttons(pad_support::effective_mask(0, &pulses, vb)))
-                    .collect(),
-            )
-        }
+        (None, Some(text)) => Some(pulse_tape(text, frames)),
         (None, None) => None,
     };
+    let inputs = inputs.map(|path| load_inputs(&path)).unwrap_or_default();
 
     let games: Vec<Game> = load_list(&list)
         .into_iter()
@@ -241,6 +243,14 @@ fn main() {
             id: game.id.clone(),
             title: game.title.clone(),
             ..GameResult::default()
+        };
+        // A per-game schedule from --inputs replaces the common one.
+        let (frames, tape) = match inputs.get(&game.id) {
+            Some((game_frames, text)) => {
+                result.pad_pulses = Some(text.clone());
+                (*game_frames, Some(pulse_tape(text, *game_frames)))
+            }
+            None => (frames, tape.clone()),
         };
         match found {
             None => result.status = "missing".into(),
@@ -330,6 +340,35 @@ fn main() {
         std::fs::write(&path, text + "\n").expect("write --json");
         eprintln!("[hle-compat] wrote {}", path.display());
     }
+}
+
+/// A scripted pulse list (mask@vblank+frames, the frontend's --pad-pulses
+/// format) as a one-sample-per-VBlank tape.
+fn pulse_tape(text: &str, frames: u64) -> Vec<PadSample> {
+    let pulses = pad_support::parse_pad_pulses(text).unwrap_or_else(|e| panic!("{e}"));
+    (0..frames)
+        .map(|vb| PadSample::from_buttons(pad_support::effective_mask(0, &pulses, vb)))
+        .collect()
+}
+
+/// `--inputs`: per-game `frames` and `pulses` (compat/inputs.toml).
+fn load_inputs(path: &Path) -> std::collections::BTreeMap<String, (u64, String)> {
+    let text =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let table: toml::Table = text
+        .parse()
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    table
+        .iter()
+        .filter_map(|(id, entry)| {
+            let frames = entry.get("frames")?.as_integer()?;
+            let pulses = entry.get("pulses")?.as_str()?;
+            Some((
+                id.clone(),
+                (frames as u64, pulses.split_whitespace().collect()),
+            ))
+        })
+        .collect()
 }
 
 fn load_list(path: &Path) -> Vec<Game> {
