@@ -1826,7 +1826,14 @@ impl ApplicationHandler for Shell {
         // rAF-driven redraws itself, so the web shell keeps redrawing per tick.
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = event_loop;
+            // `Poll` spins the browser event loop between animation frames
+            // (winit re-posts a task as soon as one finishes), which kept the
+            // main thread ~100% busy even on the idle menu. Poll only until
+            // the async GPU init lands; after that every tick ends in
+            // `request_redraw`, so `Wait` still wakes once per rAF.
+            if self.graphics.is_some() {
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
             self.install_pending_graphics();
             // Apply any game file the user picked since the last frame.
             self.state.poll_web_uploads();
