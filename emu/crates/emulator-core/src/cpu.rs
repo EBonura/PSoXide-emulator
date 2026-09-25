@@ -282,10 +282,13 @@ impl CpuCycleProfileSnapshot {
 ///
 /// A wait loop is a short backward branch (at most
 /// [`WAIT_LOOP_MAX_SPAN`] bytes) taken again to the same target without any
-/// store in between: the shape of `while (!flag) {}` polling. The first
+/// store in between, other than stores through `$sp`: the shape of
+/// `while (!flag) {}` polling, including Sony's libetc `VSync`, which counts
+/// a volatile timeout local down on the stack every iteration. The first
 /// iteration arms the detector, every later one is charged here, split by
-/// what the loop reads. It is a heuristic: a store-free loop that does real
-/// work (a checksum over memory, say) is counted as waiting too.
+/// what the loop reads. It is a heuristic: a loop that does real work
+/// without storing outside its stack frame (a checksum over memory, say) is
+/// counted as waiting too.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CpuWaitProfileSnapshot {
     /// Wait loops that read an I/O register (GPUSTAT, DMA, CD, timers, IRQ).
@@ -312,7 +315,7 @@ impl CpuWaitProfileSnapshot {
 
 /// Longest loop body, in bytes from the branch target to the delay slot,
 /// the wait-loop detector treats as polling.
-pub const WAIT_LOOP_MAX_SPAN: u32 = 64;
+pub const WAIT_LOOP_MAX_SPAN: u32 = 128;
 
 /// Per-iteration state of the wait-loop detector.
 #[derive(Clone, Copy, Debug, Default)]
@@ -1310,7 +1313,8 @@ impl Cpu {
         access: Option<ProfiledDataAccess>,
     ) {
         let opcode = (instr >> 26) & 0x3f;
-        if matches!(opcode, 0x28 | 0x29 | 0x2a | 0x2b | 0x2e | 0x3a) {
+        let base = (instr >> 21) & 0x1f;
+        if matches!(opcode, 0x28 | 0x29 | 0x2a | 0x2b | 0x2e | 0x3a) && base != 29 {
             self.wait_loop.stored = true;
         }
         match access {
@@ -1328,8 +1332,17 @@ impl Cpu {
             return;
         };
         // `pc` is the delay slot; an exception may have redirected past the
-        // branch, which ends any loop in progress.
-        if self.pc != target || target > pc || pc - target > WAIT_LOOP_MAX_SPAN {
+        // branch, which ends any loop in progress. Forward branches (an `if`
+        // inside the loop body) and calls leave it armed; only the loop's
+        // own backward branch closes an iteration.
+        if self.pc != target {
+            self.wait_loop.armed = false;
+            return;
+        }
+        if target > pc {
+            return;
+        }
+        if pc - target > WAIT_LOOP_MAX_SPAN {
             self.wait_loop.armed = false;
             return;
         }
