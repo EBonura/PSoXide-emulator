@@ -20,6 +20,9 @@ mod web_files;
 // Same-origin streamed discs (the demo disc). wasm-only: native has a library.
 #[cfg(target_arch = "wasm32")]
 mod web_stream;
+// Headless-browser measurement hooks (`?disc=`, `psoxideBenchStats()`).
+#[cfg(target_arch = "wasm32")]
+mod web_bench;
 // The headless CLI (`scan`/`list`/`launch`/...) is a native developer tool:
 // it reads argv, the filesystem, and spins up its own offscreen wgpu device.
 // None of that applies in the browser, so it is compiled out on wasm and the
@@ -1811,6 +1814,12 @@ impl ApplicationHandler for Shell {
                 }
 
                 profile.total_ms = elapsed_ms(profile_start);
+                #[cfg(target_arch = "wasm32")]
+                web_bench::note_redraw(
+                    &profile,
+                    self.audio.as_ref().map_or(0, |a| a.underrun_frames()),
+                    self.audio.as_ref().map_or(0, |a| a.queue_len()),
+                );
                 if let Some(line) = state.profiler.record(profile) {
                     eprintln!("{line}");
                 }
