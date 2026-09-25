@@ -202,8 +202,7 @@ export async function readGame(path) {
   let h = dh;
   for (let i = 0; i < parts.length - 1; i++) h = await h.getDirectoryHandle(parts[i]);
   const fh = await h.getFileHandle(parts[parts.length - 1]);
-  const f = await fh.getFile();
-  return new Uint8Array(await f.arrayBuffer());
+  return await fh.getFile();
 }
 export async function saveQuickState(gameId, bytes, createdAt, cpuTick) {
   // Best effort: supporting browsers can exempt this origin from automatic
@@ -218,6 +217,11 @@ export async function loadQuickState(gameId) {
 export async function inspectQuickState(gameId) {
   const state = await _getState('quick:' + gameId);
   return state ? state.createdAt + '\n' + state.cpuTick : undefined;
+}
+export async function fetchGame(url) {
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  return await r.blob();
 }
 export function downloadCsv(filenameStem, csv) {
   const safeStem = String(filenameStem || 'psoxide-input')
@@ -260,6 +264,8 @@ extern "C" {
     fn idb_load_quick_state(game_id: &str) -> js_sys::Promise;
     #[wasm_bindgen(js_name = inspectQuickState)]
     fn idb_inspect_quick_state(game_id: &str) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = fetchGame)]
+    fn js_fetch_game(url: &str) -> js_sys::Promise;
     #[wasm_bindgen(catch, js_name = downloadCsv)]
     fn download_csv(filename_stem: &str, csv: &str) -> Result<(), JsValue>;
 }
@@ -392,12 +398,26 @@ pub fn read_game(id: &str) {
         let game_id = id.to_string();
         spawn_local(async move {
             if let Ok(v) = JsFuture::from(fsa_read_game(&path)).await {
-                if !v.is_null() && !v.is_undefined() {
-                    push_bytes(Upload::Game, name, Some(game_id), &v);
+                if let Ok(file) = v.dyn_into::<web_sys::Blob>() {
+                    read_blob_into_pending(file, Upload::Game, name, Some(game_id)).await;
                 }
             }
         });
     }
+}
+
+/// Fetch a game served next to the page and queue it like a picked file
+/// (the `?disc=` measurement hook, see [`crate::web_bench`]).
+pub fn fetch_game(url: &str) {
+    let url = url.to_string();
+    let name = url.rsplit('/').next().unwrap_or(&url).to_string();
+    spawn_local(async move {
+        if let Ok(v) = JsFuture::from(js_fetch_game(&url)).await {
+            if let Ok(blob) = v.dyn_into::<web_sys::Blob>() {
+                read_blob_into_pending(blob, Upload::Game, name, None).await;
+            }
+        }
+    });
 }
 
 /// Persist the current game's quick-save in origin-scoped IndexedDB.
@@ -480,18 +500,6 @@ pub fn inspect_quick_state(game_id: String) {
 }
 
 // ---- shared helpers -------------------------------------------------------
-
-fn push_bytes(kind: Upload, name: String, game_id: Option<String>, val: &JsValue) {
-    let bytes = js_sys::Uint8Array::new(val).to_vec();
-    PENDING.with(|q| {
-        q.borrow_mut().push(LoadedFile {
-            kind,
-            name,
-            game_id,
-            bytes,
-        });
-    });
-}
 
 fn js_error(value: JsValue) -> String {
     value.as_string().unwrap_or_else(|| format!("{value:?}"))
@@ -608,24 +616,68 @@ fn make_file_input() -> Option<web_sys::HtmlInputElement> {
 
 fn read_into_pending(file: web_sys::File, kind: Upload, game_id: Option<String>) {
     let name = file.name();
-    let Ok(reader) = web_sys::FileReader::new() else {
-        return;
-    };
-    let reader_for_load = reader.clone();
-    let on_load = Closure::<dyn FnMut()>::new(move || {
-        if let Ok(buffer) = reader_for_load.result() {
-            let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-            PENDING.with(|q| {
-                q.borrow_mut().push(LoadedFile {
-                    kind,
-                    name: name.clone(),
-                    game_id: game_id.clone(),
-                    bytes,
-                });
-            });
-        }
+    spawn_local(async move {
+        read_blob_into_pending(file.into(), kind, name, game_id).await;
     });
-    reader.set_onload(Some(on_load.as_ref().unchecked_ref()));
-    on_load.forget();
-    let _ = reader.read_as_array_buffer(&file);
+}
+
+/// Bytes per `Blob.slice` read. Large enough that a 700 MB disc is ~23
+/// awaits, small enough that the transient JS copy is noise next to it.
+const READ_CHUNK_BYTES: usize = 32 << 20;
+
+/// Read a file into wasm memory a slice at a time and queue it. A whole-file
+/// `arrayBuffer()` followed by a copy into wasm held the image twice (the JS
+/// buffer until GC, plus the wasm `Vec`); a CD image is up to ~750 MB, so the
+/// load peak was well over twice the disc. Here the only full-size buffer is
+/// the destination `Vec`, reserved up front so a disc too large for the tab
+/// fails with a message instead of aborting the module.
+async fn read_blob_into_pending(
+    blob: web_sys::Blob,
+    kind: Upload,
+    name: String,
+    game_id: Option<String>,
+) {
+    match read_blob(&blob).await {
+        Ok(bytes) => PENDING.with(|q| {
+            q.borrow_mut().push(LoadedFile {
+                kind,
+                name,
+                game_id,
+                bytes,
+            });
+        }),
+        Err(error) => web_sys::console::error_1(&JsValue::from_str(&format!(
+            "[psoxide] reading {name}: {error}"
+        ))),
+    }
+}
+
+async fn read_blob(blob: &web_sys::Blob) -> Result<Vec<u8>, String> {
+    let size = blob.size() as usize;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|_| format!("not enough memory for a {} MB file", size >> 20))?;
+    while bytes.len() < size {
+        let start = bytes.len();
+        let end = (start + READ_CHUNK_BYTES).min(size);
+        let part = blob
+            .slice_with_f64_and_f64(start as f64, end as f64)
+            .map_err(js_error)?;
+        let chunk = JsFuture::from(part.array_buffer())
+            .await
+            .map_err(js_error)?;
+        let chunk = js_sys::Uint8Array::new(&chunk);
+        let len = end - start;
+        if chunk.length() as usize != len {
+            return Err("file changed while it was being read".to_string());
+        }
+        // Copy straight into the reserved tail: no zero-fill pass over a
+        // disc-sized buffer, no intermediate Vec.
+        chunk.copy_to_uninit(&mut bytes.spare_capacity_mut()[..len]);
+        // SAFETY: `copy_to_uninit` initialised exactly `len` bytes past the
+        // current length, and the capacity was reserved above.
+        unsafe { bytes.set_len(end) };
+    }
+    Ok(bytes)
 }

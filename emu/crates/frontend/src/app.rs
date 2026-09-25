@@ -646,6 +646,10 @@ impl AppState {
         // offer a one-click reconnect.
         #[cfg(target_arch = "wasm32")]
         crate::web_files::check_saved();
+        #[cfg(target_arch = "wasm32")]
+        if let Some(disc) = crate::web_bench::disc_param() {
+            crate::web_files::fetch_game(&disc);
+        }
         // Both builds start on the open menu (bundled discs like Celeste are
         // launchable from the Games/Examples categories), rather than
         // auto-booting into a game.
