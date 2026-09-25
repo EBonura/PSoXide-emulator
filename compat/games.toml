@@ -19,6 +19,9 @@
 # kernel_patches            B(56h)/B(57h) patch routines identified by their
 #                           OpenBIOS signature hash.
 #
+# Entries without kernel_functions_runtime were added after the census
+# (tools/kcall_scan.py only): their lists are static call sites.
+#
 # Source: BIOS usage census of 2026-09-24 (bios_syscall_probe with
 # PSOXIDE_CENSUS_OUT, plus tools/kcall_scan.py).
 
@@ -187,3 +190,53 @@ boot_exe_sha256 = "0213f5292fa1d995ebe61f42d5dbdb6614e481cb3840ac5f1521c2dfdccc0
 kernel_functions = ["A(10h)", "A(13h)", "A(15h)", "A(17h)", "A(18h)", "A(19h)", "A(1Bh)", "A(25h)", "A(28h)", "A(2Ah)", "A(2Bh)", "A(2Eh)", "A(2Fh)", "A(30h)", "A(39h)", "A(3Fh)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(14h)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(34h)", "B(35h)", "B(36h)", "B(38h)", "B(3Fh)", "B(41h)", "B(42h)", "B(43h)", "B(45h)", "B(47h)", "B(4Ah)", "B(4Bh)", "B(4Eh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
 kernel_functions_runtime = ["A(13h)", "A(17h)", "A(18h)", "A(28h)", "A(2Ah)", "A(39h)", "A(3Fh)", "A(44h)", "A(49h)", "A(72h)", "B(07h)", "B(08h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(17h)", "B(19h)", "B(3Fh)", "B(56h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
 kernel_patches = ["_patch_card#2", "_patch_card2#2", "_patch_card_info#1", "_patch_gte#1"]
+
+[[game]]
+id = "chronocross"
+title = "Chrono Cross (USA) (Disc 1)"
+serial = "SLUS-01041"
+region = "NTSC-U"
+disc_sha256 = "01a0716ed46b6bce7717be1f9220f9bf323cee52404c9cd7fd4ef747d41a98da"
+boot_exe_sha256 = "9a5453bf09d7f5c71a6451d255471374fb2d7cc5f3dfb1ea51223a5c88cdda47"
+kernel_functions = ["A(39h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "A(ADh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(12h)", "B(13h)", "B(14h)", "B(15h)", "B(17h)", "B(18h)", "B(19h)", "B(20h)", "B(32h)", "B(33h)", "B(34h)", "B(35h)", "B(36h)", "B(38h)", "B(42h)", "B(43h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(4Fh)", "B(50h)", "B(51h)", "B(56h)", "B(57h)", "B(5Bh)", "B(5Ch)", "B(5Dh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_clear_card#1", "_patch_card#2", "_patch_card2#2", "_patch_card_info#1", "_patch_gte#1", "_patch_pad#1", "_remove_ChgclrPAD#1"]
+
+[[game]]
+id = "valkyrie"
+title = "Valkyrie Profile (USA) (Disc 1)"
+serial = "SLUS-01156"
+region = "NTSC-U"
+disc_sha256 = "4c988bac4dcdbfafdf2ae710c6fea7b19c004f50ffd675b9c664ab4dda3d2a78"
+boot_exe_sha256 = "78ad0f390a1aec6b4528c4115a566336a643b0263c3e3f1f59ceafefb7792358"
+kernel_functions = ["A(3Ah)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(12h)", "B(13h)", "B(14h)", "B(15h)", "B(17h)", "B(18h)", "B(19h)", "B(35h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_clear_card#1", "_patch_card#2", "_patch_card2#2", "_patch_card_info#1", "_patch_pad#1", "_remove_ChgclrPAD#1"]
+
+[[game]]
+id = "nightmare"
+title = "Nightmare Creatures (USA)"
+serial = "SLUS-00582"
+region = "NTSC-U"
+disc_sha256 = "18fd76beb3cb7050cc719b2dd58e71a7a25f7a9921f687ff849cad8205b7f7fb"
+boot_exe_sha256 = "e4fbdef854e64f25cf326e9f060449cbe075c7f48ed54d16a25df3a401acaafd"
+kernel_functions = ["A(39h)", "A(42h)", "A(43h)", "A(44h)", "A(49h)", "A(70h)", "A(71h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(09h)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(12h)", "B(13h)", "B(14h)", "B(15h)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(34h)", "B(35h)", "B(36h)", "B(41h)", "B(42h)", "B(43h)", "B(45h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(4Fh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(0Ah)"]
+kernel_patches = ["_patch_card#1", "_patch_card2#1", "_patch_gte#2", "_patch_pad#3"]
+
+[[game]]
+id = "f12001"
+title = "Formula One 2001 (Europe) (En,Fi)"
+serial = "SCES-03404"
+region = "PAL"
+disc_sha256 = "059b627df34a506ddd6690a520a796274cbefdb92fae02094705329534c829ae"
+boot_exe_sha256 = "b31a3bdfb9b2af61ee1edd3d550415d3c097bd4103f67aff0fe2d469607bfb64"
+kernel_functions = ["A(13h)", "A(39h)", "A(3Fh)", "A(43h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "B(07h)", "B(08h)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(17h)", "B(18h)", "B(19h)", "B(35h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(4Fh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_clear_card#1", "_patch_card#2", "_patch_card2#2", "_patch_card_info#1", "_patch_gte#1"]
+
+[[game]]
+id = "soulreaver"
+title = "Legacy of Kain - Soul Reaver (Europe)"
+serial = "SLES-01301"
+region = "PAL"
+disc_sha256 = "9ac300d56b879699d15331aab395fa57a137752dfdc2aa5569874445a0b933df"
+boot_exe_sha256 = "c83aa1f7c78ff4e09b1d6f92bc8f63c065c2d867ee4d87531dcce4fd9bf7ba03"
+kernel_functions = ["A(39h)", "A(44h)", "A(49h)", "A(70h)", "A(72h)", "A(ABh)", "A(ACh)", "B(07h)", "B(08h)", "B(09h)", "B(0Ah)", "B(0Bh)", "B(0Ch)", "B(0Dh)", "B(17h)", "B(18h)", "B(19h)", "B(32h)", "B(33h)", "B(34h)", "B(35h)", "B(36h)", "B(42h)", "B(43h)", "B(45h)", "B(4Ah)", "B(4Bh)", "B(4Ch)", "B(4Eh)", "B(4Fh)", "B(50h)", "B(56h)", "B(57h)", "B(5Bh)", "C(02h)", "C(03h)", "C(0Ah)"]
+kernel_patches = ["_clear_card#1", "_patch_card#2", "_patch_card2#2", "_patch_card_info#1", "_patch_gte#1"]
