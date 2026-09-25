@@ -306,7 +306,8 @@ fn host_line(ui: &mut Ui, stats: &GuestStats) {
         return;
     };
     let behind = speed < 0.97;
-    let text = if behind {
+    let gap_ms = stats.audio_gap_ms();
+    let mut text = if behind {
         format!(
             "Host: {frame_ms:.1} ms per redraw, emulating at {:.0}% of real time. \
              The host is behind, so the game runs slower than the figures below.",
@@ -318,9 +319,15 @@ fn host_line(ui: &mut Ui, stats: &GuestStats) {
             speed * 100.0
         )
     };
+    if gap_ms >= 1.0 {
+        text.push_str(&format!(
+            " Audio ran dry for {gap_ms:.0} ms in the last half second."
+        ));
+    }
+    let warn = behind || gap_ms >= 1.0;
     ui.label(
         RichText::new(text)
-            .color(if behind {
+            .color(if warn {
                 plot::CRITICAL
             } else {
                 plot::TEXT_MUTED

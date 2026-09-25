@@ -21,7 +21,6 @@ use crate::burn::{validate_burn_target_path, BurnState};
 
 use crate::playtest_input::{PlaytestInputEvent, PlaytestInputTape, Port1PadSample};
 use crate::ui;
-use crate::ui::hud::HudState;
 use crate::ui::memory::MemoryView;
 use crate::ui::menu::{LibraryItem as MenuLibraryItem, MenuState, PadBindTarget, SaveStateRow};
 use crate::{paths_equivalent, repo_root_dir};
@@ -395,7 +394,6 @@ pub struct AppState {
     /// replaying the next command log.
     pub gpu_resync_generation: u64,
     pub menu: MenuState,
-    pub hud: HudState,
     /// Rolling frame-time breakdown, visible from the profiler toolbar button.
     pub profiler: ui::profiler::FrameProfiler,
     /// Per-vblank PS1 telemetry behind the debug sidebar's guest
@@ -575,7 +573,6 @@ impl AppState {
             bus,
             gpu_resync_generation: initial_gpu_resync_generation,
             menu: MenuState::with_running(autorun),
-            hud: HudState::default(),
             profiler: ui::profiler::FrameProfiler::default(),
             guest_stats: psoxide_debug_ui::GuestStats::new(),
             memory_view: MemoryView::default(),

@@ -8,7 +8,6 @@
 pub mod burn;
 pub mod debug_sidebar;
 pub mod framebuffer;
-pub mod hud;
 pub mod memory;
 pub mod menu;
 pub mod profiler;
@@ -31,7 +30,6 @@ pub fn draw_layout(
     display_uv: egui::Rect,
     dt: f32,
 ) {
-    state.hud.update(dt, state.cpu.tick());
     state.guest_stats.note_host_frame(f64::from(dt));
     state.tick_status(dt);
     let recording_input = state.input_recording_status().0;
