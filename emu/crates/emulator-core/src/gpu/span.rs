@@ -381,6 +381,37 @@ fn tex_span_chunked<const D: u8, const SHADE: u8, const DITHER: bool, const GENE
     }
 }
 
+/// Draw rows `top..=bottom` of a textured rectangle or sprite through the
+/// chunked span loop (same preconditions as `tex_tri`): `row(y)` gives
+/// the row's first and one-past-last pixel and the texture coordinates at
+/// the first pixel and their per-pixel step, as `(u, v, du, dv)` in the
+/// 8.24 format of the triangle planes.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn tex_rows<const D: u8, const SHADE: u8, const DITHER: bool, const GENERAL: bool>(
+    vram: &mut [u16; VRAM_LEN],
+    clut: &[u16; 256],
+    tex: TexFetch,
+    (top, bottom): (i32, i32),
+    mut row: impl FnMut(i32) -> (i32, i32, [u32; 4]),
+    prim: &TexTri,
+    merge: Merge,
+) {
+    for y in top..=bottom {
+        let (xs, xe, [u, v, du, dv]) = row(y);
+        tex_span_chunked::<D, SHADE, DITHER, GENERAL>(
+            vram,
+            clut,
+            &tex,
+            (y, xs, xe),
+            [0, 0, 0, u, v],
+            [0, 0, 0, du, dv],
+            prim,
+            merge,
+        );
+    }
+}
+
 /// The attribute planes of a set-up triangle, evaluated at a pixel.
 #[inline(always)]
 fn plane_at(p: (u32, u32, u32), x: i32, y: i32) -> u32 {

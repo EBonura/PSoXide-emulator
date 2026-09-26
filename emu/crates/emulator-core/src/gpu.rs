@@ -2942,6 +2942,40 @@ impl Gpu {
 
         let flip_x = self.tex_rect_flip_x;
         let flip_y = self.tex_rect_flip_y;
+        // Chunked rows, with the same texel walk: U steps by one texel a
+        // pixel (backwards when flipped), V by one a row.
+        let shade = if tint == RAW_TEXTURE_TINT {
+            span::SHADE_RAW
+        } else {
+            span::SHADE_FLAT
+        };
+        let prim = TexTri {
+            tint,
+            semi: semi_trans,
+            blend: tpage_mode,
+        };
+        let (u0w, v0w) = (u32::from(u0), u32::from(v0));
+        let row = |py: i32| {
+            let dx = (left - x) as u32;
+            let dy = (py - y) as u32;
+            let (u, du) = if flip_x {
+                (
+                    u0w.wrapping_add(1).wrapping_sub(dx),
+                    (1u32 << 24).wrapping_neg(),
+                )
+            } else {
+                (u0w.wrapping_add(dx), 1 << 24)
+            };
+            let v = if flip_y {
+                v0w.wrapping_sub(dy)
+            } else {
+                v0w.wrapping_add(dy)
+            };
+            (left, right + 1, [u << 24, v << 24, du, 0])
+        };
+        if self.draw_tex_rows((left, top, right, bottom), shade, false, &prim, row) {
+            return;
+        }
         for py in top..=bottom {
             for px in left..=right {
                 let dx = (px - x) as u16;
@@ -3420,6 +3454,48 @@ impl Gpu {
         let delta_right_v =
             ((right_bottom.1 as i64 - right_top.1 as i64) << ATTR_SHIFT) / height as i64;
 
+        // Chunked rows with the same Q12 walk: (pos << 12) as u32 keeps
+        // exactly the bits the per-pixel `(pos >> 12) as u16` reads (the
+        // texel fetch uses its low 8), and wrapping steps keep it in step.
+        let shade = if tint == RAW_TEXTURE_TINT {
+            span::SHADE_RAW
+        } else {
+            span::SHADE_FLAT
+        };
+        let prim = TexTri {
+            tint,
+            semi: semi_trans,
+            blend: tpage_mode,
+        };
+        let row_uv = |py: i32| {
+            let row = (py - top) as i64;
+            let mut pos_u = left_u0 + row * delta_left_u;
+            let mut pos_v = left_v0 + row * delta_left_v;
+            let right_u = right_u0 + row * delta_right_u;
+            let right_v = right_v0 + row * delta_right_v;
+            let delta_u = (right_u - pos_u) / width as i64;
+            let delta_v = (right_v - pos_v) / width as i64;
+            if x_start > left {
+                let skip = (x_start - left) as i64;
+                pos_u += skip * delta_u;
+                pos_v += skip * delta_v;
+            }
+            let q = |p: i64| (p << (24 - ATTR_SHIFT)) as u32;
+            (
+                x_start,
+                x_end + 1,
+                [q(pos_u), q(pos_v), q(delta_u), q(delta_v)],
+            )
+        };
+        if self.draw_tex_rows(
+            (x_start, y_start, x_end, y_end),
+            shade,
+            dither,
+            &prim,
+            row_uv,
+        ) {
+            return true;
+        }
         for py in y_start..=y_end {
             let row = (py - top) as i64;
             let mut pos_u = left_u0 + row * delta_left_u;
@@ -3603,6 +3679,65 @@ impl Gpu {
             1 => shade!(DEPTH_8),
             _ => shade!(DEPTH_15),
         }
+    }
+
+    /// Draw the rows of a textured rectangle or sprite (clipped to
+    /// `left..=right`, `top..=bottom`) with the chunked span loop, `row`
+    /// supplying each row's pixels and texture walk (see `span::tex_rows`).
+    /// Returns `false`, drawing nothing, when the pixel tracer is on or the
+    /// texture page overlaps the rectangle: the caller then plots pixel by
+    /// pixel.
+    fn draw_tex_rows(
+        &mut self,
+        (left, top, right, bottom): (i32, i32, i32, i32),
+        shade: u8,
+        dither: bool,
+        prim: &TexTri,
+        row: impl FnMut(i32) -> (i32, i32, [u32; 4]),
+    ) -> bool {
+        use span::{DEPTH_15, DEPTH_4, DEPTH_8, SHADE_FLAT, SHADE_RAW};
+        let tex = self.tex_fetch();
+        let depth = self.tex_depth;
+        if self.pixel_owner.is_some() || tex.page_overlaps(depth, left, top, right, bottom) {
+            return false;
+        }
+        // Every texel of the unpopulated upper VRAM bank reads as
+        // transparent: nothing to draw.
+        if self.tex_page_y >= VRAM_HEIGHT as u16 {
+            return true;
+        }
+        let merge = span::Merge {
+            mask_check: self.mask_check_before_draw,
+            mask_or: if self.mask_set_on_draw { 0x8000 } else { 0 },
+        };
+        let general = prim.semi || merge.mask_check;
+        let clut = &self.clut_cache;
+        let vram = self.vram.array_mut();
+        let rows = (top, bottom);
+        macro_rules! go {
+            ($d:expr, $s:expr, $di:expr) => {
+                if general {
+                    span::tex_rows::<$d, $s, $di, true>(vram, clut, tex, rows, row, prim, merge)
+                } else {
+                    span::tex_rows::<$d, $s, $di, false>(vram, clut, tex, rows, row, prim, merge)
+                }
+            };
+        }
+        macro_rules! shade {
+            ($d:expr) => {
+                match (shade, dither) {
+                    (SHADE_RAW, _) => go!($d, SHADE_RAW, false),
+                    (SHADE_FLAT, false) => go!($d, SHADE_FLAT, false),
+                    _ => go!($d, SHADE_FLAT, true),
+                }
+            };
+        }
+        match depth {
+            0 => shade!(DEPTH_4),
+            1 => shade!(DEPTH_8),
+            _ => shade!(DEPTH_15),
+        }
+        true
     }
 
     /// The drawing area as a span clip rectangle.
