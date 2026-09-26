@@ -1038,7 +1038,7 @@ impl MenuState {
         // launch) still produces at least one visible row and avoids
         // a divide-by-zero in the visible-count math below.
         // Stop above the notice and hint lines painted at the bottom.
-        let bottom_margin = 72.0;
+        let bottom_margin = 56.0;
         let available_h = (sh - items_start_y - bottom_margin).max(row_stride);
         let visible_rows = (available_h / row_stride).floor().max(1.0) as usize;
 
@@ -1274,15 +1274,7 @@ impl MenuState {
             arrow(Pos2::new(center_x, sh - bottom_margin + 8.0), 5.0);
         }
 
-        // Project framing + WIP/legal notice, shown on every menu screen in
-        // both builds.
-        painter.text(
-            Pos2::new(sw / 2.0, sh - 62.0),
-            Align2::CENTER_TOP,
-            "The emulator is early, game compatibility is still low.",
-            FontId::proportional(11.0),
-            fade(theme::MENU_TEXT_DIM),
-        );
+        // Project framing, shown on every menu screen in both builds.
         painter.text(
             Pos2::new(sw / 2.0, sh - 46.0),
             Align2::CENTER_TOP,
@@ -2355,13 +2347,6 @@ fn about_panel(ctx: &egui::Context, open: &mut bool) {
                         ui.label(
                             egui::RichText::new(
                                 "Independent, open-source PS1 developer environment",
-                            )
-                            .color(theme::MENU_TEXT_DIM)
-                            .size(13.0),
-                        );
-                        ui.label(
-                            egui::RichText::new(
-                                "Emulator is early, game compatibility is still low",
                             )
                             .color(theme::MENU_TEXT_DIM)
                             .size(13.0),
