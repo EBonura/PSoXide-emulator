@@ -103,7 +103,7 @@ const H_ACTIVE_START_GPU: u64 = 0x260;
 const H_ACTIVE_END_GPU: u64 = 0xC60;
 
 /// The full three-timer bank.
-#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Timers {
     /// Per-counter state. Index 0 / 1 / 2 corresponds to Timer 0 / 1 / 2.
     pub timers: [Timer; 3],
