@@ -603,3 +603,103 @@ fn raster_stress_wireframe() {
         "raster stress wireframe digest changed"
     );
 }
+
+/// The display hash and RGBA conversion before they worked a row at a
+/// time: a pixel at a time through `get_pixel` / `read_pixel_rgb24`.
+fn reference_display(gpu: &Gpu) -> ((u64, u32, u32, usize), (Vec<u8>, u32, u32)) {
+    let hash = if !gpu.display_configured {
+        (psx_hw::hash::Fnv1a64::new().finish(), 0, 0, 0)
+    } else {
+        let da = gpu.display_area();
+        let mut h = psx_hw::hash::Fnv1a64::new();
+        let mut byte_len = 0usize;
+        let effective_h = da.height.min((VRAM_HEIGHT as u16).saturating_sub(da.y));
+        let effective_w = if da.bpp24 {
+            da.width.min(rgb24_pixels_left(da.x))
+        } else {
+            da.width.min((VRAM_WIDTH as u16).saturating_sub(da.x))
+        };
+        for dy in 0..effective_h {
+            for dx in 0..effective_w {
+                if da.bpp24 {
+                    let (r, g, b) = gpu.read_pixel_rgb24(da.x, dx, da.y + dy);
+                    h.update(&[r, g, b]);
+                    byte_len += 3;
+                } else {
+                    h.update(&gpu.vram.get_pixel(da.x + dx, da.y + dy).to_le_bytes());
+                    byte_len += 2;
+                }
+            }
+        }
+        (h.finish(), effective_w as u32, effective_h as u32, byte_len)
+    };
+    let da = gpu.display_area();
+    let eff_h = da.height.min((VRAM_HEIGHT as u16).saturating_sub(da.y));
+    let eff_w = if da.bpp24 {
+        da.width.min(rgb24_pixels_left(da.x))
+    } else {
+        da.width.min((VRAM_WIDTH as u16).saturating_sub(da.x))
+    };
+    let off_x = gpu
+        .horizontal_display_offset_px()
+        .clamp(-(eff_w as i32), eff_w as i32);
+    let off_y = gpu
+        .vertical_display_offset_px()
+        .clamp(-(eff_h as i32), eff_h as i32);
+    let mut out = Vec::new();
+    for dy in 0..eff_h {
+        let src_y = dy as i32 - off_y;
+        for dx in 0..eff_w {
+            let src_x = dx as i32 - off_x;
+            if src_x < 0 || src_x >= eff_w as i32 || src_y < 0 || src_y >= eff_h as i32 {
+                out.extend_from_slice(&[0, 0, 0, 0xFF]);
+                continue;
+            }
+            let sy = da.y + src_y as u16;
+            if da.bpp24 {
+                let (r, g, b) = gpu.read_pixel_rgb24(da.x, src_x as u16, sy);
+                out.extend_from_slice(&[r, g, b, 0xFF]);
+            } else {
+                let pixel = gpu.vram.get_pixel(da.x + src_x as u16, sy);
+                let r = ((pixel & 0x1F) as u8) << 3;
+                let g = (((pixel >> 5) & 0x1F) as u8) << 3;
+                let b = (((pixel >> 10) & 0x1F) as u8) << 3;
+                out.extend_from_slice(&[r | (r >> 5), g | (g >> 5), b | (b >> 5), 0xFF]);
+            }
+        }
+    }
+    (hash, (out, eff_w as u32, eff_h as u32))
+}
+
+#[test]
+fn display_hash_and_rgba_match_the_per_pixel_reference() {
+    let mut s = Stress::new(0x5EED_0005);
+    // Unconfigured display first.
+    assert_eq!(s.gpu.display_hash(), reference_display(&s.gpu).0);
+    for _ in 0..600 {
+        let rng = &mut s.rng;
+        let start = if rng.chance(30) {
+            // Near the right / bottom edges.
+            (1024 - rng.below(700)) & 0x3FF | ((512 - rng.below(300)) & 0x1FF) << 10
+        } else {
+            rng.word() & 0x7FFFF
+        };
+        let x1 = (0x260 + rng.range(-400, 400)) as u32;
+        let hrange = (x1 & 0xFFF) | ((x1 + 2560) & 0xFFF) << 12;
+        let y1 = if rng.chance(50) {
+            0x10
+        } else {
+            rng.below(0x40)
+        };
+        let y2 = y1 + rng.below(520);
+        let vrange = (y1 & 0x3FF) | (y2 & 0x3FF) << 10;
+        let mode = rng.word() & 0x7F;
+        s.gp1(0x0500_0000 | start);
+        s.gp1(0x0600_0000 | hrange);
+        s.gp1(0x0700_0000 | vrange);
+        s.gp1(0x0800_0000 | mode);
+        let (hash, rgba) = reference_display(&s.gpu);
+        assert_eq!(s.gpu.display_hash(), hash, "display_hash");
+        assert!(s.gpu.display_rgba8() == rgba, "display_rgba8");
+    }
+}

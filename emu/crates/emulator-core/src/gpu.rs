@@ -904,25 +904,24 @@ impl Gpu {
         } else {
             da.width.min(vram_w.saturating_sub(da.x))
         };
-        if da.bpp24 {
-            // 24-bit mode: each pixel is 3 bytes packed in VRAM. A row
-            // of W 24-bit pixels occupies W*3 bytes = 1.5 * W 16-bit
-            // words. We read per-byte to span the straddles.
-            for dy in 0..effective_h {
-                for dx in 0..effective_w {
-                    let (r, g, b) = self.read_pixel_rgb24(da.x, dx, da.y + dy);
-                    h.update(&[r, g, b]);
-                    byte_len += 3;
-                }
+        // Each row's bytes are contiguous in VRAM (little-endian halfwords
+        // from `da.x`; the clipping above keeps them inside the row): 2 per
+        // pixel at 15bpp, 3 packed bytes per pixel at 24bpp. Hash them a
+        // row at a time.
+        let row_bytes = usize::from(effective_w) * if da.bpp24 { 3 } else { 2 };
+        let mut bytes = [0u8; VRAM_WIDTH * 2];
+        let words = self.vram.words();
+        for dy in 0..effective_h {
+            let start = usize::from(da.y + dy) * VRAM_WIDTH + usize::from(da.x);
+            let halfwords = row_bytes.div_ceil(2);
+            for (pair, &word) in bytes
+                .chunks_exact_mut(2)
+                .zip(&words[start..start + halfwords])
+            {
+                pair.copy_from_slice(&word.to_le_bytes());
             }
-        } else {
-            for dy in 0..effective_h {
-                for dx in 0..effective_w {
-                    let pixel = self.vram.get_pixel(da.x + dx, da.y + dy);
-                    h.update(&pixel.to_le_bytes());
-                    byte_len += 2;
-                }
-            }
+            h.update(&bytes[..row_bytes]);
+            byte_len += row_bytes;
         }
         (h.finish(), effective_w as u32, effective_h as u32, byte_len)
     }
@@ -1117,27 +1116,52 @@ impl Gpu {
         let off_y = self
             .vertical_display_offset_px()
             .clamp(-(eff_h as i32), eff_h as i32);
-        let mut out = Vec::with_capacity((eff_w as usize) * (eff_h as usize) * 4);
-        for dy in 0..eff_h {
-            let src_y = dy as i32 - off_y;
-            for dx in 0..eff_w {
-                let src_x = dx as i32 - off_x;
-                if src_x < 0 || src_x >= eff_w as i32 || src_y < 0 || src_y >= eff_h as i32 {
-                    out.extend_from_slice(&[0, 0, 0, 0xFF]);
-                    continue;
+        // Opaque black, then the shifted picture row by row: displayed
+        // pixel `dx` of row `dy` shows source pixel `dx - off_x` of source
+        // row `dy - off_y` when that lies inside the display area.
+        let (w, h) = (i32::from(eff_w), i32::from(eff_h));
+        let mut out = [0u8, 0, 0, 0xFF].repeat(w as usize * h as usize);
+        let words = self.vram.words();
+        for dy in 0..h {
+            let src_y = dy - off_y;
+            if src_y < 0 || src_y >= h {
+                continue;
+            }
+            let x0 = off_x.max(0);
+            let x1 = (w + off_x).min(w);
+            if x0 >= x1 {
+                continue;
+            }
+            let sy = da.y + src_y as u16;
+            let row = &mut out[(dy * w + x0) as usize * 4..(dy * w + x1) as usize * 4];
+            if da.bpp24 {
+                // The row's packed bytes from the first shown pixel on
+                // (see `display_hash`).
+                let first = (x0 - off_x) as usize;
+                let n = (x1 - x0) as usize;
+                let byte0 = usize::from(da.x) * 2 + first * 3;
+                let start = usize::from(sy) * VRAM_WIDTH + byte0 / 2;
+                let mut bytes = [0u8; VRAM_WIDTH * 2 + 2];
+                let halfwords = (byte0 % 2 + n * 3).div_ceil(2);
+                for (pair, &word) in bytes
+                    .chunks_exact_mut(2)
+                    .zip(&words[start..start + halfwords])
+                {
+                    pair.copy_from_slice(&word.to_le_bytes());
                 }
-                let sx = da.x + src_x as u16;
-                let sy = da.y + src_y as u16;
-                if da.bpp24 {
-                    let (r, g, b) = self.read_pixel_rgb24(da.x, src_x as u16, sy);
-                    out.extend_from_slice(&[r, g, b, 0xFF]);
-                } else {
-                    let pixel = self.vram.get_pixel(sx, sy);
+                let packed = &bytes[byte0 % 2..byte0 % 2 + n * 3];
+                for (px, rgb) in row.chunks_exact_mut(4).zip(packed.chunks_exact(3)) {
+                    px[..3].copy_from_slice(rgb);
+                }
+            } else {
+                let start =
+                    usize::from(sy) * VRAM_WIDTH + usize::from(da.x) + (x0 - off_x) as usize;
+                for (px, &pixel) in row.chunks_exact_mut(4).zip(&words[start..]) {
                     let r = ((pixel & 0x1F) as u8) << 3;
                     let g = (((pixel >> 5) & 0x1F) as u8) << 3;
                     let b = (((pixel >> 10) & 0x1F) as u8) << 3;
                     // Replicate high 3 bits into low 3 for fuller range.
-                    out.extend_from_slice(&[r | (r >> 5), g | (g >> 5), b | (b >> 5), 0xFF]);
+                    px[..3].copy_from_slice(&[r | (r >> 5), g | (g >> 5), b | (b >> 5)]);
                 }
             }
         }
@@ -2681,23 +2705,48 @@ impl Gpu {
         // check-mask preserves destination pixels whose bit15 is set, and
         // force-mask ORs bit15 into every written pixel.
         let mask_check = self.mask_check_before_draw;
-        let mask_set = self.mask_set_on_draw;
-        let mut row = vec![0u16; w as usize];
-        for dy_off in 0..h {
-            for dx_off in 0..w {
-                row[dx_off as usize] = self.vram.get_pixel(sx + dx_off, sy + dy_off);
-            }
-            for dx_off in 0..w {
-                let (px, py) = (dx + dx_off, dy + dy_off);
-                if mask_check && self.vram.get_pixel(px, py) & 0x8000 != 0 {
-                    continue;
+        let mask_or = if self.mask_set_on_draw { 0x8000 } else { 0 };
+        // Each source row is read whole before its destination row is
+        // written, so overlapping rectangles copy as before. Columns and
+        // rows wrap at the VRAM edges.
+        let (sx, dx, w) = (usize::from(sx), usize::from(dx), usize::from(w));
+        let vram = self.vram.array_mut();
+        let mut row = [0u16; VRAM_WIDTH];
+        let row = &mut row[..w];
+        for dy_off in 0..usize::from(h) {
+            let src = ((usize::from(sy) + dy_off) % VRAM_HEIGHT) * VRAM_WIDTH;
+            let dst = ((usize::from(dy) + dy_off) % VRAM_HEIGHT) * VRAM_WIDTH;
+            if !mask_check && sx + w <= VRAM_WIDTH && dx + w <= VRAM_WIDTH {
+                // No wrap and no mask test: a move (overlap-safe, like the
+                // row buffer), then the forced mask bit.
+                vram.copy_within(src + sx..src + sx + w, dst + dx);
+                if mask_or != 0 {
+                    for p in &mut vram[dst + dx..dst + dx + w] {
+                        *p |= mask_or;
+                    }
                 }
-                let pixel = if mask_set {
-                    row[dx_off as usize] | 0x8000
+                continue;
+            }
+            let first = w.min(VRAM_WIDTH - sx);
+            row[..first].copy_from_slice(&vram[src + sx..src + sx + first]);
+            row[first..].copy_from_slice(&vram[src..src + (w - first)]);
+            let first = w.min(VRAM_WIDTH - dx);
+            let (a, b) = row.split_at(first);
+            for (part, start) in [(a, dx), (b, 0)] {
+                let out = &mut vram[dst + start..dst + start + part.len()];
+                if !mask_check && mask_or == 0 {
+                    out.copy_from_slice(part);
+                } else if mask_check {
+                    for (o, &p) in out.iter_mut().zip(part) {
+                        if *o & 0x8000 == 0 {
+                            *o = p | mask_or;
+                        }
+                    }
                 } else {
-                    row[dx_off as usize]
-                };
-                self.vram.set_pixel(px, py, pixel);
+                    for (o, &p) in out.iter_mut().zip(part) {
+                        *o = p | mask_or;
+                    }
+                }
             }
         }
     }
@@ -3121,29 +3170,17 @@ impl Gpu {
                 return;
             }
 
-            let left = left as usize;
-            let right = right as usize;
-            let top = top as usize;
-            let bottom = bottom as usize;
-            let set_mask = self.mask_set_on_draw;
-            let check_mask = self.mask_check_before_draw;
-            for py in top..=bottom {
-                let row_start = py * VRAM_WIDTH;
-                for existing in &mut self.vram.words_mut()[row_start + left..=row_start + right] {
-                    if check_mask && *existing & 0x8000 != 0 {
-                        continue;
-                    }
-                    let mut pixel = if mode == BlendMode::Opaque {
-                        color
-                    } else {
-                        blend_pixel(*existing, color, mode)
-                    };
-                    if set_mask {
-                        pixel |= 0x8000;
-                    }
-                    *existing = pixel;
-                }
-            }
+            let merge = span::Merge {
+                mask_check: self.mask_check_before_draw,
+                mask_or: if self.mask_set_on_draw { 0x8000 } else { 0 },
+            };
+            span::flat_rows(
+                self.vram.array_mut(),
+                (left, top, right, bottom),
+                color,
+                mode,
+                merge,
+            );
             return;
         }
         for py in top..=bottom {
@@ -4353,12 +4390,16 @@ impl Gpu {
         };
 
         let color15 = rgb24_to_bgr15(color24);
-        for row in 0..h {
-            for col in 0..w {
-                let px = (x + col) as usize % VRAM_WIDTH;
-                let py = (y + row) as usize % VRAM_HEIGHT;
-                self.vram.set_pixel(px as u16, py as u16, color15);
-            }
+        // Row slices: the columns x..x+w, wrapped at the right edge of
+        // VRAM (a width of 1024 covers the whole row), rows wrapped at the
+        // bottom.
+        let (x, w) = (usize::from(x), usize::from(w));
+        let first = w.min(VRAM_WIDTH - x);
+        let vram = self.vram.array_mut();
+        for row in 0..usize::from(h) {
+            let base = ((usize::from(y) + row) % VRAM_HEIGHT) * VRAM_WIDTH;
+            vram[base + x..base + x + first].fill(color15);
+            vram[base..base + (w - first)].fill(color15);
         }
     }
 }
