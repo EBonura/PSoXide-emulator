@@ -225,6 +225,21 @@ impl Asm {
         self.rrr(0xEB00_0000, ZR, rn, rm);
     }
 
+    /// `LDRB wt, [xn]`.
+    pub fn ldrb_w(&mut self, rt: u8, rn: u8) {
+        self.emit(0x3940_0000 | (rn as u32) << 5 | rt as u32);
+    }
+
+    /// `LDRH wt, [xn]`.
+    pub fn ldrh_w(&mut self, rt: u8, rn: u8) {
+        self.emit(0x7940_0000 | (rn as u32) << 5 | rt as u32);
+    }
+
+    /// `LDR wt, [xn, xm, LSL #2]`.
+    pub fn ldr_w_idx4(&mut self, rt: u8, rn: u8, rm: u8) {
+        self.emit(0xB860_7800 | (rm as u32) << 16 | (rn as u32) << 5 | rt as u32);
+    }
+
     /// `STR wt, [xn, xm, LSL #2]`.
     pub fn str_w_idx4(&mut self, rt: u8, rn: u8, rm: u8) {
         self.emit(0xB820_7800 | (rm as u32) << 16 | (rn as u32) << 5 | rt as u32);

@@ -17,7 +17,7 @@
 use emulator_core::cpu::block::{op_flags, Block, BlockCompiler, OpClass};
 use emulator_core::cpu::jit_abi::{
     jit_batch_memory, jit_batch_other, jit_chain, jit_gte_hazard, jit_ram_load, jit_ram_store32,
-    native_run as off, NATIVE_CHAIN_OFFSET,
+    link_cell as cell, native_run as off, LinkCell, NATIVE_BODY_OFFSET, NATIVE_CHAIN_OFFSET,
 };
 
 use crate::a64::{Asm, Cond, ZR};
@@ -66,6 +66,10 @@ pub struct TierCompiler {
     /// cache decodes a block again whenever its I-cache lines are refilled
     /// with other code and back, and the same ops compile the same.
     emitted: std::collections::HashMap<(u32, Vec<u64>), usize>,
+    /// Exit cells of the emitted code (taken, not taken), at addresses the
+    /// code holds: boxed so they stay put as the list grows.
+    #[allow(clippy::vec_box)]
+    cells: Vec<Box<[LinkCell; 2]>>,
     stats: std::sync::Arc<std::sync::Mutex<TierStats>>,
 }
 
@@ -77,6 +81,7 @@ impl TierCompiler {
             Self {
                 code: CodeBuffer::new(TIER_CODE_BYTES)?,
                 emitted: std::collections::HashMap::new(),
+                cells: Vec::new(),
                 stats: stats.clone(),
             },
             stats,
@@ -143,7 +148,13 @@ impl BlockCompiler for TierCompiler {
             self.emitted.insert(key, 0);
             return 0;
         }
-        let asm = emit(block, &steps);
+        let cells = Box::new([LinkCell::default(), LinkCell::default()]);
+        let cell_addrs = [
+            &cells[0] as *const LinkCell as u64,
+            &cells[1] as *const LinkCell as u64,
+        ];
+        self.cells.push(cells);
+        let asm = emit(block, &steps, cell_addrs);
         let Some(entry) = self.code.install(&asm.code) else {
             stats.declined += 1;
             return 0;
@@ -315,7 +326,8 @@ fn emit_issue(a: &mut Asm, word: u32) {
     a.add_x_imm(X_ISSUE, X_ISSUE, 1);
 }
 
-fn emit(block: &Block, steps: &[Step]) -> Asm {
+/// `cells`: the addresses of the block's exit cells (taken, not taken).
+fn emit(block: &Block, steps: &[Step], cells: [u64; 2]) -> Asm {
     let mut a = Asm::default();
     // Frame: x29/x30 and x19..x28.
     a.stp_x_pre(29, 30, -96);
@@ -335,6 +347,8 @@ fn emit(block: &Block, steps: &[Step]) -> Asm {
     a.ldr_x(X_RAN, X_RUN, off::RAN as u32);
     a.ldr_x(X_BUDGET, X_RUN, off::BUDGET_LEFT as u32);
     a.ldr_w(X_IRQ, X_RUN, off::IRQ_ENABLED as u32);
+    // Linked entry: another block's code jumps here with everything set up.
+    assert_eq!(a.pos() * 4, NATIVE_BODY_OFFSET);
 
     let mut exits = Vec::new();
     // The entry state may carry a load in flight.
@@ -390,9 +404,17 @@ fn emit(block: &Block, steps: &[Step]) -> Asm {
                 if maybe_pending {
                     emit_take_pending(&mut a);
                 }
+                let fast = (!store).then(|| {
+                    let helper = emit_fast_load(&mut a, word);
+                    let done = a.b();
+                    for fixup in helper {
+                        a.bind(fixup);
+                    }
+                    done
+                });
                 a.str_x(X_ISSUE, X_RUN, off::ISSUE as u32);
-                // The shadow helper may have clobbered w9: form the address
-                // again (register values have not changed since).
+                // Form the address again for the helper (register values
+                // have not changed since).
                 load_reg(&mut a, 9, (word >> 21) & 0x1F);
                 a.mov32(10, (word as i16) as i32 as u32);
                 a.add_w(1, 9, 10);
@@ -406,6 +428,9 @@ fn emit(block: &Block, steps: &[Step]) -> Asm {
                     a.mov64(16, jit_ram_load as *const () as usize as u64);
                 }
                 a.blr(16);
+                if let Some(done) = fast {
+                    a.bind(done);
+                }
                 a.mov_x(X_ISSUE, ZR);
                 let rt = (word >> 16) & 0x1F;
                 if !store && rt != 0 {
@@ -473,8 +498,9 @@ fn emit(block: &Block, steps: &[Step]) -> Asm {
         }
     }
     if steps.len() == block.ops.len() {
-        // Every op ran: on to the next block, by a jump when it runs
-        // natively too.
+        // Every op ran: on to the next block, straight through a linked
+        // exit when its checks hold, else by `jit_chain` (which links it).
+        emit_link_exit(&mut a, block, cells);
         a.str_x(X_ISSUE, X_RUN, off::ISSUE as u32);
         a.str_x(X_RAN, X_RUN, off::RAN as u32);
         a.mov_x(0, X_RUN);
@@ -500,6 +526,130 @@ fn emit(block: &Block, steps: &[Step]) -> Asm {
     a.str_x(X_RAN, X_RUN, off::RAN as u32);
     emit_epilogue(&mut a);
     a
+}
+
+/// The linked exit at the end of a block: [`Cpu::chain_fast`]'s checks
+/// and work inline, with the next block taken from the exit's
+/// [`LinkCell`]. Falls through, with `run.link` pointing at the cell, to
+/// the `jit_chain` call when a check fails.
+///
+/// [`Cpu::chain_fast`]: emulator_core::Cpu
+fn emit_link_exit(a: &mut Asm, block: &Block, cells: [u64; 2]) {
+    let n = block.ops.len();
+    let mut slow = Vec::new();
+    let branch = if block.ops[n - 1].flags & op_flags::DELAY_SLOT != 0 {
+        match classify(block.ops[n - 2].word) {
+            Class::Branch(branch) => Some(branch),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    match branch {
+        None => a.mov64(11, cells[1]),
+        Some(branch) => {
+            use crate::decode::Branch;
+            let pc = block.vaddr.wrapping_add(4 * (n as u32 - 2));
+            let word = block.ops[n - 2].word;
+            let unconditional =
+                matches!(branch, Branch::J | Branch::Jal | Branch::Jr | Branch::Jalr);
+            let not_taken = if unconditional {
+                None
+            } else {
+                a.ldr_w(10, X_RUN, off::TAKEN as u32);
+                Some(a.cbz_w(10))
+            };
+            a.mov64(11, cells[0]);
+            // The branch-boundary work has nothing to do below the quiet
+            // clock and with no interrupt pending or SR written.
+            a.ldr_x(9, X_CYCLES, 0);
+            a.add_x(9, 9, X_ISSUE);
+            a.ldr_x(10, X_RUN, off::BOUNDARY_UNTIL as u32);
+            a.cmp_x(9, 10);
+            slow.push(a.b_cond(Cond::Hs));
+            a.ldr_w(10, X_RUN, off::SLOW_BOUNDARY as u32);
+            slow.push(a.cbnz_w(10));
+            match branch {
+                Branch::Jr | Branch::Jalr => {
+                    // Kernel call vectors (low addresses) the slow way; the
+                    // cell holds the target it was linked for.
+                    a.ldr_w(12, X_RUN, off::TARGET as u32);
+                    a.mov32(13, 0x1F_FFFF);
+                    a.and_w(13, 12, 13);
+                    a.cmp_w_imm(13, 0x100);
+                    slow.push(a.b_cond(Cond::Lo));
+                    a.ldr_w(13, 11, cell::VADDR as u32);
+                    a.cmp_w(13, 12);
+                    slow.push(a.b_cond(Cond::Ne));
+                }
+                _ => {
+                    let target = if matches!(branch, Branch::J | Branch::Jal) {
+                        (pc.wrapping_add(4) & 0xF000_0000) | ((word & 0x03FF_FFFF) << 2)
+                    } else {
+                        pc.wrapping_add(4)
+                            .wrapping_add((((word as i16) as i32) << 2) as u32)
+                    };
+                    let base = (target >> 20) & 0x0FFC;
+                    if matches!(base, 0x000 | 0x800 | 0xA00) && target & 0x1F_FFFF < 0x100 {
+                        slow.push(a.b());
+                    }
+                }
+            }
+            a.str_x(9, X_RUN, off::LAST_BOUNDARY as u32);
+            if let Some(fixup) = not_taken {
+                let joined = a.b();
+                a.bind(fixup);
+                a.mov64(11, cells[1]);
+                a.bind(joined);
+            }
+        }
+    }
+    // x11 = the cell. Budget, watch, linked, still current.
+    a.cmp_x(X_RAN, X_BUDGET);
+    slow.push(a.b_cond(Cond::Hs));
+    a.ldr_w(10, X_RUN, off::WATCH as u32);
+    slow.push(a.cbnz_w(10));
+    a.ldr_x(12, 11, cell::ENTRY as u32);
+    slow.push(a.cbz_x(12));
+    a.ldr_x(13, X_RUN, off::EPOCH_PTR as u32);
+    a.ldr_x(13, 13, 0);
+    a.ldr_x(14, X_RUN, off::LINK_GEN_PTR as u32);
+    a.ldr_x(14, 14, 0);
+    a.add_x(13, 13, 14);
+    a.ldr_x(14, 11, cell::GEN as u32);
+    a.cmp_x(13, 14);
+    slow.push(a.b_cond(Cond::Ne));
+    // With interrupts enabled, RAM must still hold the target's words.
+    let no_irq = a.cbz_w(X_IRQ);
+    a.ldr_x(13, X_RUN, off::PAGES as u32);
+    for (page, count) in [(cell::PAGE1, cell::COUNT1), (cell::PAGE2, cell::COUNT2)] {
+        a.ldr_w(14, 11, page as u32);
+        a.ldr_w_idx4(14, 13, 14);
+        a.ldr_w(15, 11, count as u32);
+        a.cmp_w(14, 15);
+        slow.push(a.b_cond(Cond::Ne));
+    }
+    a.bind(no_irq);
+    // Point `run` at the target and jump.
+    a.ldr_x(13, 11, cell::OPS as u32);
+    a.str_x(13, X_RUN, off::OPS as u32);
+    for (from, to) in [
+        (cell::VADDR, off::VADDR),
+        (cell::OP_COUNT, off::OP_COUNT),
+        (cell::BLOCK, off::BLOCK),
+        (cell::AFTER_IS_GTE, off::AFTER_IS_GTE),
+    ] {
+        a.ldr_w(13, 11, from as u32);
+        a.str_w(13, X_RUN, to as u32);
+    }
+    a.str_x(X_RAN, X_RUN, off::RAN0 as u32);
+    a.str_w(X_IRQ, X_RUN, off::RAM_OK as u32);
+    a.str_w(ZR, X_RUN, off::TAKEN as u32);
+    a.br(12);
+    for fixup in slow {
+        a.bind(fixup);
+    }
+    a.str_x(11, X_RUN, off::LINK as u32);
 }
 
 fn emit_epilogue(a: &mut Asm) {
@@ -541,6 +691,87 @@ fn emit_ram_address(a: &mut Asm, word: u32) -> Vec<crate::a64::Fixup> {
     a.lsr_w_imm(10, 10, 23);
     slow.push(a.cbnz_w(10));
     slow
+}
+
+/// A main-RAM load at w9 (checked aligned and in RAM) in the common case,
+/// leaving the value in w0; what `jit_ram_load` does, inline: no I-cache
+/// fill still using the bus and no DRAM refresh due, so the load costs its
+/// six wait clocks, and it comes from cached code (the fetch was a hit), so
+/// a load shadow starts. The clock moves here; its GPU decay is left in
+/// `run.decay`. Returns the jumps to the helper for the other cases.
+fn emit_fast_load(a: &mut Asm, word: u32) -> Vec<crate::a64::Fixup> {
+    const LOAD_WAIT: u32 = 6;
+    let state = off::LOAD_STATE as u32;
+    let mut helper = Vec::new();
+    // x10 = now, the clock with this op's issue applied.
+    a.ldr_x(10, X_CYCLES, 0);
+    a.add_x(10, 10, X_ISSUE);
+    a.ldr_x(13, X_RUN, state);
+    a.ldr_x(13, 13, 0);
+    a.cmp_x(10, 13);
+    helper.push(a.b_cond(Cond::Lo));
+    a.ldr_x(13, X_RUN, state + 8);
+    a.ldr_x(13, 13, 0);
+    a.cmp_x(10, 13);
+    helper.push(a.b_cond(Cond::Hs));
+    a.ldr_x(13, X_RUN, state + 16);
+    a.str_x(10, 13, 0);
+    a.add_x_imm(14, 10, LOAD_WAIT);
+    a.str_x(14, X_CYCLES, 0);
+    a.ldr_x(13, X_RUN, off::DECAY as u32);
+    a.add_x(13, 13, X_ISSUE);
+    a.add_x_imm(13, 13, LOAD_WAIT);
+    a.str_x(13, X_RUN, off::DECAY as u32);
+    a.mov_x(X_ISSUE, ZR);
+    // x14 = the host address.
+    a.mov32(13, 0x1F_FFFF);
+    a.and_w(13, 9, 13);
+    a.ldr_x(14, X_RUN, off::RAM as u32);
+    a.add_x(14, 14, 13);
+    a.ldr_x(15, X_RUN, state + 24);
+    let op = word >> 26;
+    if op == 0x23 {
+        a.ldr_w(0, 14, 0);
+        a.str_w(0, 15, 0);
+    } else {
+        // Byte or halfword: merge it into the latch at its lane.
+        let (lane_mask, width_mask) = if matches!(op, 0x21 | 0x25) {
+            a.ldrh_w(0, 14);
+            (2, 0xFFFF)
+        } else {
+            a.ldrb_w(0, 14);
+            (3, 0xFF)
+        };
+        a.mov32(12, lane_mask);
+        a.and_w(12, 9, 12);
+        a.lsl_w_imm(12, 12, 3);
+        a.mov32(13, width_mask);
+        a.lslv_w(13, 13, 12);
+        a.orn_w(11, ZR, 13);
+        a.ldr_w(13, 15, 0);
+        a.and_w(13, 13, 11);
+        a.lslv_w(11, 0, 12);
+        a.orr_w(13, 13, 11);
+        a.str_w(13, 15, 0);
+        match op {
+            0x20 => {
+                a.lsl_w_imm(0, 0, 24);
+                a.asr_w_imm(0, 0, 24);
+            }
+            0x21 => {
+                a.lsl_w_imm(0, 0, 16);
+                a.asr_w_imm(0, 0, 16);
+            }
+            _ => {}
+        }
+    }
+    // The load shadow starts.
+    a.movz_w(13, 1, 0);
+    a.str_w(13, X_RUN, off::SHADOW as u32);
+    a.str_w(ZR, X_RUN, off::SHADOW_POS as u32);
+    a.mov32(13, (word >> 16) & 0x1F);
+    a.str_w(13, X_RUN, off::SHADOW_REG as u32);
+    helper
 }
 
 /// Take the load in flight into w27/w28 and clear it (the op about to run
