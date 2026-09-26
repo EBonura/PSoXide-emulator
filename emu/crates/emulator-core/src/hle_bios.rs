@@ -1559,6 +1559,44 @@ fn pad_existing_field(out: &mut Vec<u8>, start: usize, width: usize, pad: u8, le
     }
 }
 
+/// Cycles a retried (waiting) call charges per attempt.
+pub(crate) const RETRY_CYCLES: u64 = 2;
+
+/// Whether [`dispatch`] at `pc` would answer "retry" without changing
+/// anything: one of the waiting calls whose condition is still unmet and
+/// whose wait reads only kernel memory. Used for exact idle skipping; any
+/// call not listed here answers `false`.
+pub(crate) fn idle_wait(pc: u32, bus: &Bus, gprs: &[u32; 32]) -> bool {
+    let phys = to_physical(pc);
+    if phys >= 0x1_0000 {
+        return false;
+    }
+    let decode = crate::hle_kernel::decode_trap;
+    let (table, func) = if let Some(vector) = Table::from_phys(phys) {
+        let t1 = gprs[9];
+        let (base, len) = crate::hle_kernel::table(vector.index());
+        if t1 >= len {
+            return false;
+        }
+        let entry = crate::hle_kernel::peek32(bus, base + 4 * t1);
+        match decode(crate::hle_kernel::peek32(bus, entry)) {
+            Some((t, f)) => (Table::from_index(t), f),
+            None => return false,
+        }
+    } else {
+        match bus.peek_instruction(pc).and_then(decode) {
+            Some((t, f)) => (Table::from_index(t), f),
+            None => return false,
+        }
+    };
+    match (table, func) {
+        (Table::A, 0x55) | (Table::A, 0x70) => crate::hle_card::bu_init_waiting(bus),
+        (Table::B, 0x0A) => crate::hle_exceptions::wait_event_waiting(bus, gprs[4]),
+        (Table::B, 0x5D) => crate::hle_card::card_wait(bus, gprs[4]).is_none(),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{append_padded, dispatch, pad_existing_field, Outcome, Table};
@@ -1904,43 +1942,5 @@ mod tests {
         // B(00h) allocates from the kernel heap set up at boot.
         let k = call(&mut bus, 0xB0, 0x00, [8, 0, 0, 0]);
         assert!((0xA000_E000..0xA001_0000).contains(&k), "{k:#x}");
-    }
-}
-
-/// Cycles a retried (waiting) call charges per attempt.
-pub(crate) const RETRY_CYCLES: u64 = 2;
-
-/// Whether [`dispatch`] at `pc` would answer "retry" without changing
-/// anything: one of the waiting calls whose condition is still unmet and
-/// whose wait reads only kernel memory. Used for exact idle skipping; any
-/// call not listed here answers `false`.
-pub(crate) fn idle_wait(pc: u32, bus: &Bus, gprs: &[u32; 32]) -> bool {
-    let phys = to_physical(pc);
-    if phys >= 0x1_0000 {
-        return false;
-    }
-    let decode = crate::hle_kernel::decode_trap;
-    let (table, func) = if let Some(vector) = Table::from_phys(phys) {
-        let t1 = gprs[9];
-        let (base, len) = crate::hle_kernel::table(vector.index());
-        if t1 >= len {
-            return false;
-        }
-        let entry = crate::hle_kernel::peek32(bus, base + 4 * t1);
-        match decode(crate::hle_kernel::peek32(bus, entry)) {
-            Some((t, f)) => (Table::from_index(t), f),
-            None => return false,
-        }
-    } else {
-        match bus.peek_instruction(pc).and_then(decode) {
-            Some((t, f)) => (Table::from_index(t), f),
-            None => return false,
-        }
-    };
-    match (table, func) {
-        (Table::A, 0x55) | (Table::A, 0x70) => crate::hle_card::bu_init_waiting(bus),
-        (Table::B, 0x0A) => crate::hle_exceptions::wait_event_waiting(bus, gprs[4]),
-        (Table::B, 0x5D) => crate::hle_card::card_wait(bus, gprs[4]).is_none(),
-        _ => false,
     }
 }
