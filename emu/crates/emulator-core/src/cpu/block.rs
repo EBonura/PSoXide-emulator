@@ -667,7 +667,9 @@ impl Cpu {
     pub(super) fn run_fast(&mut self, bus: &mut Bus, budget: u64, until_cycle: u64) -> u64 {
         if self.cursor.block == 0 || self.cursor.pc != self.pc {
             self.cursor.block = 0;
-            if !(self.block_entry_ok() && self.enter_block(bus, self.pc)) {
+            if !(self.block_entry_ok() && self.enter_block(bus, self.pc))
+                && !self.can_interpret_in_batch(bus)
+            {
                 return 0;
             }
         }
@@ -692,6 +694,18 @@ impl Cpu {
         // block, so it is not asked again there.
         let mut skip_native = false;
         'blocks: loop {
+            if self.cursor.block == 0 || self.cursor.pc != self.pc {
+                // Outside any block (an I-cache miss, a delay slot entered
+                // from outside, a block end): run single steps through the
+                // interpreter while that keeps the batch's guarantees.
+                self.cursor.block = 0;
+                if !(self.block_entry_ok() && self.enter_block(bus, self.pc)) {
+                    if !self.batch_interpret_step(bus, &mut st) {
+                        break 'blocks;
+                    }
+                    continue 'blocks;
+                }
+            }
             let irq_enabled = self.irq_enabled();
             let index = (self.cursor.block - 1) as usize;
             // The hazard reads the next word from the block while RAM
@@ -717,8 +731,15 @@ impl Cpu {
                 // cache until the loop leaves this block.
                 let op = unsafe { *ops.add(self.cursor.op as usize) };
                 let delay = op.flags & op_flags::DELAY_SLOT != 0;
-                if op.flags & op_flags::BATCH == 0 || st.done >= st.budget {
+                if st.done >= st.budget {
                     break 'blocks;
+                }
+                if op.flags & op_flags::BATCH == 0 {
+                    // Not a batch op: a single interpreter step, when safe.
+                    if !self.batch_interpret_step(bus, &mut st) {
+                        break 'blocks;
+                    }
+                    continue 'blocks;
                 }
                 if bus.cycles() + st.issue + 1 >= st.limit {
                     if bus.cycles() + st.issue + 1 >= st.hard {
@@ -810,10 +831,7 @@ impl Cpu {
                 }
                 self.branch_delay_next = op.class == OpClass::Branch;
                 if let Some(target) = branch_after_this {
-                    if !self.batch_taken_boundary(bus, target, &mut st)
-                        || device
-                        || !self.enter_block(bus, self.pc)
-                    {
+                    if !self.batch_taken_boundary(bus, target, &mut st) || device {
                         break 'blocks;
                     }
                     continue 'blocks;
@@ -821,7 +839,7 @@ impl Cpu {
                 self.pc = pc.wrapping_add(4);
                 if op.flags & op_flags::LAST != 0 {
                     self.cursor.block = 0;
-                    if device || !self.enter_block(bus, self.pc) {
+                    if device {
                         break 'blocks;
                     }
                     continue 'blocks;
@@ -854,6 +872,87 @@ impl Cpu {
         let (hard, soft) = bus.quiet_limits();
         st.hard = hard.min(st.until_cycle);
         st.limit = st.hard.min(soft);
+    }
+
+    /// Whether the interpreter's step at the PC changes nothing but the
+    /// CPU, main RAM, the scratchpad and the clock (so a batch may run it
+    /// and go on), given that it does not reach the batch's hard limit: a
+    /// cached, executable, non-HLE PC outside a taken branch's delay slot
+    /// (whose step drains the scheduler), not next to a GTE command with
+    /// interrupts enabled (whose step samples the interrupt line), and an
+    /// instruction that is register arithmetic, a branch, a trapping or
+    /// multiply/divide or COP0/GTE register op, a GTE command without
+    /// interrupts, or a load or store to main RAM or the scratchpad. What
+    /// the fetch returns is the cache's word on a hit, RAM's on a miss.
+    fn can_interpret_in_batch(&self, bus: &Bus) -> bool {
+        let pc = self.pc;
+        if !self.block_cache_enabled
+            || self.cpu_cycle_profile_enabled
+            || self.instruction_class_profile_enabled
+            || self.instruction_cache_event_profile_enabled
+            || self.pending_pc.is_some()
+            || self.cop0[12] & (1 << 16) != 0
+            || self.cache_control & CACHE_CONTROL_IS1 == 0
+            || pc & 3 != 0
+            || pc >= 0xA000_0000
+        {
+            return false;
+        }
+        let phys = memory::to_physical(pc);
+        if phys >= memory::ram::MIRROR_END || (bus.hle_bios_enabled && phys < 0x1_0000) {
+            return false;
+        }
+        let word = match self.instruction_cache.hit(phys) {
+            Some(word) => word,
+            None => bus.ram_word((phys % RAM_BYTES) as usize),
+        };
+        if self.irq_enabled()
+            && (self.gte_irq_watch.is_some() || bus.peek_is_gte_command(pc.wrapping_add(4)))
+        {
+            return false;
+        }
+        match classify(word) {
+            Some(OpClass::Alu | OpClass::Branch | OpClass::Other) => true,
+            Some(OpClass::GteCommand) => !self.irq_enabled(),
+            Some(OpClass::Load | OpClass::Store) => {
+                let addr = self
+                    .gpr(((word >> 21) & 0x1F) as u8)
+                    .wrapping_add((word as i16) as i32 as u32);
+                matches!(access_kind(word, addr), Access::Quiet)
+            }
+            Some(OpClass::Terminator) | None => false,
+        }
+    }
+
+    /// Inside a batch, run one instruction through the interpreter's step
+    /// (see [`Cpu::can_interpret_in_batch`]) after settling the batch's
+    /// clock and interrupt-line count. `false`, having changed nothing, when
+    /// that is not safe or the budget or clock limit is reached; the batch
+    /// then ends. The batch also ends after a step that reached the hard
+    /// limit, so the caller sees what it dispatched.
+    fn batch_interpret_step(&mut self, bus: &mut Bus, st: &mut BatchState) -> bool {
+        if st.done >= st.budget
+            || bus.cycles() + st.issue + 1 >= st.hard
+            || !self.can_interpret_in_batch(bus)
+        {
+            return false;
+        }
+        bus.advance_quiet(st.issue);
+        st.issue = 0;
+        if st.uncounted != 0 && bus.external_interrupt_pending_quiet(st.uncounted) {
+            self.irq_line_high_steps = self.irq_line_high_steps.saturating_add(st.uncounted);
+        }
+        st.uncounted = 0;
+        let stepped = self.execute_one_cached(bus);
+        debug_assert!(stepped.is_ok(), "a batch step runs a valid instruction");
+        st.done += 1;
+        // The step set the fetch flags its own way.
+        st.refetch = true;
+        if bus.cycles() >= st.hard {
+            return false;
+        }
+        self.batch_new_limits(bus, st);
+        true
     }
 
     /// The GTE interrupt hazard's sample of the interrupt line at the start
