@@ -106,6 +106,7 @@ fn draw_contents(ui: &mut egui::Ui, state: &mut AppState, vram_tex: egui::Textur
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            collapsible(ui, "Developer", true, |ui| developer(ui, state));
             let mut export = None;
             collapsible(ui, "Guest performance (PS1)", true, |ui| {
                 export = psoxide_debug_ui::draw(ui, &mut state.guest_stats, Some(vram_tex));
@@ -135,6 +136,72 @@ fn draw_contents(ui: &mut egui::Ui, state: &mut AppState, vram_tex: egui::Textur
                 vram::draw_contents(ui, vram_tex);
             });
         });
+}
+
+/// Stepping, render debugging, freecam, and the SDK examples build.
+fn developer(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .button("Step one instruction")
+            .on_hover_text("Pause, then retire one CPU instruction")
+            .clicked()
+        {
+            state.running = false;
+            state.menu.sync_run_label(false);
+            if let Some(bus) = state.bus.as_mut() {
+                if let Ok(record) = state.cpu.step_traced(bus) {
+                    crate::app::push_history(&mut state.exec_history, record);
+                }
+            }
+        }
+        if ui
+            .button("Advance one frame")
+            .on_hover_text("Pause, then run one emulated frame")
+            .clicked()
+        {
+            state.running = false;
+            state.menu.sync_run_label(false);
+            crate::app::step_one_frame(state);
+        }
+    });
+    // Wireframe mode lives on the GPU; there is nothing to flip before a
+    // game is loaded.
+    let mut wireframe = state.bus.as_ref().is_some_and(|b| b.gpu.wireframe_enabled);
+    let response = ui.add_enabled(
+        state.bus.is_some(),
+        egui::Checkbox::new(&mut wireframe, "Wireframe (edges only)"),
+    );
+    if response.changed() {
+        if let Some(bus) = state.bus.as_mut() {
+            bus.gpu.wireframe_enabled = wireframe;
+        }
+    }
+    // Switching freecam KEEPS the camera pose, matching the L3+R3 chord, so
+    // glancing back at the game and returning keeps the framing.
+    let mut freecam = state.freelook.enabled;
+    if ui
+        .checkbox(&mut freecam, "Freecam (tap L3+R3)")
+        .on_hover_text(
+            "Left stick moves, right stick looks, R2 boosts. Game input is paused \
+             while it is on. Hold L3+R3 to reset the camera.",
+        )
+        .changed()
+    {
+        state.freelook.enabled = freecam;
+        state.status_message_set(if freecam {
+            "Freecam ON - pad drives the camera, game input paused (hold L3+R3 to reset)"
+        } else {
+            "Freecam controls off - framing preserved; pad returns to the game"
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if ui
+        .button("Build SDK examples")
+        .on_hover_text("Run `make examples` in the background, then refresh the library")
+        .clicked()
+    {
+        state.start_examples_build();
+    }
 }
 
 fn collapsible(

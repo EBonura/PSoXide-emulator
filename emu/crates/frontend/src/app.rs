@@ -38,7 +38,7 @@ fn env_flag(name: &str) -> bool {
 }
 
 /// Panels that can be shown/hidden via the Menu. The Menu *is* the
-/// library browser (Games / Examples columns), so we don't have
+/// library browser (its Library column), so we don't have
 /// a separate "library" panel -- it's integrated into the shell
 /// the PSX way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -147,7 +147,7 @@ pub mod bundled {
     /// menu column it lands in.
     #[derive(Copy, Clone, PartialEq, Eq)]
     pub enum BundledKind {
-        /// A full disc image, booted through the no-BIOS HLE disc path. Games.
+        /// A full disc image, booted through the no-BIOS HLE disc path.
         #[allow(dead_code)]
         DiscBin,
         /// A raw PSX-EXE, side-loaded. Examples and tests; roughly a tenth the
@@ -194,9 +194,8 @@ pub mod bundled {
 
     /// The baked-in payloads in menu order. The first auto-boots on load.
     ///
-    /// Games hold shipped homebrew; examples hold the SDK/engine samples and
-    /// tests. They are separate columns in the menu, so a sample never shows up
-    /// beside a real game.
+    /// These are SDK/engine samples and tests; the menu lists them in the
+    /// Library's Homebrew folder, apart from the games folder.
     pub static DISCS: &[BundledDisc] = &[
         example!("game-breakout", "sample game"),
         example!("game-invaders", "sample game"),
@@ -257,7 +256,8 @@ pub struct AppState {
     /// recorded before it is persisted beside its input tape.
     pending_input_profile_capture: Option<PendingInputProfileCapture>,
 
-    /// Background `make examples` job launched from the Examples menu.
+    /// Background `make examples` job launched from the debug sidebar or an
+    /// unbuilt example row.
     examples_build_child: Option<Child>,
     /// CD burning submenu state and burner hotplug watcher.
     pub(crate) burn: BurnState,
@@ -329,8 +329,8 @@ pub struct AppState {
     pub settings: Settings,
     /// Cached library scan results. Populated from
     /// `<config>/library.ron` at startup, refreshed by
-    /// [`AppState::rescan_library`] (triggered from the Menu's
-    /// Games / Examples "Refresh library" row).
+    /// [`AppState::rescan_library`] (triggered from the Library's
+    /// "Refresh library" row).
     pub library: Library,
     /// Resolved on-disk paths (settings.ron, library.ron, per-game
     /// subtree). Set once from the platform default or a
@@ -360,7 +360,7 @@ pub struct AppState {
     #[cfg(not(target_arch = "wasm32"))]
     pending_savestate_thumbnails: Vec<PathBuf>,
     /// Web build: games found by the last folder scan, as `(id, title,
-    /// subtitle)`. Injected into the Games menu category; launching one reads
+    /// subtitle)`. Listed in the Library's games tree; launching one reads
     /// its file bytes on demand.
     #[cfg(target_arch = "wasm32")]
     web_games: Vec<(String, String, String)>,
@@ -383,6 +383,11 @@ pub struct AppState {
     /// (volume descriptor, directories, SYSTEM.CNF, executable) to arrive.
     #[cfg(target_arch = "wasm32")]
     web_pending_boot: Option<PendingWebBoot>,
+    /// Web: the demo disc started at page open is still assembling. Any
+    /// other launch in the meantime abandons it, so it never boots over
+    /// the user's choice.
+    #[cfg(target_arch = "wasm32")]
+    web_autoboot: bool,
     /// [`emulator_core::game_image_hash`] of the current game image, both
     /// targets. Recorded into browser tape CSVs; compared when a replay
     /// loads so a changed build gets flagged to the user. `None` when the
@@ -520,6 +525,8 @@ impl AppState {
             web_boot: None,
             #[cfg(target_arch = "wasm32")]
             web_pending_boot: None,
+            #[cfg(target_arch = "wasm32")]
+            web_autoboot: false,
             current_game_hash: None,
         };
         // Startup auto-rescan: always run when a developer-facing build dir
@@ -544,9 +551,8 @@ impl AppState {
                 eprintln!("[frontend] startup auto-rescan skipped: {e}");
             }
         }
-        // Seed the Menu's Games + Examples columns from the (now
-        // possibly-rescanned) library so the user sees entries
-        // immediately instead of a "No games found" placeholder.
+        // Seed the Menu's Library from the (now possibly-rescanned)
+        // library so the user sees entries immediately.
         out.refresh_menu_library();
         out.menu
             .set_menu_opacity(out.settings.video.menu_opacity_pct);
@@ -568,17 +574,28 @@ impl AppState {
         #[cfg(target_arch = "wasm32")]
         crate::web_files::check_saved();
         #[cfg(target_arch = "wasm32")]
-        if let Some(disc) = crate::web_bench::disc_param() {
-            crate::web_files::fetch_game(&disc);
+        {
+            let disc = crate::web_bench::disc_param();
+            if let Some(disc) = disc.as_deref() {
+                crate::web_files::fetch_game(disc);
+            }
+            if let Some(id) = web_autoboot_id(disc.as_deref()) {
+                if let Some(stream) = crate::web_stream::find(id) {
+                    // Quiet until the manifest answers: a dev build without
+                    // the delivery staged falls back to the menu silently.
+                    crate::web_stream::start(stream);
+                    out.web_autoboot = true;
+                    out.menu.open = false;
+                }
+            }
         }
         #[cfg(target_arch = "wasm32")]
         if crate::web_bench::flag("smooth") {
             out.settings.video.smooth_slow_host = true;
             out.menu.set_smooth_slow_host(true);
         }
-        // Both builds start on the open menu (bundled discs like Celeste are
-        // launchable from the Games/Examples categories), rather than
-        // auto-booting into a game.
+        // Native starts on the open menu; the web page boots the demo disc
+        // when its delivery is served (Esc opens the menu).
         out
     }
 }
@@ -1008,7 +1025,7 @@ impl AppState {
         self.refresh_save_state_menu_rows();
     }
 
-    /// Rebuild the System menu's save-state rows from whatever's
+    /// Refresh the save-states panel's rows from whatever's
     /// actually on disk for the running game. Call after anything
     /// that could change the set of saves (a save, a load, launching
     /// a different game) -- cheap (one directory listing plus a
@@ -1020,7 +1037,7 @@ impl AppState {
             Some(game_id) => self.build_save_state_rows(&game_id),
             None => Vec::new(),
         };
-        self.menu.sync_save_states(self.running, &rows);
+        self.menu.sync_save_states(&rows);
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1042,7 +1059,7 @@ impl AppState {
                 }]
             })
             .unwrap_or_default();
-        self.menu.sync_save_states(self.running, &rows);
+        self.menu.sync_save_states(&rows);
     }
 
     /// Newest-first `SaveStateRow`s for `game_id`, each labeled with a
@@ -1122,6 +1139,11 @@ impl AppState {
             #[cfg(not(target_arch = "wasm32"))]
             let _ = kind;
             return Ok(());
+        }
+        #[cfg(target_arch = "wasm32")]
+        if self.web_autoboot && id != DEMO_DISC_ID {
+            self.web_autoboot = false;
+            crate::web_stream::abandon();
         }
         // Web streamed discs: kick off the fetch; boot happens on a later
         // frame via `poll_web_uploads` once the bytes are in.
@@ -1224,7 +1246,7 @@ impl AppState {
     /// entries, the Menu's columns show the "No … found" placeholder
     /// instead of blowing up.
     ///
-    /// Also refreshes the Menu's Games + Examples columns so the
+    /// Also refreshes the Menu's Library so the
     /// newly-scanned entries appear immediately.
     pub fn rescan_library(&mut self) -> Result<usize, String> {
         let game_library = self.settings.paths.game_library.trim();
@@ -1282,7 +1304,7 @@ impl AppState {
     }
 
     /// Build the public SDK/engine examples in the background so the
-    /// Examples menu can populate a fresh clone without blocking UI
+    /// Homebrew folder can populate a fresh clone without blocking UI
     /// frames. Completion is handled by [`Self::poll_examples_build`].
     pub fn start_examples_build(&mut self) {
         if self.finish_completed_examples_build() {
@@ -1539,11 +1561,9 @@ impl AppState {
         games.sort_by_key(|a| a.title.to_lowercase());
         examples.sort_by_key(|a| a.title.to_lowercase());
         projects.sort_by_key(|a| a.title.to_lowercase());
-        // Web build: surface the baked-in payloads. A disc image is a shipped
-        // game and belongs under Games; a baked EXE is an SDK/engine sample and
-        // belongs under Examples, next to the ones a source tree would list.
-        // Baked disc images are shipped games; the EXEs were folded into
-        // Examples above, for both targets.
+        // Web build: surface the baked-in payloads. A baked disc image is a
+        // shipped game and joins the games list; the baked EXEs were folded
+        // into the examples above, for both targets.
         #[cfg(target_arch = "wasm32")]
         for disc in bundled::DISCS {
             if disc.kind != bundled::BundledKind::DiscBin {
@@ -1558,18 +1578,21 @@ impl AppState {
                 launchable: true,
             });
         }
-        // Streamed discs sit beside the baked ones; the subtitle says the
+        // Streamed discs head the Homebrew folder; the subtitle says the
         // download out loud so the click is informed.
         #[cfg(target_arch = "wasm32")]
-        for disc in crate::web_stream::DISCS {
-            games.push(MenuLibraryItem {
-                folder: std::path::PathBuf::new(),
-                id: disc.id.to_string(),
-                title: disc.title.to_string(),
-                subtitle: disc.subtitle.to_string(),
-                burnable: false,
-                launchable: true,
-            });
+        for (index, disc) in crate::web_stream::DISCS.iter().enumerate() {
+            examples.insert(
+                index,
+                MenuLibraryItem {
+                    folder: std::path::PathBuf::new(),
+                    id: disc.id.to_string(),
+                    title: disc.title.to_string(),
+                    subtitle: disc.subtitle.to_string(),
+                    burnable: false,
+                    launchable: true,
+                },
+            );
         }
         #[cfg(target_arch = "wasm32")]
         for (id, title, subtitle) in &self.web_games {
@@ -1609,13 +1632,13 @@ impl AppState {
                 return None;
             }
             if crate::web_files::saved_available() {
-                return Some("Saved games found - reconnect your folder in Settings");
+                return Some("Saved games found - reconnect your folder in the Library");
             }
-            return Some("Load a games folder in Settings");
+            return Some("Load a games folder from the Library");
         }
         #[cfg(not(target_arch = "wasm32"))]
         if self.games_path_missing() {
-            Some("Set a games folder in Settings to list your disc collection")
+            Some("Choose a games folder in the Library to list your disc collection")
         } else {
             None
         }
@@ -1780,12 +1803,12 @@ impl AppState {
     #[cfg(target_arch = "wasm32")]
     pub fn poll_web_uploads(&mut self) {
         self.poll_streamed_disc();
-        // A folder scan finished: rebuild the Games list and jump to it.
+        // A folder scan finished: rebuild the Library and jump to it.
         if let Some(scanned) = crate::web_files::take_scanned() {
             let n = scanned.len();
             self.web_games = scanned;
             self.refresh_menu_library();
-            self.menu.select_category("Games");
+            self.menu.select_category("Library");
             self.status_message_set(format!("Found {n} game(s) in folder"));
         }
         for error in crate::web_files::drain_load_errors() {
@@ -1916,7 +1939,20 @@ impl AppState {
     #[cfg(target_arch = "wasm32")]
     fn poll_streamed_disc(&mut self) {
         use crate::web_stream::{BgEvent, BootStatus};
-        match crate::web_stream::poll_boot() {
+        let status = crate::web_stream::poll_boot();
+        if matches!(
+            status,
+            BootStatus::Ready { .. } | BootStatus::Failed(_) | BootStatus::NotServed(_)
+        ) && std::mem::take(&mut self.web_autoboot)
+        {
+            // The page-open boot has resolved; on failure show the menu.
+            self.menu.open = !matches!(status, BootStatus::Ready { .. });
+            if stream_failure_is_quiet(true, matches!(status, BootStatus::NotServed(_))) {
+                self.status_message = None;
+                return;
+            }
+        }
+        match status {
             BootStatus::Idle => {}
             BootStatus::Progress(line) => self.status_message_set(line),
             BootStatus::Ready {
@@ -1960,7 +1996,9 @@ impl AppState {
                     Err(e) => self.status_message_set(format!("{}: {e}", disc.title)),
                 }
             }
-            BootStatus::Failed(message) => self.status_message_set(message),
+            BootStatus::Failed(message) | BootStatus::NotServed(message) => {
+                self.status_message_set(message)
+            }
         }
 
         for BgEvent::TrackReady(number, pcm) in crate::web_stream::poll_background() {
@@ -2131,7 +2169,7 @@ impl AppState {
         self.menu.sync_run_label(true);
     }
 
-    /// Choose and persist the games folder from the Menu Settings column.
+    /// Choose and persist the games folder from the Menu's Library.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn choose_games_path(&mut self) {
         let mut dialog = rfd::FileDialog::new().set_title("Choose games folder");
@@ -2168,9 +2206,9 @@ impl AppState {
         crate::web_files::pick_games();
     }
 
-    /// Refresh the Settings menu's games folder.
+    /// Show the games folder on the Library's folder row.
     pub fn sync_menu_settings_paths(&mut self) {
-        self.menu.sync_settings_paths(self.games_path_label());
+        self.menu.set_games_path_label(self.games_path_label());
     }
 
     /// Current display label for every rebindable port-1 target, for
@@ -2627,8 +2665,8 @@ impl AppState {
 const STATUS_MESSAGE_TTL_SECS: f32 = 3.5;
 
 /// Format the right-aligned subtitle the Menu shows next to a
-/// game's title. Keeps everything in one place so the Games and
-/// Examples columns stay visually consistent.
+/// game's title. Keeps everything in one place so games and homebrew
+/// rows stay visually consistent.
 fn format_subtitle(e: &LibraryEntry) -> String {
     let region = match e.region {
         Region::NtscU => "NTSC-U",
@@ -2825,7 +2863,7 @@ fn public_example_source_items(
     items
 }
 
-/// Fold the baked-in examples into a scanned Examples column.
+/// Fold the baked-in examples into the scanned examples list.
 ///
 /// Three cases, and the middle one is what shipped broken: a source checkout
 /// lists every known example, including ones it has not compiled, as a "not
@@ -3381,6 +3419,25 @@ fn load_sidecar_disc_for_exe(exe_path: &Path) -> Result<Option<Disc>, String> {
     Ok(None)
 }
 
+/// Launch id of the streamed demo disc.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) const DEMO_DISC_ID: &str = "stream:demo-disc";
+
+/// What the web page boots at open: a `?disc=` file boots through its own
+/// hook, otherwise the streamed demo disc does.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn web_autoboot_id(disc_param: Option<&str>) -> Option<&'static str> {
+    disc_param.is_none().then_some(DEMO_DISC_ID)
+}
+
+/// Whether a streamed-disc failure passes without a message: only the
+/// page-open boot on a page that does not serve the delivery (a dev build).
+/// A click, or a delivery that is served but broken, always reports.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn stream_failure_is_quiet(autoboot: bool, manifest_missing: bool) -> bool {
+    autoboot && manifest_missing
+}
+
 /// Build all panels/overlays for one frame. Called from `gfx::Graphics::render`
 /// inside the egui context. `dt` drives Menu animations.
 pub fn build_ui(
@@ -3423,6 +3480,17 @@ fn next_ui_scale_pct(current: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_page_autoboots_the_demo_disc_unless_a_disc_is_named() {
+        assert_eq!(web_autoboot_id(None), Some(DEMO_DISC_ID));
+        assert_eq!(web_autoboot_id(Some("g/game.bin")), None);
+        // A dev build without the delivery falls back to the menu quietly.
+        assert!(stream_failure_is_quiet(true, true));
+        // A served but broken delivery, or any click, still reports.
+        assert!(!stream_failure_is_quiet(true, false));
+        assert!(!stream_failure_is_quiet(false, true));
+    }
 
     #[test]
     fn library_keeps_same_id_discs_in_their_own_cue_folders() {
