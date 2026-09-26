@@ -188,17 +188,25 @@ impl Block {
     #[inline(never)]
     fn revalidate(&mut self, cache: &InstructionCache) -> bool {
         let base = memory::to_physical(self.vaddr);
-        let same = self
-            .ops
-            .iter()
-            .enumerate()
-            .all(|(i, op)| cache.hit(base.wrapping_add(4 * i as u32)) == Some(op.word));
-        if same {
-            for (phys, generation) in &mut self.lines[..self.line_count as usize] {
-                *generation = cache.generation(*phys);
+        let end = base.wrapping_add(4 * self.ops.len() as u32);
+        // Only the words in lines that changed can differ.
+        for &(line, generation) in &self.lines[..self.line_count as usize] {
+            if cache.generation(line) == generation {
+                continue;
+            }
+            let mut phys = line.max(base);
+            while phys < (line + 0x10).min(end) {
+                let op = &self.ops[(phys.wrapping_sub(base) / 4) as usize];
+                if cache.hit(phys) != Some(op.word) {
+                    return false;
+                }
+                phys += 4;
             }
         }
-        same
+        for (phys, generation) in &mut self.lines[..self.line_count as usize] {
+            *generation = cache.generation(*phys);
+        }
+        true
     }
 }
 
@@ -606,6 +614,16 @@ impl Cpu {
         // The fetch flags need setting for a plain cache hit.
         let mut refetch = true;
         let mut limit = bus.quiet_limit().min(until_cycle);
+        // The GTE hazard's watch: only the hazard sample sets it, and the
+        // batch stops before any step that would sample, so the first step
+        // takes it and it stays clear. A watch on that first step with
+        // interrupts on means the step samples: leave it to the interpreter.
+        if let Some(watch) = self.gte_irq_watch {
+            if watch == self.pc && self.cop0[12] & IRQ_ENABLED == IRQ_ENABLED {
+                return 0;
+            }
+            self.gte_irq_watch = None;
+        }
         'blocks: loop {
             let irq_enabled = self.cop0[12] & IRQ_ENABLED == IRQ_ENABLED;
             let index = (self.cursor.block - 1) as usize;
@@ -639,7 +657,7 @@ impl Cpu {
                     } else {
                         bus.peek_is_gte_command(pc.wrapping_add(4))
                     };
-                    if self.gte_irq_watch == Some(pc) || next_gte {
+                    if next_gte {
                         break 'blocks;
                     }
                 }
@@ -666,7 +684,6 @@ impl Cpu {
                     bus.note_cached_fetch(true);
                     refetch = false;
                 }
-                self.gte_irq_watch = None;
                 issue += if self.load_shadow.is_some() && self.hides_in_load_shadow(op.word, bus) {
                     0
                 } else {
@@ -750,7 +767,10 @@ impl Cpu {
                             .expect("enter_exception staged a vector");
                         break 'blocks;
                     }
-                    if device || !self.enter_block(bus, self.pc) {
+                    if device {
+                        break 'blocks;
+                    }
+                    if !self.enter_block(bus, self.pc) {
                         break 'blocks;
                     }
                     continue 'blocks;
@@ -758,7 +778,10 @@ impl Cpu {
                 self.pc = pc.wrapping_add(4);
                 if op.flags & op_flags::LAST != 0 {
                     self.cursor.block = 0;
-                    if device || !self.enter_block(bus, self.pc) {
+                    if device {
+                        break 'blocks;
+                    }
+                    if !self.enter_block(bus, self.pc) {
                         break 'blocks;
                     }
                     continue 'blocks;
