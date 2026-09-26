@@ -388,13 +388,18 @@ fn main() {
             let (mut cpu, mut bus) = machine(&code, &handler);
             let mut jit = Jit::new().expect("map code buffer");
             let use_jit = args[1] == "jit";
+            if args[1] == "tier" {
+                psoxide_jit::install_tier(&mut cpu).expect("tier");
+            }
             let t0 = cpu_seconds();
             while cpu.tick() < instructions {
-                if use_jit {
-                    let left = instructions - cpu.tick();
-                    jit.run(&mut cpu, &mut bus, left).expect("run");
-                } else {
-                    cpu.step(&mut bus).expect("step");
+                let left = instructions - cpu.tick();
+                match args[1].as_str() {
+                    "jit" => jit.run(&mut cpu, &mut bus, left).expect("run"),
+                    "run" | "tier" => {
+                        cpu.run(&mut bus, left, u64::MAX, |_| false).1.expect("run");
+                    }
+                    _ => cpu.step(&mut bus).expect("step"),
                 }
             }
             let s = cpu_seconds() - t0;

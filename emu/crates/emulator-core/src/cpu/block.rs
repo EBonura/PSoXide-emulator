@@ -236,6 +236,38 @@ pub trait BlockCompiler: Send {
     fn compile(&mut self, block: &Block) -> usize;
 }
 
+/// How the native tier handed control back to the batch loop
+/// ([`Cpu::run_native`]).
+enum NativeExit {
+    /// Carry on interpreting at the cursor.
+    Resume,
+    /// End the batch (an interrupt was taken, an exception raised, or no
+    /// block could be entered).
+    Break,
+}
+
+/// The batch loop's running state ([`Cpu::run_fast`]), shared with the
+/// native tier's chaining helper.
+#[doc(hidden)]
+pub struct BatchState {
+    /// Issue cycles not yet applied to the bus clock.
+    pub issue: u64,
+    /// Steps retired in this batch.
+    pub done: u64,
+    /// Steps the batch may retire.
+    pub budget: u64,
+    /// Steps since the interrupt line was last counted.
+    pub uncounted: u64,
+    /// Clock limit the batch must never reach.
+    pub hard: u64,
+    /// `hard`, or the end of the GPU's quiet span when that is earlier.
+    pub limit: u64,
+    /// The caller's cycle limit.
+    pub until_cycle: u64,
+    /// The fetch flags need setting for a plain cache hit.
+    pub refetch: bool,
+}
+
 /// Entries after which a block is handed to the native tier.
 const NATIVE_THRESHOLD: u32 = 16;
 /// [`Block::native`] for a block the native tier declined.
@@ -639,46 +671,44 @@ impl Cpu {
                 return 0;
             }
         }
-        const IRQ_ENABLED: u32 = 0x401;
-        let mut done = 0u64;
-        // Steps since the interrupt line was last counted.
-        let mut uncounted = 0u64;
-        // Issue cycles not yet applied to the bus clock.
-        let mut issue = 0u64;
-        // The fetch flags need setting for a plain cache hit.
-        let mut refetch = true;
-        let mut limit = bus.quiet_limit().min(until_cycle);
-        // The GTE hazard's watch: only the hazard sample sets it, and the
-        // batch stops before any step that would sample, so the first step
-        // takes it and it stays clear. A watch on that first step with
-        // interrupts on means the step samples: leave it to the interpreter.
-        if let Some(watch) = self.gte_irq_watch {
-            if watch == self.pc && self.cop0[12] & IRQ_ENABLED == IRQ_ENABLED {
-                return 0;
-            }
-            self.gte_irq_watch = None;
-        }
+        // The clock limit: `hard` must never be reached inside the batch;
+        // `limit` is also below the GPU's quiet span, past which each
+        // step's issue cycle is applied at once (`eager`) so the GPU list
+        // walk and FIFO advance exactly as under per-instruction ticks.
+        let (hard, soft) = bus.quiet_limits();
+        let hard = hard.min(until_cycle);
+        let mut st = BatchState {
+            issue: 0,
+            done: 0,
+            budget,
+            uncounted: 0,
+            hard,
+            limit: hard.min(soft),
+            until_cycle,
+            refetch: true,
+        };
+        let mut eager = false;
+        // Set when the native tier handed back control at the start of a
+        // block, so it is not asked again there.
+        let mut skip_native = false;
         'blocks: loop {
-            let irq_enabled = self.cop0[12] & IRQ_ENABLED == IRQ_ENABLED;
+            let irq_enabled = self.irq_enabled();
             let index = (self.cursor.block - 1) as usize;
             // The hazard reads the next word from the block while RAM
             // matches it; a store in the batch ends that for this block.
             let mut ram_ok = irq_enabled && self.block_ram_matches(bus, index);
             let after_is_gte = self.blocks.blocks[index].after_is_gte;
-            if self.cursor.op == 0 && self.blocks.compiler.is_some() {
-                self.run_native(
-                    bus,
-                    index,
-                    irq_enabled,
-                    &mut ram_ok,
-                    &mut issue,
-                    &mut refetch,
-                    limit,
-                    budget,
-                    &mut done,
-                    &mut uncounted,
-                );
+            if !skip_native && self.cursor.op == 0 && self.blocks.compiler.is_some() {
+                match self.run_native(bus, index, irq_enabled, ram_ok, &mut st) {
+                    Some(NativeExit::Resume) => {
+                        skip_native = true;
+                        continue 'blocks;
+                    }
+                    Some(NativeExit::Break) => break 'blocks,
+                    None => {}
+                }
             }
+            skip_native = false;
             let ops = self.blocks.blocks[index].ops.as_ptr();
             loop {
                 let pc = self.pc;
@@ -687,15 +717,33 @@ impl Cpu {
                 // cache until the loop leaves this block.
                 let op = unsafe { *ops.add(self.cursor.op as usize) };
                 let delay = op.flags & op_flags::DELAY_SLOT != 0;
-                if op.flags & op_flags::BATCH == 0
-                    || done >= budget
-                    || bus.cycles() + issue + 1 >= limit
-                {
+                if op.flags & op_flags::BATCH == 0 || st.done >= st.budget {
                     break 'blocks;
                 }
+                if bus.cycles() + st.issue + 1 >= st.limit {
+                    if bus.cycles() + st.issue + 1 >= st.hard {
+                        break 'blocks;
+                    }
+                    // Past the GPU's quiet span: settle the clock exactly
+                    // and go on one step at a time.
+                    bus.advance_exact(st.issue);
+                    st.issue = 0;
+                    self.batch_new_limits(bus, &mut st);
+                    if bus.cycles() + 1 >= st.hard {
+                        break 'blocks;
+                    }
+                    eager = bus.cycles() + 1 >= st.limit;
+                }
                 if irq_enabled {
+                    // The GTE interrupt hazard (`Cpu::gte_irq_hazard`): around
+                    // a GTE command the step samples the interrupt line.
+                    let next = if delay {
+                        self.pending_pc.unwrap_or(pc.wrapping_add(4))
+                    } else {
+                        pc.wrapping_add(4)
+                    };
                     let next_gte = if delay {
-                        bus.peek_is_gte_command(self.pending_pc.unwrap_or(pc.wrapping_add(4)))
+                        bus.peek_is_gte_command(next)
                     } else if ram_ok {
                         if op.flags & op_flags::LAST != 0 {
                             after_is_gte
@@ -703,11 +751,19 @@ impl Cpu {
                             op.flags & op_flags::NEXT_GTE != 0
                         }
                     } else {
-                        bus.peek_is_gte_command(pc.wrapping_add(4))
+                        bus.peek_is_gte_command(next)
                     };
-                    if next_gte {
-                        break 'blocks;
+                    let watched = self.gte_irq_watch == Some(pc);
+                    if watched || next_gte {
+                        if !self.batch_gte_sample(bus, &mut st.issue) {
+                            break 'blocks;
+                        }
+                        self.gte_irq_watch = next_gte.then_some(next);
+                    } else {
+                        self.gte_irq_watch = None;
                     }
+                } else {
+                    self.gte_irq_watch = None;
                 }
                 let memory = matches!(op.class, OpClass::Load | OpClass::Store);
                 let mut addr = 0;
@@ -729,16 +785,22 @@ impl Cpu {
                     pc,
                     delay,
                     addr,
-                    &mut issue,
-                    &mut refetch,
-                    limit,
+                    &mut st.issue,
+                    &mut st.refetch,
+                    st.limit,
                     &mut ram_ok,
                 ) else {
                     break 'blocks;
                 };
+                if eager {
+                    // This step's issue cycle, applied as its tick would.
+                    bus.advance_exact(st.issue);
+                    st.issue = 0;
+                    eager = false;
+                }
                 self.tick += 1;
-                done += 1;
-                uncounted += 1;
+                st.done += 1;
+                st.uncounted += 1;
                 if let Some(vector) = self.pending_exception_pc.take() {
                     // An `Other` op trapped (overflow, coprocessor
                     // unusable); never in a delay slot. Entering the
@@ -748,36 +810,10 @@ impl Cpu {
                 }
                 self.branch_delay_next = op.class == OpClass::Branch;
                 if let Some(target) = branch_after_this {
-                    // Taken branch: the branch-boundary work reads the clock
-                    // and may raise interrupts; settle everything first.
-                    self.pc = target;
-                    bus.advance_quiet(issue);
-                    issue = 0;
-                    if bus.external_interrupt_pending_quiet(uncounted) {
-                        self.irq_line_high_steps =
-                            self.irq_line_high_steps.saturating_add(uncounted);
-                    }
-                    uncounted = 0;
-                    self.cursor.block = 0;
-                    self.apply_redux_bios_kernel_call_intercept();
-                    if !bus.post_op_quiet() {
-                        bus.drain_scheduler_events_post_op();
-                        limit = bus.quiet_limit().min(until_cycle);
-                    }
-                    if self.should_take_interrupt(bus) {
-                        self.should_take_interrupt_steps =
-                            self.should_take_interrupt_steps.saturating_add(1);
-                        self.enter_exception(ExceptionCode::Interrupt, self.pc, false);
-                        self.pc = self
-                            .pending_exception_pc
-                            .take()
-                            .expect("enter_exception staged a vector");
-                        break 'blocks;
-                    }
-                    if device {
-                        break 'blocks;
-                    }
-                    if !self.enter_block(bus, self.pc) {
+                    if !self.batch_taken_boundary(bus, target, &mut st)
+                        || device
+                        || !self.enter_block(bus, self.pc)
+                    {
                         break 'blocks;
                     }
                     continue 'blocks;
@@ -785,10 +821,7 @@ impl Cpu {
                 self.pc = pc.wrapping_add(4);
                 if op.flags & op_flags::LAST != 0 {
                     self.cursor.block = 0;
-                    if device {
-                        break 'blocks;
-                    }
-                    if !self.enter_block(bus, self.pc) {
+                    if device || !self.enter_block(bus, self.pc) {
                         break 'blocks;
                     }
                     continue 'blocks;
@@ -800,107 +833,226 @@ impl Cpu {
                 }
             }
         }
-        bus.advance_quiet(issue);
-        if uncounted != 0 && bus.external_interrupt_pending_quiet(uncounted) {
-            self.irq_line_high_steps = self.irq_line_high_steps.saturating_add(uncounted);
+        bus.advance_quiet(st.issue);
+        if st.uncounted != 0 && bus.external_interrupt_pending_quiet(st.uncounted) {
+            self.irq_line_high_steps = self.irq_line_high_steps.saturating_add(st.uncounted);
         }
-        done
+        st.done
     }
 
-    /// The native tier's part of a block entered at its first op: compile it
-    /// once it is hot, then run the compiled prefix (see
-    /// [`jit_abi::NativeRun`](super::jit_abi::NativeRun)). Leaves the
-    /// cursor, the PC and the batch state where the interpreted loop picks
-    /// up, as if it had run the same ops itself.
+    /// SR IEc and IM2 are both set: the interrupt line can be taken.
     #[inline(always)]
-    #[allow(clippy::too_many_arguments)]
-    fn run_native(
+    pub(super) fn irq_enabled(&self) -> bool {
+        const IRQ_ENABLED: u32 = 0x401;
+        self.cop0[12] & IRQ_ENABLED == IRQ_ENABLED
+    }
+
+    /// Recompute the batch's clock limits after the clock or the scheduler
+    /// moved outside a quiet stretch.
+    #[inline(always)]
+    fn batch_new_limits(&self, bus: &Bus, st: &mut BatchState) {
+        let (hard, soft) = bus.quiet_limits();
+        st.hard = hard.min(st.until_cycle);
+        st.limit = st.hard.min(soft);
+    }
+
+    /// The GTE interrupt hazard's sample of the interrupt line at the start
+    /// of a step (`Cpu::gte_irq_sample`), inside a batch: the clock is
+    /// settled, then the sample's branch-boundary drain is done only when it
+    /// has nothing to do ([`Bus::post_op_quiet`]) and no interrupt is
+    /// pending, in which case the sample's only effect is the watch the
+    /// caller sets. `false` (the step is left to the interpreter) otherwise:
+    /// then an interrupt could be taken after a GTE command, which the batch
+    /// does not model.
+    #[inline(always)]
+    pub(super) fn batch_gte_sample(&mut self, bus: &mut Bus, issue: &mut u64) -> bool {
+        bus.advance_quiet(*issue);
+        *issue = 0;
+        !bus.irq().pending() && bus.post_op_quiet()
+    }
+
+    /// The branch-boundary work after a taken branch's delay slot, as the
+    /// interpreter's step does it: settle the clock, count the interrupt
+    /// line, the kernel-call intercept, the scheduler and CD drain (or its
+    /// quiet shortcut, then new clock limits), and the interrupt check.
+    /// Leaves the PC at `target` and the cursor outside any block. `false`
+    /// when an interrupt was taken (the PC is then at its vector).
+    #[inline(always)]
+    pub(super) fn batch_taken_boundary(
         &mut self,
         bus: &mut Bus,
+        target: u32,
+        st: &mut BatchState,
+    ) -> bool {
+        // Taken branch: the branch-boundary work reads the clock and may
+        // raise interrupts; settle everything first.
+        self.pc = target;
+        bus.advance_quiet(st.issue);
+        st.issue = 0;
+        if bus.external_interrupt_pending_quiet(st.uncounted) {
+            self.irq_line_high_steps = self.irq_line_high_steps.saturating_add(st.uncounted);
+        }
+        st.uncounted = 0;
+        self.cursor.block = 0;
+        self.apply_redux_bios_kernel_call_intercept();
+        if !bus.post_op_quiet() {
+            bus.drain_scheduler_events_post_op();
+            self.batch_new_limits(bus, st);
+        }
+        if self.should_take_interrupt(bus) {
+            self.should_take_interrupt_steps = self.should_take_interrupt_steps.saturating_add(1);
+            self.enter_exception(ExceptionCode::Interrupt, self.pc, false);
+            self.pc = self
+                .pending_exception_pc
+                .take()
+                .expect("enter_exception staged a vector");
+            return false;
+        }
+        true
+    }
+
+    /// The native code for block `index`, entered at its first op, when
+    /// the native tier may run it now: compiled (compiling it once it is
+    /// hot), a plain cache-hit fetch at hand, the decoded words standing in
+    /// for RAM when the GTE hazard needs them, no watch, budget left.
+    #[inline(always)]
+    pub(super) fn native_ready(
+        &mut self,
+        bus: &Bus,
         index: usize,
         irq_enabled: bool,
-        ram_ok: &mut bool,
-        issue: &mut u64,
-        refetch: &mut bool,
-        limit: u64,
-        budget: u64,
-        done: &mut u64,
-        uncounted: &mut u64,
-    ) {
+        ram_ok: bool,
+        st: &BatchState,
+    ) -> Option<usize> {
         let mut native = self.blocks.blocks[index].native;
         if native == 0 {
             if self.blocks.blocks[index].hits < NATIVE_THRESHOLD {
-                return;
+                return None;
             }
-            let compiler = self
-                .blocks
-                .compiler
-                .as_mut()
-                .expect("checked by the caller");
+            let compiler = self.blocks.compiler.as_mut()?;
             native = match compiler.compile(&self.blocks.blocks[index]) {
                 0 => NATIVE_DECLINED,
                 entry => entry,
             };
             self.blocks.blocks[index].native = native;
         }
-        // Compiled code starts with a plain cache-hit fetch and checks the
-        // GTE hazard only through the decoded words.
         if native == NATIVE_DECLINED
             || !bus.code_stream_idle()
-            || (irq_enabled && !*ram_ok)
+            || (irq_enabled && !ram_ok)
             || self.pending_pc.is_some()
-            || *done >= budget
+            || self.gte_irq_watch.is_some()
+            || st.done >= st.budget
         {
-            return;
+            return None;
         }
-        if *refetch {
+        Some(native)
+    }
+
+    /// Point `run` at block `index`, about to run from its first op.
+    #[inline(always)]
+    pub(super) fn native_enter(
+        &self,
+        run: &mut super::jit_abi::NativeRun,
+        index: usize,
+        irq_enabled: bool,
+        ram_ok: bool,
+        st: &BatchState,
+    ) {
+        let block = &self.blocks.blocks[index];
+        run.ops = block.ops.as_ptr();
+        run.vaddr = block.vaddr;
+        run.op_count = block.ops.len() as u32;
+        run.tick0 = self.tick;
+        run.issue = st.issue;
+        run.limit = st.limit;
+        run.budget_left = st.budget - st.done;
+        run.ran = 0;
+        run.ram_ok = u32::from(ram_ok);
+        run.irq_enabled = u32::from(irq_enabled);
+        run.taken = 0;
+        run.target = 0;
+        run.after_is_gte = u32::from(block.after_is_gte);
+        run.status = super::jit_abi::NATIVE_IN_BLOCK;
+    }
+
+    /// Account the ops compiled code retired in the current block.
+    #[inline(always)]
+    fn native_retired(&mut self, run: &super::jit_abi::NativeRun, st: &mut BatchState) {
+        self.tick = run.tick0 + run.ran;
+        st.done += run.ran;
+        st.uncounted += run.ran;
+        st.issue = run.issue;
+    }
+
+    /// The native tier from a block entered at its first op: run compiled
+    /// code, chained from block to block, until it hands back. `None` when
+    /// the block cannot run natively now (the batch loop runs it itself).
+    /// On return the CPU, the cursor and the batch state are where the
+    /// interpreted loop picks up, as if it had run the same ops itself.
+    fn run_native(
+        &mut self,
+        bus: &mut Bus,
+        index: usize,
+        irq_enabled: bool,
+        ram_ok: bool,
+        st: &mut BatchState,
+    ) -> Option<NativeExit> {
+        let native = self.native_ready(bus, index, irq_enabled, ram_ok, st)?;
+        if st.refetch {
             bus.note_cached_fetch(true);
-            *refetch = false;
+            st.refetch = false;
         }
-        let ops = self.blocks.blocks[index].ops.as_ptr();
-        let vaddr = self.blocks.blocks[index].vaddr;
-        let cycles = bus.jit_cycles_ptr();
-        let mut run = super::jit_abi::NativeRun {
-            cpu: self as *mut Cpu,
-            bus: bus as *mut Bus,
-            gprs: self.gprs.as_mut_ptr(),
-            cycles,
-            ops,
-            vaddr,
-            tick0: self.tick,
-            issue: *issue,
-            limit,
-            budget_left: budget - *done,
-            ran: 0,
-            pend_reg: 0,
-            pend_val: 0,
-            ram_ok: u32::from(*ram_ok),
-            irq_enabled: u32::from(irq_enabled),
-            shadow: u32::from(self.load_shadow.is_some()),
-        };
+        let mut run = super::jit_abi::NativeRun::new(self, bus, st);
+        self.native_enter(&mut run, index, irq_enabled, ram_ok, st);
         if let Some((reg, value)) = self.pending_load.take() {
             run.pend_reg = u32::from(reg);
             run.pend_val = value;
         }
+        run.shadow_from(self);
         // SAFETY: `native` came from the installed compiler for this block's
         // current ops, and the code only touches the state `run` points at.
         unsafe {
             let entry: super::jit_abi::NativeFn = std::mem::transmute(native);
             entry(&mut run);
         }
-        let ran = run.ran;
+        run.shadow_to(self);
         self.pending_load = (run.pend_reg != 0).then_some((run.pend_reg as u8, run.pend_val));
-        *issue = run.issue;
-        *ram_ok = run.ram_ok != 0;
-        if ran != 0 {
-            self.tick = run.tick0 + ran;
-            *done += ran;
-            *uncounted += ran;
-            self.branch_delay_next = false;
-            self.pc = vaddr.wrapping_add(4 * ran as u32);
-            self.cursor.op = ran as u32;
-            self.cursor.pc = self.pc;
+        match run.status {
+            super::jit_abi::NATIVE_BREAK => return Some(NativeExit::Break),
+            super::jit_abi::NATIVE_NEXT_BLOCK => return Some(NativeExit::Resume),
+            _ => {}
         }
+        // Stopped in the block it was running.
+        let index = (self.cursor.block - 1) as usize;
+        let ran = run.ran;
+        if run.status == super::jit_abi::NATIVE_IN_BLOCK
+            && ran as usize == self.blocks.blocks[index].ops.len()
+        {
+            // It ran the whole block (stopping after its last op): finish it
+            // as the batch loop would.
+            return Some(match self.native_block_done(bus, &run, st) {
+                Some(_) => NativeExit::Resume,
+                None => NativeExit::Break,
+            });
+        }
+        self.native_retired(&run, st);
+        self.branch_delay_next = false;
+        self.executing_in_branch_delay = false;
+        if run.status == super::jit_abi::NATIVE_EXCEPTION {
+            // The helper left the PC at the vector.
+            return Some(NativeExit::Break);
+        }
+        let block = &self.blocks.blocks[index];
+        debug_assert!((ran as usize) < block.ops.len(), "a finished block chains");
+        self.pc = run.vaddr.wrapping_add(4 * ran as u32);
+        self.cursor.op = ran as u32;
+        self.cursor.pc = self.pc;
+        if block.ops[ran as usize].flags & op_flags::DELAY_SLOT != 0 {
+            // Stopped in front of the delay slot: the branch has run.
+            self.pending_pc = (run.taken != 0).then_some(run.target);
+            self.branch_delay_next = true;
+        }
+        Some(NativeExit::Resume)
     }
 
     /// One batched step of `op` at `pc` after its checks (budget, clock
@@ -948,6 +1100,17 @@ impl Cpu {
         let memory = matches!(op.class, OpClass::Load | OpClass::Store);
         match op.class {
             OpClass::Alu | OpClass::Branch => self.execute_register_op(op, pc),
+            OpClass::Load | OpClass::Store if op.word >> 26 >= 0x30 => {
+                // LWC2/SWC2: through `execute`, which checks the GTE is
+                // enabled.
+                bus.advance_quiet(*issue);
+                *issue = 0;
+                self.pc = pc;
+                let _ = self.execute(op.word, pc, false, bus);
+                if op.class == OpClass::Store {
+                    *ram_ok = false;
+                }
+            }
             OpClass::Load | OpClass::Store => {
                 bus.advance_quiet(*issue);
                 *issue = 0;
@@ -1090,7 +1253,7 @@ pub(super) fn quiet_access(word: u32, addr: u32) -> bool {
 #[inline(always)]
 fn access_kind(word: u32, addr: u32) -> Access {
     let aligned = match word >> 26 {
-        0x23 | 0x2B => addr & 3 == 0,
+        0x23 | 0x2B | 0x32 | 0x3A => addr & 3 == 0,
         0x21 | 0x25 | 0x29 => addr & 1 == 0,
         _ => true,
     };
@@ -1118,10 +1281,12 @@ fn decoded(word: u32, class: OpClass, flags: u8) -> DecodedOp {
     };
     let batch = match class {
         OpClass::Alu | OpClass::Branch => true,
-        // CPU loads and stores; not LWC2/SWC2, which go through the GTE.
-        OpClass::Load | OpClass::Store => word >> 26 <= 0x2E,
-        OpClass::Other => flags & op_flags::DELAY_SLOT == 0,
-        OpClass::GteCommand | OpClass::Terminator => false,
+        // CPU loads and stores; LWC2/SWC2 (which can trap on a disabled
+        // GTE) and GTE commands outside delay slots, like the other ops
+        // that can trap.
+        OpClass::Load | OpClass::Store => word >> 26 <= 0x2E || flags & op_flags::DELAY_SLOT == 0,
+        OpClass::Other | OpClass::GteCommand => flags & op_flags::DELAY_SLOT == 0,
+        OpClass::Terminator => false,
     };
     let bus_flag = bus_flag | if batch { op_flags::BATCH } else { 0 };
     DecodedOp {

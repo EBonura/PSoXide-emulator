@@ -816,7 +816,7 @@ fn call(a: &mut Asm, helper: Helper, arg3: u32, arg4: u32) {
     a.blr(16);
 }
 
-fn load_reg(a: &mut Asm, host: u8, guest: u32) {
+pub(crate) fn load_reg(a: &mut Asm, host: u8, guest: u32) {
     if guest == 0 {
         a.movz_w(host, 0, 0);
     } else {
@@ -919,6 +919,14 @@ pub(crate) fn emit_alu(a: &mut Asm, alu: Alu, word: u32) {
 }
 
 fn emit_branch(a: &mut Asm, branch: Branch, word: u32, pc: u32) {
+    emit_branch_decision(a, branch, word, pc);
+    a.str_w(11, X_FRAME, F_TAKEN);
+    a.str_w(12, X_FRAME, F_TARGET);
+}
+
+/// A branch's decision: writes the link register (through the squashing
+/// path, like `set_gpr`), and leaves w11 = taken (0/1), w12 = target.
+pub(crate) fn emit_branch_decision(a: &mut Asm, branch: Branch, word: u32, pc: u32) {
     let rs = (word >> 21) & 0x1F;
     let rt = (word >> 16) & 0x1F;
     let rd = (word >> 11) & 0x1F;
@@ -990,8 +998,6 @@ fn emit_branch(a: &mut Asm, branch: Branch, word: u32, pc: u32) {
             a.mov32(12, branch_target);
         }
     }
-    a.str_w(11, X_FRAME, F_TAKEN);
-    a.str_w(12, X_FRAME, F_TARGET);
 }
 
 /// Commit the load in flight after a native instruction, unless that
