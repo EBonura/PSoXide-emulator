@@ -1033,31 +1033,6 @@ impl Gpu {
         self.cmd_log.get(idx as usize)
     }
 
-    /// Read one 24-bit display pixel. VRAM bytes are packed: pixel
-    /// N lives at byte offsets `3*N..3*N+2` within a row, and each
-    /// row is 2048 bytes (1024 × 16-bit). The three bytes may
-    /// straddle two VRAM halfwords -- we read them individually.
-    /// 24bpp pixel `px` of a display line starting at VRAM halfword
-    /// `start_x` (GP1(05h) addresses halfwords in every depth).
-    fn read_pixel_rgb24(&self, start_x: u16, px: u16, y: u16) -> (u8, u8, u8) {
-        let byte_x = (start_x as u32) * 2 + (px as u32) * 3;
-        let word_x = (byte_x / 2) as u16;
-        let even = byte_x & 1 == 0;
-        let w0 = self.vram.get_pixel(word_x, y);
-        let w1 = self.vram.get_pixel(word_x.wrapping_add(1), y);
-        if even {
-            let r = (w0 & 0xFF) as u8;
-            let g = (w0 >> 8) as u8;
-            let b = (w1 & 0xFF) as u8;
-            (r, g, b)
-        } else {
-            let r = (w0 >> 8) as u8;
-            let g = (w1 & 0xFF) as u8;
-            let b = (w1 >> 8) as u8;
-            (r, g, b)
-        }
-    }
-
     /// Horizontal presentation offset, in displayed pixels, requested by
     /// GP1(06h) relative to the standard centred window. Real hardware slides
     /// the active picture by this much within the video signal (the classic

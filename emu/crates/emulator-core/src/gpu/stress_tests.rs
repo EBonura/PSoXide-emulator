@@ -604,9 +604,29 @@ fn raster_stress_wireframe() {
     );
 }
 
+/// One 24-bit display pixel the way the display readout used to fetch
+/// it: pixel `px` of a line starting at VRAM halfword `start_x` covers
+/// bytes `3*px..3*px+2` from there, which may straddle two halfwords.
+fn reference_rgb24(gpu: &Gpu, start_x: u16, px: u16, y: u16) -> (u8, u8, u8) {
+    let byte_x = (start_x as u32) * 2 + (px as u32) * 3;
+    let word_x = (byte_x / 2) as u16;
+    let w0 = gpu.vram.get_pixel(word_x, y);
+    let w1 = gpu.vram.get_pixel(word_x.wrapping_add(1), y);
+    if byte_x & 1 == 0 {
+        ((w0 & 0xFF) as u8, (w0 >> 8) as u8, (w1 & 0xFF) as u8)
+    } else {
+        ((w0 >> 8) as u8, (w1 & 0xFF) as u8, (w1 >> 8) as u8)
+    }
+}
+
+/// `Gpu::display_hash` output.
+type DisplayHash = (u64, u32, u32, usize);
+/// `Gpu::display_rgba8` output.
+type DisplayRgba = (Vec<u8>, u32, u32);
+
 /// The display hash and RGBA conversion before they worked a row at a
-/// time: a pixel at a time through `get_pixel` / `read_pixel_rgb24`.
-fn reference_display(gpu: &Gpu) -> ((u64, u32, u32, usize), (Vec<u8>, u32, u32)) {
+/// time: a pixel at a time through `get_pixel` / `reference_rgb24`.
+fn reference_display(gpu: &Gpu) -> (DisplayHash, DisplayRgba) {
     let hash = if !gpu.display_configured {
         (psx_hw::hash::Fnv1a64::new().finish(), 0, 0, 0)
     } else {
@@ -622,7 +642,7 @@ fn reference_display(gpu: &Gpu) -> ((u64, u32, u32, usize), (Vec<u8>, u32, u32))
         for dy in 0..effective_h {
             for dx in 0..effective_w {
                 if da.bpp24 {
-                    let (r, g, b) = gpu.read_pixel_rgb24(da.x, dx, da.y + dy);
+                    let (r, g, b) = reference_rgb24(gpu, da.x, dx, da.y + dy);
                     h.update(&[r, g, b]);
                     byte_len += 3;
                 } else {
@@ -657,7 +677,7 @@ fn reference_display(gpu: &Gpu) -> ((u64, u32, u32, usize), (Vec<u8>, u32, u32))
             }
             let sy = da.y + src_y as u16;
             if da.bpp24 {
-                let (r, g, b) = gpu.read_pixel_rgb24(da.x, src_x as u16, sy);
+                let (r, g, b) = reference_rgb24(gpu, da.x, src_x as u16, sy);
                 out.extend_from_slice(&[r, g, b, 0xFF]);
             } else {
                 let pixel = gpu.vram.get_pixel(da.x + src_x as u16, sy);
