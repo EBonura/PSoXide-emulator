@@ -16,8 +16,8 @@ pub mod splash;
 pub mod toolbar;
 pub mod vram;
 
-use crate::app::AppState;
-use crate::input::InputRouter;
+use crate::app::{AppState, ScaleMode};
+use crate::input::{InputRouter, PsxPort};
 
 /// Paint every panel for this frame, in layering order.
 pub fn draw_layout(
@@ -34,19 +34,21 @@ pub fn draw_layout(
     state.tick_status(dt);
     let recording_input = state.input_recording_status().0;
     state.menu.sync_input_recording_label(recording_input);
+    state.menu.set_game_loaded(state.bus.is_some());
+    state.menu.sync_video_audio(
+        state.scale_mode == ScaleMode::Window,
+        state.texture_filter.label(),
+        state.audio_volume,
+        state.audio_muted,
+    );
 
-    // One-shot boot splash on a foreground layer (drawn before the workspace
-    // branch so it overlays both the emulator and editor at launch).
+    // One-shot boot splash on a foreground layer.
     splash::draw(ctx);
-
-    // When the editor workspace owns the central UI it takes over the whole
-    // frame; the emulator panels below never run. Compiled out without the
-    // editor feature (the workspace can never be the editor then).
 
     // Top-bar controls go first so the central panel (framebuffer)
     // clips to what's left under them. The unified debug sidebar
     // docks next so the framebuffer gives it room.
-    toolbar::draw(ctx, state, input_router);
+    toolbar::draw(ctx, state);
 
     // Always called: the sidebar animates itself open/closed from the
     // `debug_sidebar` flag and early-returns when fully closed.
@@ -68,6 +70,13 @@ pub fn draw_layout(
 
     let menu_warning = state.menu_setup_warning();
     state.menu.draw(ctx, dt, menu_warning);
+    let mut port_message = None;
+    state
+        .menu
+        .draw_controls(ctx, |ui| port_message = controller_ports(ui, input_router));
+    if let Some(message) = port_message {
+        state.status_message_set(message);
+    }
     burn::draw(ctx, state);
     draw_recording_indicator(ctx, state);
     draw_freecam_indicator(ctx, state);
@@ -83,14 +92,6 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             // Auto-close the overlay so Run is observable immediately.
             if state.running {
                 state.menu.open = false;
-            }
-            MenuOutcome::None
-        }
-        StepOne => {
-            if let Some(bus) = state.bus.as_mut() {
-                if let Ok(record) = state.cpu.step_traced(bus) {
-                    crate::app::push_history(&mut state.exec_history, record);
-                }
             }
             MenuOutcome::None
         }
@@ -147,8 +148,7 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
         }
         LaunchGame(id) => {
             // Game-launch rebuilds Bus + Cpu from scratch. Close
-            // the Menu on success so the user sees the freshly-
-            // booted BIOS / EXE, exactly like a real PSX shell.
+            // the Menu on success so the user sees the game boot.
             match state.launch_by_id(&id) {
                 Ok(()) => {
                     state.menu.open = false;
@@ -191,6 +191,30 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.choose_games_path();
             MenuOutcome::None
         }
+        CycleVideoScale => {
+            state.scale_mode = match state.scale_mode {
+                ScaleMode::Window => ScaleMode::Native,
+                ScaleMode::Native => ScaleMode::Window,
+            };
+            MenuOutcome::None
+        }
+        CycleTextureFilter => {
+            state.texture_filter = state.texture_filter.next();
+            MenuOutcome::None
+        }
+        CycleVolume => {
+            const STEPS: [f32; 7] = [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5];
+            state.audio_volume = STEPS
+                .into_iter()
+                .find(|&step| step > state.audio_volume + 0.01)
+                .unwrap_or(STEPS[0]);
+            state.audio_muted = false;
+            MenuOutcome::None
+        }
+        ToggleMute => {
+            state.audio_muted = !state.audio_muted;
+            MenuOutcome::None
+        }
         CycleMenuOpacity => {
             state.cycle_menu_opacity();
             MenuOutcome::None
@@ -212,9 +236,63 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.menu.show_about();
             MenuOutcome::None
         }
-        Noop => MenuOutcome::None,
         Quit => MenuOutcome::Quit,
     }
+}
+
+/// The Controls panel's port section: which host device drives which PS1
+/// controller port, and whether it presents as a digital pad or a DualShock.
+/// Returns a status message when a setting changed.
+fn controller_ports(ui: &mut egui::Ui, input_router: &mut InputRouter) -> Option<String> {
+    let mut message = None;
+    ui.label("Assign each host device to one PS1 controller port.");
+    ui.label(
+        egui::RichText::new("Digital is compatible with early games such as Crash Bandicoot.")
+            .small()
+            .color(crate::theme::MENU_TEXT_DIM),
+    );
+    ui.add_space(6.0);
+    for device in input_router.devices() {
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [220.0, 26.0],
+                egui::Label::new(egui::RichText::new(&device.name).strong()).truncate(),
+            )
+            .on_hover_text(&device.name);
+
+            let mut port = device.port;
+            egui::ComboBox::from_id_salt(("controller_port", &device.id))
+                .selected_text(port.label())
+                .width(72.0)
+                .show_ui(ui, |ui| {
+                    for choice in [PsxPort::Off, PsxPort::One, PsxPort::Two] {
+                        ui.selectable_value(&mut port, choice, choice.label());
+                    }
+                });
+            if port != device.port && input_router.set_device_port(&device.id, port) {
+                message = Some(format!("{} assigned to {}", device.name, port.label()));
+            }
+
+            let mode_label = if device.analog { "Analog" } else { "Digital" };
+            if ui
+                .add_sized([62.0, 26.0], egui::Button::new(mode_label))
+                .on_hover_text(if device.analog {
+                    "Expose an Analog DualShock (ID 0x73)"
+                } else {
+                    "Expose an original digital pad (ID 0x41)"
+                })
+                .clicked()
+                && input_router.set_device_analog(&device.id, !device.analog)
+            {
+                message = Some(format!(
+                    "{} will use {} mode",
+                    device.name,
+                    if device.analog { "Digital" } else { "Analog" }
+                ));
+            }
+        });
+    }
+    message
 }
 
 /// What the shell needs to do after an Menu action.

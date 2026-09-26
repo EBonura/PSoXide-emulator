@@ -32,8 +32,8 @@ src/
 ├── disasm.rs         # MIPS disassembler for the registers/memory panels
 └── ui/
     ├── mod.rs           # draw_layout -- composes toolbar/sidebar/framebuffer/overlays
-    ├── toolbar.rs       # top strip: status, EMU/DRAW/HOST/MIPS/dt/AUDIO, transport, toggles
-    ├── debug_sidebar.rs # right sidebar docking the four debug sections below
+    ├── toolbar.rs       # top strip: status dot + FPS; play/pause, reset, save states, controls, volume, sidebar
+    ├── debug_sidebar.rs # right sidebar: Developer tools plus the debug sections below
     ├── registers.rs     # CPU + COP0 + history + breakpoints section
     ├── memory.rs        # hex+ASCII / RAM visual map / disasm viewer, quick-jump, BP toggle
     ├── profiler.rs      # FrameProfiler data model + profiler section + CSV/stderr
@@ -46,10 +46,10 @@ src/
 
 ## Layer order, outside-in
 
-1. **Toolbar** (`egui::TopBottomPanel::top`) -- status dot, live metrics, transport controls, volume, debug toggles.
+1. **Toolbar** (`egui::TopBottomPanel::top`) -- status dot and FPS, play/pause, reset, save states, controls, volume, debug sidebar toggle.
 2. **Debug sidebar** (`egui::SidePanel::right`, hidden by default) -- one resizable sidebar docking four `CollapsingHeader` sections: CPU Registers, Memory, VRAM, Frame Profiler. All sections lay out width-aware: the GPR grid reflows 1/2/4 columns, the hex dump adapts bytes-per-row (16/8/4), the memory visual map shows a bucketed 2 MiB RAM overview, profiler bars stretch with the panel, and the VRAM image keeps its true 2:1 aspect.
 3. **Central panel** -- the live PS1 framebuffer at 4:3.
-4. **Menu overlay** on `egui::Order::Middle` -- dims background, slides animated category icons.
+4. **Menu overlay** on `egui::Order::Middle` -- dims background, slides animated category icons: Library, Game (while a game is loaded), Settings.
 5. **Burn window / status toast** on top.
 
 Each section is its own module, so adding a new one is about 150 lines and touching `ui/debug_sidebar.rs`.
@@ -83,7 +83,7 @@ The VRAM panel then renders the single `egui::Image` referencing this texture --
 ## Frame profiler
 
 The Frame Profiler is a section of the debug sidebar (toolbar bug icon or
-Menu -> Debug to open). It records a rolling sample per redraw: input/Menu, guest emulation, SPU/audio, command-log
+F3 to open). It records a rolling sample per redraw: input/Menu, guest emulation, SPU/audio, command-log
 drain, compute replay, VRAM upload, hardware-render scale/clone/replay, and
 egui/wgpu presentation. The same sample includes emulated frame count, CPU
 ticks, bus cycles, emulated VBlank cadence, draw-producing VBlank cadence,
