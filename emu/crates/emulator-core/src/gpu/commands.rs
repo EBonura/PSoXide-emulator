@@ -6,7 +6,25 @@
 /// floor. That's usually harmless because nothing reads VRAM from
 /// those paths yet; when we add them, the packet size here grows
 /// to match.
+#[inline]
 pub(super) fn gp0_packet_size(op: u8) -> usize {
+    // The FIFO model asks for this several times per queued word, so it is
+    // a table lookup rather than a branch tree.
+    PACKET_SIZE[op as usize] as usize
+}
+
+/// [`packet_size_of`] for every opcode.
+const PACKET_SIZE: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut op = 0;
+    while op < 256 {
+        t[op] = packet_size_of(op as u8) as u8;
+        op += 1;
+    }
+    t
+};
+
+const fn packet_size_of(op: u8) -> usize {
     match op {
         // NOP / clear cache / misc -- single word.
         0x00 | 0x01 | 0x03..=0x1E => 1,
