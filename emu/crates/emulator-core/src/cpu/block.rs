@@ -228,7 +228,7 @@ pub(super) struct Cursor {
 
 /// A second tier that turns hot blocks into native code (the recompiler,
 /// `psoxide-jit`). Installed with [`Cpu::set_block_compiler`].
-pub trait BlockCompiler: Send {
+pub trait BlockCompiler: Send + Sync {
     /// Compile the run of ops of `block` the native tier handles, from its
     /// first op. Returns the entry address of a
     /// [`jit_abi::NativeFn`](super::jit_abi::NativeFn), or 0 when nothing
