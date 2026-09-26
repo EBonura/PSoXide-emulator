@@ -43,7 +43,7 @@ pub struct StreamedDisc {
 /// demo-disc repo's rolling `web-disc` release; a missing file surfaces as
 /// an HTTP error in the status bar rather than a build failure.
 pub static DISCS: &[StreamedDisc] = &[StreamedDisc {
-    id: "stream:demo-disc",
+    id: crate::app::DEMO_DISC_ID,
     title: "PSoXide Demo Disc",
     subtitle: "homebrew - boots in ~25 MB, music streams in",
     manifest_url: "web-manifest.txt",
@@ -232,6 +232,9 @@ pub enum BootStatus {
     },
     /// The stream is dead; message handed over exactly once.
     Failed(String),
+    /// The manifest is not served (or not a manifest): this page has no
+    /// delivery staged, as on a dev build. Handed over exactly once.
+    NotServed(String),
 }
 
 /// A background delivery event for the shell to apply.
@@ -241,11 +244,14 @@ pub enum BgEvent {
 }
 
 /// Kick off a stream. Idempotent while one is running: double-clicking the
-/// menu entry cannot fork the pipeline.
+/// menu entry cannot fork the pipeline. A failed stream can be retried.
 pub fn start(disc: &'static StreamedDisc) {
     STREAM.with(|cell| {
         let mut slot = cell.borrow_mut();
-        if slot.is_some() {
+        if slot
+            .as_ref()
+            .is_some_and(|s| !matches!(s.phase, Phase::Failed))
+        {
             return;
         }
         ws_fetch("manifest", disc.manifest_url);
@@ -395,6 +401,12 @@ fn pump_decode(s: &mut Stream) {
     }
 }
 
+/// Drop a stream that is still assembling, so it never boots. Fetches in
+/// flight land in their slots and are reused if the disc is started again.
+pub fn abandon() {
+    STREAM.with(|cell| *cell.borrow_mut() = None);
+}
+
 fn fail(s: &mut Stream, message: String) -> BootStatus {
     s.phase = Phase::Failed;
     BootStatus::Failed(message)
@@ -418,12 +430,16 @@ pub fn poll_boot() -> BootStatus {
                 "done" => {
                     let text = String::from_utf8_lossy(&ws_take("manifest")).into_owned();
                     if let Err(e) = parse_manifest(&text, s) {
-                        return fail(s, e);
+                        s.phase = Phase::Failed;
+                        return BootStatus::NotServed(e);
                     }
                     ws_fetch("data", "demo-data.bin.gz");
                     start_fetch(s, 0);
                 }
-                "error" => return fail(s, ws_error("manifest")),
+                "error" => {
+                    s.phase = Phase::Failed;
+                    return BootStatus::NotServed(ws_error("manifest"));
+                }
                 _ => return BootStatus::Progress(format!("{}: reading manifest...", s.disc.title)),
             }
         }

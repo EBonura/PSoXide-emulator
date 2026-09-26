@@ -383,6 +383,11 @@ pub struct AppState {
     /// (volume descriptor, directories, SYSTEM.CNF, executable) to arrive.
     #[cfg(target_arch = "wasm32")]
     web_pending_boot: Option<PendingWebBoot>,
+    /// Web: the demo disc started at page open is still assembling. Any
+    /// other launch in the meantime abandons it, so it never boots over
+    /// the user's choice.
+    #[cfg(target_arch = "wasm32")]
+    web_autoboot: bool,
     /// [`emulator_core::game_image_hash`] of the current game image, both
     /// targets. Recorded into browser tape CSVs; compared when a replay
     /// loads so a changed build gets flagged to the user. `None` when the
@@ -520,6 +525,8 @@ impl AppState {
             web_boot: None,
             #[cfg(target_arch = "wasm32")]
             web_pending_boot: None,
+            #[cfg(target_arch = "wasm32")]
+            web_autoboot: false,
             current_game_hash: None,
         };
         // Startup auto-rescan: always run when a developer-facing build dir
@@ -567,16 +574,28 @@ impl AppState {
         #[cfg(target_arch = "wasm32")]
         crate::web_files::check_saved();
         #[cfg(target_arch = "wasm32")]
-        if let Some(disc) = crate::web_bench::disc_param() {
-            crate::web_files::fetch_game(&disc);
+        {
+            let disc = crate::web_bench::disc_param();
+            if let Some(disc) = disc.as_deref() {
+                crate::web_files::fetch_game(disc);
+            }
+            if let Some(id) = web_autoboot_id(disc.as_deref()) {
+                if let Some(stream) = crate::web_stream::find(id) {
+                    // Quiet until the manifest answers: a dev build without
+                    // the delivery staged falls back to the menu silently.
+                    crate::web_stream::start(stream);
+                    out.web_autoboot = true;
+                    out.menu.open = false;
+                }
+            }
         }
         #[cfg(target_arch = "wasm32")]
         if crate::web_bench::flag("smooth") {
             out.settings.video.smooth_slow_host = true;
             out.menu.set_smooth_slow_host(true);
         }
-        // Both builds start on the open menu (the Library lists the
-        // bundled discs), rather than auto-booting into a game.
+        // Native starts on the open menu; the web page boots the demo disc
+        // when its delivery is served (Esc opens the menu).
         out
     }
 }
@@ -1120,6 +1139,11 @@ impl AppState {
             #[cfg(not(target_arch = "wasm32"))]
             let _ = kind;
             return Ok(());
+        }
+        #[cfg(target_arch = "wasm32")]
+        if self.web_autoboot && id != DEMO_DISC_ID {
+            self.web_autoboot = false;
+            crate::web_stream::abandon();
         }
         // Web streamed discs: kick off the fetch; boot happens on a later
         // frame via `poll_web_uploads` once the bytes are in.
@@ -1915,7 +1939,20 @@ impl AppState {
     #[cfg(target_arch = "wasm32")]
     fn poll_streamed_disc(&mut self) {
         use crate::web_stream::{BgEvent, BootStatus};
-        match crate::web_stream::poll_boot() {
+        let status = crate::web_stream::poll_boot();
+        if matches!(
+            status,
+            BootStatus::Ready { .. } | BootStatus::Failed(_) | BootStatus::NotServed(_)
+        ) && std::mem::take(&mut self.web_autoboot)
+        {
+            // The page-open boot has resolved; on failure show the menu.
+            self.menu.open = !matches!(status, BootStatus::Ready { .. });
+            if stream_failure_is_quiet(true, matches!(status, BootStatus::NotServed(_))) {
+                self.status_message = None;
+                return;
+            }
+        }
+        match status {
             BootStatus::Idle => {}
             BootStatus::Progress(line) => self.status_message_set(line),
             BootStatus::Ready {
@@ -1959,7 +1996,9 @@ impl AppState {
                     Err(e) => self.status_message_set(format!("{}: {e}", disc.title)),
                 }
             }
-            BootStatus::Failed(message) => self.status_message_set(message),
+            BootStatus::Failed(message) | BootStatus::NotServed(message) => {
+                self.status_message_set(message)
+            }
         }
 
         for BgEvent::TrackReady(number, pcm) in crate::web_stream::poll_background() {
@@ -3380,6 +3419,25 @@ fn load_sidecar_disc_for_exe(exe_path: &Path) -> Result<Option<Disc>, String> {
     Ok(None)
 }
 
+/// Launch id of the streamed demo disc.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) const DEMO_DISC_ID: &str = "stream:demo-disc";
+
+/// What the web page boots at open: a `?disc=` file boots through its own
+/// hook, otherwise the streamed demo disc does.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn web_autoboot_id(disc_param: Option<&str>) -> Option<&'static str> {
+    disc_param.is_none().then_some(DEMO_DISC_ID)
+}
+
+/// Whether a streamed-disc failure passes without a message: only the
+/// page-open boot on a page that does not serve the delivery (a dev build).
+/// A click, or a delivery that is served but broken, always reports.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn stream_failure_is_quiet(autoboot: bool, manifest_missing: bool) -> bool {
+    autoboot && manifest_missing
+}
+
 /// Build all panels/overlays for one frame. Called from `gfx::Graphics::render`
 /// inside the egui context. `dt` drives Menu animations.
 pub fn build_ui(
@@ -3422,6 +3480,17 @@ fn next_ui_scale_pct(current: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_page_autoboots_the_demo_disc_unless_a_disc_is_named() {
+        assert_eq!(web_autoboot_id(None), Some(DEMO_DISC_ID));
+        assert_eq!(web_autoboot_id(Some("g/game.bin")), None);
+        // A dev build without the delivery falls back to the menu quietly.
+        assert!(stream_failure_is_quiet(true, true));
+        // A served but broken delivery, or any click, still reports.
+        assert!(!stream_failure_is_quiet(true, false));
+        assert!(!stream_failure_is_quiet(false, true));
+    }
 
     #[test]
     fn library_keeps_same_id_discs_in_their_own_cue_folders() {
