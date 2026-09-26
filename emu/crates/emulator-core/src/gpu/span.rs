@@ -129,6 +129,14 @@ pub(super) struct Plotter<'a> {
 }
 
 impl Plotter<'_> {
+    /// The mask-bit settings for the chunked (untraced) loops.
+    pub(super) fn merge(&self) -> Merge {
+        Merge {
+            mask_check: self.mask_check,
+            mask_or: self.mask_or,
+        }
+    }
+
     /// Same result as `Gpu::plot_pixel_with` for an in-range pixel.
     #[inline(always)]
     pub(super) fn put(&mut self, vram: &mut [u16; VRAM_LEN], idx: usize, fg: u16, mode: BlendMode) {
@@ -227,22 +235,77 @@ fn shade_lanes<const SHADE: u8, const DITHER: bool>(
     out
 }
 
-/// One span of a plain (opaque, unmasked, untraced) textured primitive
-/// whose texture page does not overlap the pixels it draws, in chunks of
-/// `LANES`: fetch the texels, shade them all, then store the opaque ones.
-/// With no overlap, fetching a chunk before storing it reads the same
-/// texels as the pixel-at-a-time order.
+/// Per-lane `blend_pixel(bg, fg, mode)`: the result keeps `fg`'s mask bit.
+#[inline(always)]
+fn blend_lanes(bg: &[u16; LANES], fg: &[u16; LANES], mode: BlendMode) -> [u16; LANES] {
+    let mut out = *fg;
+    let ch = |v: u16, shift: u16| (v >> shift) & 0x1F;
+    macro_rules! each {
+        ($op:expr) => {
+            for i in 0..LANES {
+                let (b, f) = (bg[i], fg[i]);
+                let op = $op;
+                out[i] = op(ch(b, 0), ch(f, 0))
+                    | (op(ch(b, 5), ch(f, 5)) << 5)
+                    | (op(ch(b, 10), ch(f, 10)) << 10)
+                    | (f & 0x8000);
+            }
+        };
+    }
+    match mode {
+        BlendMode::Opaque => {}
+        BlendMode::Average => each!(|b: u16, f: u16| (b + f) >> 1),
+        BlendMode::Add => each!(|b: u16, f: u16| (b + f).min(31)),
+        BlendMode::Sub => each!(|b: u16, f: u16| b.saturating_sub(f)),
+        BlendMode::AddQuarter => each!(|b: u16, f: u16| (b + (f >> 2)).min(31)),
+    }
+    out
+}
+
+/// Run `f` on the `n` (at most `LANES`) pixels of VRAM from `at` as one
+/// chunk. Lanes past `n` start as zero and are not stored back.
+#[inline(always)]
+fn with_chunk(vram: &mut [u16; VRAM_LEN], at: usize, n: usize, f: impl FnOnce(&mut [u16; LANES])) {
+    if n == LANES {
+        f((&mut vram[at..at + LANES]).try_into().unwrap());
+    } else {
+        let mut buf = [0u16; LANES];
+        for (i, b) in buf.iter_mut().enumerate().take(n) {
+            *b = vram[(at + i) & (VRAM_LEN - 1)];
+        }
+        f(&mut buf);
+        for (i, &b) in buf.iter().enumerate().take(n) {
+            vram[(at + i) & (VRAM_LEN - 1)] = b;
+        }
+    }
+}
+
+/// How the pixels of an untraced primitive land in VRAM: `plain` is an
+/// opaque primitive without the mask test (plain stores), otherwise the
+/// mask test and blending apply per pixel as in `Plotter::put`.
+#[derive(Clone, Copy)]
+pub(super) struct Merge {
+    pub mask_check: bool,
+    pub mask_or: u16,
+}
+
+/// One span of an untraced textured primitive whose texture page does not
+/// overlap the pixels it draws, in chunks of `LANES`: fetch the texels,
+/// shade them all, then merge the opaque ones into VRAM. With no overlap,
+/// fetching a chunk before storing it reads the same texels as the
+/// pixel-at-a-time order. `GENERAL` adds semi-transparency and the mask
+/// test; without it the primitive is opaque and unmasked.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn tex_span_chunked<const D: u8, const SHADE: u8, const DITHER: bool>(
+fn tex_span_chunked<const D: u8, const SHADE: u8, const DITHER: bool, const GENERAL: bool>(
     vram: &mut [u16; VRAM_LEN],
     clut: &[u16; 256],
     tex: &TexFetch,
     (y, xs, xe): (i32, i32, i32),
     start: [u32; 5],
     step: [u32; 5],
-    tint: (u32, u32, u32),
-    mask_or: u16,
+    prim: &TexTri,
+    merge: Merge,
 ) {
     let mut rgb = if SHADE == SHADE_GOURAUD {
         [
@@ -260,6 +323,7 @@ fn tex_span_chunked<const D: u8, const SHADE: u8, const DITHER: bool>(
     } else {
         [0; LANES]
     };
+    let mask_or = merge.mask_or;
     let row = y as usize * VRAM_WIDTH;
     let (mut x, end) = (xs as usize, xe as usize);
     while x < end {
@@ -270,9 +334,27 @@ fn tex_span_chunked<const D: u8, const SHADE: u8, const DITHER: bool>(
             u = u.wrapping_add(du);
             v = v.wrapping_add(dv);
         }
-        let out = shade_lanes::<SHADE, DITHER>(&texel, &rgb, tint, &doff);
+        let out = shade_lanes::<SHADE, DITHER>(&texel, &rgb, prim.tint, &doff);
         let at = row + x;
-        if n == LANES {
+        if GENERAL {
+            with_chunk(vram, at, n, |dst| {
+                let blended = if prim.semi {
+                    blend_lanes(dst, &out, prim.blend)
+                } else {
+                    out
+                };
+                for i in 0..LANES {
+                    let (d, t) = (dst[i], texel[i]);
+                    let skip = t == 0 || (merge.mask_check && d & 0x8000 != 0);
+                    let px = if prim.semi && t & 0x8000 != 0 {
+                        blended[i]
+                    } else {
+                        out[i]
+                    };
+                    dst[i] = if skip { d } else { px | mask_or };
+                }
+            });
+        } else if n == LANES {
             // A whole chunk inside the row: merge the opaque lanes into
             // the destination and store all of it back.
             let dst: &mut [u16; LANES] = (&mut vram[at..at + LANES]).try_into().unwrap();
@@ -299,78 +381,95 @@ fn tex_span_chunked<const D: u8, const SHADE: u8, const DITHER: bool>(
     }
 }
 
-/// Draw a set-up textured triangle. `SHADE` picks the texel modulation
-/// (for `SHADE_GOURAUD` the colour planes of `setup` supply the tint),
-/// `DITHER` the dithered variant of it. `SIMPLE` promises an opaque,
-/// untraced primitive without the mask test whose texture page does not
-/// overlap its own pixels, which takes the chunked span loop.
+/// The attribute planes of a set-up triangle, evaluated at a pixel.
+#[inline(always)]
+fn plane_at(p: (u32, u32, u32), x: i32, y: i32) -> u32 {
+    p.2.wrapping_add((x as u32).wrapping_mul(p.0))
+        .wrapping_add((y as u32).wrapping_mul(p.1))
+}
+
+/// Draw a set-up textured triangle, untraced, with a texture page clear of
+/// the pixels it draws (see `tex_span_chunked`). `SHADE` picks the texel
+/// modulation (for `SHADE_GOURAUD` the colour planes of `setup` supply
+/// the tint), `DITHER` the dithered variant of it.
 #[inline(never)]
-pub(super) fn tex_tri<const D: u8, const SHADE: u8, const DITHER: bool, const SIMPLE: bool>(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn tex_tri<const D: u8, const SHADE: u8, const DITHER: bool, const GENERAL: bool>(
+    vram: &mut [u16; VRAM_LEN],
+    clut: &[u16; 256],
+    setup: &TriRasterSetup,
+    clip: Clip,
+    tex: TexFetch,
+    prim: &TexTri,
+    merge: Merge,
+) {
+    let [pr, pg, pb, pu, pv] = setup.planes;
+    let step = [pr.0, pg.0, pb.0, pu.0, pv.0];
+    tri_spans(setup, clip, |y, xs, xe| {
+        let start = [
+            plane_at(pr, xs, y),
+            plane_at(pg, xs, y),
+            plane_at(pb, xs, y),
+            plane_at(pu, xs, y),
+            plane_at(pv, xs, y),
+        ];
+        tex_span_chunked::<D, SHADE, DITHER, GENERAL>(
+            vram,
+            clut,
+            &tex,
+            (y, xs, xe),
+            start,
+            step,
+            prim,
+            merge,
+        );
+    });
+}
+
+/// Draw a set-up textured triangle one pixel at a time, in exactly the
+/// hardware order. For the rare cases the chunked loop cannot take: the
+/// pixel tracer, or a texture page that overlaps the pixels drawn (a
+/// pixel may then read a texel an earlier pixel of the span just wrote).
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn tex_tri_exact(
     vram: &mut [u16; VRAM_LEN],
     clut: &[u16; 256],
     plot: &mut Plotter<'_>,
     setup: &TriRasterSetup,
     clip: Clip,
     tex: TexFetch,
+    (depth, shade, dither): (u8, u8, bool),
     prim: &TexTri,
 ) {
     let [pr, pg, pb, pu, pv] = setup.planes;
-    let at = |p: (u32, u32, u32), x: i32, y: i32| {
-        p.2.wrapping_add((x as u32).wrapping_mul(p.0))
-            .wrapping_add((y as u32).wrapping_mul(p.1))
-    };
     let (tr, tg, tb) = prim.tint;
-    if SIMPLE {
-        let step = [pr.0, pg.0, pb.0, pu.0, pv.0];
-        tri_spans(setup, clip, |y, xs, xe| {
-            let start = [
-                at(pr, xs, y),
-                at(pg, xs, y),
-                at(pb, xs, y),
-                at(pu, xs, y),
-                at(pv, xs, y),
-            ];
-            tex_span_chunked::<D, SHADE, DITHER>(
-                vram,
-                clut,
-                &tex,
-                (y, xs, xe),
-                start,
-                step,
-                prim.tint,
-                plot.mask_or,
-            );
-        });
-        return;
-    }
     tri_spans(setup, clip, |y, xs, xe| {
-        let (mut u, mut v) = (at(pu, xs, y), at(pv, xs, y));
-        let (mut r, mut g, mut b) = if SHADE == SHADE_GOURAUD {
-            (at(pr, xs, y), at(pg, xs, y), at(pb, xs, y))
-        } else {
-            (0, 0, 0)
-        };
+        let (mut u, mut v) = (plane_at(pu, xs, y), plane_at(pv, xs, y));
+        let (mut r, mut g, mut b) = (
+            plane_at(pr, xs, y),
+            plane_at(pg, xs, y),
+            plane_at(pb, xs, y),
+        );
         let row = y as usize * VRAM_WIDTH;
         for x in xs..xe {
-            let texel = tex.texel::<D>(vram, clut, u >> 24, v >> 24);
+            let texel = match depth {
+                0 => tex.texel::<DEPTH_4>(vram, clut, u >> 24, v >> 24),
+                1 => tex.texel::<DEPTH_8>(vram, clut, u >> 24, v >> 24),
+                _ => tex.texel::<DEPTH_15>(vram, clut, u >> 24, v >> 24),
+            };
             if texel != 0 {
-                let shaded = match SHADE {
-                    SHADE_RAW => texel,
-                    SHADE_FLAT => {
-                        if DITHER {
-                            modulate_tint_dithered(texel, tr, tg, tb, x, y)
-                        } else {
-                            modulate_tint(texel, tr, tg, tb)
-                        }
-                    }
-                    _ => {
-                        let (ri, gi, bi) = (r >> 24, g >> 24, b >> 24);
-                        if DITHER {
-                            modulate_tint_dithered(texel, ri, gi, bi, x, y)
-                        } else {
-                            modulate_tint(texel, ri, gi, bi)
-                        }
-                    }
+                let (kr, kg, kb) = if shade == SHADE_GOURAUD {
+                    (r >> 24, g >> 24, b >> 24)
+                } else {
+                    (tr, tg, tb)
+                };
+                let shaded = if shade == SHADE_RAW {
+                    texel
+                } else if dither {
+                    modulate_tint_dithered(texel, kr, kg, kb, x, y)
+                } else {
+                    modulate_tint(texel, kr, kg, kb)
                 };
                 let mode = if prim.semi && texel & 0x8000 != 0 {
                     prim.blend
@@ -381,40 +480,6 @@ pub(super) fn tex_tri<const D: u8, const SHADE: u8, const DITHER: bool, const SI
             }
             u = u.wrapping_add(pu.0);
             v = v.wrapping_add(pv.0);
-            if SHADE == SHADE_GOURAUD {
-                r = r.wrapping_add(pr.0);
-                g = g.wrapping_add(pg.0);
-                b = b.wrapping_add(pb.0);
-            }
-        }
-    });
-}
-
-/// Draw a set-up Gouraud (untextured) triangle.
-#[inline(always)]
-pub(super) fn shaded_tri<const DITHER: bool>(
-    vram: &mut [u16; VRAM_LEN],
-    plot: &mut Plotter<'_>,
-    setup: &TriRasterSetup,
-    clip: Clip,
-    mode: BlendMode,
-) {
-    let [pr, pg, pb, _, _] = setup.planes;
-    let at = |p: (u32, u32, u32), x: i32, y: i32| {
-        p.2.wrapping_add((x as u32).wrapping_mul(p.0))
-            .wrapping_add((y as u32).wrapping_mul(p.1))
-    };
-    tri_spans(setup, clip, |y, xs, xe| {
-        let (mut r, mut g, mut b) = (at(pr, xs, y), at(pg, xs, y), at(pb, xs, y));
-        let row = y as usize * VRAM_WIDTH;
-        for x in xs..xe {
-            let (ri, gi, bi) = (r >> 24, g >> 24, b >> 24);
-            let colour = if DITHER {
-                dither_rgb(ri as i32, gi as i32, bi as i32, x, y)
-            } else {
-                ((ri >> 3) | ((gi >> 3) << 5) | ((bi >> 3) << 10)) as u16
-            };
-            plot.put(vram, row + x as usize, colour, mode);
             r = r.wrapping_add(pr.0);
             g = g.wrapping_add(pg.0);
             b = b.wrapping_add(pb.0);
@@ -422,20 +487,151 @@ pub(super) fn shaded_tri<const DITHER: bool>(
     });
 }
 
-/// Draw a set-up flat (untextured) triangle.
+/// Draw a set-up Gouraud (untextured) triangle, untraced, in chunks of
+/// `LANES`.
+#[inline(never)]
+pub(super) fn shaded_tri<const DITHER: bool>(
+    vram: &mut [u16; VRAM_LEN],
+    setup: &TriRasterSetup,
+    clip: Clip,
+    mode: BlendMode,
+    merge: Merge,
+) {
+    let [pr, pg, pb, _, _] = setup.planes;
+    let plain = mode == BlendMode::Opaque && !merge.mask_check;
+    tri_spans(setup, clip, |y, xs, xe| {
+        let mut rgb = [
+            lanes(plane_at(pr, xs, y), pr.0),
+            lanes(plane_at(pg, xs, y), pg.0),
+            lanes(plane_at(pb, xs, y), pb.0),
+        ];
+        let doff = if DITHER {
+            dither_lanes(xs, y)
+        } else {
+            [0; LANES]
+        };
+        let row = y as usize * VRAM_WIDTH;
+        let (mut x, end) = (xs as usize, xe as usize);
+        while x < end {
+            let n = (end - x).min(LANES);
+            // `dither_rgb` / the plain 24-to-15-bit truncation per lane.
+            let mut fg = [0u16; LANES];
+            for (i, f) in fg.iter_mut().enumerate() {
+                let ch = |c: usize| {
+                    let v = (rgb[c][i] >> 24) as i16;
+                    if DITHER {
+                        ((v + doff[i] as i16).clamp(0, 255) >> 3) as u16
+                    } else {
+                        (v >> 3) as u16
+                    }
+                };
+                *f = ch(0) | (ch(1) << 5) | (ch(2) << 10);
+            }
+            merge_flat_lanes(vram, row + x, n, &fg, plain, mode, merge);
+            for (acc, s) in rgb.iter_mut().zip([pr.0, pg.0, pb.0]) {
+                advance(acc, s);
+            }
+            x += LANES;
+        }
+    });
+}
+
+/// Store an untextured chunk: every lane of it is drawn, subject to the
+/// mask test, blended by `mode`.
 #[inline(always)]
+fn merge_flat_lanes(
+    vram: &mut [u16; VRAM_LEN],
+    at: usize,
+    n: usize,
+    fg: &[u16; LANES],
+    plain: bool,
+    mode: BlendMode,
+    merge: Merge,
+) {
+    let mask_or = merge.mask_or;
+    if plain {
+        if n == LANES {
+            let dst: &mut [u16; LANES] = (&mut vram[at..at + LANES]).try_into().unwrap();
+            for i in 0..LANES {
+                dst[i] = fg[i] | mask_or;
+            }
+        } else {
+            for (i, &f) in fg.iter().enumerate().take(n) {
+                vram[(at + i) & (VRAM_LEN - 1)] = f | mask_or;
+            }
+        }
+        return;
+    }
+    with_chunk(vram, at, n, |dst| {
+        let px = blend_lanes(dst, fg, mode);
+        for i in 0..LANES {
+            let d = dst[i];
+            let skip = merge.mask_check && d & 0x8000 != 0;
+            dst[i] = if skip { d } else { px[i] | mask_or };
+        }
+    });
+}
+
+/// Draw a set-up flat (untextured) triangle, untraced.
+#[inline(never)]
 pub(super) fn flat_tri(
     vram: &mut [u16; VRAM_LEN],
-    plot: &mut Plotter<'_>,
     setup: &TriRasterSetup,
     clip: Clip,
     colour: u16,
     mode: BlendMode,
+    merge: Merge,
 ) {
+    let plain = mode == BlendMode::Opaque && !merge.mask_check;
+    let fg = [colour; LANES];
     tri_spans(setup, clip, |y, xs, xe| {
         let row = y as usize * VRAM_WIDTH;
+        if plain {
+            vram[row + xs as usize..row + xe as usize].fill(colour | merge.mask_or);
+            return;
+        }
+        let (mut x, end) = (xs as usize, xe as usize);
+        while x < end {
+            let n = (end - x).min(LANES);
+            merge_flat_lanes(vram, row + x, n, &fg, false, mode, merge);
+            x += LANES;
+        }
+    });
+}
+
+/// Draw a set-up untextured triangle one pixel at a time through
+/// `Plotter::put` (the pixel tracer's path). `shaded` interpolates the
+/// colour planes of `setup` (dithered when `dither`), otherwise every
+/// pixel is `colour`.
+#[inline(never)]
+pub(super) fn untextured_tri_exact(
+    vram: &mut [u16; VRAM_LEN],
+    plot: &mut Plotter<'_>,
+    setup: &TriRasterSetup,
+    clip: Clip,
+    shading: Option<bool>,
+    colour: u16,
+    mode: BlendMode,
+) {
+    let [pr, pg, pb, _, _] = setup.planes;
+    tri_spans(setup, clip, |y, xs, xe| {
+        let (mut r, mut g, mut b) = (
+            plane_at(pr, xs, y),
+            plane_at(pg, xs, y),
+            plane_at(pb, xs, y),
+        );
+        let row = y as usize * VRAM_WIDTH;
         for x in xs..xe {
-            plot.put(vram, row + x as usize, colour, mode);
+            let (ri, gi, bi) = (r >> 24, g >> 24, b >> 24);
+            let c = match shading {
+                None => colour,
+                Some(true) => dither_rgb(ri as i32, gi as i32, bi as i32, x, y),
+                Some(false) => ((ri >> 3) | ((gi >> 3) << 5) | ((bi >> 3) << 10)) as u16,
+            };
+            plot.put(vram, row + x as usize, c, mode);
+            r = r.wrapping_add(pr.0);
+            g = g.wrapping_add(pg.0);
+            b = b.wrapping_add(pb.0);
         }
     });
 }
