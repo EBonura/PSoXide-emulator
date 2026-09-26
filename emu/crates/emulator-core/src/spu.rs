@@ -2214,6 +2214,20 @@ impl Spu {
         let mut reverb_in_l: i32 = 0;
         let mut reverb_in_r: i32 = 0;
         for v in 0..NUM_VOICES {
+            // A keyed-off voice past its start delay with fixed volumes
+            // outputs silence and changes nothing but its diagnostics:
+            // exactly what `tick_voice` does for it, without the walk
+            // through decode, envelope and volume.
+            let voice = &self.voices[v];
+            if voice.phase == AdsrPhase::Off
+                && voice.start_delay == 0
+                && !voice.vol_l.sweep_active
+                && !voice.vol_r.sweep_active
+            {
+                self.idle_voice_diagnostics(v);
+                self.voices[v].last_sample = 0;
+                continue;
+            }
             let (l, r) = self.tick_voice(v);
             if l != 0 || r != 0 {
                 self.dbg_voiced_samples[v] = self.dbg_voiced_samples[v].saturating_add(1);
@@ -2347,6 +2361,9 @@ impl Spu {
     fn apply_kon_koff(&mut self) {
         let kon = std::mem::take(&mut self.kon_pending);
         let koff = std::mem::take(&mut self.koff_pending);
+        if kon | koff == 0 {
+            return;
+        }
         for v in 0..NUM_VOICES {
             let bit = 1u32 << v;
             let key_on = kon & bit != 0;
@@ -2368,6 +2385,22 @@ impl Spu {
                 self.voices[v].key_off();
                 self.dbg_koff_count[v] = self.dbg_koff_count[v].saturating_add(1);
             }
+        }
+    }
+
+    /// The diagnostic trace bookkeeping `tick_voice` does for an idle
+    /// voice (decoded sample 0, envelope held at its latched level).
+    #[inline(always)]
+    fn idle_voice_diagnostics(&mut self, v: usize) {
+        let env = self.voices[v].envelope;
+        if env > self.dbg_acc_emax[v] {
+            self.dbg_acc_emax[v] = env;
+        }
+        if self.dbg_sample_idx & 0x3FF == 0 && self.dbg_trace[v].len() < 2600 {
+            let ph = self.voices[v].phase as u8;
+            self.dbg_trace[v].push((self.dbg_acc_smax[v] as i16, self.dbg_acc_emax[v], ph));
+            self.dbg_acc_smax[v] = 0;
+            self.dbg_acc_emax[v] = 0;
         }
     }
 
