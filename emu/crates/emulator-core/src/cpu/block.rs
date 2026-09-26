@@ -606,6 +606,95 @@ impl Cpu {
     }
 }
 
+impl Cpu {
+    /// Execute a CPU load or store (primary opcodes `0x20..=0x2E`) to `addr`
+    /// (already checked by [`access_kind`]): plain loads and word stores to
+    /// main RAM directly (see [`Bus::cpu_ram_load`], [`Bus::cpu_ram_store32`]),
+    /// everything else through its `op_*` function.
+    #[allow(dead_code)] // the native tier (`cpu/block/tier.rs`) runs ops through these
+    #[inline(always)]
+    fn execute_memory_op(&mut self, op: DecodedOp, addr: u32, bus: &mut Bus) {
+        let instr = op.word;
+        if memory::to_physical(addr) < memory::ram::MIRROR_END {
+            let value = match instr >> 26 {
+                0x20 => Some(bus.cpu_ram_load(addr, 1) as u8 as i8 as i32 as u32),
+                0x24 => Some(bus.cpu_ram_load(addr, 1)),
+                0x21 => Some(bus.cpu_ram_load(addr, 2) as u16 as i16 as i32 as u32),
+                0x25 => Some(bus.cpu_ram_load(addr, 2)),
+                0x23 => Some(bus.cpu_ram_load(addr, 4)),
+                _ => None,
+            };
+            if let Some(value) = value {
+                if op.rt != 0 {
+                    self.pending_load = Some((op.rt, value));
+                }
+                return;
+            }
+            if instr >> 26 == 0x2B {
+                bus.cpu_ram_store32(addr, self.gpr(op.rt));
+                return;
+            }
+        }
+        let _ = match instr >> 26 {
+            0x20 => self.op_lb(instr, bus),
+            0x21 => self.op_lh(instr, bus),
+            0x22 => self.op_lwl(instr, bus),
+            0x23 => self.op_lw(instr, bus),
+            0x24 => self.op_lbu(instr, bus),
+            0x25 => self.op_lhu(instr, bus),
+            0x26 => self.op_lwr(instr, bus),
+            0x28 => self.op_sb(instr, bus),
+            0x29 => self.op_sh(instr, bus),
+            0x2A => self.op_swl(instr, bus),
+            0x2B => self.op_sw(instr, bus),
+            0x2E => self.op_swr(instr, bus),
+            _ => unreachable!("not a CPU load or store: {instr:08x}"),
+        };
+    }
+
+    /// Execute an [`OpClass::Alu`] or [`OpClass::Branch`] word: the same
+    /// `op_*` functions [`Cpu::execute`] dispatches to, none of which can
+    /// fail or touch the bus.
+    #[allow(dead_code)]
+    #[inline(always)]
+    fn execute_register_op(&mut self, op: DecodedOp, pc: u32) {
+        let instr = op.word;
+        let _ = match op.handler {
+            0x40 => self.op_sll(instr),
+            0x42 => self.op_srl(instr),
+            0x43 => self.op_sra(instr),
+            0x44 => self.op_sllv(instr),
+            0x46 => self.op_srlv(instr),
+            0x47 => self.op_srav(instr),
+            0x48 => self.op_jr(instr, pc),
+            0x49 => self.op_jalr(instr, pc),
+            0x61 => self.op_addu(instr),
+            0x63 => self.op_subu(instr),
+            0x64 => self.op_and(instr),
+            0x65 => self.op_or(instr),
+            0x66 => self.op_xor(instr),
+            0x67 => self.op_nor(instr),
+            0x6A => self.op_slt(instr),
+            0x6B => self.op_sltu(instr),
+            0x01 => self.dispatch_regimm(instr, pc),
+            0x02 => self.op_j(instr, pc),
+            0x03 => self.op_jal(instr, pc),
+            0x04 => self.op_beq(instr, pc),
+            0x05 => self.op_bne(instr, pc),
+            0x06 => self.op_blez(instr, pc),
+            0x07 => self.op_bgtz(instr, pc),
+            0x09 => self.op_addiu(instr),
+            0x0A => self.op_slti(instr),
+            0x0B => self.op_sltiu(instr),
+            0x0C => self.op_andi(instr),
+            0x0D => self.op_ori(instr),
+            0x0E => self.op_xori(instr),
+            0x0F => self.op_lui(instr),
+            _ => unreachable!("not a register-only op: {instr:08x}"),
+        };
+    }
+}
+
 /// One step of a [`Cpu::batch_simple`] op on the batch state, given as
 /// places (locals or fields; see [`Batch`]): the issue cycle or the load
 /// shadow, the load delay, the op itself (`$addr` is a memory op's

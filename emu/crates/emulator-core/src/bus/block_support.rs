@@ -300,6 +300,7 @@ impl Bus {
     /// exactly what `Cpu::charge_read` and the bus read do there (stalls,
     /// then the value and the data-bus latch). `width` is 1, 2 or 4 bytes;
     /// the address is aligned to it.
+    #[allow(dead_code)] // kept for the native tier's memory helper
     #[inline(always)]
     pub(crate) fn cpu_ram_load(&mut self, virt: u32, width: u32) -> u32 {
         let (value, stalls) = self.batch_ram_load(self.cycles, virt, width);
@@ -310,6 +311,7 @@ impl Bus {
     /// A CPU `SW` to main RAM at word-aligned `virt` with no limit oracle
     /// configured: exactly [`Bus::cpu_write32`] there (data-bus latch,
     /// write-buffer and refresh stalls, then the store).
+    #[allow(dead_code)]
     #[inline(always)]
     pub(crate) fn cpu_ram_store32(&mut self, virt: u32, value: u32) {
         let stall = self.batch_ram_store(self.cycles, virt, value, 4);
