@@ -14,6 +14,8 @@ pub enum Cond {
     Hs = 2,
     /// Unsigned lower.
     Lo = 3,
+    /// Unsigned higher.
+    Hi = 8,
     /// Signed greater or equal.
     Ge = 10,
     /// Signed less than.
@@ -159,6 +161,11 @@ impl Asm {
     pub fn cmp_w(&mut self, rn: u8, rm: u8) {
         self.rrr(0x6B00_0000, ZR, rn, rm);
     }
+    /// `ADD wd, wn, #imm12`.
+    pub fn add_w_imm(&mut self, rd: u8, rn: u8, imm12: u32) {
+        debug_assert!(imm12 < 4096);
+        self.emit(0x1100_0000 | imm12 << 10 | (rn as u32) << 5 | rd as u32);
+    }
     /// `CMP wn, #imm12`.
     pub fn cmp_w_imm(&mut self, rn: u8, imm12: u32) {
         debug_assert!(imm12 < 4096);
@@ -252,6 +259,19 @@ impl Asm {
     /// `BLR xn`.
     pub fn blr(&mut self, rn: u8) {
         self.emit(0xD63F_0000 | (rn as u32) << 5);
+    }
+    /// `BR xn`.
+    pub fn br(&mut self, rn: u8) {
+        self.emit(0xD61F_0000 | (rn as u32) << 5);
+    }
+    /// `CBZ xt, <label>` to be bound later.
+    pub fn cbz_x(&mut self, rt: u8) -> Fixup {
+        let at = self.pos();
+        self.emit(0xB400_0000 | rt as u32);
+        Fixup {
+            at,
+            kind: FixupKind::Imm19,
+        }
     }
     /// `RET`.
     pub fn ret(&mut self) {
