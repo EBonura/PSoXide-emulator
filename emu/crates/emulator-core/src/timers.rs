@@ -71,6 +71,15 @@ pub struct Timer {
     irq_fired_once: bool,
 }
 
+impl Timer {
+    /// Whether the counter can still raise an interrupt: one is enabled
+    /// (on target or on wrap), and it repeats or has not fired yet.
+    fn can_fire(&self) -> bool {
+        self.mode & (MODE_IRQ_ON_TARGET | MODE_IRQ_ON_WRAP) != 0
+            && (self.mode & MODE_IRQ_REPEAT != 0 || !self.irq_fired_once)
+    }
+}
+
 // Mode-register bit layout (nocash PSX-SPX, section "Timers").
 /// bit 0: sync enable. When set, the timer obeys the sync-mode
 /// bits below; when clear, the timer is "free-run" (pure clock).
@@ -346,7 +355,7 @@ impl Timers {
             }
         }
         self.last_advance_cycle = now;
-        self.quiet_until = self.compute_quiet_until(hsync_period);
+        self.quiet_until = self.compute_quiet_until(hsync_period, vblank_period);
         fired
     }
 
@@ -377,10 +386,25 @@ impl Timers {
     /// `Bus::settle_lazy_timers`). Timer 0's dot clock and every other sync
     /// mode, or a counter hold in progress, keep the bank advancing at every
     /// branch boundary exactly as before.
-    fn compute_quiet_until(&self, hsync_period: u64) -> u64 {
+    fn compute_quiet_until(&self, hsync_period: u64, vblank_period: u64) -> u64 {
         let mut quiet = u64::MAX;
         for idx in 0..3 {
             let t = &self.timers[idx];
+            // A counter that cannot raise an interrupt (none enabled, or a
+            // one-shot already spent) is only ever observed through its
+            // registers, and every register access advances the bank first:
+            // whatever it counts, it never needs an advance of its own.
+            if !t.can_fire() {
+                // Except that the Timer 1 VBlank-sync walk only resolves the
+                // blanking edges around the scheduler's current frame, so a
+                // synchronized Timer 1 still gets an advance every half frame.
+                let free_running = t.mode & MODE_SYNC_ENABLE == 0
+                    || ((t.mode & MODE_SYNC_MODE_MASK) >> 1 == 3 && t.sync_seen);
+                if idx == 1 && !free_running {
+                    quiet = quiet.min(vblank_period / 2);
+                }
+                continue;
+            }
             if t.counter_hold_cycles != 0 {
                 return 0;
             }
@@ -643,6 +667,7 @@ impl Timers {
         let blank_duration = blank_lines * hsync;
         let mut cursor = start;
         let mut fired = false;
+        let can_fire = self.timers[1].can_fire();
 
         while cursor < end {
             let previous_start = if next_vblank <= cursor {
@@ -665,7 +690,15 @@ impl Timers {
                 }
                 _ => (next_vblank, true, false),
             };
-            let segment = (end - cursor).min(boundary.saturating_sub(cursor).max(1));
+            let segment = if boundary <= cursor && !can_fire {
+                // Past a boundary the scheduler has not moved on yet: every
+                // further step is the same arm with no edge to take, so a
+                // counter that cannot interrupt covers the rest at once
+                // (ticks add up; only per-step IRQ edges could differ).
+                end - cursor
+            } else {
+                (end - cursor).min(boundary.saturating_sub(cursor).max(1))
+            };
 
             let timer = &mut self.timers[1];
             let source = (timer.mode >> 8) & 0x3;
