@@ -3521,12 +3521,19 @@ impl Gpu {
             semi: semi_trans,
             blend: tpage_mode,
         };
-        self.draw_tex_tri(&setup, shade, dither, &prim);
+        self.draw_tex_tri(&setup, tri_bbox([v0, v1, v2]), shade, dither, &prim);
     }
 
     /// Draw a set-up textured triangle with the span loop specialised for
     /// the current texture depth, `shade` and `dither`.
-    fn draw_tex_tri(&mut self, setup: &TriRasterSetup, shade: u8, dither: bool, prim: &TexTri) {
+    fn draw_tex_tri(
+        &mut self,
+        setup: &TriRasterSetup,
+        bbox: (i32, i32, i32, i32),
+        shade: u8,
+        dither: bool,
+        prim: &TexTri,
+    ) {
         use span::{DEPTH_15, DEPTH_4, DEPTH_8, SHADE_FLAT, SHADE_GOURAUD, SHADE_RAW};
         let clip = self.clip();
         let tex = self.tex_fetch();
@@ -3539,7 +3546,21 @@ impl Gpu {
         };
         let clut = &self.clut_cache;
         let vram = self.vram.array_mut();
-        let simple = !prim.semi && !plot.mask_check && plot.owner.is_none();
+        // The chunked loop fetches a few texels ahead of the pixels it
+        // stores, so it needs the texture page clear of the pixels drawn
+        // (any VRAM the triangle's bounding box, padded by a pixel, can
+        // reach).
+        let (x0, y0, x1, y1) = bbox;
+        let simple = !prim.semi
+            && !plot.mask_check
+            && plot.owner.is_none()
+            && !tex.page_overlaps(
+                depth,
+                (x0 - 1).max(clip.left),
+                (y0 - 1).max(clip.top),
+                (x1 + 1).min(clip.right),
+                (y1 + 1).min(clip.bottom),
+            );
         macro_rules! go {
             ($d:expr, $s:expr, $di:expr) => {
                 if simple {
@@ -3750,7 +3771,7 @@ impl Gpu {
             semi: semi_trans,
             blend: tpage_mode,
         };
-        self.draw_tex_tri(&setup, shade, dither, &prim);
+        self.draw_tex_tri(&setup, tri_bbox([v0, v1, v2]), shade, dither, &prim);
     }
 
     /// Rasterize a triangle with per-vertex colours -- Gouraud shading.
@@ -4218,6 +4239,18 @@ const DRAW_SCANLINE_Q8: u64 = 572;
 /// full-screen semi-transparent quad.
 const DRAW_SEMI_Q8: u64 = 199;
 const DRAW_SEMI_SCANLINE_Q8: u64 = 1526;
+
+/// Bounding box `(min_x, min_y, max_x, max_y)` of a triangle's vertices.
+fn tri_bbox(v: [(i32, i32); 3]) -> (i32, i32, i32, i32) {
+    let xs = v.map(|p| p.0);
+    let ys = v.map(|p| p.1);
+    (
+        xs[0].min(xs[1]).min(xs[2]),
+        ys[0].min(ys[1]).min(ys[2]),
+        xs[0].max(xs[1]).max(xs[2]),
+        ys[0].max(ys[1]).max(ys[2]),
+    )
+}
 
 fn scale_gpu_pixels(pixels: u64, numerator: u64, denominator: u64) -> u64 {
     pixels
