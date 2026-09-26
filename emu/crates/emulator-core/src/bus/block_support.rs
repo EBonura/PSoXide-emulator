@@ -136,6 +136,34 @@ impl Bus {
         true
     }
 
+    /// The first cycle at which [`Bus::post_op_quiet`] would not hold (0 when
+    /// it never does). It moves only with the scheduler, the timers and the
+    /// CD-ROM: a batch computes it once and again after each full drain.
+    #[inline]
+    pub(crate) fn post_op_quiet_until(&self) -> u64 {
+        if self.limits.pending() {
+            return 0;
+        }
+        self.scheduler
+            .lowest_target()
+            .min(self.spu_sample_deadline)
+            .min(self.timers.quiet_until())
+            .min(self.cdrom.idle_until().saturating_add(1))
+    }
+
+    /// Record a branch boundary at `now` below [`Bus::post_op_quiet_until`]:
+    /// all [`Bus::post_op_quiet`] does there.
+    #[inline(always)]
+    pub(crate) fn record_post_op(&mut self, now: u64) {
+        self.last_post_op_cycle = now;
+    }
+
+    /// Whether the interrupt line is high (no diagnostic count).
+    #[inline(always)]
+    pub(crate) fn irq_line(&self) -> bool {
+        self.irq.pending()
+    }
+
     /// Whether the word at `virt` in main RAM (or wherever
     /// [`Bus::peek_instruction`] reads) is a GTE command: the GTE interrupt
     /// hazard's look at the next instruction, with main RAM read directly.

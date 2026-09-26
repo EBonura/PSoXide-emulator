@@ -147,6 +147,9 @@ pub struct Block {
     /// The RAM word after the last op is a GTE command (as last checked).
     after_is_gte: bool,
     ram_stamp: RamStamp,
+    /// The blocks entered from this one lately, as (PC, block index plus
+    /// one): a cache in front of the slot table ([`Cpu::batch_enter`]).
+    exits: [(u32, u32); 2],
     /// `(line base physical address, generation)` of every I-cache line
     /// the ops were read from.
     lines: [(u32, u32); MAX_LINES],
@@ -459,6 +462,7 @@ impl Cpu {
                         ram_matches: false,
                         after_is_gte: false,
                         ram_stamp: RamStamp::default(),
+                        exits: [(0, 0); 2],
                     },
                 );
                 old.ops.clear();
@@ -466,6 +470,7 @@ impl Cpu {
                 old.native = 0;
                 old.hits = 0;
                 old.ram_stamp = RamStamp::default();
+                old.exits = [(0, 0); 2];
                 old
             }
             None => Block {
@@ -479,6 +484,7 @@ impl Cpu {
                 ram_matches: false,
                 after_is_gte: false,
                 ram_stamp: RamStamp::default(),
+                exits: [(0, 0); 2],
             },
         };
         block.vaddr = pc;
@@ -781,6 +787,8 @@ impl Cpu {
             irq_enabled: false,
             ram_ok: false,
             block_ram: (0, 0),
+            post_op_until: bus.post_op_quiet_until(),
+            irq_line: bus.irq_line(),
         };
         'blocks: loop {
             b.irq_enabled = self.cop0[12] & IRQ_ENABLED == IRQ_ENABLED;
@@ -853,9 +861,27 @@ impl Cpu {
                 }
                 let device = access == Access::Device;
                 if let Some(target) = branch_after_this {
-                    // Taken branch: the branch-boundary work reads the clock
-                    // and may raise interrupts.
-                    if !self.batch_boundary(bus, &mut b, target, device) {
+                    // Taken branch: the branch-boundary work. After no device
+                    // access, with the clock still in the quiet span (so the
+                    // deferred clock advance stays additive), nothing due, the
+                    // interrupt line low and no kernel-call
+                    // intercept possible (the target is past the first
+                    // 64 KiB of its RAM mirror), it only records the boundary
+                    // (see `batch_boundary`).
+                    if !device
+                        && b.now < b.post_op_until
+                        && b.now < b.limit
+                        && !b.irq_line
+                        && target & 0x001F_0000 != 0
+                    {
+                        bus.record_post_op(b.now);
+                        b.counted = b.done;
+                        b.pc = target;
+                        self.cursor.block = 0;
+                        if !self.batch_enter(bus, &mut b) {
+                            break 'blocks;
+                        }
+                    } else if !self.batch_boundary(bus, &mut b, target, device) {
                         break 'blocks;
                     }
                     continue 'blocks;
@@ -976,10 +1002,37 @@ impl Cpu {
     /// can start there.
     #[inline(never)]
     fn batch_enter(&mut self, bus: &Bus, b: &mut Batch) -> bool {
-        if !self.enter_block(bus, b.pc) {
+        let from = b.block as usize;
+        let pc = b.pc;
+        // The exits cache: a block last entered from here at this PC, if it
+        // is still that block and current, is what `enter_block` would find.
+        for (vaddr, id) in self.blocks.blocks[from].exits {
+            if vaddr == pc && id != 0 {
+                let block = &mut self.blocks.blocks[id as usize - 1];
+                if block.vaddr == pc && block.current(&self.instruction_cache) {
+                    block.hits = block.hits.wrapping_add(1);
+                    self.cursor = Cursor {
+                        block: id,
+                        op: 0,
+                        pc,
+                        cache_control: self.cache_control,
+                    };
+                    b.block = id - 1;
+                    b.at = 0;
+                    return true;
+                }
+            }
+        }
+        if !self.enter_block(bus, pc) {
             return false;
         }
-        b.block = self.cursor.block - 1;
+        let id = self.cursor.block;
+        let exits = &mut self.blocks.blocks[from].exits;
+        if exits[0].0 != pc {
+            exits[1] = exits[0];
+        }
+        exits[0] = (pc, id);
+        b.block = id - 1;
         b.at = 0;
         true
     }
@@ -1105,6 +1158,8 @@ impl Cpu {
             b.limit = bus.quiet_limit().min(b.until_cycle);
             b.now = bus.cycles();
             b.synced = b.now;
+            b.post_op_until = bus.post_op_quiet_until();
+            b.irq_line = bus.irq_line();
         }
         if self.should_take_interrupt(bus) {
             self.should_take_interrupt_steps = self.should_take_interrupt_steps.saturating_add(1);
@@ -1156,6 +1211,10 @@ struct Batch {
     ram_ok: bool,
     /// The current block's words and the one after, as (RAM offset, bytes).
     block_ram: (u32, u32),
+    /// [`Bus::post_op_quiet_until`] and [`Bus::irq_line`], as of the start
+    /// or the last full drain (nothing in a batch moves them otherwise).
+    post_op_until: u64,
+    irq_line: bool,
     /// The next fetch needs more than a plain hit: noting the hit once, or
     /// a streaming line fill (which only ends within a batch).
     slow_fetch: bool,
