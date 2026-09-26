@@ -69,16 +69,6 @@ impl CodeBuffer {
         })
     }
 
-    /// Bytes in use.
-    pub fn used(&self) -> usize {
-        self.used
-    }
-
-    /// Forget every block (the caller drops its pointers first).
-    pub fn reset(&mut self) {
-        self.used = 0;
-    }
-
     /// Copy `words` in and return their entry address, or `None` when the
     /// buffer is full.
     pub fn install(&mut self, words: &[u32]) -> Option<*const u8> {

@@ -1,16 +1,21 @@
-//! Boot a disc through the HLE kernel and run it with the interpreter, the
-//! recompiler, or both in lockstep.
+//! Boot a disc through the HLE kernel and time or cross-check the ways of
+//! running the CPU: `step` (plain `Cpu::step`), `run` (the batched
+//! `Cpu::run` over the decoded-block cache) and `tier` (`Cpu::run` with the
+//! native tier installed).
 //!
 //! usage:
-//!   jit_run bench    <disc.cue> <frames> <interp|jit> [--pulses P] [--hash-log F]
-//!   jit_run lockstep <disc.cue> <frames> [--pulses P] [--full-every N]
+//!   jit_run bench    <disc.cue> <frames> <step|run|tier> [--from N] [--pulses P] [--hash-log F]
+//!   jit_run lockstep <disc.cue> <frames> <run|tier> [--pulses P] [--full-every N]
+//!   jit_run fuzz     <run|tier> <first seed> <seeds> <body> <gte%> <instructions>
+//!   jit_run synth    <step|run|tier> <body> <alu%> <mem%> <branch%> <muldiv%> <instructions>
 //!
-//! `bench` reports host CPU seconds and emulated frames per CPU-second.
-//! `lockstep` runs two machines from the same boot: one steps the
-//! interpreter, the other the recompiler. After every recompiler step the
-//! interpreter catches up to the same retired-instruction count and the
-//! CPU state, the cycle counter and the frame boundaries are compared; the
-//! full serialized machine state is compared every N steps and at the end.
+//! `bench` runs frame by frame as the emu-bench harness does (to the next
+//! VBlank, then the pad pulses and the SPU catch-up) and reports frames per
+//! host CPU-second over frames `from..frames`. `lockstep` runs a second
+//! machine with plain `Cpu::step` beside it, compares CPU state, cycles and
+//! frame boundaries after every VBlank and the whole serialized machine
+//! every `--full-every` VBlanks and at the end. `fuzz` does the same on
+//! random programs (`testgen`); `synth` times a CPU-only random loop.
 
 #[path = "../../emulator-core/examples/support/disc.rs"]
 mod disc_support;
@@ -20,7 +25,6 @@ mod pad_support;
 use std::path::Path;
 
 use emulator_core::{fast_boot_disc, Bus, Cpu, EmulatorStateRef};
-use psoxide_jit::Jit;
 
 #[repr(C)]
 #[derive(Default)]
@@ -63,9 +67,8 @@ fn boot(cue: &Path) -> (Cpu, Bus) {
     (cpu, bus)
 }
 
-/// What the harness does between instructions, identically for every
-/// engine: SPU catch-up and audio drain as the frontends do, and the pad
-/// pulses at frame boundaries.
+/// What the harness does at frame boundaries, identically for every mode:
+/// SPU catch-up and audio drain as the frontends do, and the pad pulses.
 struct Host {
     pulses: Vec<pad_support::PadPulse>,
     mask: Option<u16>,
@@ -73,13 +76,12 @@ struct Host {
     frame: u64,
     /// Retired-instruction count at each frame boundary.
     boundaries: Vec<u64>,
+    /// Display hash at each frame boundary.
     hashes: Vec<u64>,
-    /// Record the display hash at each frame boundary.
-    hash: bool,
 }
 
 impl Host {
-    fn new(bus: &mut Bus, pulses: &str, hash: bool) -> Self {
+    fn new(bus: &mut Bus, pulses: &str) -> Self {
         let pulses = pad_support::parse_pad_pulses(pulses).expect("--pulses");
         let mut host = Self {
             pulses,
@@ -88,29 +90,38 @@ impl Host {
             frame: 0,
             boundaries: Vec::new(),
             hashes: Vec::new(),
-            hash,
         };
         pad_support::sync_pad_mask(bus, 0, &host.pulses, &mut host.mask);
         host
     }
 
-    /// Returns true on a new frame.
-    fn after_step(&mut self, cpu: &Cpu, bus: &mut Bus) -> bool {
+    /// Run the CPU up to the next VBlank (one step in `step` mode).
+    fn advance(&self, cpu: &mut Cpu, bus: &mut Bus, mode: &str) -> Result<(), String> {
+        if mode == "step" {
+            return cpu.step(bus).map_err(|e| e.to_string());
+        }
+        let base = self.base_vblank;
+        let frame = self.frame;
+        cpu.run(bus, 1 << 20, u64::MAX, |bus| {
+            bus.irq().raise_counts()[0] - base != frame
+        })
+        .1
+        .map_err(|e| e.to_string())
+    }
+
+    fn after(&mut self, cpu: &Cpu, bus: &mut Bus) {
         bus.run_spu_to_current_cycle();
         if bus.spu.audio_queue_len() != 0 {
             let _ = bus.spu.drain_audio();
         }
         let vblank = bus.irq().raise_counts()[0] - self.base_vblank;
         if vblank == self.frame {
-            return false;
+            return;
         }
         self.frame = vblank;
         self.boundaries.push(cpu.tick());
-        if self.hash {
-            self.hashes.push(bus.gpu.display_hash().0);
-        }
+        self.hashes.push(bus.gpu.display_hash().0);
         pad_support::sync_pad_mask(bus, 0, &self.pulses, &mut self.mask);
-        true
     }
 }
 
@@ -124,15 +135,17 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
+fn install(
+    cpu: &mut Cpu,
+    mode: &str,
+) -> Option<std::sync::Arc<std::sync::Mutex<psoxide_jit::tier::TierStats>>> {
+    (mode == "tier").then(|| psoxide_jit::install_tier(cpu).expect("native tier"))
+}
+
 fn bench(cue: &Path, frames: u64, mode: &str, pulses: &str, hash_log: Option<&str>, from: u64) {
     let (mut cpu, mut bus) = boot(cue);
-    let mut host = Host::new(&mut bus, pulses, hash_log.is_some());
-    let mut jit = Jit::new().expect("map code buffer");
-    let tier = if mode == "tier" {
-        psoxide_jit::install_tier(&mut cpu)
-    } else {
-        None
-    };
+    let mut host = Host::new(&mut bus, pulses);
+    let tier = install(&mut cpu, mode);
     let mut t0 = cpu_seconds();
     let mut tick0 = cpu.tick();
     let mut cycles0 = bus.cycles();
@@ -144,31 +157,13 @@ fn bench(cue: &Path, frames: u64, mode: &str, pulses: &str, hash_log: Option<&st
             tick0 = cpu.tick();
             cycles0 = bus.cycles();
         }
-        // `run`: the interpreter's batched path, driven as the emu-bench
-        // harness (emu_bench_run) and hle_compat drive it: run to the next
-        // VBlank, then the per-frame host work. `step`: the plain
-        // per-instruction loop. `jit`: the recompiler, which returns at
-        // event boundaries.
-        let result = match mode {
-            "jit" => jit.run(&mut cpu, &mut bus, u64::MAX),
-            "run" | "tier" => {
-                let base = host.base_vblank;
-                let frame = host.frame;
-                cpu.run(&mut bus, 1 << 20, u64::MAX, |bus| {
-                    bus.irq().raise_counts()[0] - base != frame
-                })
-                .1
-            }
-            _ => cpu.step(&mut bus),
-        };
-        if let Err(e) = result {
+        if let Err(e) = host.advance(&mut cpu, &mut bus, mode) {
             println!("cpu_error frame={} {e}", host.frame);
             break;
         }
-        host.after_step(&cpu, &mut bus);
+        host.after(&cpu, &mut bus);
     }
     let cpu_s = cpu_seconds() - t0;
-    let stats = jit.stats();
     println!(
         "mode={mode} frames={} timed_from={from} cpu_s={cpu_s:.3} fps_per_cpu_s={:.1} instructions={} cycles={} display_hash={:016x} state_hash={:016x}",
         host.frame,
@@ -180,33 +175,6 @@ fn bench(cue: &Path, frames: u64, mode: &str, pulses: &str, hash_log: Option<&st
     );
     if let Some(stats) = &tier {
         println!("tier: {:?}", *stats.lock().expect("tier stats"));
-    }
-    if mode == "jit" {
-        let census = jit.mode_census();
-        println!(
-            "jit: {stats:?} code_in_use={} census(native,plain,full,delay,last)={census:?} branch_blocks={}",
-            jit.code_bytes_in_use(),
-            jit.branch_blocks()
-        );
-        let by_pc = std::env::var_os("PSOXIDE_JIT_PROFILE_PC").is_some();
-        for ((reason, key), n) in jit.fallback_profile().into_iter().take(16) {
-            if by_pc {
-                println!(
-                    "fallback reason={reason} pc={key:08x} steps={n} icache={:08x?} ram={:08x?} hook={}",
-                    cpu.jit_cached_word(key),
-                    bus.peek_instruction(key),
-                    bus.peek_instruction(key).is_some_and(|w| emulator_core::cpu::jit_abi::is_hle_hook(key, w)),
-                );
-            } else {
-                println!("fallback reason={reason} page={:08x} steps={n}", key << 12);
-            }
-        }
-        let total = stats.native_instructions + stats.interpreter_steps;
-        println!(
-            "jit: {:.1}% of instructions retired in compiled blocks, {:.2} instructions per block run",
-            100.0 * stats.native_instructions as f64 / total.max(1) as f64,
-            stats.native_instructions as f64 / stats.runs.max(1) as f64
-        );
     }
     if let Some(path) = hash_log {
         let mut out = String::new();
@@ -232,14 +200,13 @@ fn describe(cpu: &Cpu, bus: &Bus) -> String {
     )
 }
 
-fn lockstep(cue: &Path, frames: u64, pulses: &str, full_every: u64, engine: &str) {
+fn lockstep(cue: &Path, frames: u64, mode: &str, pulses: &str, full_every: u64) {
     let (mut ci, mut bi) = boot(cue);
     let (mut cj, mut bj) = boot(cue);
-    let mut hi = Host::new(&mut bi, pulses, true);
-    let mut hj = Host::new(&mut bj, pulses, true);
-    let mut jit = Jit::new().expect("map code buffer");
-    let tier = (engine == "tier").then(|| psoxide_jit::install_tier(&mut cj).expect("tier"));
-    let mut steps = 0u64;
+    let mut hi = Host::new(&mut bi, pulses);
+    let mut hj = Host::new(&mut bj, pulses);
+    let tier = install(&mut cj, mode);
+    let mut calls = 0u64;
     let mut full_checks = 0u64;
     let t0 = cpu_seconds();
     let mut last_good = (cj.pc(), cj.tick());
@@ -247,31 +214,18 @@ fn lockstep(cue: &Path, frames: u64, pulses: &str, full_every: u64, engine: &str
         if hj.frame >= frames {
             break "ok".to_string();
         }
-        let pc_before = cj.pc();
-        let tick_before = cj.tick();
-        let result = if engine == "run" || engine == "tier" {
-            // The interpreter's batched path, the way hle_compat drives it.
-            let base = hj.base_vblank;
-            let frame = hj.frame;
-            cj.run(&mut bj, 1 << 20, u64::MAX, |bus| {
-                bus.irq().raise_counts()[0] - base != frame
-            })
-            .1
-        } else {
-            jit.run(&mut cj, &mut bj, u64::MAX)
-        };
-        if let Err(e) = result {
-            break format!("{engine} error: {e}");
+        if let Err(e) = hj.advance(&mut cj, &mut bj, mode) {
+            break format!("{mode} error: {e}");
         }
-        hj.after_step(&cj, &mut bj);
+        hj.after(&cj, &mut bj);
         while ci.tick() < cj.tick() {
             if let Err(e) = ci.step(&mut bi) {
                 eprintln!("interpreter error: {e}");
                 break;
             }
-            hi.after_step(&ci, &mut bi);
+            hi.after(&ci, &mut bi);
         }
-        steps += 1;
+        calls += 1;
         let same = ci.tick() == cj.tick()
             && ci.pc() == cj.pc()
             && ci.gprs() == cj.gprs()
@@ -284,20 +238,18 @@ fn lockstep(cue: &Path, frames: u64, pulses: &str, full_every: u64, engine: &str
             && hi.hashes == hj.hashes;
         if !same {
             break format!(
-                "MISMATCH after step {steps} (block pc {pc_before:08x}, from tick {tick_before}; last good pc {:08x} tick {})\n interp: {}\n jit:    {}\n boundaries interp {:?}\n boundaries jit    {:?}",
+                "MISMATCH after call {calls} (last good pc {:08x} tick {})\n  step: {}\n  {mode}: {}",
                 last_good.0,
                 last_good.1,
                 describe(&ci, &bi),
                 describe(&cj, &bj),
-                hi.boundaries.iter().rev().take(3).collect::<Vec<_>>(),
-                hj.boundaries.iter().rev().take(3).collect::<Vec<_>>(),
             );
         }
-        if full_every != 0 && steps.is_multiple_of(full_every) {
+        if full_every != 0 && calls.is_multiple_of(full_every) {
             full_checks += 1;
             if state_bytes(&ci, &bi) != state_bytes(&cj, &bj) {
                 break format!(
-                    "FULL STATE MISMATCH at step {steps} (tick {}, block pc {pc_before:08x}); CPU matched",
+                    "FULL STATE MISMATCH at call {calls} (tick {}); CPU matched",
                     cj.tick()
                 );
             }
@@ -305,25 +257,76 @@ fn lockstep(cue: &Path, frames: u64, pulses: &str, full_every: u64, engine: &str
         last_good = (cj.pc(), cj.tick());
     };
     let final_same = state_bytes(&ci, &bi) == state_bytes(&cj, &bj);
-    let stats = jit.stats();
     println!(
-        "lockstep {outcome}: frames={} jit_steps={steps} instructions={} full_checks={full_checks} final_state_equal={final_same} display_hash interp={:016x} jit={:016x} host_cpu_s={:.1}",
+        "lockstep {outcome}: mode={mode} frames={} instructions={} full_checks={full_checks} final_state_equal={final_same} display_hash step={:016x} {mode}={:016x} host_cpu_s={:.1}",
         hj.frame,
         cj.tick(),
         bi.gpu.display_hash().0,
         bj.gpu.display_hash().0,
         cpu_seconds() - t0
     );
-    if let Some(tier) = &tier {
-        println!("tier: {:?}", *tier.lock().expect("tier stats"));
+    if let Some(stats) = &tier {
+        println!("tier: {:?}", *stats.lock().expect("tier stats"));
     }
-    let total = stats.native_instructions + stats.interpreter_steps;
-    println!(
-        "jit: {stats:?}\njit: {:.1}% of instructions retired in compiled blocks",
-        100.0 * stats.native_instructions as f64 / total.max(1) as f64
-    );
     if outcome != "ok" || !final_same {
         std::process::exit(1);
+    }
+}
+
+fn fuzz(mode: &str, first: u64, count: u64, body: usize, gte: u32, instructions: u64) {
+    let mut failed = 0;
+    let mut total = 0;
+    for seed in first..first + count {
+        let mut rng = psoxide_jit::testgen::Rng::new(seed);
+        let (code, handler) = psoxide_jit::testgen::program(&mut rng, body, gte);
+        match psoxide_jit::testgen::lockstep(
+            &code,
+            &handler,
+            instructions,
+            500,
+            seed,
+            mode == "tier",
+        ) {
+            Err(e) => {
+                failed += 1;
+                println!("seed {seed}: {e}");
+            }
+            Ok(n) => total += n,
+        }
+    }
+    println!(
+        "fuzz {mode}: {count} programs, {failed} failed; {total} instructions in passing runs"
+    );
+    if failed != 0 {
+        std::process::exit(1);
+    }
+}
+
+fn synth(mode: &str, body: usize, mix: psoxide_jit::testgen::Mix, instructions: u64) {
+    use psoxide_jit::testgen::{machine, synthetic, Rng};
+    let (code, handler) = synthetic(&mut Rng::new(7), body, mix);
+    let (mut cpu, mut bus) = machine(&code, &handler);
+    let tier = install(&mut cpu, mode);
+    let t0 = cpu_seconds();
+    while cpu.tick() < instructions {
+        let left = instructions - cpu.tick();
+        if mode == "step" {
+            cpu.step(&mut bus).expect("step");
+        } else {
+            cpu.run(&mut bus, left, u64::MAX, |_| false).1.expect("run");
+        }
+    }
+    let s = cpu_seconds() - t0;
+    println!(
+        "synth {mode} {mix:?}: {} instructions in {s:.3} s = {:.2} ns/instruction, {:.1} M instructions/s, cycles={} state_hash={:016x}",
+        cpu.tick(),
+        s * 1e9 / cpu.tick() as f64,
+        cpu.tick() as f64 / s / 1e6,
+        bus.cycles(),
+        fnv(&state_bytes(&cpu, &bus)),
+    );
+    if let Some(stats) = &tier {
+        println!("tier: {:?}", *stats.lock().expect("tier stats"));
     }
 }
 
@@ -343,143 +346,31 @@ fn main() {
     let full_every: u64 = take("--full-every")
         .map(|v| v.parse().expect("--full-every"))
         .unwrap_or(20_000);
+    let n = |i: usize| args[i].parse::<u64>().expect("number");
     match args.first().map(String::as_str) {
         Some("bench") => bench(
             Path::new(&args[1]),
-            args[2].parse().expect("frames"),
+            n(2),
             &args[3],
             &pulses,
             hash_log.as_deref(),
             from,
         ),
-        Some("lockstep") => lockstep(
-            Path::new(&args[1]),
-            args[2].parse().expect("frames"),
-            &pulses,
-            full_every,
-            "jit",
-        ),
-        Some("lockstep-tier") => lockstep(
-            Path::new(&args[1]),
-            args[2].parse().expect("frames"),
-            &pulses,
-            full_every,
-            "tier",
-        ),
-        Some("lockstep-run") => lockstep(
-            Path::new(&args[1]),
-            args[2].parse().expect("frames"),
-            &pulses,
-            full_every,
-            "run",
-        ),
-        Some("synth") => {
-            // jit_run synth <interp|jit> <body> <alu%> <mem%> <branch%> <muldiv%> <instructions>
-            use psoxide_jit::testgen::{machine, synthetic, Mix, Rng};
-            let n = |i: usize| args[i].parse::<u64>().expect("number");
-            let mix = Mix {
+        Some("lockstep") => lockstep(Path::new(&args[1]), n(2), &args[3], &pulses, full_every),
+        Some("fuzz") => fuzz(&args[1], n(2), n(3), n(4) as usize, n(5) as u32, n(6)),
+        Some("synth") => synth(
+            &args[1],
+            n(2) as usize,
+            psoxide_jit::testgen::Mix {
                 alu: n(3) as u32,
                 mem: n(4) as u32,
                 branch: n(5) as u32,
                 muldiv: n(6) as u32,
-            };
-            let instructions = n(7);
-            let (code, handler) = synthetic(&mut Rng::new(7), n(2) as usize, mix);
-            let (mut cpu, mut bus) = machine(&code, &handler);
-            let mut jit = Jit::new().expect("map code buffer");
-            let use_jit = args[1] == "jit";
-            if args[1] == "tier" {
-                psoxide_jit::install_tier(&mut cpu).expect("tier");
-            }
-            let t0 = cpu_seconds();
-            while cpu.tick() < instructions {
-                let left = instructions - cpu.tick();
-                match args[1].as_str() {
-                    "jit" => jit.run(&mut cpu, &mut bus, left).expect("run"),
-                    "run" | "tier" => {
-                        cpu.run(&mut bus, left, u64::MAX, |_| false).1.expect("run");
-                    }
-                    _ => cpu.step(&mut bus).expect("step"),
-                }
-            }
-            let s = cpu_seconds() - t0;
-            println!(
-                "synth {} {mix:?}: {} instructions in {s:.3} s = {:.2} ns/instruction, {:.1} M instructions/s, cycles={} state_hash={:016x}",
-                args[1],
-                cpu.tick(),
-                s * 1e9 / cpu.tick() as f64,
-                cpu.tick() as f64 / s / 1e6,
-                bus.cycles(),
-                fnv(&state_bytes(&cpu, &bus)),
-            );
-            if use_jit {
-                println!("jit: {:?}", jit.stats());
-            }
-        }
-        Some("fuzz-run") | Some("fuzz-tier") => {
-            let tier = args[0] == "fuzz-tier";
-            // jit_run fuzz-run <first seed> <seeds> <body> <gte%> <instructions>
-            let n = |i: usize| args[i].parse::<u64>().expect("number");
-            let (first, count, body, gte, instructions) = (n(1), n(2), n(3), n(4), n(5));
-            let mut failed = 0;
-            let mut total = 0;
-            for seed in first..first + count {
-                let mut rng = psoxide_jit::testgen::Rng::new(seed);
-                let (code, handler) =
-                    psoxide_jit::testgen::program(&mut rng, body as usize, gte as u32);
-                match psoxide_jit::testgen::lockstep_run(
-                    &code,
-                    &handler,
-                    instructions,
-                    500,
-                    seed,
-                    tier,
-                ) {
-                    Err(e) => {
-                        failed += 1;
-                        println!("seed {seed}: {e}");
-                    }
-                    Ok(n) => total += n,
-                }
-            }
-            println!(
-                "fuzz-run: {count} programs, {failed} failed; {total} instructions in passing runs"
-            );
-            if failed != 0 {
-                std::process::exit(1);
-            }
-        }
-        Some("fuzz") => {
-            // jit_run fuzz <first seed> <seeds> <body> <gte%> <instructions>
-            let n = |i: usize| args[i].parse::<u64>().expect("number");
-            let (first, count, body, gte, instructions) = (n(1), n(2), n(3), n(4), n(5));
-            let mut failed = 0;
-            let mut total = psoxide_jit::testgen::Coverage::default();
-            for seed in first..first + count {
-                let mut rng = psoxide_jit::testgen::Rng::new(seed);
-                let (code, handler) =
-                    psoxide_jit::testgen::program(&mut rng, body as usize, gte as u32);
-                match psoxide_jit::testgen::lockstep(&code, &handler, instructions, 5_000) {
-                    Err(e) => {
-                        failed += 1;
-                        println!("seed {seed}: {e}");
-                    }
-                    Ok(c) => {
-                        total.instructions += c.instructions;
-                        total.native += c.native;
-                        total.interrupts += c.interrupts;
-                        total.address_errors += c.address_errors;
-                        total.overflows += c.overflows;
-                    }
-                }
-            }
-            println!("fuzz: {count} programs, {failed} failed; passing runs covered {total:?}");
-            if failed != 0 {
-                std::process::exit(1);
-            }
-        }
+            },
+            n(7),
+        ),
         _ => {
-            eprintln!("usage: jit_run bench <cue> <frames> <interp|jit> | lockstep <cue> <frames> | fuzz <seed> <n> <body> <gte%> <instructions>");
+            eprintln!("usage: see the header of examples/jit_run.rs");
             std::process::exit(2);
         }
     }

@@ -14,8 +14,6 @@
 
 use emulator_core::{Bus, Cpu, EmulatorStateRef};
 
-use crate::Jit;
-
 /// Code load address.
 pub const CODE_BASE: u32 = 0x8001_0000;
 /// RAM data area the loads and stores use.
@@ -31,7 +29,7 @@ impl Rng {
         Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
     }
     /// Next 64 random bits.
-    pub fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
@@ -39,7 +37,7 @@ impl Rng {
     }
     /// Uniform in `0..n`.
     pub fn below(&mut self, n: u32) -> u32 {
-        (self.next() % n as u64) as u32
+        (self.next_u64() % n as u64) as u32
     }
     /// True with probability `p` percent.
     pub fn chance(&mut self, p: u32) -> bool {
@@ -83,7 +81,7 @@ fn src(rng: &mut Rng) -> u32 {
 
 fn alu(rng: &mut Rng) -> u32 {
     let (rd, rs, rt) = (reg(rng), src(rng), src(rng));
-    let imm = rng.next() as u32 & 0xFFFF;
+    let imm = rng.next_u64() as u32 & 0xFFFF;
     match rng.below(20) {
         0 => r(0x21, rs, rt, rd, 0),
         1 => r(0x23, rs, rt, rd, 0),
@@ -163,7 +161,7 @@ fn trapping(rng: &mut Rng) -> u32 {
     match rng.below(3) {
         0 => r(0x20, rs, rt, rd, 0),
         1 => r(0x22, rs, rt, rd, 0),
-        _ => i(0x08, rs, rd, rng.next() as u32),
+        _ => i(0x08, rs, rd, rng.next_u64() as u32),
     }
 }
 
@@ -228,7 +226,7 @@ pub fn program(rng: &mut Rng, body_len: usize, gte_percent: u32) -> (Vec<u32>, V
         i(0x0D, BASE_IO, BASE_IO, 0x1000),
     ]);
     for rd in (1..=19).chain(22..=25) {
-        let v = rng.next() as u32;
+        let v = rng.next_u64() as u32;
         code.push(i(0x0F, 0, rd, v >> 16));
         code.push(i(0x0D, rd, rd, v));
     }
@@ -340,165 +338,14 @@ pub fn state_bytes(cpu: &Cpu, bus: &Bus) -> Vec<u8> {
     postcard::to_allocvec(&EmulatorStateRef { cpu, bus }).expect("serialize state")
 }
 
-/// Run `instructions` instructions of the program under the recompiler
-/// (block by block) and the interpreter (step by step) side by side,
-/// comparing CPU state after every block and the whole machine every
-/// `full_every` blocks and at the end. `Err` describes the first
-/// difference; `Ok` carries what was exercised.
+/// Run `instructions` instructions of the program two ways and compare:
+/// one machine runs `Cpu::run` (the batched path, with the native tier when
+/// `tier` is set) in chunks of random length drawn from `seed`
+/// (`PSOXIDE_FUZZ_SPAN` fixes the span), the other plain `Cpu::step`. CPU
+/// state and cycles are compared after every chunk, the whole serialized
+/// machine every `full_every` chunks and at the end. `Err` describes the
+/// first difference; `Ok` the instructions run.
 pub fn lockstep(
-    code: &[u32],
-    handler: &[u32],
-    instructions: u64,
-    full_every: u64,
-) -> Result<Coverage, String> {
-    let (mut ci, mut bi) = machine(code, handler);
-    let (mut cj, mut bj) = machine(code, handler);
-    let mut jit = Jit::new().ok_or("no executable memory")?;
-    let mut blocks = 0u64;
-    while cj.tick() < instructions {
-        let from = (cj.pc(), cj.tick());
-        let rj = jit.step(&mut cj, &mut bj).map_err(|e| e.to_string());
-        let mut ri = Ok(());
-        while ci.tick() < cj.tick() && ri.is_ok() {
-            ri = ci.step(&mut bi).map_err(|e| e.to_string());
-        }
-        // An error retires nothing: the interpreter's next step must fail
-        // the same way.
-        if rj.is_err() && ri.is_ok() && ci.tick() == cj.tick() {
-            ri = ci.step(&mut bi).map_err(|e| e.to_string());
-        }
-        if rj != ri {
-            return Err(format!(
-                "results differ from {from:x?}: jit {rj:?} interp {ri:?}"
-            ));
-        }
-        blocks += 1;
-        let same = ci.tick() == cj.tick()
-            && ci.pc() == cj.pc()
-            && ci.gprs() == cj.gprs()
-            && ci.hi() == cj.hi()
-            && ci.lo() == cj.lo()
-            && ci.cop0() == cj.cop0()
-            && bi.cycles() == bj.cycles()
-            && ci.jit_debug_state() == cj.jit_debug_state();
-        if !same {
-            return Err(format!(
-                "state differs after block from pc {:08x} tick {}:\n interp pc={:08x} cycles={} {:?}\n   jit  pc={:08x} cycles={} {:?}\n interp gprs={:08x?}\n   jit  gprs={:08x?}",
-                from.0, from.1, ci.pc(), bi.cycles(), ci.jit_debug_state(),
-                cj.pc(), bj.cycles(), cj.jit_debug_state(), ci.gprs(), cj.gprs()
-            ));
-        }
-        if rj.is_err() {
-            break;
-        }
-        if (full_every != 0 && blocks.is_multiple_of(full_every))
-            && state_bytes(&ci, &bi) != state_bytes(&cj, &bj)
-        {
-            return Err(format!(
-                "full state differs at tick {} (CPU state equal)",
-                cj.tick()
-            ));
-        }
-    }
-    if state_bytes(&ci, &bi) != state_bytes(&cj, &bj) {
-        return Err(format!("final full state differs at tick {}", cj.tick()));
-    }
-    let stats = jit.stats();
-    let counts = cj.exception_counts();
-    Ok(Coverage {
-        instructions: cj.tick(),
-        native: stats.native_instructions,
-        interrupts: counts[0],
-        address_errors: counts[4] + counts[5],
-        overflows: counts[12],
-    })
-}
-
-/// What one lockstep run exercised.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Coverage {
-    /// Instructions retired.
-    pub instructions: u64,
-    /// Of which inside compiled blocks.
-    pub native: u64,
-    /// Interrupts taken.
-    pub interrupts: u64,
-    /// Load/store address errors.
-    pub address_errors: u64,
-    /// Arithmetic overflows.
-    pub overflows: u64,
-}
-
-/// Instruction mix for [`synthetic`], in percent (the rest are NOPs).
-#[derive(Clone, Copy, Debug)]
-pub struct Mix {
-    /// Register arithmetic.
-    pub alu: u32,
-    /// Aligned loads and stores to RAM and the scratchpad.
-    pub mem: u32,
-    /// Forward conditional branches (with an ALU delay slot).
-    pub branch: u32,
-    /// Multiply/divide and HI/LO moves.
-    pub muldiv: u32,
-}
-
-/// A CPU-only loop for throughput measurements: no interrupts, no
-/// exceptions (aligned accesses, no trapping adds), no GTE. The body of
-/// `body_len` instructions repeats forever.
-pub fn synthetic(rng: &mut Rng, body_len: usize, mix: Mix) -> (Vec<u32>, Vec<u32>) {
-    let mut code = vec![
-        i(0x0F, 0, BASE_RAM, DATA_BASE >> 16),
-        i(0x0F, 0, BASE_SCRATCH, SCRATCH_BASE >> 16),
-    ];
-    for rd in (1..=19).chain(22..=25) {
-        let v = rng.next() as u32;
-        code.push(i(0x0F, 0, rd, v >> 16));
-        code.push(i(0x0D, rd, rd, v));
-    }
-    let body_start = code.len();
-    let mut n = 0;
-    while n < body_len {
-        let roll = rng.below(100);
-        if roll < mix.alu {
-            code.push(alu(rng));
-            n += 1;
-        } else if roll < mix.alu + mix.mem {
-            let mut word = mem(rng);
-            // Keep it aligned: word/half forms get their low bits cleared.
-            let op = word >> 26;
-            if matches!(op, 0x21 | 0x25 | 0x29) {
-                word &= !1;
-            } else if matches!(op, 0x23 | 0x2B) {
-                word &= !3;
-            }
-            code.push(word);
-            n += 1;
-        } else if roll < mix.alu + mix.mem + mix.branch {
-            let (rs, rt) = (src(rng), src(rng));
-            let op = [0x04, 0x05, 0x06, 0x07][rng.below(4) as usize];
-            code.push(i(op, rs, if op < 6 { rt } else { 0 }, 2));
-            code.push(alu(rng));
-            code.push(alu(rng));
-            code.push(alu(rng));
-            n += 4;
-        } else if roll < mix.alu + mix.mem + mix.branch + mix.muldiv {
-            code.push(muldiv(rng));
-            n += 1;
-        } else {
-            code.push(NOP);
-            n += 1;
-        }
-    }
-    code.push(j(0x02, CODE_BASE + 4 * body_start as u32));
-    code.push(NOP);
-    (code, vec![NOP; 4])
-}
-
-/// Like [`lockstep`], but checks the interpreter's batched path: one machine
-/// runs `Cpu::run` in chunks of random length (drawn from `seed`), the other
-/// plain `Cpu::step`, compared after every chunk and in full every
-/// `full_every` chunks and at the end.
-pub fn lockstep_run(
     code: &[u32],
     handler: &[u32],
     instructions: u64,
@@ -581,4 +428,69 @@ pub fn lockstep_run(
         return Err(format!("final full state differs at tick {}", cr.tick()));
     }
     Ok(cr.tick())
+}
+
+/// Instruction mix for [`synthetic`], in percent (the rest are NOPs).
+#[derive(Clone, Copy, Debug)]
+pub struct Mix {
+    /// Register arithmetic.
+    pub alu: u32,
+    /// Aligned loads and stores to RAM and the scratchpad.
+    pub mem: u32,
+    /// Forward conditional branches (with an ALU delay slot).
+    pub branch: u32,
+    /// Multiply/divide and HI/LO moves.
+    pub muldiv: u32,
+}
+
+/// A CPU-only loop for throughput measurements: no interrupts, no
+/// exceptions (aligned accesses, no trapping adds), no GTE. The body of
+/// `body_len` instructions repeats forever.
+pub fn synthetic(rng: &mut Rng, body_len: usize, mix: Mix) -> (Vec<u32>, Vec<u32>) {
+    let mut code = vec![
+        i(0x0F, 0, BASE_RAM, DATA_BASE >> 16),
+        i(0x0F, 0, BASE_SCRATCH, SCRATCH_BASE >> 16),
+    ];
+    for rd in (1..=19).chain(22..=25) {
+        let v = rng.next_u64() as u32;
+        code.push(i(0x0F, 0, rd, v >> 16));
+        code.push(i(0x0D, rd, rd, v));
+    }
+    let body_start = code.len();
+    let mut n = 0;
+    while n < body_len {
+        let roll = rng.below(100);
+        if roll < mix.alu {
+            code.push(alu(rng));
+            n += 1;
+        } else if roll < mix.alu + mix.mem {
+            let mut word = mem(rng);
+            // Keep it aligned: word/half forms get their low bits cleared.
+            let op = word >> 26;
+            if matches!(op, 0x21 | 0x25 | 0x29) {
+                word &= !1;
+            } else if matches!(op, 0x23 | 0x2B) {
+                word &= !3;
+            }
+            code.push(word);
+            n += 1;
+        } else if roll < mix.alu + mix.mem + mix.branch {
+            let (rs, rt) = (src(rng), src(rng));
+            let op = [0x04, 0x05, 0x06, 0x07][rng.below(4) as usize];
+            code.push(i(op, rs, if op < 6 { rt } else { 0 }, 2));
+            code.push(alu(rng));
+            code.push(alu(rng));
+            code.push(alu(rng));
+            n += 4;
+        } else if roll < mix.alu + mix.mem + mix.branch + mix.muldiv {
+            code.push(muldiv(rng));
+            n += 1;
+        } else {
+            code.push(NOP);
+            n += 1;
+        }
+    }
+    code.push(j(0x02, CODE_BASE + 4 * body_start as u32));
+    code.push(NOP);
+    (code, vec![NOP; 4])
 }
