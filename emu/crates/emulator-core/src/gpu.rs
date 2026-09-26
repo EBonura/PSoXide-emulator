@@ -4464,14 +4464,19 @@ fn clipped_polygon_area(
         return ((twice_area.unsigned_abs() + (1u128 << 32)) >> 33) as u64;
     }
 
-    let mut polygon: Vec<(i64, i64)> = vertices
-        .iter()
-        .map(|&(x, y)| (i64::from(x) * FP, i64::from(y) * FP))
-        .collect();
-    polygon = clip_timing_polygon(&polygon, true, left, true);
-    polygon = clip_timing_polygon(&polygon, true, right, false);
-    polygon = clip_timing_polygon(&polygon, false, top, true);
-    polygon = clip_timing_polygon(&polygon, false, bottom, false);
+    // Each clip adds at most one vertex, so the clipped polygon fits in a
+    // fixed buffer (no allocation per primitive).
+    assert!(vertices.len() <= TIMING_POLY_MAX - 4);
+    let mut a = TimingPoly::default();
+    for &(x, y) in vertices {
+        a.push((i64::from(x) * FP, i64::from(y) * FP));
+    }
+    let mut b = TimingPoly::default();
+    clip_timing_polygon(&a, &mut b, true, left, true);
+    clip_timing_polygon(&b, &mut a, true, right, false);
+    clip_timing_polygon(&a, &mut b, false, top, true);
+    clip_timing_polygon(&b, &mut a, false, bottom, false);
+    let polygon = a.as_slice();
     if polygon.len() < 3 {
         return 0;
     }
@@ -4488,14 +4493,40 @@ fn clipped_polygon_area(
     ((twice_area.unsigned_abs() + (1u128 << 32)) >> 33) as u64
 }
 
+/// Vertex capacity of [`TimingPoly`]: a polygon of up to four vertices
+/// clipped against the four drawing-area edges.
+const TIMING_POLY_MAX: usize = 8;
+
+/// A small polygon in Q16.16 for the draw-cost clip, held inline.
+#[derive(Default)]
+struct TimingPoly {
+    len: usize,
+    pts: [(i64, i64); TIMING_POLY_MAX],
+}
+
+impl TimingPoly {
+    fn push(&mut self, p: (i64, i64)) {
+        self.pts[self.len] = p;
+        self.len += 1;
+    }
+
+    fn as_slice(&self) -> &[(i64, i64)] {
+        &self.pts[..self.len]
+    }
+}
+
+/// Clip `polygon` against one drawing-area edge into `out` (cleared first).
 fn clip_timing_polygon(
-    polygon: &[(i64, i64)],
+    polygon: &TimingPoly,
+    out: &mut TimingPoly,
     x_axis: bool,
     bound: i64,
     keep_greater: bool,
-) -> Vec<(i64, i64)> {
+) {
+    out.len = 0;
+    let polygon = polygon.as_slice();
     if polygon.is_empty() {
-        return Vec::new();
+        return;
     }
     let coord = |p: (i64, i64)| if x_axis { p.0 } else { p.1 };
     let inside = |p: (i64, i64)| {
@@ -4523,7 +4554,6 @@ fn clip_timing_polygon(
         }
     };
 
-    let mut out = Vec::with_capacity(polygon.len() + 1);
     let mut previous = polygon[polygon.len() - 1];
     let mut previous_inside = inside(previous);
     for &current in polygon {
@@ -4537,7 +4567,6 @@ fn clip_timing_polygon(
         previous = current;
         previous_inside = current_inside;
     }
-    out
 }
 
 /// Walk the PS1 line engine's coordinate DDA. The callback receives the
