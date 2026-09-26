@@ -228,6 +228,11 @@ impl InstructionCache {
         self.epoch
     }
 
+    /// Where [`InstructionCache::epoch`] lives, for compiled code.
+    pub(super) fn epoch_ptr(&self) -> *const u64 {
+        &self.epoch
+    }
+
     /// Change count of the line holding physical address `phys`.
     #[inline(always)]
     pub(super) fn generation(&self, phys: u32) -> u32 {

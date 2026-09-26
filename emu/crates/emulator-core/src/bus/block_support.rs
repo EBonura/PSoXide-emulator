@@ -58,6 +58,11 @@ impl RamPages {
         }
     }
 
+    /// The write counts, one per page.
+    pub(crate) fn counts_ptr(&self) -> *const u32 {
+        self.counts.as_ptr()
+    }
+
     /// Write count of the page holding RAM byte offset `offset`.
     #[inline(always)]
     pub(crate) fn count(&self, offset: usize) -> u32 {

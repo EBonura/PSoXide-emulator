@@ -127,6 +127,25 @@ pub struct NativeRun {
     pub batch: *mut crate::cpu::block::BatchState,
     /// Main RAM.
     pub ram: *const u8,
+    /// The I-cache's change count ([`LinkCell::gen`]).
+    pub epoch_ptr: *const u64,
+    /// The block cache's link generation ([`LinkCell::gen`]).
+    pub link_gen_ptr: *const u64,
+    /// Main RAM's page write counts.
+    pub pages: *const u32,
+    /// The block being run: its index plus one (the cursor's `block`).
+    pub block: u32,
+    /// A GTE interrupt watch is set (the helper that sets it says so).
+    pub watch: u32,
+    /// The exit cell [`jit_chain`] fills in when the next block runs
+    /// compiled (null for none).
+    pub link: *mut LinkCell,
+    /// [`Bus::jit_load_state_ptrs`]: fill end, refresh deadline, last RAM
+    /// access, data-bus latch.
+    pub load_state: [usize; 4],
+    /// Cycles compiled code moved the clock by itself whose GPU decay is
+    /// still to apply ([`Bus::jit_settle_decay`]).
+    pub decay: u64,
     /// `ran` when the current block was entered: `ran - ran0` ops of it
     /// have retired. `ran` counts from the last [`Cpu::native_enter`].
     pub ran0: u64,
@@ -189,6 +208,14 @@ impl NativeRun {
             status: NATIVE_IN_BLOCK,
             batch,
             ram: bus.jit_ram_ptr(),
+            epoch_ptr: cpu.instruction_cache.epoch_ptr(),
+            link_gen_ptr: cpu.blocks.link_gen_ptr(),
+            pages: bus.jit_ram_pages().0,
+            block: 0,
+            watch: 0,
+            link: std::ptr::null_mut(),
+            load_state: bus.jit_load_state_ptrs(),
+            decay: 0,
             ran0: 0,
             boundary_until: 0,
             slow_boundary: 1,
@@ -246,7 +273,9 @@ pub unsafe extern "C" fn jit_chain(run: *mut NativeRun) -> usize {
     // SAFETY: per the contract, the pointers are live and unaliased here.
     let run = unsafe { &mut *run };
     let (cpu, bus, st) = unsafe { (&mut *run.cpu, &mut *run.bus, &mut *run.batch) };
+    let link = std::mem::replace(&mut run.link, std::ptr::null_mut());
     if let Some(entry) = cpu.chain_fast(bus, run) {
+        cpu.fill_link(bus, run, link, entry);
         return entry + NATIVE_CHAIN_OFFSET;
     }
     run.flush_boundary(bus);
@@ -259,6 +288,7 @@ pub unsafe extern "C" fn jit_chain(run: *mut NativeRun) -> usize {
     match cpu.native_ready(bus, index, irq_enabled, ram_ok, st) {
         Some(entry) => {
             cpu.native_enter(bus, run, index, irq_enabled, ram_ok, st);
+            cpu.fill_link(bus, run, link, entry);
             entry + NATIVE_CHAIN_OFFSET
         }
         None => {
@@ -271,6 +301,75 @@ pub unsafe extern "C" fn jit_chain(run: *mut NativeRun) -> usize {
 /// A compiled block prefix.
 #[doc(hidden)]
 pub type NativeFn = unsafe extern "C" fn(*mut NativeRun);
+
+/// One exit of a compiled block, linked to the block it last went to
+/// (filled in by [`jit_chain`], read by the compiled code). While the
+/// I-cache epoch plus the block cache's link generation equal `gen`, the
+/// block at `block` still starts at `vaddr` with these ops and is still
+/// current and compiled; with interrupts enabled, main RAM still holds its
+/// words (for the GTE hazard) while pages `page1` and `page2` still have
+/// write counts `count1` and `count2`. The compiled code then does
+/// [`Cpu::chain_fast`]'s work itself and jumps to `entry`.
+#[doc(hidden)]
+#[repr(C)]
+#[derive(Default)]
+pub struct LinkCell {
+    /// The target's code, past the frame setup and register loads
+    /// ([`NATIVE_BODY_OFFSET`]); 0 while unlinked.
+    pub entry: usize,
+    /// See above.
+    pub gen: u64,
+    /// The target block's ops.
+    pub ops: usize,
+    /// Its first op's address.
+    pub vaddr: u32,
+    /// Its index plus one.
+    pub block: u32,
+    /// Its op count.
+    pub op_count: u32,
+    /// Main RAM's word after it is a GTE command.
+    pub after_is_gte: u32,
+    /// First page of its words (and the word after).
+    pub page1: u32,
+    /// That page's write count.
+    pub count1: u32,
+    /// Last page of them.
+    pub page2: u32,
+    /// Its write count.
+    pub count2: u32,
+}
+
+/// Offsets of [`LinkCell`] fields, for the emitter.
+#[doc(hidden)]
+pub mod link_cell {
+    use super::LinkCell;
+    /// `entry`
+    pub const ENTRY: usize = core::mem::offset_of!(LinkCell, entry);
+    /// `gen`
+    pub const GEN: usize = core::mem::offset_of!(LinkCell, gen);
+    /// `ops`
+    pub const OPS: usize = core::mem::offset_of!(LinkCell, ops);
+    /// `vaddr`
+    pub const VADDR: usize = core::mem::offset_of!(LinkCell, vaddr);
+    /// `block`
+    pub const BLOCK: usize = core::mem::offset_of!(LinkCell, block);
+    /// `op_count`
+    pub const OP_COUNT: usize = core::mem::offset_of!(LinkCell, op_count);
+    /// `after_is_gte`
+    pub const AFTER_IS_GTE: usize = core::mem::offset_of!(LinkCell, after_is_gte);
+    /// `page1`
+    pub const PAGE1: usize = core::mem::offset_of!(LinkCell, page1);
+    /// `count1`
+    pub const COUNT1: usize = core::mem::offset_of!(LinkCell, count1);
+    /// `page2`
+    pub const PAGE2: usize = core::mem::offset_of!(LinkCell, page2);
+    /// `count2`
+    pub const COUNT2: usize = core::mem::offset_of!(LinkCell, count2);
+}
+
+/// Bytes from a block's entry to its first op's code: the frame setup and
+/// the register loads that linked code (already set up) skips.
+pub const NATIVE_BODY_OFFSET: usize = 60;
 
 /// Byte offsets of [`NativeRun`] fields, for the emitter.
 #[doc(hidden)]
@@ -312,6 +411,36 @@ pub mod native_run {
     pub const STATUS: usize = core::mem::offset_of!(NativeRun, status);
     /// `ram`
     pub const RAM: usize = core::mem::offset_of!(NativeRun, ram);
+    /// `epoch_ptr`
+    pub const EPOCH_PTR: usize = core::mem::offset_of!(NativeRun, epoch_ptr);
+    /// `link_gen_ptr`
+    pub const LINK_GEN_PTR: usize = core::mem::offset_of!(NativeRun, link_gen_ptr);
+    /// `pages`
+    pub const PAGES: usize = core::mem::offset_of!(NativeRun, pages);
+    /// `block`
+    pub const BLOCK: usize = core::mem::offset_of!(NativeRun, block);
+    /// `watch`
+    pub const WATCH: usize = core::mem::offset_of!(NativeRun, watch);
+    /// `link`
+    pub const LINK: usize = core::mem::offset_of!(NativeRun, link);
+    /// `load_state`
+    pub const LOAD_STATE: usize = core::mem::offset_of!(NativeRun, load_state);
+    /// `decay`
+    pub const DECAY: usize = core::mem::offset_of!(NativeRun, decay);
+    /// `ops`
+    pub const OPS: usize = core::mem::offset_of!(NativeRun, ops);
+    /// `vaddr`
+    pub const VADDR: usize = core::mem::offset_of!(NativeRun, vaddr);
+    /// `op_count`
+    pub const OP_COUNT: usize = core::mem::offset_of!(NativeRun, op_count);
+    /// `ran0`
+    pub const RAN0: usize = core::mem::offset_of!(NativeRun, ran0);
+    /// `boundary_until`
+    pub const BOUNDARY_UNTIL: usize = core::mem::offset_of!(NativeRun, boundary_until);
+    /// `slow_boundary`
+    pub const SLOW_BOUNDARY: usize = core::mem::offset_of!(NativeRun, slow_boundary);
+    /// `last_boundary`
+    pub const LAST_BOUNDARY: usize = core::mem::offset_of!(NativeRun, last_boundary);
 }
 
 /// Helper result: go on with the next op.
@@ -323,12 +452,14 @@ pub const NATIVE_STOP: u32 = 1;
 impl NativeRun {
     /// Record the last quietly passed branch boundary in the bus (see
     /// [`Bus::note_post_op_cycle`]).
+    /// Also applies the GPU decay compiled code deferred.
     #[inline(always)]
     pub(super) fn flush_boundary(&mut self, bus: &mut Bus) {
         if self.last_boundary != 0 {
             bus.note_post_op_cycle(self.last_boundary);
             self.last_boundary = 0;
         }
+        bus.jit_settle_decay(std::mem::take(&mut self.decay));
     }
 
     /// The CPU's load shadow as the compiled code keeps it.
@@ -580,6 +711,7 @@ pub unsafe extern "C" fn jit_gte_hazard(run: *mut NativeRun, index: u32) -> u32 
     } else {
         cpu.gte_irq_watch = None;
     }
+    run.watch = u32::from(cpu.gte_irq_watch.is_some());
     NATIVE_CONTINUE
 }
 

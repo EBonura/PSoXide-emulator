@@ -241,6 +241,10 @@ pub struct BlockCache {
     blocks: Vec<Block>,
     /// Blocks built (or rebuilt) since creation. Diagnostic.
     pub built: u64,
+    /// Changes to which block a slot holds (builds and clears): compiled
+    /// code linked to a block at one count is still linked to it while
+    /// this and the I-cache epoch are unchanged.
+    link_gen: u64,
 }
 
 impl BlockCache {
@@ -254,6 +258,7 @@ impl BlockCache {
     pub fn clear(&mut self) {
         self.slots = Vec::new();
         self.blocks.clear();
+        self.link_gen += 1;
     }
 
     /// Number of blocks held.
@@ -577,6 +582,7 @@ impl Cpu {
         }
         block.checked_epoch = self.instruction_cache.epoch();
         self.blocks.built += 1;
+        self.blocks.link_gen += 1;
         Some(match reuse {
             Some(index) => {
                 self.blocks.blocks[index as usize] = block;

@@ -65,6 +65,13 @@ pub fn tier_batch(op: &DecodedOp) -> bool {
             && (op.class == OpClass::GteCommand || matches!(op.word >> 26, 0x32 | 0x3A)))
 }
 
+impl BlockCache {
+    /// Where the link generation lives, for compiled code.
+    pub(in crate::cpu) fn link_gen_ptr(&self) -> *const u64 {
+        &self.link_gen
+    }
+}
+
 impl Cpu {
     /// Run from decoded blocks for as long as nothing but the CPU, RAM, the
     /// scratchpad and the clock can change, and return how many
@@ -516,6 +523,7 @@ impl Cpu {
         }
         if native == NATIVE_DECLINED
             || !bus.code_stream_idle()
+            || !bus.jit_fetch_off_ram_bus()
             || (irq_enabled && !ram_ok)
             || self.pending_pc.is_some()
             || self.gte_irq_watch.is_some()
@@ -553,6 +561,9 @@ impl Cpu {
         run.after_is_gte = u32::from(block.after_is_gte);
         run.status = crate::cpu::jit_abi::NATIVE_IN_BLOCK;
         run.ran0 = 0;
+        run.block = index as u32 + 1;
+        run.watch = 0;
+        run.link = std::ptr::null_mut();
         run.boundary_until = bus.boundary_quiet_until();
         run.slow_boundary = u32::from(bus.irq().pending());
         run.last_boundary = 0;
@@ -636,6 +647,7 @@ impl Cpu {
         run.ops = block.ops.as_ptr();
         run.vaddr = pc;
         run.op_count = block.ops.len() as u32;
+        run.block = id;
         run.ran0 = run.ran;
         run.ram_ok = u32::from(ram_ok);
         run.taken = 0;
@@ -643,6 +655,53 @@ impl Cpu {
         run.after_is_gte = u32::from(block.after_is_gte);
         run.status = crate::cpu::jit_abi::NATIVE_IN_BLOCK;
         Some(native)
+    }
+
+    /// Link exit `link` (when not null) to the block `run` now points at,
+    /// whose compiled code is at `entry`: see [`LinkCell`]. Left unlinked
+    /// when main RAM does not hold the block's words.
+    ///
+    /// [`LinkCell`]: crate::cpu::jit_abi::LinkCell
+    pub(in crate::cpu) fn fill_link(
+        &mut self,
+        bus: &Bus,
+        run: &crate::cpu::jit_abi::NativeRun,
+        link: *mut crate::cpu::jit_abi::LinkCell,
+        entry: usize,
+    ) {
+        if link.is_null() {
+            return;
+        }
+        let index = run.block as usize - 1;
+        if !self.block_ram_matches(bus, index) {
+            return;
+        }
+        let block = &self.blocks.blocks[index];
+        let offset = memory::to_physical(block.vaddr) % RAM_BYTES;
+        let last = (offset + 4 * block.ops.len() as u32) % RAM_BYTES;
+        let (pages, _) = bus.jit_ram_pages();
+        let page1 = (offset >> 12) & (RAM_BYTES / 4096 - 1);
+        let page2 = (last >> 12) & (RAM_BYTES / 4096 - 1);
+        // SAFETY: `link` is a cell of the installed compiler's code, and the
+        // page indices are below the page count.
+        unsafe {
+            *link = crate::cpu::jit_abi::LinkCell {
+                entry: entry + crate::cpu::jit_abi::NATIVE_BODY_OFFSET,
+                gen: self
+                    .instruction_cache
+                    .epoch()
+                    .wrapping_add(self.blocks.link_gen),
+                ops: block.ops.as_ptr() as usize,
+                vaddr: block.vaddr,
+                block: run.block,
+                op_count: block.ops.len() as u32,
+                after_is_gte: u32::from(block.after_is_gte),
+                page1,
+                count1: *pages.add(page1 as usize),
+                page2,
+                count2: *pages.add(page2 as usize),
+            };
+        }
     }
 
     /// Account the ops compiled code retired in the current block.
@@ -700,7 +759,14 @@ impl Cpu {
             self.executing_in_branch_delay = false;
             return Some(NativeExit::Break);
         }
-        // Stopped in the block it was running.
+        // Stopped in the block it was running (reached by linked code,
+        // which leaves the cursor to be set here).
+        self.cursor = Cursor {
+            block: run.block,
+            op: 0,
+            pc: run.vaddr,
+            cache_control: self.cache_control,
+        };
         let index = (self.cursor.block - 1) as usize;
         // Ops of the current block that retired.
         let ran = run.ran - run.ran0;
