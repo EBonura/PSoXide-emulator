@@ -150,6 +150,9 @@ pub struct Block {
     /// The blocks entered from this one lately, as (PC, block index plus
     /// one): a cache in front of the slot table ([`Cpu::batch_enter`]).
     exits: [(u32, u32); 2],
+    /// The block lies in the HLE kernel's first 64 KiB of RAM
+    /// ([`Cpu::enter_block`]).
+    kernel: bool,
     /// `(line base physical address, generation)` of every I-cache line
     /// the ops were read from.
     lines: [(u32, u32); MAX_LINES],
@@ -159,6 +162,12 @@ pub struct Block {
 }
 
 impl Block {
+    /// Whether the block lies in the HLE kernel area (see
+    /// [`Cpu::enter_block`]): a store while running it must leave it.
+    pub(crate) fn in_kernel(&self) -> bool {
+        self.kernel
+    }
+
     /// The RAM word after the last op is a GTE command, as of the last RAM
     /// check ([`Cpu::block_ram_matches`]).
     pub fn after_is_gte(&self) -> bool {
@@ -367,7 +376,16 @@ impl Cpu {
             return false;
         }
         let phys = memory::to_physical(pc);
-        if phys >= memory::ram::MIRROR_END || (bus.hle_bios_enabled && phys < 0x1_0000) {
+        if phys >= memory::ram::MIRROR_END {
+            return false;
+        }
+        // The HLE kernel area: the interpreter looks for its hooks (the
+        // A0/B0/C0 vectors, the exception-return stub, trap words in RAM)
+        // before every fetch there. A block never starts on a hook nor holds
+        // a trap word (`build_block`), and is entered only while RAM holds
+        // its words, so no hook can hide under one of its ops.
+        let kernel = bus.hle_bios_enabled && phys < 0x1_0000;
+        if kernel && hle_hook(phys) {
             return false;
         }
         let slot = ((phys % RAM_BYTES) >> 2) as usize;
@@ -396,6 +414,9 @@ impl Cpu {
                 None => return false,
             }
         };
+        if kernel && !self.block_ram_matches(bus, index as usize) {
+            return false;
+        }
         let block = &mut self.blocks.blocks[index as usize];
         block.hits = block.hits.wrapping_add(1);
         self.cursor = Cursor {
@@ -463,6 +484,7 @@ impl Cpu {
                         after_is_gte: false,
                         ram_stamp: RamStamp::default(),
                         exits: [(0, 0); 2],
+                        kernel: false,
                     },
                 );
                 old.ops.clear();
@@ -485,17 +507,28 @@ impl Cpu {
                 after_is_gte: false,
                 ram_stamp: RamStamp::default(),
                 exits: [(0, 0); 2],
+                kernel: false,
             },
         };
         block.vaddr = pc;
+        block.kernel = hle && base < 0x1_0000;
         // The word at `i`, when a fetch there is a cache hit inside the same
         // RAM mirror and outside the HLE kernel area.
         let word_at = |cpu: &Cpu, i: usize| -> Option<u32> {
             let phys = base.wrapping_add(4 * i as u32);
-            if phys / RAM_BYTES != base / RAM_BYTES || (hle && phys < 0x1_0000) {
+            if phys / RAM_BYTES != base / RAM_BYTES {
                 return None;
             }
-            cpu.instruction_cache.hit(phys)
+            let word = cpu.instruction_cache.hit(phys)?;
+            if hle
+                && phys < 0x1_0000
+                && (hle_hook(phys)
+                    || crate::hle_kernel::decode_trap(word).is_some()
+                    || crate::hle_kernel::decode_trap(bus.ram_word(phys as usize)).is_some())
+            {
+                return None;
+            }
+            Some(word)
         };
         while block.ops.len() < MAX_BLOCK_OPS {
             let i = block.ops.len();
@@ -756,16 +789,6 @@ impl Cpu {
             }
         }
         const IRQ_ENABLED: u32 = 0x401;
-        // The GTE hazard's watch: only the hazard sample sets it, and the
-        // batch stops before any step that would sample, so the first step
-        // takes it and it stays clear. A watch on that first step with
-        // interrupts on means the step samples: leave it to the interpreter.
-        if let Some(watch) = self.gte_irq_watch {
-            if watch == self.pc && self.cop0[12] & IRQ_ENABLED == IRQ_ENABLED {
-                return 0;
-            }
-            self.gte_irq_watch = None;
-        }
         let mut b = Batch {
             now: bus.cycles(),
             synced: bus.cycles(),
@@ -789,6 +812,8 @@ impl Cpu {
             block_ram: (0, 0),
             post_op_until: bus.post_op_quiet_until(),
             irq_line: bus.irq_line(),
+            watch: self.gte_irq_watch.take(),
+            kernel: false,
         };
         'blocks: loop {
             b.irq_enabled = self.cop0[12] & IRQ_ENABLED == IRQ_ENABLED;
@@ -796,6 +821,7 @@ impl Cpu {
             // matches it (see `Batch::ram_ok`).
             b.ram_ok = b.irq_enabled && self.block_ram_matches(bus, b.block as usize);
             let block = &self.blocks.blocks[b.block as usize];
+            b.kernel = block.kernel;
             let after_is_gte = block.after_is_gte;
             let ops = block.ops.as_ptr();
             b.block_ram = (
@@ -810,24 +836,33 @@ impl Cpu {
                 // op flagged LAST), and nothing below touches the block cache
                 // until the loop leaves this block.
                 let op = unsafe { *ops.add(b.at as usize) };
-                if b.done >= b.budget || b.now + 1 >= b.limit || op.flags & op_flags::BATCH == 0 {
+                // Everything but a terminator runs here (see `batch_fallback`).
+                if b.done >= b.budget || b.now + 1 >= b.limit || op.class == OpClass::Terminator {
                     break 'blocks;
                 }
                 let delay = op.flags & op_flags::DELAY_SLOT != 0;
+                // The GTE interrupt hazard (`Cpu::gte_irq_hazard`): the step
+                // takes the watch, and samples when it is watched or a GTE
+                // command comes next. The sample's drain has nothing due
+                // below `post_op_until` but the boundary record, and with the
+                // line low it only sets the watch; anything else is left to
+                // the interpreter.
+                let watched = b.watch == Some(b.pc);
+                let mut sample = None;
                 if b.irq_enabled {
-                    let next_gte = if delay {
-                        bus.peek_is_gte_command(b.taken.unwrap_or(b.pc.wrapping_add(4)))
-                    } else if b.ram_ok {
-                        if op.flags & op_flags::LAST != 0 {
-                            after_is_gte
-                        } else {
-                            op.flags & op_flags::NEXT_GTE != 0
-                        }
+                    let next = if delay { b.taken.unwrap_or(b.pc.wrapping_add(4)) } else { b.pc.wrapping_add(4) };
+                    let next_gte = if delay || !b.ram_ok {
+                        bus.peek_is_gte_command(next)
+                    } else if op.flags & op_flags::LAST != 0 {
+                        after_is_gte
                     } else {
-                        bus.peek_is_gte_command(b.pc.wrapping_add(4))
+                        op.flags & op_flags::NEXT_GTE != 0
                     };
-                    if next_gte {
-                        break 'blocks;
+                    if next_gte || watched {
+                        if b.now >= b.post_op_until || b.now >= b.limit || b.irq_line {
+                            break 'blocks;
+                        }
+                        sample = Some((b.now, next_gte.then_some(next)));
                     }
                 }
                 let memory = op.flags & op_flags::TOUCHES_BUS != 0;
@@ -844,6 +879,11 @@ impl Cpu {
                 // -- the step, as `execute_one_inner` + `execute_fetched` --
                 if b.slow_fetch && !Self::batch_slow_fetch(bus, &mut b) {
                     break 'blocks;
+                }
+                b.watch = None;
+                if let Some((at_cycle, watch)) = sample {
+                    bus.record_post_op(at_cycle);
+                    b.watch = watch;
                 }
                 let branch_after_this = if delay { b.taken.take() } else { None };
                 if Self::batch_simple(op, access) {
@@ -887,7 +927,10 @@ impl Cpu {
                     continue 'blocks;
                 }
                 b.pc = b.pc.wrapping_add(4);
-                if op.flags & op_flags::LAST != 0 {
+                // In the kernel area a store may have put a trap word under a
+                // later op: enter again from here (`enter_block` checks).
+                let kernel_store = b.kernel && memory && op.word >> 26 >= 0x28;
+                if op.flags & op_flags::LAST != 0 || kernel_store {
                     self.cursor.block = 0;
                     if device || !self.batch_enter(bus, &mut b) {
                         break 'blocks;
@@ -913,6 +956,7 @@ impl Cpu {
             .map(|(position, register)| LoadShadow { position, register });
         self.pending_pc = b.taken;
         self.branch_delay_next = b.after_branch;
+        self.gte_irq_watch = b.watch;
         let uncounted = b.done - b.counted;
         if uncounted != 0 && bus.external_interrupt_pending_quiet(uncounted) {
             self.irq_line_high_steps = self.irq_line_high_steps.saturating_add(uncounted);
@@ -929,7 +973,7 @@ impl Cpu {
     /// these, or would pass the budget or the quiet limit.
     #[inline(never)]
     fn batch_plain(&mut self, bus: &mut Bus, ops: *const DecodedOp, st: &mut Batch) {
-        if st.irq_enabled && !st.ram_ok {
+        if (st.irq_enabled && !st.ram_ok) || st.kernel || st.watch.is_some() {
             return;
         }
         let mask = op_flags::DELAY_SLOT
@@ -1009,7 +1053,7 @@ impl Cpu {
         for (vaddr, id) in self.blocks.blocks[from].exits {
             if vaddr == pc && id != 0 {
                 let block = &mut self.blocks.blocks[id as usize - 1];
-                if block.vaddr == pc && block.current(&self.instruction_cache) {
+                if block.vaddr == pc && !block.kernel && block.current(&self.instruction_cache) {
                     block.hits = block.hits.wrapping_add(1);
                     self.cursor = Cursor {
                         block: id,
@@ -1089,7 +1133,8 @@ impl Cpu {
         self.committing_load = (b.pend.0 != 0).then_some(b.pend);
         b.pend = (0, 0);
         self.branch_delay_next = false;
-        self.executing_in_branch_delay = op.flags & op_flags::DELAY_SLOT != 0;
+        let delay = op.flags & op_flags::DELAY_SLOT != 0;
+        self.executing_in_branch_delay = delay;
         if memory {
             let _ = match word >> 26 {
                 0x20 => self.op_lb(word, bus),
@@ -1104,7 +1149,8 @@ impl Cpu {
                 0x2A => self.op_swl(word, bus),
                 0x2B => self.op_sw(word, bus),
                 0x2E => self.op_swr(word, bus),
-                _ => unreachable!("not a CPU load or store: {word:08x}"),
+                // LWC2/SWC2, through the GTE.
+                _ => self.execute(word, b.pc, delay, bus),
             };
             if word >> 26 >= 0x28 {
                 b.ram_ok = false;
@@ -1113,7 +1159,7 @@ impl Cpu {
                 b.shadow = Some((0, op.rt));
             }
         } else {
-            let _ = self.execute(word, b.pc, false, bus);
+            let _ = self.execute(word, b.pc, delay, bus);
         }
         self.executing_in_branch_delay = false;
         b.now = bus.cycles();
@@ -1215,6 +1261,10 @@ struct Batch {
     /// or the last full drain (nothing in a batch moves them otherwise).
     post_op_until: u64,
     irq_line: bool,
+    /// `Cpu::gte_irq_watch`.
+    watch: Option<u32>,
+    /// The current block is in the HLE kernel area ([`Block::in_kernel`]).
+    kernel: bool,
     /// The next fetch needs more than a plain hit: noting the hit once, or
     /// a streaming line fill (which only ends within a batch).
     slow_fetch: bool,
@@ -1242,7 +1292,7 @@ enum Access {
 #[inline(always)]
 fn access_kind(word: u32, addr: u32) -> Access {
     let aligned = match word >> 26 {
-        0x23 | 0x2B => addr & 3 == 0,
+        0x23 | 0x2B | 0x32 | 0x3A => addr & 3 == 0,
         0x21 | 0x25 | 0x29 => addr & 1 == 0,
         _ => true,
     };
@@ -1438,4 +1488,11 @@ mod tests {
         assert_eq!(classify(0x0000_000C), Some(OpClass::Terminator)); // syscall
         assert_eq!(classify(0xFC00_0000), None);
     }
+}
+
+/// Whether `phys` is where the HLE BIOS takes over from the interpreter
+/// before a fetch: the A0/B0/C0 vectors and the exception-return stub.
+fn hle_hook(phys: u32) -> bool {
+    matches!(phys, 0xA0 | 0xB0 | 0xC0)
+        || phys == memory::to_physical(crate::hle_bios::EXCEPTION_RETURN_STUB)
 }

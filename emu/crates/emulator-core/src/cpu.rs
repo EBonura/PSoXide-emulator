@@ -1869,8 +1869,12 @@ impl Cpu {
             self.cursor.pc = pc.wrapping_add(4);
         }
         let result = self.execute_block_op(bus, pc, op);
-        // A store may have written the cache-control register.
-        if op.class == OpClass::Store && self.cache_control != cursor.cache_control {
+        // A store may have written the cache-control register, or (in the
+        // HLE kernel area) put a trap word under a later op.
+        if op.class == OpClass::Store
+            && (self.cache_control != cursor.cache_control
+                || self.blocks.block(cursor.block - 1).in_kernel())
+        {
             self.cursor.block = 0;
         }
         result
