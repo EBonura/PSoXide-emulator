@@ -1696,6 +1696,17 @@ impl Cpu {
     ) -> (u64, Result<(), ExecutionError>) {
         let mut steps = 0;
         while steps < max_steps {
+            // A waiting HLE call retried with nothing else happening is
+            // charged without re-running the call; same instructions, same
+            // cycles, same stop point (see `skip_hle_wait_stepwise`).
+            let (skipped, stop) = self.skip_hle_wait_stepwise(bus, max_steps - steps, &mut stop_after);
+            steps += skipped;
+            if stop {
+                break;
+            }
+            if skipped != 0 {
+                continue;
+            }
             if let Err(error) = self.execute_one(bus) {
                 return (steps, Err(error));
             }

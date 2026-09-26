@@ -13,6 +13,25 @@ impl Bus {
     /// charged (possibly 0); the state afterwards is the state after that
     /// many single steps.
     pub(crate) fn skip_idle_steps(&mut self, step: u64, max: u64) -> u64 {
+        let n = self.idle_window(step, max);
+        if n != 0 {
+            self.advance_cycles((n * step) as u32);
+            // What the last step's drain records.
+            self.last_post_op_cycle = self.cycles;
+        }
+        n
+    }
+
+    /// One of the steps [`Bus::idle_window`] allowed: the clock advance and
+    /// what that step's drain records.
+    pub(crate) fn idle_step(&mut self, step: u64) {
+        self.advance_cycles(step as u32);
+        self.last_post_op_cycle = self.cycles;
+    }
+
+    /// How many idle steps of `step` cycles (at most `max`) change nothing
+    /// but the clock; see [`Bus::skip_idle_steps`]. Pure.
+    pub(crate) fn idle_window(&self, step: u64, max: u64) -> u64 {
         // The clock's plain path: one advance of n cycles equals n advances
         // of one (no frozen limit range, no experimental GPU list walk, no
         // GPU DMA held back, plain GPU credit decay). No limit oracle may
@@ -37,15 +56,9 @@ impl Bus {
             .min(self.cdrom.idle_until())
             // Each step's drain skips the root counters only below this.
             .min(self.timers.quiet_until().saturating_sub(1));
-        let n = (bound.saturating_sub(self.cycles) / step)
+        (bound.saturating_sub(self.cycles) / step)
             .min(max)
-            .min(u64::from(u32::MAX) / step);
-        if n != 0 {
-            self.advance_cycles((n * step) as u32);
-            // What the last step's drain records.
-            self.last_post_op_cycle = self.cycles;
-        }
-        n
+            .min(u64::from(u32::MAX) / step)
     }
 
     /// The interrupt-line sample at the start of `n` idle steps: the SPU
