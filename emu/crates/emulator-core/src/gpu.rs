@@ -3161,7 +3161,11 @@ impl Gpu {
 
         let clip = self.clip();
         let (vram, mut plot) = self.plotter();
-        span::flat_tri(vram, &mut plot, &setup, clip, color, mode);
+        if plot.owner.is_some() {
+            span::untextured_tri_exact(vram, &mut plot, &setup, clip, None, color, mode);
+        } else {
+            span::flat_tri(vram, &setup, clip, color, mode, plot.merge());
+        }
     }
 
     /// GP0 0x24..=0x27 -- textured triangle. 7 words:
@@ -3549,28 +3553,37 @@ impl Gpu {
         // The chunked loop fetches a few texels ahead of the pixels it
         // stores, so it needs the texture page clear of the pixels drawn
         // (any VRAM the triangle's bounding box, padded by a pixel, can
-        // reach).
+        // reach). The pixel tracer also takes the exact path.
         let (x0, y0, x1, y1) = bbox;
-        let simple = !prim.semi
-            && !plot.mask_check
-            && plot.owner.is_none()
-            && !tex.page_overlaps(
+        let exact = plot.owner.is_some()
+            || tex.page_overlaps(
                 depth,
                 (x0 - 1).max(clip.left),
                 (y0 - 1).max(clip.top),
                 (x1 + 1).min(clip.right),
                 (y1 + 1).min(clip.bottom),
             );
+        if exact {
+            span::tex_tri_exact(
+                vram,
+                clut,
+                &mut plot,
+                setup,
+                clip,
+                tex,
+                (depth, shade, dither),
+                prim,
+            );
+            return;
+        }
+        let general = prim.semi || plot.mask_check;
+        let merge = plot.merge();
         macro_rules! go {
             ($d:expr, $s:expr, $di:expr) => {
-                if simple {
-                    span::tex_tri::<$d, $s, $di, true>(
-                        vram, clut, &mut plot, setup, clip, tex, prim,
-                    )
+                if general {
+                    span::tex_tri::<$d, $s, $di, true>(vram, clut, setup, clip, tex, prim, merge)
                 } else {
-                    span::tex_tri::<$d, $s, $di, false>(
-                        vram, clut, &mut plot, setup, clip, tex, prim,
-                    )
+                    span::tex_tri::<$d, $s, $di, false>(vram, clut, setup, clip, tex, prim, merge)
                 }
             };
         }
@@ -3813,10 +3826,12 @@ impl Gpu {
         let clip = self.clip();
         let dither = self.dither_enabled;
         let (vram, mut plot) = self.plotter();
-        if dither {
-            span::shaded_tri::<true>(vram, &mut plot, &setup, clip, mode);
+        if plot.owner.is_some() {
+            span::untextured_tri_exact(vram, &mut plot, &setup, clip, Some(dither), 0, mode);
+        } else if dither {
+            span::shaded_tri::<true>(vram, &setup, clip, mode, plot.merge());
         } else {
-            span::shaded_tri::<false>(vram, &mut plot, &setup, clip, mode);
+            span::shaded_tri::<false>(vram, &setup, clip, mode, plot.merge());
         }
     }
 
