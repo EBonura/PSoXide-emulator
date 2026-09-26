@@ -142,6 +142,30 @@ impl Bus {
         self.advance_cycles(n as u32);
     }
 
+    /// The clock below which a branch boundary's drain has nothing to do
+    /// ([`Bus::post_op_quiet`] would hold): the next scheduler event, SPU
+    /// sample, timer crossing and CD-ROM deadline; 0 while a limit oracle
+    /// waits to start. Holds until an access to a device, a drain or a
+    /// clock change past it.
+    #[inline(always)]
+    pub(crate) fn boundary_quiet_until(&self) -> u64 {
+        if self.limits.pending() {
+            return 0;
+        }
+        self.scheduler
+            .lowest_target()
+            .min(self.spu_sample_deadline)
+            .min(self.timers.quiet_until())
+            .min(self.cdrom.idle_until().saturating_add(1))
+    }
+
+    /// Record a branch boundary at `cycle` whose drain had nothing to do,
+    /// as [`Bus::post_op_quiet`] does when it passes.
+    #[inline(always)]
+    pub(crate) fn note_post_op_cycle(&mut self, cycle: u64) {
+        self.last_post_op_cycle = cycle;
+    }
+
     #[doc(hidden)]
     #[inline(always)]
     pub fn advance_quiet(&mut self, n: u64) {

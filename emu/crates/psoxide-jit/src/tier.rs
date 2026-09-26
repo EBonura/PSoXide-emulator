@@ -201,22 +201,61 @@ fn emit_budget_checks(a: &mut Asm, exits: &mut Vec<crate::a64::Fixup>) {
 /// other ops only clear a watch that cannot be set: compiled code runs with
 /// RAM holding the block's words, so the decoded flags say where GTE
 /// commands are.
+///
+/// Inside compiled code the watch is only ever set for the op right after
+/// the one that set it, which is then a GTE command. So for any other op
+/// the helper has work only when the next instruction is a GTE command:
+/// known from the block for ops inside it, `after_is_gte` for the last op,
+/// and a look at RAM for a delay slot (the branch target when taken).
 fn emit_gte_check(
     a: &mut Asm,
     flags: u8,
     gte_command: bool,
     index: usize,
+    pc: u32,
     exits: &mut Vec<crate::a64::Fixup>,
 ) {
     if flags & (op_flags::DELAY_SLOT | op_flags::NEXT_GTE | op_flags::LAST) == 0 && !gte_command {
         return;
     }
     let off_irq = a.cbz_w(X_IRQ);
+    let mut quiet = Vec::new();
+    if !gte_command && flags & op_flags::NEXT_GTE == 0 {
+        if flags & op_flags::DELAY_SLOT != 0 {
+            // w12 = the next instruction's address.
+            a.ldr_w(10, X_RUN, off::TAKEN as u32);
+            a.ldr_w(12, X_RUN, off::TARGET as u32);
+            let taken = a.cbnz_w(10);
+            a.mov32(12, pc.wrapping_add(4));
+            a.bind(taken);
+            // Outside main RAM: the helper looks.
+            a.mov32(10, 0x1FFF_FFFF);
+            a.and_w(13, 12, 10);
+            a.lsr_w_imm(10, 13, 23);
+            let outside = a.cbnz_w(10);
+            a.mov32(10, 0x1F_FFFC);
+            a.and_w(13, 13, 10);
+            a.ldr_x(11, X_RUN, off::RAM as u32);
+            a.add_x(11, 11, 13);
+            a.ldr_w(13, 11, 0);
+            a.lsr_w_imm(13, 13, 25);
+            a.cmp_w_imm(13, 0x4A00_0000 >> 25);
+            quiet.push(a.b_cond(Cond::Ne));
+            a.bind(outside);
+        } else {
+            // The last op: the word after the block.
+            a.ldr_w(10, X_RUN, off::AFTER_IS_GTE as u32);
+            quiet.push(a.cbz_w(10));
+        }
+    }
     a.str_x(X_ISSUE, X_RUN, off::ISSUE as u32);
     call(a, jit_gte_hazard as *const () as usize as u64, index as u32);
     a.ldr_x(X_ISSUE, X_RUN, off::ISSUE as u32);
     exits.push(a.cbnz_w(0));
     a.bind(off_irq);
+    for fixup in quiet {
+        a.bind(fixup);
+    }
 }
 
 /// The issue cycle: one (BIAS), or none for an op hidden in a load
@@ -312,6 +351,7 @@ fn emit(block: &Block, steps: &[Step]) -> Asm {
                     op.flags,
                     op.class == OpClass::GteCommand,
                     i,
+                    pc,
                     &mut exits,
                 );
                 emit_issue(&mut a, word);
@@ -342,6 +382,7 @@ fn emit(block: &Block, steps: &[Step]) -> Asm {
                     op.flags,
                     op.class == OpClass::GteCommand,
                     i,
+                    pc,
                     &mut exits,
                 );
                 let slow = emit_ram_address(&mut a, word);
@@ -413,6 +454,7 @@ fn emit(block: &Block, steps: &[Step]) -> Asm {
                     op.flags,
                     op.class == OpClass::GteCommand,
                     i,
+                    pc,
                     &mut exits,
                 );
                 a.str_x(X_ISSUE, X_RUN, off::ISSUE as u32);
