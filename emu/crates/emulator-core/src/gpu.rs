@@ -24,6 +24,7 @@ mod blend;
 mod commands;
 mod idle;
 mod raster;
+mod span;
 mod status;
 
 pub use blend::BlendMode;
@@ -31,8 +32,9 @@ use blend::{
     blend_pixel, dither_rgb, modulate_tint, modulate_tint_dithered, prim_blend_mode,
     prim_is_semi_trans, rgb24_to_bgr15, split_tint, RAW_TEXTURE_TINT,
 };
-use raster::{for_each_tri_pixel, triangle_exceeds_hw_extent};
+use raster::triangle_exceeds_hw_extent;
 pub use raster::{tri_plane_eval, tri_raster_setup, tri_span_x, TriRasterSetup};
+use span::{Clip, Plotter, TexFetch, TexTri};
 use status::GpuStatus;
 
 use crate::vram::{Vram, VRAM_HEIGHT, VRAM_WIDTH};
@@ -3157,28 +3159,9 @@ impl Gpu {
             return; // zero vertical extent
         };
 
-        let draw_top = self.draw_area_top as i32;
-        let draw_bottom = self.draw_area_bottom as i32;
-        let draw_left = self.draw_area_left as i32;
-        let draw_right = self.draw_area_right as i32;
-
-        for (y0, y1, mut lx, ls, mut rx, rs) in setup.parts {
-            let mut y = y0;
-            while y < y1 {
-                if y >= draw_top && y <= draw_bottom {
-                    let xs = tri_span_x(lx).max(draw_left);
-                    let xe = tri_span_x(rx).min(draw_right + 1); // right-exclusive
-                    let mut x = xs;
-                    while x < xe {
-                        self.plot_pixel(x as u16, y as u16, color, mode);
-                        x += 1;
-                    }
-                }
-                lx += ls;
-                rx += rs;
-                y += 1;
-            }
-        }
+        let clip = self.clip();
+        let (vram, mut plot) = self.plotter();
+        span::flat_tri(vram, &mut plot, &setup, clip, color, mode);
     }
 
     /// GP0 0x24..=0x27 -- textured triangle. 7 words:
@@ -3519,44 +3502,110 @@ impl Gpu {
             (t1.0 as i32, t1.1 as i32),
             (t2.0 as i32, t2.1 as i32),
         ];
-        let draw_top = self.draw_area_top as i32;
-        let draw_bottom = self.draw_area_bottom as i32;
-        let draw_left = self.draw_area_left as i32;
-        let draw_right = self.draw_area_right as i32;
-        let dither = self.dither_enabled;
-        let tex = self.sampler();
-        let plot = self.plot_state();
-        for_each_tri_pixel(
-            [v0, v1, v2],
-            v_rgb,
-            v_uv,
-            draw_top,
-            draw_bottom,
-            draw_left,
-            draw_right,
-            |x, y, ri, gi, bi, u, v| {
-                if let Some(texel) =
-                    tex.sample(self.vram.words(), &self.clut_cache, u as u16, v as u16)
-                {
-                    let (tint_r, tint_g, tint_b) = if raw_texture {
-                        RAW_TEXTURE_TINT
-                    } else {
-                        (ri as u32, gi as u32, bi as u32)
-                    };
-                    let shaded = if !raw_texture && dither {
-                        modulate_tint_dithered(texel, tint_r, tint_g, tint_b, x, y)
-                    } else {
-                        modulate_tint(texel, tint_r, tint_g, tint_b)
-                    };
-                    let mode = if semi_trans && (texel & 0x8000) != 0 {
-                        tpage_mode
-                    } else {
-                        BlendMode::Opaque
-                    };
-                    self.plot_pixel_with(plot, x as u16, y as u16, shaded, mode);
+        // Every texel of the unpopulated upper VRAM bank reads as
+        // transparent: nothing to draw.
+        if self.tex_page_y >= VRAM_HEIGHT as u16 {
+            return;
+        }
+        let Some(setup) = tri_raster_setup([v0, v1, v2], v_rgb, v_uv, true) else {
+            return;
+        };
+        // A raw-texture primitive's identity tint leaves every texel as is.
+        let (shade, dither) = if raw_texture {
+            (span::SHADE_RAW, false)
+        } else {
+            (span::SHADE_GOURAUD, self.dither_enabled)
+        };
+        let prim = TexTri {
+            tint: RAW_TEXTURE_TINT,
+            semi: semi_trans,
+            blend: tpage_mode,
+        };
+        self.draw_tex_tri(&setup, shade, dither, &prim);
+    }
+
+    /// Draw a set-up textured triangle with the span loop specialised for
+    /// the current texture depth, `shade` and `dither`.
+    fn draw_tex_tri(&mut self, setup: &TriRasterSetup, shade: u8, dither: bool, prim: &TexTri) {
+        use span::{DEPTH_15, DEPTH_4, DEPTH_8, SHADE_FLAT, SHADE_GOURAUD, SHADE_RAW};
+        let clip = self.clip();
+        let tex = self.tex_fetch();
+        let depth = self.tex_depth;
+        let mut plot = Plotter {
+            mask_check: self.mask_check_before_draw,
+            mask_or: if self.mask_set_on_draw { 0x8000 } else { 0 },
+            owner: self.pixel_owner.as_mut(),
+            cmd_index: self.current_cmd_index,
+        };
+        let clut = &self.clut_cache;
+        let vram = self.vram.array_mut();
+        let simple = !prim.semi && !plot.mask_check && plot.owner.is_none();
+        macro_rules! go {
+            ($d:expr, $s:expr, $di:expr) => {
+                if simple {
+                    span::tex_tri::<$d, $s, $di, true>(
+                        vram, clut, &mut plot, setup, clip, tex, prim,
+                    )
+                } else {
+                    span::tex_tri::<$d, $s, $di, false>(
+                        vram, clut, &mut plot, setup, clip, tex, prim,
+                    )
                 }
-            },
+            };
+        }
+        macro_rules! shade {
+            ($d:expr) => {
+                match (shade, dither) {
+                    (SHADE_RAW, _) => go!($d, SHADE_RAW, false),
+                    (SHADE_FLAT, false) => go!($d, SHADE_FLAT, false),
+                    (SHADE_FLAT, true) => go!($d, SHADE_FLAT, true),
+                    (SHADE_GOURAUD, false) => go!($d, SHADE_GOURAUD, false),
+                    _ => go!($d, SHADE_GOURAUD, true),
+                }
+            };
+        }
+        match depth {
+            0 => shade!(DEPTH_4),
+            1 => shade!(DEPTH_8),
+            _ => shade!(DEPTH_15),
+        }
+    }
+
+    /// The drawing area as a span clip rectangle.
+    fn clip(&self) -> Clip {
+        Clip {
+            top: self.draw_area_top as i32,
+            bottom: self.draw_area_bottom as i32,
+            left: self.draw_area_left as i32,
+            right: self.draw_area_right as i32,
+        }
+    }
+
+    /// Texture-page addressing for the span loops (see [`Gpu::sampler`]).
+    fn tex_fetch(&self) -> TexFetch {
+        let (mx, my) = (
+            u32::from(self.tex_window_mask_x),
+            u32::from(self.tex_window_mask_y),
         );
+        TexFetch {
+            and_u: !mx & 0xFF,
+            or_u: u32::from(self.tex_window_offset_x) & mx,
+            and_v: !my & 0xFF,
+            or_v: u32::from(self.tex_window_offset_y) & my,
+            page_x: u32::from(self.tex_page_x),
+            page_y: u32::from(self.tex_page_y),
+        }
+    }
+
+    /// VRAM plus the mask-bit and tracer state the span loops write with.
+    fn plotter(&mut self) -> (&mut [u16; span::VRAM_LEN], Plotter<'_>) {
+        let plot = Plotter {
+            mask_check: self.mask_check_before_draw,
+            mask_or: if self.mask_set_on_draw { 0x8000 } else { 0 },
+            owner: self.pixel_owner.as_mut(),
+            cmd_index: self.current_cmd_index,
+        };
+        (self.vram.array_mut(), plot)
     }
 
     /// Apply the tpage bits embedded in a textured-primitive UV word
@@ -3681,38 +3730,27 @@ impl Gpu {
             (t1.0 as i32, t1.1 as i32),
             (t2.0 as i32, t2.1 as i32),
         ];
-        let draw_top = self.draw_area_top as i32;
-        let draw_bottom = self.draw_area_bottom as i32;
-        let draw_left = self.draw_area_left as i32;
-        let draw_right = self.draw_area_right as i32;
-        let tex = self.sampler();
-        let plot = self.plot_state();
-        for_each_tri_pixel(
-            [v0, v1, v2],
-            [(0, 0, 0); 3],
-            v_uv,
-            draw_top,
-            draw_bottom,
-            draw_left,
-            draw_right,
-            |x, y, _r, _g, _b, u, v| {
-                if let Some(texel) =
-                    tex.sample(self.vram.words(), &self.clut_cache, u as u16, v as u16)
-                {
-                    let shaded = if dither {
-                        modulate_tint_dithered(texel, tint.0, tint.1, tint.2, x, y)
-                    } else {
-                        modulate_tint(texel, tint.0, tint.1, tint.2)
-                    };
-                    let mode = if semi_trans && (texel & 0x8000) != 0 {
-                        tpage_mode
-                    } else {
-                        BlendMode::Opaque
-                    };
-                    self.plot_pixel_with(plot, x as u16, y as u16, shaded, mode);
-                }
-            },
-        );
+        // Every texel of the unpopulated upper VRAM bank reads as
+        // transparent: nothing to draw.
+        if self.tex_page_y >= VRAM_HEIGHT as u16 {
+            return;
+        }
+        let Some(setup) = tri_raster_setup([v0, v1, v2], [(0, 0, 0); 3], v_uv, true) else {
+            return;
+        };
+        // The identity tint leaves every texel as is (and is never
+        // dithered, see above).
+        let shade = if tint == RAW_TEXTURE_TINT {
+            span::SHADE_RAW
+        } else {
+            span::SHADE_FLAT
+        };
+        let prim = TexTri {
+            tint,
+            semi: semi_trans,
+            blend: tpage_mode,
+        };
+        self.draw_tex_tri(&setup, shade, dither, &prim);
     }
 
     /// Rasterize a triangle with per-vertex colours -- Gouraud shading.
@@ -3748,28 +3786,17 @@ impl Gpu {
             (r(c1), g(c1), b(c1)),
             (r(c2), g(c2), b(c2)),
         ];
-        let draw_top = self.draw_area_top as i32;
-        let draw_bottom = self.draw_area_bottom as i32;
-        let draw_left = self.draw_area_left as i32;
-        let draw_right = self.draw_area_right as i32;
+        let Some(setup) = tri_raster_setup([v0, v1, v2], v_rgb, [(0, 0); 3], true) else {
+            return;
+        };
+        let clip = self.clip();
         let dither = self.dither_enabled;
-        for_each_tri_pixel(
-            [v0, v1, v2],
-            v_rgb,
-            [(0, 0); 3],
-            draw_top,
-            draw_bottom,
-            draw_left,
-            draw_right,
-            |x, y, ri, gi, bi, _u, _v| {
-                let colour = if dither {
-                    dither_rgb(ri as i32, gi as i32, bi as i32, x, y)
-                } else {
-                    rgb24_to_bgr15((ri as u32) | ((gi as u32) << 8) | ((bi as u32) << 16))
-                };
-                self.plot_pixel(x as u16, y as u16, colour, mode);
-            },
-        );
+        let (vram, mut plot) = self.plotter();
+        if dither {
+            span::shaded_tri::<true>(vram, &mut plot, &setup, clip, mode);
+        } else {
+            span::shaded_tri::<false>(vram, &mut plot, &setup, clip, mode);
+        }
     }
 
     // --- Lines (GP0 0x40..=0x5F) ---

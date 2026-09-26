@@ -42,6 +42,12 @@ impl Vram {
         self.data.as_mut()
     }
 
+    /// The whole of VRAM as a fixed-size array, for the rasteriser's span
+    /// loops: indices masked to the array length need no bounds checks.
+    pub(crate) fn array_mut(&mut self) -> &mut [u16; VRAM_WIDTH * VRAM_HEIGHT] {
+        &mut self.data
+    }
+
     /// Zero all pixels.
     pub fn clear(&mut self) {
         self.data.fill(0);

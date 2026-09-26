@@ -4,11 +4,10 @@
 //
 // Home of the silicon-verified triangle coverage/interpolation math:
 // the hardware extent rule, the center-sampled Q32.32 DDA setup
-// (`tri_raster_setup`), and the attributed per-pixel walker
-// (`for_each_tri_pixel`). The `Gpu` methods in `gpu.rs` (flat
-// `rasterize_triangle`, the shaded/textured paths) and
-// psx-gpu-render's compute-span encoder all consume the SAME setup,
-// so CPU and GPU coverage cannot drift.
+// (`tri_raster_setup`). The span loops in `span.rs` behind the `Gpu`
+// methods in `gpu.rs` (flat `rasterize_triangle`, the shaded/textured
+// paths) and psx-gpu-render's compute-span encoder all consume the SAME
+// setup, so CPU and GPU coverage cannot drift.
 //
 // The old Redux-parity scanline-delta rasterizer that lived here was
 // retired once hardware proved Redux samples pixel CORNERS while
@@ -34,81 +33,11 @@ pub(super) fn triangle_exceeds_hw_extent(v0: (i32, i32), v1: (i32, i32), v2: (i3
         .any(|(a, b)| (a.0 - b.0).abs() > MAX_DX || (a.1 - b.1).abs() > MAX_DY)
 }
 
-/// Rasterize a triangle with PS1-silicon coverage AND attribute
-/// interpolation, calling `plot(x, y, r, g, b, u, v)` for every covered
-/// pixel. Coverage is the center-sampled DDA; attributes use the
-/// determinant-plane interpolation with the exact `tl` (top-left) anchor,
-/// so the integer-truncated gradients land bit-identically to hardware.
-/// The coverage/interpolation RULE is the documented PS1 (PSX-SPX) behavior;
-/// this implementation was written from that public hardware documentation
-/// and is verified pixel-exact against real silicon (hardware-tests GPU
-/// read-back battery).
-/// The caller's closure owns texture sampling, dither, blend and the
-/// actual VRAM write -- this just supplies coverage and the per-pixel
-/// interpolated R/G/B/U/V.
-///
-/// Caller must apply the polygon-too-large extent cull first; this assumes the
-/// triangle is drawable.
-pub(super) fn for_each_tri_pixel(
-    v: [(i32, i32); 3],
-    rgb: [(i32, i32, i32); 3],
-    uv: [(i32, i32); 3],
-    draw_top: i32,
-    draw_bottom: i32,
-    draw_left: i32,
-    draw_right: i32,
-    mut plot: impl FnMut(i32, i32, u8, u8, u8, u8, u8),
-) {
-    let Some(setup) = tri_raster_setup(v, rgb, uv, true) else {
-        return;
-    };
-    let [pr, pg, pb, pu, pv] = setup.planes;
-    // `tri_plane_eval` is linear in x in wrapping u32 arithmetic, so along a
-    // span each channel's accumulator steps by its x gradient: the same
-    // values without a multiply per channel per pixel.
-    let at = |p: (u32, u32, u32), x: i32, y: i32| {
-        p.2.wrapping_add((x as u32).wrapping_mul(p.0))
-            .wrapping_add((y as u32).wrapping_mul(p.1))
-    };
-    for (y0, y1, mut lx, ls, mut rx, rs) in setup.parts {
-        let mut y = y0;
-        while y < y1 {
-            if y >= draw_top && y <= draw_bottom {
-                let xs = tri_span_x(lx).max(draw_left);
-                let xe = tri_span_x(rx).min(draw_right + 1); // right-exclusive
-                let mut x = xs;
-                let (mut r, mut g, mut b) = (at(pr, x, y), at(pg, x, y), at(pb, x, y));
-                let (mut u, mut v) = (at(pu, x, y), at(pv, x, y));
-                while x < xe {
-                    plot(
-                        x,
-                        y,
-                        (r >> 24) as u8,
-                        (g >> 24) as u8,
-                        (b >> 24) as u8,
-                        (u >> 24) as u8,
-                        (v >> 24) as u8,
-                    );
-                    r = r.wrapping_add(pr.0);
-                    g = g.wrapping_add(pg.0);
-                    b = b.wrapping_add(pb.0);
-                    u = u.wrapping_add(pu.0);
-                    v = v.wrapping_add(pv.0);
-                    x += 1;
-                }
-            }
-            lx += ls;
-            rx += rs;
-            y += 1;
-        }
-    }
-}
-
 /// The CPU rasterizer's complete triangle setup: top-left attribute
 /// anchor from the ORIGINAL vertex order, Y-sort, determinant planes,
 /// and the center-sampled Q32.32 coverage DDA. This is the SINGLE
-/// source of truth -- the flat and attribute-interpolating CPU walkers
-/// above/below consume it, and `psx-gpu-render::scanline` builds the
+/// source of truth -- the flat and attribute-interpolating span loops
+/// in `span.rs` consume it, and `psx-gpu-render::scanline` builds the
 /// compute shader's row spans + plane uniforms from the same call, so
 /// CPU and GPU coverage/interpolation cannot drift (they used to be
 /// three hand-synced copies; two of this session's parity bugs lived
