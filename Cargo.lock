@@ -3145,6 +3145,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "psoxide-jit"
+version = "0.1.0"
+dependencies = [
+ "emulator-core",
+ "postcard",
+ "psoxide-settings",
+ "psx-iso",
+]
+
+[[package]]
 name = "psoxide-link"
 version = "0.1.0"
 dependencies = [
