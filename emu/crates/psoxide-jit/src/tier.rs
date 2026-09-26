@@ -1,20 +1,18 @@
 //! The native tier over the interpreter's decoded-block cache.
 //!
 //! The cached interpreter (`Cpu::run`, `cpu/block.rs`) hands a block to
-//! [`TierCompiler`] once it is hot. The compiler emits AArch64 for the
-//! block's prefix, the ops from its first up to the first one that is not
-//! register arithmetic or a CPU load or store, the block's last op, or an op
-//! followed by a GTE command (see `jit_abi::NativeRun`). The interpreter
-//! runs the compiled prefix and carries on with the rest of the block
-//! itself, so the branch, its delay slot, the branch-boundary work and
-//! everything the prefix does not cover stay the interpreter's.
-//!
-//! Per op the compiled code does what the batch loop does: stop before the
-//! op when the batch budget is spent or the clock would reach the quiet
-//! limit; add the issue cycle (through `jit_shadow_issue` while a load
-//! shadow is active); run the operation; commit the load in flight unless
-//! the op wrote the same register. Loads and stores call
-//! `jit_batch_memory`, the interpreter's own batched step.
+//! [`TierCompiler`] once it is hot, and the compiler emits AArch64 for as
+//! many of its ops, from the first, as the batch may run. Per op the code
+//! does what the batch loop does: stop before the op when the batch budget
+//! is spent or the clock would reach the quiet limit; the GTE interrupt
+//! hazard (inline, or through `jit_gte_hazard` around GTE commands); the
+//! issue cycle with the load-shadow rule inline; the operation; the commit
+//! of the load in flight unless the op wrote the same register. Register
+//! arithmetic and branch decisions run inline, main-RAM loads and word
+//! stores through lean helpers, everything else through the batch's own
+//! step (`jit_batch_memory`, `jit_batch_other`). At the end of a block
+//! `jit_chain` does the batch loop's block-to-block work and returns the
+//! next block's code, which is entered by a jump.
 
 use emulator_core::cpu::block::{op_flags, Block, BlockCompiler, OpClass};
 use emulator_core::cpu::jit_abi::{
@@ -25,7 +23,7 @@ use emulator_core::cpu::jit_abi::{
 use crate::a64::{Asm, Cond, ZR};
 use crate::codebuf::CodeBuffer;
 use crate::decode::{alu_dest, classify, Class};
-use crate::{emit_alu, emit_branch_decision, X_GPRS};
+use crate::ops::{emit_alu, emit_branch_decision, load_reg, X_GPRS};
 
 // Registers held across the prefix (callee-saved).
 const X_RUN: u8 = 19;
@@ -354,12 +352,12 @@ fn emit(block: &Block, steps: &[Step]) -> Asm {
                 a.str_x(X_ISSUE, X_RUN, off::ISSUE as u32);
                 // The shadow helper may have clobbered w9: form the address
                 // again (register values have not changed since).
-                crate::load_reg(&mut a, 9, (word >> 21) & 0x1F);
+                load_reg(&mut a, 9, (word >> 21) & 0x1F);
                 a.mov32(10, (word as i16) as i32 as u32);
                 a.add_w(1, 9, 10);
                 a.mov_x(0, X_RUN);
                 if store {
-                    crate::load_reg(&mut a, 2, (word >> 16) & 0x1F);
+                    load_reg(&mut a, 2, (word >> 16) & 0x1F);
                     a.mov32(3, word);
                     a.mov64(16, jit_ram_store32 as *const () as usize as u64);
                 } else {
@@ -478,7 +476,7 @@ fn emit_ram_address(a: &mut Asm, word: u32) -> Vec<crate::a64::Fixup> {
     let rs = (word >> 21) & 0x1F;
     let imm = (word as i16) as i32 as u32;
     let mut slow = Vec::new();
-    crate::load_reg(a, 9, rs);
+    load_reg(a, 9, rs);
     a.mov32(10, imm);
     a.add_w(9, 9, 10);
     let align = match word >> 26 {

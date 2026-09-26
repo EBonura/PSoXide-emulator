@@ -193,22 +193,22 @@ impl Asm {
 
     /// `LDR wt, [xn, #off]` (off a multiple of 4 below 16 KiB).
     pub fn ldr_w(&mut self, rt: u8, rn: u8, off: u32) {
-        debug_assert!(off % 4 == 0 && off < 16384);
+        debug_assert!(off.is_multiple_of(4) && off < 16384);
         self.emit(0xB940_0000 | (off / 4) << 10 | (rn as u32) << 5 | rt as u32);
     }
     /// `STR wt, [xn, #off]`.
     pub fn str_w(&mut self, rt: u8, rn: u8, off: u32) {
-        debug_assert!(off % 4 == 0 && off < 16384);
+        debug_assert!(off.is_multiple_of(4) && off < 16384);
         self.emit(0xB900_0000 | (off / 4) << 10 | (rn as u32) << 5 | rt as u32);
     }
     /// `LDR xt, [xn, #off]` (off a multiple of 8 below 32 KiB).
     pub fn ldr_x(&mut self, rt: u8, rn: u8, off: u32) {
-        debug_assert!(off % 8 == 0 && off < 32768);
+        debug_assert!(off.is_multiple_of(8) && off < 32768);
         self.emit(0xF940_0000 | (off / 8) << 10 | (rn as u32) << 5 | rt as u32);
     }
     /// `STR xt, [xn, #off]`.
     pub fn str_x(&mut self, rt: u8, rn: u8, off: u32) {
-        debug_assert!(off % 8 == 0 && off < 32768);
+        debug_assert!(off.is_multiple_of(8) && off < 32768);
         self.emit(0xF900_0000 | (off / 8) << 10 | (rn as u32) << 5 | rt as u32);
     }
     /// `ADD xd, xn, xm`.

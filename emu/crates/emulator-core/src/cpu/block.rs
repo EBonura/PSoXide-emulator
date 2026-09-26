@@ -667,9 +667,8 @@ impl Cpu {
     pub(super) fn run_fast(&mut self, bus: &mut Bus, budget: u64, until_cycle: u64) -> u64 {
         if self.cursor.block == 0 || self.cursor.pc != self.pc {
             self.cursor.block = 0;
-            if !(self.block_entry_ok() && self.enter_block(bus, self.pc))
-                && !self.can_interpret_in_batch(bus)
-            {
+            let entered = self.block_entry_ok() && self.enter_block(bus, self.pc);
+            if !entered && !self.can_interpret_in_batch(bus) {
                 return 0;
             }
         }
@@ -951,7 +950,11 @@ impl Cpu {
         if bus.cycles() >= st.hard {
             return false;
         }
-        self.batch_new_limits(bus, st);
+        // A quiet step moves nothing the limits depend on but the clock;
+        // past the GPU's quiet span its own clock advance ran the walk.
+        if bus.cycles() + 1 >= st.limit {
+            self.batch_new_limits(bus, st);
+        }
         true
     }
 
