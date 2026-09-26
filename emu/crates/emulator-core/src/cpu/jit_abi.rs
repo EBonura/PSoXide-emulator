@@ -84,7 +84,7 @@ pub struct NativeRun {
     /// The bus clock.
     pub cycles: *const u64,
     /// The block's decoded ops.
-    pub ops: *const super::block::DecodedOp,
+    pub ops: *const crate::cpu::block::DecodedOp,
     /// Address of the block's first op.
     pub vaddr: u32,
     /// Number of ops in the block.
@@ -124,7 +124,7 @@ pub struct NativeRun {
     /// How the compiled code ended (out): [`NATIVE_IN_BLOCK`] and friends.
     pub status: u32,
     /// The batch loop's state, for [`jit_chain`].
-    pub batch: *mut super::block::BatchState,
+    pub batch: *mut crate::cpu::block::BatchState,
 }
 
 /// Exit: stopped before op `ran` of the current block (the interpreter
@@ -144,7 +144,11 @@ pub const NATIVE_CHAIN_OFFSET: usize = 32;
 
 impl NativeRun {
     /// Fresh state for a native run inside the batch `batch`.
-    pub(super) fn new(cpu: &mut Cpu, bus: &mut Bus, batch: &mut super::block::BatchState) -> Self {
+    pub(super) fn new(
+        cpu: &mut Cpu,
+        bus: &mut Bus,
+        batch: &mut crate::cpu::block::BatchState,
+    ) -> Self {
         Self {
             cpu: cpu as *mut Cpu,
             bus: bus as *mut Bus,
@@ -183,9 +187,9 @@ impl Cpu {
         &mut self,
         bus: &mut Bus,
         run: &NativeRun,
-        st: &mut super::block::BatchState,
+        st: &mut crate::cpu::block::BatchState,
     ) -> Option<usize> {
-        use super::block::op_flags;
+        use crate::cpu::block::op_flags;
         let n = run.op_count as usize;
         // SAFETY: `ops` points at the current block's `op_count` ops.
         let last = unsafe { *run.ops.add(n - 1) };
@@ -336,14 +340,14 @@ pub unsafe extern "C" fn jit_batch_memory(run: *mut NativeRun, index: u32) -> u3
         return NATIVE_STOP;
     }
     let addr = cpu.gpr(op.rs).wrapping_add((op.word as i16) as i32 as u32);
-    if !super::block::quiet_access(op.word, addr) {
+    if !crate::cpu::block::quiet_access(op.word, addr) {
         return NATIVE_STOP;
     }
     let pc = run.vaddr.wrapping_add(4 * index);
     cpu.tick = run.tick0 + run.ran;
     cpu.pc = pc;
     cpu.pending_load = (run.pend_reg != 0).then_some((run.pend_reg as u8, run.pend_val));
-    let delay = op.flags & super::block::op_flags::DELAY_SLOT != 0;
+    let delay = op.flags & crate::cpu::block::op_flags::DELAY_SLOT != 0;
     if delay {
         cpu.pending_pc = (run.taken != 0).then_some(run.target);
     }
@@ -368,7 +372,7 @@ pub unsafe extern "C" fn jit_batch_memory(run: *mut NativeRun, index: u32) -> u3
     run.ran += 1;
     // A store elsewhere leaves the block's words (and the word after it) as
     // they were in RAM: the decoded flags still answer the GTE hazard.
-    let stored = matches!(op.class, super::block::OpClass::Store);
+    let stored = matches!(op.class, crate::cpu::block::OpClass::Store);
     run.ram_ok =
         u32::from(ram_ok || (stored && run.ram_ok != 0 && !store_hits_block(run, addr, 4)));
     run.shadow_from(cpu);
@@ -386,7 +390,7 @@ pub unsafe extern "C" fn jit_batch_memory(run: *mut NativeRun, index: u32) -> u3
     }
 }
 
-/// Run op `index` of the block, an [`OpClass::Other`](super::block::OpClass)
+/// Run op `index` of the block, an [`OpClass::Other`](crate::cpu::block::OpClass)
 /// op outside a delay slot (a trapping add, multiply/divide, HI/LO, MFC0 or
 /// a GTE register move), as the batch does: stop before it
 /// ([`NATIVE_STOP`], nothing changed) when the budget is spent or the clock
@@ -509,7 +513,7 @@ pub unsafe extern "C" fn jit_ram_store32(run: *mut NativeRun, addr: u32, value: 
 /// As [`jit_batch_memory`].
 #[doc(hidden)]
 pub unsafe extern "C" fn jit_gte_hazard(run: *mut NativeRun, index: u32) -> u32 {
-    use super::block::op_flags;
+    use crate::cpu::block::op_flags;
     // SAFETY: per the contract, the pointers are live and unaliased here.
     let run = unsafe { &mut *run };
     let (cpu, bus) = unsafe { (&mut *run.cpu, &mut *run.bus) };

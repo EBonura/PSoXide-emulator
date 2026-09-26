@@ -103,7 +103,7 @@ enum Step {
 fn plan(block: &Block) -> Vec<Step> {
     let mut steps = Vec::new();
     for op in &block.ops {
-        if op.flags & op_flags::BATCH == 0 {
+        if !emulator_core::cpu::block::tier_batch(op) {
             break;
         }
         steps.push(match (op.class, classify(op.word)) {
