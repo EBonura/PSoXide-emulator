@@ -630,6 +630,28 @@ pub(super) fn flat_tri(
     });
 }
 
+/// Blend (or mask-test) `colour` into the rows `top..=bottom`, columns
+/// `left..=right`, of an untextured rectangle, in chunks of `LANES`.
+pub(super) fn flat_rows(
+    vram: &mut [u16; VRAM_LEN],
+    (left, top, right, bottom): (i32, i32, i32, i32),
+    colour: u16,
+    mode: BlendMode,
+    merge: Merge,
+) {
+    let plain = mode == BlendMode::Opaque && !merge.mask_check;
+    let fg = [colour; LANES];
+    for y in top..=bottom {
+        let row = y as usize * VRAM_WIDTH;
+        let (mut x, end) = (left as usize, right as usize + 1);
+        while x < end {
+            let n = (end - x).min(LANES);
+            merge_flat_lanes(vram, row + x, n, &fg, plain, mode, merge);
+            x += LANES;
+        }
+    }
+}
+
 /// Draw a set-up untextured triangle one pixel at a time through
 /// `Plotter::put` (the pixel tracer's path). `shaded` interpolates the
 /// colour planes of `setup` (dithered when `dither`), otherwise every
