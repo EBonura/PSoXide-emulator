@@ -7,15 +7,25 @@
     <link data-trunk rel="icon" href="../../../assets/branding/psoxide-app-icon.png" />
     <script>
       // Browsers suspend the WebAudio context until a user gesture (autoplay
-      // policy), so cpal's audio stays silent on an auto-booting page. Capture
-      // the AudioContext cpal creates and resume it on the first user input.
+      // policy), so cpal's audio stays silent on the auto-booting page.
+      // Capture the AudioContext cpal creates, resume it on the first user
+      // input, and show a small hint until it is actually running.
       (function () {
         var Orig = window.AudioContext || window.webkitAudioContext;
         if (!Orig) return;
         var ctxs = [];
+        function suspended() {
+          return ctxs.some(function (c) { return c.state === "suspended"; });
+        }
+        function update() {
+          var hint = document.getElementById("psoxide-sound-hint");
+          if (hint) hint.hidden = !suspended();
+        }
         function Patched(opts) {
           var c = new Orig(opts);
           ctxs.push(c);
+          c.addEventListener("statechange", update);
+          update();
           return c;
         }
         Patched.prototype = Orig.prototype;
@@ -23,12 +33,26 @@
         window.webkitAudioContext = Patched;
         function resume() {
           ctxs.forEach(function (c) {
-            if (c.state === "suspended") c.resume();
+            if (c.state === "suspended") c.resume().then(update, update);
           });
         }
         ["pointerdown", "keydown", "touchstart"].forEach(function (ev) {
           window.addEventListener(ev, resume, true);
         });
+        // Pad presses are not DOM events. Try a resume on one while sound is
+        // still blocked; browsers that do not count a pad press as a gesture
+        // keep the hint up until a click or key.
+        setInterval(function () {
+          if (!suspended() || !navigator.getGamepads) return;
+          var pads = navigator.getGamepads();
+          for (var i = 0; i < pads.length; i++) {
+            if (pads[i] && pads[i].buttons.some(function (b) { return b.pressed; })) {
+              resume();
+              return;
+            }
+          }
+        }, 250);
+        document.addEventListener("DOMContentLoaded", update);
       })();
     </script>
     <style>
@@ -107,6 +131,20 @@
         animation: none;
       }
       .psoxide-loader.has-error .psoxide-loader-status { color: #ff9292; }
+      .psoxide-sound-hint {
+        position: fixed;
+        right: 14px;
+        bottom: 14px;
+        z-index: 10;
+        padding: 5px 12px;
+        border-radius: 999px;
+        background: rgba(16, 18, 22, 0.72);
+        color: #aab6c2;
+        font: 600 12px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        pointer-events: none;
+      }
+      .psoxide-sound-hint[hidden] { display: none; }
       @keyframes psoxide-loader-sweep {
         from { transform: translateX(-115%); }
         to { transform: translateX(350%); }
@@ -169,6 +207,7 @@
         </div>
       </div>
     </div>
+    <div id="psoxide-sound-hint" class="psoxide-sound-hint" hidden>Click or press a key for sound</div>
     <noscript>PSoXide requires JavaScript.</noscript>
   </body>
 </html>
