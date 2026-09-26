@@ -465,6 +465,8 @@ fn emit(block: &Block, steps: &[Step], cells: [u64; 2]) -> Asm {
                 );
                 a.ldr_x(X_ISSUE, X_RUN, off::ISSUE as u32);
                 a.ldr_x(X_RAN, X_RUN, off::RAN as u32);
+                // A device access may have moved the clock limit.
+                a.ldr_x(X_LIMIT, X_RUN, off::LIMIT as u32);
                 exits.push(a.cbnz_w(0));
                 a.bind(joined);
                 maybe_pending = !store;
@@ -492,6 +494,7 @@ fn emit(block: &Block, steps: &[Step], cells: [u64; 2]) -> Asm {
                 call(&mut a, helper, i as u32);
                 a.ldr_x(X_ISSUE, X_RUN, off::ISSUE as u32);
                 a.ldr_x(X_RAN, X_RUN, off::RAN as u32);
+                a.ldr_x(X_LIMIT, X_RUN, off::LIMIT as u32);
                 exits.push(a.cbnz_w(0));
                 maybe_pending = true;
             }
@@ -695,8 +698,9 @@ fn emit_ram_address(a: &mut Asm, word: u32) -> Vec<crate::a64::Fixup> {
 
 /// A main-RAM load at w9 (checked aligned and in RAM) in the common case,
 /// leaving the value in w0; what `jit_ram_load` does, inline: no I-cache
-/// fill still using the bus and no DRAM refresh due, so the load costs its
-/// six wait clocks, and it comes from cached code (the fetch was a hit), so
+/// fill still using the bus, no DRAM refresh due and the load's end below
+/// the quiet limit, so the load costs its six wait clocks, and it comes from
+/// cached code (the fetch was a hit), so
 /// a load shadow starts. The clock moves here; its GPU decay is left in
 /// `run.decay`. Returns the jumps to the helper for the other cases.
 fn emit_fast_load(a: &mut Asm, word: u32) -> Vec<crate::a64::Fixup> {
@@ -714,9 +718,13 @@ fn emit_fast_load(a: &mut Asm, word: u32) -> Vec<crate::a64::Fixup> {
     a.ldr_x(13, 13, 0);
     a.cmp_x(10, 13);
     helper.push(a.b_cond(Cond::Hs));
+    // The wait must stay below the quiet limit too: past it, moving the
+    // clock can run a GPU list walk, which the helper's clock does.
+    a.add_x_imm(14, 10, LOAD_WAIT);
+    a.cmp_x(14, X_LIMIT);
+    helper.push(a.b_cond(Cond::Hs));
     a.ldr_x(13, X_RUN, state + 16);
     a.str_x(10, 13, 0);
-    a.add_x_imm(14, 10, LOAD_WAIT);
     a.str_x(14, X_CYCLES, 0);
     a.ldr_x(13, X_RUN, off::DECAY as u32);
     a.add_x(13, 13, X_ISSUE);
