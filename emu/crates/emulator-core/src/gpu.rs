@@ -4477,6 +4477,9 @@ impl Default for Gpu {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod stress_tests;
+
 /// 24bpp pixels that fit on a VRAM line after halfword `start_x`.
 fn rgb24_pixels_left(start_x: u16) -> u16 {
     let halfwords = (crate::VRAM_WIDTH as u32).saturating_sub(u32::from(start_x));
