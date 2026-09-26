@@ -4,12 +4,12 @@
 //! the active category. Drawn via `egui::Painter` on a middle layer so
 //! it overlays the framebuffer/central area but sits below the HUD.
 //!
-//! Navigation: arrows + Enter + Escape (gamepad will land when the
-//! input subsystem does). Escape also toggles the overlay open/closed.
+//! Navigation: arrows + Enter + Escape, or the pad (Cross confirms, Circle
+//! backs out). Escape also toggles the overlay open/closed.
 //!
-//! Categories: Games / Examples / Projects / Editor / Settings / System
-//! (Projects + Create are editor/native-only). The debug sidebar is
-//! toggled from the toolbar, not the menu.
+//! Categories: Library (the games folder, then a Homebrew folder), Game
+//! (only while a game is loaded) and Settings. Developer tools live in the
+//! debug sidebar, which the toolbar toggles.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -26,7 +26,7 @@ const ITEM_HEIGHT: f32 = 40.0;
 const FOLDER_INDENT: f32 = 18.0;
 /// Hard ceiling on item-row width (huge libraries / long paths elide past it).
 const ITEM_MAX_WIDTH: f32 = 820.0;
-/// Floor so short categories (System, Settings) don't shrink to a sliver.
+/// Floor so short categories (Game, Settings) don't shrink to a sliver.
 const ITEM_MIN_WIDTH: f32 = 260.0;
 /// How much a row's right-aligned value (path / region tag) may contribute to
 /// the auto-sizing, and how wide it may draw before eliding.
@@ -48,8 +48,6 @@ const FADE_SPEED: f32 = 16.0;
 pub enum MenuAction {
     /// Toggle between continuous-run and paused.
     ToggleRun,
-    /// Advance the CPU by one retired instruction.
-    StepOne,
     /// Reseat the CPU at its reset vector.
     Reset,
     /// Start a new poll-exact port-1 recording, or stop and persist the
@@ -70,13 +68,13 @@ pub enum MenuAction {
     /// restored frame instead of immediately continuing.
     LoadState(u8, bool),
     /// Open the save-states panel (thumbnail list, pin-to-top,
-    /// load-with-confirmation) -- driven by the always-visible toolbar
-    /// icon as well as the System category's "Save states" row.
+    /// load-with-confirmation) -- driven by the toolbar icon as well as
+    /// the Game category's "Load state" row.
     OpenSaveStates,
-    /// Open the controls panel (clickable PS1 controller drawing,
-    /// press-a-key rebinding, reset to defaults) -- driven by the
-    /// always-visible toolbar icon as well as the System category's
-    /// "Controls" row.
+    /// Open the controls panel (controller ports and Digital/Analog mode,
+    /// the clickable PS1 controller drawing, press-a-key rebinding, reset
+    /// to defaults) -- driven by the toolbar icon as well as the Settings
+    /// category's "Controls" row.
     OpenControls,
     /// Restore every port-1 binding to the built-in defaults.
     ResetControls,
@@ -88,21 +86,27 @@ pub enum MenuAction {
     /// stable library ID; authored project builds use a path-qualified
     /// token so projects sharing the same PSX volume ID remain distinct.
     LaunchGame(String),
-    /// Expand or collapse a directory in the Games list.
+    /// Expand or collapse a directory in the Library list.
     ToggleLibraryFolder(PathBuf),
     /// Open the CD burn submenu for a launchable example/project disc.
     OpenBurnMenu(String),
     /// Re-walk the configured library root and refresh
-    /// `library.ron`. Surfaced as a "Refresh library" item in
-    /// the Games / Examples categories so users can trigger a
-    /// rescan without leaving the Menu.
+    /// `library.ron`. The last row of the Library.
     RescanLibrary,
     /// Build all public SDK/engine examples, then rescan the
-    /// library once the background make job completes.
+    /// library once the background make job completes. What an
+    /// unbuilt example row does when confirmed.
     BuildExamples,
-
     /// Pick and persist the games library root.
     ChooseGamesPath,
+    /// Switch between high-res and native-resolution rendering.
+    CycleVideoScale,
+    /// Cycle the sample-time texture filter.
+    CycleTextureFilter,
+    /// Step the output volume through a few presets.
+    CycleVolume,
+    /// Mute or unmute the audio.
+    ToggleMute,
     /// Cycle the menu backdrop opacity through a few presets.
     CycleMenuOpacity,
     /// Cycle the DPI-aware host UI scale through compact and enlarged presets.
@@ -114,9 +118,6 @@ pub enum MenuAction {
     Reconnect,
     /// Open the About card (from the Settings menu).
     ShowAbout,
-    /// A non-actionable row, e.g. the "not available in the web build"
-    /// placeholder on a desktop-only category. Selecting it does nothing.
-    Noop,
     /// Quit the application.
     Quit,
 }
@@ -245,26 +246,32 @@ struct MenuItem {
     value: Option<String>,
 }
 
-/// One Menu column. `icon_name` is a short tag used by tests /
-/// diagnostics so we can identify a category without comparing
-/// Unicode codepoints.
+/// One Menu column. `name` identifies a category in code and tests
+/// without comparing Unicode codepoints.
 struct Category {
     name: &'static str,
     icon: char,
     items: Vec<MenuItem>,
 }
 
-impl Category {
-    /// True when this category is a desktop-only stand-in: a single
-    /// non-actionable placeholder row. Drawn greyed in the icon row.
-    fn disabled(&self) -> bool {
-        matches!(self.items.as_slice(), [item] if item.action == MenuAction::Noop)
-    }
-}
+/// Expansion key of the Library's Homebrew folder. Games-folder keys are
+/// paths relative to the games root, so an absolute one never collides with
+/// a real folder of the same name.
+pub(crate) const HOMEBREW_FOLDER: &str = "/homebrew";
 
 pub struct MenuState {
     games: Vec<LibraryItem>,
+    /// SDK examples, project builds and (web) the streamed demo disc,
+    /// listed inside the Library's Homebrew folder.
+    homebrew: Vec<LibraryItem>,
+    /// Right-hand value of the Library's games-folder row (native: the path).
+    games_path: String,
     expanded_folders: HashSet<PathBuf>,
+    /// Whether the Game column is showing (a game is loaded).
+    game_loaded: bool,
+    /// Drive the Game column's Pause/Resume and recording row labels.
+    running: bool,
+    recording: bool,
     pub open: bool,
     category_index: usize,
     item_index: usize,
@@ -298,9 +305,7 @@ pub struct MenuState {
     /// tied to `open` the way the About card is.
     save_states_open: bool,
     /// Live snapshot of this game's saves, newest first, set by
-    /// [`MenuState::sync_save_states`]. The System category's row
-    /// count and the save-states panel both read from here rather
-    /// than each keeping their own copy.
+    /// [`MenuState::sync_save_states`], for the save-states panel.
     save_rows: Vec<SaveStateRow>,
     /// A "Load" click in the save-states panel doesn't load
     /// immediately -- it stages the target slot here so the panel can
@@ -311,9 +316,9 @@ pub struct MenuState {
     /// written (saves are a history, not overwritten slots), so a
     /// path is a stable cache key for the process's lifetime.
     save_thumb_cache: HashMap<PathBuf, egui::TextureHandle>,
-    /// Whether the controls panel (PS1 controller drawing + rebinds)
-    /// is showing. Like `save_states_open`, reachable from the
-    /// always-visible toolbar icon independent of the Menu overlay.
+    /// Whether the controls panel (controller ports, PS1 controller
+    /// drawing + rebinds) is showing. Like `save_states_open`, reachable
+    /// from the toolbar icon independent of the Menu overlay.
     controls_open: bool,
     /// The target currently waiting for a key press, if the user
     /// clicked a hotspot. The shell's keyboard handler consumes the
@@ -399,43 +404,22 @@ impl MenuState {
     }
 
     pub fn with_running(running: bool) -> Self {
-        // Boot categories with the library sections empty -- they
-        // get filled by `set_library` once AppState loads the
-        // cached entries. A fresh install sees placeholder "No
-        // games found -- run Refresh library" rows.
+        // The Library starts empty and is filled by `set_library` once
+        // AppState loads the cached entries. The Game column appears with
+        // the first loaded game (`set_game_loaded`).
         let categories = vec![
-            build_games_category(&[], &HashSet::new()),
-            build_examples_category(&[]),
-            // Projects are editor-authored and filesystem-backed; the web build
-            // has neither, so the category is dropped there.
-            #[cfg(not(target_arch = "wasm32"))]
-            build_projects_category(&[]),
-            // Projects is dropped outright on web rather than shown greyed:
-            // it is filesystem-backed and can never work there, so a permanent
-            // "not available" row is a dead entry the user has to skip past on
-            // every visit. Examples carry the web build instead.
-            // The Editor category is the entry point into the host editor
-            // workspace; it is absent in emulator-only builds.
+            build_library_category(&[], &[], &HashSet::new(), ""),
             build_settings_category(),
-            build_system_category(running, 0),
-            // There is no "quit" in a browser tab, so the web build omits it.
-            #[cfg(not(target_arch = "wasm32"))]
-            Category {
-                name: "Quit",
-                icon: icons::POWER,
-                items: vec![MenuItem {
-                    depth: 0,
-                    label: "Quit PSoXide".to_string(),
-                    action: MenuAction::Quit,
-                    burn_action: None,
-                    value: Some("Esc ×2".to_string()),
-                }],
-            },
         ];
 
         Self {
             games: Vec::new(),
+            homebrew: Vec::new(),
+            games_path: String::new(),
             expanded_folders: HashSet::new(),
+            game_loaded: false,
+            running,
+            recording: false,
             open: true,
             category_index: 0,
             item_index: 0,
@@ -459,71 +443,52 @@ impl MenuState {
         }
     }
 
-    /// Rebuild the Games + Examples + Projects categories from a library
-    /// snapshot. Call after load, after a rescan, and whenever the
-    /// library changes. Existing selection is preserved when
-    /// possible (same category + in-range item) and clamped to the
-    /// new bounds otherwise.
+    /// Rebuild the Library from a library snapshot. Examples and project
+    /// builds both land in the Homebrew folder. Call after load, after a
+    /// rescan, and whenever the library changes. The selected row is kept
+    /// when it still exists and clamped otherwise.
     pub fn set_library(
         &mut self,
         games: &[LibraryItem],
         examples: &[LibraryItem],
         projects: &[LibraryItem],
     ) {
-        // Snapshot the current selection's category NAME so we can
-        // re-resolve after rebuilding (indices may change).
-        let current_cat_name = self
-            .categories
-            .get(self.category_index)
-            .map(|c| c.name)
-            .unwrap_or("");
-
-        let selected_action = self
-            .categories
-            .get(self.category_index)
-            .and_then(|category| category.items.get(self.item_index))
-            .filter(|_| current_cat_name != "Games" || !self.games.is_empty())
-            .map(|item| item.action.clone());
         self.games = games.to_vec();
-        self.expanded_folders
-            .retain(|folder| games.iter().any(|game| game.folder.starts_with(folder)));
-        if let Some(games_cat) = self.categories.first_mut() {
-            *games_cat = build_games_category(&self.games, &self.expanded_folders);
-        }
-        if let Some(examples_cat) = self.categories.get_mut(1) {
-            *examples_cat = build_examples_category(examples);
-        }
-        // The web build has no Projects category (see `with_running`), so the
-        // index-2 slot is Settings there; only update Projects off-web.
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(projects_cat) = self.categories.get_mut(2) {
-            *projects_cat = build_projects_category(projects);
-        }
-        #[cfg(target_arch = "wasm32")]
-        let _ = projects;
+        self.homebrew = examples.iter().chain(projects).cloned().collect();
+        self.expanded_folders.retain(|folder| {
+            folder == Path::new(HOMEBREW_FOLDER)
+                || games.iter().any(|game| game.folder.starts_with(folder))
+        });
+        self.rebuild_library();
+    }
 
-        // Try to preserve the user's category if it still exists.
-        if let Some(idx) = self
-            .categories
-            .iter()
-            .position(|c| c.name == current_cat_name)
-        {
-            self.category_index = idx;
-        } else {
-            self.category_index = 0;
-        }
-        if let Some(index) = self.categories[self.category_index]
+    /// Rebuild the Library column in place. A selected game or folder stays
+    /// selected (or falls back to the top when it is gone); a selected
+    /// action row keeps its place, which is still an action row.
+    fn rebuild_library(&mut self) {
+        let selected = self.categories[0]
             .items
-            .iter()
-            .position(|item| Some(&item.action) == selected_action.as_ref())
-        {
-            self.item_index = index;
+            .get(self.item_index)
+            .map(|item| item.action.clone());
+        self.categories[0] = build_library_category(
+            &self.games,
+            &self.homebrew,
+            &self.expanded_folders,
+            &self.games_path,
+        );
+        if self.category_index != 0 {
+            return;
         }
-        // Clamp item index to the new category bounds.
-        let item_count = self.categories[self.category_index].items.len();
-        if self.item_index >= item_count {
-            self.item_index = item_count.saturating_sub(1);
-        }
+        let items = &self.categories[0].items;
+        self.item_index = match selected {
+            Some(action @ (MenuAction::LaunchGame(_) | MenuAction::ToggleLibraryFolder(_))) => {
+                items
+                    .iter()
+                    .position(|item| item.action == action)
+                    .unwrap_or(0)
+            }
+            _ => self.item_index.min(items.len().saturating_sub(1)),
+        };
     }
 
     /// Folder expansion lasts for this session; newly found folders start closed.
@@ -539,7 +504,7 @@ impl MenuState {
         if !self.expanded_folders.remove(folder) {
             self.expanded_folders.insert(folder.to_path_buf());
         }
-        self.categories[0] = build_games_category(&self.games, &self.expanded_folders);
+        self.rebuild_library();
         if self.category_index == 0 {
             self.item_index = self.categories[0]
                 .items
@@ -550,66 +515,81 @@ impl MenuState {
         self.marquee_t = 0.0;
     }
 
-    /// Rebuild categories with a fresh "Run"/"Pause" label. Called
-    /// when `AppState.running` flips.
+    /// Show the Game column while a game is loaded and drop it otherwise.
+    /// Cheap to call every frame; the selected column is kept by name.
+    pub fn set_game_loaded(&mut self, loaded: bool) {
+        if loaded == self.game_loaded {
+            return;
+        }
+        self.game_loaded = loaded;
+        let current = self.categories[self.category_index].name;
+        if loaded {
+            self.categories
+                .insert(1, build_game_category(self.running, self.recording));
+        } else {
+            self.categories.retain(|category| category.name != "Game");
+        }
+        match self.categories.iter().position(|c| c.name == current) {
+            Some(index) => self.category_index = index,
+            None => {
+                self.category_index = 0;
+                self.item_index = 0;
+                self.scroll_y = 0.0;
+            }
+        }
+        self.anim_x = self.category_index as f32;
+    }
+
+    /// Flip the Game column's Pause/Resume label. Called when
+    /// `AppState.running` flips.
     pub fn sync_run_label(&mut self, running: bool) {
-        if let Some(system) = self.categories.iter_mut().find(|c| c.name == "System") {
-            if let Some(item) = system.items.first_mut() {
-                item.label = if running {
-                    "Pause".into()
-                } else {
-                    "Run".into()
-                };
-            }
-        }
+        self.running = running;
+        self.set_label(
+            &MenuAction::ToggleRun,
+            if running { "Pause" } else { "Resume" },
+        );
     }
 
-    /// Keep the System row in sync with the F8 recording latch.
+    /// Keep the Game column's recording row in sync with the F8 latch.
     pub fn sync_input_recording_label(&mut self, recording: bool) {
-        if let Some(system) = self.categories.iter_mut().find(|c| c.name == "System") {
-            if let Some(item) = system
-                .items
-                .iter_mut()
-                .find(|item| item.action == MenuAction::ToggleInputRecording)
-            {
-                item.label = if recording {
-                    if cfg!(target_arch = "wasm32") {
-                        "Stop recording (download CSV)"
-                    } else {
-                        "Stop input recording"
-                    }
-                } else if cfg!(target_arch = "wasm32") {
-                    "Record input from boot"
-                } else {
-                    "Record input"
-                }
-                .into();
+        self.recording = recording;
+        self.set_label(
+            &MenuAction::ToggleInputRecording,
+            recording_label(recording),
+        );
+    }
+
+    fn set_label(&mut self, action: &MenuAction, label: &str) {
+        for item in self.categories.iter_mut().flat_map(|c| c.items.iter_mut()) {
+            if item.action == *action && item.label != label {
+                item.label = label.to_string();
             }
         }
     }
 
-    /// Rebuild the System category's save-state rows from a live save
-    /// listing. Call after a save/load completes and whenever the
-    /// running game changes (a different game has different saves).
-    /// Rebuilds the whole category (like [`build_system_category`]
-    /// does at startup) rather than patching rows in place, since the
-    /// row *count* changes as saves are added -- `running` is passed
-    /// through unchanged so this doesn't clobber the Run/Pause label.
-    pub fn sync_save_states(&mut self, running: bool, rows: &[SaveStateRow]) {
-        self.save_rows = rows.to_vec();
-        if let Some(idx) = self.categories.iter().position(|c| c.name == "System") {
-            self.categories[idx] = build_system_category(running, rows.len());
+    fn set_value(&mut self, action: &MenuAction, value: String) {
+        for item in self.categories.iter_mut().flat_map(|c| c.items.iter_mut()) {
+            if item.action == *action && item.value.as_deref() != Some(value.as_str()) {
+                item.value = Some(value.clone());
+            }
         }
     }
 
-    /// Open the save-states panel. Driven by the always-visible
-    /// toolbar icon and the System category's "Save states" row.
+    /// Replace the save-states panel's rows with a live save listing.
+    /// Call after a save/load completes and whenever the running game
+    /// changes (a different game has different saves).
+    pub fn sync_save_states(&mut self, rows: &[SaveStateRow]) {
+        self.save_rows = rows.to_vec();
+    }
+
+    /// Open the save-states panel. Driven by the toolbar icon and the
+    /// Game category's "Load state" row.
     pub fn open_save_states(&mut self) {
         self.save_states_open = true;
     }
 
-    /// Open the controls panel. Driven by the always-visible toolbar
-    /// icon and the System category's "Controls" row.
+    /// Open the controls panel. Driven by the toolbar icon and the
+    /// Settings category's "Controls" row.
     pub fn open_controls(&mut self) {
         self.controls_open = true;
     }
@@ -657,53 +637,48 @@ impl MenuState {
     /// Settings item's displayed value. Driven by `video.menu_opacity_pct`.
     pub fn set_menu_opacity(&mut self, pct: u8) {
         self.backdrop_pct = pct.min(100);
-        if let Some(settings) = self.categories.iter_mut().find(|c| c.name == "Settings") {
-            if let Some(item) = settings
-                .items
-                .iter_mut()
-                .find(|item| item.action == MenuAction::CycleMenuOpacity)
-            {
-                item.value = Some(format!("{}%", self.backdrop_pct));
-            }
-        }
+        self.set_value(
+            &MenuAction::CycleMenuOpacity,
+            format!("{}%", self.backdrop_pct),
+        );
     }
 
     /// Reflect the persisted host UI scale in the Settings row.
     pub fn set_ui_scale(&mut self, pct: u8) {
-        if let Some(settings) = self.categories.iter_mut().find(|c| c.name == "Settings") {
-            if let Some(item) = settings
-                .items
-                .iter_mut()
-                .find(|item| item.action == MenuAction::CycleUiScale)
-            {
-                item.value = Some(format!("{}%", pct.clamp(50, 150)));
-            }
-        }
+        self.set_value(
+            &MenuAction::CycleUiScale,
+            format!("{}%", pct.clamp(50, 150)),
+        );
     }
 
     /// Reflect the slow-host choice in its Settings row.
     pub fn set_smooth_slow_host(&mut self, smooth: bool) {
-        if let Some(settings) = self.categories.iter_mut().find(|c| c.name == "Settings") {
-            if let Some(item) = settings
-                .items
-                .iter_mut()
-                .find(|item| item.action == MenuAction::ToggleSmoothSlowHost)
-            {
-                item.value = Some(slow_host_label(smooth).into());
-            }
-        }
+        self.set_value(
+            &MenuAction::ToggleSmoothSlowHost,
+            slow_host_label(smooth).into(),
+        );
     }
 
-    /// Update the Settings category path summaries.
-    pub fn sync_settings_paths(&mut self, games: impl Into<String>) {
-        let games = games.into();
-        if let Some(settings) = self.categories.iter_mut().find(|c| c.name == "Settings") {
-            for item in &mut settings.items {
-                if item.action == MenuAction::ChooseGamesPath {
-                    item.value = Some(games.clone());
-                }
-            }
-        }
+    /// Reflect the video and audio settings in their Settings rows. The
+    /// toolbar changes volume and mute directly, so the shell calls this
+    /// every frame; rows are only rewritten when a value changed.
+    pub fn sync_video_audio(&mut self, high_res: bool, filter: &str, volume: f32, muted: bool) {
+        self.set_value(
+            &MenuAction::CycleVideoScale,
+            if high_res { "High-res" } else { "Native" }.into(),
+        );
+        self.set_value(&MenuAction::CycleTextureFilter, filter.into());
+        self.set_value(&MenuAction::CycleVolume, format!("{:.0}%", volume * 100.0));
+        self.set_value(
+            &MenuAction::ToggleMute,
+            if muted { "On" } else { "Off" }.into(),
+        );
+    }
+
+    /// Show the games folder on the Library's folder row.
+    pub fn set_games_path_label(&mut self, games: impl Into<String>) {
+        self.games_path = games.into();
+        self.rebuild_library();
     }
 
     /// Move selection to the category named `name`, if it exists.
@@ -820,6 +795,29 @@ impl MenuState {
         self.categories.get(self.category_index).map(|c| c.name)
     }
 
+    /// Draw the controls panel when it is open. Like the save-states panel
+    /// it is toolbar-reachable and independent of the Menu overlay, so
+    /// rebinding works mid-game. `controllers` draws the controller-port
+    /// section, which needs the shell's input router. Closing the panel
+    /// disarms any pending key capture with it.
+    pub fn draw_controls(&mut self, ctx: &egui::Context, controllers: impl FnOnce(&mut egui::Ui)) {
+        if !self.controls_open {
+            return;
+        }
+        controls_panel(
+            ctx,
+            &mut self.controls_open,
+            &self.controls_labels,
+            &self.controls_live_held,
+            &mut self.controls_capture,
+            &mut self.pending_pointer_action,
+            controllers,
+        );
+        if !self.controls_open {
+            self.controls_capture = None;
+        }
+    }
+
     /// Draw the Menu overlay on a middle-layer painter. `dt` drives the
     /// slide animation.
     pub fn draw(&mut self, ctx: &egui::Context, dt: f32, warning: Option<&str>) {
@@ -838,22 +836,6 @@ impl MenuState {
                 &mut self.save_thumb_cache,
                 &mut self.pending_pointer_action,
             );
-        }
-        // The controls panel is likewise toolbar-reachable and lives
-        // outside the appear-gate so rebinding works mid-game. Closing
-        // the panel disarms any pending key capture with it.
-        if self.controls_open {
-            controls_panel(
-                ctx,
-                &mut self.controls_open,
-                &self.controls_labels,
-                &self.controls_live_held,
-                &mut self.controls_capture,
-                &mut self.pending_pointer_action,
-            );
-            if !self.controls_open {
-                self.controls_capture = None;
-            }
         }
         // The About card belongs to the open menu; drop it the moment the menu
         // is dismissed so it can't linger through the close dissolve.
@@ -951,18 +933,6 @@ impl MenuState {
             } else {
                 ICON_SIZE_INACTIVE
             };
-            let disabled = cat.disabled();
-            let color = if disabled {
-                // Desktop-only category: always greyed, even when selected.
-                fade(theme::MENU_TEXT_DIM.gamma_multiply(0.45))
-            } else {
-                fade(if is_active {
-                    theme::MENU_ACCENT
-                } else {
-                    theme::MENU_TEXT_DIM
-                })
-            };
-
             if x < -50.0 || x > sw + 50.0 {
                 continue;
             }
@@ -973,16 +943,17 @@ impl MenuState {
             if hovered {
                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
             }
+            let color = fade(if is_active || hovered {
+                theme::MENU_ACCENT
+            } else {
+                theme::MENU_TEXT_DIM
+            });
             painter.text(
                 Pos2::new(x, center_y),
                 Align2::CENTER_CENTER,
                 cat.icon.to_string(),
                 icons::font(size),
-                if hovered && !disabled {
-                    fade(theme::MENU_ACCENT)
-                } else {
-                    color
-                },
+                color,
             );
             if is_active {
                 painter.text(
@@ -990,11 +961,7 @@ impl MenuState {
                     Align2::CENTER_TOP,
                     cat.name,
                     FontId::proportional(16.0),
-                    if disabled {
-                        fade(theme::MENU_TEXT_DIM)
-                    } else {
-                        fade(theme::MENU_TEXT_BRIGHT)
-                    },
+                    fade(theme::MENU_TEXT_BRIGHT),
                 );
             }
             if interactive_release.is_some_and(|position| hit_rect.contains(position)) {
@@ -1036,7 +1003,7 @@ impl MenuState {
         let needed = cat.items.iter().fold(0.0_f32, |acc, item| {
             let label_w = measure(&item.label, label_font.clone())
                 + item.depth as f32 * FOLDER_INDENT
-                + if cat.name == "Games"
+                + if cat.name == "Library"
                     && matches!(
                         item.action,
                         MenuAction::ToggleLibraryFolder(_) | MenuAction::LaunchGame(_)
@@ -1070,7 +1037,8 @@ impl MenuState {
         // `max(1)` so a degenerate window height (tiny resize during
         // launch) still produces at least one visible row and avoids
         // a divide-by-zero in the visible-count math below.
-        let bottom_margin = 16.0;
+        // Stop above the notice and hint lines painted at the bottom.
+        let bottom_margin = 72.0;
         let available_h = (sh - items_start_y - bottom_margin).max(row_stride);
         let visible_rows = (available_h / row_stride).floor().max(1.0) as usize;
 
@@ -1111,7 +1079,17 @@ impl MenuState {
             self.scroll_y = target_scroll;
         }
 
+        // Rows scrolling past either end are clipped to the list, so they
+        // never cover the column name or the notice lines.
+        let list_rect = Rect::from_min_max(
+            Pos2::new(0.0, items_start_y),
+            Pos2::new(sw, sh - bottom_margin),
+        );
+        let list_painter = painter.with_clip_rect(list_rect);
+        let pointer_hover = pointer_hover.filter(|p| list_rect.contains(*p));
+        let interactive_release = interactive_release.filter(|p| list_rect.contains(*p));
         for (i, item) in cat.items.iter().enumerate() {
+            let painter = &list_painter;
             let y = items_start_y + (i as f32 - self.scroll_y) * row_stride;
             let row_bottom = y + ITEM_HEIGHT;
             // Cull items entirely above the list region or below the
@@ -1183,7 +1161,7 @@ impl MenuState {
                     egui::Stroke::NONE,
                 ));
                 content_left += 18.0;
-            } else if cat.name == "Games" && matches!(item.action, MenuAction::LaunchGame(_)) {
+            } else if cat.name == "Library" && matches!(item.action, MenuAction::LaunchGame(_)) {
                 content_left += 18.0;
             }
             let avail_right = items_x + item_width - 12.0 - action_count as f32 * ROW_ACTION_WIDTH;
@@ -1242,7 +1220,7 @@ impl MenuState {
             if let Some(action) = item.burn_action.as_ref() {
                 draw_row_icon_action(
                     ctx,
-                    &painter,
+                    painter,
                     row_action_rect(items_x, item_width, y, action_index),
                     pointer_hover,
                     interactive_release,
@@ -1259,7 +1237,7 @@ impl MenuState {
             if let Some(action) = launch_action {
                 draw_row_icon_action(
                     ctx,
-                    &painter,
+                    painter,
                     row_action_rect(items_x, item_width, y, action_index),
                     pointer_hover,
                     interactive_release,
@@ -1281,23 +1259,19 @@ impl MenuState {
         let indicator_color = fade(theme::MENU_TEXT_DIM);
         let has_above = self.scroll_y > 0.1;
         let has_below = (self.scroll_y + visible_rows as f32) < num_items as f32 - 0.1;
-        if has_above {
-            painter.text(
-                Pos2::new(center_x, items_start_y - 6.0),
-                Align2::CENTER_BOTTOM,
-                "▲",
-                FontId::proportional(10.0),
+        // Painted, not text: the menu font has no arrow glyphs.
+        let arrow = |tip: Pos2, dy: f32| {
+            painter.add(egui::Shape::convex_polygon(
+                vec![tip, tip + Vec2::new(-5.0, -dy), tip + Vec2::new(5.0, -dy)],
                 indicator_color,
-            );
+                egui::Stroke::NONE,
+            ));
+        };
+        if has_above {
+            arrow(Pos2::new(center_x, items_start_y - 11.0), -5.0);
         }
         if has_below {
-            painter.text(
-                Pos2::new(center_x, sh - bottom_margin + 4.0),
-                Align2::CENTER_TOP,
-                "▼",
-                FontId::proportional(10.0),
-                indicator_color,
-            );
+            arrow(Pos2::new(center_x, sh - bottom_margin + 8.0), 5.0);
         }
 
         // Project framing + WIP/legal notice, shown on every menu screen in
@@ -1666,10 +1640,12 @@ fn save_states_panel(
     }
 }
 
-/// The controls panel: a painter-drawn PS1 controller whose parts are
-/// clickable rebind hotspots -- each showing its current key right on
-/// the drawing -- plus a grouped clickable list of every target below
-/// it, a live capture banner, and a reset-to-defaults button.
+/// The controls panel: the controller-port section (`controllers`, drawn
+/// by the shell: which host device drives which PS1 port, Digital or
+/// Analog), then a painter-drawn PS1 controller whose parts are
+/// clickable keyboard rebind hotspots -- each showing its current key
+/// right on the drawing -- plus a grouped clickable list of every target
+/// below it, a live capture banner, and a reset-to-defaults button.
 ///
 /// Controls light up green while their key is physically held, which
 /// doubles as an in-app rollover/ghosting tester: hold three keys and
@@ -1693,6 +1669,7 @@ fn controls_panel(
     held: &[PadBindTarget],
     capture: &mut Option<PadBindTarget>,
     pending_pointer_action: &mut Option<MenuAction>,
+    controllers: impl FnOnce(&mut egui::Ui),
 ) {
     use egui::{Color32, CornerRadius, Sense, Stroke};
 
@@ -1746,7 +1723,23 @@ fn controls_panel(
         // draws straight over the panel when both are up.
         .order(egui::Order::Foreground)
         .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        // The whole panel scrolls when the window is shorter than it.
+        .vscroll(true)
+        .default_height(ctx.screen_rect().height() - 120.0)
         .show(ctx, |ui| {
+            let heading = |ui: &mut egui::Ui, text: &str| {
+                ui.label(
+                    egui::RichText::new(text)
+                        .color(theme::MENU_ACCENT)
+                        .size(14.0)
+                        .strong(),
+                );
+            };
+            heading(ui, "Controllers");
+            controllers(ui);
+            ui.add_space(6.0);
+            ui.separator();
+            heading(ui, "Keyboard");
             // Capture banner / hint line above the drawing.
             match *capture {
                 Some(target) => {
@@ -2216,46 +2209,42 @@ fn controls_panel(
                     ],
                 ),
             ];
-            egui::ScrollArea::vertical()
-                .max_height(170.0)
-                .show(ui, |ui| {
-                    for (group, targets) in GROUPS {
-                        ui.add_space(3.0);
-                        ui.label(
-                            egui::RichText::new(group)
-                                .color(theme::MENU_ACCENT)
-                                .size(12.0)
-                                .strong(),
-                        );
-                        egui::Grid::new(group)
-                            .num_columns(2)
-                            .striped(true)
-                            .min_col_width(190.0)
-                            .show(ui, |ui| {
-                                for &target in targets {
-                                    ui.label(egui::RichText::new(target.label()).size(13.0));
-                                    let armed = *capture == Some(target);
-                                    let text = if armed {
-                                        "press a key...".to_string()
-                                    } else {
-                                        bind_of(target)
-                                    };
-                                    let btn = egui::Button::new(
-                                        egui::RichText::new(text).size(13.0).color(if armed {
-                                            theme::MENU_ACCENT
-                                        } else {
-                                            Color32::from_rgb(220, 224, 232)
-                                        }),
-                                    )
-                                    .min_size(Vec2::new(150.0, 20.0));
-                                    if ui.add(btn).clicked() {
-                                        *capture = Some(target);
-                                    }
-                                    ui.end_row();
-                                }
-                            });
-                    }
-                });
+            for (group, targets) in GROUPS {
+                ui.add_space(3.0);
+                ui.label(
+                    egui::RichText::new(group)
+                        .color(theme::MENU_ACCENT)
+                        .size(12.0)
+                        .strong(),
+                );
+                egui::Grid::new(group)
+                    .num_columns(2)
+                    .striped(true)
+                    .min_col_width(190.0)
+                    .show(ui, |ui| {
+                        for &target in targets {
+                            ui.label(egui::RichText::new(target.label()).size(13.0));
+                            let armed = *capture == Some(target);
+                            let text = if armed {
+                                "press a key...".to_string()
+                            } else {
+                                bind_of(target)
+                            };
+                            let btn = egui::Button::new(
+                                egui::RichText::new(text).size(13.0).color(if armed {
+                                    theme::MENU_ACCENT
+                                } else {
+                                    Color32::from_rgb(220, 224, 232)
+                                }),
+                            )
+                            .min_size(Vec2::new(150.0, 20.0));
+                            if ui.add(btn).clicked() {
+                                *capture = Some(target);
+                            }
+                            ui.end_row();
+                        }
+                    });
+            }
 
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -2455,63 +2444,46 @@ fn open_external_url(url: &str) {
     }
 }
 
-/// Emulator settings entry point.
+/// A plain row: no indent, no burn action.
+fn row(label: &str, action: MenuAction, value: Option<&str>) -> MenuItem {
+    MenuItem {
+        depth: 0,
+        label: label.into(),
+        action,
+        burn_action: None,
+        value: value.map(Into::into),
+    }
+}
+
+/// Emulator settings. Values are filled in by the `set_*`/`sync_*` setters.
 fn build_settings_category() -> Category {
+    let mut items = vec![
+        row("Controls", MenuAction::OpenControls, None),
+        row("Video scale", MenuAction::CycleVideoScale, Some("High-res")),
+        row(
+            "Texture filter",
+            MenuAction::CycleTextureFilter,
+            Some("None"),
+        ),
+        row("Volume", MenuAction::CycleVolume, Some("100%")),
+        row("Mute", MenuAction::ToggleMute, Some("Off")),
+        row("Menu opacity", MenuAction::CycleMenuOpacity, Some("90%")),
+        row("UI scale", MenuAction::CycleUiScale, Some("100%")),
+        row(
+            "When the computer is slow",
+            MenuAction::ToggleSmoothSlowHost,
+            Some(slow_host_label(false)),
+        ),
+        row("About", MenuAction::ShowAbout, None),
+    ];
+    // There is no "quit" in a browser tab.
+    if cfg!(not(target_arch = "wasm32")) {
+        items.push(row("Quit PSoXide", MenuAction::Quit, None));
+    }
     Category {
         name: "Settings",
         icon: icons::HARD_DRIVE,
-        items: vec![
-            MenuItem {
-                depth: 0,
-                label: if cfg!(target_arch = "wasm32") {
-                    "Load games folder"
-                } else {
-                    "Choose games path"
-                }
-                .into(),
-                action: MenuAction::ChooseGamesPath,
-                burn_action: None,
-                value: Some("Missing".into()),
-            },
-            MenuItem {
-                depth: 0,
-                label: "Menu opacity".into(),
-                action: MenuAction::CycleMenuOpacity,
-                burn_action: None,
-                value: Some("90%".into()),
-            },
-            MenuItem {
-                depth: 0,
-                label: "UI scale".into(),
-                action: MenuAction::CycleUiScale,
-                burn_action: None,
-                value: Some("100%".into()),
-            },
-            MenuItem {
-                depth: 0,
-                label: "On a slow computer".into(),
-                action: MenuAction::ToggleSmoothSlowHost,
-                burn_action: None,
-                value: Some(slow_host_label(false).into()),
-            },
-            // Web only: reload the games folder remembered from a
-            // previous visit (Chrome/Edge; no-op where unsupported).
-            #[cfg(target_arch = "wasm32")]
-            MenuItem {
-                depth: 0,
-                label: "Reconnect saved files".into(),
-                action: MenuAction::Reconnect,
-                burn_action: None,
-                value: None,
-            },
-            MenuItem {
-                depth: 0,
-                label: "About".into(),
-                action: MenuAction::ShowAbout,
-                burn_action: None,
-                value: None,
-            },
-        ],
+        items,
     }
 }
 
@@ -2562,259 +2534,125 @@ impl LibraryFolder<'_> {
     }
 }
 
-/// Construct the Games category from a library snapshot. Empty
-/// libraries get a helpful placeholder item so the user
-/// understands the category isn't broken, just unpopulated.
-fn build_games_category(games: &[LibraryItem], expanded: &HashSet<PathBuf>) -> Category {
-    let mut items = Vec::with_capacity(games.len() + 2);
-    // Web: a quick "load your own game file" entry at the top of Games (the
-    // browser has no scanned library folder). Reuses the Settings action.
-    #[cfg(target_arch = "wasm32")]
-    items.push(MenuItem {
-        depth: 0,
-        label: "Load games folder".into(),
-        action: MenuAction::ChooseGamesPath,
-        burn_action: None,
-        value: None,
-    });
-    if games.is_empty() {
-        items.push(MenuItem {
-            depth: 0,
-            label: "No games found yet".into(),
-            action: MenuAction::RescanLibrary,
-            burn_action: None,
-            value: Some("Refresh".into()),
-        });
-    } else {
-        let mut root = LibraryFolder::default();
-        for game in games {
-            let mut folder = &mut root;
-            folder.count += 1;
-            for part in game.folder.components() {
-                if let std::path::Component::Normal(name) = part {
-                    folder = folder.children.entry(name.to_owned()).or_default();
-                    folder.count += 1;
-                }
+/// Construct the Library: the games-folder tree, then the Homebrew folder
+/// (SDK examples, project builds, and on the web the streamed demo disc),
+/// then the folder and refresh rows, each exactly once.
+fn build_library_category(
+    games: &[LibraryItem],
+    homebrew: &[LibraryItem],
+    expanded: &HashSet<PathBuf>,
+    games_path: &str,
+) -> Category {
+    let mut items = Vec::with_capacity(games.len() + homebrew.len() + 4);
+    let mut root = LibraryFolder::default();
+    for game in games {
+        let mut folder = &mut root;
+        folder.count += 1;
+        for part in game.folder.components() {
+            if let std::path::Component::Normal(name) = part {
+                folder = folder.children.entry(name.to_owned()).or_default();
+                folder.count += 1;
             }
-            folder.games.push(game);
         }
-        root.append_rows(Path::new(""), 0, expanded, &mut items);
-        // Always offer a rescan at the end of the Games list so the
-        // primary entries stay grouped together.
+        folder.games.push(game);
+    }
+    root.append_rows(Path::new(""), 0, expanded, &mut items);
+
+    if !homebrew.is_empty() {
+        let key = PathBuf::from(HOMEBREW_FOLDER);
+        let open = expanded.contains(&key);
         items.push(MenuItem {
             depth: 0,
-            label: "Refresh library".into(),
-            action: MenuAction::RescanLibrary,
+            label: "Homebrew".into(),
+            action: MenuAction::ToggleLibraryFolder(key),
             burn_action: None,
-            value: Some("↻".into()),
+            value: Some(format!("{} entries", homebrew.len())),
         });
+        if open {
+            items.extend(homebrew.iter().map(|entry| {
+                MenuItem {
+                    depth: 1,
+                    label: entry.title.clone(),
+                    action: if entry.launchable {
+                        MenuAction::LaunchGame(entry.id.clone())
+                    } else {
+                        MenuAction::BuildExamples
+                    },
+                    burn_action: (entry.launchable && entry.burnable)
+                        .then(|| MenuAction::OpenBurnMenu(entry.id.clone())),
+                    value: (!entry.subtitle.is_empty()).then(|| entry.subtitle.clone()),
+                }
+            }));
+        }
+    }
+
+    if cfg!(target_arch = "wasm32") {
+        items.push(row("Load games folder", MenuAction::ChooseGamesPath, None));
+        // Reload the folder remembered from a previous visit (Chrome/Edge;
+        // no-op where unsupported).
+        #[cfg(target_arch = "wasm32")]
+        items.push(row("Reconnect saved games", MenuAction::Reconnect, None));
+    } else {
+        items.push(row(
+            "Choose games folder",
+            MenuAction::ChooseGamesPath,
+            Some(if games_path.is_empty() {
+                "Missing"
+            } else {
+                games_path
+            }),
+        ));
+        // The web library is whatever the folder picker returned, so a
+        // rescan there has nothing to walk.
+        items.push(row("Refresh library", MenuAction::RescanLibrary, Some("↻")));
     }
     Category {
-        name: "Games",
+        name: "Library",
         icon: icons::DISC,
         items,
     }
 }
 
-/// Construct the Examples category. Built examples launch from CUE/BIN
-/// discs; source placeholders are supplied by the app layer after it
-/// scans `sdk/examples` and `engine/examples`.
-fn build_examples_category(examples: &[LibraryItem]) -> Category {
-    let mut items = Vec::with_capacity(examples.len() + 2);
-    if examples.is_empty() {
-        items.push(MenuItem {
-            depth: 0,
-            label: "Build SDK examples".into(),
-            action: MenuAction::BuildExamples,
-            burn_action: None,
-            value: Some("make examples".into()),
-        });
-        items.push(MenuItem {
-            depth: 0,
-            label: "Refresh library".into(),
-            action: MenuAction::RescanLibrary,
-            burn_action: None,
-            value: Some("↻".into()),
-        });
-    } else {
-        for e in examples {
-            items.push(MenuItem {
-                depth: 0,
-                label: e.title.clone(),
-                action: if e.launchable {
-                    MenuAction::LaunchGame(e.id.clone())
-                } else {
-                    MenuAction::BuildExamples
-                },
-                burn_action: (e.launchable && e.burnable)
-                    .then(|| MenuAction::OpenBurnMenu(e.id.clone())),
-                value: if e.subtitle.is_empty() {
-                    None
-                } else {
-                    Some(e.subtitle.clone())
-                },
-            });
-        }
-        items.push(MenuItem {
-            depth: 0,
-            label: "Refresh library".into(),
-            action: MenuAction::RescanLibrary,
-            burn_action: None,
-            value: Some("↻".into()),
-        });
-    }
+/// The Game column, shown only while a game is loaded: run control,
+/// save states, reset and input tapes.
+fn build_game_category(running: bool, recording: bool) -> Category {
     Category {
-        name: "Examples",
-        icon: icons::FOLDER,
-        items,
+        name: "Game",
+        icon: icons::GAMEPAD_2,
+        items: vec![
+            row(
+                if running { "Pause" } else { "Resume" },
+                MenuAction::ToggleRun,
+                None,
+            ),
+            row("Save state", MenuAction::SaveState, Some("F5")),
+            row("Load state", MenuAction::OpenSaveStates, Some("F7")),
+            row("Reset", MenuAction::Reset, None),
+            row(
+                recording_label(recording),
+                MenuAction::ToggleInputRecording,
+                Some("F8"),
+            ),
+            row("Load input replay", MenuAction::LoadInputReplay, None),
+        ],
     }
 }
 
-/// Construct the Projects category. These are project-baked CUE/BIN
-/// discs discovered under `editor/projects`, separated from SDK
-/// examples so authored games have their own launch surface.
-fn build_projects_category(projects: &[LibraryItem]) -> Category {
-    let mut items = Vec::with_capacity(projects.len() + 1);
-    if projects.is_empty() {
-        items.push(MenuItem {
-            depth: 0,
-            label: "No project builds found".into(),
-            action: MenuAction::RescanLibrary,
-            burn_action: None,
-            value: Some("Refresh".into()),
-        });
-    } else {
-        for p in projects {
-            items.push(MenuItem {
-                depth: 0,
-                label: p.title.clone(),
-                action: MenuAction::LaunchGame(p.id.clone()),
-                burn_action: p.burnable.then(|| MenuAction::OpenBurnMenu(p.id.clone())),
-                value: if p.subtitle.is_empty() {
-                    None
-                } else {
-                    Some(p.subtitle.clone())
-                },
-            });
-        }
-        items.push(MenuItem {
-            depth: 0,
-            label: "Refresh library".into(),
-            action: MenuAction::RescanLibrary,
-            burn_action: None,
-            value: Some("↻".into()),
-        });
-    }
-    Category {
-        name: "Projects",
-        icon: icons::LAYERS,
-        items,
-    }
-}
-
-/// Web-only stand-in for a desktop-only category (Projects, Create): a greyed
-/// icon plus a single non-actionable "not available" row, so the feature is
-/// visible but clearly unavailable in the browser.
-#[cfg(target_arch = "wasm32")]
-fn disabled_category(name: &'static str, icon: char) -> Category {
-    Category {
-        name,
-        icon,
-        items: vec![MenuItem {
-            depth: 0,
-            label: "Not available in the web build".into(),
-            action: MenuAction::Noop,
-            burn_action: None,
-            value: None,
-        }],
-    }
-}
-
-/// The System category holds emulator-wide actions: run/pause,
-/// step, reset. The Games column stays focused on launchable entries,
-/// while System carries runtime controls.
-///
-/// `save_count` is how many saves currently exist for whichever game
-/// is running (0 if none, or no game running at all) -- just enough
-/// for the row's label; the actual per-save data (thumbnails,
-/// pin-to-top, load-with-confirmation) lives in the richer
-/// save-states panel opened via [`MenuAction::OpenSaveStates`] --
-/// see [`MenuState::sync_save_states`] / [`MenuState::open_save_states`].
-fn build_system_category(running: bool, save_count: usize) -> Category {
-    let run_label = if running { "Pause" } else { "Run" };
-    let save_states_label = if save_count > 0 {
-        format!("Save states ({save_count})")
-    } else {
-        "Save states".to_string()
-    };
-    let items = vec![
-        MenuItem {
-            depth: 0,
-            label: run_label.into(),
-            action: MenuAction::ToggleRun,
-            burn_action: None,
-            value: Some("Space".into()),
-        },
-        MenuItem {
-            depth: 0,
-            label: "Step one instruction".into(),
-            action: MenuAction::StepOne,
-            burn_action: None,
-            value: None,
-        },
-        MenuItem {
-            depth: 0,
-            label: "Reset".into(),
-            action: MenuAction::Reset,
-            burn_action: None,
-            value: None,
-        },
-        MenuItem {
-            depth: 0,
-            // Web recordings reboot the game first (cold-boot tapes).
-            label: if cfg!(target_arch = "wasm32") {
-                "Record input from boot"
-            } else {
-                "Record input"
-            }
-            .into(),
-            action: MenuAction::ToggleInputRecording,
-            burn_action: None,
-            value: Some("F8".into()),
-        },
-        MenuItem {
-            depth: 0,
-            label: "Load input replay".into(),
-            action: MenuAction::LoadInputReplay,
-            burn_action: None,
-            value: None,
-        },
-        MenuItem {
-            depth: 0,
-            label: save_states_label,
-            action: MenuAction::OpenSaveStates,
-            burn_action: None,
-            value: Some("F5/F7".into()),
-        },
-        MenuItem {
-            depth: 0,
-            label: "Controls".into(),
-            action: MenuAction::OpenControls,
-            burn_action: None,
-            value: None,
-        },
-    ];
-    Category {
-        name: "System",
-        icon: icons::CPU,
-        items,
+/// The recording row's label. Web recordings reboot the game first
+/// (cold-boot tapes) and download as a CSV.
+fn recording_label(recording: bool) -> &'static str {
+    match (recording, cfg!(target_arch = "wasm32")) {
+        (true, true) => "Stop recording (download CSV)",
+        (true, false) => "Stop input recording",
+        (false, true) => "Record input from boot",
+        (false, false) => "Record input",
     }
 }
 
 /// Settings-row value for `video.smooth_slow_host`.
 fn slow_host_label(smooth: bool) -> &'static str {
     if smooth {
-        "Smooth picture, slower game"
+        "Keep it smooth"
     } else {
         "Keep game speed"
     }
@@ -2860,6 +2698,28 @@ mod tests {
         let _ = context.run(input, |context| menu.draw(context, 1.0, None));
     }
 
+    fn labels(menu: &MenuState, category: &str) -> Vec<String> {
+        menu.categories
+            .iter()
+            .find(|c| c.name == category)
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.label.clone())
+            .collect()
+    }
+
+    fn names(menu: &MenuState) -> Vec<&'static str> {
+        menu.categories.iter().map(|c| c.name).collect()
+    }
+
+    fn confirm(menu: &mut MenuState) -> Option<MenuAction> {
+        menu.update(&MenuInput {
+            confirm: true,
+            ..Default::default()
+        })
+    }
+
     #[test]
     fn nested_library_folders_start_closed_and_launch_the_selected_game() {
         let mut game = dummy_item("hl", "Half-Life", "460 MiB");
@@ -2869,36 +2729,27 @@ mod tests {
         let mut menu = MenuState::new();
         menu.set_library(&games, &[], &[]);
         assert_eq!(
-            menu.categories[0]
-                .items
-                .iter()
-                .map(|item| item.label.as_str())
-                .collect::<Vec<_>>(),
-            ["Bonnie Studios", "Root game", "Refresh library"]
+            labels(&menu, "Library"),
+            [
+                "Bonnie Studios",
+                "Root game",
+                "Choose games folder",
+                "Refresh library"
+            ]
         );
-        let action = menu.update(&MenuInput {
-            confirm: true,
-            ..Default::default()
-        });
         assert_eq!(
-            action,
+            confirm(&mut menu),
             Some(MenuAction::ToggleLibraryFolder("Bonnie Studios".into()))
         );
         menu.toggle_library_folder(Path::new("Bonnie Studios"));
         assert_eq!(menu.categories[0].items[1].label, "Ports");
         assert_eq!(menu.categories[0].items[1].depth, 1);
-        assert!(!menu.categories[0]
-            .items
-            .iter()
-            .any(|item| item.label == "Half-Life"));
+        assert!(!labels(&menu, "Library").contains(&"Half-Life".to_string()));
         menu.toggle_library_folder(Path::new("Bonnie Studios/Ports"));
         assert_eq!(menu.categories[0].items[2].depth, 2);
         menu.item_index = 2;
         assert_eq!(
-            menu.update(&MenuInput {
-                confirm: true,
-                ..Default::default()
-            }),
+            confirm(&mut menu),
             Some(MenuAction::LaunchGame("hl".into()))
         );
         menu.set_library(&games, &[], &[]);
@@ -2908,10 +2759,10 @@ mod tests {
         );
         menu.toggle_library_folder(Path::new("Bonnie Studios"));
         assert_eq!(menu.item_index, 0);
-        assert_eq!(menu.categories[0].items.len(), 3);
+        assert_eq!(menu.categories[0].items.len(), 4);
         let mut fresh = MenuState::new();
         fresh.set_library(&games, &[], &[]);
-        assert_eq!(fresh.categories[0].items.len(), 3);
+        assert_eq!(fresh.categories[0].items.len(), 4);
     }
 
     #[test]
@@ -2925,14 +2776,8 @@ mod tests {
         menu.toggle_library_folder(Path::new("A"));
         menu.toggle_library_folder(Path::new("A/Tests"));
         menu.toggle_library_folder(Path::new("B"));
-        assert!(menu.categories[0]
-            .items
-            .iter()
-            .any(|item| item.label == "Game A"));
-        assert!(!menu.categories[0]
-            .items
-            .iter()
-            .any(|item| item.label == "Game B"));
+        assert!(labels(&menu, "Library").contains(&"Game A".to_string()));
+        assert!(!labels(&menu, "Library").contains(&"Game B".to_string()));
         menu.item_index = 2;
         menu.set_library(&[a, b, dummy_item("new", "New root game", "")], &[], &[]);
         assert_eq!(
@@ -2961,50 +2806,131 @@ mod tests {
     }
 
     #[test]
-    fn fresh_state_has_expected_categories() {
+    fn fresh_state_has_library_and_settings_only() {
         let s = MenuState::new();
+        assert_eq!(names(&s), ["Library", "Settings"]);
+    }
+
+    #[test]
+    fn game_column_appears_only_while_a_game_is_loaded() {
+        let mut s = MenuState::new();
+        s.select_category("Settings");
+        s.set_game_loaded(true);
+        assert_eq!(names(&s), ["Library", "Game", "Settings"]);
+        // The selected column is kept across the insert.
+        assert_eq!(s.current_category(), Some("Settings"));
         assert_eq!(
-            s.categories
-                .iter()
-                .map(|category| category.name)
-                .collect::<Vec<_>>(),
-            ["Games", "Examples", "Projects", "Settings", "System", "Quit"]
+            labels(&s, "Game"),
+            [
+                "Resume",
+                "Save state",
+                "Load state",
+                "Reset",
+                "Record input",
+                "Load input replay"
+            ]
         );
+        s.sync_run_label(true);
+        s.sync_input_recording_label(true);
+        assert_eq!(labels(&s, "Game")[0], "Pause");
+        assert_eq!(labels(&s, "Game")[4], "Stop input recording");
+        // Recording stays one row, one key.
+        let game = s.categories.iter().find(|c| c.name == "Game").unwrap();
+        let rec: Vec<_> = game
+            .items
+            .iter()
+            .filter(|item| item.action == MenuAction::ToggleInputRecording)
+            .collect();
+        assert_eq!(rec.len(), 1);
+        assert_eq!(rec[0].value.as_deref(), Some("F8"));
+
+        s.select_category("Game");
+        s.set_game_loaded(false);
+        assert_eq!(names(&s), ["Library", "Settings"]);
+        assert_eq!(s.current_category(), Some("Library"));
+        // Labels survive the column being rebuilt.
+        s.set_game_loaded(true);
+        assert_eq!(labels(&s, "Game")[0], "Pause");
+        assert_eq!(labels(&s, "Game")[4], "Stop input recording");
     }
 
     #[test]
-    fn empty_library_shows_placeholder_that_triggers_rescan() {
-        let s = MenuState::new();
-        let first = s.categories[0].items.first().unwrap();
-        assert_eq!(first.action, MenuAction::RescanLibrary);
-        let first_example = s.categories[1].items.first().unwrap();
-        assert_eq!(first_example.action, MenuAction::BuildExamples);
-    }
-
-    #[test]
-    fn set_library_populates_games_and_examples() {
+    fn folder_and_refresh_rows_appear_exactly_once_at_the_bottom() {
         let mut s = MenuState::new();
         s.set_library(
-            &[dummy_item("g1", "Crash", "NTSC-U · 600 MiB")],
+            &[dummy_item("g1", "Crash", "NTSC-U")],
             &[dummy_item("e1", "hello-tri", "EXE")],
             &[dummy_item("p1", "Stone Room", "Project")],
         );
-        assert_eq!(s.categories[0].items[0].label, "Crash");
+        s.toggle_library_folder(Path::new(HOMEBREW_FOLDER));
+        let actions: Vec<_> = s.categories.iter().flat_map(|c| &c.items).collect();
+        for wanted in [MenuAction::RescanLibrary, MenuAction::ChooseGamesPath] {
+            assert_eq!(actions.iter().filter(|i| i.action == wanted).count(), 1);
+        }
+        let library = &s.categories[0].items;
+        let n = library.len();
+        assert_eq!(library[n - 2].action, MenuAction::ChooseGamesPath);
+        assert_eq!(library[n - 1].action, MenuAction::RescanLibrary);
+        s.set_games_path_label("discs");
+        assert_eq!(s.categories[0].items[n - 2].value.as_deref(), Some("discs"));
+        // An empty library has no placeholder rows, only the two actions.
+        let empty = MenuState::new();
         assert_eq!(
-            s.categories[0].items[0].action,
-            MenuAction::LaunchGame("g1".to_string())
+            labels(&empty, "Library"),
+            ["Choose games folder", "Refresh library"]
         );
-        // Refresh row is appended after the actual entries.
         assert_eq!(
-            s.categories[0].items.last().unwrap().action,
-            MenuAction::RescanLibrary
+            empty.categories[0].items[0].value.as_deref(),
+            Some("Missing")
         );
-        assert_eq!(s.categories[1].items[0].label, "hello-tri");
-        assert_eq!(s.categories[2].items[0].label, "Stone Room");
+        assert!(!labels(&s, "Settings")
+            .iter()
+            .any(|label| label.to_lowercase().contains("folder")
+                || label.to_lowercase().contains("bios")));
     }
 
     #[test]
-    fn burn_action_is_only_shown_for_burnable_examples_and_projects() {
+    fn homebrew_folder_follows_the_games_tree() {
+        let mut s = MenuState::new();
+        let mut nested = dummy_item("g2", "Nested", "");
+        nested.folder = "Ports".into();
+        s.set_library(
+            &[dummy_item("g1", "Crash", "NTSC-U · 600 MiB"), nested],
+            &[dummy_item("e1", "hello-tri", "EXE")],
+            &[dummy_item("p1", "Stone Room", "Project")],
+        );
+        assert_eq!(
+            labels(&s, "Library"),
+            [
+                "Ports",
+                "Crash",
+                "Homebrew",
+                "Choose games folder",
+                "Refresh library"
+            ]
+        );
+        let homebrew = &s.categories[0].items[2];
+        assert_eq!(homebrew.value.as_deref(), Some("2 entries"));
+        s.toggle_library_folder(Path::new(HOMEBREW_FOLDER));
+        let items = &s.categories[0].items;
+        assert_eq!(items[3].label, "hello-tri");
+        assert_eq!(items[3].depth, 1);
+        assert_eq!(items[4].label, "Stone Room");
+        assert_eq!(items[4].action, MenuAction::LaunchGame("p1".into()));
+        // A rescan keeps the Homebrew folder open.
+        s.set_library(
+            &[dummy_item("g1", "Crash", "")],
+            &[dummy_item("e1", "hello-tri", "EXE")],
+            &[],
+        );
+        assert_eq!(labels(&s, "Library")[2], "hello-tri");
+        // No homebrew, no folder.
+        s.set_library(&[dummy_item("g1", "Crash", "")], &[], &[]);
+        assert!(!labels(&s, "Library").contains(&"Homebrew".to_string()));
+    }
+
+    #[test]
+    fn burn_action_is_only_shown_for_burnable_homebrew() {
         let mut s = MenuState::new();
         let game = LibraryItem {
             burnable: true,
@@ -3025,15 +2951,17 @@ mod tests {
         };
 
         s.set_library(&[game], &[example, source_example], &[project]);
-
-        assert_eq!(s.categories[0].items[0].burn_action, None);
+        s.toggle_library_folder(Path::new(HOMEBREW_FOLDER));
+        let items = &s.categories[0].items;
+        assert_eq!(items[0].burn_action, None);
         assert_eq!(
-            s.categories[1].items[0].burn_action,
+            items[2].burn_action,
             Some(MenuAction::OpenBurnMenu("e1".to_string()))
         );
-        assert_eq!(s.categories[1].items[1].burn_action, None);
+        assert_eq!(items[3].burn_action, None);
+        assert_eq!(items[3].action, MenuAction::BuildExamples);
         assert_eq!(
-            s.categories[2].items[0].burn_action,
+            items[4].burn_action,
             Some(MenuAction::OpenBurnMenu("p1".to_string()))
         );
     }
@@ -3041,53 +2969,19 @@ mod tests {
     #[test]
     fn set_library_preserves_category_across_rebuild() {
         let mut s = MenuState::new();
-        // Move to "System" category before rebuilding.
-        s.select_category("System");
+        s.select_category("Settings");
         s.set_library(&[], &[], &[]);
-        assert_eq!(s.current_category(), Some("System"));
-    }
-
-    #[test]
-    fn sync_run_label_flips_system_run_item() {
-        let mut s = MenuState::new();
-        assert_eq!(
-            s.categories
-                .iter()
-                .find(|category| category.name == "System")
-                .unwrap()
-                .items[0]
-                .label,
-            "Run"
-        );
-        s.sync_run_label(true);
-        assert_eq!(
-            s.categories
-                .iter()
-                .find(|category| category.name == "System")
-                .unwrap()
-                .items[0]
-                .label,
-            "Pause"
-        );
-        s.sync_run_label(false);
-        assert_eq!(
-            s.categories
-                .iter()
-                .find(|category| category.name == "System")
-                .unwrap()
-                .items[0]
-                .label,
-            "Run"
-        );
+        assert_eq!(s.current_category(), Some("Settings"));
     }
 
     #[test]
     fn left_right_wraps_around_categories() {
         let mut s = MenuState::new();
         s.set_library(&[dummy_item("a", "A", "")], &[], &[]);
+        s.set_game_loaded(true);
         let n = s.categories.len();
-        assert!(n >= 2);
-        assert_eq!(s.current_category(), Some("Games")); // first category
+        assert_eq!(n, 3);
+        assert_eq!(s.current_category(), Some("Library"));
 
         let left = MenuInput {
             left: true,
@@ -3100,15 +2994,15 @@ mod tests {
 
         // Left from the first category wraps to the last.
         s.update(&left);
-        assert_eq!(s.current_category(), s.categories.last().map(|c| c.name));
+        assert_eq!(s.current_category(), Some("Settings"));
         // Right from the last wraps back to the first.
         s.update(&right);
-        assert_eq!(s.current_category(), Some("Games"));
+        assert_eq!(s.current_category(), Some("Library"));
         // A full lap of rights returns to the start.
         for _ in 0..n {
             s.update(&right);
         }
-        assert_eq!(s.current_category(), Some("Games"));
+        assert_eq!(s.current_category(), Some("Library"));
     }
 
     #[test]
@@ -3143,11 +3037,34 @@ mod tests {
     }
 
     #[test]
-    fn select_category_moves_to_settings() {
+    fn settings_holds_controls_video_audio_and_quit() {
         let mut s = MenuState::new();
         s.select_category("Settings");
-        assert_eq!(s.current_category(), Some("Settings"));
-        assert_eq!(s.selected_action(), Some(&MenuAction::ChooseGamesPath));
+        assert_eq!(s.selected_action(), Some(&MenuAction::OpenControls));
+        assert_eq!(
+            labels(&s, "Settings"),
+            [
+                "Controls",
+                "Video scale",
+                "Texture filter",
+                "Volume",
+                "Mute",
+                "Menu opacity",
+                "UI scale",
+                "When the computer is slow",
+                "About",
+                "Quit PSoXide"
+            ]
+        );
+        s.sync_video_audio(false, "xBR", 0.5, true);
+        s.set_smooth_slow_host(true);
+        let values: Vec<_> = s.categories[1]
+            .items
+            .iter()
+            .map(|item| item.value.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(&values[1..5], ["Native", "xBR", "50%", "On"]);
+        assert_eq!(values[7], "Keep it smooth");
     }
 
     #[test]
@@ -3160,7 +3077,7 @@ mod tests {
 
         assert_eq!(
             s.take_pending_pointer_action(),
-            Some(MenuAction::ChooseGamesPath)
+            Some(MenuAction::OpenControls)
         );
     }
 
@@ -3183,40 +3100,21 @@ mod tests {
     }
 
     #[test]
-    fn sync_settings_paths_updates_menu_values() {
-        let mut s = MenuState::new();
-        s.sync_settings_paths("discs");
-        let settings = s
-            .categories
-            .iter()
-            .find(|category| category.name == "Settings")
-            .unwrap();
-        let games = settings
-            .items
-            .iter()
-            .find(|item| item.action == MenuAction::ChooseGamesPath)
-            .unwrap();
-        assert_eq!(games.value.as_deref(), Some("discs"));
-        assert!(!settings
-            .items
-            .iter()
-            .any(|item| item.label.to_lowercase().contains("bios")));
-    }
-
-    #[test]
-    fn ui_scale_setting_updates_its_menu_value() {
+    fn menu_settings_update_their_values() {
         let mut state = MenuState::new();
         state.set_ui_scale(75);
-        let settings = state
-            .categories
-            .iter()
-            .find(|category| category.name == "Settings")
-            .unwrap();
-        let scale = settings
-            .items
-            .iter()
-            .find(|item| item.action == MenuAction::CycleUiScale)
-            .unwrap();
-        assert_eq!(scale.value.as_deref(), Some("75%"));
+        state.set_menu_opacity(65);
+        let settings = &state.categories[1];
+        let value = |action: MenuAction| {
+            settings
+                .items
+                .iter()
+                .find(|item| item.action == action)
+                .unwrap()
+                .value
+                .clone()
+        };
+        assert_eq!(value(MenuAction::CycleUiScale).as_deref(), Some("75%"));
+        assert_eq!(value(MenuAction::CycleMenuOpacity).as_deref(), Some("65%"));
     }
 }
