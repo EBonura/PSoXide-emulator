@@ -40,8 +40,10 @@ pub struct CodeBuffer {
     used: usize,
 }
 
-// The buffer is owned by one `Jit`, which is used from one thread at a time.
+// The buffer is owned by one compiler and only written through `&mut self`;
+// shared references read nothing but its size.
 unsafe impl Send for CodeBuffer {}
+unsafe impl Sync for CodeBuffer {}
 
 impl CodeBuffer {
     /// Map `size` bytes of executable memory.
