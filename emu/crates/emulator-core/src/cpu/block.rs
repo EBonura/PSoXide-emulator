@@ -981,10 +981,15 @@ impl Cpu {
                 } else {
                     let trapped = self.batch_fallback(bus, &mut b, op);
                     if trapped {
-                        // An `Other` op trapped (overflow, coprocessor
-                        // unusable); never in a delay slot. Entering the
-                        // exception left the block.
+                        // The op trapped (overflow, coprocessor unusable):
+                        // the PC is the exception vector. In the delay slot of
+                        // a taken branch the interpreter still does the
+                        // branch-boundary work there (drain, interrupt check).
                         self.cursor.block = 0;
+                        if branch_after_this.is_some() {
+                            let vector = b.pc;
+                            self.batch_boundary(bus, &mut b, vector, true);
+                        }
                         break 'blocks;
                     }
                 }
