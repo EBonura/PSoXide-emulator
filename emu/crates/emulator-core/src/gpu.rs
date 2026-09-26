@@ -3021,60 +3021,34 @@ impl Gpu {
     }
 
     fn sample_texture(&self, u: u16, v: u16) -> Option<u16> {
-        // PSX-SPX: the GPU's U/V counters are 8 bits -- texture pages
-        // wrap every 256 texels horizontally and vertically. Callers
-        // pass u16 because rasterizer interpolation works in a wider
-        // domain, so we mask down to 8 bits *before* the texture
-        // window. Without this, a sprite or polygon whose `U + dx`
-        // exceeds 255 reads VRAM PAST the tpage edge -- typically the
-        // neighbouring tpage's data, garbage texels, or a different
-        // CLUT-driven byte. Visible as smeared / corrupted 2D sprites
-        // (character portraits, BIOS dialog frames).
-        let u = u & 0xFF;
-        let v = v & 0xFF;
-        // Apply the texture window -- PSX-SPX:
-        //   U' = (U AND NOT(mask_x * 8)) OR ((offset_x * 8) AND (mask_x * 8))
-        // but both `mask_*` and `offset_*` are already pre-shifted (×8)
-        // when we stored them in the GP0 0xE2 handler.
-        let mask_x = self.tex_window_mask_x as u16;
-        let mask_y = self.tex_window_mask_y as u16;
-        let off_x = self.tex_window_offset_x as u16;
-        let off_y = self.tex_window_offset_y as u16;
-        let u = (u & !mask_x) | (off_x & mask_x);
-        let v = (v & !mask_y) | (off_y & mask_y);
+        self.sampler()
+            .sample(self.vram.words(), &self.clut_cache, u, v)
+    }
 
-        // PSoXide models a retail 1 MiB VRAM. GP1(09h)+tpage bit 11 selects
-        // the unpopulated upper bank on that hardware, so texture reads do
-        // not mirror into the lower 512 lines.
-        if self.tex_page_y >= VRAM_HEIGHT as u16 {
-            return None;
+    /// The texture state [`Gpu::sample_texture`] reads, copied out once per
+    /// primitive so the per-pixel loops need not reload it after every
+    /// VRAM write.
+    #[inline]
+    fn sampler(&self) -> TexSampler {
+        TexSampler {
+            mask_x: self.tex_window_mask_x as u16,
+            mask_y: self.tex_window_mask_y as u16,
+            off_x: self.tex_window_offset_x as u16,
+            off_y: self.tex_window_offset_y as u16,
+            page_x: self.tex_page_x,
+            page_y: self.tex_page_y,
+            depth: self.tex_depth,
         }
-        let tpy = self.tex_page_y.wrapping_add(v);
-        let texel = match self.tex_depth {
-            0 => {
-                // 4bpp: 4 texels per VRAM word; select by (u & 3).
-                let tpx = self.tex_page_x.wrapping_add(u / 4);
-                let word = self.vram.get_pixel(tpx, tpy);
-                let idx = (word >> ((u & 3) * 4)) & 0xF;
-                self.clut_cache[idx as usize]
-            }
-            1 => {
-                // 8bpp: 2 texels per VRAM word.
-                let tpx = self.tex_page_x.wrapping_add(u / 2);
-                let word = self.vram.get_pixel(tpx, tpy);
-                let idx = (word >> ((u & 1) * 8)) & 0xFF;
-                self.clut_cache[idx as usize]
-            }
-            _ => {
-                // 15bpp: direct colour, 1 texel per word.
-                let tpx = self.tex_page_x.wrapping_add(u);
-                self.vram.get_pixel(tpx, tpy)
-            }
-        };
-        if texel == 0 {
-            None
-        } else {
-            Some(texel)
+    }
+
+    /// The mask-bit and tracer state [`Gpu::plot_pixel`] reads, copied out
+    /// once per primitive.
+    #[inline]
+    fn plot_state(&self) -> PlotState {
+        PlotState {
+            mask_check: self.mask_check_before_draw,
+            mask_set: self.mask_set_on_draw,
+            traced: self.pixel_owner.is_some(),
         }
     }
 
@@ -3550,6 +3524,8 @@ impl Gpu {
         let draw_left = self.draw_area_left as i32;
         let draw_right = self.draw_area_right as i32;
         let dither = self.dither_enabled;
+        let tex = self.sampler();
+        let plot = self.plot_state();
         for_each_tri_pixel(
             [v0, v1, v2],
             v_rgb,
@@ -3559,7 +3535,9 @@ impl Gpu {
             draw_left,
             draw_right,
             |x, y, ri, gi, bi, u, v| {
-                if let Some(texel) = self.sample_texture(u as u16, v as u16) {
+                if let Some(texel) =
+                    tex.sample(self.vram.words(), &self.clut_cache, u as u16, v as u16)
+                {
                     let (tint_r, tint_g, tint_b) = if raw_texture {
                         RAW_TEXTURE_TINT
                     } else {
@@ -3575,7 +3553,7 @@ impl Gpu {
                     } else {
                         BlendMode::Opaque
                     };
-                    self.plot_pixel(x as u16, y as u16, shaded, mode);
+                    self.plot_pixel_with(plot, x as u16, y as u16, shaded, mode);
                 }
             },
         );
@@ -3621,8 +3599,14 @@ impl Gpu {
     /// Callers do their own draw-area clipping before calling this
     /// -- it's the hot per-pixel path and shouldn't re-check bounds.
     fn plot_pixel(&mut self, x: u16, y: u16, fg: u16, mode: BlendMode) {
+        self.plot_pixel_with(self.plot_state(), x, y, fg, mode);
+    }
+
+    /// [`Gpu::plot_pixel`] with its flags read once per primitive.
+    #[inline(always)]
+    fn plot_pixel_with(&mut self, state: PlotState, x: u16, y: u16, fg: u16, mode: BlendMode) {
         let existing = self.vram.get_pixel(x, y);
-        if self.mask_check_before_draw && existing & 0x8000 != 0 {
+        if state.mask_check && existing & 0x8000 != 0 {
             return;
         }
         let mut pixel = if mode == BlendMode::Opaque {
@@ -3630,7 +3614,7 @@ impl Gpu {
         } else {
             blend_pixel(existing, fg, mode)
         };
-        if self.mask_set_on_draw {
+        if state.mask_set {
             pixel |= 0x8000;
         }
         self.vram.set_pixel(x, y, pixel);
@@ -3638,8 +3622,10 @@ impl Gpu {
         // this every time a primitive writes a pixel, but the cost
         // is a single array write behind an Option check -- cheap
         // enough to keep on even in release diagnostic builds.
-        if let Some(ref mut owner) = self.pixel_owner {
-            owner[y as usize * VRAM_WIDTH + x as usize] = self.current_cmd_index;
+        if state.traced {
+            if let Some(ref mut owner) = self.pixel_owner {
+                owner[y as usize * VRAM_WIDTH + x as usize] = self.current_cmd_index;
+            }
         }
     }
 
@@ -3699,6 +3685,8 @@ impl Gpu {
         let draw_bottom = self.draw_area_bottom as i32;
         let draw_left = self.draw_area_left as i32;
         let draw_right = self.draw_area_right as i32;
+        let tex = self.sampler();
+        let plot = self.plot_state();
         for_each_tri_pixel(
             [v0, v1, v2],
             [(0, 0, 0); 3],
@@ -3708,7 +3696,9 @@ impl Gpu {
             draw_left,
             draw_right,
             |x, y, _r, _g, _b, u, v| {
-                if let Some(texel) = self.sample_texture(u as u16, v as u16) {
+                if let Some(texel) =
+                    tex.sample(self.vram.words(), &self.clut_cache, u as u16, v as u16)
+                {
                     let shaded = if dither {
                         modulate_tint_dithered(texel, tint.0, tint.1, tint.2, x, y)
                     } else {
@@ -3719,7 +3709,7 @@ impl Gpu {
                     } else {
                         BlendMode::Opaque
                     };
-                    self.plot_pixel(x as u16, y as u16, shaded, mode);
+                    self.plot_pixel_with(plot, x as u16, y as u16, shaded, mode);
                 }
             },
         );
@@ -4492,4 +4482,74 @@ fn rgb24_pixels_left(start_x: u16) -> u16 {
     let halfwords = (crate::VRAM_WIDTH as u32).saturating_sub(u32::from(start_x));
     // The last pixel reads the halfword after its first byte.
     (halfwords.saturating_sub(1) * 2 / 3) as u16
+}
+
+/// Texture-sampling state copied from the [`Gpu`] once per primitive; see
+/// [`Gpu::sampler`].
+#[derive(Clone, Copy)]
+struct TexSampler {
+    mask_x: u16,
+    mask_y: u16,
+    off_x: u16,
+    off_y: u16,
+    page_x: u16,
+    page_y: u16,
+    depth: u8,
+}
+
+impl TexSampler {
+    /// Fetch a single texel from the active texture page. Returns
+    /// `None` for transparent -- PSX convention is **the resolved
+    /// 16-bit colour == 0x0000**, regardless of mode. See
+    /// [`Gpu::sample_texture`] for the rules.
+    #[inline(always)]
+    fn sample(&self, vram: &[u16], clut: &[u16; 256], u: u16, v: u16) -> Option<u16> {
+        // PSX-SPX: the GPU's U/V counters are 8 bits -- texture pages
+        // wrap every 256 texels horizontally and vertically.
+        let u = u & 0xFF;
+        let v = v & 0xFF;
+        // Texture window: U' = (U AND NOT mask) OR (offset AND mask), with
+        // mask and offset stored pre-shifted (x8).
+        let u = (u & !self.mask_x) | (self.off_x & self.mask_x);
+        let v = (v & !self.mask_y) | (self.off_y & self.mask_y);
+        // PSoXide models a retail 1 MiB VRAM. GP1(09h)+tpage bit 11 selects
+        // the unpopulated upper bank on that hardware, so texture reads do
+        // not mirror into the lower 512 lines.
+        if self.page_y >= VRAM_HEIGHT as u16 {
+            return None;
+        }
+        let tpy = self.page_y.wrapping_add(v);
+        let at = |x: u16| {
+            vram[((tpy as usize) & (VRAM_HEIGHT - 1)) * VRAM_WIDTH
+                + ((x as usize) & (VRAM_WIDTH - 1))]
+        };
+        let texel = match self.depth {
+            0 => {
+                // 4bpp: 4 texels per VRAM word; select by (u & 3).
+                let word = at(self.page_x.wrapping_add(u / 4));
+                clut[((word >> ((u & 3) * 4)) & 0xF) as usize]
+            }
+            1 => {
+                // 8bpp: 2 texels per VRAM word.
+                let word = at(self.page_x.wrapping_add(u / 2));
+                clut[((word >> ((u & 1) * 8)) & 0xFF) as usize]
+            }
+            // 15bpp: direct colour, 1 texel per word.
+            _ => at(self.page_x.wrapping_add(u)),
+        };
+        if texel == 0 {
+            None
+        } else {
+            Some(texel)
+        }
+    }
+}
+
+/// Mask-bit and tracer state for [`Gpu::plot_pixel_with`], copied from the
+/// [`Gpu`] once per primitive.
+#[derive(Clone, Copy)]
+struct PlotState {
+    mask_check: bool,
+    mask_set: bool,
+    traced: bool,
 }
