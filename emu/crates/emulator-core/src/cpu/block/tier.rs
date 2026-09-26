@@ -55,14 +55,13 @@ const NATIVE_THRESHOLD: u32 = 16;
 /// [`Block::native`] for a block the native tier declined.
 pub const NATIVE_DECLINED: usize = 1;
 
-/// Whether the tier's loop runs `op` itself: the plain loop's
-/// [`op_flags::BATCH`] ops, plus GTE commands and LWC2/SWC2 outside delay
-/// slots.
+/// Whether the tier's loop runs `op` itself: everything but terminators.
+/// Beyond the plain loop's [`op_flags::BATCH`] ops that is GTE commands,
+/// LWC2/SWC2, and the ops that can trap in a delay slot (the step enters
+/// the exception as a delay slot's, and the batch ends there).
 #[inline(always)]
 pub fn tier_batch(op: &DecodedOp) -> bool {
-    op.flags & op_flags::BATCH != 0
-        || (op.flags & op_flags::DELAY_SLOT == 0
-            && (op.class == OpClass::GteCommand || matches!(op.word >> 26, 0x32 | 0x3A)))
+    op.class != OpClass::Terminator
 }
 
 impl BlockCache {
@@ -272,9 +271,13 @@ impl Cpu {
                 st.uncounted += 1;
                 if let Some(vector) = self.pending_exception_pc.take() {
                     // An `Other` op trapped (overflow, coprocessor
-                    // unusable); never in a delay slot. Entering the
-                    // exception left the block.
+                    // unusable). Entering the exception left the block.
+                    // In a taken branch's delay slot the step still does
+                    // the branch-boundary work, at the vector.
                     self.pc = vector;
+                    if branch_after_this.is_some() {
+                        let _ = self.batch_taken_boundary(bus, vector, &mut st);
+                    }
                     break 'blocks;
                 }
                 if device && self.device_step_quiet(bus, addr, raised, &mut st) {
@@ -761,6 +764,13 @@ impl Cpu {
             self.native_retired(&run, st);
             self.branch_delay_next = false;
             self.executing_in_branch_delay = false;
+            // The op that trapped; in a taken branch's delay slot its step
+            // still does the branch-boundary work, at the vector.
+            // SAFETY: `ops` points at the block's ops, and the op ran.
+            let op = unsafe { *run.ops.add((run.ran.wrapping_sub(run.ran0) - 1) as usize) };
+            if op.flags & op_flags::DELAY_SLOT != 0 && run.taken != 0 {
+                let _ = self.batch_taken_boundary(bus, self.pc, st);
+            }
             return Some(NativeExit::Break);
         }
         // Stopped in the block it was running (reached by linked code,
@@ -853,7 +863,7 @@ impl Cpu {
                 bus.advance_quiet(*issue);
                 *issue = 0;
                 self.pc = pc;
-                let _ = self.execute(op.word, pc, false, bus);
+                let _ = self.execute(op.word, pc, delay, bus);
                 if op.class == OpClass::Store {
                     *ram_ok = false;
                 }
@@ -871,7 +881,7 @@ impl Cpu {
                 bus.advance_quiet(*issue);
                 *issue = 0;
                 self.pc = pc;
-                let _ = self.execute(op.word, pc, false, bus);
+                let _ = self.execute(op.word, pc, delay, bus);
             }
         }
         self.executing_in_branch_delay = false;
