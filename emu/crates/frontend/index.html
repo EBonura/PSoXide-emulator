@@ -117,13 +117,33 @@
       }
     </style>
     <script>
+      // The wasm is built with WebAssembly SIMD (see .cargo/config.toml). A
+      // browser without it cannot compile the module; say so plainly rather
+      // than the generic startup error. Validates a minimal module using
+      // i8x16.splat and i8x16.popcnt.
+      var psoxideNoSimd = false;
+      try {
+        psoxideNoSimd = !WebAssembly.validate(new Uint8Array([
+          0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0,
+          10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11,
+        ]));
+      } catch (e) {
+        psoxideNoSimd = true;
+      }
       // Keep startup failures visible instead of leaving an endless animation.
       function showPsoxideLoadError() {
         var loader = document.getElementById("psoxide-loader");
         if (!loader || loader.classList.contains("is-ready")) return;
         loader.classList.add("has-error");
         var status = document.getElementById("psoxide-loader-status");
-        if (status) status.textContent = "Could not start - reload to try again";
+        if (status) {
+          status.textContent = psoxideNoSimd
+            ? "This browser lacks WebAssembly SIMD - please update it"
+            : "Could not start - reload to try again";
+        }
+      }
+      if (psoxideNoSimd) {
+        document.addEventListener("DOMContentLoaded", showPsoxideLoadError);
       }
       window.addEventListener("error", showPsoxideLoadError);
       window.addEventListener("unhandledrejection", showPsoxideLoadError);

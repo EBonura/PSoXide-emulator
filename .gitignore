@@ -16,8 +16,10 @@ Cargo.lock.orig
 .vscode/
 .idea/
 
-# Local agent/tooling metadata.
-.cargo/
+# Local agent/tooling metadata. The shared cargo config (web build flags)
+# is tracked.
+.cargo/*
+!.cargo/config.toml
 .codex/
 .claude/
 previous chat.md
