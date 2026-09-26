@@ -20,6 +20,8 @@ serde        = { workspace = true, features = ["std"] }
 serde_bytes  = { workspace = true }
 
 [dev-dependencies]
+# Whole-machine state comparison in the block-cache lockstep checker.
+postcard = { workspace = true }
 psx-spu = { path = "../../../sdk/crates/psx-spu" }
 psoxide-settings = { workspace = true }
 # GPU packet structs (TriTexturedGouraud / QuadTexturedGouraud) so the

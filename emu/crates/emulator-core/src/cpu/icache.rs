@@ -38,12 +38,29 @@ pub(super) struct Refill {
 pub(super) struct InstructionCache {
     #[serde(with = "crate::serde_big_array::array")]
     lines: [CacheLine; LINE_COUNT],
+    /// Per line, a count of changes to its tag, valid bits or words. A
+    /// decoded block (`cpu/block.rs`) records the counts of the lines it
+    /// was read from; while they are unchanged, every one of its words is
+    /// still a hit with the same value. Host-side, excluded from save
+    /// states: a restored CPU starts with an empty block cache.
+    #[serde(skip, default = "zero_generations")]
+    generations: [u32; LINE_COUNT],
+    /// Changes to any line: a block validated at this count is still
+    /// current without looking at its lines. Host-side, like `generations`.
+    #[serde(skip)]
+    epoch: u64,
+}
+
+fn zero_generations() -> [u32; LINE_COUNT] {
+    [0; LINE_COUNT]
 }
 
 impl Default for InstructionCache {
     fn default() -> Self {
         Self {
             lines: [CacheLine::default(); LINE_COUNT],
+            generations: zero_generations(),
+            epoch: 0,
         }
     }
 }
@@ -94,6 +111,8 @@ impl InstructionCache {
         if line.tag == tag && line.valid & valid_bit != 0 {
             return (line.words[word_index], FillShape::default(), None);
         }
+        self.generations[line_index] = self.generations[line_index].wrapping_add(1);
+        self.epoch += 1;
 
         let victim = capture_refill.then(|| {
             let victim_tag = line.tag;
@@ -169,6 +188,8 @@ impl InstructionCache {
     pub(super) fn write_data(&mut self, addr: u32, value: u32) {
         let (line, word, _) = Self::coordinates(addr);
         self.lines[line].words[word] = value;
+        self.generations[line] = self.generations[line].wrapping_add(1);
+        self.epoch += 1;
     }
 
     /// Cache-isolated tag-mode read. Bits 3:0 expose the valid bits,
@@ -187,12 +208,30 @@ impl InstructionCache {
         let (line, _, tag) = Self::coordinates(addr);
         self.lines[line].tag = tag;
         self.lines[line].valid = value as u8 & 0xF;
+        self.generations[line] = self.generations[line].wrapping_add(1);
+        self.epoch += 1;
     }
 
     pub(super) fn invalidate_all(&mut self) {
         for line in &mut self.lines {
             line.valid = 0;
         }
+        for generation in &mut self.generations {
+            *generation = generation.wrapping_add(1);
+        }
+        self.epoch += 1;
+    }
+
+    /// Count of changes to any line.
+    #[inline(always)]
+    pub(super) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Change count of the line holding physical address `phys`.
+    #[inline(always)]
+    pub(super) fn generation(&self, phys: u32) -> u32 {
+        self.generations[((phys >> 4) & 0xFF) as usize]
     }
 
     #[cfg(test)]

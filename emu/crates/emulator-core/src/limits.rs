@@ -277,6 +277,7 @@ impl LimitOracles {
     }
 
     /// Whether any switch or range is configured.
+    #[inline(always)]
     pub fn configured(&self) -> bool {
         self.configured != 0 || self.track_pc
     }

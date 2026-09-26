@@ -1347,9 +1347,8 @@ fn run_headless_launch(
             let deadline = route_tick_deadline;
             let frames = observed_guest_frames;
             let visual = observed_visual_frames;
-            cpu.run(&mut bus, batch, |bus| {
-                bus.cycles() >= deadline
-                    || bus.telemetry.frames_seen() != frames
+            cpu.run(&mut bus, batch, deadline, |bus| {
+                bus.telemetry.frames_seen() != frames
                     || bus
                         .telemetry
                         .counter_total(telemetry::counter::VISUAL_FRAMES)

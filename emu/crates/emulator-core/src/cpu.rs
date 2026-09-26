@@ -23,11 +23,13 @@ use crate::bus::{AccessWidth, Bus};
 use crate::freelook::{self, FreelookState};
 use psx_gte_core::Gte;
 
+pub mod block;
 mod branch;
 mod icache;
 mod idle;
 mod timing;
 
+use block::{BlockCache, Cursor, DecodedOp, OpClass};
 use branch::branch_target;
 use icache::InstructionCache;
 use timing::cycle_cost;
@@ -690,6 +692,23 @@ pub struct Cpu {
     /// from the recorded trace. Syscall-entered spans clear this to
     /// false and stay that way until the outermost RFE.
     clean_irq_entry: bool,
+    /// Decoded-block cache (`cpu/block.rs`). Host-side: a restored CPU
+    /// starts empty and rebuilds from its I-cache.
+    #[serde(skip)]
+    blocks: BlockCache,
+    /// Position inside the block being run, if any.
+    #[serde(skip)]
+    cursor: Cursor,
+    /// Run from decoded blocks where they apply. On by default;
+    /// `PSOXIDE_NO_BLOCK_CACHE=1` or [`Cpu::set_block_cache_enabled`]
+    /// turns it off, leaving the plain per-instruction interpreter, which
+    /// produces the same results.
+    #[serde(skip, default = "block_cache_default")]
+    block_cache_enabled: bool,
+}
+
+fn block_cache_default() -> bool {
+    std::env::var_os("PSOXIDE_NO_BLOCK_CACHE").is_none()
 }
 
 /// Every MIPS I branch and jump: REGIMM, J, JAL, BEQ, BNE, BLEZ, BGTZ, and
@@ -782,7 +801,23 @@ impl Cpu {
             freelook: FreelookState::default(),
             isr_depth: 0,
             clean_irq_entry: false,
+            blocks: BlockCache::default(),
+            cursor: Cursor::default(),
+            block_cache_enabled: block_cache_default(),
         }
+    }
+
+    /// Run from decoded blocks (the default) or strictly one fetched
+    /// instruction at a time. Both give identical results; the switch
+    /// exists for lockstep checks.
+    pub fn set_block_cache_enabled(&mut self, enabled: bool) {
+        self.block_cache_enabled = enabled;
+        self.cursor = Cursor::default();
+    }
+
+    /// Blocks decoded so far (built or rebuilt). Diagnostic.
+    pub fn blocks_built(&self) -> u64 {
+        self.blocks.built
     }
 
     /// Set the debug freelook camera delta (see [`FreelookState`]). The
@@ -844,6 +879,7 @@ impl Cpu {
     /// The corresponding payload must already have been copied into
     /// RAM by [`crate::Bus::load_exe_payload`].
     pub fn seed_from_exe(&mut self, initial_pc: u32, initial_gp: u32, initial_sp: Option<u32>) {
+        self.cursor = Cursor::default();
         self.pc = initial_pc;
         // The real BIOS Exec path flushes the I-cache before entering a
         // newly loaded executable and leaves BIU_CONFIG in its normal
@@ -987,6 +1023,7 @@ impl Cpu {
 
     /// Enable or disable exact instruction-cache refill event capture.
     pub fn set_instruction_cache_event_profile_enabled(&mut self, enabled: bool) {
+        self.cursor = Cursor::default();
         self.instruction_cache_event_profile_enabled = enabled;
         self.last_instruction_cache_refill = None;
     }
@@ -999,6 +1036,7 @@ impl Cpu {
 
     /// Enable or disable CPU cycle attribution, resetting prior observations.
     pub fn set_cpu_cycle_profile_enabled(&mut self, enabled: bool) {
+        self.cursor = Cursor::default();
         self.cpu_cycle_profile_enabled = enabled;
         self.cpu_cycle_profile = CpuCycleProfileSnapshot::default();
         self.cpu_wait_profile = CpuWaitProfileSnapshot::default();
@@ -1026,6 +1064,7 @@ impl Cpu {
 
     /// Enable or disable exact instruction-class profiling and reset totals.
     pub fn set_instruction_class_profile_enabled(&mut self, enabled: bool) {
+        self.cursor = Cursor::default();
         self.instruction_class_profile_enabled = enabled;
         self.instruction_class_profile = InstructionClassProfileSnapshot::default();
     }
@@ -1678,20 +1717,29 @@ impl Cpu {
     /// debug-UI single-step button).
     #[inline]
     pub fn step(&mut self, bus: &mut Bus) -> Result<(), ExecutionError> {
-        self.execute_one(bus).map(|_| ())
+        self.execute_one::<false>(bus).map(|_| ())
     }
 
-    /// Execute up to `max_steps` instructions, stopping after the first one
-    /// for which `stop_after` returns `true`, and return how many ran. The
-    /// same as `step` in a loop with that check after each instruction, but
-    /// one call for the whole run, so the interpreter's setup and teardown
-    /// are paid once rather than per instruction. Stops early, with the
-    /// count so far, on an execution error.
+    /// Execute up to `max_steps` instructions and return how many ran.
+    /// Stops after the first instruction that ends at or past bus cycle
+    /// `until_cycle`, or for which `stop_after` returns `true`. The same as
+    /// [`Cpu::step`] in a loop with those checks after each instruction,
+    /// but one call for the whole run, so the interpreter's setup is paid
+    /// once, and runs of register-only instructions between two events
+    /// execute as one batch (see `cpu/block.rs`).
+    ///
+    /// `stop_after` must only look at bus state other than the clock
+    /// (interrupt counts, telemetry, pad polls): inside such a batch
+    /// nothing else changes, so it is checked after every instruction that
+    /// could change it rather than after every instruction. Put clock
+    /// limits in `until_cycle`. Stops early, with the count so far, on an
+    /// execution error.
     #[inline]
     pub fn run(
         &mut self,
         bus: &mut Bus,
         max_steps: u64,
+        until_cycle: u64,
         mut stop_after: impl FnMut(&Bus) -> bool,
     ) -> (u64, Result<(), ExecutionError>) {
         let mut steps = 0;
@@ -1699,8 +1747,9 @@ impl Cpu {
             // A waiting HLE call retried with nothing else happening is
             // charged without re-running the call; same instructions, same
             // cycles, same stop point (see `skip_hle_wait_stepwise`).
-            let (skipped, stop) =
-                self.skip_hle_wait_stepwise(bus, max_steps - steps, &mut stop_after);
+            let (skipped, stop) = self.skip_hle_wait_stepwise(bus, max_steps - steps, &mut |bus| {
+                bus.cycles() >= until_cycle || stop_after(bus)
+            });
             steps += skipped;
             if stop {
                 break;
@@ -1708,11 +1757,22 @@ impl Cpu {
             if skipped != 0 {
                 continue;
             }
-            if let Err(error) = self.execute_one(bus) {
+            if !bus.limits.configured() {
+                let ran = self.run_fast(bus, max_steps - steps, until_cycle);
+                if ran != 0 {
+                    steps += ran;
+                    // A run's last access can take the clock to the limit.
+                    if bus.cycles() >= until_cycle || stop_after(bus) {
+                        break;
+                    }
+                    continue;
+                }
+            }
+            if let Err(error) = self.execute_one::<true>(bus) {
                 return (steps, Err(error));
             }
             steps += 1;
-            if stop_after(bus) {
+            if bus.cycles() >= until_cycle || stop_after(bus) {
                 break;
             }
         }
@@ -1723,7 +1783,7 @@ impl Cpu {
     /// after retirement. Allocates 404 bytes per call.
     #[inline]
     pub fn step_traced(&mut self, bus: &mut Bus) -> Result<InstructionRecord, ExecutionError> {
-        let outcome = self.execute_one(bus)?;
+        let outcome = self.execute_one::<false>(bus)?;
         let (cop2_data, cop2_ctl) = self.snapshot_cop2();
         Ok(InstructionRecord {
             // Trace records report bus cycles (same unit Redux's
@@ -1745,7 +1805,22 @@ impl Cpu {
     /// `step_traced` go through here, so the interpreter logic
     /// stays in one place.
     #[inline(always)]
-    fn execute_one(&mut self, bus: &mut Bus) -> Result<ExecutedInstruction, ExecutionError> {
+    ///
+    /// `CACHED`: run from the decoded-block cache where it applies
+    /// ([`Cpu::run`]'s single steps between batches). Callers that step one
+    /// instruction at a time from outside ([`Cpu::step`]) gain nothing from
+    /// a block entered for one op, and use the plain interpreter; stepping
+    /// that way leaves any block, so the cursor is dropped.
+    fn execute_one<const CACHED: bool>(
+        &mut self,
+        bus: &mut Bus,
+    ) -> Result<ExecutedInstruction, ExecutionError> {
+        if CACHED && !bus.limits.configured() {
+            return self.execute_one_cached(bus);
+        }
+        if !CACHED {
+            self.cursor.block = 0;
+        }
         if !bus.limits.tracks_pc() {
             return self.execute_one_inner(bus);
         }
@@ -1771,6 +1846,52 @@ impl Cpu {
             ]);
         }
         outcome
+    }
+
+    /// One instruction, from the current decoded block when the PC is where
+    /// the block continues, or from a block entered here; otherwise the
+    /// plain interpreter. See `cpu/block.rs`.
+    #[inline(always)]
+    fn execute_one_cached(&mut self, bus: &mut Bus) -> Result<ExecutedInstruction, ExecutionError> {
+        let pc = self.pc;
+        if self.cursor.block == 0 || self.cursor.pc != pc {
+            self.cursor.block = 0;
+            if !(self.block_entry_ok() && self.enter_block(bus, pc)) {
+                return self.execute_one_inner(bus);
+            }
+        }
+        let cursor = self.cursor;
+        let op = self.blocks.block(cursor.block - 1).ops[cursor.op as usize];
+        if op.flags & block::op_flags::LAST != 0 {
+            self.cursor.block = 0;
+        } else {
+            self.cursor.op += 1;
+            self.cursor.pc = pc.wrapping_add(4);
+        }
+        let result = self.execute_block_op(bus, pc, op);
+        // A store may have written the cache-control register.
+        if op.class == OpClass::Store && self.cache_control != cursor.cache_control {
+            self.cursor.block = 0;
+        }
+        result
+    }
+
+    /// Run one op of a block: the interpreter's step for a fetch that is a
+    /// plain cache hit (see [`Cpu::block_entry_ok`]), outside the HLE
+    /// kernel area, with the word taken from the block.
+    #[inline(always)]
+    fn execute_block_op(
+        &mut self,
+        bus: &mut Bus,
+        pc: u32,
+        op: DecodedOp,
+    ) -> Result<ExecutedInstruction, ExecutionError> {
+        if bus.external_interrupt_pending() {
+            self.irq_line_high_steps = self.irq_line_high_steps.saturating_add(1);
+        }
+        let gte_irq_taken_after = self.gte_irq_hazard(pc, bus);
+        Self::block_fetch(bus, pc);
+        self.execute_fetched(bus, pc, op.word, gte_irq_taken_after)
     }
 
     /// [`Self::execute_one_inner`] kept out of line, for the limit-oracle
@@ -1926,7 +2047,23 @@ impl Cpu {
             });
         }
         let instr = self.fetch_instruction(pc_before, bus);
+        self.execute_fetched(bus, pc_before, instr, gte_irq_taken_after)
+    }
 
+    /// The back half of a step: everything after the instruction word is in
+    /// hand. The interpreter's step, the block cache (`cpu/block.rs`) and the
+    /// recompiler (`jit_abi`) all run an instruction through here, so its
+    /// timing and state changes are written once. `pc_before` is the PC the
+    /// word was fetched from and `gte_irq_taken_after` the result of
+    /// [`Cpu::gte_irq_hazard`] taken before the fetch.
+    #[inline(always)]
+    fn execute_fetched(
+        &mut self,
+        bus: &mut Bus,
+        pc_before: u32,
+        instr: u32,
+        gte_irq_taken_after: bool,
+    ) -> Result<ExecutedInstruction, ExecutionError> {
         // BIAS charged BEFORE the opcode runs -- matches Redux's
         // `m_regs.cycle += BIAS` at psxinterpreter.cc:1631, which is
         // *ahead* of the opcode dispatch. Any MMIO reads the opcode
@@ -3572,6 +3709,7 @@ impl Cpu {
     /// - **Vector**: `0xBFC0_0180` when `SR.BEV` (bit 22) is set (the
     ///   post-reset default the BIOS boots in), else `0x8000_0080`.
     fn enter_exception(&mut self, code: ExceptionCode, pc: u32, in_delay_slot: bool) {
+        self.cursor = Cursor::default();
         let code_bits = (code as u32) & 0x1F;
         self.exception_counts[code_bits as usize] =
             self.exception_counts[code_bits as usize].saturating_add(1);

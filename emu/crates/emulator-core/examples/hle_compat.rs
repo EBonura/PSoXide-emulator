@@ -589,7 +589,7 @@ fn run_frames(
         // Run to the next VBlank (or the step cap) in one call; the checks
         // below only act on a VBlank, and the SPU catch-up they did after
         // every instruction the next instruction does first anyway.
-        let (ran, result) = cpu.run(bus, cap.saturating_sub(steps).max(1), |bus| {
+        let (ran, result) = cpu.run(bus, cap.saturating_sub(steps).max(1), u64::MAX, |bus| {
             bus.irq().raise_counts()[0].wrapping_sub(base_vblank) != last_vblank
         });
         steps += ran;

@@ -27,7 +27,11 @@ use crate::spu::Spu;
 use crate::telemetry::GuestTelemetry;
 use crate::timers::Timers;
 
+mod block_support;
 mod idle;
+
+use block_support::RamPages;
+pub(crate) use block_support::RamStamp;
 mod memory_timing;
 mod timing;
 
@@ -243,6 +247,12 @@ pub struct Bus {
     /// for `settle_lazy_timers`; excluded from save states.
     #[serde(skip)]
     last_post_op_cycle: u64,
+    /// Per 4 KiB page of main RAM, a count of writes (CPU stores, DMA,
+    /// host loads), and an id for this RAM's lifetime. A decoded block
+    /// (`cpu/block.rs`) that checked RAM against its words keeps that
+    /// result while its pages' counts are unchanged. Host-side.
+    #[serde(skip, default = "RamPages::new")]
+    ram_pages: RamPages,
     /// Physical address of the next word the stream will deliver, and one
     /// past the last.
     #[serde(default)]
@@ -461,6 +471,7 @@ impl Bus {
             code_fill_busy_until: 0,
             code_stream_active: false,
             last_post_op_cycle: 0,
+            ram_pages: RamPages::new(),
             code_stream_next: 0,
             code_stream_end: 0,
             code_stream_next_ready: 0,
@@ -527,6 +538,7 @@ impl Bus {
             s => u8::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or(0xAA),
         };
         self.ram.fill(byte);
+        self.ram_pages.touch_all();
         self.scratchpad.fill(byte);
         let halfword = (u16::from(byte) << 8) | u16::from(byte);
         self.gpu.vram.words_mut().fill(halfword);
@@ -1548,60 +1560,62 @@ impl Bus {
     #[inline]
     pub(crate) fn cpu_read_stalls(&mut self, virt: u32, width: AccessWidth) -> u32 {
         self.thaw_limits_for_io(virt);
+        let phys = to_physical(virt);
+        // Main RAM first: most loads, and none of the external-bus cases
+        // below apply to it.
+        if phys < memory::ram::MIRROR_END {
+            return self.ram_read_stalls(virt);
+        }
         // Root-counter reads use the same three-cycle total (one issue + two
         // wait) measured for the other internal MMIO registers by the public
         // access-time suite. Counter phase differences in compound loops must
         // be modeled at their real CPU/bus dependency, not hidden in this
         // independently observable access cost.
-        let phys = to_physical(virt);
-        // Main RAM first: most loads, and none of the external-bus cases
-        // below apply to it. `read_stalls` answers six for every RAM width.
-        let stalls = if phys < memory::ram::MIRROR_END {
-            6
-        } else {
-            self.memory_control.read_stalls(virt, width)
-        };
-        let external_counter_overlap = phys >= memory::ram::MIRROR_END
-            && ((memory::expansion1::BASE
-                ..memory::expansion1::BASE + memory::expansion1::SIZE as u32)
+        let stalls = self.memory_control.read_stalls(virt, width);
+        let external_counter_overlap = (memory::expansion1::BASE
+            ..memory::expansion1::BASE + memory::expansion1::SIZE as u32)
+            .contains(&phys)
+            || (memory::expansion2::BASE
+                ..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
                 .contains(&phys)
-                || (memory::expansion2::BASE
-                    ..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
-                    .contains(&phys)
-                || (memory::expansion3::BASE
-                    ..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
-                    .contains(&phys)
-                || (0x1F80_1800..0x1F80_1804).contains(&phys)
-                || (0x1F80_1C00..0x1F80_2000).contains(&phys));
+            || (memory::expansion3::BASE
+                ..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
+                .contains(&phys)
+            || (0x1F80_1800..0x1F80_1804).contains(&phys)
+            || (0x1F80_1C00..0x1F80_2000).contains(&phys);
         if external_counter_overlap {
             self.timers
                 .overlap_counter_write_with_external_read(self.cycles, stalls);
         }
-        if phys < memory::ram::MIRROR_END {
-            self.ram_load_from_cached_code =
-                !self.code_fetch_on_ram_bus && self.cycles >= self.code_fill_busy_until;
-            let stalls = self.ram_load_stalls_with_code_contention(stalls);
-            let access_gap = self.cycles.saturating_sub(self.last_cpu_ram_access_cycle);
-            self.last_cpu_ram_access_cycle = self.cycles;
-            let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
-                if access_gap <= 16 {
-                    6
-                } else {
-                    memory_timing::DRAM_REFRESH_UNCACHED_STALL_CYCLES
-                }
-            } else if access_gap == 8 {
-                2
+        stalls
+    }
+
+    /// [`Bus::cpu_read_stalls`] for a main-RAM address: the six-cycle
+    /// access (`MemoryControl::read_stalls` answers six for every RAM
+    /// width), code-fetch contention and the DRAM refresh wait.
+    #[inline(always)]
+    pub(crate) fn ram_read_stalls(&mut self, virt: u32) -> u32 {
+        self.ram_load_from_cached_code =
+            !self.code_fetch_on_ram_bus && self.cycles >= self.code_fill_busy_until;
+        let stalls = self.ram_load_stalls_with_code_contention(6);
+        let access_gap = self.cycles.saturating_sub(self.last_cpu_ram_access_cycle);
+        self.last_cpu_ram_access_cycle = self.cycles;
+        let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
+            if access_gap <= 16 {
+                6
             } else {
-                memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES
-            };
-            stalls.saturating_add(memory_timing::dram_refresh_wait(
-                self.cycles,
-                &mut self.dram_refresh_deadline,
-                refresh_stall,
-            ))
+                memory_timing::DRAM_REFRESH_UNCACHED_STALL_CYCLES
+            }
+        } else if access_gap == 8 {
+            2
         } else {
-            stalls
-        }
+            memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES
+        };
+        stalls.saturating_add(memory_timing::dram_refresh_wait(
+            self.cycles,
+            &mut self.dram_refresh_deadline,
+            refresh_stall,
+        ))
     }
 
     /// CPU store stalls beyond the instruction's one-cycle issue cost.
@@ -1616,23 +1630,30 @@ impl Bus {
             return 0;
         }
         if to_physical(virt) < memory::ram::MIRROR_END {
-            self.last_cpu_ram_access_cycle = self.cycles;
-            let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
-                memory_timing::DRAM_REFRESH_UNCACHED_STALL_CYCLES
-            } else {
-                memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES
-            };
-            self.queue_store()
-                .saturating_add(memory_timing::dram_refresh_wait(
-                    self.cycles,
-                    &mut self.dram_refresh_deadline,
-                    refresh_stall,
-                ))
+            self.ram_write_stalls(virt)
         } else if to_physical(virt) == crate::gpu::GP0_ADDR {
             self.queue_store()
         } else {
             self.memory_control.write_stalls(virt, width)
         }
+    }
+
+    /// [`Bus::cpu_write_stalls`] for a main-RAM address with the RAM limit
+    /// oracle off: a write-buffer slot and the DRAM refresh wait.
+    #[inline(always)]
+    pub(crate) fn ram_write_stalls(&mut self, virt: u32) -> u32 {
+        self.last_cpu_ram_access_cycle = self.cycles;
+        let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
+            memory_timing::DRAM_REFRESH_UNCACHED_STALL_CYCLES
+        } else {
+            memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES
+        };
+        self.queue_store()
+            .saturating_add(memory_timing::dram_refresh_wait(
+                self.cycles,
+                &mut self.dram_refresh_deadline,
+                refresh_stall,
+            ))
     }
 
     /// A RAM load that has to share the bus with a code fetch.
@@ -1656,6 +1677,25 @@ impl Bus {
 
     /// Clocks to restart the pipeline after jumping out of a streamed line.
     const STREAM_RESTART_CYCLES: u32 = 2;
+
+    /// What [`Bus::streaming_fill_wait`] would return for `phys` now,
+    /// without changing anything.
+    pub(crate) fn streaming_fill_wait_peek(&self, phys: u32) -> u32 {
+        if !self.code_stream_active {
+            return 0;
+        }
+        let settled = self.code_fill_busy_until + u64::from(Self::STREAM_RESTART_CYCLES);
+        if self.cycles >= settled {
+            return 0;
+        }
+        if phys == self.code_stream_next {
+            if phys == self.code_stream_end {
+                return 0;
+            }
+            return self.code_stream_next_ready.saturating_sub(self.cycles) as u32;
+        }
+        (settled - self.cycles) as u32
+    }
 
     /// Called with every fetch address before the fetch is costed; returns
     /// the clocks the core waits on a streaming line fill.
@@ -2240,6 +2280,7 @@ impl Bus {
         while !rest.is_empty() {
             let n = rest.len().min(ram_len - at);
             self.ram[at..at + n].copy_from_slice(&rest[..n]);
+            self.ram_pages.touch_range(at, n);
             rest = &rest[n..];
             at = 0;
         }
@@ -2425,6 +2466,7 @@ impl Bus {
             }
             6 => {
                 let otc_words = if self.dma.is_channel_enabled(6) {
+                    self.ram_pages.touch_all();
                     self.dma.run_otc(&mut self.ram[..])
                 } else {
                     0
@@ -2594,6 +2636,7 @@ impl Bus {
             let offset = (addr & 0x001F_FFFF) as usize;
             if offset + 4 <= self.ram.len() {
                 self.ram[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+                self.ram_pages.touch(offset);
             }
             addr = addr.wrapping_add(step);
         }
@@ -2683,6 +2726,7 @@ impl Bus {
             );
             for word in words {
                 write_ram_u16(&mut self.ram[..], addr, word);
+                self.ram_pages.touch((addr & 0x001F_FFFF) as usize);
                 addr = addr.wrapping_add(step);
             }
         }
@@ -2773,6 +2817,7 @@ impl Bus {
             let offset = (addr & 0x001F_FFFF) as usize;
             if offset + 4 <= self.ram.len() {
                 self.ram[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+                self.ram_pages.touch(offset);
             }
             addr = addr.wrapping_add(step);
         }
@@ -2900,6 +2945,7 @@ impl Bus {
                     .read32_at(crate::gpu::GP0_ADDR, self.cycles)
                     .unwrap_or(0);
                 write_ram_u32(&mut self.ram[..], addr, word);
+                self.ram_pages.touch((addr & 0x001F_FFFF) as usize);
                 addr = addr.wrapping_add(step);
             }
         }
@@ -2944,6 +2990,7 @@ impl Bus {
                     .read32_at(crate::gpu::GP0_ADDR, self.cycles)
                     .unwrap_or(0);
                 write_ram_u32(&mut self.ram[..], addr, word);
+                self.ram_pages.touch((addr & 0x001F_FFFF) as usize);
                 addr = addr.wrapping_add(step);
             }
         }
@@ -3129,6 +3176,7 @@ impl Bus {
         let phys = to_physical(virt);
         if phys < memory::ram::MIRROR_END {
             self.ram[(phys as usize) % memory::ram::SIZE] = value;
+            self.ram_pages.touch((phys as usize) % memory::ram::SIZE);
             true
         } else if (memory::scratchpad::BASE
             ..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
@@ -3571,6 +3619,7 @@ impl Bus {
         if phys < memory::ram::MIRROR_END {
             let offset = (phys as usize) % memory::ram::SIZE;
             self.ram[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            self.ram_pages.touch(offset);
             return;
         }
         self.trace_mmio(MmioKind::W32, phys, value);
@@ -3721,6 +3770,7 @@ impl Bus {
         if phys < memory::ram::MIRROR_END {
             let offset = (phys as usize) % memory::ram::SIZE;
             self.ram[offset..offset + 4].copy_from_slice(&bytes);
+            self.ram_pages.touch(offset);
             return;
         }
 
@@ -3924,6 +3974,7 @@ impl Bus {
         }
         if phys < memory::ram::MIRROR_END {
             self.ram[(phys as usize) % memory::ram::SIZE] = value;
+            self.ram_pages.touch((phys as usize) % memory::ram::SIZE);
             return;
         }
         if phys >= IO_SPACE_START {
@@ -4019,6 +4070,7 @@ impl Bus {
         if phys < memory::ram::MIRROR_END {
             let off = (phys as usize) % memory::ram::SIZE;
             self.ram[off..off + 2].copy_from_slice(&bytes);
+            self.ram_pages.touch(off);
             return;
         }
         if phys >= IO_SPACE_START {
