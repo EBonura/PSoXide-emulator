@@ -1124,12 +1124,17 @@ impl Cpu {
             super::jit_abi::NATIVE_NEXT_BLOCK => return Some(NativeExit::Resume),
             _ => {}
         }
+        if run.status == super::jit_abi::NATIVE_EXCEPTION {
+            // The helper left the PC at the vector (and the cursor cleared).
+            self.native_retired(&run, st);
+            self.branch_delay_next = false;
+            self.executing_in_branch_delay = false;
+            return Some(NativeExit::Break);
+        }
         // Stopped in the block it was running.
         let index = (self.cursor.block - 1) as usize;
         let ran = run.ran;
-        if run.status == super::jit_abi::NATIVE_IN_BLOCK
-            && ran as usize == self.blocks.blocks[index].ops.len()
-        {
+        if ran as usize == self.blocks.blocks[index].ops.len() {
             // It ran the whole block (stopping after its last op): finish it
             // as the batch loop would.
             return Some(match self.native_block_done(bus, &run, st) {
@@ -1140,10 +1145,6 @@ impl Cpu {
         self.native_retired(&run, st);
         self.branch_delay_next = false;
         self.executing_in_branch_delay = false;
-        if run.status == super::jit_abi::NATIVE_EXCEPTION {
-            // The helper left the PC at the vector.
-            return Some(NativeExit::Break);
-        }
         let block = &self.blocks.blocks[index];
         debug_assert!((ran as usize) < block.ops.len(), "a finished block chains");
         self.pc = run.vaddr.wrapping_add(4 * ran as u32);
