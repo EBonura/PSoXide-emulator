@@ -3093,9 +3093,9 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     if !trace && !check_breakpoints {
         // Nothing to look at between instructions: run the frame in one call.
         if bus.cycles() < target_cycles {
-            let (ran, result) = state.cpu.run(bus, u64::from(max_steps), |bus| {
-                bus.cycles() >= target_cycles
-            });
+            let (ran, result) = state
+                .cpu
+                .run(bus, u64::from(max_steps), target_cycles, |_| false);
             steps_run = ran as u32;
             if result.is_err() {
                 steps_run += 1;
