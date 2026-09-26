@@ -63,6 +63,13 @@ pub(super) fn for_each_tri_pixel(
         return;
     };
     let [pr, pg, pb, pu, pv] = setup.planes;
+    // `tri_plane_eval` is linear in x in wrapping u32 arithmetic, so along a
+    // span each channel's accumulator steps by its x gradient: the same
+    // values without a multiply per channel per pixel.
+    let at = |p: (u32, u32, u32), x: i32, y: i32| {
+        p.2.wrapping_add((x as u32).wrapping_mul(p.0))
+            .wrapping_add((y as u32).wrapping_mul(p.1))
+    };
     for (y0, y1, mut lx, ls, mut rx, rs) in setup.parts {
         let mut y = y0;
         while y < y1 {
@@ -70,16 +77,23 @@ pub(super) fn for_each_tri_pixel(
                 let xs = tri_span_x(lx).max(draw_left);
                 let xe = tri_span_x(rx).min(draw_right + 1); // right-exclusive
                 let mut x = xs;
+                let (mut r, mut g, mut b) = (at(pr, x, y), at(pg, x, y), at(pb, x, y));
+                let (mut u, mut v) = (at(pu, x, y), at(pv, x, y));
                 while x < xe {
                     plot(
                         x,
                         y,
-                        tri_plane_eval(pr, x, y),
-                        tri_plane_eval(pg, x, y),
-                        tri_plane_eval(pb, x, y),
-                        tri_plane_eval(pu, x, y),
-                        tri_plane_eval(pv, x, y),
+                        (r >> 24) as u8,
+                        (g >> 24) as u8,
+                        (b >> 24) as u8,
+                        (u >> 24) as u8,
+                        (v >> 24) as u8,
                     );
+                    r = r.wrapping_add(pr.0);
+                    g = g.wrapping_add(pg.0);
+                    b = b.wrapping_add(pb.0);
+                    u = u.wrapping_add(pu.0);
+                    v = v.wrapping_add(pv.0);
                     x += 1;
                 }
             }
