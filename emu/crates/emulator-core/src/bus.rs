@@ -2578,6 +2578,23 @@ impl Bus {
         }
     }
 
+    /// Cycles DMA1 takes per decoded word. 8 is Redux's model and the
+    /// default. `PSOXIDE_MDEC_OUT_CYCLES_PER_WORD` overrides it for player
+    /// experiments: silicon's MDEC throughput is not measured yet, and the
+    /// v1.26 FMV profile puts a whole frame's decode-plus-upload near 952k
+    /// cycles, several times what 8 gives. Diagnostic only, like
+    /// `PSOXIDE_WEDGE_DMA`.
+    fn mdec_out_cycles_per_word() -> u64 {
+        static CYCLES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *CYCLES.get_or_init(|| {
+            std::env::var("PSOXIDE_MDEC_OUT_CYCLES_PER_WORD")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(8)
+        })
+    }
+
     fn try_schedule_ready_mdec_out(&mut self) {
         use crate::scheduler::EventSlot;
 
@@ -2595,7 +2612,7 @@ impl Bus {
         if let Some(mdec_words) = self.run_dma_mdec_out() {
             // Redux's MDEC model schedules output DMA by byte count
             // multiplied by MDEC_BIAS=2.0, i.e. 8 cycles per 32-bit word.
-            let delay = mdec_words as u64 * 8;
+            let delay = mdec_words as u64 * Self::mdec_out_cycles_per_word();
             let target = self.cycles + delay;
             self.log_dma_schedule("MdecOut", delay, target);
             self.scheduler
