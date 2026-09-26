@@ -600,8 +600,8 @@ pub unsafe extern "C" fn jit_batch_memory(run: *mut NativeRun, index: u32) -> u3
 }
 
 /// Run op `index` of the block, an [`OpClass::Other`](crate::cpu::block::OpClass)
-/// op outside a delay slot (a trapping add, multiply/divide, HI/LO, MFC0 or
-/// a GTE register move), as the batch does: stop before it
+/// op or a GTE command (a trapping add, multiply/divide, HI/LO, MFC0 or a
+/// GTE register move; in a delay slot too), as the batch does: stop before it
 /// ([`NATIVE_STOP`], nothing changed) when the budget is spent or the clock
 /// would reach the limit; otherwise the interpreter's batched step. When
 /// the op trapped, sets the PC to the exception vector, `status` to
@@ -625,6 +625,10 @@ pub unsafe extern "C" fn jit_batch_other(run: *mut NativeRun, index: u32) -> u32
     cpu.tick = run.tick0 + run.ran;
     cpu.pc = pc;
     cpu.pending_load = (run.pend_reg != 0).then_some((run.pend_reg as u8, run.pend_val));
+    let delay = op.flags & crate::cpu::block::op_flags::DELAY_SLOT != 0;
+    if delay {
+        cpu.pending_pc = (run.taken != 0).then_some(run.target);
+    }
     if op.word >> 21 == 0x10 << 5 | 4 {
         // MTC0: SR (the interrupt enables) may change.
         run.slow_boundary = 1;
@@ -636,7 +640,7 @@ pub unsafe extern "C" fn jit_batch_other(run: *mut NativeRun, index: u32) -> u32
         bus,
         op,
         pc,
-        false,
+        delay,
         0,
         &mut run.issue,
         &mut refetch,

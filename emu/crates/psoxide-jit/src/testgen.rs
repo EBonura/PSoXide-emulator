@@ -338,6 +338,73 @@ pub fn state_bytes(cpu: &Cpu, bus: &Bus) -> Vec<u8> {
     postcard::to_allocvec(&EmulatorStateRef { cpu, bus }).expect("serialize state")
 }
 
+/// Where two machines' serialized states first differ: the CPU's or the
+/// bus's bytes, the offset, and the CPU's COP0 registers when those differ.
+fn state_diff(ca: &Cpu, ba: &Bus, cb: &Cpu, bb: &Bus) -> String {
+    let first = |x: &[u8], y: &[u8]| {
+        x.iter()
+            .zip(y)
+            .position(|(p, q)| p != q)
+            .unwrap_or(x.len().min(y.len()))
+    };
+    let (xa, xb) = (
+        postcard::to_allocvec(ca).unwrap(),
+        postcard::to_allocvec(cb).unwrap(),
+    );
+    if xa != xb {
+        return format!(
+            "cpu bytes differ at {} of {}; cop0 step={:08x?} run={:08x?}",
+            first(&xa, &xb),
+            xa.len(),
+            ca.cop0(),
+            cb.cop0()
+        );
+    }
+    let (ya, yb) = (
+        postcard::to_allocvec(ba).unwrap(),
+        postcard::to_allocvec(bb).unwrap(),
+    );
+    let part = |name: &str, x: Vec<u8>, y: Vec<u8>| (x != y).then(|| name.to_string());
+    let parts: Vec<String> = [
+        part(
+            "irq",
+            postcard::to_allocvec(ba.irq()).unwrap(),
+            postcard::to_allocvec(bb.irq()).unwrap(),
+        ),
+        part(
+            "timers",
+            postcard::to_allocvec(&ba.timers).unwrap(),
+            postcard::to_allocvec(&bb.timers).unwrap(),
+        ),
+        part(
+            "gpu",
+            postcard::to_allocvec(&ba.gpu).unwrap(),
+            postcard::to_allocvec(&bb.gpu).unwrap(),
+        ),
+        part(
+            "spu",
+            postcard::to_allocvec(&ba.spu).unwrap(),
+            postcard::to_allocvec(&bb.spu).unwrap(),
+        ),
+        part(
+            "scheduler",
+            postcard::to_allocvec(&ba.scheduler).unwrap(),
+            postcard::to_allocvec(&bb.scheduler).unwrap(),
+        ),
+        part("ram", ba.ram().to_vec(), bb.ram().to_vec()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    format!(
+        "bus bytes differ at {} of {} (parts: {parts:?}; irq raises step={:?} run={:?})",
+        first(&ya, &yb),
+        ya.len(),
+        ba.irq().raise_counts(),
+        bb.irq().raise_counts()
+    )
+}
+
 /// Run `instructions` instructions of the program two ways and compare:
 /// one machine runs `Cpu::run` (the batched path, with the native tier when
 /// `tier` is set) in chunks of random length drawn from `seed`
@@ -419,8 +486,9 @@ pub fn lockstep(
             && state_bytes(&ci, &bi) != state_bytes(&cr, &br)
         {
             return Err(format!(
-                "full state differs at tick {} (CPU state equal)",
-                cr.tick()
+                "full state differs at tick {} (CPU state equal): {}",
+                cr.tick(),
+                state_diff(&ci, &bi, &cr, &br)
             ));
         }
     }
