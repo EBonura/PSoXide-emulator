@@ -226,9 +226,26 @@ pub(super) struct Cursor {
     pub cache_control: u32,
 }
 
+/// A second tier that turns hot blocks into native code (the recompiler,
+/// `psoxide-jit`). Installed with [`Cpu::set_block_compiler`].
+pub trait BlockCompiler: Send {
+    /// Compile the run of ops of `block` the native tier handles, from its
+    /// first op. Returns the entry address of a
+    /// [`jit_abi::NativeFn`](super::jit_abi::NativeFn), or 0 when nothing
+    /// is worth compiling (the block then stays interpreted).
+    fn compile(&mut self, block: &Block) -> usize;
+}
+
+/// Entries after which a block is handed to the native tier.
+const NATIVE_THRESHOLD: u32 = 16;
+/// [`Block::native`] for a block the native tier declined.
+pub const NATIVE_DECLINED: usize = 1;
+
 /// Decoded blocks, indexed by the physical word they start at.
 #[derive(Default)]
 pub struct BlockCache {
+    /// The native tier, if one is installed.
+    compiler: Option<Box<dyn BlockCompiler>>,
     /// Per RAM word: block index plus one, zero for none. Allocated on
     /// first use (zeroed pages cost nothing until touched).
     slots: Vec<u32>,
@@ -244,7 +261,7 @@ impl BlockCache {
         &self.blocks[index as usize]
     }
 
-    /// Drop every block.
+    /// Drop every block (and with them every native handle).
     pub fn clear(&mut self) {
         self.slots = Vec::new();
         self.blocks.clear();
@@ -292,6 +309,23 @@ impl Cpu {
     #[doc(hidden)]
     pub fn block_ram_check(&mut self, bus: &Bus, index: u32) -> bool {
         self.block_ram_matches(bus, index as usize)
+    }
+
+    /// Install (or remove) the native tier. Blocks already decoded lose
+    /// their native code, so compiled code from an earlier compiler is
+    /// never entered again.
+    #[doc(hidden)]
+    pub fn set_block_compiler(&mut self, compiler: Option<Box<dyn BlockCompiler>>) {
+        self.blocks.compiler = compiler;
+        for block in &mut self.blocks.blocks {
+            block.native = 0;
+        }
+    }
+
+    /// Whether a native tier is installed.
+    #[doc(hidden)]
+    pub fn has_block_compiler(&self) -> bool {
+        self.blocks.compiler.is_some()
     }
 }
 
@@ -631,6 +665,20 @@ impl Cpu {
             // matches it; a store in the batch ends that for this block.
             let mut ram_ok = irq_enabled && self.block_ram_matches(bus, index);
             let after_is_gte = self.blocks.blocks[index].after_is_gte;
+            if self.cursor.op == 0 && self.blocks.compiler.is_some() {
+                self.run_native(
+                    bus,
+                    index,
+                    irq_enabled,
+                    &mut ram_ok,
+                    &mut issue,
+                    &mut refetch,
+                    limit,
+                    budget,
+                    &mut done,
+                    &mut uncounted,
+                );
+            }
             let ops = self.blocks.blocks[index].ops.as_ptr();
             loop {
                 let pc = self.pc;
@@ -675,60 +723,19 @@ impl Cpu {
                     }
                 }
                 // -- the step, as `execute_one_inner` + `execute_fetched` --
-                if !bus.code_stream_idle() {
-                    if !Self::batch_fetch_streaming(bus, pc, &mut issue, limit) {
-                        break 'blocks;
-                    }
-                    refetch = true;
-                } else if refetch {
-                    bus.note_cached_fetch(true);
-                    refetch = false;
-                }
-                issue += if self.load_shadow.is_some() && self.hides_in_load_shadow(op.word, bus) {
-                    0
-                } else {
-                    u64::from(cycle_cost(op.word))
+                let Some(branch_after_this) = self.batch_step(
+                    bus,
+                    op,
+                    pc,
+                    delay,
+                    addr,
+                    &mut issue,
+                    &mut refetch,
+                    limit,
+                    &mut ram_ok,
+                ) else {
+                    break 'blocks;
                 };
-                let branch_after_this = if delay { self.pending_pc.take() } else { None };
-                self.branch_delay_next = false;
-                self.executing_in_branch_delay = delay;
-                let loading = self.pending_load.is_some();
-                if loading {
-                    self.committing_load = self.pending_load.take();
-                }
-                match op.class {
-                    OpClass::Alu | OpClass::Branch => self.execute_register_op(op, pc),
-                    OpClass::Load | OpClass::Store => {
-                        bus.advance_quiet(issue);
-                        issue = 0;
-                        self.execute_memory_op(op, addr, bus);
-                        if op.class == OpClass::Store {
-                            ram_ok = false;
-                        }
-                    }
-                    _ => {
-                        // Multiply/divide, HI/LO and GTE moves read the clock.
-                        bus.advance_quiet(issue);
-                        issue = 0;
-                        self.pc = pc;
-                        let _ = self.execute(op.word, pc, false, bus);
-                    }
-                }
-                self.executing_in_branch_delay = false;
-                if memory && bus.take_ram_load_from_cached_code() {
-                    self.load_shadow = Some(LoadShadow {
-                        position: 0,
-                        register: op.rt,
-                    });
-                }
-                if loading {
-                    if let Some((reg, value)) = self.committing_load.take() {
-                        let i = (reg & 31) as usize;
-                        if i != 0 {
-                            self.gprs[i] = value;
-                        }
-                    }
-                }
                 self.tick += 1;
                 done += 1;
                 uncounted += 1;
@@ -798,6 +805,181 @@ impl Cpu {
             self.irq_line_high_steps = self.irq_line_high_steps.saturating_add(uncounted);
         }
         done
+    }
+
+    /// The native tier's part of a block entered at its first op: compile it
+    /// once it is hot, then run the compiled prefix (see
+    /// [`jit_abi::NativeRun`](super::jit_abi::NativeRun)). Leaves the
+    /// cursor, the PC and the batch state where the interpreted loop picks
+    /// up, as if it had run the same ops itself.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn run_native(
+        &mut self,
+        bus: &mut Bus,
+        index: usize,
+        irq_enabled: bool,
+        ram_ok: &mut bool,
+        issue: &mut u64,
+        refetch: &mut bool,
+        limit: u64,
+        budget: u64,
+        done: &mut u64,
+        uncounted: &mut u64,
+    ) {
+        let mut native = self.blocks.blocks[index].native;
+        if native == 0 {
+            if self.blocks.blocks[index].hits < NATIVE_THRESHOLD {
+                return;
+            }
+            let compiler = self
+                .blocks
+                .compiler
+                .as_mut()
+                .expect("checked by the caller");
+            native = match compiler.compile(&self.blocks.blocks[index]) {
+                0 => NATIVE_DECLINED,
+                entry => entry,
+            };
+            self.blocks.blocks[index].native = native;
+        }
+        // Compiled code starts with a plain cache-hit fetch and checks the
+        // GTE hazard only through the decoded words.
+        if native == NATIVE_DECLINED
+            || !bus.code_stream_idle()
+            || (irq_enabled && !*ram_ok)
+            || self.pending_pc.is_some()
+            || *done >= budget
+        {
+            return;
+        }
+        if *refetch {
+            bus.note_cached_fetch(true);
+            *refetch = false;
+        }
+        let ops = self.blocks.blocks[index].ops.as_ptr();
+        let vaddr = self.blocks.blocks[index].vaddr;
+        let cycles = bus.jit_cycles_ptr();
+        let mut run = super::jit_abi::NativeRun {
+            cpu: self as *mut Cpu,
+            bus: bus as *mut Bus,
+            gprs: self.gprs.as_mut_ptr(),
+            cycles,
+            ops,
+            vaddr,
+            tick0: self.tick,
+            issue: *issue,
+            limit,
+            budget_left: budget - *done,
+            ran: 0,
+            pend_reg: 0,
+            pend_val: 0,
+            ram_ok: u32::from(*ram_ok),
+            irq_enabled: u32::from(irq_enabled),
+            shadow: u32::from(self.load_shadow.is_some()),
+        };
+        if let Some((reg, value)) = self.pending_load.take() {
+            run.pend_reg = u32::from(reg);
+            run.pend_val = value;
+        }
+        // SAFETY: `native` came from the installed compiler for this block's
+        // current ops, and the code only touches the state `run` points at.
+        unsafe {
+            let entry: super::jit_abi::NativeFn = std::mem::transmute(native);
+            entry(&mut run);
+        }
+        let ran = run.ran;
+        self.pending_load = (run.pend_reg != 0).then_some((run.pend_reg as u8, run.pend_val));
+        *issue = run.issue;
+        *ram_ok = run.ram_ok != 0;
+        if ran != 0 {
+            self.tick = run.tick0 + ran;
+            *done += ran;
+            *uncounted += ran;
+            self.branch_delay_next = false;
+            self.pc = vaddr.wrapping_add(4 * ran as u32);
+            self.cursor.op = ran as u32;
+            self.cursor.pc = self.pc;
+        }
+    }
+
+    /// One batched step of `op` at `pc` after its checks (budget, clock
+    /// limit, GTE hazard, access kind): the fetch, the issue cycle, the
+    /// delay-slot and load-delay bookkeeping, the operation and the load
+    /// shadow. Returns the taken branch's target when `op` is a delay slot,
+    /// and `None` (having changed nothing but the clock) when a streaming
+    /// fetch would leave the quiet span. The caller counts the step.
+    /// Shared by [`Cpu::run_fast`] and the recompiler's memory helper.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn batch_step(
+        &mut self,
+        bus: &mut Bus,
+        op: DecodedOp,
+        pc: u32,
+        delay: bool,
+        addr: u32,
+        issue: &mut u64,
+        refetch: &mut bool,
+        limit: u64,
+        ram_ok: &mut bool,
+    ) -> Option<Option<u32>> {
+        if !bus.code_stream_idle() {
+            if !Self::batch_fetch_streaming(bus, pc, issue, limit) {
+                return None;
+            }
+            *refetch = true;
+        } else if *refetch {
+            bus.note_cached_fetch(true);
+            *refetch = false;
+        }
+        *issue += if self.load_shadow.is_some() && self.hides_in_load_shadow(op.word, bus) {
+            0
+        } else {
+            u64::from(cycle_cost(op.word))
+        };
+        let branch_after_this = if delay { self.pending_pc.take() } else { None };
+        self.branch_delay_next = false;
+        self.executing_in_branch_delay = delay;
+        let loading = self.pending_load.is_some();
+        if loading {
+            self.committing_load = self.pending_load.take();
+        }
+        let memory = matches!(op.class, OpClass::Load | OpClass::Store);
+        match op.class {
+            OpClass::Alu | OpClass::Branch => self.execute_register_op(op, pc),
+            OpClass::Load | OpClass::Store => {
+                bus.advance_quiet(*issue);
+                *issue = 0;
+                self.execute_memory_op(op, addr, bus);
+                if op.class == OpClass::Store {
+                    *ram_ok = false;
+                }
+            }
+            _ => {
+                // Multiply/divide, HI/LO and GTE moves read the clock.
+                bus.advance_quiet(*issue);
+                *issue = 0;
+                self.pc = pc;
+                let _ = self.execute(op.word, pc, false, bus);
+            }
+        }
+        self.executing_in_branch_delay = false;
+        if memory && bus.take_ram_load_from_cached_code() {
+            self.load_shadow = Some(LoadShadow {
+                position: 0,
+                register: op.rt,
+            });
+        }
+        if loading {
+            if let Some((reg, value)) = self.committing_load.take() {
+                let i = (reg & 31) as usize;
+                if i != 0 {
+                    self.gprs[i] = value;
+                }
+            }
+        }
+        Some(branch_after_this)
     }
 
     /// Execute a CPU load or store (primary opcodes `0x20..=0x2E`) to `addr`
@@ -897,6 +1079,12 @@ enum Access {
     /// Misaligned (an address error) or KSEG2 (cache control): left to the
     /// interpreter.
     Unsafe,
+}
+
+/// Whether a batched load or store of `word` to `addr` is [`Access::Quiet`].
+#[inline(always)]
+pub(super) fn quiet_access(word: u32, addr: u32) -> bool {
+    matches!(access_kind(word, addr), Access::Quiet)
 }
 
 #[inline(always)]

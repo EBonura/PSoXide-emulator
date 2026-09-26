@@ -29,6 +29,7 @@ use crate::timers::Timers;
 
 mod block_support;
 mod idle;
+mod jit_support;
 
 use block_support::RamPages;
 pub(crate) use block_support::RamStamp;
