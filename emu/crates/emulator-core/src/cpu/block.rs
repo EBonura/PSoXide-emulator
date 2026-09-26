@@ -956,12 +956,12 @@ impl Cpu {
                 }
                 let memory = op.flags & op_flags::TOUCHES_BUS != 0;
                 let mut addr = 0;
-                let mut access = Access::Ram;
+                let mut access = BatchAccess::Ram;
                 if memory {
                     addr = self.gprs[(op.rs & 0x1F) as usize]
                         .wrapping_add((op.word as i16) as i32 as u32);
-                    access = access_kind(op.word, addr);
-                    if access == Access::Unsafe {
+                    access = batch_access_kind(op.word, addr);
+                    if access == BatchAccess::Unsafe {
                         break 'blocks;
                     }
                 }
@@ -988,7 +988,7 @@ impl Cpu {
                         break 'blocks;
                     }
                 }
-                let device = access == Access::Device;
+                let device = access == BatchAccess::Device;
                 if let Some(target) = branch_after_this {
                     // Taken branch: the branch-boundary work. After no device
                     // access, with the clock still in the quiet span (so the
@@ -1088,11 +1088,11 @@ impl Cpu {
                 break;
             }
             let mut addr = 0;
-            let mut access = Access::Ram;
+            let mut access = BatchAccess::Ram;
             if op.flags & op_flags::TOUCHES_BUS != 0 {
                 addr = self.gprs[(op.rs & 0x1F) as usize]
                     .wrapping_add((op.word as i16) as i32 as u32);
-                access = access_kind(op.word, addr);
+                access = batch_access_kind(op.word, addr);
             }
             if !Self::batch_simple(op, access) {
                 break;
@@ -1120,11 +1120,11 @@ impl Cpu {
     /// `access`): register arithmetic, branches, and plain loads and stores
     /// to main RAM.
     #[inline(always)]
-    fn batch_simple(op: DecodedOp, access: Access) -> bool {
+    fn batch_simple(op: DecodedOp, access: BatchAccess) -> bool {
         match op.class {
             OpClass::Alu | OpClass::Branch => true,
             OpClass::Load | OpClass::Store => {
-                access == Access::Ram
+                access == BatchAccess::Ram
                     && matches!(op.handler, 0x20 | 0x21 | 0x23 | 0x24 | 0x25 | 0x28 | 0x29 | 0x2B)
             }
             _ => false,
@@ -1363,8 +1363,46 @@ struct Batch {
 
 
 /// How a CPU load or store to `addr` fits in a batch.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum Access {
+    /// Main RAM (any segment) or the scratchpad (cached segments): touches
+    /// no device, interrupt or event.
+    Quiet,
+    /// Any other address below KSEG2: a device, the BIOS or an expansion
+    /// region. Runs through the full bus path; the batch ends after it.
+    Device,
+    /// Misaligned (an address error) or KSEG2 (cache control): left to the
+    /// interpreter.
+    Unsafe,
+}
+
+#[allow(dead_code)] // the native tier's batch loop
+#[inline(always)]
+fn access_kind(word: u32, addr: u32) -> Access {
+    let aligned = match word >> 26 {
+        0x23 | 0x2B => addr & 3 == 0,
+        0x21 | 0x25 | 0x29 => addr & 1 == 0,
+        _ => true,
+    };
+    if !aligned || addr >= 0xC000_0000 {
+        return Access::Unsafe;
+    }
+    let phys = memory::to_physical(addr);
+    if phys < memory::ram::MIRROR_END
+        || (addr < 0xA000_0000
+            && (memory::scratchpad::BASE
+                ..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
+                .contains(&phys))
+    {
+        Access::Quiet
+    } else {
+        Access::Device
+    }
+}
+
+/// How a CPU load or store to `addr` fits in [`Cpu::run_fast`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BatchAccess {
     /// Main RAM (any segment): touches no device, interrupt or event.
     Ram,
     /// The scratchpad (cached segments): the same, through the `op_*`
@@ -1379,25 +1417,25 @@ enum Access {
 }
 
 #[inline(always)]
-fn access_kind(word: u32, addr: u32) -> Access {
+fn batch_access_kind(word: u32, addr: u32) -> BatchAccess {
     let aligned = match word >> 26 {
         0x23 | 0x2B | 0x32 | 0x3A => addr & 3 == 0,
         0x21 | 0x25 | 0x29 => addr & 1 == 0,
         _ => true,
     };
     if !aligned || addr >= 0xC000_0000 {
-        return Access::Unsafe;
+        return BatchAccess::Unsafe;
     }
     let phys = memory::to_physical(addr);
     if phys < memory::ram::MIRROR_END {
-        Access::Ram
+        BatchAccess::Ram
     } else if addr < 0xA000_0000
         && (memory::scratchpad::BASE..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
             .contains(&phys)
     {
-        Access::Scratchpad
+        BatchAccess::Scratchpad
     } else {
-        Access::Device
+        BatchAccess::Device
     }
 }
 
