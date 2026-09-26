@@ -606,14 +606,6 @@ impl Cpu {
             }
         }
         const IRQ_ENABLED: u32 = 0x401;
-        let mut done = 0u64;
-        // Steps since the interrupt line was last counted.
-        let mut uncounted = 0u64;
-        // Issue cycles not yet applied to the bus clock.
-        let mut issue = 0u64;
-        // The fetch flags need setting for a plain cache hit.
-        let mut refetch = true;
-        let mut limit = bus.quiet_limit().min(until_cycle);
         // The GTE hazard's watch: only the hazard sample sets it, and the
         // batch stops before any step that would sample, so the first step
         // takes it and it stays clear. A watch on that first step with
@@ -624,30 +616,53 @@ impl Cpu {
             }
             self.gte_irq_watch = None;
         }
+        let mut limit = bus.quiet_limit().min(until_cycle);
+        // The step state lives in locals while the batch runs and goes back
+        // into `self` around anything that reads it there (the `op_*`
+        // fallbacks, the branch-boundary work) and at the end:
+        // * `now`: the clock. The bus clock was last advanced properly at
+        //   `synced`; RAM accesses in between only set it
+        //   ([`Bus::batch_settle`]).
+        // * `pend`: `pending_load` (register 0 for none); `commit` below is
+        //   `committing_load`.
+        // * `shadow`: `load_shadow` (position, register), `None` for none.
+        // * `taken`: `pending_pc`; `after_branch`: `branch_delay_next`.
+        let tick0 = self.tick;
+        let mut done = 0u64;
+        // Steps since the interrupt line was last counted.
+        let mut uncounted = 0u64;
+        let mut now = bus.cycles();
+        let mut synced = now;
+        let mut pc = self.pc;
+        let mut pend = self.pending_load.take().unwrap_or((0, 0));
+        let mut shadow = self.load_shadow.take().map(|s| (s.position, s.register));
+        let mut taken = self.pending_pc.take();
+        let mut after_branch = self.branch_delay_next;
+        // The fetch needs more than a plain hit: noting the hit once, or a
+        // streaming line fill (which only ends within a batch).
+        let mut slow_fetch = true;
+        let mut fetch_hit = true;
+        let mut block = self.cursor.block - 1;
+        let mut at = self.cursor.op as usize;
         'blocks: loop {
             let irq_enabled = self.cop0[12] & IRQ_ENABLED == IRQ_ENABLED;
-            let index = (self.cursor.block - 1) as usize;
             // The hazard reads the next word from the block while RAM
             // matches it; a store in the batch ends that for this block.
-            let mut ram_ok = irq_enabled && self.block_ram_matches(bus, index);
-            let after_is_gte = self.blocks.blocks[index].after_is_gte;
-            let ops = self.blocks.blocks[index].ops.as_ptr();
+            let mut ram_ok = irq_enabled && self.block_ram_matches(bus, block as usize);
+            let after_is_gte = self.blocks.blocks[block as usize].after_is_gte;
+            let ops = self.blocks.blocks[block as usize].ops.as_ptr();
             loop {
-                let pc = self.pc;
-                // SAFETY: the cursor indexes an op of this block (it stops at
-                // the op flagged LAST), and nothing below touches the block
-                // cache until the loop leaves this block.
-                let op = unsafe { *ops.add(self.cursor.op as usize) };
+                // SAFETY: `at` indexes an op of this block (it stops at the
+                // op flagged LAST), and nothing below touches the block cache
+                // until the loop leaves this block.
+                let op = unsafe { *ops.add(at) };
                 let delay = op.flags & op_flags::DELAY_SLOT != 0;
-                if op.flags & op_flags::BATCH == 0
-                    || done >= budget
-                    || bus.cycles() + issue + 1 >= limit
-                {
+                if op.flags & op_flags::BATCH == 0 || done >= budget || now + 1 >= limit {
                     break 'blocks;
                 }
                 if irq_enabled {
                     let next_gte = if delay {
-                        bus.peek_is_gte_command(self.pending_pc.unwrap_or(pc.wrapping_add(4)))
+                        bus.peek_is_gte_command(taken.unwrap_or(pc.wrapping_add(4)))
                     } else if ram_ok {
                         if op.flags & op_flags::LAST != 0 {
                             after_is_gte
@@ -661,91 +676,237 @@ impl Cpu {
                         break 'blocks;
                     }
                 }
-                let memory = matches!(op.class, OpClass::Load | OpClass::Store);
+                let memory = op.flags & op_flags::TOUCHES_BUS != 0;
                 let mut addr = 0;
-                // A device access (I/O, BIOS, expansion) may change anything
-                // a caller looks at: run it, then end the batch.
-                let mut device = false;
+                let mut access = Access::Ram;
                 if memory {
-                    addr = self.gpr(op.rs).wrapping_add((op.word as i16) as i32 as u32);
-                    match access_kind(op.word, addr) {
-                        Access::Quiet => {}
-                        Access::Device => device = true,
-                        Access::Unsafe => break 'blocks,
+                    addr = self.gprs[op.rs as usize].wrapping_add((op.word as i16) as i32 as u32);
+                    access = access_kind(op.word, addr);
+                    if access == Access::Unsafe {
+                        break 'blocks;
                     }
                 }
                 // -- the step, as `execute_one_inner` + `execute_fetched` --
-                if !bus.code_stream_idle() {
-                    if !Self::batch_fetch_streaming(bus, pc, &mut issue, limit) {
-                        break 'blocks;
+                if slow_fetch {
+                    if !bus.code_stream_idle() {
+                        bus.batch_settle(synced, now);
+                        let mut issue = 0;
+                        let fetched = Self::batch_fetch_streaming(bus, pc, &mut issue, limit);
+                        now = bus.cycles();
+                        synced = now;
+                        if !fetched {
+                            break 'blocks;
+                        }
+                    } else {
+                        bus.note_cached_fetch(true);
+                        slow_fetch = false;
                     }
-                    refetch = true;
-                } else if refetch {
-                    bus.note_cached_fetch(true);
-                    refetch = false;
+                    fetch_hit = bus.last_fetch_was_a_cache_hit();
                 }
-                issue += if self.load_shadow.is_some() && self.hides_in_load_shadow(op.word, bus) {
-                    0
-                } else {
-                    u64::from(cycle_cost(op.word))
-                };
-                let branch_after_this = if delay { self.pending_pc.take() } else { None };
-                self.branch_delay_next = false;
-                self.executing_in_branch_delay = delay;
-                let loading = self.pending_load.is_some();
-                if loading {
-                    self.committing_load = self.pending_load.take();
+                // `hides_in_load_shadow`, on the locals.
+                let mut hidden = false;
+                if let Some((position, register)) = shadow.as_mut() {
+                    *position += 1;
+                    let reads_loaded =
+                        *register != 0 && (op.rs == *register || op.rt == *register);
+                    if memory || reads_loaded || !fetch_hit || *position > 6 {
+                        shadow = None;
+                    } else {
+                        hidden = *position > 2;
+                    }
                 }
-                match op.class {
-                    OpClass::Alu | OpClass::Branch => self.execute_register_op(op, pc),
-                    OpClass::Load | OpClass::Store => {
-                        bus.advance_quiet(issue);
-                        issue = 0;
-                        self.execute_memory_op(op, addr, bus);
-                        if op.class == OpClass::Store {
-                            ram_ok = false;
+                if !hidden {
+                    now += u64::from(cycle_cost(op.word));
+                }
+                let branch_after_this = if delay { taken.take() } else { None };
+                let commit = pend;
+                pend = (0, 0);
+                let mut commit_reg = commit.0;
+                let word = op.word;
+                let rs = self.gprs[op.rs as usize];
+                let rt = self.gprs[op.rt as usize];
+                let rd = (word >> 11) & 0x1F;
+                let imm = (word as i16) as i32 as u32;
+                // `set_gpr`: a write squashes the commit of a load to the
+                // same register.
+                macro_rules! set {
+                    ($reg:expr, $value:expr) => {{
+                        let reg = $reg as u8;
+                        let value: u32 = $value;
+                        self.gprs[reg as usize] = value;
+                        self.gprs[0] = 0;
+                        if reg == commit_reg {
+                            commit_reg = 0;
+                        }
+                    }};
+                }
+                let mut fallback = false;
+                match op.handler {
+                    0x40 => set!(rd, rt << ((word >> 6) & 0x1F)),
+                    0x42 => set!(rd, rt >> ((word >> 6) & 0x1F)),
+                    0x43 => set!(rd, ((rt as i32) >> ((word >> 6) & 0x1F)) as u32),
+                    0x44 => set!(rd, rt << (rs & 0x1F)),
+                    0x46 => set!(rd, rt >> (rs & 0x1F)),
+                    0x47 => set!(rd, ((rt as i32) >> (rs & 0x1F)) as u32),
+                    0x48 => taken = Some(rs),
+                    0x49 => {
+                        set!(rd, pc.wrapping_add(8));
+                        taken = Some(rs);
+                    }
+                    0x61 => set!(rd, rs.wrapping_add(rt)),
+                    0x63 => set!(rd, rs.wrapping_sub(rt)),
+                    0x64 => set!(rd, rs & rt),
+                    0x65 => set!(rd, rs | rt),
+                    0x66 => set!(rd, rs ^ rt),
+                    0x67 => set!(rd, !(rs | rt)),
+                    0x6A => set!(rd, ((rs as i32) < (rt as i32)) as u32),
+                    0x6B => set!(rd, (rs < rt) as u32),
+                    0x01 => {
+                        // BLTZAL/BGEZAL link before reading `rs`.
+                        if op.rt & 0x10 != 0 {
+                            set!(31, pc.wrapping_add(8));
+                        }
+                        let value = self.gprs[op.rs as usize] as i32;
+                        let branch = if op.rt & 1 != 0 { value >= 0 } else { value < 0 };
+                        if branch {
+                            taken = Some(branch_target(pc, word));
                         }
                     }
-                    _ => {
-                        // Multiply/divide, HI/LO and GTE moves read the clock.
-                        bus.advance_quiet(issue);
-                        issue = 0;
-                        self.pc = pc;
-                        let _ = self.execute(op.word, pc, false, bus);
+                    0x02 => {
+                        taken = Some((pc.wrapping_add(4) & 0xF000_0000) | ((word & 0x03FF_FFFF) << 2));
                     }
-                }
-                self.executing_in_branch_delay = false;
-                if memory && bus.take_ram_load_from_cached_code() {
-                    self.load_shadow = Some(LoadShadow {
-                        position: 0,
-                        register: op.rt,
-                    });
-                }
-                if loading {
-                    if let Some((reg, value)) = self.committing_load.take() {
-                        let i = (reg & 31) as usize;
-                        if i != 0 {
-                            self.gprs[i] = value;
+                    0x03 => {
+                        set!(31, pc.wrapping_add(8));
+                        taken = Some((pc.wrapping_add(4) & 0xF000_0000) | ((word & 0x03FF_FFFF) << 2));
+                    }
+                    0x04 => {
+                        if rs == rt {
+                            taken = Some(branch_target(pc, word));
                         }
                     }
+                    0x05 => {
+                        if rs != rt {
+                            taken = Some(branch_target(pc, word));
+                        }
+                    }
+                    0x06 => {
+                        if rs as i32 <= 0 {
+                            taken = Some(branch_target(pc, word));
+                        }
+                    }
+                    0x07 => {
+                        if rs as i32 > 0 {
+                            taken = Some(branch_target(pc, word));
+                        }
+                    }
+                    0x09 => set!(op.rt, rs.wrapping_add(imm)),
+                    0x0A => set!(op.rt, ((rs as i32) < (imm as i32)) as u32),
+                    0x0B => set!(op.rt, (rs < imm) as u32),
+                    0x0C => set!(op.rt, rs & (word & 0xFFFF)),
+                    0x0D => set!(op.rt, rs | (word & 0xFFFF)),
+                    0x0E => set!(op.rt, rs ^ (word & 0xFFFF)),
+                    0x0F => set!(op.rt, word << 16),
+                    // Plain loads from main RAM (`Bus::batch_ram_load`).
+                    0x20 | 0x21 | 0x23 | 0x24 | 0x25 if access == Access::Ram => {
+                        let width = match op.handler {
+                            0x20 | 0x24 => 1,
+                            0x21 | 0x25 => 2,
+                            _ => 4,
+                        };
+                        let (value, stalls) = bus.batch_ram_load(now, addr, width);
+                        now += u64::from(stalls);
+                        let value = match op.handler {
+                            0x20 => value as u8 as i8 as i32 as u32,
+                            0x21 => value as u16 as i16 as i32 as u32,
+                            _ => value,
+                        };
+                        if op.rt != 0 {
+                            pend = (op.rt, value);
+                        }
+                    }
+                    // Stores to main RAM (`Bus::batch_ram_store`).
+                    0x28 | 0x29 | 0x2B if access == Access::Ram => {
+                        let width = match op.handler {
+                            0x28 => 1,
+                            0x29 => 2,
+                            _ => 4,
+                        };
+                        now += u64::from(bus.batch_ram_store(now, addr, rt, width));
+                    }
+                    _ => fallback = true,
                 }
-                self.tick += 1;
+                if fallback {
+                    // Through the interpreter's own `op_*`/`execute`, on the
+                    // step state in `self`.
+                    bus.batch_settle(synced, now);
+                    self.pc = pc;
+                    self.tick = tick0 + done;
+                    self.committing_load = (commit_reg != 0).then_some((commit_reg, commit.1));
+                    self.branch_delay_next = false;
+                    self.executing_in_branch_delay = delay;
+                    if memory {
+                        let _ = match word >> 26 {
+                            0x20 => self.op_lb(word, bus),
+                            0x21 => self.op_lh(word, bus),
+                            0x22 => self.op_lwl(word, bus),
+                            0x23 => self.op_lw(word, bus),
+                            0x24 => self.op_lbu(word, bus),
+                            0x25 => self.op_lhu(word, bus),
+                            0x26 => self.op_lwr(word, bus),
+                            0x28 => self.op_sb(word, bus),
+                            0x29 => self.op_sh(word, bus),
+                            0x2A => self.op_swl(word, bus),
+                            0x2B => self.op_sw(word, bus),
+                            0x2E => self.op_swr(word, bus),
+                            _ => unreachable!("not a CPU load or store: {word:08x}"),
+                        };
+                    } else {
+                        // Multiply/divide, HI/LO and GTE moves, MFC0, the
+                        // trapping adds.
+                        let _ = self.execute(word, pc, false, bus);
+                    }
+                    self.executing_in_branch_delay = false;
+                    now = bus.cycles();
+                    synced = now;
+                    pend = self.pending_load.take().unwrap_or((0, 0));
+                    commit_reg = match self.committing_load.take() {
+                        Some((reg, _)) => reg,
+                        None => 0,
+                    };
+                }
+                if memory {
+                    if word >> 26 >= 0x28 {
+                        ram_ok = false;
+                    }
+                    if bus.take_ram_load_from_cached_code() {
+                        shadow = Some((0, op.rt));
+                    }
+                }
+                if commit_reg != 0 {
+                    self.gprs[commit_reg as usize] = commit.1;
+                }
                 done += 1;
                 uncounted += 1;
-                if let Some(vector) = self.pending_exception_pc.take() {
-                    // An `Other` op trapped (overflow, coprocessor
-                    // unusable); never in a delay slot. Entering the
-                    // exception left the block.
-                    self.pc = vector;
-                    break 'blocks;
+                if fallback && !memory {
+                    if let Some(vector) = self.pending_exception_pc.take() {
+                        // An `Other` op trapped (overflow, coprocessor
+                        // unusable); never in a delay slot. Entering the
+                        // exception left the block.
+                        pc = vector;
+                        after_branch = false;
+                        self.cursor.block = 0;
+                        break 'blocks;
+                    }
                 }
-                self.branch_delay_next = op.class == OpClass::Branch;
+                after_branch = op.class == OpClass::Branch;
+                let device = access == Access::Device;
                 if let Some(target) = branch_after_this {
                     // Taken branch: the branch-boundary work reads the clock
                     // and may raise interrupts; settle everything first.
+                    pc = target;
                     self.pc = target;
-                    bus.advance_quiet(issue);
-                    issue = 0;
+                    bus.batch_settle(synced, now);
+                    synced = now;
                     if bus.external_interrupt_pending_quiet(uncounted) {
                         self.irq_line_high_steps =
                             self.irq_line_high_steps.saturating_add(uncounted);
@@ -756,141 +917,71 @@ impl Cpu {
                     if !bus.post_op_quiet() {
                         bus.drain_scheduler_events_post_op();
                         limit = bus.quiet_limit().min(until_cycle);
+                        now = bus.cycles();
+                        synced = now;
                     }
                     if self.should_take_interrupt(bus) {
                         self.should_take_interrupt_steps =
                             self.should_take_interrupt_steps.saturating_add(1);
+                        self.pending_load = (pend.0 != 0).then_some(pend);
+                        pend = (0, 0);
                         self.enter_exception(ExceptionCode::Interrupt, self.pc, false);
-                        self.pc = self
+                        pc = self
                             .pending_exception_pc
                             .take()
                             .expect("enter_exception staged a vector");
+                        pend = self.pending_load.take().unwrap_or(pend);
                         break 'blocks;
                     }
-                    if device {
+                    if device || !self.enter_block(bus, pc) {
                         break 'blocks;
                     }
-                    if !self.enter_block(bus, self.pc) {
-                        break 'blocks;
-                    }
+                    block = self.cursor.block - 1;
+                    at = 0;
                     continue 'blocks;
                 }
-                self.pc = pc.wrapping_add(4);
+                pc = pc.wrapping_add(4);
                 if op.flags & op_flags::LAST != 0 {
                     self.cursor.block = 0;
-                    if device {
+                    if device || !self.enter_block(bus, pc) {
                         break 'blocks;
                     }
-                    if !self.enter_block(bus, self.pc) {
-                        break 'blocks;
-                    }
+                    block = self.cursor.block - 1;
+                    at = 0;
                     continue 'blocks;
                 }
-                self.cursor.op += 1;
-                self.cursor.pc = self.pc;
+                at += 1;
                 if device {
                     break 'blocks;
                 }
             }
         }
-        bus.advance_quiet(issue);
+        bus.batch_settle(synced, now);
+        self.pc = pc;
+        if self.cursor.block != 0 {
+            self.cursor.op = at as u32;
+            self.cursor.pc = pc;
+        }
+        self.tick = tick0 + done;
+        self.pending_load = (pend.0 != 0).then_some(pend);
+        self.load_shadow = shadow.map(|(position, register)| LoadShadow { position, register });
+        self.pending_pc = taken;
+        self.branch_delay_next = after_branch;
         if uncounted != 0 && bus.external_interrupt_pending_quiet(uncounted) {
             self.irq_line_high_steps = self.irq_line_high_steps.saturating_add(uncounted);
         }
         done
     }
-
-    /// Execute a CPU load or store (primary opcodes `0x20..=0x2E`) to `addr`
-    /// (already checked by [`access_kind`]): plain loads and word stores to
-    /// main RAM directly (see [`Bus::cpu_ram_load`], [`Bus::cpu_ram_store32`]),
-    /// everything else through its `op_*` function.
-    #[inline(always)]
-    fn execute_memory_op(&mut self, op: DecodedOp, addr: u32, bus: &mut Bus) {
-        let instr = op.word;
-        if memory::to_physical(addr) < memory::ram::MIRROR_END {
-            let value = match instr >> 26 {
-                0x20 => Some(bus.cpu_ram_load(addr, 1) as u8 as i8 as i32 as u32),
-                0x24 => Some(bus.cpu_ram_load(addr, 1)),
-                0x21 => Some(bus.cpu_ram_load(addr, 2) as u16 as i16 as i32 as u32),
-                0x25 => Some(bus.cpu_ram_load(addr, 2)),
-                0x23 => Some(bus.cpu_ram_load(addr, 4)),
-                _ => None,
-            };
-            if let Some(value) = value {
-                if op.rt != 0 {
-                    self.pending_load = Some((op.rt, value));
-                }
-                return;
-            }
-            if instr >> 26 == 0x2B {
-                bus.cpu_ram_store32(addr, self.gpr(op.rt));
-                return;
-            }
-        }
-        let _ = match instr >> 26 {
-            0x20 => self.op_lb(instr, bus),
-            0x21 => self.op_lh(instr, bus),
-            0x22 => self.op_lwl(instr, bus),
-            0x23 => self.op_lw(instr, bus),
-            0x24 => self.op_lbu(instr, bus),
-            0x25 => self.op_lhu(instr, bus),
-            0x26 => self.op_lwr(instr, bus),
-            0x28 => self.op_sb(instr, bus),
-            0x29 => self.op_sh(instr, bus),
-            0x2A => self.op_swl(instr, bus),
-            0x2B => self.op_sw(instr, bus),
-            0x2E => self.op_swr(instr, bus),
-            _ => unreachable!("not a CPU load or store: {instr:08x}"),
-        };
-    }
-
-    /// Execute an [`OpClass::Alu`] or [`OpClass::Branch`] word: the same
-    /// `op_*` functions [`Cpu::execute`] dispatches to, none of which can
-    /// fail or touch the bus.
-    #[inline(always)]
-    fn execute_register_op(&mut self, op: DecodedOp, pc: u32) {
-        let instr = op.word;
-        let _ = match op.handler {
-            0x40 => self.op_sll(instr),
-            0x42 => self.op_srl(instr),
-            0x43 => self.op_sra(instr),
-            0x44 => self.op_sllv(instr),
-            0x46 => self.op_srlv(instr),
-            0x47 => self.op_srav(instr),
-            0x48 => self.op_jr(instr, pc),
-            0x49 => self.op_jalr(instr, pc),
-            0x61 => self.op_addu(instr),
-            0x63 => self.op_subu(instr),
-            0x64 => self.op_and(instr),
-            0x65 => self.op_or(instr),
-            0x66 => self.op_xor(instr),
-            0x67 => self.op_nor(instr),
-            0x6A => self.op_slt(instr),
-            0x6B => self.op_sltu(instr),
-            0x01 => self.dispatch_regimm(instr, pc),
-            0x02 => self.op_j(instr, pc),
-            0x03 => self.op_jal(instr, pc),
-            0x04 => self.op_beq(instr, pc),
-            0x05 => self.op_bne(instr, pc),
-            0x06 => self.op_blez(instr, pc),
-            0x07 => self.op_bgtz(instr, pc),
-            0x09 => self.op_addiu(instr),
-            0x0A => self.op_slti(instr),
-            0x0B => self.op_sltiu(instr),
-            0x0C => self.op_andi(instr),
-            0x0D => self.op_ori(instr),
-            0x0E => self.op_xori(instr),
-            0x0F => self.op_lui(instr),
-            _ => unreachable!("not a register-only op: {instr:08x}"),
-        };
-    }
 }
 
 /// How a CPU load or store to `addr` fits in a batch.
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Access {
-    /// Main RAM (any segment) or the scratchpad (cached segments): touches
-    /// no device, interrupt or event.
-    Quiet,
+    /// Main RAM (any segment): touches no device, interrupt or event.
+    Ram,
+    /// The scratchpad (cached segments): the same, through the `op_*`
+    /// functions.
+    Scratchpad,
     /// Any other address below KSEG2: a device, the BIOS or an expansion
     /// region. Runs through the full bus path; the batch ends after it.
     Device,
@@ -910,13 +1001,13 @@ fn access_kind(word: u32, addr: u32) -> Access {
         return Access::Unsafe;
     }
     let phys = memory::to_physical(addr);
-    if phys < memory::ram::MIRROR_END
-        || (addr < 0xA000_0000
-            && (memory::scratchpad::BASE
-                ..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
-                .contains(&phys))
+    if phys < memory::ram::MIRROR_END {
+        Access::Ram
+    } else if addr < 0xA000_0000
+        && (memory::scratchpad::BASE..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
+            .contains(&phys)
     {
-        Access::Quiet
+        Access::Scratchpad
     } else {
         Access::Device
     }

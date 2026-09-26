@@ -154,17 +154,31 @@ impl Bus {
         word & 0xFE00_0000 == 0x4A00_0000
     }
 
-    /// A CPU load from main RAM at `virt` with no limit oracle configured:
-    /// exactly what `Cpu::charge_read` and the bus read do there (stalls,
-    /// then the value and the data-bus latch). `width` is 1, 2 or 4 bytes;
-    /// the address is aligned to it.
+    /// Settle a batch's clock: the bus clock was last advanced properly at
+    /// `synced` and has since only been set ([`Bus::batch_ram_load`],
+    /// [`Bus::batch_ram_store`]); charge the cycles up to `now` as one quiet
+    /// advance ([`Bus::advance_quiet`] is additive below the quiet limit, so
+    /// the GPU credit decays exactly as it would have step by step).
     #[inline(always)]
-    pub(crate) fn cpu_ram_load(&mut self, virt: u32, width: u32) -> u32 {
+    pub(crate) fn batch_settle(&mut self, synced: u64, now: u64) {
+        self.cycles = synced;
+        self.advance_quiet(now - synced);
+    }
+
+    /// A CPU load from main RAM at `virt` at clock `now`, inside a quiet
+    /// batch with no limit oracle configured: exactly what `Cpu::charge_read`
+    /// and the bus read do there (stalls, then the value and the data-bus
+    /// latch). Returns the value (zero-extended) and the stall cycles, which
+    /// the caller adds to its clock. `width` is 1, 2 or 4 bytes; the address
+    /// is aligned to it. Leaves the bus clock at `now` with the GPU decay
+    /// owed ([`Bus::batch_settle`]): nothing on this path reads it.
+    #[inline(always)]
+    pub(crate) fn batch_ram_load(&mut self, now: u64, virt: u32, width: u32) -> (u32, u32) {
+        self.cycles = now;
         let stalls = self.ram_read_stalls(virt);
-        self.add_cycles(stalls);
         let phys = to_physical(virt);
         let offset = (phys as usize) % memory::ram::SIZE;
-        match width {
+        let value = match width {
             4 => {
                 let value = read_u32_le(&self.ram[offset..]);
                 self.data_bus_latch = value;
@@ -184,20 +198,28 @@ impl Bus {
                     (self.data_bus_latch & !(0xFF << shift)) | (u32::from(value) << shift);
                 u32::from(value)
             }
-        }
+        };
+        (value, stalls)
     }
 
-    /// A CPU `SW` to main RAM at word-aligned `virt` with no limit oracle
-    /// configured: exactly [`Bus::cpu_write32`] there (data-bus latch,
-    /// write-buffer and refresh stalls, then the store).
+    /// A CPU `SB`/`SH`/`SW` (`width` 1, 2, 4) of `source` to main RAM at
+    /// aligned `virt` at clock `now`, inside a quiet batch with no limit
+    /// oracle configured: exactly `Bus::cpu_write8/16/32` there (data-bus
+    /// latch, write-buffer and refresh stalls, then the store). Returns the
+    /// stall cycles; see [`Bus::batch_ram_load`] for the clock.
     #[inline(always)]
-    pub(crate) fn cpu_ram_store32(&mut self, virt: u32, value: u32) {
-        self.data_bus_latch = value;
+    pub(crate) fn batch_ram_store(&mut self, now: u64, virt: u32, source: u32, width: u32) -> u32 {
+        self.cycles = now;
+        self.data_bus_latch = source;
         let stall = self.ram_write_stalls(virt);
-        self.add_cycles(stall);
         let offset = (to_physical(virt) as usize) % memory::ram::SIZE;
-        self.ram[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        match width {
+            4 => self.ram[offset..offset + 4].copy_from_slice(&source.to_le_bytes()),
+            2 => self.ram[offset..offset + 2].copy_from_slice(&(source as u16).to_le_bytes()),
+            _ => self.ram[offset] = source as u8,
+        }
         self.ram_pages.touch(offset);
+        stall
     }
 
     /// A stamp of the RAM pages holding bytes `offset..offset + len`
