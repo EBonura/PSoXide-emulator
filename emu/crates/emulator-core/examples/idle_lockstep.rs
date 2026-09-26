@@ -170,7 +170,11 @@ fn main() {
                     t0 = cpu_seconds();
                     skipped_timed = skipped;
                 }
-                let n = if skip { cpu.skip_hle_wait(&mut bus, u64::MAX) } else { 0 };
+                let n = if skip {
+                    cpu.skip_hle_wait(&mut bus, u64::MAX)
+                } else {
+                    0
+                };
                 skipped += n;
                 if n == 0 {
                     cpu.step(&mut bus).unwrap();
