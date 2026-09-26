@@ -1,0 +1,7 @@
+# The web build (trunk, wasm32-unknown-unknown) uses WebAssembly SIMD: the
+# GPU rasteriser's span loops vectorise to simd128. Every current browser
+# supports it; index.html shows a message on one that does not. Native
+# targets are unaffected. A RUSTFLAGS environment variable replaces this
+# setting, so a build that sets one must add the flag itself.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]
