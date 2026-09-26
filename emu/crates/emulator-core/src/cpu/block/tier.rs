@@ -225,13 +225,18 @@ impl Cpu {
                 let memory = matches!(op.class, OpClass::Load | OpClass::Store);
                 let mut addr = 0;
                 // A device access (I/O, BIOS, expansion) may change anything
-                // a caller looks at: run it, then end the batch.
+                // a caller looks at: run it, then end the batch, unless it
+                // was one [`Cpu::device_step_quiet`] lets the batch go past.
                 let mut device = false;
+                let mut raised = 0;
                 if memory {
                     addr = self.gpr(op.rs).wrapping_add((op.word as i16) as i32 as u32);
                     match tier_access_kind(op.word, addr) {
                         Access::Quiet => {}
-                        Access::Device => device = true,
+                        Access::Device => {
+                            device = true;
+                            raised = irq_raise_total(bus);
+                        }
                         Access::Unsafe => break 'blocks,
                     }
                 }
@@ -265,6 +270,11 @@ impl Cpu {
                     self.pc = vector;
                     break 'blocks;
                 }
+                if device && self.device_step_quiet(bus, addr, raised, &mut st) {
+                    device = false;
+                    // A DMA it started may have written this block's words.
+                    ram_ok = false;
+                }
                 self.branch_delay_next = op.class == OpClass::Branch;
                 if let Some(target) = branch_after_this {
                     if !self.batch_taken_boundary(bus, target, &mut st) || device {
@@ -292,6 +302,35 @@ impl Cpu {
             self.irq_line_high_steps = self.irq_line_high_steps.saturating_add(st.uncounted);
         }
         st.done
+    }
+
+    /// After a batched step that accessed a device at `addr`: whether the
+    /// batch may go on. The caller's `stop_after` looks only at interrupt
+    /// counts, telemetry and pad polls ([`Cpu::run`]), so the step must be
+    /// to the I/O ports other than the serial ports (pads, memory cards)
+    /// and must not have raised an interrupt (`raised` is the raise total
+    /// before it). Anything else the access changed that the batch relies
+    /// on is taken up again: the clock limits (it may have scheduled an
+    /// event or ended the GPU's quiet span) are recomputed here, and the
+    /// caller drops its RAM check. The branch-boundary work reads the rest
+    /// afresh each time.
+    #[inline(never)]
+    fn device_step_quiet(
+        &mut self,
+        bus: &Bus,
+        addr: u32,
+        raised: u64,
+        st: &mut BatchState,
+    ) -> bool {
+        let phys = memory::to_physical(addr);
+        if !(0x1F80_1000..0x1F80_2000).contains(&phys)
+            || (0x1F80_1040..0x1F80_1060).contains(&phys)
+            || irq_raise_total(bus) != raised
+        {
+            return false;
+        }
+        self.batch_new_limits(bus, st);
+        true
     }
 
     /// SR IEc and IM2 are both set: the interrupt line can be taken.
@@ -491,6 +530,7 @@ impl Cpu {
     #[inline(always)]
     pub(in crate::cpu) fn native_enter(
         &self,
+        bus: &Bus,
         run: &mut crate::cpu::jit_abi::NativeRun,
         index: usize,
         irq_enabled: bool,
@@ -512,6 +552,97 @@ impl Cpu {
         run.target = 0;
         run.after_is_gte = u32::from(block.after_is_gte);
         run.status = crate::cpu::jit_abi::NATIVE_IN_BLOCK;
+        run.ran0 = 0;
+        run.boundary_until = bus.boundary_quiet_until();
+        run.slow_boundary = u32::from(bus.irq().pending());
+        run.last_boundary = 0;
+    }
+
+    /// [`jit_chain`](crate::cpu::jit_abi::jit_chain)'s common case: compiled
+    /// code ran every op of the current block, and both the branch-boundary
+    /// work and the entry into the next block have nothing to do but move
+    /// the cursor. That is: after a taken branch, the clock is below
+    /// [`Bus::boundary_quiet_until`] (no scheduler, SPU, timer or CD-ROM
+    /// work due), no interrupt is pending and SR has not been written (so
+    /// no interrupt can be taken and the interrupt-line count adds
+    /// nothing), and the target is not a kernel call vector; then the next
+    /// block is decoded, unchanged since its I-cache lines were last
+    /// checked, compiled, within the budget, with no GTE watch and (with
+    /// interrupts enabled) RAM still holding its words. The clock is left
+    /// unsettled (issue cycles keep adding up, as within a block) and the
+    /// boundary's cycle is kept in `run` for the bus. Returns the next
+    /// block's native entry with `run` and the cursor pointing at it;
+    /// `None`, having changed nothing but `last_boundary`, otherwise.
+    #[inline(always)]
+    pub(in crate::cpu) fn chain_fast(
+        &mut self,
+        bus: &Bus,
+        run: &mut crate::cpu::jit_abi::NativeRun,
+    ) -> Option<usize> {
+        let n = run.op_count as usize;
+        // SAFETY: `ops` points at the current block's `op_count` ops.
+        let last = unsafe { *run.ops.add(n - 1) };
+        let pc = if last.flags & op_flags::DELAY_SLOT != 0 && run.taken != 0 {
+            let now = bus.cycles() + run.issue;
+            if now >= run.boundary_until || run.slow_boundary != 0 {
+                return None;
+            }
+            // `apply_redux_bios_kernel_call_intercept`'s vectors.
+            let base = (run.target >> 20) & 0x0FFC;
+            if matches!(base, 0x000 | 0x800 | 0xA00) && run.target & (RAM_BYTES - 1) < 0x100 {
+                return None;
+            }
+            run.last_boundary = now;
+            run.target
+        } else {
+            run.vaddr.wrapping_add(4 * n as u32)
+        };
+        if run.ran >= run.budget_left
+            || self.gte_irq_watch.is_some()
+            || pc & 3 != 0
+            || pc >= 0xA000_0000
+        {
+            return None;
+        }
+        let phys = memory::to_physical(pc);
+        if phys >= memory::ram::MIRROR_END || (bus.hle_bios_enabled && phys < 0x1_0000) {
+            return None;
+        }
+        let id = *self.blocks.slots.get(((phys % RAM_BYTES) >> 2) as usize)?;
+        if id == 0 {
+            return None;
+        }
+        let index = (id - 1) as usize;
+        let block = &self.blocks.blocks[index];
+        if block.vaddr != pc
+            || block.checked_epoch != self.instruction_cache.epoch()
+            || block.native <= NATIVE_DECLINED
+        {
+            return None;
+        }
+        let native = block.native;
+        let ram_ok = run.irq_enabled != 0;
+        if ram_ok && !self.block_ram_matches(bus, index) {
+            return None;
+        }
+        let block = &self.blocks.blocks[index];
+        self.cursor = Cursor {
+            block: id,
+            op: 0,
+            pc,
+            cache_control: self.cache_control,
+        };
+        self.pc = pc;
+        run.ops = block.ops.as_ptr();
+        run.vaddr = pc;
+        run.op_count = block.ops.len() as u32;
+        run.ran0 = run.ran;
+        run.ram_ok = u32::from(ram_ok);
+        run.taken = 0;
+        run.target = 0;
+        run.after_is_gte = u32::from(block.after_is_gte);
+        run.status = crate::cpu::jit_abi::NATIVE_IN_BLOCK;
+        Some(native)
     }
 
     /// Account the ops compiled code retired in the current block.
@@ -542,7 +673,7 @@ impl Cpu {
             st.refetch = false;
         }
         let mut run = crate::cpu::jit_abi::NativeRun::new(self, bus, st);
-        self.native_enter(&mut run, index, irq_enabled, ram_ok, st);
+        self.native_enter(bus, &mut run, index, irq_enabled, ram_ok, st);
         if let Some((reg, value)) = self.pending_load.take() {
             run.pend_reg = u32::from(reg);
             run.pend_val = value;
@@ -554,6 +685,7 @@ impl Cpu {
             let entry: crate::cpu::jit_abi::NativeFn = std::mem::transmute(native);
             entry(&mut run);
         }
+        run.flush_boundary(bus);
         run.shadow_to(self);
         self.pending_load = (run.pend_reg != 0).then_some((run.pend_reg as u8, run.pend_val));
         match run.status {
@@ -570,7 +702,8 @@ impl Cpu {
         }
         // Stopped in the block it was running.
         let index = (self.cursor.block - 1) as usize;
-        let ran = run.ran;
+        // Ops of the current block that retired.
+        let ran = run.ran - run.ran0;
         if ran as usize == self.blocks.blocks[index].ops.len() {
             // It ran the whole block (stopping after its last op): finish it
             // as the batch loop would.
@@ -684,6 +817,12 @@ impl Cpu {
         }
         Some(branch_after_this)
     }
+}
+
+/// Interrupts raised so far, all sources.
+#[inline(always)]
+fn irq_raise_total(bus: &Bus) -> u64 {
+    bus.irq().raise_counts().iter().sum()
 }
 
 /// Whether a batched load or store of `word` to `addr` is [`Access::Quiet`]

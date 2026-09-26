@@ -125,6 +125,20 @@ pub struct NativeRun {
     pub status: u32,
     /// The batch loop's state, for [`jit_chain`].
     pub batch: *mut crate::cpu::block::BatchState,
+    /// Main RAM.
+    pub ram: *const u8,
+    /// `ran` when the current block was entered: `ran - ran0` ops of it
+    /// have retired. `ran` counts from the last [`Cpu::native_enter`].
+    pub ran0: u64,
+    /// The clock below which a branch boundary has nothing to do
+    /// ([`Bus::boundary_quiet_until`]).
+    pub boundary_until: u64,
+    /// Branch boundaries must take the full path (an interrupt is pending,
+    /// or SR was written).
+    pub slow_boundary: u32,
+    /// Clock of the last branch boundary [`jit_chain`] passed quietly and
+    /// has not yet recorded in the bus (0: none).
+    pub last_boundary: u64,
 }
 
 /// Exit: stopped before op `ran` of the current block (the interpreter
@@ -174,6 +188,11 @@ impl NativeRun {
             after_is_gte: 0,
             status: NATIVE_IN_BLOCK,
             batch,
+            ram: bus.jit_ram_ptr(),
+            ran0: 0,
+            boundary_until: 0,
+            slow_boundary: 1,
+            last_boundary: 0,
         }
     }
 }
@@ -227,6 +246,10 @@ pub unsafe extern "C" fn jit_chain(run: *mut NativeRun) -> usize {
     // SAFETY: per the contract, the pointers are live and unaliased here.
     let run = unsafe { &mut *run };
     let (cpu, bus, st) = unsafe { (&mut *run.cpu, &mut *run.bus, &mut *run.batch) };
+    if let Some(entry) = cpu.chain_fast(bus, run) {
+        return entry + NATIVE_CHAIN_OFFSET;
+    }
+    run.flush_boundary(bus);
     let Some(index) = cpu.native_block_done(bus, run, st) else {
         run.status = NATIVE_BREAK;
         return 0;
@@ -235,7 +258,7 @@ pub unsafe extern "C" fn jit_chain(run: *mut NativeRun) -> usize {
     let ram_ok = irq_enabled && cpu.block_ram_matches(bus, index);
     match cpu.native_ready(bus, index, irq_enabled, ram_ok, st) {
         Some(entry) => {
-            cpu.native_enter(run, index, irq_enabled, ram_ok, st);
+            cpu.native_enter(bus, run, index, irq_enabled, ram_ok, st);
             entry + NATIVE_CHAIN_OFFSET
         }
         None => {
@@ -287,6 +310,8 @@ pub mod native_run {
     pub const AFTER_IS_GTE: usize = core::mem::offset_of!(NativeRun, after_is_gte);
     /// `status`
     pub const STATUS: usize = core::mem::offset_of!(NativeRun, status);
+    /// `ram`
+    pub const RAM: usize = core::mem::offset_of!(NativeRun, ram);
 }
 
 /// Helper result: go on with the next op.
@@ -296,6 +321,16 @@ pub const NATIVE_CONTINUE: u32 = 0;
 pub const NATIVE_STOP: u32 = 1;
 
 impl NativeRun {
+    /// Record the last quietly passed branch boundary in the bus (see
+    /// [`Bus::note_post_op_cycle`]).
+    #[inline(always)]
+    pub(super) fn flush_boundary(&mut self, bus: &mut Bus) {
+        if self.last_boundary != 0 {
+            bus.note_post_op_cycle(self.last_boundary);
+            self.last_boundary = 0;
+        }
+    }
+
     /// The CPU's load shadow as the compiled code keeps it.
     #[inline(always)]
     pub(super) fn shadow_from(&mut self, cpu: &Cpu) {
@@ -413,6 +448,10 @@ pub unsafe extern "C" fn jit_batch_other(run: *mut NativeRun, index: u32) -> u32
     cpu.tick = run.tick0 + run.ran;
     cpu.pc = pc;
     cpu.pending_load = (run.pend_reg != 0).then_some((run.pend_reg as u8, run.pend_val));
+    if op.word >> 21 == 0x10 << 5 | 4 {
+        // MTC0: SR (the interrupt enables) may change.
+        run.slow_boundary = 1;
+    }
     let mut refetch = false;
     let mut ram_ok = run.ram_ok != 0;
     run.shadow_to(cpu);

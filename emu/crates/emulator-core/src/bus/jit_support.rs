@@ -10,4 +10,9 @@ impl Bus {
     pub fn jit_cycles_ptr(&self) -> *const u64 {
         &self.cycles
     }
+
+    /// Main RAM's bytes, for compiled code's look at the next instruction.
+    pub fn jit_ram_ptr(&self) -> *const u8 {
+        self.ram.as_ptr()
+    }
 }
