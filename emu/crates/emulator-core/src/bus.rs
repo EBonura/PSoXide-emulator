@@ -1717,6 +1717,13 @@ impl Bus {
             || self.experimental_gpu_list.is_some()
             || self.gpu_dma_waiting_for_request
         {
+            // Inside a known quiet list window a zero advance does nothing.
+            if !self.limits.frozen()
+                && !self.gpu_dma_waiting_for_request
+                && self.cycles <= self.gpu_quiet_until
+            {
+                return;
+            }
             self.advance_cycles_slow(0);
         }
     }
