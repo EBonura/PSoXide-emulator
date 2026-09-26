@@ -110,6 +110,39 @@ one macroblock, 7463 for two) and wildly non-linear in PSoXide (3119, then
 39374), which points at the emulator's lazy decode-on-read rather than at
 hardware.
 
+#### Reset latency and the lost enable (hardware tests v1.26, modelled)
+
+SCPH-9002, 2026-09-26, `mdec_diag` / `mdec_reset_trace` / `mdec_frame_control`
+records. Timer 2 clocks from just before the reset write:
+
+| Trace | Console | PSoXide now |
+|---|---|---|
+| reset from idle | 13: 0x80040000, no change | 8: 0x80040000 |
+| reset from busy | 13: 0xA0040000, 39: 0x80040000 | 9: 0xA0040000, 44: 0x80040000 |
+| from busy, enable straight after | 15: 0x60000000, 41: 0x80040000 | 13: 0x60000000, 48: 0x80040000 |
+
+The differences are the trace loop's read spacing, not the model: PSoXide's
+loop samples 18-25 cycles apart, so 44 and 48 are the first samples after the
+modelled 39-cycle window.
+
+A control write that lands a few cycles behind the reset is swallowed: the port
+reads the written word back until the reset completes, and the DMA enables it
+carried are gone. PSn00bSDK's order (reset and enable back to back, 2 cycles
+apart in PSoXide's write timing) failed 8 of 8 runs from idle and from busy,
+stuck at its first table upload with status 0xA004001F and DMA0 idle (CHCR
+0x01000201, 0 words moved). The v1.25 driver, whose build left the enable 2
+cycles behind the reset too, failed the same way on the v1.25 disc; the same
+source rebuilt for v1.26 put it 7 cycles behind and worked 8 of 8, including
+the four runs that reset a busy MDEC. So the loss is bounded by the write
+spacing, not by the whole busy window. `RESET_CAPTURE_CYCLES` (5) sits between
+the two; silicon does not pin it closer.
+
+Also modelled from the same capture: DMA0 moves nothing until the MDEC raises
+its data-in request (enable set and parameter words outstanding), the status
+parameter field reads 0 after a reset and remaining-1 (FFFFh when none)
+afterwards, and a frame fed and drained by the CPU comes out whole (38400 of
+38400 words, sum equal to the DMA path).
+
 ## SIO: the pad's setup delay is not modelled at all
 
 **Status:** open, fully characterised. **Found:** 2026-07-26, HWTEST v1.5 capture
