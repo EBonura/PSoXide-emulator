@@ -202,6 +202,52 @@ impl Bus {
         (value, stalls)
     }
 
+    /// A batched plain load from main RAM (`handler`: the primary opcode of
+    /// LB, LH, LW, LBU or LHU) at clock `now`: [`Bus::batch_ram_load`] with
+    /// the sign extension, plus whether the load starts a load shadow
+    /// (`take_ram_load_from_cached_code`). Out of line, to keep the batch
+    /// loop small.
+    #[inline(never)]
+    pub(crate) fn batch_load_op(&mut self, now: u64, virt: u32, handler: u8) -> (u32, u32, bool) {
+        let width = match handler {
+            0x20 | 0x24 => 1,
+            0x21 | 0x25 => 2,
+            _ => 4,
+        };
+        let (value, stalls) = self.batch_ram_load(now, virt, width);
+        let value = match handler {
+            0x20 => value as u8 as i8 as i32 as u32,
+            0x21 => value as u16 as i16 as i32 as u32,
+            _ => value,
+        };
+        (value, stalls, self.take_ram_load_from_cached_code())
+    }
+
+    /// A batched store to main RAM (`handler`: the primary opcode of SB, SH
+    /// or SW) at clock `now`: [`Bus::batch_ram_store`], plus whether it
+    /// landed on the RAM range `block` (offset, bytes).
+    #[inline(never)]
+    pub(crate) fn batch_store_op(
+        &mut self,
+        now: u64,
+        virt: u32,
+        source: u32,
+        handler: u8,
+        block: (u32, u32),
+    ) -> (u32, bool) {
+        let width = match handler {
+            0x28 => 1,
+            0x29 => 2,
+            _ => 4,
+        };
+        let stalls = self.batch_ram_store(now, virt, source, width);
+        let offset = to_physical(virt) % memory::ram::SIZE as u32;
+        let (start, len) = block;
+        let lands = offset.wrapping_sub(start) < len || start.wrapping_sub(offset) < width;
+        // A store never starts a load shadow; the flag stays clear.
+        (stalls, lands)
+    }
+
     /// A CPU `SB`/`SH`/`SW` (`width` 1, 2, 4) of `source` to main RAM at
     /// aligned `virt` at clock `now`, inside a quiet batch with no limit
     /// oracle configured: exactly `Bus::cpu_write8/16/32` there (data-bus
@@ -220,6 +266,26 @@ impl Bus {
         }
         self.ram_pages.touch(offset);
         stall
+    }
+
+    /// A CPU load from main RAM at `virt` with no limit oracle configured:
+    /// exactly what `Cpu::charge_read` and the bus read do there (stalls,
+    /// then the value and the data-bus latch). `width` is 1, 2 or 4 bytes;
+    /// the address is aligned to it.
+    #[inline(always)]
+    pub(crate) fn cpu_ram_load(&mut self, virt: u32, width: u32) -> u32 {
+        let (value, stalls) = self.batch_ram_load(self.cycles, virt, width);
+        self.add_cycles(stalls);
+        value
+    }
+
+    /// A CPU `SW` to main RAM at word-aligned `virt` with no limit oracle
+    /// configured: exactly [`Bus::cpu_write32`] there (data-bus latch,
+    /// write-buffer and refresh stalls, then the store).
+    #[inline(always)]
+    pub(crate) fn cpu_ram_store32(&mut self, virt: u32, value: u32) {
+        let stall = self.batch_ram_store(self.cycles, virt, value, 4);
+        self.add_cycles(stall);
     }
 
     /// A stamp of the RAM pages holding bytes `offset..offset + len`

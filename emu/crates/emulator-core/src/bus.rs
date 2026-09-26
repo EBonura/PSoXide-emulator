@@ -1663,6 +1663,7 @@ impl Bus {
     /// still streaming, the load waits for the fill to let go of the bus. And
     /// when the instruction itself was fetched from RAM uncached, the load is
     /// five wait clocks rather than six. Either way RAM_SIZE bit 7 adds one.
+    #[inline(always)]
     fn ram_load_stalls_with_code_contention(&self, stalls: u32) -> u32 {
         let contention = self.memory_control.code_data_contention_cycles();
         let fill_wait = self.code_fill_busy_until.saturating_sub(self.cycles) as u32;
@@ -1801,31 +1802,33 @@ impl Bus {
     /// cost one clock a store (`0x12B`, `0x12C`); a burst of eight costs twelve
     /// (`0x12D`): four slots, then one store for every write that completes.
     /// GP0 stores behave the same (`0xFA`, `0x12E`).
+    #[inline]
     fn queue_store(&mut self) -> u32 {
         let now = self.cycles;
-        for slot in &mut self.write_queue {
-            if *slot != 0 && *slot <= now {
-                *slot = 0;
-            }
+        let queue = &mut self.write_queue;
+        // The queue holds completion times in ascending order, then zeros
+        // (every store below keeps it so), so the writes that have landed
+        // are a prefix of the occupied slots.
+        debug_assert!(queue.windows(2).all(|w| w[1] == 0 || (w[0] != 0 && w[0] < w[1])));
+        let mut len = queue.iter().take_while(|&&slot| slot != 0).count();
+        let landed = queue[..len].iter().take_while(|&&slot| slot <= now).count();
+        if landed != 0 {
+            queue.copy_within(landed..len, 0);
+            len -= landed;
+            queue[len..].fill(0);
         }
-        self.write_queue
-            .sort_unstable_by_key(|&slot| if slot == 0 { u64::MAX } else { slot });
         let mut wait = 0;
-        if self.write_queue[3] != 0 {
+        if len == queue.len() {
             // Full: the oldest write has to land first.
-            wait = self.write_queue[0] - now;
-            self.write_queue.rotate_left(1);
-            self.write_queue[3] = 0;
+            wait = queue[0] - now;
+            queue.copy_within(1.., 0);
+            len -= 1;
+            queue[len] = 0;
         }
         let issued = now + wait;
-        let newest = self.write_queue.iter().copied().max().unwrap_or(0);
+        let newest = if len == 0 { 0 } else { queue[len - 1] };
         let completion = (issued + Self::WRITE_QUEUE_FIRST).max(newest + Self::WRITE_QUEUE_PERIOD);
-        let free = self
-            .write_queue
-            .iter()
-            .position(|&slot| slot == 0)
-            .unwrap_or(3);
-        self.write_queue[free] = completion;
+        queue[len] = completion;
         self.ram_write_buffer_ready_cycle = completion;
         wait as u32
     }

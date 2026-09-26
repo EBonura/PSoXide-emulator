@@ -28,11 +28,16 @@ pub(super) const DRAM_REFRESH_CACHED_STALL_CYCLES: u32 = 8;
 pub(super) const DRAM_REFRESH_UNCACHED_STALL_CYCLES: u32 = 4;
 
 /// Arbitrate a pending main-RAM refresh request at the next CPU RAM access.
+#[inline(always)]
 pub(super) fn dram_refresh_wait(now: u64, next_deadline: &mut u64, stall_cycles: u32) -> u32 {
     if now < *next_deadline {
         return 0;
     }
+    dram_refresh_due(now, next_deadline, stall_cycles)
+}
 
+#[inline(never)]
+fn dram_refresh_due(now: u64, next_deadline: &mut u64, stall_cycles: u32) -> u32 {
     // Refresh requests are generated from an autonomous 515-clock divider,
     // but the memory controller arbitrates the transaction at a CPU RAM
     // access. Advance from the original divider phase so a late request never
