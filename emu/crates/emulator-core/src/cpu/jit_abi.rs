@@ -170,6 +170,10 @@ pub const NATIVE_BREAK: u32 = 1;
 pub const NATIVE_NEXT_BLOCK: u32 = 2;
 /// Exit: an op raised an exception; the PC is at its vector.
 pub const NATIVE_EXCEPTION: u32 = 3;
+/// Exit: stopped after a device access the batch may not go past
+/// ([`Cpu::device_step_quiet`]); the batch ends once that op's step is
+/// complete.
+pub const NATIVE_STOPPED: u32 = 4;
 
 /// Bytes from a block's entry to its chaining entry: the frame setup that a
 /// chained block (reached by a jump from another block's code) skips.
@@ -487,11 +491,14 @@ impl NativeRun {
 
 /// Run op `index` of the block, a CPU load or store, as the batch does:
 /// stop before it ([`NATIVE_STOP`], nothing changed) when the budget is
-/// spent, the clock would reach the limit, or the access is not a quiet
-/// one (main RAM or the scratchpad, aligned); otherwise the interpreter's
-/// batched step. Returns [`NATIVE_STOP`] after running it too when it was a
-/// store with interrupts enabled (the GTE hazard then needs RAM peeks the
-/// compiled code does not do).
+/// spent, the clock would reach the limit, or the access is one the batch
+/// cannot run (misaligned, KSEG2); otherwise the interpreter's
+/// batched step; a device access too, after which the batch goes on only
+/// if [`Cpu::device_step_quiet`] allows (else `status` becomes
+/// [`NATIVE_STOPPED`] and it returns [`NATIVE_STOP`] with the op run).
+/// Returns [`NATIVE_STOP`] after running it too when main RAM may no
+/// longer hold the block's words with interrupts enabled (the GTE hazard
+/// then needs RAM peeks the compiled code does not do).
 ///
 /// # Safety
 /// `run` must be the state of a running compiled prefix and `index` one of
@@ -501,14 +508,26 @@ pub unsafe extern "C" fn jit_batch_memory(run: *mut NativeRun, index: u32) -> u3
     // SAFETY: per the contract, the pointers are live and unaliased here.
     let run = unsafe { &mut *run };
     let (cpu, bus) = unsafe { (&mut *run.cpu, &mut *run.bus) };
+    // The clock may move past the quiet span here, where the GPU's state
+    // matters: apply the decay compiled code deferred first.
+    bus.jit_settle_decay(std::mem::take(&mut run.decay));
     let op = unsafe { *run.ops.add(index as usize) };
     if run.ran >= run.budget_left || bus.cycles() + run.issue + 1 >= run.limit {
         return NATIVE_STOP;
     }
     let addr = cpu.gpr(op.rs).wrapping_add((op.word as i16) as i32 as u32);
-    if !crate::cpu::block::quiet_access(op.word, addr) {
+    let device = !crate::cpu::block::quiet_access(op.word, addr);
+    if device && !crate::cpu::block::device_access(op.word, addr) {
         return NATIVE_STOP;
     }
+    // A device may read the GPU or the timers: hand the deferred decay and
+    // the last branch boundary to the bus first.
+    let raised = if device {
+        run.flush_boundary(bus);
+        crate::cpu::block::irq_raise_total(bus)
+    } else {
+        0
+    };
     let pc = run.vaddr.wrapping_add(4 * index);
     cpu.tick = run.tick0 + run.ran;
     cpu.pc = pc;
@@ -541,6 +560,30 @@ pub unsafe extern "C" fn jit_batch_memory(run: *mut NativeRun, index: u32) -> u3
     let stored = matches!(op.class, crate::cpu::block::OpClass::Store);
     run.ram_ok =
         u32::from(ram_ok || (stored && run.ram_ok != 0 && !store_hits_block(run, addr, 4)));
+    if device {
+        // SAFETY: the batch state outlives the native run.
+        let st = unsafe { &mut *run.batch };
+        if !cpu.device_step_quiet(bus, addr, raised, st) {
+            run.status = NATIVE_STOPPED;
+            run.shadow_from(cpu);
+            match cpu.pending_load.take() {
+                Some((reg, value)) => {
+                    run.pend_reg = u32::from(reg);
+                    run.pend_val = value;
+                }
+                None => run.pend_reg = 0,
+            }
+            return NATIVE_STOP;
+        }
+        // What the access may have changed: the limits (just taken again),
+        // the boundary's quiet clock, the interrupt lines, and RAM under
+        // the block (a DMA).
+        run.limit = st.limit;
+        run.boundary_until = bus.boundary_quiet_until();
+        run.slow_boundary |= u32::from(bus.irq().pending());
+        run.ram_ok =
+            u32::from(run.irq_enabled != 0 && cpu.block_ram_matches(bus, run.block as usize - 1));
+    }
     run.shadow_from(cpu);
     match cpu.pending_load.take() {
         Some((reg, value)) => {
@@ -549,7 +592,7 @@ pub unsafe extern "C" fn jit_batch_memory(run: *mut NativeRun, index: u32) -> u3
         }
         None => run.pend_reg = 0,
     }
-    if !ram_ok && run.irq_enabled != 0 {
+    if run.ram_ok == 0 && run.irq_enabled != 0 {
         NATIVE_STOP
     } else {
         NATIVE_CONTINUE
@@ -571,6 +614,9 @@ pub unsafe extern "C" fn jit_batch_other(run: *mut NativeRun, index: u32) -> u32
     // SAFETY: per the contract, the pointers are live and unaliased here.
     let run = unsafe { &mut *run };
     let (cpu, bus) = unsafe { (&mut *run.cpu, &mut *run.bus) };
+    // The clock may move past the quiet span here, where the GPU's state
+    // matters: apply the decay compiled code deferred first.
+    bus.jit_settle_decay(std::mem::take(&mut run.decay));
     let op = unsafe { *run.ops.add(index as usize) };
     if run.ran >= run.budget_left || bus.cycles() + run.issue + 1 >= run.limit {
         return NATIVE_STOP;
@@ -629,6 +675,9 @@ pub unsafe extern "C" fn jit_ram_load(run: *mut NativeRun, addr: u32, word: u32)
     // SAFETY: per the contract, the pointers are live and unaliased here.
     let run = unsafe { &mut *run };
     let (cpu, bus) = unsafe { (&mut *run.cpu, &mut *run.bus) };
+    // The clock may move past the quiet span here, where the GPU's state
+    // matters: apply the decay compiled code deferred first.
+    bus.jit_settle_decay(std::mem::take(&mut run.decay));
     bus.advance_quiet(run.issue);
     run.issue = 0;
     let value = match word >> 26 {
@@ -658,6 +707,9 @@ pub unsafe extern "C" fn jit_ram_store32(run: *mut NativeRun, addr: u32, value: 
     // SAFETY: per the contract, the pointers are live and unaliased here.
     let run = unsafe { &mut *run };
     let (cpu, bus) = unsafe { (&mut *run.cpu, &mut *run.bus) };
+    // The clock may move past the quiet span here, where the GPU's state
+    // matters: apply the decay compiled code deferred first.
+    bus.jit_settle_decay(std::mem::take(&mut run.decay));
     bus.advance_quiet(run.issue);
     run.issue = 0;
     bus.cpu_ram_store32(addr, value);

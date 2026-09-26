@@ -322,7 +322,7 @@ impl Cpu {
     /// caller drops its RAM check. The branch-boundary work reads the rest
     /// afresh each time.
     #[inline(never)]
-    fn device_step_quiet(
+    pub(in crate::cpu) fn device_step_quiet(
         &mut self,
         bus: &Bus,
         addr: u32,
@@ -752,6 +752,10 @@ impl Cpu {
             crate::cpu::jit_abi::NATIVE_NEXT_BLOCK => return Some(NativeExit::Resume),
             _ => {}
         }
+        // After a device access the batch may not go past, it ends once
+        // the op's step is finished (the branch-boundary work too, when it
+        // was a delay slot).
+        let stopped = run.status == crate::cpu::jit_abi::NATIVE_STOPPED;
         if run.status == crate::cpu::jit_abi::NATIVE_EXCEPTION {
             // The helper left the PC at the vector (and the cursor cleared).
             self.native_retired(&run, st);
@@ -774,8 +778,8 @@ impl Cpu {
             // It ran the whole block (stopping after its last op): finish it
             // as the batch loop would.
             return Some(match self.native_block_done(bus, &run, st) {
-                Some(_) => NativeExit::Resume,
-                None => NativeExit::Break,
+                Some(_) if !stopped => NativeExit::Resume,
+                _ => NativeExit::Break,
             });
         }
         self.native_retired(&run, st);
@@ -791,7 +795,11 @@ impl Cpu {
             self.pending_pc = (run.taken != 0).then_some(run.target);
             self.branch_delay_next = true;
         }
-        Some(NativeExit::Resume)
+        Some(if stopped {
+            NativeExit::Break
+        } else {
+            NativeExit::Resume
+        })
     }
 
     /// One batched step of `op` at `pc` after its checks (budget, clock
@@ -887,7 +895,7 @@ impl Cpu {
 
 /// Interrupts raised so far, all sources.
 #[inline(always)]
-fn irq_raise_total(bus: &Bus) -> u64 {
+pub(in crate::cpu) fn irq_raise_total(bus: &Bus) -> u64 {
     bus.irq().raise_counts().iter().sum()
 }
 
@@ -896,6 +904,13 @@ fn irq_raise_total(bus: &Bus) -> u64 {
 #[inline(always)]
 pub(in crate::cpu) fn quiet_access(word: u32, addr: u32) -> bool {
     matches!(tier_access_kind(word, addr), Access::Quiet)
+}
+
+/// Whether a batched load or store of `word` to `addr` goes to a device
+/// (I/O, BIOS, expansion): not quiet, but one the batch may run.
+#[inline(always)]
+pub(in crate::cpu) fn device_access(word: u32, addr: u32) -> bool {
+    matches!(tier_access_kind(word, addr), Access::Device)
 }
 
 #[inline(always)]
