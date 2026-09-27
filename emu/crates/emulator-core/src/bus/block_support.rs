@@ -253,13 +253,13 @@ impl Bus {
 
     /// Settle a batch's clock: the bus clock was last advanced properly at
     /// `synced` and has since only been set ([`Bus::batch_ram_load`],
-    /// [`Bus::batch_ram_store`]); charge the cycles up to `now` as one quiet
-    /// advance ([`Bus::advance_quiet`] is additive below the quiet limit, so
-    /// the GPU credit decays exactly as it would have step by step).
+    /// [`Bus::batch_ram_store`]); charge the cycles up to `now`. Issued
+    /// instructions stay below the quiet limit, but the final load's stall
+    /// may cross it, so use the exact advance rather than a quiet assertion.
     #[inline(always)]
     pub(crate) fn batch_settle(&mut self, synced: u64, now: u64) {
         self.cycles = synced;
-        self.advance_quiet(now - synced);
+        self.advance_cycles((now - synced) as u32);
     }
 
     /// A CPU load from main RAM at `virt` at clock `now`, inside a quiet
@@ -318,6 +318,29 @@ impl Bus {
             _ => value,
         };
         (value, stalls, self.take_ram_load_from_cached_code())
+    }
+
+    /// Whether a RAM store at `now` completes before the batch boundary.
+    /// Preview the same queue and refresh waits as `ram_write_stalls`
+    /// without issuing the store. Crossing stores must advance devices
+    /// before touching RAM, since GPU DMA can read the old word meanwhile.
+    #[inline(always)]
+    pub(crate) fn batch_ram_store_fits(&self, now: u64, virt: u32, limit: u64) -> bool {
+        // Sorted occupied slots followed by zeros: only a full queue whose
+        // oldest entry has not landed can block this store.
+        let queue_wait = if self.write_queue[3] != 0 {
+            self.write_queue[0].saturating_sub(now) as u32
+        } else {
+            0
+        };
+        let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
+            memory_timing::DRAM_REFRESH_UNCACHED_STALL_CYCLES
+        } else {
+            memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES
+        };
+        let mut deadline = self.dram_refresh_deadline;
+        let refresh_wait = memory_timing::dram_refresh_wait(now, &mut deadline, refresh_stall);
+        now.saturating_add(u64::from(queue_wait.saturating_add(refresh_wait))) < limit
     }
 
     /// A batched store to main RAM (`handler`: the primary opcode of SB, SH
@@ -383,8 +406,12 @@ impl Bus {
     #[allow(dead_code)]
     #[inline(always)]
     pub(crate) fn cpu_ram_store32(&mut self, virt: u32, value: u32) {
-        let stall = self.batch_ram_store(self.cycles, virt, value, 4);
+        self.data_bus_latch = value;
+        let stall = self.ram_write_stalls(virt);
         self.add_cycles(stall);
+        let offset = (to_physical(virt) as usize) % memory::ram::SIZE;
+        self.ram[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        self.ram_pages.touch(offset);
     }
 
     /// A stamp of the RAM pages holding bytes `offset..offset + len`
