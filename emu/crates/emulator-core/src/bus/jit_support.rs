@@ -44,9 +44,12 @@ impl Bus {
         }
         if let Some(list) = self.experimental_gpu_list.as_mut() {
             self.gpu.decay_busy_quiet(n);
-            list.setup_cycles = list
-                .setup_cycles
-                .saturating_sub(n.min(u64::from(u32::MAX)) as u32);
+            // DPCR pauses the list sequencer, but not GPU execution credit.
+            if list.setup_cycles != 0 && self.dma.is_channel_enabled(2) {
+                list.setup_cycles = list
+                    .setup_cycles
+                    .saturating_sub(n.min(u64::from(u32::MAX)) as u32);
+            }
         } else {
             self.gpu.decay_busy(n);
         }
@@ -55,5 +58,67 @@ impl Bus {
     /// Main RAM's bytes, for compiled code's look at the next instruction.
     pub fn jit_ram_ptr(&self) -> *const u8 {
         self.ram.as_ptr()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jit_decay_preserves_paused_gpu_list_setup() {
+        let make = || {
+            let mut bus = Bus::new_without_bios();
+            bus.gpu.enable_experimental_dma_fifo();
+            bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+            bus.write32(0x300, 0x01ff_ffff);
+            bus.write32(0x304, 0);
+            bus.dma.dpcr = 1 << (2 * 4 + 3);
+            bus.dma.channels[2].base = 0x300;
+            bus.dma.channels[2].channel_control = 0x0100_0401;
+            bus.run_dma_channel(2);
+            bus.add_cycles(1);
+            assert_eq!(bus.experimental_gpu_list.as_ref().unwrap().setup_cycles, 15);
+            bus.write32(Dma::BASE + Dma::DPCR_OFFSET, 0);
+            bus
+        };
+        let mut native = make();
+        let mut reference = make();
+        let advance = |native: &mut Bus, reference: &mut Bus, cycles: u64| {
+            assert!(cycles == 0 || native.cycles + cycles < native.quiet_limit());
+            // Native code advances this clock itself, then settles credits
+            // before the next external observation or MMIO operation.
+            native.cycles += cycles;
+            native.jit_settle_decay(cycles);
+            for _ in 0..cycles {
+                reference.cycles += 1;
+                reference.gpu.decay_busy(1);
+                reference.advance_experimental_gpu_list();
+            }
+            assert!(
+                postcard::to_allocvec(native).unwrap() == postcard::to_allocvec(reference).unwrap(),
+                "batch {cycles}: setup {:?} vs {:?}",
+                native
+                    .experimental_gpu_list
+                    .as_ref()
+                    .map(|l| l.setup_cycles),
+                reference
+                    .experimental_gpu_list
+                    .as_ref()
+                    .map(|l| l.setup_cycles)
+            );
+        };
+        for cycles in [0, 1, 2, 7, 32, 128] {
+            advance(&mut native, &mut reference, cycles);
+        }
+        native.write32(Dma::BASE + Dma::DPCR_OFFSET, 1 << (2 * 4 + 3));
+        reference.write32(Dma::BASE + Dma::DPCR_OFFSET, 1 << (2 * 4 + 3));
+        for cycles in [0, 1, 2, 7, 5] {
+            advance(&mut native, &mut reference, cycles);
+        }
+        assert_eq!(
+            native.experimental_gpu_list.as_ref().unwrap().setup_cycles,
+            0
+        );
     }
 }
