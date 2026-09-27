@@ -11,6 +11,10 @@
 //! `designs/psoxide-jit.md` of the perf workspace.
 
 pub mod a64;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod codebuf;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[path = "codebuf_unavailable.rs"]
 mod codebuf;
 pub mod decode;
 mod ops;
