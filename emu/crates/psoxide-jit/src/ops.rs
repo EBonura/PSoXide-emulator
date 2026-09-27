@@ -33,6 +33,15 @@ pub(crate) fn emit_alu(a: &mut Asm, alu: Alu, word: u32) {
     let sa = (word >> 6) & 0x1F;
     let imm = word & 0xFFFF;
     let simm = (word as i16) as i32 as u32;
+    let dest = match alu {
+        Alu::Addiu | Alu::Slti | Alu::Sltiu | Alu::Andi | Alu::Ori | Alu::Xori | Alu::Lui => rt,
+        _ => rd,
+    };
+    // Every operation here is nontrapping. Its issue cycle, load shadow,
+    // and delayed-load commit still run in the caller, even for a NOP.
+    if dest == 0 {
+        return;
+    }
     match alu {
         Alu::Sll | Alu::Srl | Alu::Sra => {
             load_reg(a, 10, rt);
