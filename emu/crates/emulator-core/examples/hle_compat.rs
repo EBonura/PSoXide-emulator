@@ -467,6 +467,9 @@ fn run_hle(
             path.display()
         );
     }
+    if std::env::var("PSOXIDE_JIT").is_ok_and(|value| value == "1") {
+        let _ = psoxide_jit::install_tier(&mut cpu);
+    }
     let cd_log = cd_log_cap();
     if let Some(cap) = cd_log {
         bus.cdrom.enable_command_log(cap);

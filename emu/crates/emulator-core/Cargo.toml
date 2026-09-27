@@ -20,6 +20,8 @@ serde        = { workspace = true, features = ["std"] }
 serde_bytes  = { workspace = true }
 
 [dev-dependencies]
+# Optional native-tier validation in hle_compat (PSOXIDE_JIT=1).
+psoxide-jit = { path = "../psoxide-jit" }
 # Whole-machine state comparison in the block-cache lockstep checker.
 postcard = { workspace = true }
 psx-spu = { path = "../../../sdk/crates/psx-spu" }
