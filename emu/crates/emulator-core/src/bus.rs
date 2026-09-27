@@ -2582,7 +2582,9 @@ impl Bus {
             self.mdec.set_dma_in_waiting(false);
             return;
         }
-        if self.mdec.dma_in_request() {
+        // A request raised while DPCR pauses DMA0 must keep its parked
+        // kick. The start helper cannot transfer while the channel is off.
+        if self.mdec.dma_in_request() && self.dma.is_channel_enabled(0) {
             self.start_mdec_in_dma();
         }
     }
@@ -6080,6 +6082,27 @@ mod tests {
         assert_eq!(bus.mdec.params_seen(), 0);
 
         // An enable written afterwards raises the request and frees it.
+        bus.write32(crate::mdec::MDEC_CTRL_STAT, 0x6000_0000);
+        assert_eq!(bus.mdec.params_seen(), 32);
+        bus.tick(1000);
+        assert_eq!(bus.dma.channels[0].channel_control & (1 << 24), 0);
+    }
+
+    #[test]
+    fn mdec_parked_request_survives_disabled_dma_channel() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        enable_mdec_dma(&mut bus);
+        bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x6000_0000);
+        bus.dma.channels[0].base = 0x100;
+        bus.dma.channels[0].block_control = 0x0001_0020;
+        bus.dma.channels[0].channel_control = 0x0100_0201;
+        bus.run_dma_channel(0);
+        assert!(bus.mdec.dma_in_waiting());
+        bus.write32(Dma::BASE + Dma::DPCR_OFFSET, 0);
+        bus.write32(crate::mdec::MDEC_CTRL_STAT, 0x6000_0000);
+        assert_eq!(bus.mdec.params_seen(), 0);
+        assert!(bus.mdec.dma_in_waiting(), "DPCR must not erase the parked kick");
+        bus.write32(Dma::BASE + Dma::DPCR_OFFSET, (1 << 3) | (1 << 7));
         bus.write32(crate::mdec::MDEC_CTRL_STAT, 0x6000_0000);
         assert_eq!(bus.mdec.params_seen(), 32);
         bus.tick(1000);
