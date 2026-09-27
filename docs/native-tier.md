@@ -12,8 +12,8 @@ cargo build --release -p frontend --features native-jit
 ```
 
 This also enables the tier for headless `launch` commands. Set
-`PSOXIDE_JIT=0` to use only the interpreter in the same binary. Hosts without
-an AArch64 backend or executable-memory support use the interpreter. The
+`PSOXIDE_JIT=0` to use only the interpreter in the same binary. The executable-memory backend supports macOS and Linux AArch64. Other
+hosts, or hosts where executable memory cannot be mapped, use the interpreter. The
 feature does not enable native code in WebAssembly builds.
 
 A fresh compiler is installed when a machine boots and when a save state is
