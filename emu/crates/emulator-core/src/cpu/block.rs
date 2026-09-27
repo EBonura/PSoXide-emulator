@@ -238,15 +238,25 @@ pub(super) struct Cursor {
     pub cache_control: u32,
 }
 
+mod tier;
+pub(in crate::cpu) use tier::{device_access, irq_raise_total, quiet_access};
+pub use tier::{tier_batch, BatchState, BlockCompiler, NATIVE_DECLINED};
+
 /// Decoded blocks, indexed by the physical word they start at.
 #[derive(Default)]
 pub struct BlockCache {
+    /// The native tier, if one is installed ([`Cpu::set_block_compiler`]).
+    compiler: Option<Box<dyn BlockCompiler>>,
     /// Per RAM word: block index plus one, zero for none. Allocated on
     /// first use (zeroed pages cost nothing until touched).
     slots: Vec<u32>,
     blocks: Vec<Block>,
     /// Blocks built (or rebuilt) since creation. Diagnostic.
     pub built: u64,
+    /// Changes to which block a slot holds (builds and clears): compiled
+    /// code linked to a block at one count is still linked to it while
+    /// this and the I-cache epoch are unchanged.
+    link_gen: u64,
 }
 
 impl BlockCache {
@@ -260,6 +270,7 @@ impl BlockCache {
     pub fn clear(&mut self) {
         self.slots = Vec::new();
         self.blocks.clear();
+        self.link_gen += 1;
     }
 
     /// Number of blocks held.
@@ -304,6 +315,23 @@ impl Cpu {
     #[doc(hidden)]
     pub fn block_ram_check(&mut self, bus: &Bus, index: u32) -> bool {
         self.block_ram_matches(bus, index as usize)
+    }
+
+    /// Install (or remove) the native tier. Blocks already decoded lose
+    /// their native code, so compiled code from an earlier compiler is
+    /// never entered again.
+    #[doc(hidden)]
+    pub fn set_block_compiler(&mut self, compiler: Option<Box<dyn BlockCompiler>>) {
+        self.blocks.compiler = compiler;
+        for block in &mut self.blocks.blocks {
+            block.native = 0;
+        }
+    }
+
+    /// Whether a native tier is installed.
+    #[doc(hidden)]
+    pub fn has_block_compiler(&self) -> bool {
+        self.blocks.compiler.is_some()
     }
 }
 
@@ -593,6 +621,7 @@ impl Cpu {
         }
         block.checked_epoch = self.instruction_cache.epoch();
         self.blocks.built += 1;
+        self.blocks.link_gen += 1;
         Some(match reuse {
             Some(index) => {
                 self.blocks.blocks[index as usize] = block;
@@ -871,6 +900,9 @@ impl Cpu {
     /// Callers must not need to look at the machine between these steps.
     #[inline(never)]
     pub(super) fn run_fast(&mut self, bus: &mut Bus, budget: u64, until_cycle: u64) -> u64 {
+        if self.blocks.compiler.is_some() {
+            return self.run_tiered(bus, budget, until_cycle);
+        }
         if self.cursor.block == 0 || self.cursor.pc != self.pc {
             self.cursor.block = 0;
             if !(self.block_entry_ok() && self.enter_block(bus, self.pc)) {

@@ -9,6 +9,8 @@ publish = false
 [features]
 # The standalone frontend has no editor dependency.
 default = []
+# AArch64 native tier, with PSOXIDE_JIT=0 as a runtime off switch.
+native-jit = ["dep:psoxide-jit"]
 # `mcp` (native-only) embeds a live MCP debug server (official `rmcp` SDK over
 # streamable HTTP) inside the running GUI, so an agent can drive the emulator:
 # screenshot, read/write RAM+VRAM, step/run frames, toggle wireframe, save/load
@@ -51,6 +53,7 @@ web-time   = "1.1"
 # The browser frontend uses the Web Gamepad API and browser file inputs instead.
 # `cpal` builds on both: native host audio here, WebAudio backend in the wasm table.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+psoxide-jit = { path = "../psoxide-jit", optional = true }
 cpal  = { workspace = true }
 gilrs = { workspace = true }
 rfd   = { workspace = true }

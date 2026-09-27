@@ -58,6 +58,11 @@ impl RamPages {
         }
     }
 
+    /// The write counts, one per page.
+    pub(crate) fn counts_ptr(&self) -> *const u32 {
+        self.counts.as_ptr()
+    }
+
     /// Write count of the page holding RAM byte offset `offset`.
     #[inline(always)]
     pub(crate) fn count(&self, offset: usize) -> u32 {
@@ -102,6 +107,70 @@ impl Bus {
     /// Move the clock `n` cycles with no drain, as ticks and memory stalls
     /// do before the next step's drain. Batches issue cycles of steps that
     /// stay below [`Bus::quiet_limit`].
+    /// The two parts of [`Bus::quiet_limit`]: the hard limit, the next
+    /// scheduler event or SPU sample (or the current cycle while a limit
+    /// oracle freezes the clock or GPU DMA waits for its request), which a
+    /// batch must not reach; and the soft limit, the end of the GPU's quiet
+    /// span (`u64::MAX` when there is none). Past the soft limit the clock
+    /// is still exact when advanced one step at a time: a GPU list walk or
+    /// FIFO drain then runs inside `advance_cycles` just as it would under
+    /// per-instruction ticks, as long as no step reaches the hard limit.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn quiet_limits(&self) -> (u64, u64) {
+        if self.limits.frozen() || self.gpu_dma_waiting_for_request {
+            return (self.cycles, self.cycles);
+        }
+        let hard = self.scheduler.lowest_target().min(self.spu_sample_deadline);
+        let soft = if self.experimental_gpu_list.is_some() {
+            let quiet_until = if self.gpu_quiet_until > self.cycles {
+                self.gpu_quiet_until
+            } else {
+                self.cycles
+                    .saturating_add(u64::from(self.gpu_list_quiet_cycles(u32::MAX)))
+            };
+            quiet_until.saturating_add(1)
+        } else if !self.gpu.decay_is_plain() {
+            self.cycles.saturating_add(self.gpu.fifo_quiet_cycles())
+        } else {
+            u64::MAX
+        };
+        (hard, soft)
+    }
+
+    /// Advance the clock by `n` with the ordinary (exact) path, for a batch
+    /// stepping past the soft limit of [`Bus::quiet_limits`] one step at a
+    /// time.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn advance_exact(&mut self, n: u64) {
+        self.advance_cycles(n as u32);
+    }
+
+    /// The clock below which a branch boundary's drain has nothing to do
+    /// ([`Bus::post_op_quiet`] would hold): the next scheduler event, SPU
+    /// sample, timer crossing and CD-ROM deadline; 0 while a limit oracle
+    /// waits to start. Holds until an access to a device, a drain or a
+    /// clock change past it.
+    #[inline(always)]
+    pub(crate) fn boundary_quiet_until(&self) -> u64 {
+        if self.limits.pending() {
+            return 0;
+        }
+        self.scheduler
+            .lowest_target()
+            .min(self.spu_sample_deadline)
+            .min(self.timers.quiet_until())
+            .min(self.cdrom.idle_until().saturating_add(1))
+    }
+
+    /// Record a branch boundary at `cycle` whose drain had nothing to do,
+    /// as [`Bus::post_op_quiet`] does when it passes.
+    #[inline(always)]
+    pub(crate) fn note_post_op_cycle(&mut self, cycle: u64) {
+        self.last_post_op_cycle = cycle;
+    }
+
     #[doc(hidden)]
     #[inline(always)]
     pub fn advance_quiet(&mut self, n: u64) {
