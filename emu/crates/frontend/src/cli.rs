@@ -927,6 +927,8 @@ fn run_headless_launch(
         }
     }
 
+    crate::install_native_tier(&mut cpu);
+
     if args.cd_command_log.is_some() {
         bus.cdrom.enable_command_log(65_536);
     }

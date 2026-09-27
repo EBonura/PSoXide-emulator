@@ -27,6 +27,7 @@ pub mod block;
 mod branch;
 mod icache;
 mod idle;
+pub mod jit_abi;
 mod timing;
 
 use block::{BlockCache, Cursor, DecodedOp, OpClass};
