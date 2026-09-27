@@ -1002,20 +1002,19 @@ impl Cpu {
                     break 'blocks;
                 }
                 // A store cannot become visible before a DMA fetch that
-                // falls in its write-buffer or refresh wait.
-                if op.class == OpClass::Store
-                    && Self::batch_simple(op, access)
-                    && !bus.batch_ram_store_fits(b.now + 1, addr, b.limit)
-                {
-                    break 'blocks;
-                }
+                // falls in its write-buffer or refresh wait. Execute crossing
+                // stores through the already-fetched fallback: leaving here
+                // would fetch again after a streaming refill already advanced.
+                let simple = Self::batch_simple(op, access)
+                    && (op.class != OpClass::Store
+                        || bus.batch_ram_store_fits(b.now + 1, addr, b.limit));
                 b.watch = None;
                 if let Some((at_cycle, watch)) = sample {
                     bus.record_post_op(at_cycle);
                     b.watch = watch;
                 }
                 let branch_after_this = if delay { b.taken.take() } else { None };
-                if Self::batch_simple(op, access) {
+                if simple {
                     batch_step!(self, bus, op, addr, b.now, b.pend.0, b.pend.1, b.shadow, b.taken,
                         b.ram_ok, b.block_ram, b.fetch_hit, b.after_branch, b.done, b.pc, true);
                 } else {
