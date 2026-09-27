@@ -153,12 +153,14 @@ impl BlockCompiler for TierCompiler {
             &cells[0] as *const LinkCell as u64,
             &cells[1] as *const LinkCell as u64,
         ];
-        self.cells.push(cells);
         let asm = emit(block, &steps, cell_addrs);
         let Some(entry) = self.code.install(&asm.code) else {
             stats.declined += 1;
             return 0;
         };
+        // Only installed code can reference these cells. In particular,
+        // a full code buffer must not retain cells on every later retry.
+        self.cells.push(cells);
         stats.compiled += 1;
         stats.ops += steps.len() as u64;
         stats.code_bytes += asm.code.len() as u64 * 4;
@@ -800,4 +802,31 @@ fn emit_commit_taken(a: &mut Asm) {
     let none = a.cbz_w(W_OLD_REG);
     a.str_w_idx4(W_OLD_VAL, X_GPRS, W_OLD_REG);
     a.bind(none);
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_code_buffer_does_not_retain_link_cells() {
+        let (mut cpu, mut bus) = crate::testgen::machine(&[0x2508_0001, 0x0800_4000, 0], &[]);
+        for _ in 0..32 {
+            cpu.step(&mut bus).unwrap();
+        }
+        let index = cpu.block_find(&bus, crate::testgen::CODE_BASE).unwrap();
+        let mut compiler = TierCompiler {
+            // Too small for even a native prologue. Repeated attempts are
+            // what a hot block rebuilt after an I-cache refill would do.
+            code: CodeBuffer::new(16).expect("executable memory"),
+            emitted: std::collections::HashMap::new(),
+            cells: Vec::new(),
+            stats: std::sync::Arc::default(),
+        };
+        for _ in 0..32 {
+            assert_eq!(compiler.compile(cpu.block_get(index)), 0);
+            assert!(compiler.cells.is_empty());
+        }
+        assert_eq!(compiler.stats.lock().unwrap().declined, 32);
+    }
 }
