@@ -760,6 +760,9 @@ pub unsafe extern "C" fn jit_gte_hazard(run: *mut NativeRun, index: u32) -> u32 
     };
     let watched = cpu.gte_irq_watch == Some(pc);
     if watched || next_gte {
+        // The sample records a newer post-op boundary and can move the GPU.
+        // Settle prior native boundaries and decay before either happens.
+        run.flush_boundary(bus);
         if !cpu.batch_gte_sample(bus, &mut run.issue) {
             return NATIVE_STOP;
         }
@@ -785,4 +788,59 @@ fn store_hits_block(run: &NativeRun, addr: u32, len: u32) -> bool {
     let end = start + 4 * (n + 1);
     let lo = (phys % size) & !3;
     lo < end && lo + len > start
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::block::{op_flags, BatchState, DecodedOp, OpClass};
+
+    #[test]
+    fn gte_sample_preserves_newer_post_op_boundary() {
+        let mut expected = Bus::new_without_bios();
+        let mut bus = Bus::new_without_bios();
+        let mut cpu = Cpu::new();
+        for b in [&mut expected, &mut bus] {
+            b.tick(10);
+            b.drain_scheduler_events_post_op();
+        }
+        expected.note_post_op_cycle(5);
+        let mut expected_issue = 2;
+        assert!(cpu.batch_gte_sample(&mut expected, &mut expected_issue));
+        let mut batch = BatchState {
+            issue: 0,
+            done: 0,
+            budget: 100,
+            uncounted: 0,
+            hard: u64::MAX,
+            limit: u64::MAX,
+            until_cycle: u64::MAX,
+            refetch: false,
+        };
+        let op = DecodedOp {
+            word: 0,
+            class: OpClass::Alu,
+            flags: op_flags::NEXT_GTE,
+            rs: 0,
+            rt: 0,
+            handler: 0x40,
+        };
+        let mut run = NativeRun::new(&mut cpu, &mut bus, &mut batch);
+        run.ops = &op;
+        run.op_count = 1;
+        run.ram_ok = 1;
+        run.last_boundary = 5;
+        run.issue = 2;
+        // SAFETY: every pointer in run refers to live, exclusive local state.
+        assert_eq!(unsafe { jit_gte_hazard(&mut run, 0) }, NATIVE_CONTINUE);
+        run.flush_boundary(&mut bus);
+        // GP1 timing writes settle lazy timers at that recorded boundary.
+        expected.write32(0x1f80_1814, 0x0800_0001);
+        bus.write32(0x1f80_1814, 0x0800_0001);
+        assert_eq!(
+            bus.timers.last_advance_cycle(),
+            expected.timers.last_advance_cycle()
+        );
+        assert!(postcard::to_allocvec(&bus).unwrap() == postcard::to_allocvec(&expected).unwrap());
+    }
 }
