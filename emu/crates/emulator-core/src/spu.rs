@@ -2209,6 +2209,9 @@ impl Spu {
         //    **suppressed** from the audible mix -- matches Redux's
         //    `if (FMod == 2) iFMod[ns] = sval; else { SSumL/R += ... }`
         //    branch (`spu.cc:689`).
+        // Each accumulator receives at most 24 i16 voice samples and one
+        // Q15-scaled i16 CD sample: its magnitude is at most 25 * 32768.
+        // i32 addition is exact here; final output saturation stays below.
         let mut sum_l: i32 = 0;
         let mut sum_r: i32 = 0;
         let mut reverb_in_l: i32 = 0;
@@ -2234,11 +2237,11 @@ impl Spu {
             }
             let is_modulator = v + 1 < NUM_VOICES && (self.pmon & (1 << (v + 1))) != 0;
             if !is_modulator {
-                sum_l = sum_l.saturating_add(l as i32);
-                sum_r = sum_r.saturating_add(r as i32);
+                sum_l += l as i32;
+                sum_r += r as i32;
                 if self.reverb_on & (1 << v) != 0 {
-                    reverb_in_l = reverb_in_l.saturating_add(l as i32);
-                    reverb_in_r = reverb_in_r.saturating_add(r as i32);
+                    reverb_in_l += l as i32;
+                    reverb_in_r += r as i32;
                 }
             }
         }
@@ -2267,12 +2270,12 @@ impl Spu {
             cd_cap_l = cl;
             cd_cap_r = cr;
             if self.spucnt & SPUCNT_CD_AUDIO_ENABLE != 0 {
-                sum_l = sum_l.saturating_add(cl);
-                sum_r = sum_r.saturating_add(cr);
+                sum_l += cl;
+                sum_r += cr;
             }
             if self.spucnt & SPUCNT_CD_REVERB_ENABLE != 0 {
-                reverb_in_l = reverb_in_l.saturating_add(cl);
-                reverb_in_r = reverb_in_r.saturating_add(cr);
+                reverb_in_l += cl;
+                reverb_in_r += cr;
             }
         }
         // External-audio input is not wired (no hardware source
