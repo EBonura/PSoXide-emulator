@@ -2384,33 +2384,7 @@ impl Bus {
         }
         // Run only the channel whose CHCR was just written.
         match ch {
-            0 => {
-                if let Some(mdec_words) = self.run_dma_mdec_in() {
-                    if crate::env_flag!("PSOXIDE_TRACE_MDEC_DMA") {
-                        eprintln!(
-                            "[mdec-dma] input accepted cycle={} words={mdec_words} command={:#010x} state={:?} rle={} next={:?} out_ready={} wait_for_out={}",
-                            self.cycles,
-                            self.mdec.command_history().last().copied().unwrap_or(0),
-                            self.mdec.state(),
-                            self.mdec.queued_rle_halfwords(),
-                            self.mdec.next_rle_halfword(),
-                            self.mdec.output_ready(),
-                            self.mdec.decode_dma0_waits_for_output()
-                        );
-                    }
-                    if self.mdec.decode_dma0_waits_for_output() {
-                        self.try_schedule_ready_mdec_out();
-                    } else {
-                        let target = self.cycles + mdec_words as u64;
-                        self.log_dma_schedule("MdecIn", mdec_words as u64, target);
-                        self.scheduler.schedule(
-                            EventSlot::MdecInDma,
-                            self.cycles,
-                            mdec_words as u64,
-                        );
-                    }
-                }
-            }
+            0 => self.start_mdec_in_dma(),
             1 => {
                 self.try_schedule_ready_mdec_out();
             }
@@ -2548,6 +2522,82 @@ impl Bus {
         }
     }
 
+    /// Start a kicked DMA0 transfer into the MDEC, or park it until the
+    /// MDEC raises its data-in request (status bit 28). Silicon moves no
+    /// word without the request: a kick behind a lost enable waits forever
+    /// (hardware tests v1.26, sequence E: CHCR busy, 0 words moved).
+    fn start_mdec_in_dma(&mut self) {
+        use crate::scheduler::EventSlot;
+        if self.dma.is_channel_enabled(0)
+            && self.dma.channels[0].channel_control & (1 << 24) != 0
+            && !self.mdec.dma_in_request()
+        {
+            if crate::env_flag!("PSOXIDE_TRACE_MDEC_DMA") {
+                eprintln!(
+                    "[mdec-dma] input waits for the data-in request cycle={}",
+                    self.cycles
+                );
+            }
+            self.mdec.set_dma_in_waiting(true);
+            return;
+        }
+        self.mdec.set_dma_in_waiting(false);
+        if let Some(mdec_words) = self.run_dma_mdec_in() {
+            if crate::env_flag!("PSOXIDE_TRACE_MDEC_DMA") {
+                eprintln!(
+                    "[mdec-dma] input accepted cycle={} words={mdec_words} command={:#010x} state={:?} rle={} next={:?} out_ready={} wait_for_out={}",
+                    self.cycles,
+                    self.mdec.command_history().last().copied().unwrap_or(0),
+                    self.mdec.state(),
+                    self.mdec.queued_rle_halfwords(),
+                    self.mdec.next_rle_halfword(),
+                    self.mdec.output_ready(),
+                    self.mdec.decode_dma0_waits_for_output()
+                );
+            }
+            if self.mdec.decode_dma0_waits_for_output() {
+                self.try_schedule_ready_mdec_out();
+            } else {
+                let target = self.cycles + mdec_words as u64;
+                self.log_dma_schedule("MdecIn", mdec_words as u64, target);
+                self.scheduler
+                    .schedule(EventSlot::MdecInDma, self.cycles, mdec_words as u64);
+            }
+        }
+    }
+
+    /// Re-check a DMA0 kick parked on the MDEC's data-in request after an
+    /// MDEC register write: an enable or a command can raise the request.
+    fn service_mdec_dma_request(&mut self) {
+        if !self.mdec.dma_in_waiting() {
+            return;
+        }
+        if self.dma.channels[0].channel_control & (1 << 24) == 0 {
+            self.mdec.set_dma_in_waiting(false);
+            return;
+        }
+        if self.mdec.dma_in_request() {
+            self.start_mdec_in_dma();
+        }
+    }
+
+    /// Cycles DMA1 takes per decoded word. 8 is Redux's model and the
+    /// default. `PSOXIDE_MDEC_OUT_CYCLES_PER_WORD` overrides it for player
+    /// experiments: silicon's MDEC throughput is not measured yet, and the
+    /// v1.26 FMV profile puts a whole frame's decode-plus-upload near 952k
+    /// cycles, several times what 8 gives. Diagnostic only, like
+    /// `PSOXIDE_WEDGE_DMA`.
+    fn mdec_out_cycles_per_word() -> u64 {
+        static CYCLES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *CYCLES.get_or_init(|| {
+            std::env::var("PSOXIDE_MDEC_OUT_CYCLES_PER_WORD")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(8)
+        })
+    }
+
     fn try_schedule_ready_mdec_out(&mut self) {
         use crate::scheduler::EventSlot;
 
@@ -2565,7 +2615,7 @@ impl Bus {
         if let Some(mdec_words) = self.run_dma_mdec_out() {
             // Redux's MDEC model schedules output DMA by byte count
             // multiplied by MDEC_BIAS=2.0, i.e. 8 cycles per 32-bit word.
-            let delay = mdec_words as u64 * 8;
+            let delay = mdec_words as u64 * Self::mdec_out_cycles_per_word();
             let target = self.cycles + delay;
             self.log_dma_schedule("MdecOut", delay, target);
             self.scheduler
@@ -3307,7 +3357,7 @@ impl Bus {
         }
         if crate::mdec::Mdec::contains(phys) {
             let aligned = phys & !3;
-            return (self.mdec.read32(aligned) >> ((phys & 3) * 8)) as u8;
+            return (self.mdec.read32_at(aligned, self.cycles) >> ((phys & 3) * 8)) as u8;
         }
         if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
             return self.io[(phys - memory::io::BASE) as usize];
@@ -3414,7 +3464,7 @@ impl Bus {
             return self.sio1.read32(phys) as u16;
         }
         if crate::mdec::Mdec::contains(phys) {
-            return (self.mdec.read32(phys & !3) >> ((phys & 2) * 8)) as u16;
+            return (self.mdec.read32_at(phys & !3, self.cycles) >> ((phys & 2) * 8)) as u16;
         }
         if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
             let off = (phys - memory::io::BASE) as usize;
@@ -3576,7 +3626,7 @@ impl Bus {
             return byte * 0x0101_0101;
         }
         if crate::mdec::Mdec::contains(phys) {
-            return self.mdec.read32(phys);
+            return self.mdec.read32_at(phys, self.cycles);
         }
 
         if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
@@ -3764,7 +3814,8 @@ impl Bus {
             return;
         }
         if crate::mdec::Mdec::contains(phys) {
-            self.mdec.write32(phys, value);
+            self.mdec.write32_at(phys, value, self.cycles);
+            self.service_mdec_dma_request();
             return;
         }
 
@@ -3950,7 +4001,8 @@ impl Bus {
             return true;
         }
         if crate::mdec::Mdec::contains(phys) {
-            self.mdec.write32(aligned, word);
+            self.mdec.write32_at(aligned, word, self.cycles);
+            self.service_mdec_dma_request();
             return true;
         }
         false
@@ -4142,7 +4194,8 @@ impl Bus {
             return;
         }
         if crate::mdec::Mdec::contains(phys) {
-            self.mdec.write32(phys & !3, value as u32);
+            self.mdec.write32_at(phys & !3, value as u32, self.cycles);
+            self.service_mdec_dma_request();
             return;
         }
         if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
@@ -5933,11 +5986,51 @@ mod tests {
         assert_eq!(read_ram_u32(&bus.ram[..], 0x200), 0x8888_8888);
     }
 
+    #[test]
+    fn mdec_dma0_waits_for_the_data_in_request() {
+        // Hardware tests v1.26, sequence E: with the enable lost, a table
+        // upload kicked over DMA0 moves nothing and CHCR stays busy.
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        enable_mdec_dma(&mut bus);
+        bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x6000_0000);
+        bus.dma.channels[0].base = 0x100;
+        bus.dma.channels[0].block_control = 0x0001_0020;
+        bus.dma.channels[0].channel_control = 0x0100_0201;
+        bus.run_dma_channel(0);
+        bus.tick(1000);
+        assert_ne!(bus.dma.channels[0].channel_control & (1 << 24), 0);
+        assert_eq!(bus.scheduler.target(EventSlot::MdecInDma), None);
+        assert_eq!(bus.mdec.params_seen(), 0);
+
+        // An enable written afterwards raises the request and frees it.
+        bus.write32(crate::mdec::MDEC_CTRL_STAT, 0x6000_0000);
+        assert_eq!(bus.mdec.params_seen(), 32);
+        bus.tick(1000);
+        assert_eq!(bus.dma.channels[0].channel_control & (1 << 24), 0);
+    }
+
+    #[test]
+    fn mdec_enable_written_right_behind_a_reset_is_lost() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        enable_mdec_dma(&mut bus);
+        bus.write32(crate::mdec::MDEC_CTRL_STAT, 0x8000_0000);
+        bus.write32(crate::mdec::MDEC_CTRL_STAT, 0x6000_0000);
+        // The swallowed word reads back until the reset completes.
+        assert_eq!(bus.read32(crate::mdec::MDEC_CTRL_STAT), 0x6000_0000);
+        assert!(!bus.mdec.dma_in_enabled());
+        bus.tick(100);
+        assert_eq!(bus.read32(crate::mdec::MDEC_CTRL_STAT), 0x8004_0000);
+        assert!(!bus.mdec.dma_in_enabled());
+    }
+
     fn enable_mdec_dma(bus: &mut Bus) {
         bus.dma.dpcr = (1 << 3) | (1 << 7);
     }
 
     fn seed_one_macroblock_decode(bus: &mut Bus) {
+        // Silicon feeds DMA0 only on the data-in request, which needs the
+        // enable.
+        bus.mdec.write32(crate::mdec::MDEC_CTRL_STAT, 0x6000_0000);
         bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x4000_0001);
         bus.mdec.dma_write_in(&[0x01_01_01_01; 32]);
         bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x3000_0006);
