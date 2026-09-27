@@ -1929,7 +1929,11 @@ impl Bus {
                 self.cycles = self.cycles.wrapping_add(n as u64);
                 self.gpu.decay_busy_quiet(u64::from(n));
                 if let Some(list) = self.experimental_gpu_list.as_mut() {
-                    list.setup_cycles = list.setup_cycles.saturating_sub(n);
+                    // A disabled DMA channel pauses the sequencer, including
+                    // its node setup delay. GPU credit still decays above.
+                    if list.setup_cycles != 0 && self.dma.is_channel_enabled(2) {
+                        list.setup_cycles = list.setup_cycles.saturating_sub(n);
+                    }
                 }
                 return;
             }
@@ -1973,7 +1977,9 @@ impl Bus {
                     self.cycles = self.cycles.wrapping_add(u64::from(quiet));
                     self.gpu.decay_busy_quiet(u64::from(quiet));
                     if let Some(list) = self.experimental_gpu_list.as_mut() {
-                        list.setup_cycles = list.setup_cycles.saturating_sub(quiet);
+                        if list.setup_cycles != 0 && self.dma.is_channel_enabled(2) {
+                            list.setup_cycles = list.setup_cycles.saturating_sub(quiet);
+                        }
                     }
                     left -= quiet;
                     continue;
@@ -5077,20 +5083,91 @@ mod tests {
     }
 
     #[test]
+    fn gpu_list_pause_and_cancel_match_reference_cycles() {
+        for before_pause in [1, 8, 16, 32, 80] {
+            for cancel in [false, true] {
+                let make = || {
+                    let mut bus = experimental_draw_burst(true);
+                    bus.run_dma_channel(2);
+                    bus
+                };
+                let mut batched = make();
+                let mut reference = make();
+                let advance_batched = |bus: &mut Bus, cycles: u32| {
+                    if cycles != 0 && bus.cycles + u64::from(cycles) < bus.quiet_limit() {
+                        bus.advance_quiet(u64::from(cycles));
+                    } else {
+                        bus.add_cycles(cycles);
+                    }
+                };
+                let advance_reference = |bus: &mut Bus, cycles: u32| {
+                    for _ in 0..cycles {
+                        bus.cycles = bus.cycles.wrapping_add(1);
+                        bus.gpu.decay_busy(1);
+                        bus.advance_experimental_gpu_list();
+                    }
+                };
+                advance_batched(&mut batched, before_pause);
+                advance_reference(&mut reference, before_pause);
+                assert!(reference.experimental_gpu_list.is_some());
+                let register = if cancel {
+                    Dma::BASE + 2 * 0x10 + 8
+                } else {
+                    Dma::BASE + Dma::DPCR_OFFSET
+                };
+                batched.write32(register, 0);
+                reference.write32(register, 0);
+                // Real MMIO writes invalidate the cached quiet window. Both
+                // recomputing that window and reusing it must preserve a paused
+                // setup countdown; clearing CHCR must instead cancel the walk.
+                for cycles in [0, 1, 2, 7, 32, 1024] {
+                    advance_batched(&mut batched, cycles);
+                    advance_reference(&mut reference, cycles);
+                    assert!(
+                        postcard::to_allocvec(&batched).unwrap()
+                            == postcard::to_allocvec(&reference).unwrap(),
+                        "pause at {before_pause}, cancel {cancel}, batch {cycles}, cycle {}: setup {:?} vs {:?}",
+                        reference.cycles,
+                        batched.experimental_gpu_list.as_ref().map(|l| l.setup_cycles),
+                        reference.experimental_gpu_list.as_ref().map(|l| l.setup_cycles)
+                    );
+                }
+                if !cancel {
+                    batched.write32(Dma::BASE + Dma::DPCR_OFFSET, 1 << (2 * 4 + 3));
+                    reference.write32(Dma::BASE + Dma::DPCR_OFFSET, 1 << (2 * 4 + 3));
+                    for cycles in [0, 1, 7, 16, 64, 50000] {
+                        advance_batched(&mut batched, cycles);
+                        advance_reference(&mut reference, cycles);
+                        assert!(
+                            postcard::to_allocvec(&batched).unwrap()
+                                == postcard::to_allocvec(&reference).unwrap(),
+                            "resumed after {before_pause}, batch {cycles}, cycle {}", reference.cycles
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn experimental_fifo_observes_dpcr_and_dreq_between_nodes() {
         let mut bus = linked_list_upload_fixture(false, true, 0);
         bus.gpu.enable_experimental_dma_fifo();
         bus.run_dma_channel(2);
         bus.tick(1); // header admitted
+        // These direct device pokes bypass MMIO cache invalidation.
         bus.dma.dpcr = 0;
+        bus.gpu_quiet_until = 0;
         bus.tick(1000);
         assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0);
         bus.dma.dpcr = 1 << (2 * 4 + 3);
         bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0000);
+        bus.gpu_quiet_until = 0;
         bus.tick(1000);
         assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0x5678); // admitted node finishes
         assert_eq!(bus.gpu.vram.get_pixel(4, 6), 0); // next node waits
         bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        bus.gpu_quiet_until = 0;
         bus.tick(1000);
         assert_eq!(bus.gpu.vram.get_pixel(4, 6), 0xef01);
     }
