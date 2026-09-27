@@ -567,6 +567,10 @@ fn emit_link_exit(a: &mut Asm, block: &Block, cells: [u64; 2]) {
             // clock and with no interrupt pending or SR written.
             a.ldr_x(9, X_CYCLES, 0);
             a.add_x(9, 9, X_ISSUE);
+            // A delay-slot stall can complete GPU DMA beyond the soft
+            // quiet limit before the cached boundary deadline expires.
+            a.cmp_x(9, X_LIMIT);
+            slow.push(a.b_cond(Cond::Hs));
             a.ldr_x(10, X_RUN, off::BOUNDARY_UNTIL as u32);
             a.cmp_x(9, 10);
             slow.push(a.b_cond(Cond::Hs));
