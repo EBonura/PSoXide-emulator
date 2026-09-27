@@ -107,6 +107,26 @@ const MDEC1_OUTPUT_SIGNED: u32 = 0x0100_0000;
 #[allow(dead_code)]
 const MDEC1_OUTPUT_BIT15: u32 = 0x0080_0000;
 
+/// How long a reset keeps the status port on its reset-time word, in CPU
+/// cycles from the reset write, when the MDEC was idle. SCPH-9002, hardware
+/// tests v1.26 (`mdec_reset_trace`): the first read after a reset from idle,
+/// 13 clocks in, already shows the idle word, so this is an upper bound.
+const RESET_IDLE_CYCLES: u64 = 13;
+/// The same when the MDEC was busy, or when the word a swallowed control
+/// write left in the status port reads busy: silicon reads busy until 39
+/// clocks after the reset write (41 with an enable written straight behind
+/// it).
+const RESET_BUSY_CYCLES: u64 = 39;
+/// A control write landing this soon after the reset write is overwritten by
+/// the reset: it is lost, and the status port reads back the written word
+/// until the reset completes. Silicon brackets this span without measuring
+/// it. In PSoXide's write timing the PSn00bSDK order puts its enable 2
+/// cycles behind the reset and lost it in 8 runs of 8 (from idle and from
+/// busy), as did the v1.25 driver's build on the v1.25 disc; the same driver
+/// rebuilt for v1.26 put it 7 cycles behind and kept it in 8 of 8, including
+/// resets from busy.
+const RESET_CAPTURE_CYCLES: u64 = 5;
+
 /// End-of-data sentinel in an RLE coefficient stream.
 const MDEC_END_OF_DATA: u16 = 0xFE00;
 
@@ -273,6 +293,28 @@ pub struct Mdec {
     /// -- excluded from save states.
     #[serde(skip)]
     command_history: Vec<u32>,
+    /// CPU cycle at which the current reset completes; the status port
+    /// reads [`Mdec::reset_status`] until then. 0 when no reset is running.
+    #[serde(default)]
+    reset_until: u64,
+    /// Control writes before this cycle are swallowed by the reset.
+    #[serde(default)]
+    reset_capture_until: u64,
+    /// The status word silicon shows while a reset completes.
+    #[serde(default)]
+    reset_status: u32,
+    /// DMA0 was kicked while the MDEC raised no data-in request; the bus
+    /// starts it when a later register write raises one.
+    #[serde(default)]
+    dma_in_waiting: bool,
+    /// No command since the last reset: silicon then reads the status
+    /// parameter-count field as 0 rather than FFFFh ("none").
+    #[serde(default = "default_true")]
+    fresh_from_reset: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Mdec {
@@ -302,6 +344,11 @@ impl Mdec {
             dma_out_enabled: false,
             macroblocks_decoded: 0,
             command_history: Vec::new(),
+            reset_until: 0,
+            reset_capture_until: 0,
+            reset_status: 0,
+            dma_in_waiting: false,
+            fresh_from_reset: true,
         }
     }
 
@@ -320,12 +367,87 @@ impl Mdec {
                 if self.out_queue.is_empty() {
                     self.reg0
                 } else {
-                    self.pop_output_word()
+                    let word = self.pop_output_word();
+                    // Silicon keeps decoding while the CPU drains the output
+                    // FIFO, so the next macroblock is ready by the next
+                    // status poll (a CPU-fed frame comes out whole).
+                    if self.out_queue.is_empty() {
+                        self.decode_until_output_words(1);
+                    }
+                    word
                 }
             }
             MDEC_CTRL_STAT => self.status_word(),
             _ => 0,
         }
+    }
+
+    /// Register read from the bus at CPU cycle `now`. Unlike [`Mdec::read32`]
+    /// this sees a reset that is still completing.
+    pub fn read32_at(&mut self, phys: u32, now: u64) -> u32 {
+        let value = if phys & 0x1F80_1FFF == MDEC_CTRL_STAT && self.resetting(now) {
+            self.reset_status
+        } else {
+            self.read32(phys)
+        };
+        if crate::env_flag!("PSOXIDE_TRACE_MDEC_IO") {
+            eprintln!("[mdec-io] r cycle={now} addr={phys:#010x} value={value:#010x}");
+        }
+        value
+    }
+
+    /// Register write from the bus at CPU cycle `now`. Unlike
+    /// [`Mdec::write32`] a reset takes time here, and a control write that
+    /// lands right behind it is lost (see [`RESET_CAPTURE_CYCLES`]).
+    pub fn write32_at(&mut self, phys: u32, value: u32, now: u64) {
+        if crate::env_flag!("PSOXIDE_TRACE_MDEC_IO") {
+            eprintln!("[mdec-io] w cycle={now} addr={phys:#010x} value={value:#010x}");
+        }
+        if phys & 0x1F80_1FFF == MDEC_CTRL_STAT {
+            if value & MDEC1_RESET != 0 {
+                let busy = if self.resetting(now) {
+                    self.reset_status
+                } else {
+                    self.status_word()
+                } & MDEC1_BUSY;
+                self.control_write(value);
+                self.reset_status = status_idle() | busy;
+                self.reset_until = now + reset_cycles(busy);
+                self.reset_capture_until = now + RESET_CAPTURE_CYCLES;
+                return;
+            }
+            if now < self.reset_capture_until && self.resetting(now) {
+                // Silicon: the word reads back from the status port until
+                // the reset completes, and the enables it carried are gone.
+                self.reset_status = value;
+                self.reset_until = now + reset_cycles(value & MDEC1_BUSY);
+                self.reset_capture_until = 0;
+                return;
+            }
+        }
+        self.write32(phys, value);
+    }
+
+    fn resetting(&self, now: u64) -> bool {
+        now < self.reset_until
+    }
+
+    /// True when the MDEC is asking DMA0 for data: the data-in enable is
+    /// set and the current command still takes parameter words. DMA0 moves
+    /// nothing without it. Only a register write can raise it, so the bus
+    /// re-checks a parked kick after each one.
+    pub fn dma_in_request(&self) -> bool {
+        self.dma_in_enabled && self.reg1 & MDEC1_BUSY != 0 && self.expected_param_words != 0
+    }
+
+    /// See [`Mdec::dma_in_request`]: whether a DMA0 kick is parked on it.
+    pub fn dma_in_waiting(&self) -> bool {
+        self.dma_in_waiting
+    }
+
+    /// Park (or release) a DMA0 kick on the data-in request.
+    pub fn set_dma_in_waiting(&mut self, waiting: bool) {
+        self.dma_in_waiting = waiting;
     }
 
     /// Write a 32-bit word to an MDEC register. Commands + data
@@ -347,6 +469,10 @@ impl Mdec {
         match self.command_code() {
             1 => {
                 self.reg1 |= MDEC1_BUSY;
+                // The words DMA0 delivers are the command's parameters: once
+                // they are in, the next MDEC0 write is a new command again.
+                self.expected_param_words =
+                    self.expected_param_words.saturating_sub(words.len() as u32);
                 self.rl_queue.clear();
                 self.out_queue.clear();
                 for &w in words {
@@ -500,6 +626,12 @@ impl Mdec {
         if self.dma_out_enabled && !self.out_queue.is_empty() {
             status |= MDEC1_DMA_OUT_REQ;
         }
+        // Parameter words still expected, minus one (FFFFh when none). The
+        // latched `reg1` never carries this field.
+        status &= !0xFFFF;
+        if !self.fresh_from_reset {
+            status |= self.expected_param_words.wrapping_sub(1) & 0xFFFF;
+        }
         if self.command_code() == 1 {
             status |= self.output_depth() << 25;
             if self.reg0 & MDEC0_SIGNED != 0 {
@@ -540,6 +672,7 @@ impl Mdec {
         }
 
         self.reg0 = value;
+        self.fresh_from_reset = false;
         self.commands_seen = self.commands_seen.saturating_add(1);
         if self.command_history.len() == 64 {
             self.command_history.remove(0);
@@ -676,6 +809,7 @@ impl Mdec {
             self.dma_out_enabled = false;
             self.expected_param_words = 0;
             self.direct_param_words_received = 0;
+            self.fresh_from_reset = true;
             self.rl_queue.clear();
             self.out_queue.clear();
             return;
@@ -869,6 +1003,14 @@ impl Mdec {
                 self.out_queue.push_back(px);
             }
         }
+    }
+}
+
+fn reset_cycles(busy: u32) -> u64 {
+    if busy != 0 {
+        RESET_BUSY_CYCLES
+    } else {
+        RESET_IDLE_CYCLES
     }
 }
 
@@ -1589,6 +1731,91 @@ mod tests {
 
         assert!(decode_block(&mut rl, &mut block, &iqtab));
         assert!(rl.is_empty());
+    }
+
+    #[test]
+    fn reset_from_busy_reads_busy_until_it_completes() {
+        let mut m = Mdec::new();
+        m.write32_at(MDEC_CMD_DATA, 0x4000_0001, 0);
+        m.write32_at(MDEC_CMD_DATA, 0, 1);
+        m.write32_at(MDEC_CTRL_STAT, 0x8000_0000, 100);
+        assert_eq!(m.read32_at(MDEC_CTRL_STAT, 113), 0xA004_0000);
+        assert_eq!(
+            m.read32_at(MDEC_CTRL_STAT, 100 + RESET_BUSY_CYCLES - 1),
+            0xA004_0000
+        );
+        assert_eq!(
+            m.read32_at(MDEC_CTRL_STAT, 100 + RESET_BUSY_CYCLES),
+            0x8004_0000
+        );
+    }
+
+    #[test]
+    fn reset_from_idle_reads_idle() {
+        let mut m = Mdec::new();
+        m.write32_at(MDEC_CTRL_STAT, 0x8000_0000, 100);
+        assert_eq!(m.read32_at(MDEC_CTRL_STAT, 101), 0x8004_0000);
+        assert_eq!(m.read32_at(MDEC_CTRL_STAT, 200), 0x8004_0000);
+    }
+
+    #[test]
+    fn control_write_right_behind_a_reset_is_lost_and_later_one_holds() {
+        // PSn00bSDK order (2 cycles behind): lost, reads back, long reset.
+        let mut m = Mdec::new();
+        m.write32_at(MDEC_CTRL_STAT, 0x8000_0000, 100);
+        m.write32_at(MDEC_CTRL_STAT, 0x6000_0000, 102);
+        assert_eq!(m.read32_at(MDEC_CTRL_STAT, 115), 0x6000_0000);
+        assert_eq!(
+            m.read32_at(MDEC_CTRL_STAT, 102 + RESET_BUSY_CYCLES),
+            0x8004_0000
+        );
+        assert!(!m.dma_in_enabled());
+        m.write32_at(MDEC_CMD_DATA, 0x6000_0000, 200);
+        assert!(!m.dma_in_request());
+        assert_eq!(m.read32_at(MDEC_CTRL_STAT, 201), 0xA004_001F);
+
+        // The v1.25 driver (7 cycles behind), even from busy: kept.
+        let mut m = Mdec::new();
+        m.write32_at(MDEC_CMD_DATA, 0x4000_0001, 0);
+        m.write32_at(MDEC_CTRL_STAT, 0x8000_0000, 100);
+        m.write32_at(MDEC_CTRL_STAT, 0x6000_0000, 107);
+        assert!(m.dma_in_enabled());
+        m.write32_at(MDEC_CMD_DATA, 0x4000_0001, 134);
+        assert!(m.dma_in_request());
+    }
+
+    #[test]
+    fn status_counts_parameter_words_left() {
+        let mut m = Mdec::new();
+        m.write32(MDEC_CTRL_STAT, 0x8000_0000);
+        assert_eq!(m.read32(MDEC_CTRL_STAT) & 0xFFFF, 0);
+        m.write32(MDEC_CTRL_STAT, 0x6000_0000);
+        m.write32(MDEC_CMD_DATA, 0x4000_0001);
+        assert_eq!(m.read32(MDEC_CTRL_STAT), 0xB004_001F);
+        m.write32(MDEC_CMD_DATA, 0);
+        assert_eq!(m.read32(MDEC_CTRL_STAT) & 0xFFFF, 0x1E);
+        m.dma_write_in(&[0; 31]);
+        assert_eq!(m.read32(MDEC_CTRL_STAT), 0x8004_FFFF);
+    }
+
+    #[test]
+    fn cpu_fed_decode_drains_every_macroblock() {
+        // Silicon: a frame fed and read back by the CPU comes out whole.
+        let mut m = Mdec::new();
+        m.write32(MDEC_CMD_DATA, 0x4000_0001);
+        m.dma_write_in(&[0x0101_0101; 32]);
+        let words = [0xFE00_0010u32; 12]; // two DC-only macroblocks
+        m.write32(MDEC_CMD_DATA, 0x3800_0000 | words.len() as u32);
+        for word in words {
+            m.write32(MDEC_CMD_DATA, word);
+        }
+        let mut drained = 0;
+        while m.read32(MDEC_CTRL_STAT) & MDEC1_EMPTY == 0 {
+            m.read32(MDEC_CMD_DATA);
+            drained += 1;
+        }
+        assert_eq!(drained, 2 * 128);
+        assert_eq!(m.macroblocks_decoded(), 2);
     }
 
     #[test]
