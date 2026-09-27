@@ -1265,11 +1265,12 @@ impl Cpu {
         }
         b.done += 1;
         b.after_branch = false;
-        if !memory {
-            if let Some(vector) = self.pending_exception_pc.take() {
-                b.pc = vector;
-                return true;
-            }
+        // LWC2/SWC2 can trap too, when CU2 is disabled. Every fallback
+        // instruction must retire at its exception vector before batching
+        // any subsequent guest instruction.
+        if let Some(vector) = self.pending_exception_pc.take() {
+            b.pc = vector;
+            return true;
         }
         false
     }
@@ -1601,6 +1602,49 @@ mod tests {
         assert_eq!(ran, steps);
         assert_eq!(digest(&cpu), digest(&plain));
         assert_eq!(digest(&bus), digest(&plain_bus));
+    }
+
+    #[test]
+    fn disabled_cop2_memory_traps_match_single_steps() {
+        for opcode in [0x32, 0x3A] {
+            for branch in [None, Some(0x04), Some(0x05)] {
+                let make = |blocks| {
+                    let mut words = vec![i(0x0F, 0, 8, 0x8002)];
+                    if let Some(branch) = branch {
+                        words.push(i(branch, 0, 0, 2));
+                    }
+                    words.extend([i(opcode, 8, 0, 0), i(0x09, 9, 9, 1),
+                        (0x02 << 26) | (0x0001_0000 >> 2), 0]);
+                    let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+                    let mut bus = Bus::new_without_bios();
+                    bus.load_exe_payload(0x8001_0000, &bytes);
+                    let mut cpu = Cpu::new();
+                    cpu.set_block_cache_enabled(false);
+                    cpu.seed_from_exe(0x8001_0000, 0, Some(0x801F_FF00));
+                    // Warm the instruction cache while COP2 is usable, then
+                    // disable it at the loop entry to exercise decoded ops.
+                    loop {
+                        cpu.step(&mut bus).unwrap();
+                        if cpu.tick > 50 && cpu.pc == 0x8001_0000 { break; }
+                        assert!(cpu.tick < 1000);
+                    }
+                    cpu.cop0[12] &= !(1 << 30);
+                    cpu.set_block_cache_enabled(blocks);
+                    (cpu, bus)
+                };
+                let (mut plain, mut plain_bus) = make(false);
+                let (mut cached, mut cached_bus) = make(true);
+                for _ in 0..20 { plain.step(&mut plain_bus).unwrap(); }
+                let (ran, result) = cached.run(&mut cached_bus, 20, u64::MAX, |_| false);
+                result.unwrap();
+                assert_eq!(ran, 20);
+                assert!(cached.blocks_built() > 0);
+                assert_eq!(cached.cop0[13], plain.cop0[13], "cause opcode {opcode:x}, branch {branch:?}");
+                assert_eq!(cached.pc, plain.pc, "PC opcode {opcode:x}, branch {branch:?}");
+                assert_eq!(digest(&cached), digest(&plain), "CPU opcode {opcode:x}, branch {branch:?}");
+                assert_eq!(digest(&cached_bus), digest(&plain_bus), "bus opcode {opcode:x}, branch {branch:?}");
+            }
+        }
     }
 
     #[test]
