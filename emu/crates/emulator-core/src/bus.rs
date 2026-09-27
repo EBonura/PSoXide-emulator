@@ -5085,6 +5085,107 @@ mod tests {
         );
     }
 
+    fn stalled_ram_dma_machine(opcode: u32, uncached: bool, refresh: bool, prefix: bool) -> (crate::Cpu, Bus) {
+        let mut bus = Bus::new_without_bios();
+        let mut cpu = crate::Cpu::new();
+        // Optional nop; memory op gp, 0(sp); j start; nop. Warm the
+        // instruction cache without DMA, then stop at the loop entry.
+        let op = (opcode << 26) | (29 << 21) | (28 << 16);
+        let program = if prefix { vec![0, op, 0x0800_4000, 0] } else { vec![op, 0x0800_4000, 0, 0] };
+        let bytes: Vec<_> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+        bus.load_exe_payload(0x8001_0000, &bytes);
+        let addr = if uncached { 0xa000_0304 } else { 0x8000_0304 };
+        cpu.seed_from_exe(0x8001_0000, 0xe100_0002, Some(addr));
+        cpu.set_block_cache_enabled(true);
+        for _ in 0..12 {
+            cpu.step(&mut bus).unwrap();
+        }
+        assert_eq!(cpu.pc(), 0x8001_0000);
+        bus.gpu.enable_experimental_dma_fifo();
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        bus.write32(0x300, 0x01ff_ffff);
+        bus.write32(0x304, 0xe100_0001);
+        bus.dma.dpcr = 1 << (2 * 4 + 3);
+        bus.dma.channels[2].base = 0x300;
+        bus.dma.channels[2].channel_control = 0x0100_0401;
+        bus.run_dma_channel(2);
+        bus.add_cycles(14 - u32::from(prefix));
+        let now = bus.cycles;
+        let issued = now + 1 + u64::from(prefix);
+        if refresh {
+            bus.write_queue = [0; 4];
+            bus.ram_write_buffer_ready_cycle = 0;
+            bus.dram_refresh_deadline = issued;
+        } else {
+            bus.write_queue = [issued + 3, issued + 5, issued + 7, issued + 9];
+            bus.ram_write_buffer_ready_cycle = issued + 9;
+            bus.dram_refresh_deadline = u64::MAX;
+        }
+        assert!(issued < bus.quiet_limit());
+        (cpu, bus)
+    }
+
+    #[test]
+    fn cached_ram_store_waits_for_gpu_dma_fetch_before_overwriting_word() {
+        for opcode in [0x28, 0x29, 0x2b] {
+            for uncached in [false, true] {
+                for refresh in [false, true] {
+                    for prefix in [false, true] {
+                        let make = || stalled_ram_dma_machine(opcode, uncached, refresh, prefix);
+                        let (mut scalar, mut scalar_bus) = make();
+                        let (mut cached, mut cached_bus) = make();
+                        let steps = 1 + u64::from(prefix);
+                        for _ in 0..steps { scalar.step(&mut scalar_bus).unwrap(); }
+                        let (ran, result) = cached.run(&mut cached_bus, steps, u64::MAX, |_| false);
+                        result.unwrap();
+                        assert_eq!(ran, steps);
+                        assert!(cached.blocks_built() > 0);
+                        assert_eq!(scalar_bus.cycles, cached_bus.cycles);
+                        assert_eq!(scalar_bus.read32(0x304), 0xe100_0002);
+                        assert_eq!(cached_bus.read32(0x304), 0xe100_0002);
+                        // DMA consumes the old E1 command during the wait.
+                        let mode = scalar_bus.gpu.read32(crate::gpu::GP1_ADDR).unwrap() & 0x1ff;
+                        assert_eq!(mode, 1);
+                        assert_eq!(cached_bus.gpu.read32(crate::gpu::GP1_ADDR).unwrap() & 0x1ff, mode);
+                        assert!(postcard::to_allocvec(&cached_bus).unwrap() == postcard::to_allocvec(&scalar_bus).unwrap());
+                        assert!(postcard::to_allocvec(&cached).unwrap() == postcard::to_allocvec(&scalar).unwrap());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn direct_ram_store_waits_for_gpu_dma_fetch_before_overwriting_word() {
+        for uncached in [false, true] {
+            for refresh in [false, true] {
+                let (_, mut direct) = stalled_ram_dma_machine(0x2b, uncached, refresh, false);
+                let (_, mut scalar) = stalled_ram_dma_machine(0x2b, uncached, refresh, false);
+                let addr = if uncached { 0xa000_0304 } else { 0x8000_0304 };
+                direct.add_cycles(1);
+                scalar.add_cycles(1);
+                direct.cpu_ram_store32(addr, 0xe100_0002);
+                scalar.cpu_write32(addr, 0xe100_0002);
+                assert_eq!(scalar.gpu.read32(crate::gpu::GP1_ADDR).unwrap() & 0x1ff, 1);
+                assert!(postcard::to_allocvec(&direct).unwrap() == postcard::to_allocvec(&scalar).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn final_cached_ram_load_stall_can_cross_quiet_limit() {
+        let (mut scalar, mut scalar_bus) = stalled_ram_dma_machine(0x23, false, false, false);
+        let (mut cached, mut cached_bus) = stalled_ram_dma_machine(0x23, false, false, false);
+        let limit = cached_bus.quiet_limit();
+        scalar.step(&mut scalar_bus).unwrap();
+        let (ran, result) = cached.run(&mut cached_bus, 1, u64::MAX, |_| false);
+        result.unwrap();
+        assert_eq!(ran, 1);
+        assert!(cached_bus.cycles >= limit);
+        assert!(postcard::to_allocvec(&cached_bus).unwrap() == postcard::to_allocvec(&scalar_bus).unwrap());
+        assert!(postcard::to_allocvec(&cached).unwrap() == postcard::to_allocvec(&scalar).unwrap());
+    }
+
     #[test]
     fn gpu_list_pause_and_cancel_match_reference_cycles() {
         for before_pause in [1, 8, 16, 32, 80] {

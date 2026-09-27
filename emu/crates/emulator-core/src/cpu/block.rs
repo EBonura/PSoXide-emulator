@@ -1001,6 +1001,14 @@ impl Cpu {
                 if b.slow_fetch && !Self::batch_slow_fetch(bus, &mut b) {
                     break 'blocks;
                 }
+                // A store cannot become visible before a DMA fetch that
+                // falls in its write-buffer or refresh wait.
+                if op.class == OpClass::Store
+                    && Self::batch_simple(op, access)
+                    && !bus.batch_ram_store_fits(b.now + 1, addr, b.limit)
+                {
+                    break 'blocks;
+                }
                 b.watch = None;
                 if let Some((at_cycle, watch)) = sample {
                     bus.record_post_op(at_cycle);
@@ -1131,7 +1139,10 @@ impl Cpu {
                     .wrapping_add((op.word as i16) as i32 as u32);
                 access = batch_access_kind(op.word, addr);
             }
-            if !Self::batch_simple(op, access) {
+            if !Self::batch_simple(op, access)
+                || (op.class == OpClass::Store
+                    && !bus.batch_ram_store_fits(now + 1, addr, limit))
+            {
                 break;
             }
             batch_step!(self, bus, op, addr, now, pend_reg, pend_value, shadow, taken, ram_ok,
