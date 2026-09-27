@@ -598,7 +598,10 @@ impl Cpu {
         let last = unsafe { *run.ops.add(n - 1) };
         let pc = if last.flags & op_flags::DELAY_SLOT != 0 && run.taken != 0 {
             let now = bus.cycles() + run.issue;
-            if now >= run.boundary_until || run.slow_boundary != 0 {
+            // A delay-slot access may have crossed the GPU quiet span and
+            // completed DMA. The cached interrupt state then needs a fresh
+            // boundary check even when the scheduler deadline is later.
+            if now >= run.limit || now >= run.boundary_until || run.slow_boundary != 0 {
                 return None;
             }
             // `apply_redux_bios_kernel_call_intercept`'s vectors.
