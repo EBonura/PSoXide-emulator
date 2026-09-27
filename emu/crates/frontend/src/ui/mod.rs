@@ -98,6 +98,7 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             // Reboot the CPU but keep the run state -- reset shouldn't drop
             // you into a paused state.
             state.cpu = emulator_core::Cpu::new();
+            crate::install_native_tier(&mut state.cpu);
             state.exec_history.clear();
             state.gpr_snapshot = None;
             if let Some(bus) = state.bus.as_mut() {

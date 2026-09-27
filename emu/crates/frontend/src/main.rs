@@ -2636,3 +2636,12 @@ mod freelook_chord_tests {
         }
     }
 }
+
+/// Install a fresh compiler when a machine is created or restored. Native
+/// code and its pointers are deliberately absent from serialized CPU state.
+fn install_native_tier(cpu: &mut emulator_core::Cpu) {
+    #[cfg(all(feature = "native-jit", not(target_arch = "wasm32")))]
+    let _ = psoxide_jit::install_tier(cpu);
+    #[cfg(not(all(feature = "native-jit", not(target_arch = "wasm32"))))]
+    let _ = cpu;
+}

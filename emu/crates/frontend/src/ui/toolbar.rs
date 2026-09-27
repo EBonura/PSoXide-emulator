@@ -622,6 +622,7 @@ fn draw_buttons(ui: &mut egui::Ui, state: &mut AppState) {
     if ui.add(reset_btn).on_hover_text("Reset").clicked() {
         // Reboot the CPU but keep the run state -- reset shouldn't force a pause.
         state.cpu = emulator_core::Cpu::new();
+        crate::install_native_tier(&mut state.cpu);
         state.exec_history.clear();
         state.gpr_snapshot = None;
         if let Some(bus) = state.bus.as_mut() {

@@ -1221,6 +1221,7 @@ name = "emulator-core"
 version = "0.1.0"
 dependencies = [
  "postcard",
+ "psoxide-jit",
  "psoxide-settings",
  "psx-gpu",
  "psx-gte-core",
@@ -1438,6 +1439,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "pollster 0.3.0",
  "psoxide-debug-ui",
+ "psoxide-jit",
  "psoxide-settings",
  "psoxide-validation",
  "psx-gpu",

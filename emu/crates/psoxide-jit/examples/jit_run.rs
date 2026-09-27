@@ -14,7 +14,7 @@
 //! host CPU-second over frames `from..frames`. `lockstep` runs a second
 //! machine with plain `Cpu::step` beside it, compares CPU state, cycles and
 //! frame boundaries after every VBlank and the whole serialized machine
-//! every `--full-every` VBlanks and at the end. `fuzz` does the same on
+//! every `--full-every` run calls and at the end. `fuzz` does the same on
 //! random programs (`testgen`); `synth` times a CPU-only random loop.
 
 #[path = "../../emulator-core/examples/support/disc.rs"]
@@ -345,7 +345,7 @@ fn main() {
         .unwrap_or(0);
     let full_every: u64 = take("--full-every")
         .map(|v| v.parse().expect("--full-every"))
-        .unwrap_or(20_000);
+        .unwrap_or(100);
     let n = |i: usize| args[i].parse::<u64>().expect("number");
     match args.first().map(String::as_str) {
         Some("bench") => bench(
