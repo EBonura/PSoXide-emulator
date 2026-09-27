@@ -24,6 +24,7 @@ mod blend;
 mod commands;
 mod idle;
 mod raster;
+mod span;
 mod status;
 
 pub use blend::BlendMode;
@@ -31,8 +32,9 @@ use blend::{
     blend_pixel, dither_rgb, modulate_tint, modulate_tint_dithered, prim_blend_mode,
     prim_is_semi_trans, rgb24_to_bgr15, split_tint, RAW_TEXTURE_TINT,
 };
-use raster::{for_each_tri_pixel, triangle_exceeds_hw_extent};
+use raster::triangle_exceeds_hw_extent;
 pub use raster::{tri_plane_eval, tri_raster_setup, tri_span_x, TriRasterSetup};
+use span::{Clip, Plotter, TexFetch, TexTri};
 use status::GpuStatus;
 
 use crate::vram::{Vram, VRAM_HEIGHT, VRAM_WIDTH};
@@ -902,25 +904,24 @@ impl Gpu {
         } else {
             da.width.min(vram_w.saturating_sub(da.x))
         };
-        if da.bpp24 {
-            // 24-bit mode: each pixel is 3 bytes packed in VRAM. A row
-            // of W 24-bit pixels occupies W*3 bytes = 1.5 * W 16-bit
-            // words. We read per-byte to span the straddles.
-            for dy in 0..effective_h {
-                for dx in 0..effective_w {
-                    let (r, g, b) = self.read_pixel_rgb24(da.x, dx, da.y + dy);
-                    h.update(&[r, g, b]);
-                    byte_len += 3;
-                }
+        // Each row's bytes are contiguous in VRAM (little-endian halfwords
+        // from `da.x`; the clipping above keeps them inside the row): 2 per
+        // pixel at 15bpp, 3 packed bytes per pixel at 24bpp. Hash them a
+        // row at a time.
+        let row_bytes = usize::from(effective_w) * if da.bpp24 { 3 } else { 2 };
+        let mut bytes = [0u8; VRAM_WIDTH * 2];
+        let words = self.vram.words();
+        for dy in 0..effective_h {
+            let start = usize::from(da.y + dy) * VRAM_WIDTH + usize::from(da.x);
+            let halfwords = row_bytes.div_ceil(2);
+            for (pair, &word) in bytes
+                .chunks_exact_mut(2)
+                .zip(&words[start..start + halfwords])
+            {
+                pair.copy_from_slice(&word.to_le_bytes());
             }
-        } else {
-            for dy in 0..effective_h {
-                for dx in 0..effective_w {
-                    let pixel = self.vram.get_pixel(da.x + dx, da.y + dy);
-                    h.update(&pixel.to_le_bytes());
-                    byte_len += 2;
-                }
-            }
+            h.update(&bytes[..row_bytes]);
+            byte_len += row_bytes;
         }
         (h.finish(), effective_w as u32, effective_h as u32, byte_len)
     }
@@ -1032,31 +1033,6 @@ impl Gpu {
         self.cmd_log.get(idx as usize)
     }
 
-    /// Read one 24-bit display pixel. VRAM bytes are packed: pixel
-    /// N lives at byte offsets `3*N..3*N+2` within a row, and each
-    /// row is 2048 bytes (1024 × 16-bit). The three bytes may
-    /// straddle two VRAM halfwords -- we read them individually.
-    /// 24bpp pixel `px` of a display line starting at VRAM halfword
-    /// `start_x` (GP1(05h) addresses halfwords in every depth).
-    fn read_pixel_rgb24(&self, start_x: u16, px: u16, y: u16) -> (u8, u8, u8) {
-        let byte_x = (start_x as u32) * 2 + (px as u32) * 3;
-        let word_x = (byte_x / 2) as u16;
-        let even = byte_x & 1 == 0;
-        let w0 = self.vram.get_pixel(word_x, y);
-        let w1 = self.vram.get_pixel(word_x.wrapping_add(1), y);
-        if even {
-            let r = (w0 & 0xFF) as u8;
-            let g = (w0 >> 8) as u8;
-            let b = (w1 & 0xFF) as u8;
-            (r, g, b)
-        } else {
-            let r = (w0 >> 8) as u8;
-            let g = (w1 & 0xFF) as u8;
-            let b = (w1 >> 8) as u8;
-            (r, g, b)
-        }
-    }
-
     /// Horizontal presentation offset, in displayed pixels, requested by
     /// GP1(06h) relative to the standard centred window. Real hardware slides
     /// the active picture by this much within the video signal (the classic
@@ -1115,27 +1091,52 @@ impl Gpu {
         let off_y = self
             .vertical_display_offset_px()
             .clamp(-(eff_h as i32), eff_h as i32);
-        let mut out = Vec::with_capacity((eff_w as usize) * (eff_h as usize) * 4);
-        for dy in 0..eff_h {
-            let src_y = dy as i32 - off_y;
-            for dx in 0..eff_w {
-                let src_x = dx as i32 - off_x;
-                if src_x < 0 || src_x >= eff_w as i32 || src_y < 0 || src_y >= eff_h as i32 {
-                    out.extend_from_slice(&[0, 0, 0, 0xFF]);
-                    continue;
+        // Opaque black, then the shifted picture row by row: displayed
+        // pixel `dx` of row `dy` shows source pixel `dx - off_x` of source
+        // row `dy - off_y` when that lies inside the display area.
+        let (w, h) = (i32::from(eff_w), i32::from(eff_h));
+        let mut out = [0u8, 0, 0, 0xFF].repeat(w as usize * h as usize);
+        let words = self.vram.words();
+        for dy in 0..h {
+            let src_y = dy - off_y;
+            if src_y < 0 || src_y >= h {
+                continue;
+            }
+            let x0 = off_x.max(0);
+            let x1 = (w + off_x).min(w);
+            if x0 >= x1 {
+                continue;
+            }
+            let sy = da.y + src_y as u16;
+            let row = &mut out[(dy * w + x0) as usize * 4..(dy * w + x1) as usize * 4];
+            if da.bpp24 {
+                // The row's packed bytes from the first shown pixel on
+                // (see `display_hash`).
+                let first = (x0 - off_x) as usize;
+                let n = (x1 - x0) as usize;
+                let byte0 = usize::from(da.x) * 2 + first * 3;
+                let start = usize::from(sy) * VRAM_WIDTH + byte0 / 2;
+                let mut bytes = [0u8; VRAM_WIDTH * 2 + 2];
+                let halfwords = (byte0 % 2 + n * 3).div_ceil(2);
+                for (pair, &word) in bytes
+                    .chunks_exact_mut(2)
+                    .zip(&words[start..start + halfwords])
+                {
+                    pair.copy_from_slice(&word.to_le_bytes());
                 }
-                let sx = da.x + src_x as u16;
-                let sy = da.y + src_y as u16;
-                if da.bpp24 {
-                    let (r, g, b) = self.read_pixel_rgb24(da.x, src_x as u16, sy);
-                    out.extend_from_slice(&[r, g, b, 0xFF]);
-                } else {
-                    let pixel = self.vram.get_pixel(sx, sy);
+                let packed = &bytes[byte0 % 2..byte0 % 2 + n * 3];
+                for (px, rgb) in row.chunks_exact_mut(4).zip(packed.chunks_exact(3)) {
+                    px[..3].copy_from_slice(rgb);
+                }
+            } else {
+                let start =
+                    usize::from(sy) * VRAM_WIDTH + usize::from(da.x) + (x0 - off_x) as usize;
+                for (px, &pixel) in row.chunks_exact_mut(4).zip(&words[start..]) {
                     let r = ((pixel & 0x1F) as u8) << 3;
                     let g = (((pixel >> 5) & 0x1F) as u8) << 3;
                     let b = (((pixel >> 10) & 0x1F) as u8) << 3;
                     // Replicate high 3 bits into low 3 for fuller range.
-                    out.extend_from_slice(&[r | (r >> 5), g | (g >> 5), b | (b >> 5), 0xFF]);
+                    px[..3].copy_from_slice(&[r | (r >> 5), g | (g >> 5), b | (b >> 5)]);
                 }
             }
         }
@@ -2679,23 +2680,48 @@ impl Gpu {
         // check-mask preserves destination pixels whose bit15 is set, and
         // force-mask ORs bit15 into every written pixel.
         let mask_check = self.mask_check_before_draw;
-        let mask_set = self.mask_set_on_draw;
-        let mut row = vec![0u16; w as usize];
-        for dy_off in 0..h {
-            for dx_off in 0..w {
-                row[dx_off as usize] = self.vram.get_pixel(sx + dx_off, sy + dy_off);
-            }
-            for dx_off in 0..w {
-                let (px, py) = (dx + dx_off, dy + dy_off);
-                if mask_check && self.vram.get_pixel(px, py) & 0x8000 != 0 {
-                    continue;
+        let mask_or = if self.mask_set_on_draw { 0x8000 } else { 0 };
+        // Each source row is read whole before its destination row is
+        // written, so overlapping rectangles copy as before. Columns and
+        // rows wrap at the VRAM edges.
+        let (sx, dx, w) = (usize::from(sx), usize::from(dx), usize::from(w));
+        let vram = self.vram.array_mut();
+        let mut row = [0u16; VRAM_WIDTH];
+        let row = &mut row[..w];
+        for dy_off in 0..usize::from(h) {
+            let src = ((usize::from(sy) + dy_off) % VRAM_HEIGHT) * VRAM_WIDTH;
+            let dst = ((usize::from(dy) + dy_off) % VRAM_HEIGHT) * VRAM_WIDTH;
+            if !mask_check && sx + w <= VRAM_WIDTH && dx + w <= VRAM_WIDTH {
+                // No wrap and no mask test: a move (overlap-safe, like the
+                // row buffer), then the forced mask bit.
+                vram.copy_within(src + sx..src + sx + w, dst + dx);
+                if mask_or != 0 {
+                    for p in &mut vram[dst + dx..dst + dx + w] {
+                        *p |= mask_or;
+                    }
                 }
-                let pixel = if mask_set {
-                    row[dx_off as usize] | 0x8000
+                continue;
+            }
+            let first = w.min(VRAM_WIDTH - sx);
+            row[..first].copy_from_slice(&vram[src + sx..src + sx + first]);
+            row[first..].copy_from_slice(&vram[src..src + (w - first)]);
+            let first = w.min(VRAM_WIDTH - dx);
+            let (a, b) = row.split_at(first);
+            for (part, start) in [(a, dx), (b, 0)] {
+                let out = &mut vram[dst + start..dst + start + part.len()];
+                if !mask_check && mask_or == 0 {
+                    out.copy_from_slice(part);
+                } else if mask_check {
+                    for (o, &p) in out.iter_mut().zip(part) {
+                        if *o & 0x8000 == 0 {
+                            *o = p | mask_or;
+                        }
+                    }
                 } else {
-                    row[dx_off as usize]
-                };
-                self.vram.set_pixel(px, py, pixel);
+                    for (o, &p) in out.iter_mut().zip(part) {
+                        *o = p | mask_or;
+                    }
+                }
             }
         }
     }
@@ -2940,6 +2966,40 @@ impl Gpu {
 
         let flip_x = self.tex_rect_flip_x;
         let flip_y = self.tex_rect_flip_y;
+        // Chunked rows, with the same texel walk: U steps by one texel a
+        // pixel (backwards when flipped), V by one a row.
+        let shade = if tint == RAW_TEXTURE_TINT {
+            span::SHADE_RAW
+        } else {
+            span::SHADE_FLAT
+        };
+        let prim = TexTri {
+            tint,
+            semi: semi_trans,
+            blend: tpage_mode,
+        };
+        let (u0w, v0w) = (u32::from(u0), u32::from(v0));
+        let row = |py: i32| {
+            let dx = (left - x) as u32;
+            let dy = (py - y) as u32;
+            let (u, du) = if flip_x {
+                (
+                    u0w.wrapping_add(1).wrapping_sub(dx),
+                    (1u32 << 24).wrapping_neg(),
+                )
+            } else {
+                (u0w.wrapping_add(dx), 1 << 24)
+            };
+            let v = if flip_y {
+                v0w.wrapping_sub(dy)
+            } else {
+                v0w.wrapping_add(dy)
+            };
+            (left, right + 1, [u << 24, v << 24, du, 0])
+        };
+        if self.draw_tex_rows((left, top, right, bottom), shade, false, &prim, row) {
+            return;
+        }
         for py in top..=bottom {
             for px in left..=right {
                 let dx = (px - x) as u16;
@@ -3085,29 +3145,17 @@ impl Gpu {
                 return;
             }
 
-            let left = left as usize;
-            let right = right as usize;
-            let top = top as usize;
-            let bottom = bottom as usize;
-            let set_mask = self.mask_set_on_draw;
-            let check_mask = self.mask_check_before_draw;
-            for py in top..=bottom {
-                let row_start = py * VRAM_WIDTH;
-                for existing in &mut self.vram.words_mut()[row_start + left..=row_start + right] {
-                    if check_mask && *existing & 0x8000 != 0 {
-                        continue;
-                    }
-                    let mut pixel = if mode == BlendMode::Opaque {
-                        color
-                    } else {
-                        blend_pixel(*existing, color, mode)
-                    };
-                    if set_mask {
-                        pixel |= 0x8000;
-                    }
-                    *existing = pixel;
-                }
-            }
+            let merge = span::Merge {
+                mask_check: self.mask_check_before_draw,
+                mask_or: if self.mask_set_on_draw { 0x8000 } else { 0 },
+            };
+            span::flat_rows(
+                self.vram.array_mut(),
+                (left, top, right, bottom),
+                color,
+                mode,
+                merge,
+            );
             return;
         }
         for py in top..=bottom {
@@ -3157,27 +3205,12 @@ impl Gpu {
             return; // zero vertical extent
         };
 
-        let draw_top = self.draw_area_top as i32;
-        let draw_bottom = self.draw_area_bottom as i32;
-        let draw_left = self.draw_area_left as i32;
-        let draw_right = self.draw_area_right as i32;
-
-        for (y0, y1, mut lx, ls, mut rx, rs) in setup.parts {
-            let mut y = y0;
-            while y < y1 {
-                if y >= draw_top && y <= draw_bottom {
-                    let xs = tri_span_x(lx).max(draw_left);
-                    let xe = tri_span_x(rx).min(draw_right + 1); // right-exclusive
-                    let mut x = xs;
-                    while x < xe {
-                        self.plot_pixel(x as u16, y as u16, color, mode);
-                        x += 1;
-                    }
-                }
-                lx += ls;
-                rx += rs;
-                y += 1;
-            }
+        let clip = self.clip();
+        let (vram, mut plot) = self.plotter();
+        if plot.owner.is_some() {
+            span::untextured_tri_exact(vram, &mut plot, &setup, clip, None, color, mode);
+        } else {
+            span::flat_tri(vram, &setup, clip, color, mode, plot.merge());
         }
     }
 
@@ -3433,6 +3466,48 @@ impl Gpu {
         let delta_right_v =
             ((right_bottom.1 as i64 - right_top.1 as i64) << ATTR_SHIFT) / height as i64;
 
+        // Chunked rows with the same Q12 walk: (pos << 12) as u32 keeps
+        // exactly the bits the per-pixel `(pos >> 12) as u16` reads (the
+        // texel fetch uses its low 8), and wrapping steps keep it in step.
+        let shade = if tint == RAW_TEXTURE_TINT {
+            span::SHADE_RAW
+        } else {
+            span::SHADE_FLAT
+        };
+        let prim = TexTri {
+            tint,
+            semi: semi_trans,
+            blend: tpage_mode,
+        };
+        let row_uv = |py: i32| {
+            let row = (py - top) as i64;
+            let mut pos_u = left_u0 + row * delta_left_u;
+            let mut pos_v = left_v0 + row * delta_left_v;
+            let right_u = right_u0 + row * delta_right_u;
+            let right_v = right_v0 + row * delta_right_v;
+            let delta_u = (right_u - pos_u) / width as i64;
+            let delta_v = (right_v - pos_v) / width as i64;
+            if x_start > left {
+                let skip = (x_start - left) as i64;
+                pos_u += skip * delta_u;
+                pos_v += skip * delta_v;
+            }
+            let q = |p: i64| (p << (24 - ATTR_SHIFT)) as u32;
+            (
+                x_start,
+                x_end + 1,
+                [q(pos_u), q(pos_v), q(delta_u), q(delta_v)],
+            )
+        };
+        if self.draw_tex_rows(
+            (x_start, y_start, x_end, y_end),
+            shade,
+            dither,
+            &prim,
+            row_uv,
+        ) {
+            return true;
+        }
         for py in y_start..=y_end {
             let row = (py - top) as i64;
             let mut pos_u = left_u0 + row * delta_left_u;
@@ -3519,44 +3594,199 @@ impl Gpu {
             (t1.0 as i32, t1.1 as i32),
             (t2.0 as i32, t2.1 as i32),
         ];
-        let draw_top = self.draw_area_top as i32;
-        let draw_bottom = self.draw_area_bottom as i32;
-        let draw_left = self.draw_area_left as i32;
-        let draw_right = self.draw_area_right as i32;
-        let dither = self.dither_enabled;
-        let tex = self.sampler();
-        let plot = self.plot_state();
-        for_each_tri_pixel(
-            [v0, v1, v2],
-            v_rgb,
-            v_uv,
-            draw_top,
-            draw_bottom,
-            draw_left,
-            draw_right,
-            |x, y, ri, gi, bi, u, v| {
-                if let Some(texel) =
-                    tex.sample(self.vram.words(), &self.clut_cache, u as u16, v as u16)
-                {
-                    let (tint_r, tint_g, tint_b) = if raw_texture {
-                        RAW_TEXTURE_TINT
-                    } else {
-                        (ri as u32, gi as u32, bi as u32)
-                    };
-                    let shaded = if !raw_texture && dither {
-                        modulate_tint_dithered(texel, tint_r, tint_g, tint_b, x, y)
-                    } else {
-                        modulate_tint(texel, tint_r, tint_g, tint_b)
-                    };
-                    let mode = if semi_trans && (texel & 0x8000) != 0 {
-                        tpage_mode
-                    } else {
-                        BlendMode::Opaque
-                    };
-                    self.plot_pixel_with(plot, x as u16, y as u16, shaded, mode);
+        // Every texel of the unpopulated upper VRAM bank reads as
+        // transparent: nothing to draw.
+        if self.tex_page_y >= VRAM_HEIGHT as u16 {
+            return;
+        }
+        let Some(setup) = tri_raster_setup([v0, v1, v2], v_rgb, v_uv, true) else {
+            return;
+        };
+        // A raw-texture primitive's identity tint leaves every texel as is.
+        let (shade, dither) = if raw_texture {
+            (span::SHADE_RAW, false)
+        } else {
+            (span::SHADE_GOURAUD, self.dither_enabled)
+        };
+        let prim = TexTri {
+            tint: RAW_TEXTURE_TINT,
+            semi: semi_trans,
+            blend: tpage_mode,
+        };
+        self.draw_tex_tri(&setup, tri_bbox([v0, v1, v2]), shade, dither, &prim);
+    }
+
+    /// Draw a set-up textured triangle with the span loop specialised for
+    /// the current texture depth, `shade` and `dither`.
+    fn draw_tex_tri(
+        &mut self,
+        setup: &TriRasterSetup,
+        bbox: (i32, i32, i32, i32),
+        shade: u8,
+        dither: bool,
+        prim: &TexTri,
+    ) {
+        use span::{DEPTH_15, DEPTH_4, DEPTH_8, SHADE_FLAT, SHADE_GOURAUD, SHADE_RAW};
+        let clip = self.clip();
+        let tex = self.tex_fetch();
+        let depth = self.tex_depth;
+        let mut plot = Plotter {
+            mask_check: self.mask_check_before_draw,
+            mask_or: if self.mask_set_on_draw { 0x8000 } else { 0 },
+            owner: self.pixel_owner.as_mut(),
+            cmd_index: self.current_cmd_index,
+        };
+        let clut = &self.clut_cache;
+        let vram = self.vram.array_mut();
+        // The chunked loop fetches a few texels ahead of the pixels it
+        // stores, so it needs the texture page clear of the pixels drawn
+        // (any VRAM the triangle's bounding box, padded by a pixel, can
+        // reach). The pixel tracer also takes the exact path.
+        let (x0, y0, x1, y1) = bbox;
+        let exact = plot.owner.is_some()
+            || tex.page_overlaps(
+                depth,
+                (x0 - 1).max(clip.left),
+                (y0 - 1).max(clip.top),
+                (x1 + 1).min(clip.right),
+                (y1 + 1).min(clip.bottom),
+            );
+        if exact {
+            span::tex_tri_exact(
+                vram,
+                clut,
+                &mut plot,
+                setup,
+                clip,
+                tex,
+                (depth, shade, dither),
+                prim,
+            );
+            return;
+        }
+        let general = prim.semi || plot.mask_check;
+        let merge = plot.merge();
+        macro_rules! go {
+            ($d:expr, $s:expr, $di:expr) => {
+                if general {
+                    span::tex_tri::<$d, $s, $di, true>(vram, clut, setup, clip, tex, prim, merge)
+                } else {
+                    span::tex_tri::<$d, $s, $di, false>(vram, clut, setup, clip, tex, prim, merge)
                 }
-            },
+            };
+        }
+        macro_rules! shade {
+            ($d:expr) => {
+                match (shade, dither) {
+                    (SHADE_RAW, _) => go!($d, SHADE_RAW, false),
+                    (SHADE_FLAT, false) => go!($d, SHADE_FLAT, false),
+                    (SHADE_FLAT, true) => go!($d, SHADE_FLAT, true),
+                    (SHADE_GOURAUD, false) => go!($d, SHADE_GOURAUD, false),
+                    _ => go!($d, SHADE_GOURAUD, true),
+                }
+            };
+        }
+        match depth {
+            0 => shade!(DEPTH_4),
+            1 => shade!(DEPTH_8),
+            _ => shade!(DEPTH_15),
+        }
+    }
+
+    /// Draw the rows of a textured rectangle or sprite (clipped to
+    /// `left..=right`, `top..=bottom`) with the chunked span loop, `row`
+    /// supplying each row's pixels and texture walk (see `span::tex_rows`).
+    /// Returns `false`, drawing nothing, when the pixel tracer is on or the
+    /// texture page overlaps the rectangle: the caller then plots pixel by
+    /// pixel.
+    fn draw_tex_rows(
+        &mut self,
+        (left, top, right, bottom): (i32, i32, i32, i32),
+        shade: u8,
+        dither: bool,
+        prim: &TexTri,
+        row: impl FnMut(i32) -> (i32, i32, [u32; 4]),
+    ) -> bool {
+        use span::{DEPTH_15, DEPTH_4, DEPTH_8, SHADE_FLAT, SHADE_RAW};
+        let tex = self.tex_fetch();
+        let depth = self.tex_depth;
+        if self.pixel_owner.is_some() || tex.page_overlaps(depth, left, top, right, bottom) {
+            return false;
+        }
+        // Every texel of the unpopulated upper VRAM bank reads as
+        // transparent: nothing to draw.
+        if self.tex_page_y >= VRAM_HEIGHT as u16 {
+            return true;
+        }
+        let merge = span::Merge {
+            mask_check: self.mask_check_before_draw,
+            mask_or: if self.mask_set_on_draw { 0x8000 } else { 0 },
+        };
+        let general = prim.semi || merge.mask_check;
+        let clut = &self.clut_cache;
+        let vram = self.vram.array_mut();
+        let rows = (top, bottom);
+        macro_rules! go {
+            ($d:expr, $s:expr, $di:expr) => {
+                if general {
+                    span::tex_rows::<$d, $s, $di, true>(vram, clut, tex, rows, row, prim, merge)
+                } else {
+                    span::tex_rows::<$d, $s, $di, false>(vram, clut, tex, rows, row, prim, merge)
+                }
+            };
+        }
+        macro_rules! shade {
+            ($d:expr) => {
+                match (shade, dither) {
+                    (SHADE_RAW, _) => go!($d, SHADE_RAW, false),
+                    (SHADE_FLAT, false) => go!($d, SHADE_FLAT, false),
+                    _ => go!($d, SHADE_FLAT, true),
+                }
+            };
+        }
+        match depth {
+            0 => shade!(DEPTH_4),
+            1 => shade!(DEPTH_8),
+            _ => shade!(DEPTH_15),
+        }
+        true
+    }
+
+    /// The drawing area as a span clip rectangle.
+    fn clip(&self) -> Clip {
+        Clip {
+            top: self.draw_area_top as i32,
+            bottom: self.draw_area_bottom as i32,
+            left: self.draw_area_left as i32,
+            right: self.draw_area_right as i32,
+        }
+    }
+
+    /// Texture-page addressing for the span loops (see [`Gpu::sampler`]).
+    fn tex_fetch(&self) -> TexFetch {
+        let (mx, my) = (
+            u32::from(self.tex_window_mask_x),
+            u32::from(self.tex_window_mask_y),
         );
+        TexFetch {
+            and_u: !mx & 0xFF,
+            or_u: u32::from(self.tex_window_offset_x) & mx,
+            and_v: !my & 0xFF,
+            or_v: u32::from(self.tex_window_offset_y) & my,
+            page_x: u32::from(self.tex_page_x),
+            page_y: u32::from(self.tex_page_y),
+        }
+    }
+
+    /// VRAM plus the mask-bit and tracer state the span loops write with.
+    fn plotter(&mut self) -> (&mut [u16; span::VRAM_LEN], Plotter<'_>) {
+        let plot = Plotter {
+            mask_check: self.mask_check_before_draw,
+            mask_or: if self.mask_set_on_draw { 0x8000 } else { 0 },
+            owner: self.pixel_owner.as_mut(),
+            cmd_index: self.current_cmd_index,
+        };
+        (self.vram.array_mut(), plot)
     }
 
     /// Apply the tpage bits embedded in a textured-primitive UV word
@@ -3681,38 +3911,27 @@ impl Gpu {
             (t1.0 as i32, t1.1 as i32),
             (t2.0 as i32, t2.1 as i32),
         ];
-        let draw_top = self.draw_area_top as i32;
-        let draw_bottom = self.draw_area_bottom as i32;
-        let draw_left = self.draw_area_left as i32;
-        let draw_right = self.draw_area_right as i32;
-        let tex = self.sampler();
-        let plot = self.plot_state();
-        for_each_tri_pixel(
-            [v0, v1, v2],
-            [(0, 0, 0); 3],
-            v_uv,
-            draw_top,
-            draw_bottom,
-            draw_left,
-            draw_right,
-            |x, y, _r, _g, _b, u, v| {
-                if let Some(texel) =
-                    tex.sample(self.vram.words(), &self.clut_cache, u as u16, v as u16)
-                {
-                    let shaded = if dither {
-                        modulate_tint_dithered(texel, tint.0, tint.1, tint.2, x, y)
-                    } else {
-                        modulate_tint(texel, tint.0, tint.1, tint.2)
-                    };
-                    let mode = if semi_trans && (texel & 0x8000) != 0 {
-                        tpage_mode
-                    } else {
-                        BlendMode::Opaque
-                    };
-                    self.plot_pixel_with(plot, x as u16, y as u16, shaded, mode);
-                }
-            },
-        );
+        // Every texel of the unpopulated upper VRAM bank reads as
+        // transparent: nothing to draw.
+        if self.tex_page_y >= VRAM_HEIGHT as u16 {
+            return;
+        }
+        let Some(setup) = tri_raster_setup([v0, v1, v2], [(0, 0, 0); 3], v_uv, true) else {
+            return;
+        };
+        // The identity tint leaves every texel as is (and is never
+        // dithered, see above).
+        let shade = if tint == RAW_TEXTURE_TINT {
+            span::SHADE_RAW
+        } else {
+            span::SHADE_FLAT
+        };
+        let prim = TexTri {
+            tint,
+            semi: semi_trans,
+            blend: tpage_mode,
+        };
+        self.draw_tex_tri(&setup, tri_bbox([v0, v1, v2]), shade, dither, &prim);
     }
 
     /// Rasterize a triangle with per-vertex colours -- Gouraud shading.
@@ -3748,28 +3967,19 @@ impl Gpu {
             (r(c1), g(c1), b(c1)),
             (r(c2), g(c2), b(c2)),
         ];
-        let draw_top = self.draw_area_top as i32;
-        let draw_bottom = self.draw_area_bottom as i32;
-        let draw_left = self.draw_area_left as i32;
-        let draw_right = self.draw_area_right as i32;
+        let Some(setup) = tri_raster_setup([v0, v1, v2], v_rgb, [(0, 0); 3], true) else {
+            return;
+        };
+        let clip = self.clip();
         let dither = self.dither_enabled;
-        for_each_tri_pixel(
-            [v0, v1, v2],
-            v_rgb,
-            [(0, 0); 3],
-            draw_top,
-            draw_bottom,
-            draw_left,
-            draw_right,
-            |x, y, ri, gi, bi, _u, _v| {
-                let colour = if dither {
-                    dither_rgb(ri as i32, gi as i32, bi as i32, x, y)
-                } else {
-                    rgb24_to_bgr15((ri as u32) | ((gi as u32) << 8) | ((bi as u32) << 16))
-                };
-                self.plot_pixel(x as u16, y as u16, colour, mode);
-            },
-        );
+        let (vram, mut plot) = self.plotter();
+        if plot.owner.is_some() {
+            span::untextured_tri_exact(vram, &mut plot, &setup, clip, Some(dither), 0, mode);
+        } else if dither {
+            span::shaded_tri::<true>(vram, &setup, clip, mode, plot.merge());
+        } else {
+            span::shaded_tri::<false>(vram, &setup, clip, mode, plot.merge());
+        }
     }
 
     // --- Lines (GP0 0x40..=0x5F) ---
@@ -4155,12 +4365,16 @@ impl Gpu {
         };
 
         let color15 = rgb24_to_bgr15(color24);
-        for row in 0..h {
-            for col in 0..w {
-                let px = (x + col) as usize % VRAM_WIDTH;
-                let py = (y + row) as usize % VRAM_HEIGHT;
-                self.vram.set_pixel(px as u16, py as u16, color15);
-            }
+        // Row slices: the columns x..x+w, wrapped at the right edge of
+        // VRAM (a width of 1024 covers the whole row), rows wrapped at the
+        // bottom.
+        let (x, w) = (usize::from(x), usize::from(w));
+        let first = w.min(VRAM_WIDTH - x);
+        let vram = self.vram.array_mut();
+        for row in 0..usize::from(h) {
+            let base = ((usize::from(y) + row) % VRAM_HEIGHT) * VRAM_WIDTH;
+            vram[base + x..base + x + first].fill(color15);
+            vram[base..base + (w - first)].fill(color15);
         }
     }
 }
@@ -4191,6 +4405,18 @@ const DRAW_SCANLINE_Q8: u64 = 572;
 /// full-screen semi-transparent quad.
 const DRAW_SEMI_Q8: u64 = 199;
 const DRAW_SEMI_SCANLINE_Q8: u64 = 1526;
+
+/// Bounding box `(min_x, min_y, max_x, max_y)` of a triangle's vertices.
+fn tri_bbox(v: [(i32, i32); 3]) -> (i32, i32, i32, i32) {
+    let xs = v.map(|p| p.0);
+    let ys = v.map(|p| p.1);
+    (
+        xs[0].min(xs[1]).min(xs[2]),
+        ys[0].min(ys[1]).min(ys[2]),
+        xs[0].max(xs[1]).max(xs[2]),
+        ys[0].max(ys[1]).max(ys[2]),
+    )
+}
 
 fn scale_gpu_pixels(pixels: u64, numerator: u64, denominator: u64) -> u64 {
     pixels
@@ -4254,14 +4480,19 @@ fn clipped_polygon_area(
         return ((twice_area.unsigned_abs() + (1u128 << 32)) >> 33) as u64;
     }
 
-    let mut polygon: Vec<(i64, i64)> = vertices
-        .iter()
-        .map(|&(x, y)| (i64::from(x) * FP, i64::from(y) * FP))
-        .collect();
-    polygon = clip_timing_polygon(&polygon, true, left, true);
-    polygon = clip_timing_polygon(&polygon, true, right, false);
-    polygon = clip_timing_polygon(&polygon, false, top, true);
-    polygon = clip_timing_polygon(&polygon, false, bottom, false);
+    // Each clip adds at most one vertex, so the clipped polygon fits in a
+    // fixed buffer (no allocation per primitive).
+    assert!(vertices.len() <= TIMING_POLY_MAX - 4);
+    let mut a = TimingPoly::default();
+    for &(x, y) in vertices {
+        a.push((i64::from(x) * FP, i64::from(y) * FP));
+    }
+    let mut b = TimingPoly::default();
+    clip_timing_polygon(&a, &mut b, true, left, true);
+    clip_timing_polygon(&b, &mut a, true, right, false);
+    clip_timing_polygon(&a, &mut b, false, top, true);
+    clip_timing_polygon(&b, &mut a, false, bottom, false);
+    let polygon = a.as_slice();
     if polygon.len() < 3 {
         return 0;
     }
@@ -4278,14 +4509,40 @@ fn clipped_polygon_area(
     ((twice_area.unsigned_abs() + (1u128 << 32)) >> 33) as u64
 }
 
+/// Vertex capacity of [`TimingPoly`]: a polygon of up to four vertices
+/// clipped against the four drawing-area edges.
+const TIMING_POLY_MAX: usize = 8;
+
+/// A small polygon in Q16.16 for the draw-cost clip, held inline.
+#[derive(Default)]
+struct TimingPoly {
+    len: usize,
+    pts: [(i64, i64); TIMING_POLY_MAX],
+}
+
+impl TimingPoly {
+    fn push(&mut self, p: (i64, i64)) {
+        self.pts[self.len] = p;
+        self.len += 1;
+    }
+
+    fn as_slice(&self) -> &[(i64, i64)] {
+        &self.pts[..self.len]
+    }
+}
+
+/// Clip `polygon` against one drawing-area edge into `out` (cleared first).
 fn clip_timing_polygon(
-    polygon: &[(i64, i64)],
+    polygon: &TimingPoly,
+    out: &mut TimingPoly,
     x_axis: bool,
     bound: i64,
     keep_greater: bool,
-) -> Vec<(i64, i64)> {
+) {
+    out.len = 0;
+    let polygon = polygon.as_slice();
     if polygon.is_empty() {
-        return Vec::new();
+        return;
     }
     let coord = |p: (i64, i64)| if x_axis { p.0 } else { p.1 };
     let inside = |p: (i64, i64)| {
@@ -4313,7 +4570,6 @@ fn clip_timing_polygon(
         }
     };
 
-    let mut out = Vec::with_capacity(polygon.len() + 1);
     let mut previous = polygon[polygon.len() - 1];
     let mut previous_inside = inside(previous);
     for &current in polygon {
@@ -4327,7 +4583,6 @@ fn clip_timing_polygon(
         previous = current;
         previous_inside = current_inside;
     }
-    out
 }
 
 /// Walk the PS1 line engine's coordinate DDA. The callback receives the
@@ -4476,6 +4731,9 @@ impl Default for Gpu {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod stress_tests;
 
 /// 24bpp pixels that fit on a VRAM line after halfword `start_x`.
 fn rgb24_pixels_left(start_x: u16) -> u16 {

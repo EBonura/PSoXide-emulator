@@ -76,10 +76,12 @@ use psoxide_settings::settings::{InputBinding, PortBindings, StickBindings};
 /// standard laptop display.
 const INITIAL_WIDTH: u32 = 1600;
 const INITIAL_HEIGHT: u32 = 1000;
-/// Keep the toolbar usable: full debug controls + boot toggle +
-/// volume slider + transport buttons need roughly 700 logical px on
-/// Retina displays, and the initial window is already larger.
+/// Native floor for the window size. The web canvas has none: the browser
+/// window decides, and a floor wider than it pushes the toolbar's right end
+/// off the page.
+#[cfg(not(target_arch = "wasm32"))]
 const MIN_WIDTH: u32 = 1400;
+#[cfg(not(target_arch = "wasm32"))]
 const MIN_HEIGHT: u32 = 700;
 /// PSX CPU clock used to convert the active machine's exact VBlank period to
 /// wall time. NTSC is about 59.29 Hz here, not 60 Hz; forcing 60 Hz steadily
@@ -925,8 +927,11 @@ impl ApplicationHandler for Shell {
         #[allow(unused_mut)]
         let mut attrs = Window::default_attributes()
             .with_title("PSoXide")
-            .with_inner_size(winit::dpi::PhysicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT))
-            .with_min_inner_size(winit::dpi::PhysicalSize::new(MIN_WIDTH, MIN_HEIGHT));
+            .with_inner_size(winit::dpi::PhysicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            attrs = attrs.with_min_inner_size(winit::dpi::PhysicalSize::new(MIN_WIDTH, MIN_HEIGHT));
+        }
         if let Some(icon) = app_icon::load_window_icon() {
             attrs = attrs.with_window_icon(Some(icon));
         }

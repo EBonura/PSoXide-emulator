@@ -16,7 +16,8 @@ pub(super) fn rgb24_to_bgr15(rgb24: u32) -> u16 {
 /// is brightness-neutral -- it rounds individual pixels both up and
 /// down to approximate intermediate shades, which is what produces
 /// the characteristic checkerboard on a flat mid-tone.
-const DITHER_OFFSETS: [i32; 16] = [-4, 0, -3, 1, 2, -2, 3, -1, -3, 1, -4, 0, 3, -1, 2, -2];
+pub(super) const DITHER_OFFSETS: [i32; 16] =
+    [-4, 0, -3, 1, 2, -2, 3, -1, -3, 1, -4, 0, 3, -1, 2, -2];
 
 /// Dither an 8-bit RGB triple to 15bpp using the PS1's signed
 /// additive 4×4 ordered-dither matrix (PSX-SPX '24bit-to-15bit
