@@ -555,6 +555,21 @@ pub unsafe extern "C" fn jit_batch_memory(run: *mut NativeRun, index: u32) -> u3
         "a quiet access in compiled code never waits on a fetch"
     );
     run.ran += 1;
+    // LWC2/SWC2 can trap when CU2 is disabled, including in a delay slot.
+    // Hand the exception back before inspecting the device or chaining.
+    if let Some(vector) = cpu.pending_exception_pc.take() {
+        run.shadow_from(cpu);
+        match cpu.pending_load.take() {
+            Some((reg, value)) => {
+                run.pend_reg = u32::from(reg);
+                run.pend_val = value;
+            }
+            None => run.pend_reg = 0,
+        }
+        cpu.pc = vector;
+        run.status = NATIVE_EXCEPTION;
+        return NATIVE_STOP;
+    }
     // A store elsewhere leaves the block's words (and the word after it) as
     // they were in RAM: the decoded flags still answer the GTE hazard.
     let stored = matches!(op.class, crate::cpu::block::OpClass::Store);
