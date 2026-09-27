@@ -5156,6 +5156,41 @@ mod tests {
     }
 
     #[test]
+    fn crossing_ram_store_after_streaming_fetch_is_not_fetched_twice() {
+        for opcode in [0x28, 0x29, 0x2b] {
+            for uncached in [false, true] {
+                for refresh in [false, true] {
+                    let make = || {
+                        let (cpu, mut bus) = stalled_ram_dma_machine(opcode, uncached, refresh, false);
+                        let now = bus.cycles;
+                        // The store's code word arrives in one cycle, before
+                        // the next DMA fetch, but its data stall crosses it.
+                        bus.experimental_gpu_list.as_mut().unwrap().setup_cycles = 3;
+                        bus.gpu_quiet_until = 0;
+                        bus.code_stream_active = true;
+                        bus.code_fill_busy_until = now + 6;
+                        bus.code_stream_next = 0x0001_0000;
+                        bus.code_stream_end = 0x0001_0010;
+                        bus.code_stream_next_ready = now + 1;
+                        (cpu, bus)
+                    };
+                    let (mut scalar, mut scalar_bus) = make();
+                    let (mut cached, mut cached_bus) = make();
+                    scalar.step(&mut scalar_bus).unwrap();
+                    let (ran, result) = cached.run(&mut cached_bus, 1, u64::MAX, |_| false);
+                    result.unwrap();
+                    assert_eq!(ran, 1);
+                    assert!(cached.blocks_built() > 0);
+                    assert_eq!(cached_bus.cycles, scalar_bus.cycles);
+                    assert_eq!(scalar_bus.gpu.read32(crate::gpu::GP1_ADDR).unwrap() & 0x1ff, 1);
+                    assert!(postcard::to_allocvec(&cached_bus).unwrap() == postcard::to_allocvec(&scalar_bus).unwrap());
+                    assert!(postcard::to_allocvec(&cached).unwrap() == postcard::to_allocvec(&scalar).unwrap());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn direct_ram_store_waits_for_gpu_dma_fetch_before_overwriting_word() {
         for uncached in [false, true] {
             for refresh in [false, true] {
