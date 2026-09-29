@@ -1810,7 +1810,9 @@ impl Bus {
         // The queue holds completion times in ascending order, then zeros
         // (every store below keeps it so), so the writes that have landed
         // are a prefix of the occupied slots.
-        debug_assert!(queue.windows(2).all(|w| w[1] == 0 || (w[0] != 0 && w[0] < w[1])));
+        debug_assert!(queue
+            .windows(2)
+            .all(|w| w[1] == 0 || (w[0] != 0 && w[0] < w[1])));
         let mut len = queue.iter().take_while(|&&slot| slot != 0).count();
         let landed = queue[..len].iter().take_while(|&&slot| slot <= now).count();
         if landed != 0 {
@@ -5085,13 +5087,22 @@ mod tests {
         );
     }
 
-    fn stalled_ram_dma_machine(opcode: u32, uncached: bool, refresh: bool, prefix: bool) -> (crate::Cpu, Bus) {
+    fn stalled_ram_dma_machine(
+        opcode: u32,
+        uncached: bool,
+        refresh: bool,
+        prefix: bool,
+    ) -> (crate::Cpu, Bus) {
         let mut bus = Bus::new_without_bios();
         let mut cpu = crate::Cpu::new();
         // Optional nop; memory op gp, 0(sp); j start; nop. Warm the
         // instruction cache without DMA, then stop at the loop entry.
         let op = (opcode << 26) | (29 << 21) | (28 << 16);
-        let program = if prefix { vec![0, op, 0x0800_4000, 0] } else { vec![op, 0x0800_4000, 0, 0] };
+        let program = if prefix {
+            vec![0, op, 0x0800_4000, 0]
+        } else {
+            vec![op, 0x0800_4000, 0, 0]
+        };
         let bytes: Vec<_> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
         bus.load_exe_payload(0x8001_0000, &bytes);
         let addr = if uncached { 0xa000_0304 } else { 0x8000_0304 };
@@ -5135,7 +5146,9 @@ mod tests {
                         let (mut scalar, mut scalar_bus) = make();
                         let (mut cached, mut cached_bus) = make();
                         let steps = 1 + u64::from(prefix);
-                        for _ in 0..steps { scalar.step(&mut scalar_bus).unwrap(); }
+                        for _ in 0..steps {
+                            scalar.step(&mut scalar_bus).unwrap();
+                        }
                         let (ran, result) = cached.run(&mut cached_bus, steps, u64::MAX, |_| false);
                         result.unwrap();
                         assert_eq!(ran, steps);
@@ -5146,9 +5159,18 @@ mod tests {
                         // DMA consumes the old E1 command during the wait.
                         let mode = scalar_bus.gpu.read32(crate::gpu::GP1_ADDR).unwrap() & 0x1ff;
                         assert_eq!(mode, 1);
-                        assert_eq!(cached_bus.gpu.read32(crate::gpu::GP1_ADDR).unwrap() & 0x1ff, mode);
-                        assert!(postcard::to_allocvec(&cached_bus).unwrap() == postcard::to_allocvec(&scalar_bus).unwrap());
-                        assert!(postcard::to_allocvec(&cached).unwrap() == postcard::to_allocvec(&scalar).unwrap());
+                        assert_eq!(
+                            cached_bus.gpu.read32(crate::gpu::GP1_ADDR).unwrap() & 0x1ff,
+                            mode
+                        );
+                        assert!(
+                            postcard::to_allocvec(&cached_bus).unwrap()
+                                == postcard::to_allocvec(&scalar_bus).unwrap()
+                        );
+                        assert!(
+                            postcard::to_allocvec(&cached).unwrap()
+                                == postcard::to_allocvec(&scalar).unwrap()
+                        );
                     }
                 }
             }
@@ -5161,7 +5183,8 @@ mod tests {
             for uncached in [false, true] {
                 for refresh in [false, true] {
                     let make = || {
-                        let (cpu, mut bus) = stalled_ram_dma_machine(opcode, uncached, refresh, false);
+                        let (cpu, mut bus) =
+                            stalled_ram_dma_machine(opcode, uncached, refresh, false);
                         let now = bus.cycles;
                         // The store's code word arrives in one cycle, before
                         // the next DMA fetch, but its data stall crosses it.
@@ -5182,9 +5205,18 @@ mod tests {
                     assert_eq!(ran, 1);
                     assert!(cached.blocks_built() > 0);
                     assert_eq!(cached_bus.cycles, scalar_bus.cycles);
-                    assert_eq!(scalar_bus.gpu.read32(crate::gpu::GP1_ADDR).unwrap() & 0x1ff, 1);
-                    assert!(postcard::to_allocvec(&cached_bus).unwrap() == postcard::to_allocvec(&scalar_bus).unwrap());
-                    assert!(postcard::to_allocvec(&cached).unwrap() == postcard::to_allocvec(&scalar).unwrap());
+                    assert_eq!(
+                        scalar_bus.gpu.read32(crate::gpu::GP1_ADDR).unwrap() & 0x1ff,
+                        1
+                    );
+                    assert!(
+                        postcard::to_allocvec(&cached_bus).unwrap()
+                            == postcard::to_allocvec(&scalar_bus).unwrap()
+                    );
+                    assert!(
+                        postcard::to_allocvec(&cached).unwrap()
+                            == postcard::to_allocvec(&scalar).unwrap()
+                    );
                 }
             }
         }
@@ -5202,7 +5234,10 @@ mod tests {
                 direct.cpu_ram_store32(addr, 0xe100_0002);
                 scalar.cpu_write32(addr, 0xe100_0002);
                 assert_eq!(scalar.gpu.read32(crate::gpu::GP1_ADDR).unwrap() & 0x1ff, 1);
-                assert!(postcard::to_allocvec(&direct).unwrap() == postcard::to_allocvec(&scalar).unwrap());
+                assert!(
+                    postcard::to_allocvec(&direct).unwrap()
+                        == postcard::to_allocvec(&scalar).unwrap()
+                );
             }
         }
     }
@@ -5217,7 +5252,10 @@ mod tests {
         result.unwrap();
         assert_eq!(ran, 1);
         assert!(cached_bus.cycles >= limit);
-        assert!(postcard::to_allocvec(&cached_bus).unwrap() == postcard::to_allocvec(&scalar_bus).unwrap());
+        assert!(
+            postcard::to_allocvec(&cached_bus).unwrap()
+                == postcard::to_allocvec(&scalar_bus).unwrap()
+        );
         assert!(postcard::to_allocvec(&cached).unwrap() == postcard::to_allocvec(&scalar).unwrap());
     }
 
@@ -5280,7 +5318,8 @@ mod tests {
                         assert!(
                             postcard::to_allocvec(&batched).unwrap()
                                 == postcard::to_allocvec(&reference).unwrap(),
-                            "resumed after {before_pause}, batch {cycles}, cycle {}", reference.cycles
+                            "resumed after {before_pause}, batch {cycles}, cycle {}",
+                            reference.cycles
                         );
                     }
                 }
@@ -5294,7 +5333,7 @@ mod tests {
         bus.gpu.enable_experimental_dma_fifo();
         bus.run_dma_channel(2);
         bus.tick(1); // header admitted
-        // These direct device pokes bypass MMIO cache invalidation.
+                     // These direct device pokes bypass MMIO cache invalidation.
         bus.dma.dpcr = 0;
         bus.gpu_quiet_until = 0;
         bus.tick(1000);
@@ -6238,7 +6277,10 @@ mod tests {
         bus.write32(Dma::BASE + Dma::DPCR_OFFSET, 0);
         bus.write32(crate::mdec::MDEC_CTRL_STAT, 0x6000_0000);
         assert_eq!(bus.mdec.params_seen(), 0);
-        assert!(bus.mdec.dma_in_waiting(), "DPCR must not erase the parked kick");
+        assert!(
+            bus.mdec.dma_in_waiting(),
+            "DPCR must not erase the parked kick"
+        );
         bus.write32(Dma::BASE + Dma::DPCR_OFFSET, (1 << 3) | (1 << 7));
         bus.write32(crate::mdec::MDEC_CTRL_STAT, 0x6000_0000);
         assert_eq!(bus.mdec.params_seen(), 32);
