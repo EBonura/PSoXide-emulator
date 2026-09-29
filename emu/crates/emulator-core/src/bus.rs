@@ -29,6 +29,7 @@ use crate::timers::Timers;
 
 mod block_support;
 mod idle;
+mod jit_support;
 
 use block_support::RamPages;
 pub(crate) use block_support::RamStamp;
@@ -1663,6 +1664,7 @@ impl Bus {
     /// still streaming, the load waits for the fill to let go of the bus. And
     /// when the instruction itself was fetched from RAM uncached, the load is
     /// five wait clocks rather than six. Either way RAM_SIZE bit 7 adds one.
+    #[inline(always)]
     fn ram_load_stalls_with_code_contention(&self, stalls: u32) -> u32 {
         let contention = self.memory_control.code_data_contention_cycles();
         let fill_wait = self.code_fill_busy_until.saturating_sub(self.cycles) as u32;
@@ -1801,31 +1803,33 @@ impl Bus {
     /// cost one clock a store (`0x12B`, `0x12C`); a burst of eight costs twelve
     /// (`0x12D`): four slots, then one store for every write that completes.
     /// GP0 stores behave the same (`0xFA`, `0x12E`).
+    #[inline]
     fn queue_store(&mut self) -> u32 {
         let now = self.cycles;
-        for slot in &mut self.write_queue {
-            if *slot != 0 && *slot <= now {
-                *slot = 0;
-            }
+        let queue = &mut self.write_queue;
+        // The queue holds completion times in ascending order, then zeros
+        // (every store below keeps it so), so the writes that have landed
+        // are a prefix of the occupied slots.
+        debug_assert!(queue.windows(2).all(|w| w[1] == 0 || (w[0] != 0 && w[0] < w[1])));
+        let mut len = queue.iter().take_while(|&&slot| slot != 0).count();
+        let landed = queue[..len].iter().take_while(|&&slot| slot <= now).count();
+        if landed != 0 {
+            queue.copy_within(landed..len, 0);
+            len -= landed;
+            queue[len..].fill(0);
         }
-        self.write_queue
-            .sort_unstable_by_key(|&slot| if slot == 0 { u64::MAX } else { slot });
         let mut wait = 0;
-        if self.write_queue[3] != 0 {
+        if len == queue.len() {
             // Full: the oldest write has to land first.
-            wait = self.write_queue[0] - now;
-            self.write_queue.rotate_left(1);
-            self.write_queue[3] = 0;
+            wait = queue[0] - now;
+            queue.copy_within(1.., 0);
+            len -= 1;
+            queue[len] = 0;
         }
         let issued = now + wait;
-        let newest = self.write_queue.iter().copied().max().unwrap_or(0);
+        let newest = if len == 0 { 0 } else { queue[len - 1] };
         let completion = (issued + Self::WRITE_QUEUE_FIRST).max(newest + Self::WRITE_QUEUE_PERIOD);
-        let free = self
-            .write_queue
-            .iter()
-            .position(|&slot| slot == 0)
-            .unwrap_or(3);
-        self.write_queue[free] = completion;
+        queue[len] = completion;
         self.ram_write_buffer_ready_cycle = completion;
         wait as u32
     }
@@ -1926,7 +1930,11 @@ impl Bus {
                 self.cycles = self.cycles.wrapping_add(n as u64);
                 self.gpu.decay_busy_quiet(u64::from(n));
                 if let Some(list) = self.experimental_gpu_list.as_mut() {
-                    list.setup_cycles = list.setup_cycles.saturating_sub(n);
+                    // A disabled DMA channel pauses the sequencer, including
+                    // its node setup delay. GPU credit still decays above.
+                    if list.setup_cycles != 0 && self.dma.is_channel_enabled(2) {
+                        list.setup_cycles = list.setup_cycles.saturating_sub(n);
+                    }
                 }
                 return;
             }
@@ -1970,7 +1978,9 @@ impl Bus {
                     self.cycles = self.cycles.wrapping_add(u64::from(quiet));
                     self.gpu.decay_busy_quiet(u64::from(quiet));
                     if let Some(list) = self.experimental_gpu_list.as_mut() {
-                        list.setup_cycles = list.setup_cycles.saturating_sub(quiet);
+                        if list.setup_cycles != 0 && self.dma.is_channel_enabled(2) {
+                            list.setup_cycles = list.setup_cycles.saturating_sub(quiet);
+                        }
                     }
                     left -= quiet;
                     continue;
@@ -2381,33 +2391,7 @@ impl Bus {
         }
         // Run only the channel whose CHCR was just written.
         match ch {
-            0 => {
-                if let Some(mdec_words) = self.run_dma_mdec_in() {
-                    if crate::env_flag!("PSOXIDE_TRACE_MDEC_DMA") {
-                        eprintln!(
-                            "[mdec-dma] input accepted cycle={} words={mdec_words} command={:#010x} state={:?} rle={} next={:?} out_ready={} wait_for_out={}",
-                            self.cycles,
-                            self.mdec.command_history().last().copied().unwrap_or(0),
-                            self.mdec.state(),
-                            self.mdec.queued_rle_halfwords(),
-                            self.mdec.next_rle_halfword(),
-                            self.mdec.output_ready(),
-                            self.mdec.decode_dma0_waits_for_output()
-                        );
-                    }
-                    if self.mdec.decode_dma0_waits_for_output() {
-                        self.try_schedule_ready_mdec_out();
-                    } else {
-                        let target = self.cycles + mdec_words as u64;
-                        self.log_dma_schedule("MdecIn", mdec_words as u64, target);
-                        self.scheduler.schedule(
-                            EventSlot::MdecInDma,
-                            self.cycles,
-                            mdec_words as u64,
-                        );
-                    }
-                }
-            }
+            0 => self.start_mdec_in_dma(),
             1 => {
                 self.try_schedule_ready_mdec_out();
             }
@@ -2545,6 +2529,84 @@ impl Bus {
         }
     }
 
+    /// Start a kicked DMA0 transfer into the MDEC, or park it until the
+    /// MDEC raises its data-in request (status bit 28). Silicon moves no
+    /// word without the request: a kick behind a lost enable waits forever
+    /// (hardware tests v1.26, sequence E: CHCR busy, 0 words moved).
+    fn start_mdec_in_dma(&mut self) {
+        use crate::scheduler::EventSlot;
+        if self.dma.is_channel_enabled(0)
+            && self.dma.channels[0].channel_control & (1 << 24) != 0
+            && !self.mdec.dma_in_request()
+        {
+            if crate::env_flag!("PSOXIDE_TRACE_MDEC_DMA") {
+                eprintln!(
+                    "[mdec-dma] input waits for the data-in request cycle={}",
+                    self.cycles
+                );
+            }
+            self.mdec.set_dma_in_waiting(true);
+            return;
+        }
+        self.mdec.set_dma_in_waiting(false);
+        if let Some(mdec_words) = self.run_dma_mdec_in() {
+            if crate::env_flag!("PSOXIDE_TRACE_MDEC_DMA") {
+                eprintln!(
+                    "[mdec-dma] input accepted cycle={} words={mdec_words} command={:#010x} state={:?} rle={} next={:?} out_ready={} wait_for_out={}",
+                    self.cycles,
+                    self.mdec.command_history().last().copied().unwrap_or(0),
+                    self.mdec.state(),
+                    self.mdec.queued_rle_halfwords(),
+                    self.mdec.next_rle_halfword(),
+                    self.mdec.output_ready(),
+                    self.mdec.decode_dma0_waits_for_output()
+                );
+            }
+            if self.mdec.decode_dma0_waits_for_output() {
+                self.try_schedule_ready_mdec_out();
+            } else {
+                let target = self.cycles + mdec_words as u64;
+                self.log_dma_schedule("MdecIn", mdec_words as u64, target);
+                self.scheduler
+                    .schedule(EventSlot::MdecInDma, self.cycles, mdec_words as u64);
+            }
+        }
+    }
+
+    /// Re-check a DMA0 kick parked on the MDEC's data-in request after an
+    /// MDEC register write: an enable or a command can raise the request.
+    fn service_mdec_dma_request(&mut self) {
+        if !self.mdec.dma_in_waiting() {
+            return;
+        }
+        if self.dma.channels[0].channel_control & (1 << 24) == 0 {
+            self.mdec.set_dma_in_waiting(false);
+            return;
+        }
+        // A request raised while DPCR pauses DMA0 must keep its parked
+        // kick. The start helper cannot transfer while the channel is off.
+        if self.mdec.dma_in_request() && self.dma.is_channel_enabled(0) {
+            self.start_mdec_in_dma();
+        }
+    }
+
+    /// Cycles DMA1 takes per decoded word. 8 is Redux's model and the
+    /// default. `PSOXIDE_MDEC_OUT_CYCLES_PER_WORD` overrides it for player
+    /// experiments: silicon's MDEC throughput is not measured yet, and the
+    /// v1.26 FMV profile puts a whole frame's decode-plus-upload near 952k
+    /// cycles, several times what 8 gives. Diagnostic only, like
+    /// `PSOXIDE_WEDGE_DMA`.
+    fn mdec_out_cycles_per_word() -> u64 {
+        static CYCLES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *CYCLES.get_or_init(|| {
+            std::env::var("PSOXIDE_MDEC_OUT_CYCLES_PER_WORD")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(8)
+        })
+    }
+
     fn try_schedule_ready_mdec_out(&mut self) {
         use crate::scheduler::EventSlot;
 
@@ -2562,7 +2624,7 @@ impl Bus {
         if let Some(mdec_words) = self.run_dma_mdec_out() {
             // Redux's MDEC model schedules output DMA by byte count
             // multiplied by MDEC_BIAS=2.0, i.e. 8 cycles per 32-bit word.
-            let delay = mdec_words as u64 * 8;
+            let delay = mdec_words as u64 * Self::mdec_out_cycles_per_word();
             let target = self.cycles + delay;
             self.log_dma_schedule("MdecOut", delay, target);
             self.scheduler
@@ -3304,7 +3366,7 @@ impl Bus {
         }
         if crate::mdec::Mdec::contains(phys) {
             let aligned = phys & !3;
-            return (self.mdec.read32(aligned) >> ((phys & 3) * 8)) as u8;
+            return (self.mdec.read32_at(aligned, self.cycles) >> ((phys & 3) * 8)) as u8;
         }
         if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
             return self.io[(phys - memory::io::BASE) as usize];
@@ -3411,7 +3473,7 @@ impl Bus {
             return self.sio1.read32(phys) as u16;
         }
         if crate::mdec::Mdec::contains(phys) {
-            return (self.mdec.read32(phys & !3) >> ((phys & 2) * 8)) as u16;
+            return (self.mdec.read32_at(phys & !3, self.cycles) >> ((phys & 2) * 8)) as u16;
         }
         if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
             let off = (phys - memory::io::BASE) as usize;
@@ -3573,7 +3635,7 @@ impl Bus {
             return byte * 0x0101_0101;
         }
         if crate::mdec::Mdec::contains(phys) {
-            return self.mdec.read32(phys);
+            return self.mdec.read32_at(phys, self.cycles);
         }
 
         if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
@@ -3761,7 +3823,8 @@ impl Bus {
             return;
         }
         if crate::mdec::Mdec::contains(phys) {
-            self.mdec.write32(phys, value);
+            self.mdec.write32_at(phys, value, self.cycles);
+            self.service_mdec_dma_request();
             return;
         }
 
@@ -3947,7 +4010,8 @@ impl Bus {
             return true;
         }
         if crate::mdec::Mdec::contains(phys) {
-            self.mdec.write32(aligned, word);
+            self.mdec.write32_at(aligned, word, self.cycles);
+            self.service_mdec_dma_request();
             return true;
         }
         false
@@ -4139,7 +4203,8 @@ impl Bus {
             return;
         }
         if crate::mdec::Mdec::contains(phys) {
-            self.mdec.write32(phys & !3, value as u32);
+            self.mdec.write32_at(phys & !3, value as u32, self.cycles);
+            self.service_mdec_dma_request();
             return;
         }
         if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
@@ -5020,21 +5085,228 @@ mod tests {
         );
     }
 
+    fn stalled_ram_dma_machine(opcode: u32, uncached: bool, refresh: bool, prefix: bool) -> (crate::Cpu, Bus) {
+        let mut bus = Bus::new_without_bios();
+        let mut cpu = crate::Cpu::new();
+        // Optional nop; memory op gp, 0(sp); j start; nop. Warm the
+        // instruction cache without DMA, then stop at the loop entry.
+        let op = (opcode << 26) | (29 << 21) | (28 << 16);
+        let program = if prefix { vec![0, op, 0x0800_4000, 0] } else { vec![op, 0x0800_4000, 0, 0] };
+        let bytes: Vec<_> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+        bus.load_exe_payload(0x8001_0000, &bytes);
+        let addr = if uncached { 0xa000_0304 } else { 0x8000_0304 };
+        cpu.seed_from_exe(0x8001_0000, 0xe100_0002, Some(addr));
+        cpu.set_block_cache_enabled(true);
+        for _ in 0..12 {
+            cpu.step(&mut bus).unwrap();
+        }
+        assert_eq!(cpu.pc(), 0x8001_0000);
+        bus.gpu.enable_experimental_dma_fifo();
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        bus.write32(0x300, 0x01ff_ffff);
+        bus.write32(0x304, 0xe100_0001);
+        bus.dma.dpcr = 1 << (2 * 4 + 3);
+        bus.dma.channels[2].base = 0x300;
+        bus.dma.channels[2].channel_control = 0x0100_0401;
+        bus.run_dma_channel(2);
+        bus.add_cycles(14 - u32::from(prefix));
+        let now = bus.cycles;
+        let issued = now + 1 + u64::from(prefix);
+        if refresh {
+            bus.write_queue = [0; 4];
+            bus.ram_write_buffer_ready_cycle = 0;
+            bus.dram_refresh_deadline = issued;
+        } else {
+            bus.write_queue = [issued + 3, issued + 5, issued + 7, issued + 9];
+            bus.ram_write_buffer_ready_cycle = issued + 9;
+            bus.dram_refresh_deadline = u64::MAX;
+        }
+        assert!(issued < bus.quiet_limit());
+        (cpu, bus)
+    }
+
+    #[test]
+    fn cached_ram_store_waits_for_gpu_dma_fetch_before_overwriting_word() {
+        for opcode in [0x28, 0x29, 0x2b] {
+            for uncached in [false, true] {
+                for refresh in [false, true] {
+                    for prefix in [false, true] {
+                        let make = || stalled_ram_dma_machine(opcode, uncached, refresh, prefix);
+                        let (mut scalar, mut scalar_bus) = make();
+                        let (mut cached, mut cached_bus) = make();
+                        let steps = 1 + u64::from(prefix);
+                        for _ in 0..steps { scalar.step(&mut scalar_bus).unwrap(); }
+                        let (ran, result) = cached.run(&mut cached_bus, steps, u64::MAX, |_| false);
+                        result.unwrap();
+                        assert_eq!(ran, steps);
+                        assert!(cached.blocks_built() > 0);
+                        assert_eq!(scalar_bus.cycles, cached_bus.cycles);
+                        assert_eq!(scalar_bus.read32(0x304), 0xe100_0002);
+                        assert_eq!(cached_bus.read32(0x304), 0xe100_0002);
+                        // DMA consumes the old E1 command during the wait.
+                        let mode = scalar_bus.gpu.read32(crate::gpu::GP1_ADDR).unwrap() & 0x1ff;
+                        assert_eq!(mode, 1);
+                        assert_eq!(cached_bus.gpu.read32(crate::gpu::GP1_ADDR).unwrap() & 0x1ff, mode);
+                        assert!(postcard::to_allocvec(&cached_bus).unwrap() == postcard::to_allocvec(&scalar_bus).unwrap());
+                        assert!(postcard::to_allocvec(&cached).unwrap() == postcard::to_allocvec(&scalar).unwrap());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn crossing_ram_store_after_streaming_fetch_is_not_fetched_twice() {
+        for opcode in [0x28, 0x29, 0x2b] {
+            for uncached in [false, true] {
+                for refresh in [false, true] {
+                    let make = || {
+                        let (cpu, mut bus) = stalled_ram_dma_machine(opcode, uncached, refresh, false);
+                        let now = bus.cycles;
+                        // The store's code word arrives in one cycle, before
+                        // the next DMA fetch, but its data stall crosses it.
+                        bus.experimental_gpu_list.as_mut().unwrap().setup_cycles = 3;
+                        bus.gpu_quiet_until = 0;
+                        bus.code_stream_active = true;
+                        bus.code_fill_busy_until = now + 6;
+                        bus.code_stream_next = 0x0001_0000;
+                        bus.code_stream_end = 0x0001_0010;
+                        bus.code_stream_next_ready = now + 1;
+                        (cpu, bus)
+                    };
+                    let (mut scalar, mut scalar_bus) = make();
+                    let (mut cached, mut cached_bus) = make();
+                    scalar.step(&mut scalar_bus).unwrap();
+                    let (ran, result) = cached.run(&mut cached_bus, 1, u64::MAX, |_| false);
+                    result.unwrap();
+                    assert_eq!(ran, 1);
+                    assert!(cached.blocks_built() > 0);
+                    assert_eq!(cached_bus.cycles, scalar_bus.cycles);
+                    assert_eq!(scalar_bus.gpu.read32(crate::gpu::GP1_ADDR).unwrap() & 0x1ff, 1);
+                    assert!(postcard::to_allocvec(&cached_bus).unwrap() == postcard::to_allocvec(&scalar_bus).unwrap());
+                    assert!(postcard::to_allocvec(&cached).unwrap() == postcard::to_allocvec(&scalar).unwrap());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn direct_ram_store_waits_for_gpu_dma_fetch_before_overwriting_word() {
+        for uncached in [false, true] {
+            for refresh in [false, true] {
+                let (_, mut direct) = stalled_ram_dma_machine(0x2b, uncached, refresh, false);
+                let (_, mut scalar) = stalled_ram_dma_machine(0x2b, uncached, refresh, false);
+                let addr = if uncached { 0xa000_0304 } else { 0x8000_0304 };
+                direct.add_cycles(1);
+                scalar.add_cycles(1);
+                direct.cpu_ram_store32(addr, 0xe100_0002);
+                scalar.cpu_write32(addr, 0xe100_0002);
+                assert_eq!(scalar.gpu.read32(crate::gpu::GP1_ADDR).unwrap() & 0x1ff, 1);
+                assert!(postcard::to_allocvec(&direct).unwrap() == postcard::to_allocvec(&scalar).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn final_cached_ram_load_stall_can_cross_quiet_limit() {
+        let (mut scalar, mut scalar_bus) = stalled_ram_dma_machine(0x23, false, false, false);
+        let (mut cached, mut cached_bus) = stalled_ram_dma_machine(0x23, false, false, false);
+        let limit = cached_bus.quiet_limit();
+        scalar.step(&mut scalar_bus).unwrap();
+        let (ran, result) = cached.run(&mut cached_bus, 1, u64::MAX, |_| false);
+        result.unwrap();
+        assert_eq!(ran, 1);
+        assert!(cached_bus.cycles >= limit);
+        assert!(postcard::to_allocvec(&cached_bus).unwrap() == postcard::to_allocvec(&scalar_bus).unwrap());
+        assert!(postcard::to_allocvec(&cached).unwrap() == postcard::to_allocvec(&scalar).unwrap());
+    }
+
+    #[test]
+    fn gpu_list_pause_and_cancel_match_reference_cycles() {
+        for before_pause in [1, 8, 16, 32, 80] {
+            for cancel in [false, true] {
+                let make = || {
+                    let mut bus = experimental_draw_burst(true);
+                    bus.run_dma_channel(2);
+                    bus
+                };
+                let mut batched = make();
+                let mut reference = make();
+                let advance_batched = |bus: &mut Bus, cycles: u32| {
+                    if cycles != 0 && bus.cycles + u64::from(cycles) < bus.quiet_limit() {
+                        bus.advance_quiet(u64::from(cycles));
+                    } else {
+                        bus.add_cycles(cycles);
+                    }
+                };
+                let advance_reference = |bus: &mut Bus, cycles: u32| {
+                    for _ in 0..cycles {
+                        bus.cycles = bus.cycles.wrapping_add(1);
+                        bus.gpu.decay_busy(1);
+                        bus.advance_experimental_gpu_list();
+                    }
+                };
+                advance_batched(&mut batched, before_pause);
+                advance_reference(&mut reference, before_pause);
+                assert!(reference.experimental_gpu_list.is_some());
+                let register = if cancel {
+                    Dma::BASE + 2 * 0x10 + 8
+                } else {
+                    Dma::BASE + Dma::DPCR_OFFSET
+                };
+                batched.write32(register, 0);
+                reference.write32(register, 0);
+                // Real MMIO writes invalidate the cached quiet window. Both
+                // recomputing that window and reusing it must preserve a paused
+                // setup countdown; clearing CHCR must instead cancel the walk.
+                for cycles in [0, 1, 2, 7, 32, 1024] {
+                    advance_batched(&mut batched, cycles);
+                    advance_reference(&mut reference, cycles);
+                    assert!(
+                        postcard::to_allocvec(&batched).unwrap()
+                            == postcard::to_allocvec(&reference).unwrap(),
+                        "pause at {before_pause}, cancel {cancel}, batch {cycles}, cycle {}: setup {:?} vs {:?}",
+                        reference.cycles,
+                        batched.experimental_gpu_list.as_ref().map(|l| l.setup_cycles),
+                        reference.experimental_gpu_list.as_ref().map(|l| l.setup_cycles)
+                    );
+                }
+                if !cancel {
+                    batched.write32(Dma::BASE + Dma::DPCR_OFFSET, 1 << (2 * 4 + 3));
+                    reference.write32(Dma::BASE + Dma::DPCR_OFFSET, 1 << (2 * 4 + 3));
+                    for cycles in [0, 1, 7, 16, 64, 50000] {
+                        advance_batched(&mut batched, cycles);
+                        advance_reference(&mut reference, cycles);
+                        assert!(
+                            postcard::to_allocvec(&batched).unwrap()
+                                == postcard::to_allocvec(&reference).unwrap(),
+                            "resumed after {before_pause}, batch {cycles}, cycle {}", reference.cycles
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn experimental_fifo_observes_dpcr_and_dreq_between_nodes() {
         let mut bus = linked_list_upload_fixture(false, true, 0);
         bus.gpu.enable_experimental_dma_fifo();
         bus.run_dma_channel(2);
         bus.tick(1); // header admitted
+        // These direct device pokes bypass MMIO cache invalidation.
         bus.dma.dpcr = 0;
+        bus.gpu_quiet_until = 0;
         bus.tick(1000);
         assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0);
         bus.dma.dpcr = 1 << (2 * 4 + 3);
         bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0000);
+        bus.gpu_quiet_until = 0;
         bus.tick(1000);
         assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0x5678); // admitted node finishes
         assert_eq!(bus.gpu.vram.get_pixel(4, 6), 0); // next node waits
         bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        bus.gpu_quiet_until = 0;
         bus.tick(1000);
         assert_eq!(bus.gpu.vram.get_pixel(4, 6), 0xef01);
     }
@@ -5930,11 +6202,72 @@ mod tests {
         assert_eq!(read_ram_u32(&bus.ram[..], 0x200), 0x8888_8888);
     }
 
+    #[test]
+    fn mdec_dma0_waits_for_the_data_in_request() {
+        // Hardware tests v1.26, sequence E: with the enable lost, a table
+        // upload kicked over DMA0 moves nothing and CHCR stays busy.
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        enable_mdec_dma(&mut bus);
+        bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x6000_0000);
+        bus.dma.channels[0].base = 0x100;
+        bus.dma.channels[0].block_control = 0x0001_0020;
+        bus.dma.channels[0].channel_control = 0x0100_0201;
+        bus.run_dma_channel(0);
+        bus.tick(1000);
+        assert_ne!(bus.dma.channels[0].channel_control & (1 << 24), 0);
+        assert_eq!(bus.scheduler.target(EventSlot::MdecInDma), None);
+        assert_eq!(bus.mdec.params_seen(), 0);
+
+        // An enable written afterwards raises the request and frees it.
+        bus.write32(crate::mdec::MDEC_CTRL_STAT, 0x6000_0000);
+        assert_eq!(bus.mdec.params_seen(), 32);
+        bus.tick(1000);
+        assert_eq!(bus.dma.channels[0].channel_control & (1 << 24), 0);
+    }
+
+    #[test]
+    fn mdec_parked_request_survives_disabled_dma_channel() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        enable_mdec_dma(&mut bus);
+        bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x6000_0000);
+        bus.dma.channels[0].base = 0x100;
+        bus.dma.channels[0].block_control = 0x0001_0020;
+        bus.dma.channels[0].channel_control = 0x0100_0201;
+        bus.run_dma_channel(0);
+        assert!(bus.mdec.dma_in_waiting());
+        bus.write32(Dma::BASE + Dma::DPCR_OFFSET, 0);
+        bus.write32(crate::mdec::MDEC_CTRL_STAT, 0x6000_0000);
+        assert_eq!(bus.mdec.params_seen(), 0);
+        assert!(bus.mdec.dma_in_waiting(), "DPCR must not erase the parked kick");
+        bus.write32(Dma::BASE + Dma::DPCR_OFFSET, (1 << 3) | (1 << 7));
+        bus.write32(crate::mdec::MDEC_CTRL_STAT, 0x6000_0000);
+        assert_eq!(bus.mdec.params_seen(), 32);
+        bus.tick(1000);
+        assert_eq!(bus.dma.channels[0].channel_control & (1 << 24), 0);
+    }
+
+    #[test]
+    fn mdec_enable_written_right_behind_a_reset_is_lost() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        enable_mdec_dma(&mut bus);
+        bus.write32(crate::mdec::MDEC_CTRL_STAT, 0x8000_0000);
+        bus.write32(crate::mdec::MDEC_CTRL_STAT, 0x6000_0000);
+        // The swallowed word reads back until the reset completes.
+        assert_eq!(bus.read32(crate::mdec::MDEC_CTRL_STAT), 0x6000_0000);
+        assert!(!bus.mdec.dma_in_enabled());
+        bus.tick(100);
+        assert_eq!(bus.read32(crate::mdec::MDEC_CTRL_STAT), 0x8004_0000);
+        assert!(!bus.mdec.dma_in_enabled());
+    }
+
     fn enable_mdec_dma(bus: &mut Bus) {
         bus.dma.dpcr = (1 << 3) | (1 << 7);
     }
 
     fn seed_one_macroblock_decode(bus: &mut Bus) {
+        // Silicon feeds DMA0 only on the data-in request, which needs the
+        // enable.
+        bus.mdec.write32(crate::mdec::MDEC_CTRL_STAT, 0x6000_0000);
         bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x4000_0001);
         bus.mdec.dma_write_in(&[0x01_01_01_01; 32]);
         bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x3000_0006);

@@ -10,6 +10,7 @@ members = [
     "emu/crates/emulator-core",
     "emu/crates/frontend",
     "emu/crates/psoxide-debug-ui",
+    "emu/crates/psoxide-jit",
     "emu/crates/psoxide-settings",
     "emu/crates/psoxide-validation",
     "emu/crates/psx-gpu-render",

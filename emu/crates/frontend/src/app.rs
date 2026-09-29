@@ -473,6 +473,7 @@ impl AppState {
         // through CUE/BIN discs.
         let mut cpu = Cpu::new();
         let bus = load_initial_bus(&settings, &mut cpu);
+        crate::install_native_tier(&mut cpu);
         let autorun = bus.is_some() && env_flag("PSOXIDE_AUTORUN");
 
         let initial_gpu_resync_generation = if bus.is_some() { 1 } else { 0 };
@@ -645,6 +646,7 @@ impl AppState {
         self.bus = Some(bus);
         self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
         self.cpu = cpu;
+        crate::install_native_tier(&mut self.cpu);
         self.running = true;
         self.menu.open = false;
         self.menu.sync_run_label(true);
@@ -756,6 +758,7 @@ impl AppState {
         self.bus = Some(bus);
         self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
         self.cpu = cpu;
+        crate::install_native_tier(&mut self.cpu);
         self.running = true;
         self.workspace = Workspace::Emulator;
         self.exec_history.clear();
@@ -1015,6 +1018,7 @@ impl AppState {
             .unwrap_or_default();
         payload.bus.attach_memcard_port1(mc_bytes);
         self.cpu = payload.cpu;
+        crate::install_native_tier(&mut self.cpu);
         self.bus = Some(payload.bus);
         self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
         if start_paused {
@@ -2123,6 +2127,7 @@ impl AppState {
         let mut payload = loaded.payload;
         payload.bus.restore_excluded_from(donor_bus);
         self.cpu = payload.cpu;
+        crate::install_native_tier(&mut self.cpu);
         self.bus = Some(payload.bus);
         self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
         self.running = !start_paused;
@@ -2161,6 +2166,7 @@ impl AppState {
         self.bus = Some(bus);
         self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
         self.cpu = cpu;
+        crate::install_native_tier(&mut self.cpu);
         self.running = true;
         self.current_game = None;
         self.exec_history.clear();

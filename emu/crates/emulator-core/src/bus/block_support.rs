@@ -58,6 +58,11 @@ impl RamPages {
         }
     }
 
+    /// The write counts, one per page.
+    pub(crate) fn counts_ptr(&self) -> *const u32 {
+        self.counts.as_ptr()
+    }
+
     /// Write count of the page holding RAM byte offset `offset`.
     #[inline(always)]
     pub(crate) fn count(&self, offset: usize) -> u32 {
@@ -102,6 +107,70 @@ impl Bus {
     /// Move the clock `n` cycles with no drain, as ticks and memory stalls
     /// do before the next step's drain. Batches issue cycles of steps that
     /// stay below [`Bus::quiet_limit`].
+    /// The two parts of [`Bus::quiet_limit`]: the hard limit, the next
+    /// scheduler event or SPU sample (or the current cycle while a limit
+    /// oracle freezes the clock or GPU DMA waits for its request), which a
+    /// batch must not reach; and the soft limit, the end of the GPU's quiet
+    /// span (`u64::MAX` when there is none). Past the soft limit the clock
+    /// is still exact when advanced one step at a time: a GPU list walk or
+    /// FIFO drain then runs inside `advance_cycles` just as it would under
+    /// per-instruction ticks, as long as no step reaches the hard limit.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn quiet_limits(&self) -> (u64, u64) {
+        if self.limits.frozen() || self.gpu_dma_waiting_for_request {
+            return (self.cycles, self.cycles);
+        }
+        let hard = self.scheduler.lowest_target().min(self.spu_sample_deadline);
+        let soft = if self.experimental_gpu_list.is_some() {
+            let quiet_until = if self.gpu_quiet_until > self.cycles {
+                self.gpu_quiet_until
+            } else {
+                self.cycles
+                    .saturating_add(u64::from(self.gpu_list_quiet_cycles(u32::MAX)))
+            };
+            quiet_until.saturating_add(1)
+        } else if !self.gpu.decay_is_plain() {
+            self.cycles.saturating_add(self.gpu.fifo_quiet_cycles())
+        } else {
+            u64::MAX
+        };
+        (hard, soft)
+    }
+
+    /// Advance the clock by `n` with the ordinary (exact) path, for a batch
+    /// stepping past the soft limit of [`Bus::quiet_limits`] one step at a
+    /// time.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn advance_exact(&mut self, n: u64) {
+        self.advance_cycles(n as u32);
+    }
+
+    /// The clock below which a branch boundary's drain has nothing to do
+    /// ([`Bus::post_op_quiet`] would hold): the next scheduler event, SPU
+    /// sample, timer crossing and CD-ROM deadline; 0 while a limit oracle
+    /// waits to start. Holds until an access to a device, a drain or a
+    /// clock change past it.
+    #[inline(always)]
+    pub(crate) fn boundary_quiet_until(&self) -> u64 {
+        if self.limits.pending() {
+            return 0;
+        }
+        self.scheduler
+            .lowest_target()
+            .min(self.spu_sample_deadline)
+            .min(self.timers.quiet_until())
+            .min(self.cdrom.idle_until().saturating_add(1))
+    }
+
+    /// Record a branch boundary at `cycle` whose drain had nothing to do,
+    /// as [`Bus::post_op_quiet`] does when it passes.
+    #[inline(always)]
+    pub(crate) fn note_post_op_cycle(&mut self, cycle: u64) {
+        self.last_post_op_cycle = cycle;
+    }
+
     #[doc(hidden)]
     #[inline(always)]
     pub fn advance_quiet(&mut self, n: u64) {
@@ -136,6 +205,34 @@ impl Bus {
         true
     }
 
+    /// The first cycle at which [`Bus::post_op_quiet`] would not hold (0 when
+    /// it never does). It moves only with the scheduler, the timers and the
+    /// CD-ROM: a batch computes it once and again after each full drain.
+    #[inline]
+    pub(crate) fn post_op_quiet_until(&self) -> u64 {
+        if self.limits.pending() {
+            return 0;
+        }
+        self.scheduler
+            .lowest_target()
+            .min(self.spu_sample_deadline)
+            .min(self.timers.quiet_until())
+            .min(self.cdrom.idle_until().saturating_add(1))
+    }
+
+    /// Record a branch boundary at `now` below [`Bus::post_op_quiet_until`]:
+    /// all [`Bus::post_op_quiet`] does there.
+    #[inline(always)]
+    pub(crate) fn record_post_op(&mut self, now: u64) {
+        self.last_post_op_cycle = now;
+    }
+
+    /// Whether the interrupt line is high (no diagnostic count).
+    #[inline(always)]
+    pub(crate) fn irq_line(&self) -> bool {
+        self.irq.pending()
+    }
+
     /// Whether the word at `virt` in main RAM (or wherever
     /// [`Bus::peek_instruction`] reads) is a GTE command: the GTE interrupt
     /// hazard's look at the next instruction, with main RAM read directly.
@@ -154,17 +251,31 @@ impl Bus {
         word & 0xFE00_0000 == 0x4A00_0000
     }
 
-    /// A CPU load from main RAM at `virt` with no limit oracle configured:
-    /// exactly what `Cpu::charge_read` and the bus read do there (stalls,
-    /// then the value and the data-bus latch). `width` is 1, 2 or 4 bytes;
-    /// the address is aligned to it.
+    /// Settle a batch's clock: the bus clock was last advanced properly at
+    /// `synced` and has since only been set ([`Bus::batch_ram_load`],
+    /// [`Bus::batch_ram_store`]); charge the cycles up to `now`. Issued
+    /// instructions stay below the quiet limit, but the final load's stall
+    /// may cross it, so use the exact advance rather than a quiet assertion.
     #[inline(always)]
-    pub(crate) fn cpu_ram_load(&mut self, virt: u32, width: u32) -> u32 {
+    pub(crate) fn batch_settle(&mut self, synced: u64, now: u64) {
+        self.cycles = synced;
+        self.advance_cycles((now - synced) as u32);
+    }
+
+    /// A CPU load from main RAM at `virt` at clock `now`, inside a quiet
+    /// batch with no limit oracle configured: exactly what `Cpu::charge_read`
+    /// and the bus read do there (stalls, then the value and the data-bus
+    /// latch). Returns the value (zero-extended) and the stall cycles, which
+    /// the caller adds to its clock. `width` is 1, 2 or 4 bytes; the address
+    /// is aligned to it. Leaves the bus clock at `now` with the GPU decay
+    /// owed ([`Bus::batch_settle`]): nothing on this path reads it.
+    #[inline(always)]
+    pub(crate) fn batch_ram_load(&mut self, now: u64, virt: u32, width: u32) -> (u32, u32) {
+        self.cycles = now;
         let stalls = self.ram_read_stalls(virt);
-        self.add_cycles(stalls);
         let phys = to_physical(virt);
         let offset = (phys as usize) % memory::ram::SIZE;
-        match width {
+        let value = match width {
             4 => {
                 let value = read_u32_le(&self.ram[offset..]);
                 self.data_bus_latch = value;
@@ -184,12 +295,115 @@ impl Bus {
                     (self.data_bus_latch & !(0xFF << shift)) | (u32::from(value) << shift);
                 u32::from(value)
             }
+        };
+        (value, stalls)
+    }
+
+    /// A batched plain load from main RAM (`handler`: the primary opcode of
+    /// LB, LH, LW, LBU or LHU) at clock `now`: [`Bus::batch_ram_load`] with
+    /// the sign extension, plus whether the load starts a load shadow
+    /// (`take_ram_load_from_cached_code`). Out of line, to keep the batch
+    /// loop small.
+    #[inline(never)]
+    pub(crate) fn batch_load_op(&mut self, now: u64, virt: u32, handler: u8) -> (u32, u32, bool) {
+        let width = match handler {
+            0x20 | 0x24 => 1,
+            0x21 | 0x25 => 2,
+            _ => 4,
+        };
+        let (value, stalls) = self.batch_ram_load(now, virt, width);
+        let value = match handler {
+            0x20 => value as u8 as i8 as i32 as u32,
+            0x21 => value as u16 as i16 as i32 as u32,
+            _ => value,
+        };
+        (value, stalls, self.take_ram_load_from_cached_code())
+    }
+
+    /// Whether a RAM store at `now` completes before the batch boundary.
+    /// Preview the same queue and refresh waits as `ram_write_stalls`
+    /// without issuing the store. Crossing stores must advance devices
+    /// before touching RAM, since GPU DMA can read the old word meanwhile.
+    #[inline(always)]
+    pub(crate) fn batch_ram_store_fits(&self, now: u64, virt: u32, limit: u64) -> bool {
+        // Sorted occupied slots followed by zeros: only a full queue whose
+        // oldest entry has not landed can block this store.
+        let queue_wait = if self.write_queue[3] != 0 {
+            self.write_queue[0].saturating_sub(now) as u32
+        } else {
+            0
+        };
+        let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
+            memory_timing::DRAM_REFRESH_UNCACHED_STALL_CYCLES
+        } else {
+            memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES
+        };
+        let mut deadline = self.dram_refresh_deadline;
+        let refresh_wait = memory_timing::dram_refresh_wait(now, &mut deadline, refresh_stall);
+        now.saturating_add(u64::from(queue_wait.saturating_add(refresh_wait))) < limit
+    }
+
+    /// A batched store to main RAM (`handler`: the primary opcode of SB, SH
+    /// or SW) at clock `now`: [`Bus::batch_ram_store`], plus whether it
+    /// landed on the RAM range `block` (offset, bytes).
+    #[inline(never)]
+    pub(crate) fn batch_store_op(
+        &mut self,
+        now: u64,
+        virt: u32,
+        source: u32,
+        handler: u8,
+        block: (u32, u32),
+    ) -> (u32, bool) {
+        let width = match handler {
+            0x28 => 1,
+            0x29 => 2,
+            _ => 4,
+        };
+        let stalls = self.batch_ram_store(now, virt, source, width);
+        let offset = to_physical(virt) % memory::ram::SIZE as u32;
+        let (start, len) = block;
+        let lands = offset.wrapping_sub(start) < len || start.wrapping_sub(offset) < width;
+        // A store never starts a load shadow; the flag stays clear.
+        (stalls, lands)
+    }
+
+    /// A CPU `SB`/`SH`/`SW` (`width` 1, 2, 4) of `source` to main RAM at
+    /// aligned `virt` at clock `now`, inside a quiet batch with no limit
+    /// oracle configured: exactly `Bus::cpu_write8/16/32` there (data-bus
+    /// latch, write-buffer and refresh stalls, then the store). Returns the
+    /// stall cycles; see [`Bus::batch_ram_load`] for the clock.
+    #[inline(always)]
+    pub(crate) fn batch_ram_store(&mut self, now: u64, virt: u32, source: u32, width: u32) -> u32 {
+        self.cycles = now;
+        self.data_bus_latch = source;
+        let stall = self.ram_write_stalls(virt);
+        let offset = (to_physical(virt) as usize) % memory::ram::SIZE;
+        match width {
+            4 => self.ram[offset..offset + 4].copy_from_slice(&source.to_le_bytes()),
+            2 => self.ram[offset..offset + 2].copy_from_slice(&(source as u16).to_le_bytes()),
+            _ => self.ram[offset] = source as u8,
         }
+        self.ram_pages.touch(offset);
+        stall
+    }
+
+    /// A CPU load from main RAM at `virt` with no limit oracle configured:
+    /// exactly what `Cpu::charge_read` and the bus read do there (stalls,
+    /// then the value and the data-bus latch). `width` is 1, 2 or 4 bytes;
+    /// the address is aligned to it.
+    #[allow(dead_code)] // kept for the native tier's memory helper
+    #[inline(always)]
+    pub(crate) fn cpu_ram_load(&mut self, virt: u32, width: u32) -> u32 {
+        let (value, stalls) = self.batch_ram_load(self.cycles, virt, width);
+        self.add_cycles(stalls);
+        value
     }
 
     /// A CPU `SW` to main RAM at word-aligned `virt` with no limit oracle
     /// configured: exactly [`Bus::cpu_write32`] there (data-bus latch,
     /// write-buffer and refresh stalls, then the store).
+    #[allow(dead_code)]
     #[inline(always)]
     pub(crate) fn cpu_ram_store32(&mut self, virt: u32, value: u32) {
         self.data_bus_latch = value;
