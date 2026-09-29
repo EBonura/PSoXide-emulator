@@ -798,7 +798,11 @@ macro_rules! batch_step {
                     set!(31, pc.wrapping_add(8));
                 }
                 let value = $cpu.gprs[rs_index] as i32;
-                let branch = if op.rt & 1 != 0 { value >= 0 } else { value < 0 };
+                let branch = if op.rt & 1 != 0 {
+                    value >= 0
+                } else {
+                    value < 0
+                };
                 if branch {
                     $taken = Some(branch_target(pc, word));
                 }
@@ -971,7 +975,11 @@ impl Cpu {
                 let watched = b.watch == Some(b.pc);
                 let mut sample = None;
                 if b.irq_enabled {
-                    let next = if delay { b.taken.unwrap_or(b.pc.wrapping_add(4)) } else { b.pc.wrapping_add(4) };
+                    let next = if delay {
+                        b.taken.unwrap_or(b.pc.wrapping_add(4))
+                    } else {
+                        b.pc.wrapping_add(4)
+                    };
                     let next_gte = if delay || !b.ram_ok {
                         bus.peek_is_gte_command(next)
                     } else if op.flags & op_flags::LAST != 0 {
@@ -1015,8 +1023,24 @@ impl Cpu {
                 }
                 let branch_after_this = if delay { b.taken.take() } else { None };
                 if simple {
-                    batch_step!(self, bus, op, addr, b.now, b.pend.0, b.pend.1, b.shadow, b.taken,
-                        b.ram_ok, b.block_ram, b.fetch_hit, b.after_branch, b.done, b.pc, true);
+                    batch_step!(
+                        self,
+                        bus,
+                        op,
+                        addr,
+                        b.now,
+                        b.pend.0,
+                        b.pend.1,
+                        b.shadow,
+                        b.taken,
+                        b.ram_ok,
+                        b.block_ram,
+                        b.fetch_hit,
+                        b.after_branch,
+                        b.done,
+                        b.pc,
+                        true
+                    );
                 } else {
                     let trapped = self.batch_fallback(bus, &mut b, op);
                     if trapped {
@@ -1112,7 +1136,11 @@ impl Cpu {
         let mask = op_flags::DELAY_SLOT
             | op_flags::LAST
             | op_flags::BATCH
-            | if st.irq_enabled { op_flags::NEXT_GTE } else { 0 };
+            | if st.irq_enabled {
+                op_flags::NEXT_GTE
+            } else {
+                0
+            };
         // The state in plain locals (see `batch_step!`).
         let (limit, budget, block_ram) = (st.limit, st.budget, st.block_ram);
         let mut now = st.now;
@@ -1134,18 +1162,33 @@ impl Cpu {
             let mut addr = 0;
             let mut access = BatchAccess::Ram;
             if op.flags & op_flags::TOUCHES_BUS != 0 {
-                addr = self.gprs[(op.rs & 0x1F) as usize]
-                    .wrapping_add((op.word as i16) as i32 as u32);
+                addr =
+                    self.gprs[(op.rs & 0x1F) as usize].wrapping_add((op.word as i16) as i32 as u32);
                 access = batch_access_kind(op.word, addr);
             }
             if !Self::batch_simple(op, access)
-                || (op.class == OpClass::Store
-                    && !bus.batch_ram_store_fits(now + 1, addr, limit))
+                || (op.class == OpClass::Store && !bus.batch_ram_store_fits(now + 1, addr, limit))
             {
                 break;
             }
-            batch_step!(self, bus, op, addr, now, pend_reg, pend_value, shadow, taken, ram_ok,
-                block_ram, fetch_hit, after_branch, done, pc, true);
+            batch_step!(
+                self,
+                bus,
+                op,
+                addr,
+                now,
+                pend_reg,
+                pend_value,
+                shadow,
+                taken,
+                ram_ok,
+                block_ram,
+                fetch_hit,
+                after_branch,
+                done,
+                pc,
+                true
+            );
             pc = pc.wrapping_add(4);
             at += 1;
             if st.irq_enabled && !ram_ok {
@@ -1172,7 +1215,10 @@ impl Cpu {
             OpClass::Alu | OpClass::Branch => true,
             OpClass::Load | OpClass::Store => {
                 access == BatchAccess::Ram
-                    && matches!(op.handler, 0x20 | 0x21 | 0x23 | 0x24 | 0x25 | 0x28 | 0x29 | 0x2B)
+                    && matches!(
+                        op.handler,
+                        0x20 | 0x21 | 0x23 | 0x24 | 0x25 | 0x28 | 0x29 | 0x2B
+                    )
             }
             _ => false,
         }
@@ -1408,7 +1454,6 @@ struct Batch {
     /// What the last fetch noted (see `Bus::last_fetch_was_a_cache_hit`).
     fetch_hit: bool,
 }
-
 
 /// How a CPU load or store to `addr` fits in a batch.
 #[allow(dead_code)]
@@ -1655,8 +1700,12 @@ mod tests {
                     if let Some(branch) = branch {
                         words.push(i(branch, 0, 0, 2));
                     }
-                    words.extend([i(opcode, 8, 0, 0), i(0x09, 9, 9, 1),
-                        (0x02 << 26) | (0x0001_0000 >> 2), 0]);
+                    words.extend([
+                        i(opcode, 8, 0, 0),
+                        i(0x09, 9, 9, 1),
+                        (0x02 << 26) | (0x0001_0000 >> 2),
+                        0,
+                    ]);
                     let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
                     let mut bus = Bus::new_without_bios();
                     bus.load_exe_payload(0x8001_0000, &bytes);
@@ -1667,7 +1716,9 @@ mod tests {
                     // disable it at the loop entry to exercise decoded ops.
                     loop {
                         cpu.step(&mut bus).unwrap();
-                        if cpu.tick > 50 && cpu.pc == 0x8001_0000 { break; }
+                        if cpu.tick > 50 && cpu.pc == 0x8001_0000 {
+                            break;
+                        }
                         assert!(cpu.tick < 1000);
                     }
                     cpu.cop0[12] &= !(1 << 30);
@@ -1676,15 +1727,31 @@ mod tests {
                 };
                 let (mut plain, mut plain_bus) = make(false);
                 let (mut cached, mut cached_bus) = make(true);
-                for _ in 0..20 { plain.step(&mut plain_bus).unwrap(); }
+                for _ in 0..20 {
+                    plain.step(&mut plain_bus).unwrap();
+                }
                 let (ran, result) = cached.run(&mut cached_bus, 20, u64::MAX, |_| false);
                 result.unwrap();
                 assert_eq!(ran, 20);
                 assert!(cached.blocks_built() > 0);
-                assert_eq!(cached.cop0[13], plain.cop0[13], "cause opcode {opcode:x}, branch {branch:?}");
-                assert_eq!(cached.pc, plain.pc, "PC opcode {opcode:x}, branch {branch:?}");
-                assert_eq!(digest(&cached), digest(&plain), "CPU opcode {opcode:x}, branch {branch:?}");
-                assert_eq!(digest(&cached_bus), digest(&plain_bus), "bus opcode {opcode:x}, branch {branch:?}");
+                assert_eq!(
+                    cached.cop0[13], plain.cop0[13],
+                    "cause opcode {opcode:x}, branch {branch:?}"
+                );
+                assert_eq!(
+                    cached.pc, plain.pc,
+                    "PC opcode {opcode:x}, branch {branch:?}"
+                );
+                assert_eq!(
+                    digest(&cached),
+                    digest(&plain),
+                    "CPU opcode {opcode:x}, branch {branch:?}"
+                );
+                assert_eq!(
+                    digest(&cached_bus),
+                    digest(&plain_bus),
+                    "bus opcode {opcode:x}, branch {branch:?}"
+                );
             }
         }
     }
