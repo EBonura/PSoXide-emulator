@@ -1,0 +1,21 @@
+[package]
+name = "psoxide-jit"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Prototype dynamic recompiler for the PSoXide R3000A: compiles basic blocks to AArch64 and reproduces the interpreter's cycles exactly."
+
+[dependencies]
+emulator-core = { workspace = true }
+# Serialized-state comparison in the lockstep test harness (testgen).
+postcard      = { workspace = true }
+
+[dev-dependencies]
+psx-iso   = { workspace = true }
+psoxide-settings = { workspace = true }
+
+[lints]
+workspace = true

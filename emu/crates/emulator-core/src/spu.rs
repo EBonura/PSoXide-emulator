@@ -2209,22 +2209,39 @@ impl Spu {
         //    **suppressed** from the audible mix -- matches Redux's
         //    `if (FMod == 2) iFMod[ns] = sval; else { SSumL/R += ... }`
         //    branch (`spu.cc:689`).
+        // Each accumulator receives at most 24 i16 voice samples and one
+        // Q15-scaled i16 CD sample: its magnitude is at most 25 * 32768.
+        // i32 addition is exact here; final output saturation stays below.
         let mut sum_l: i32 = 0;
         let mut sum_r: i32 = 0;
         let mut reverb_in_l: i32 = 0;
         let mut reverb_in_r: i32 = 0;
         for v in 0..NUM_VOICES {
+            // A keyed-off voice past its start delay with fixed volumes
+            // outputs silence and changes nothing but its diagnostics:
+            // exactly what `tick_voice` does for it, without the walk
+            // through decode, envelope and volume.
+            let voice = &self.voices[v];
+            if voice.phase == AdsrPhase::Off
+                && voice.start_delay == 0
+                && !voice.vol_l.sweep_active
+                && !voice.vol_r.sweep_active
+            {
+                self.idle_voice_diagnostics(v);
+                self.voices[v].last_sample = 0;
+                continue;
+            }
             let (l, r) = self.tick_voice(v);
             if l != 0 || r != 0 {
                 self.dbg_voiced_samples[v] = self.dbg_voiced_samples[v].saturating_add(1);
             }
             let is_modulator = v + 1 < NUM_VOICES && (self.pmon & (1 << (v + 1))) != 0;
             if !is_modulator {
-                sum_l = sum_l.saturating_add(l as i32);
-                sum_r = sum_r.saturating_add(r as i32);
+                sum_l += l as i32;
+                sum_r += r as i32;
                 if self.reverb_on & (1 << v) != 0 {
-                    reverb_in_l = reverb_in_l.saturating_add(l as i32);
-                    reverb_in_r = reverb_in_r.saturating_add(r as i32);
+                    reverb_in_l += l as i32;
+                    reverb_in_r += r as i32;
                 }
             }
         }
@@ -2253,12 +2270,12 @@ impl Spu {
             cd_cap_l = cl;
             cd_cap_r = cr;
             if self.spucnt & SPUCNT_CD_AUDIO_ENABLE != 0 {
-                sum_l = sum_l.saturating_add(cl);
-                sum_r = sum_r.saturating_add(cr);
+                sum_l += cl;
+                sum_r += cr;
             }
             if self.spucnt & SPUCNT_CD_REVERB_ENABLE != 0 {
-                reverb_in_l = reverb_in_l.saturating_add(cl);
-                reverb_in_r = reverb_in_r.saturating_add(cr);
+                reverb_in_l += cl;
+                reverb_in_r += cr;
             }
         }
         // External-audio input is not wired (no hardware source
@@ -2347,6 +2364,9 @@ impl Spu {
     fn apply_kon_koff(&mut self) {
         let kon = std::mem::take(&mut self.kon_pending);
         let koff = std::mem::take(&mut self.koff_pending);
+        if kon | koff == 0 {
+            return;
+        }
         for v in 0..NUM_VOICES {
             let bit = 1u32 << v;
             let key_on = kon & bit != 0;
@@ -2368,6 +2388,22 @@ impl Spu {
                 self.voices[v].key_off();
                 self.dbg_koff_count[v] = self.dbg_koff_count[v].saturating_add(1);
             }
+        }
+    }
+
+    /// The diagnostic trace bookkeeping `tick_voice` does for an idle
+    /// voice (decoded sample 0, envelope held at its latched level).
+    #[inline(always)]
+    fn idle_voice_diagnostics(&mut self, v: usize) {
+        let env = self.voices[v].envelope;
+        if env > self.dbg_acc_emax[v] {
+            self.dbg_acc_emax[v] = env;
+        }
+        if self.dbg_sample_idx & 0x3FF == 0 && self.dbg_trace[v].len() < 2600 {
+            let ph = self.voices[v].phase as u8;
+            self.dbg_trace[v].push((self.dbg_acc_smax[v] as i16, self.dbg_acc_emax[v], ph));
+            self.dbg_acc_smax[v] = 0;
+            self.dbg_acc_emax[v] = 0;
         }
     }
 
