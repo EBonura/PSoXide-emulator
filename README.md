@@ -56,11 +56,15 @@ supplied. What runs, and how far, is in
 
 ## Game library
 
-Choose your games directory in Settings. The Games menu follows its subfolders;
-folders start collapsed each time you launch PSoXide. Click a folder or press
-Enter to expand it. Contents are indented, including nested folders.
-Use Refresh library after moving or adding games. Keep each CUE beside its
-BIN files when organizing discs.
+Open the Library menu and pick "Choose games folder" to set your games
+directory. The Library lists its subfolders; folders start collapsed each time
+you launch PSoXide. Click a folder or press Enter to expand it. Contents are
+indented, including nested folders. Use "Refresh library" (also in Library)
+after moving or adding games. Keep each CUE beside its BIN files when
+organizing discs.
+
+The menu has three categories: Library, Game (shown only while a game is
+running) and Settings.
 
 ## Source dependencies
 
@@ -88,6 +92,20 @@ Where the HLE kernel's behaviour comes from is recorded in
 [docs/hle-bios-provenance.md](docs/hle-bios-provenance.md).
 
 PlayStation is a trademark of Sony Interactive Entertainment Inc.; PSoXide is not affiliated with or endorsed by Sony.
+
+## How This Was Built
+
+PSoXide was developed with heavy use of AI coding assistants, with a human
+directing the architecture, debugging and hardware verification. A large part
+of the code was written by an AI assistant under human direction, review and
+integration.
+
+This is not a clean-room implementation, and disclosing AI assistance is not a
+warranty of clean-room provenance or of non-infringement. Parts of the emulator
+core are derived from PCSX-Redux (GPL-2.0-or-later), tracked file by file. The
+full picture is in PSoXide's
+[downstream licensing](https://github.com/EBonura/PSoXide/blob/main/docs/downstream-licensing.md)
+document.
 
 ## Recent changes
 
