@@ -25,6 +25,9 @@ mod web_stream;
 // Headless-browser measurement hooks (`?disc=`, `psoxideBenchStats()`).
 #[cfg(target_arch = "wasm32")]
 mod web_bench;
+// `?embed=1` player for iframes on a host page (commands in, run state out).
+#[cfg(target_arch = "wasm32")]
+mod web_embed;
 // The headless CLI (`scan`/`list`/`launch`/...) is a native developer tool:
 // it reads argv, the filesystem, and spins up its own offscreen wgpu device.
 // None of that applies in the browser, so it is compiled out on wasm and the
@@ -1348,6 +1351,11 @@ impl ApplicationHandler for Shell {
                 // (or Select+Start, now) to swap contexts, not to
                 // press "back" on whatever menu item happened to
                 // be highlighted.
+                // An embedded player has no menu: Escape and Select+Start
+                // go nowhere rather than opening one over the host's example.
+                if crate::app::embed_mode() {
+                    input.toggle_open = false;
+                }
                 if input.toggle_open {
                     input.toggle_open = false;
                     input.back = false;
@@ -1933,6 +1941,8 @@ impl ApplicationHandler for Shell {
             self.install_pending_graphics();
             // Apply any game file the user picked since the last frame.
             self.state.poll_web_uploads();
+            // Embed mode: host commands in, run-state changes out.
+            web_embed::tick(&mut self.state);
             // winit on web does not auto-size the canvas to the page, so the
             // surface and egui's screen rect (both read from inner_size()) would
             // stay at the 1x1 init size and nothing would be visible. Match the
