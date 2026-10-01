@@ -1,0 +1,16 @@
+# Trunk settings for the web build (index.html drives the asset pipeline).
+
+[build]
+# Trunk normally injects a module script that imports and starts the wasm at
+# page load. The embedded player (?embed=1) must wait for a click instead, so
+# the injected script only publishes the hashed file names and index.html's
+# own loader decides when to start. The JS glue is still modulepreloaded; the
+# loader fetches the wasm itself (at once on the normal page).
+pattern_script = "<script>window.psoxideWasm = { js: '{base}{js}', wasm: '{base}{wasm}' };</script>"
+pattern_preload = "<link rel=\"modulepreload\" href=\"{base}{js}\">"
+
+[tools]
+# Pin Binaryen so a local build and a CI build run the same optimiser. Trunk
+# uses a wasm-opt on PATH when its version matches, otherwise downloads this
+# release. (wasm-bindgen is pinned by Cargo.lock the same way.)
+wasm_opt = "version_125"

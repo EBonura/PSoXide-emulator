@@ -42,13 +42,21 @@ pub fn draw_layout(
         state.audio_muted,
     );
 
+    // An embedded player (web `?embed=1`) is just the game screen: the host
+    // page supplies the chrome.
+    let embed = crate::app::embed_mode();
+
     // One-shot boot splash on a foreground layer.
-    splash::draw(ctx);
+    if !embed {
+        splash::draw(ctx);
+    }
 
     // Top-bar controls go first so the central panel (framebuffer)
     // clips to what's left under them. The unified debug sidebar
     // docks next so the framebuffer gives it room.
-    toolbar::draw(ctx, state);
+    if !embed {
+        toolbar::draw(ctx, state);
+    }
 
     // Always called: the sidebar animates itself open/closed from the
     // `debug_sidebar` flag and early-returns when fully closed.
@@ -80,7 +88,9 @@ pub fn draw_layout(
     burn::draw(ctx, state);
     draw_recording_indicator(ctx, state);
     draw_freecam_indicator(ctx, state);
-    draw_status_toast(ctx, state);
+    if !embed {
+        draw_status_toast(ctx, state);
+    }
 }
 
 pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> MenuOutcome {
