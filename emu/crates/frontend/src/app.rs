@@ -580,7 +580,12 @@ impl AppState {
             if let Some(disc) = disc.as_deref() {
                 crate::web_files::fetch_game(disc);
             }
-            if let Some(id) = web_autoboot_id(disc.as_deref()) {
+            if crate::web_embed::enabled() {
+                // The player boots only what `?disc=` names, and shows no
+                // menu while it loads.
+                out.menu.open = false;
+            }
+            if let Some(id) = web_autoboot_id(disc.as_deref(), crate::web_embed::enabled()) {
                 if let Some(stream) = crate::web_stream::find(id) {
                     // Quiet until the manifest answers: a dev build without
                     // the delivery staged falls back to the menu silently.
@@ -1776,7 +1781,7 @@ impl AppState {
     /// Recording and replay both start from this reboot so a tape's poll
     /// clock counts from poll 0 of a deterministic fresh machine.
     #[cfg(target_arch = "wasm32")]
-    fn reboot_current_web_game(&mut self) -> Result<(), String> {
+    pub(crate) fn reboot_current_web_game(&mut self) -> Result<(), String> {
         let boot = self
             .web_boot
             .clone()
@@ -1816,6 +1821,7 @@ impl AppState {
             self.status_message_set(format!("Found {n} game(s) in folder"));
         }
         for error in crate::web_files::drain_load_errors() {
+            crate::web_embed::error(&error);
             self.status_message_set(error);
         }
         for loaded in crate::web_files::drain() {
@@ -1880,7 +1886,10 @@ impl AppState {
                             self.set_web_current_game(game_id, title, kind, size);
                             self.status_message_set(format!("Launched: {}", loaded.name));
                         }
-                        Err(e) => self.status_message_set(e),
+                        Err(e) => {
+                            crate::web_embed::error(&e);
+                            self.status_message_set(e);
+                        }
                     }
                 }
                 crate::web_files::Upload::Tape => {
@@ -1927,7 +1936,9 @@ impl AppState {
                     pending.disc = disc;
                     self.web_pending_boot = Some(pending);
                 } else {
-                    self.status_message_set(format!("{}: {error}", pending.name));
+                    let message = format!("{}: {error}", pending.name);
+                    crate::web_embed::error(&message);
+                    self.status_message_set(message);
                 }
             }
         }
@@ -3430,10 +3441,24 @@ fn load_sidecar_disc_for_exe(exe_path: &Path) -> Result<Option<Disc>, String> {
 pub(crate) const DEMO_DISC_ID: &str = "stream:demo-disc";
 
 /// What the web page boots at open: a `?disc=` file boots through its own
-/// hook, otherwise the streamed demo disc does.
+/// hook, otherwise the streamed demo disc does. An embedded player
+/// (`?embed=1`) never boots the demo disc.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-fn web_autoboot_id(disc_param: Option<&str>) -> Option<&'static str> {
-    disc_param.is_none().then_some(DEMO_DISC_ID)
+fn web_autoboot_id(disc_param: Option<&str>, embed: bool) -> Option<&'static str> {
+    (disc_param.is_none() && !embed).then_some(DEMO_DISC_ID)
+}
+
+/// The web build's `?embed=1` player mode: no menu, toolbar, splash or
+/// toasts (see `web_embed`). Always off on native.
+pub(crate) fn embed_mode() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::web_embed::enabled()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
 }
 
 /// Whether a streamed-disc failure passes without a message: only the
@@ -3488,9 +3513,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn web_page_autoboots_the_demo_disc_unless_a_disc_is_named() {
-        assert_eq!(web_autoboot_id(None), Some(DEMO_DISC_ID));
-        assert_eq!(web_autoboot_id(Some("g/game.bin")), None);
+    fn web_page_autoboots_the_demo_disc_unless_a_disc_is_named_or_embedded() {
+        assert_eq!(web_autoboot_id(None, false), Some(DEMO_DISC_ID));
+        assert_eq!(web_autoboot_id(Some("g/game.bin"), false), None);
+        assert_eq!(web_autoboot_id(None, true), None);
+        assert_eq!(web_autoboot_id(Some("g/game.exe"), true), None);
         // A dev build without the delivery falls back to the menu quietly.
         assert!(stream_failure_is_quiet(true, true));
         // A served but broken delivery, or any click, still reports.
