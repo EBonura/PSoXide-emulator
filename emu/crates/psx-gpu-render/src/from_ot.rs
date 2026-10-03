@@ -53,6 +53,10 @@ pub unsafe fn build_cmd_log_into<const N: usize>(
     log.clear();
     let mut command_index = 0u32;
     // SAFETY: contract above forwards directly to iter_packets.
+    // The naming pass renamed it to `packets` and kept this name as a
+    // deprecated forwarder; this crate builds against SDKs on both sides of
+    // that pass (its own pin and the editor's), so it keeps the old name.
+    #[allow(deprecated)]
     let iter = unsafe { ot.iter_packets() };
     for (packet_ptr, words) in iter {
         let words = words as usize;
