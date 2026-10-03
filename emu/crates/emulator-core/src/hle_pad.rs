@@ -92,11 +92,6 @@ const MODE: u16 = 0x0D;
 const DELAY_UNIT: u32 = 10;
 const ACK_TIMEOUT: u32 = 0x51 * 16;
 
-/// Kernel patch bits (see [`crate::hle_kernel::PATCHES`]).
-const PATCH_PAD_ANY: u32 = (1 << 3) | (1 << 4) | (1 << 5);
-const PATCH_REMOVE_CHGCLRPAD: u32 = (1 << 6) | (1 << 7);
-const PATCH_SEND_PAD: u32 = (1 << 8) | (1 << 9);
-
 /// Reader phases.
 mod phase {
     /// Start the port in [`super::kvar::PORT`].
@@ -128,10 +123,6 @@ fn set_deadline(bus: &mut Bus, cycles: u32) {
 
 fn deadline_passed(bus: &Bus) -> bool {
     now(bus).wrapping_sub(peek32(bus, kvar::DEADLINE)) as i32 >= 0
-}
-
-fn patches(bus: &Bus) -> u32 {
-    peek32(bus, crate::hle_kernel::kvar::PATCH_FLAGS)
 }
 
 fn ctrl(bus: &mut Bus) -> u16 {
@@ -277,7 +268,7 @@ pub fn verifier(bus: &mut Bus) -> u32 {
 
 /// Handler: read both pads when the pad driver is enabled, run PAD_dr for
 /// PAD_init2 users, acknowledge VBlank when pad auto-ack is on (and
-/// `_remove_ChgclrPAD` has not removed that), then let the card driver
+/// no game has cleared that code, see [`crate::hle_patch::pad_vblank_ack`]), then let the card driver
 /// schedule its next command. `None` while a transfer is waiting on the
 /// port.
 pub fn handler(bus: &mut Bus) -> Option<u32> {
@@ -288,7 +279,7 @@ pub fn handler(bus: &mut Bus) -> Option<u32> {
         }
     }
     let auto_ack = peek32(bus, crate::hle_kernel::kvar::SIO0_AUTO_ACK) != 0;
-    if auto_ack && patches(bus) & PATCH_REMOVE_CHGCLRPAD == 0 {
+    if auto_ack && crate::hle_patch::pad_vblank_ack(bus) {
         bus.write32(I_STAT, !IRQ_VBLANK);
     }
     if peek32(bus, crate::hle_card::kvar::STARTED) != 0 {
@@ -444,11 +435,11 @@ fn next_port(bus: &mut Bus) {
 }
 
 /// No ACK, or a bad reply: status FFh. The retail reader then selects the
-/// other slot for a moment; `_patch_pad` removes that (psx-spx
-/// "patch_pad_error_handling").
+/// other slot for a moment, until a game clears that code (psx-spx
+/// "patch_pad_error_handling_and_get_pad_enable_functions").
 fn abort(bus: &mut Bus, port: u32, buf: u32) {
     bus.write8_safe(buf, 0xFF);
-    if patches(bus) & PATCH_PAD_ANY == 0 {
+    if crate::hle_patch::pad_error_reselect(bus) {
         let other = if port == 0 { CTRL_PORT2 } else { 0 };
         bus.write16(SIO_CTRL, other | CTRL_DTR);
         set_deadline(bus, 10 * DELAY_UNIT);
@@ -461,8 +452,8 @@ fn abort(bus: &mut Bus, port: u32, buf: u32) {
 
 /// Byte sent for `step`: 01h, 42h, then 00h, then the controller output
 /// data. Output comes from setPadOutputData's buffer (its first byte
-/// enables it; data byte n is buffer[1 + n]); without `_send_pad` each
-/// byte is clipped to 0/1, as the retail kernel does (psx-spx
+/// enables it; data byte n is buffer[1 + n]); until a game replaces
+/// the clipping code each byte is clipped to 0/1 (psx-spx
 /// "patch_optional_pad_output").
 fn tx_byte(bus: &Bus, port: u32, step: u32) -> u8 {
     match step {
@@ -475,7 +466,7 @@ fn tx_byte(bus: &Bus, port: u32, step: u32) -> u8 {
                 return 0;
             }
             let byte = bus.try_read8(out.wrapping_add(1 + (n - 3))).unwrap_or(0);
-            if patches(bus) & PATCH_SEND_PAD != 0 {
+            if !crate::hle_patch::pad_output_clipped(bus) {
                 byte
             } else {
                 u8::from(byte != 0)
@@ -666,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn pad_output_bytes_are_clipped_unless_send_pad_patched() {
+    fn pad_output_bytes_are_clipped_until_a_game_replaces_the_clipping() {
         let mut bus = Bus::new_without_bios();
         bus.enable_hle_bios();
         let out = 0x8002_0200;
@@ -676,7 +667,11 @@ mod tests {
         poke32(&mut bus, crate::hle_kernel::kvar::PAD_OUTPUT, out);
         assert_eq!([tx_byte(&bus, 0, 3), tx_byte(&bus, 0, 4)], [0x00, 0x01]);
         assert_eq!(tx_byte(&bus, 1, 3), 0, "no output buffer for pad 2");
-        poke32(&mut bus, crate::hle_kernel::kvar::PATCH_FLAGS, 1 << 8);
+        poke32(
+            &mut bus,
+            crate::hle_kernel::PAD_CARD_ENTRY + crate::hle_patch::site::PAD_OUTPUT_CLIP,
+            0,
+        );
         assert_eq!([tx_byte(&bus, 0, 4), tx_byte(&bus, 0, 5)], [0x40, 0xFF]);
         // A zero first byte disables output altogether.
         bus.write8_safe(out, 0);

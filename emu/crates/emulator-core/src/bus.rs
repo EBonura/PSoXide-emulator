@@ -1116,25 +1116,29 @@ impl Bus {
         self.hle_bios_records.push(record);
     }
 
-    /// Internal: remember a B(56h)/B(57h) kernel-patch call site, and say
-    /// so on stderr when the routine is not recognised.
-    pub(crate) fn hle_bios_record_patch(&mut self, site: crate::hle_kernel::PatchSite, ra: u32) {
-        let name = match site {
-            crate::hle_kernel::PatchSite::AlreadyApplied => return,
-            crate::hle_kernel::PatchSite::Known(patch) => patch.name.to_string(),
-            crate::hle_kernel::PatchSite::Unknown(hash) => {
-                eprintln!("[hle-bios] unknown kernel patch hash {hash:08x} at ra={ra:#010x}");
-                format!("unknown:{hash:08x}")
-            }
+    /// Internal: remember the patch routines decoded after a B(56h)/B(57h)
+    /// call. A call followed by nothing documented is kept as
+    /// `unrecognised:<ra>` and reported on stderr.
+    pub(crate) fn hle_bios_record_patch(&mut self, found: &[crate::hle_patch::Routine], ra: u32) {
+        let names: Vec<String> = if found.is_empty() {
+            eprintln!("[hle-bios] unrecognised kernel patch routine at ra={ra:#010x}");
+            vec![format!("unrecognised:{ra:08x}")]
+        } else {
+            found
+                .iter()
+                .map(|routine| routine.name().to_string())
+                .collect()
         };
-        if !self.hle_bios_patches.iter().any(|(n, _)| *n == name) {
-            self.hle_bios_patches.push((name, ra));
+        for name in names {
+            if !self.hle_bios_patches.iter().any(|(n, _)| *n == name) {
+                self.hle_bios_patches.push((name, ra));
+            }
         }
     }
 
     /// Kernel patch routines seen at B(56h)/B(57h) call sites, as
-    /// `(name, $ra)` in first-seen order; unrecognised ones are named
-    /// `unknown:<hash>`.
+    /// `(name, $ra)` in first-seen order, named by
+    /// [`crate::hle_patch::Routine::name`] or `unrecognised:<ra>`.
     pub fn hle_bios_patches(&self) -> &[(String, u32)] {
         &self.hle_bios_patches
     }

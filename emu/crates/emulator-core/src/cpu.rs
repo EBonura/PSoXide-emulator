@@ -1960,8 +1960,8 @@ impl Cpu {
                     });
                 }
                 // A(44h) FlushCache normally executes the BIOS's isolated
-                // tag-clear loop, and kernel-patch counterpatches rewrite
-                // guest code. HLE skips the loop, so preserve the
+                // tag-clear loop, and the HLE kernel may have rewritten guest
+                // code. HLE skips the loop, so preserve the
                 // architectural result here.
                 if out.flush_icache {
                     self.instruction_cache.invalidate_all();

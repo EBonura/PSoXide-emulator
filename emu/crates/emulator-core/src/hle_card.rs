@@ -140,9 +140,6 @@ const CTRL_RESET: u16 = 1 << 6;
 const CTRL_ACK_IRQ: u16 = 1 << 12;
 const CTRL_PORT2: u16 = 1 << 13;
 
-/// `_patch_card_info` bit in the kernel patch flags.
-const PATCH_CARD_INFO: u32 = 1 << 0;
-
 fn slot_of(device: u32) -> u32 {
     // Device ids 00h..0Fh are slot 1, 10h..1Fh slot 2 (retail rounds
     // negative ids toward zero first).
@@ -533,9 +530,8 @@ fn info_step(bus: &mut Bus, slot: u32, step: u32) -> i32 {
         4 => {
             let b = bus.read8(SIO_DATA);
             // The retail function sends one byte too many here (psx-spx
-            // "patch_card_info_step4"); `_patch_card_info` removes it.
-            let patches = peek32(bus, crate::hle_kernel::kvar::PATCH_FLAGS);
-            if patches & PATCH_CARD_INFO == 0 {
+            // "patch_card_info_step4") until a game clears that opcode.
+            if crate::hle_patch::card_info_extra_byte(bus) {
                 bus.write8(SIO_DATA, 0);
             }
             let c = bus.read16(SIO_CTRL);

@@ -458,7 +458,8 @@ fn assemble() -> KernelCode {
 }
 
 /// The exception handler at C(06h). Offsets up to the patch slots match
-/// the retail/OpenBIOS layout: games patch +00h..+37h (_patch_gte), read
+/// the retail/OpenBIOS layout: games patch +00h..+37h (psx-spx
+/// "patch_missing_cop0r13_in_exception_handler"), read
 /// and write +70h.. (memory card and lightgun patches).
 fn assemble_handler(cause_epc: u32) -> Vec<u32> {
     let base = crate::hle_kernel::EXCEPTION_HANDLER;
