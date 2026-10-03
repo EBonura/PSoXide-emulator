@@ -4291,7 +4291,7 @@ mod tests {
         bus.set_hle_strict(true);
         cpu.pc = 0xA0;
         cpu.gprs[2] = 0x1234_5678;
-        cpu.gprs[9] = 0x3A; // abort
+        cpu.gprs[9] = 0x3A; // _exit
         cpu.gprs[31] = 0x8001_0000;
         let cycles = bus.cycles();
         let err = cpu.step(&mut bus).unwrap_err();
@@ -4300,7 +4300,7 @@ mod tests {
             ExecutionError::HleUnimplemented {
                 table: 'A',
                 func: 0x3A,
-                name: "abort",
+                name: "_exit",
                 ra: 0x8001_0000,
             }
         );

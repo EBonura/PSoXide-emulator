@@ -1,334 +1,361 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Conventional names for the BIOS A0/B0/C0 function slots, used by HLE
-//! diagnostics and the BIOS census tooling.
+//! Display names for the BIOS A0/B0/C0 function numbers, used by HLE
+//! diagnostics and the compat report.
 //!
-//! Provenance: generated mechanically from the `A0names`, `B0names` and
-//! `C0names` tables in pcsx-redux `src/core/kernellog.cc` (GPL-2.0-or-later,
-//! compatible with this crate's licence), which follow the nocash psx-spx
-//! "BIOS Function Summary". Index = the function number passed in `$t1`.
-//! A(70h) and A(71h) are swapped relative to kernellog.cc to match psx-spx
-//! and OpenBIOS (`_bu_init` is 70h, `_96_init` is 71h).
-//! Names are interface identifiers only; no BIOS code or data is involved.
+//! Each name is the one nocash psx-spx gives in "BIOS Function Summary",
+//! cut at the argument list: `open` for "A(00h) or B(32h)
+//! open(filename,accessmode)". Slots psx-spx lists as "return 0" are named
+//! `return_zero`. A(6Fh), which psx-spx describes only as clearing a card
+//! FCB error field, is `card_clear_error`. Numbers past the end of a
+//! table, and B(5Eh) and up, have no name and print as `?`.
 
 /// Name of function `func` in table 0 (A), 1 (B) or 2 (C), or `"?"`.
 pub fn function_name(table: u8, func: u32) -> &'static str {
-    let names = match table {
-        0 => A0_NAMES,
-        1 => B0_NAMES,
-        _ => C0_NAMES,
+    let names: &[&str] = match table {
+        0 => &A_NAMES,
+        1 => &B_NAMES,
+        2 => &C_NAMES,
+        _ => return "?",
     };
-    names.get(func as usize).copied().flatten().unwrap_or("?")
+    names.get(func as usize).copied().unwrap_or("?")
 }
 
-/// A-table names.
-pub const A0_NAMES: &[Option<&str>] = &[
-    Some("open"),
-    Some("lseek"),
-    Some("read"),
-    Some("write"),
-    Some("close"),
-    Some("ioctl"),
-    Some("exit"),
-    Some("isFileConsole"),
-    Some("getc"),
-    Some("putc"),
-    Some("todigit"),
-    None,
-    Some("strtoul"),
-    Some("strtol"),
-    Some("abs"),
-    Some("labs"),
-    Some("atoi"),
-    Some("atol"),
-    Some("atob"),
-    Some("setjmp"),
-    Some("longjmp"),
-    Some("strcat"),
-    Some("strncat"),
-    Some("strcmp"),
-    Some("strncmp"),
-    Some("strcpy"),
-    Some("strncpy"),
-    Some("strlen"),
-    Some("index"),
-    Some("rindex"),
-    Some("strchr"),
-    Some("strrchr"),
-    Some("strpbrk"),
-    Some("strspn"),
-    Some("strcspn"),
-    Some("strtok"),
-    Some("strstr"),
-    Some("toupper"),
-    Some("tolower"),
-    Some("bcopy"),
-    Some("bzero"),
-    Some("bcmp"),
-    Some("memcpy"),
-    Some("memset"),
-    Some("memmove"),
-    Some("memcmp"),
-    Some("memchr"),
-    Some("rand"),
-    Some("srand"),
-    Some("qsort"),
-    Some("strtod"),
-    Some("user_malloc"),
-    Some("user_free"),
-    Some("lsearch"),
-    Some("bsearch"),
-    Some("user_calloc"),
-    Some("user_realloc"),
-    Some("user_initheap"),
-    Some("abort"),
-    Some("getchar"),
-    Some("putchar"),
-    Some("gets"),
-    Some("puts"),
-    Some("printf"),
-    Some("SystemErrorUnresolvedException"),
-    Some("loadExeHeader"),
-    Some("loadExe"),
-    Some("exec"),
-    Some("flushCache"),
-    Some("installKernelHandlers"),
-    Some("GPU_dw"),
-    Some("GPU_mem2vram"),
-    Some("GPU_send"),
-    Some("GPU_cw"),
-    Some("GPU_cwb"),
-    Some("GPU_sendPackets"),
-    Some("GPU_abort"),
-    Some("GPU_getStatus"),
-    Some("GPU_sync"),
-    None,
-    None,
-    Some("loadAndExec"),
-    None,
-    None,
-    Some("initCDRom"),
-    Some("initMC"),
-    Some("deinitCDRom"),
-    None,
-    None,
-    None,
-    None,
-    Some("dev_tty_init"),
-    Some("dev_tty_open"),
-    Some("dev_tty_action"),
-    Some("dev_tty_ioctl"),
-    Some("dev_cd_open"),
-    Some("dev_cd_read"),
-    Some("dev_cd_close"),
-    Some("dev_cd_firstFile"),
-    Some("dev_cd_nextFile"),
-    Some("dev_cd_chdir"),
-    Some("dev_mc_open"),
-    Some("dev_mc_read"),
-    Some("dev_mc_write"),
-    Some("dev_mc_close"),
-    Some("dev_mc_firstFile"),
-    Some("dev_mc_nextFile"),
-    None,
-    None,
-    None,
-    None,
-    Some("clearFileError"),
-    Some("initMC"),
-    Some("initCDRom"),
-    Some("deinitCDRom"),
-    None,
-    None,
-    None,
-    None,
-    None,
-    Some("cdromSeekL"),
-    None,
-    None,
-    None,
-    Some("cdromGetStatus"),
-    None,
-    Some("cdromRead"),
-    None,
-    None,
-    Some("cdromSetMode"),
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    Some("cdromIOVerifier"),
-    Some("cdromDMAVerifier"),
-    Some("cdromIOHandler"),
-    Some("cdromDMAVerifier"),
-    Some("getLastCDRomError"),
-    Some("cdromInnerInit"),
-    Some("addCDRomDevice"),
-    Some("addMemoryCardDevice"),
-    Some("addConsoleDevice"),
-    Some("addDummyConsoleDevice"),
-    None,
-    None,
-    Some("setConfiguration"),
-    Some("getConfiguration"),
-    Some("setCDRomIRQAutoAck"),
-    Some("setMemSize"),
-    Some("quickReboot"),
-    Some("cdromException"),
-    Some("enqueueCDRomHandlers"),
-    Some("dequeueCDRomHandlers"),
-    Some("cdromGetFileLBA"),
-    Some("cdromBlockReading"),
-    Some("cdromBlockGetStatus"),
-    Some("buLowLevelOpCompleted"),
-    Some("buLowLevelOpError1"),
-    Some("buLowLevelOpError2"),
-    Some("buLowLevelOpError3"),
-    Some("cardInfo"),
-    Some("buReadTOC"),
-    Some("buSetAutoFormat"),
-    Some("buError3"),
-    Some("cardTest"),
-    None,
-    None,
-    Some("ioabort"),
-    None,
-    Some("getSystemInfo"),
+/// Table A, indexed by function number.
+const A_NAMES: [&str; 0xB5] = [
+    "open",                           // A(00h)
+    "lseek",                          // A(01h)
+    "read",                           // A(02h)
+    "write",                          // A(03h)
+    "close",                          // A(04h)
+    "ioctl",                          // A(05h)
+    "exit",                           // A(06h)
+    "isatty",                         // A(07h)
+    "getc",                           // A(08h)
+    "putc",                           // A(09h)
+    "todigit",                        // A(0Ah)
+    "atof",                           // A(0Bh)
+    "strtoul",                        // A(0Ch)
+    "strtol",                         // A(0Dh)
+    "abs",                            // A(0Eh)
+    "labs",                           // A(0Fh)
+    "atoi",                           // A(10h)
+    "atol",                           // A(11h)
+    "atob",                           // A(12h)
+    "setjmp",                         // A(13h)
+    "longjmp",                        // A(14h)
+    "strcat",                         // A(15h)
+    "strncat",                        // A(16h)
+    "strcmp",                         // A(17h)
+    "strncmp",                        // A(18h)
+    "strcpy",                         // A(19h)
+    "strncpy",                        // A(1Ah)
+    "strlen",                         // A(1Bh)
+    "index",                          // A(1Ch)
+    "rindex",                         // A(1Dh)
+    "strchr",                         // A(1Eh)
+    "strrchr",                        // A(1Fh)
+    "strpbrk",                        // A(20h)
+    "strspn",                         // A(21h)
+    "strcspn",                        // A(22h)
+    "strtok",                         // A(23h)
+    "strstr",                         // A(24h)
+    "toupper",                        // A(25h)
+    "tolower",                        // A(26h)
+    "bcopy",                          // A(27h)
+    "bzero",                          // A(28h)
+    "bcmp",                           // A(29h)
+    "memcpy",                         // A(2Ah)
+    "memset",                         // A(2Bh)
+    "memmove",                        // A(2Ch)
+    "memcmp",                         // A(2Dh)
+    "memchr",                         // A(2Eh)
+    "rand",                           // A(2Fh)
+    "srand",                          // A(30h)
+    "qsort",                          // A(31h)
+    "strtod",                         // A(32h)
+    "malloc",                         // A(33h)
+    "free",                           // A(34h)
+    "lsearch",                        // A(35h)
+    "bsearch",                        // A(36h)
+    "calloc",                         // A(37h)
+    "realloc",                        // A(38h)
+    "InitHeap",                       // A(39h)
+    "_exit",                          // A(3Ah)
+    "getchar",                        // A(3Bh)
+    "putchar",                        // A(3Ch)
+    "gets",                           // A(3Dh)
+    "puts",                           // A(3Eh)
+    "printf",                         // A(3Fh)
+    "SystemErrorUnresolvedException", // A(40h)
+    "LoadTest",                       // A(41h)
+    "Load",                           // A(42h)
+    "Exec",                           // A(43h)
+    "FlushCache",                     // A(44h)
+    "init_a0_b0_c0_vectors",          // A(45h)
+    "GPU_dw",                         // A(46h)
+    "gpu_send_dma",                   // A(47h)
+    "SendGP1Command",                 // A(48h)
+    "GPU_cw",                         // A(49h)
+    "GPU_cwp",                        // A(4Ah)
+    "send_gpu_linked_list",           // A(4Bh)
+    "gpu_abort_dma",                  // A(4Ch)
+    "GetGPUStatus",                   // A(4Dh)
+    "gpu_sync",                       // A(4Eh)
+    "SystemError",                    // A(4Fh)
+    "SystemError",                    // A(50h)
+    "LoadExec",                       // A(51h)
+    "GetSysSp",                       // A(52h)
+    "SystemError",                    // A(53h)
+    "_96_init",                       // A(54h)
+    "_bu_init",                       // A(55h)
+    "_96_remove",                     // A(56h)
+    "return_zero",                    // A(57h)
+    "return_zero",                    // A(58h)
+    "return_zero",                    // A(59h)
+    "return_zero",                    // A(5Ah)
+    "dev_tty_init",                   // A(5Bh)
+    "dev_tty_open",                   // A(5Ch)
+    "dev_tty_in_out",                 // A(5Dh)
+    "dev_tty_ioctl",                  // A(5Eh)
+    "dev_cd_open",                    // A(5Fh)
+    "dev_cd_read",                    // A(60h)
+    "dev_cd_close",                   // A(61h)
+    "dev_cd_firstfile",               // A(62h)
+    "dev_cd_nextfile",                // A(63h)
+    "dev_cd_chdir",                   // A(64h)
+    "dev_card_open",                  // A(65h)
+    "dev_card_read",                  // A(66h)
+    "dev_card_write",                 // A(67h)
+    "dev_card_close",                 // A(68h)
+    "dev_card_firstfile",             // A(69h)
+    "dev_card_nextfile",              // A(6Ah)
+    "dev_card_erase",                 // A(6Bh)
+    "dev_card_undelete",              // A(6Ch)
+    "dev_card_format",                // A(6Dh)
+    "dev_card_rename",                // A(6Eh)
+    "card_clear_error",               // A(6Fh)
+    "_bu_init",                       // A(70h)
+    "_96_init",                       // A(71h)
+    "_96_remove",                     // A(72h)
+    "return_zero",                    // A(73h)
+    "return_zero",                    // A(74h)
+    "return_zero",                    // A(75h)
+    "return_zero",                    // A(76h)
+    "return_zero",                    // A(77h)
+    "CdAsyncSeekL",                   // A(78h)
+    "return_zero",                    // A(79h)
+    "return_zero",                    // A(7Ah)
+    "return_zero",                    // A(7Bh)
+    "CdAsyncGetStatus",               // A(7Ch)
+    "return_zero",                    // A(7Dh)
+    "CdAsyncReadSector",              // A(7Eh)
+    "return_zero",                    // A(7Fh)
+    "return_zero",                    // A(80h)
+    "CdAsyncSetMode",                 // A(81h)
+    "return_zero",                    // A(82h)
+    "return_zero",                    // A(83h)
+    "return_zero",                    // A(84h)
+    "return_zero",                    // A(85h)
+    "return_zero",                    // A(86h)
+    "return_zero",                    // A(87h)
+    "return_zero",                    // A(88h)
+    "return_zero",                    // A(89h)
+    "return_zero",                    // A(8Ah)
+    "return_zero",                    // A(8Bh)
+    "return_zero",                    // A(8Ch)
+    "return_zero",                    // A(8Dh)
+    "return_zero",                    // A(8Eh)
+    "return_zero",                    // A(8Fh)
+    "CdromIoIrqFunc1",                // A(90h)
+    "CdromDmaIrqFunc1",               // A(91h)
+    "CdromIoIrqFunc2",                // A(92h)
+    "CdromDmaIrqFunc2",               // A(93h)
+    "CdromGetInt5errCode",            // A(94h)
+    "CdInitSubFunc",                  // A(95h)
+    "AddCDROMDevice",                 // A(96h)
+    "AddMemCardDevice",               // A(97h)
+    "AddDuartTtyDevice",              // A(98h)
+    "add_nullcon_driver",             // A(99h)
+    "SystemError",                    // A(9Ah)
+    "SystemError",                    // A(9Bh)
+    "SetConf",                        // A(9Ch)
+    "GetConf",                        // A(9Dh)
+    "SetCdromIrqAutoAbort",           // A(9Eh)
+    "SetMem",                         // A(9Fh)
+    "_boot",                          // A(A0h)
+    "SystemError",                    // A(A1h)
+    "EnqueueCdIntr",                  // A(A2h)
+    "DequeueCdIntr",                  // A(A3h)
+    "CdGetLbn",                       // A(A4h)
+    "CdReadSector",                   // A(A5h)
+    "CdGetStatus",                    // A(A6h)
+    "bufs_cb_0",                      // A(A7h)
+    "bufs_cb_1",                      // A(A8h)
+    "bufs_cb_2",                      // A(A9h)
+    "bufs_cb_3",                      // A(AAh)
+    "_card_info",                     // A(ABh)
+    "_card_load",                     // A(ACh)
+    "_card_auto",                     // A(ADh)
+    "bufs_cb_4",                      // A(AEh)
+    "card_write_test",                // A(AFh)
+    "return_zero",                    // A(B0h)
+    "return_zero",                    // A(B1h)
+    "ioabort_raw",                    // A(B2h)
+    "return_zero",                    // A(B3h)
+    "GetSystemInfo",                  // A(B4h)
 ];
-/// B-table names.
-pub const B0_NAMES: &[Option<&str>] = &[
-    Some("kern_malloc"),
-    Some("kern_free"),
-    Some("initTimer"),
-    Some("getTimer"),
-    Some("enableTimerIRQ"),
-    Some("disableTimerIRQ"),
-    Some("restartTimer"),
-    Some("deliverEvent"),
-    Some("openEvent"),
-    Some("closeEvent"),
-    Some("waitEvent"),
-    Some("testEvent"),
-    Some("enableEvent"),
-    Some("disableEvent"),
-    Some("openThread"),
-    Some("closeThread"),
-    Some("changeThread"),
-    None,
-    Some("initPad"),
-    Some("startPad"),
-    Some("stopPad"),
-    Some("initPadHighLevel"),
-    Some("readPadHighLevel"),
-    Some("returnFromException"),
-    Some("setDefaultExceptionJmpBuf"),
-    Some("setExceptionJmpBuf"),
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    Some("undeliverEvent"),
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    Some("open"),
-    Some("lseek"),
-    Some("read"),
-    Some("write"),
-    Some("close"),
-    Some("ioctl"),
-    Some("exit"),
-    Some("isFileConsole"),
-    Some("getc"),
-    Some("putc"),
-    Some("getchar"),
-    Some("putchar"),
-    Some("gets"),
-    Some("puts"),
-    Some("chdir"),
-    Some("format"),
-    Some("firstFile"),
-    Some("nextFile"),
-    Some("rename"),
-    Some("delete"),
-    Some("undelete"),
-    Some("addDevice"),
-    Some("removeDevice"),
-    Some("printInstalledDevices"),
-    Some("initCard"),
-    Some("startCard"),
-    Some("stopCard"),
-    Some("cardInfoInternal"),
-    Some("mcWriteSector"),
-    Some("mcReadSector"),
-    Some("mcAllowNewCard"),
-    Some("Krom2RawAdd"),
-    None,
-    Some("Krom2Offset"),
-    Some("getErrno"),
-    Some("getFileErrno"),
-    Some("getC0table"),
-    Some("getB0table"),
-    Some("mcGetLastDevice"),
-    Some("checkDevice"),
-    None,
-    Some("setSIO0AutoAck"),
+
+/// Table B, indexed by function number.
+const B_NAMES: [&str; 0x5E] = [
+    "alloc_kernel_memory",   // B(00h)
+    "free_kernel_memory",    // B(01h)
+    "init_timer",            // B(02h)
+    "get_timer",             // B(03h)
+    "enable_timer_irq",      // B(04h)
+    "disable_timer_irq",     // B(05h)
+    "restart_timer",         // B(06h)
+    "DeliverEvent",          // B(07h)
+    "OpenEvent",             // B(08h)
+    "CloseEvent",            // B(09h)
+    "WaitEvent",             // B(0Ah)
+    "TestEvent",             // B(0Bh)
+    "EnableEvent",           // B(0Ch)
+    "DisableEvent",          // B(0Dh)
+    "OpenTh",                // B(0Eh)
+    "CloseTh",               // B(0Fh)
+    "ChangeTh",              // B(10h)
+    "jump_to_00000000h",     // B(11h)
+    "InitPAD2",              // B(12h)
+    "StartPAD2",             // B(13h)
+    "StopPAD2",              // B(14h)
+    "PAD_init2",             // B(15h)
+    "PAD_dr",                // B(16h)
+    "ReturnFromException",   // B(17h)
+    "ResetEntryInt",         // B(18h)
+    "HookEntryInt",          // B(19h)
+    "SystemError",           // B(1Ah)
+    "SystemError",           // B(1Bh)
+    "SystemError",           // B(1Ch)
+    "SystemError",           // B(1Dh)
+    "SystemError",           // B(1Eh)
+    "SystemError",           // B(1Fh)
+    "UnDeliverEvent",        // B(20h)
+    "SystemError",           // B(21h)
+    "SystemError",           // B(22h)
+    "SystemError",           // B(23h)
+    "jump_to_00000000h",     // B(24h)
+    "jump_to_00000000h",     // B(25h)
+    "jump_to_00000000h",     // B(26h)
+    "jump_to_00000000h",     // B(27h)
+    "jump_to_00000000h",     // B(28h)
+    "jump_to_00000000h",     // B(29h)
+    "SystemError",           // B(2Ah)
+    "SystemError",           // B(2Bh)
+    "jump_to_00000000h",     // B(2Ch)
+    "jump_to_00000000h",     // B(2Dh)
+    "jump_to_00000000h",     // B(2Eh)
+    "jump_to_00000000h",     // B(2Fh)
+    "jump_to_00000000h",     // B(30h)
+    "jump_to_00000000h",     // B(31h)
+    "open",                  // B(32h)
+    "lseek",                 // B(33h)
+    "read",                  // B(34h)
+    "write",                 // B(35h)
+    "close",                 // B(36h)
+    "ioctl",                 // B(37h)
+    "exit",                  // B(38h)
+    "isatty",                // B(39h)
+    "getc",                  // B(3Ah)
+    "putc",                  // B(3Bh)
+    "getchar",               // B(3Ch)
+    "putchar",               // B(3Dh)
+    "gets",                  // B(3Eh)
+    "puts",                  // B(3Fh)
+    "cd",                    // B(40h)
+    "format",                // B(41h)
+    "firstfile2",            // B(42h)
+    "nextfile",              // B(43h)
+    "rename",                // B(44h)
+    "erase",                 // B(45h)
+    "undelete",              // B(46h)
+    "AddDrv",                // B(47h)
+    "DelDrv",                // B(48h)
+    "PrintInstalledDevices", // B(49h)
+    "InitCARD2",             // B(4Ah)
+    "StartCARD2",            // B(4Bh)
+    "StopCARD2",             // B(4Ch)
+    "_card_info_subfunc",    // B(4Dh)
+    "_card_write",           // B(4Eh)
+    "_card_read",            // B(4Fh)
+    "_new_card",             // B(50h)
+    "Krom2RawAdd",           // B(51h)
+    "SystemError",           // B(52h)
+    "Krom2Offset",           // B(53h)
+    "_get_errno",            // B(54h)
+    "_get_error",            // B(55h)
+    "GetC0Table",            // B(56h)
+    "GetB0Table",            // B(57h)
+    "_card_chan",            // B(58h)
+    "testdevice",            // B(59h)
+    "SystemError",           // B(5Ah)
+    "ChangeClearPAD",        // B(5Bh)
+    "_card_status",          // B(5Ch)
+    "_card_wait",            // B(5Dh)
 ];
-/// C-table names.
-pub const C0_NAMES: &[Option<&str>] = &[
-    Some("enqueueRCntIrqs"),
-    Some("enqueueSyscallHandler"),
-    Some("sysEnqIntRP"),
-    Some("sysDeqIntRP"),
-    Some("getFreeEvCBSlot"),
-    Some("getFreeTCBslot"),
-    Some("exceptionHandler"),
-    Some("installExceptionHandler"),
-    Some("kern_initheap"),
-    None,
-    Some("setTimerAutoAck"),
-    None,
-    Some("enqueueIrqHandler"),
-    None,
-    None,
-    None,
-    None,
-    None,
-    Some("setupFileIO"),
-    Some("reopenStdio"),
-    None,
-    Some("cdevinput"),
-    Some("cdevscan"),
-    Some("circgetc"),
-    Some("circputc"),
-    Some("ioAbortWithMsg"),
-    Some("setDeviceStatus"),
-    Some("installStdIo"),
-    Some("patchA0table"),
-    Some("getDeviceStatus"),
+
+/// Table C, indexed by function number.
+const C_NAMES: [&str; 0x1E] = [
+    "EnqueueTimerAndVblankIrqs", // C(00h)
+    "EnqueueSyscallHandler",     // C(01h)
+    "SysEnqIntRP",               // C(02h)
+    "SysDeqIntRP",               // C(03h)
+    "get_free_EvCB_slot",        // C(04h)
+    "get_free_TCB_slot",         // C(05h)
+    "ExceptionHandler",          // C(06h)
+    "InstallExceptionHandlers",  // C(07h)
+    "SysInitMemory",             // C(08h)
+    "SysInitKernelVariables",    // C(09h)
+    "ChangeClearRCnt",           // C(0Ah)
+    "SystemError",               // C(0Bh)
+    "InitDefInt",                // C(0Ch)
+    "SetIrqAutoAck",             // C(0Dh)
+    "return_zero",               // C(0Eh)
+    "return_zero",               // C(0Fh)
+    "return_zero",               // C(10h)
+    "return_zero",               // C(11h)
+    "InstallDevices",            // C(12h)
+    "FlushStdInOutPut",          // C(13h)
+    "return_zero",               // C(14h)
+    "_cdevinput",                // C(15h)
+    "_cdevscan",                 // C(16h)
+    "_circgetc",                 // C(17h)
+    "_circputc",                 // C(18h)
+    "_ioabort",                  // C(19h)
+    "set_card_find_mode",        // C(1Ah)
+    "KernelRedirect",            // C(1Bh)
+    "AdjustA0Table",             // C(1Ch)
+    "get_card_find_mode",        // C(1Dh)
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::function_name;
+
+    #[test]
+    fn names_follow_the_psx_spx_summary() {
+        assert_eq!(function_name(0, 0x00), "open");
+        assert_eq!(function_name(0, 0x3A), "_exit");
+        assert_eq!(function_name(0, 0x70), "_bu_init");
+        assert_eq!(function_name(0, 0x71), "_96_init");
+        assert_eq!(function_name(0, 0x57), "return_zero");
+        assert_eq!(function_name(0, 0xB4), "GetSystemInfo");
+        assert_eq!(function_name(0, 0xB5), "?");
+        assert_eq!(function_name(1, 0x32), "open");
+        assert_eq!(function_name(1, 0x5B), "ChangeClearPAD");
+        assert_eq!(function_name(1, 0x5E), "?");
+        assert_eq!(function_name(2, 0x00), "EnqueueTimerAndVblankIrqs");
+        assert_eq!(function_name(2, 0x1D), "get_card_find_mode");
+        assert_eq!(function_name(2, 0x1E), "?");
+        assert_eq!(function_name(3, 0x00), "?");
+    }
+}

@@ -101,24 +101,24 @@ impl Table {
 pub fn function_name(table: Table, func: u8) -> &'static str {
     match table {
         Table::Kernel => match func {
-            crate::hle_kernel::internal::START_PAD => "startPad",
-            crate::hle_kernel::internal::STOP_PAD => "stopPad",
-            crate::hle_kernel::internal::SET_PAD_OUTPUT_DATA => "setPadOutputData",
-            crate::hle_exceptions::internal::SYSCALL_VERIFIER => "syscallVerifier",
-            0x04..=0x07 => "rcntHandler",
-            0x10..=0x15 => "fileContinuation",
-            0x1F => "nop",
-            0x20 => "ttyInOut",
-            0x28 => "cdOpen",
-            0x29 => "cdRead",
-            crate::hle_exceptions::internal::DELIVER_NEXT => "deliverNext",
-            crate::hle_pad::internal::VERIFIER => "padCardVerifier",
-            crate::hle_pad::internal::HANDLER => "padCardHandler",
-            crate::hle_card::internal::VERIFIER => "cardVerifier",
-            crate::hle_card::internal::HANDLER => "cardHandler",
-            crate::hle_card::internal::FAST => "cardEarlyByte",
-            0x38 => "cdromIoIrq",
-            0x39 => "cdromDmaIrq",
+            crate::hle_kernel::internal::START_PAD => "SetPadEnableFlag",
+            crate::hle_kernel::internal::STOP_PAD => "ClearPadEnableFlag",
+            crate::hle_kernel::internal::SET_PAD_OUTPUT_DATA => "SetPadOutput",
+            crate::hle_exceptions::internal::SYSCALL_VERIFIER => "kernel_syscall_check",
+            0x04..=0x07 => "kernel_timer_irq",
+            0x10..=0x15 => "kernel_file_continue",
+            0x1F => "kernel_nop",
+            0x20 => "kernel_tty_io",
+            0x28 => "kernel_cd_open",
+            0x29 => "kernel_cd_read",
+            crate::hle_exceptions::internal::DELIVER_NEXT => "kernel_event_next",
+            crate::hle_pad::internal::VERIFIER => "kernel_pad_card_check",
+            crate::hle_pad::internal::HANDLER => "kernel_pad_card_irq",
+            crate::hle_card::internal::VERIFIER => "kernel_card_check",
+            crate::hle_card::internal::HANDLER => "kernel_card_irq",
+            crate::hle_card::internal::FAST => "kernel_card_early_byte",
+            0x38 => "kernel_cd_io_irq",
+            0x39 => "kernel_cd_dma_irq",
             _ => "?",
         },
         t => crate::bios_names::function_name(t.index(), u32::from(func)),
@@ -1861,7 +1861,7 @@ mod tests {
         assert_eq!(first.count, 2);
         assert_eq!(
             first.to_string().split(" a1=").next(),
-            Some("A(3Ah) abort a0=0x00000040")
+            Some("A(3Ah) _exit a0=0x00000040")
         );
     }
 
