@@ -194,7 +194,7 @@ pub struct Hle {
     /// How the call was serviced.
     pub outcome: Outcome,
     /// The handler changed code in RAM; the instruction cache must be
-    /// invalidated (FlushCache, kernel patch counterpatches).
+    /// invalidated (FlushCache, code the kernel writes).
     pub flush_icache: bool,
     /// The function is waiting and will be called again from the same PC.
     pub retry: bool,
@@ -829,17 +829,20 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         }
 
         // B(56h) GetC0Table / B(57h) GetB0Table. Psy-Q libraries call
-        // these only to patch the kernel; the code after the call is
-        // hashed and known variants are handled as OpenBIOS does.
+        // these only to patch the kernel. The routine after the call runs
+        // as written (see hle_patch); it is only decoded here so the
+        // compat report can say which patches a game uses.
         (Table::B, 0x56) | (Table::B, 0x57) => {
-            let (patch_table, base) = if func == 0x56 {
-                (2, k::C0_TABLE)
+            let (got, base) = if func == 0x56 {
+                (crate::hle_patch::Got::C0, k::C0_TABLE)
             } else {
-                (1, k::B0_TABLE)
+                (crate::hle_patch::Got::B0, k::B0_TABLE)
             };
-            let (site, rewrote) = k::handle_patch_site(bus, patch_table, gprs[31]);
-            *flush |= rewrote;
-            bus.hle_bios_record_patch(site, gprs[31]);
+            let ra = gprs[31];
+            let words: Vec<u32> = (0..crate::hle_patch::WINDOW as u32)
+                .map(|i| k::peek32(bus, ra.wrapping_add(4 * i)))
+                .collect();
+            bus.hle_bios_record_patch(&crate::hle_patch::identify(got, &words), ra);
             Done(base)
         }
 
@@ -923,7 +926,7 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             Done(0)
         }
 
-        // --- Kernel-internal functions handed out by counterpatches ---
+        // --- Kernel functions games take from the B(5Bh) zone (hle_patch) ---
         (Table::Kernel, k::internal::START_PAD) => {
             k::poke32(bus, k::kvar::PAD_STARTED, 1);
             Done(0)
@@ -1916,14 +1919,31 @@ mod tests {
     #[test]
     fn get_table_calls_return_the_retail_table_addresses_and_report_patches() {
         let mut bus = hle_bus();
-        // Code after the call that matches no known patch routine.
+        // Code after the call that touches nothing psx-spx documents.
         for i in 0..16u32 {
             crate::hle_kernel::poke32(&mut bus, RA + 4 * i, 0x2400_0000 | i);
         }
         assert_eq!(call(&mut bus, 0xB0, 0x56, [0; 4]), 0x674);
+        // A routine that clears the pad handler's VBlank acknowledge.
+        let mut a = crate::hle_asm::Asm::new(RA);
+        a.lw(crate::hle_asm::V0, 0x16C, crate::hle_asm::V0);
+        a.nop();
+        a.sw(crate::hle_asm::ZERO, 0x62C, crate::hle_asm::V0);
+        a.jal_abs(0x8001_2340);
+        a.nop();
+        for (i, word) in a.finish().into_iter().enumerate() {
+            crate::hle_kernel::poke32(&mut bus, RA + 4 * i as u32, word);
+        }
         assert_eq!(call(&mut bus, 0xB0, 0x57, [0; 4]), 0x874);
-        assert_eq!(bus.hle_bios_patches().len(), 2);
-        assert!(bus.hle_bios_patches()[0].0.starts_with("unknown:"));
+        let names: Vec<&str> = bus
+            .hle_bios_patches()
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["unrecognised:80010100", "patch_no_pad_card_auto_ack"]
+        );
     }
 
     #[test]
