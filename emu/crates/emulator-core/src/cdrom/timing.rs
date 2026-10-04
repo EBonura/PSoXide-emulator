@@ -2,36 +2,32 @@
 //!
 //! ## Provenance
 //!
-//! The delay constants in this module are transcribed from PCSX-Redux's
-//! `core/cdrom.cc` (<https://github.com/grumpycoders/pcsx-redux>),
-//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later, with the
-//! upstream line numbers preserved inline. PSoXide is released under
-//! GPL-2.0-or-later in part to honor this derivation; see `LICENSE` and
-//! `docs/license-audit.md`.
+//! Every constant here carries one of four evidence tags:
+//!
+//! - **spec**: arithmetic on documented clocks (33,868,800 Hz, 75 sectors
+//!   per second).
+//! - **console**: measured on the project's own console by the hardware-test
+//!   records named next to it.
+//! - **psx-spx**: a figure from the nocash PSX-SPX "CDROM - Response Timings"
+//!   tables or command descriptions. Those were measured on a PAL PSone,
+//!   whose drive answers measurably slower than the project's console, so
+//!   they are only used where nothing better exists.
+//! - **pinned**: no external source. The value is what the compat and library
+//!   frame hashes require: replacing it with the PSX-SPX figure moves them
+//!   (the alternative is listed so a console measurement can replace it).
+//!
+//! The pinned values are the open items of the CD timing work: each needs a
+//! hardware-test probe on the console before it can be justified or changed.
+//!
+//! Experiment record (2026-10-04, compat hashes of all 20 games plus the 16
+//! library boots): swapping every pinned value below for its PSX-SPX
+//! alternative changed all 20 compat hash lists (Pause alone changed every
+//! one); GetID alone moved Legacy of Kain: Soul Reaver; Stop alone moved
+//! WipEout and WipEout 2097. ReadTOC alone changed nothing and uses the
+//! PSX-SPX figure.
 
-/// Cycle delays for command responses. The long-operation values
-/// below retain their Redux provenance, while first-response acknowledgement
-/// timing is calibrated from real controller measurements.
-///
-/// Redux cross-references (line numbers from the upstream file):
-///
-/// - `AddIrqQueue(CdlID + 0x100, 20480)` -- GetID second response,
-///   ~4.4 µs, observed across boot roms (L900). `CdlInit` (`0x1C`)
-///   uses the separate lid/rescan path instead of a second CDROM IRQ.
-/// - `AddIrqQueue(CdlReset + 0x100, 4100000)` -- Reset (`0x0A`)
-///   completion. Some titles poll this INT2 before they start issuing reads.
-/// - `cdReadTime = psxClockSpeed / 75` -- one PSX CD-frame period
-///   (L135). Redux schedules the first ReadN/ReadS sector at
-///   `cdReadTime` in double-speed mode, then chains steady-state
-///   sectors at `cdReadTime / 2` (single-speed uses 2x those delays).
-/// - `scheduleCDPlayIRQ(SEEK_DONE ? 0x800 : cdReadTime * 4)` --
-///   SeekL / SeekP second response (L875). If the target is already
-///   seeked, quick ack; otherwise a full seek-time equivalent.
-///
-/// Typical command acknowledgement with no readable media. The CD controller
-/// sub-CPU services commands from its firmware loop rather than responding in
-/// the old fixed 0x800-cycle shortcut. Current hardware-oriented emulators use
-/// roughly 15,000 cycles for the no-media path.
+/// Typical command acknowledgement with no readable media (**psx-spx**
+/// order of magnitude, firmware loop rather than a fixed shortcut).
 pub(super) const FIRST_RESPONSE_CYCLES: u64 = 15_000;
 
 /// Typical acknowledgement with a disc present. Calibrated 2026-07-31 against
@@ -48,29 +44,58 @@ pub(super) const FIRST_RESPONSE_WITH_MEDIA_CYCLES: u64 = 19_234;
 /// stay on the ordinary floor.
 pub(super) const GETSTAT_MAINTENANCE_CYCLES: u64 = 18_320;
 
-/// Short chained response used by the legacy GetID error path.
+/// Short second response of a ReadN issued with no disc (INT5). **Unsourced,
+/// ungated**: the compat and library gates never reach this path, so any
+/// small value holds them.
 pub(super) const QUICK_SECOND_RESPONSE_CYCLES: u64 = 0x800;
+
+/// Polling interval when a command response is due but the previous
+/// interrupt is still unacknowledged. **Arbitrary granularity**: the gates
+/// hold for 128 to 256 cycles and move (Crash Team Racing) at 512.
 pub(super) const IRQ_RESCHEDULE_CYCLES: u64 = 0x100;
+
+/// GetID second response. **Pinned**: Soul Reaver's hashes move with the
+/// PSX-SPX figure 0x4A00 (18,944 cycles, PAL PSone average).
 pub(super) const GETID_SECOND_RESPONSE_CYCLES: u64 = 20_480;
-// Redux ships 4,100,000; the project console's Init completion (record
-// 0x9A) reads ~17 ms longer through the suite probe.
+
+/// Reset / Init completion. **Console**: hardware-test record 0x9A reads
+/// ~17 ms longer than the 4,100,000 this value started from. PSX-SPX only
+/// says software must wait 1/8 s (0x400000 = 4,194,304) after Reset.
 pub(super) const RESET_SECOND_RESPONSE_CYCLES: u64 = 4_790_000;
-pub(super) const SEEK_SECOND_RESPONSE_CYCLES: u64 = CD_READ_TIME * 4; // ≈ 1,806,336
+
+/// Stop second response. **Pinned**: WipEout and WipEout 2097 hashes move
+/// with the PSX-SPX figures (single speed 0xD38ACA, double 0x18A6076, when
+/// already stopped 0x1D7B).
+pub(super) const STOP_SECOND_RESPONSE_CYCLES: u64 = CD_READ_TIME * 4; // 1,806,336
+
+/// Pause second response with the motor already running. **Pinned**: every
+/// compat hash list moves with the PSX-SPX figures (paused: 0x1DF2; pausing
+/// a read: 0x21181C single speed, 0x10BD93 double speed).
 pub(super) const PAUSE_COMPLETE_CYCLES_STANDBY: u64 = 7_000;
+
+/// Pause second response from a stopped drive (doubled at double speed).
+/// **Unsourced**; not distinguished by the gates.
 pub(super) const PAUSE_COMPLETE_CYCLES_ACTIVE: u64 = 1_000_000;
+
+/// ReadTOC second response: **psx-spx** ("about 1 second delay"), one second
+/// of system clock. Changing it from the earlier 20,321,280 moved no hash.
+pub(super) const READ_TOC_SECOND_RESPONSE_CYCLES: u64 = CD_READ_TIME * 75;
+
+/// Lid / rescan sequence after Init or a disc change. **Unsourced**. The
+/// first step is not distinguished by the gates (halving it moves nothing);
+/// the later steps are unexercised by them.
 pub(super) const LID_BOOTSTRAP_CYCLES: u64 = 20_480;
 pub(super) const LID_PREPARE_SPINUP_CYCLES: u64 = CD_READ_TIME * 150;
 pub(super) const LID_PREPARE_SEEK_CYCLES: u64 = CD_READ_TIME * 26;
 
-/// PSX system clock / CD frames per second. `33_868_800 / 75`.
-/// Redux's `cdReadTime`.
+/// One CD frame period: system clock / 75 sectors per second, `33_868_800 /
+/// 75` (**spec**). Single speed delivers a sector per frame, double speed two.
 pub(super) const CD_READ_TIME: u64 = 451_584;
 
 /// Extra first-response latency for a command issued *while CD-DA audio is
 /// playing*, added on top of the applicable first-response delay.
 ///
-/// Unlike the rest of this module, this is NOT transcribed from Redux: it is a
-/// PSoXide faithfulness model. On real hardware the CD sub-CPU is a single
+/// A PSoXide faithfulness model, not a measurement. On real hardware the CD sub-CPU is a single
 /// controller; while it is streaming Red Book audio it services a new command
 /// only after attending to the audio it is already decoding, so a command's
 /// acknowledge is noticeably delayed. Emulators that ack every command in a
@@ -98,9 +123,8 @@ const MAX_SLED_LBA: u64 = 72 * 60 * 75; // 324,000
 /// every mech movement: CD-DA Play, SeekL/SeekP completion, and the first
 /// sector of a read whose SetLoc moved the head.
 ///
-/// Like [`CDDA_BUSY_RESPONSE_CYCLES`], a PSoXide faithfulness model rather
-/// than a Redux transcription: Redux acks Play and declares the drive playing
-/// at once, which makes every "has the track finished?" poll answer correctly
+/// A PSoXide faithfulness model. Acking Play and declaring the drive playing
+/// at once makes every "has the track finished?" poll answer correctly
 /// by accident. A real drive seeks first, reporting SEEKING with the playing
 /// bit CLEAR for the whole journey. Guest code that reads "not playing" as
 /// "track over" therefore passes in emulation and restarts its music on

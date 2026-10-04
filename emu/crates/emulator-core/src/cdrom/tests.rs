@@ -110,7 +110,7 @@ fn response_fifo_pop_returns_pushed_bytes() {
     cd.responses.push_back(0x22);
     assert_eq!(cd.read8(BASE + 1), 0x11);
     assert_eq!(cd.read8(BASE + 1), 0x22);
-    // Empty pop reads as zero -- matches Redux.
+    // Empty pop reads as zero.
     assert_eq!(cd.read8(BASE + 1), 0);
 }
 
@@ -374,7 +374,7 @@ fn getlocl_fails_with_80h_while_a_read_is_still_seeking() {
 }
 
 /// SeekL: GetlocL fails during the seek, then reports the target sector's
-/// header, as the drive has read it to confirm the seek (DuckStation).
+/// header, as the drive has read it to confirm the seek.
 #[test]
 fn getlocl_reports_the_seekl_target_once_the_seek_is_over() {
     let mut cd = CdRom::new();
@@ -503,11 +503,11 @@ fn load_next_sector_sets_ready_latch_but_leaves_transfer_disarmed() {
 }
 
 #[test]
-fn sector_read_cycles_match_calibrated_initial_and_redux_stream_cadence() {
+fn sector_read_cycles_match_calibrated_initial_and_nominal_stream_cadence() {
     let mut cd = CdRom::new();
     // Default mode = 0x80 → double-speed. Initial carries the extra half
     // frame of rotational alignment measured on the console (records
-    // 0x94/0x95); the steady cadence stays Redux's rotation-locked rate.
+    // 0x94/0x95); the steady cadence is the nominal 150 sectors per second.
     assert_eq!(cd.initial_sector_read_cycles(), CD_READ_TIME * 3 / 2);
     assert_eq!(cd.sector_read_cycles(), CD_READ_TIME / 2);
     // Flipping bit 7 off via SetMode gives single-speed (2×).
@@ -586,8 +586,8 @@ fn dataready_arrives_on_schedule_even_with_the_cpu_irq_still_pending() {
 /// announced once the CPU acknowledges, instead of never: the controller
 /// keeps one pending INT1 and delivers it after the ack (psx-spx "Sector
 /// Buffer VS GetlocL Response Tests", where a delayed handler still gets
-/// the next INT1; DuckStation delivers the pending async interrupt about
-/// 500 cycles after the ack). Without this a handler that acked a little
+/// the next INT1; the delay used here is unsourced, see
+/// `DEFERRED_DATA_READY_DELAY`). Without this a handler that acked a little
 /// late waited a whole sector for the next INT1, and the snap to the newest
 /// sector then dropped the one it was never told about (Spider-Man lost
 /// sectors this way under both kernels).
@@ -684,7 +684,7 @@ fn xa_audio_sector_suppresses_dataready_irq_but_keeps_streaming() {
 
     assert!(
         !cd.tick(1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2 + 1),
-        "Redux suppresses DataReady IRQs for STRSND XA audio sectors"
+        "DataReady IRQs are suppressed for XA audio sectors while XA-ADPCM is enabled"
     );
     assert_eq!(cd.irq_flag, 0);
     assert!(cd.responses.is_empty());
