@@ -1308,11 +1308,55 @@ fn xa_decode_silent_mono_sector_has_full_frame_count() {
 }
 
 #[test]
+fn xa_decode_4bit_stereo_blocks_follow_the_documented_layout() {
+    // First 128-byte portion: block 0 is the left channel (low nibble of
+    // byte 0 of each word), block 1 the right (high nibble). Headers for
+    // blocks 0 and 1 sit at portion offsets 4 and 5: range 12, filter 0.
+    let mut raw = vec![0u8; psx_iso::SECTOR_BYTES];
+    raw[24 + 4] = 0x0C;
+    raw[24 + 5] = 0x0C;
+    raw[24 + 16] = 0xF1; // left +1, right -1 (first sample of both)
+    raw[24 + 16 + 4] = 0x72; // second word: left +2, right +7
+    let mut left = crate::spu::XaDecoderState::new();
+    let mut right = crate::spu::XaDecoderState::new();
+    let coding = XaCoding {
+        stereo: true,
+        freq: 37_800,
+        nbits: 4,
+    };
+    let samples = decode_xa_audio_sector(&raw, coding, &mut left, &mut right).unwrap();
+    assert_eq!(samples[0], (1, -1));
+    // The nearest-sample resampler repeats source frames, so look for the
+    // second source frame anywhere in the output.
+    assert!(samples.contains(&(2, 7)));
+}
+
+#[test]
+fn xa_decode_8bit_stereo_blocks_use_one_byte_per_block() {
+    // 8-bit data: byte 0 of a word is block 0 (left), byte 1 block 1
+    // (right). A widened `byte << 8` shifted by range 8 gives the byte.
+    let mut raw = vec![0u8; psx_iso::SECTOR_BYTES];
+    raw[24 + 4] = 0x08;
+    raw[24 + 5] = 0x08;
+    raw[24 + 16] = 0x05;
+    raw[24 + 16 + 1] = 0xFB; // -5
+    let mut left = crate::spu::XaDecoderState::new();
+    let mut right = crate::spu::XaDecoderState::new();
+    let coding = XaCoding {
+        stereo: true,
+        freq: 37_800,
+        nbits: 8,
+    };
+    let samples = decode_xa_audio_sector(&raw, coding, &mut left, &mut right).unwrap();
+    assert_eq!(samples[0], (5, -5));
+}
+
+#[test]
 fn xa_decode_uses_stream_coding_not_each_sector_byte() {
     let mut raw = vec![0u8; psx_iso::SECTOR_BYTES];
     raw[15] = 2;
     raw[18] = 0x24;
-    raw[19] = 0x0c; // invalid if reparsed; Redux ignores this mid-stream.
+    raw[19] = 0x0c; // invalid if reparsed; the stream coding wins mid-stream.
 
     let mut left = crate::spu::XaDecoderState::new();
     let mut right = crate::spu::XaDecoderState::new();

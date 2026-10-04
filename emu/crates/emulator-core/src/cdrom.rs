@@ -523,10 +523,10 @@ pub struct CdRom {
     /// first one in a stream, `0` = continuing stream, `-1` =
     /// decode disabled until the next `Read*`.
     xa_first_sector: i8,
-    /// Parsed XA coding for the active stream. Redux parses this on
-    /// the first sector, resets decoder history if it changes, then
-    /// reuses it for successive sectors instead of trusting every
-    /// sector's coding byte.
+    /// Parsed XA coding for the active stream. It is read from the
+    /// first sector, decoder history is reset if it changes, and the
+    /// parsed value is then reused for successive sectors rather than
+    /// re-reading every sector's coding byte.
     xa_coding: Option<XaCoding>,
     /// Live CD-XA volume matrix, applied before samples reach the SPU.
     attenuator_left_to_left: u8,
@@ -2850,11 +2850,12 @@ fn disc_region_code(disc: &Disc) -> [u8; 4] {
 /// Subheader byte 3 (coding info): bits 0-1 mono/stereo, bits 2-3
 /// sample rate, bits 4-5 bits/sample.
 ///
-/// Decodes the Redux-supported XA layouts: 4-bit/8-bit, mono/stereo,
-/// at 37.8 kHz or 18.9 kHz. Unsupported coding nibbles return `None`.
+/// Accepts the documented XA layouts: 4-bit/8-bit, mono/stereo, at
+/// 37.8 kHz or 18.9 kHz. Unsupported coding nibbles return `None`.
 ///
-/// Samples are decoded in Redux's sound-unit order, then resampled from
-/// the XA source rate up to the SPU's 44.1 kHz rate on output.
+/// Samples are decoded block by block (see `decode_xa_audio_sector`), then
+/// resampled from the XA source rate up to the SPU's 44.1 kHz rate on
+/// output.
 fn parse_xa_coding(coding: u8) -> Option<XaCoding> {
     let stereo = match coding & 0x03 {
         1 => true,
@@ -2878,102 +2879,71 @@ fn parse_xa_coding(coding: u8) -> Option<XaCoding> {
     })
 }
 
+/// Decode one XA audio sector to 16-bit stereo frames at 44.1 kHz.
+///
+/// Layout from PSX-SPX "CDROM XA Audio ADPCM Compression": after the 12
+/// sync, 4 header and 8 subheader bytes come 18 portions of 128 bytes.
+/// A portion has a 16-byte header (the eight block header bytes sit at
+/// 04h..0Bh, the rest are copies) followed by 28 four-byte words. In 4-bit
+/// data every word carries one sample for each of eight blocks (low nibble
+/// of byte `n` is block `2n`, high nibble block `2n + 1`); in 8-bit data
+/// byte `n` is the sample of block `n`, giving four blocks. Stereo streams
+/// alternate left and right blocks, mono streams play them in order.
 fn decode_xa_audio_sector(
     raw: &[u8],
     coding: XaCoding,
     left: &mut crate::spu::XaDecoderState,
     right: &mut crate::spu::XaDecoderState,
 ) -> Option<Vec<(i16, i16)>> {
+    const PORTIONS: usize = 18;
+    const PORTION_BYTES: usize = 128;
+    const WORDS: usize = 28;
     if raw.len() < 2352 {
         return None;
     }
-    let stereo = coding.stereo;
-    let freq = coding.freq;
-    let nbits = coding.nbits;
-
-    // XA payload starts at offset 24 (after 12+4+8 bytes of header).
-    // 18 sound groups × 128 bytes. 4-bit stereo yields 2016 source
-    // frames, while 4-bit mono yields 4032. 8-bit modes carry fewer
-    // sound units per group; keep the same Redux unpacking path rather
-    // than rejecting the stream and prematurely killing playback.
-    let payload = &raw[24..24 + 18 * 128];
-    let units_per_group = if nbits == 4 { 4 } else { 2 };
+    let XaCoding {
+        stereo,
+        freq,
+        nbits,
+    } = coding;
+    let blocks_per_portion = if nbits == 4 { 8 } else { 4 };
+    let payload = &raw[24..24 + PORTIONS * PORTION_BYTES];
     let mut decoded: Vec<(i16, i16)> =
-        Vec::with_capacity(18 * units_per_group * 28 * if stereo { 1 } else { 2 });
-    let head_table = [0usize, 2, 8, 10];
-    for group_idx in 0..18 {
-        let group = &payload[group_idx * 128..group_idx * 128 + 128];
-        let headers = &group[0..16];
-        let data = &group[16..128];
+        Vec::with_capacity(PORTIONS * blocks_per_portion * WORDS / if stereo { 2 } else { 1 });
 
-        for unit in 0..units_per_group {
-            let decode_words = if nbits == 4 {
-                let mut low_words = [0u16; 7];
-                let mut high_words = [0u16; 7];
-                for k in 0..7 {
-                    let base = k * 16 + unit;
-                    let b0 = data[base] as u16;
-                    let b1 = data[base + 4] as u16;
-                    let b2 = data[base + 8] as u16;
-                    let b3 = data[base + 12] as u16;
-                    low_words[k] =
-                        (b0 & 0x0F) | ((b1 & 0x0F) << 4) | ((b2 & 0x0F) << 8) | ((b3 & 0x0F) << 12);
-                    high_words[k] =
-                        (b0 >> 4) | ((b1 >> 4) << 4) | ((b2 >> 4) << 8) | ((b3 >> 4) << 12);
-                }
-                (low_words, high_words)
+    for portion in payload.chunks_exact(PORTION_BYTES) {
+        let headers = &portion[4..4 + blocks_per_portion];
+        let words = &portion[16..16 + WORDS * 4];
+        // Left block of a stereo pair, held until its right block is decoded.
+        let mut pending_left = [0i16; WORDS];
+        for block in 0..blocks_per_portion {
+            let mut widened = [0i16; WORDS];
+            for (word, dst) in words.chunks_exact(4).zip(widened.iter_mut()) {
+                *dst = if nbits == 4 {
+                    let nibble = (word[block / 2] >> ((block % 2) * 4)) & 0x0F;
+                    // `nibble << 12` as a signed 16-bit value: the nibble's
+                    // top bit becomes the sign bit.
+                    i16::from_le_bytes([0, nibble << 4])
+                } else {
+                    i16::from(word[block] as i8) << 8
+                };
+            }
+            let right_block = stereo && block % 2 == 1;
+            let mut samples = [0i16; WORDS];
+            let state = if right_block { &mut *right } else { &mut *left };
+            crate::spu::xa_decode_block(state, headers[block], &widened, &mut samples);
+            if !stereo {
+                decoded.extend(samples.iter().map(|&s| (s, s)));
+            } else if right_block {
+                decoded.extend(pending_left.iter().zip(&samples).map(|(&l, &r)| (l, r)));
             } else {
-                let mut words = [0u16; 7];
-                for (k, word) in words.iter_mut().enumerate() {
-                    let base = k * 8 + unit;
-                    *word = data[base] as u16 | ((data[base + 4] as u16) << 8);
-                }
-                (words, words)
-            };
-
-            let mut first_samples = [0i16; 28];
-            crate::spu::xa_decode_block(
-                left,
-                headers[head_table[unit]],
-                &decode_words.0,
-                &mut first_samples,
-                1,
-            );
-
-            if stereo {
-                let mut second_samples = [0i16; 28];
-                crate::spu::xa_decode_block(
-                    right,
-                    headers[head_table[unit] + 1],
-                    &decode_words.1,
-                    &mut second_samples,
-                    1,
-                );
-                for i in 0..28 {
-                    decoded.push((first_samples[i], second_samples[i]));
-                }
-            } else {
-                for &sample in &first_samples {
-                    decoded.push((sample, sample));
-                }
-                let mut second_samples = [0i16; 28];
-                crate::spu::xa_decode_block(
-                    left,
-                    headers[head_table[unit] + 1],
-                    &decode_words.1,
-                    &mut second_samples,
-                    1,
-                );
-                for &sample in &second_samples {
-                    decoded.push((sample, sample));
-                }
+                pending_left = samples;
             }
         }
     }
 
-    // Upsample to the SPU rate. This is still a simple resampler, but
-    // the sector decode above now matches Redux's sound-unit ordering
-    // and frame count.
+    // Upsample to the SPU rate with a nearest-sample resampler (the
+    // console's 25-point zigzag filter is not modelled).
     let mut resampled: Vec<(i16, i16)> =
         Vec::with_capacity(decoded.len() * 44_100 / freq as usize + 1);
     let src_n = decoded.len() as u32;
