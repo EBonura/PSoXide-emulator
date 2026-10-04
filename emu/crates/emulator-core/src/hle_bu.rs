@@ -1,74 +1,88 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! The memory card file device ("bu00:", "bu10:") of the HLE kernel:
-//! open (existing or new files), read, write, close, firstfile/nextfile,
-//! erase, rename and format, over the directory cache and sector commands
-//! of [`crate::hle_card`].
+//! Backup unit of the HLE kernel: the directory cache with its loading
+//! (`_bu_init`, `_card_load`, `_card_info`), and the "bu" file device that
+//! opens, reads, writes, lists, erases, renames, undeletes and formats
+//! files on the cards. The sector transport is [`crate::hle_card`].
 //!
-//! Behaviour follows psx-spx "BIOS Memory Card Functions", "BIOS File
-//! Functions" and "Memory Card Data Format", with OpenBIOS `card/device.c`
-//! and `card/backupunit.c` (pcsx-redux, MIT) as the specification for the
-//! order of sector writes (inner directory frames before first frames),
-//! the synchronous and asynchronous (open mode bit 15) paths, error codes
-//! and events. Where OpenBIOS documents a retail bug that would hang or
-//! corrupt data (the endless loop after a failed allocation, the broken
-//! reallocation retry), the failure is reported instead.
+//! Sources: psx-spx "Memory Card Data Format" (the header frame "MC", the
+//! 15 directory frames with their allocation states 51h/52h/53h/A0h..A3h,
+//! the size, next-block and name fields and the XOR checksum, the broken
+//! sector list in frames 16..35 with replacements 20 frames later, the
+//! write test frame 3Fh), "BIOS Memory Card Functions" (the functions, one
+//! sector per access, 80h-byte alignment, files in whole 2000h-byte blocks,
+//! synchronous and asynchronous access, the extra sector 0 read when a
+//! file is opened, auto format, `_card_info` after a write), "BIOS File
+//! Functions" (the open mode bits, error numbers, the direntry layout, the
+//! wildcards and their bug, find mode, the two-character events) and "BIOS
+//! Event Summary" (the SwCARD events of class F4000001h). psx-spx leaves a
+//! few things open; each is decided where it comes up.
 //!
-//! Driver functions run as kernel traps retried while a sector command is
-//! on the wire, with their progress in kernel RAM ([`kvar`]).
+//! All work is driven from guest calls that are retried while a sector is
+//! on its way (a call returns `None` until it is done) or, for the
+//! asynchronous calls, from the card driver's completion hook
+//! ([`low_level_done`]). Progress lives in kernel RAM ([`kvar`]), so a save
+//! state taken in the middle resumes.
 
-use crate::hle_card::{self as card, dir_entry, BROKEN, BU_BUFFER};
-use crate::hle_files::{fcb, read_cstr};
+use crate::hle_card::{self as card, outcome, BROKEN, BU_BUFFER, DIRECTORY, DIR_ENTRY_SIZE, EVENT_BU};
+use crate::hle_exceptions as ex;
+use crate::hle_files::fcb;
 use crate::hle_kernel::{peek32, poke32};
 use crate::Bus;
 
-/// Kernel variables of the device (`0x3BA0..0x3BFF`).
+/// Kernel variables of the backup unit. Per-slot ones are two words.
 pub mod kvar {
-    /// A sector command of the current operation is on the wire.
-    pub const IO_PENDING: u32 = 0x3BA0;
-    /// Phase of the current synchronous operation (0 = not started).
-    pub const PHASE: u32 = 0x3BA4;
-    /// Loop index of the current operation.
-    pub const INDEX: u32 = 0x3BA8;
-    /// Sectors done / directory entry of the current operation.
-    pub const AUX: u32 = 0x3BAC;
-    /// Directory frames still to write: inner blocks (bit per entry).
-    pub const MASK_INNER: u32 = 0x3BB0;
-    /// Directory frames still to write: first blocks.
-    pub const MASK_FIRST: u32 = 0x3BB4;
-    /// Last error index of a sector command (1..4), for read/write.
-    pub const OP_ERROR: u32 = 0x3BB8;
-    /// C(1Ah)/C(1Dh) find mode: 0 = files, 1 = deleted files.
-    pub const FIND_MODE: u32 = 0x3BBC;
-    /// firstfile/nextfile: index of the last match.
-    pub const FIND_INDEX: u32 = 0x3BC0;
-    /// Asynchronous read/write per slot: next relative sector.
-    pub const ASYNC_SECTOR: u32 = 0x3BC4;
-    /// Asynchronous read/write per slot: sectors left.
-    pub const ASYNC_COUNT: u32 = 0x3BCC;
-    /// Asynchronous read/write per slot: buffer.
-    pub const ASYNC_BUFFER: u32 = 0x3BD4;
-    /// Asynchronous read/write per slot: FCB.
-    pub const ASYNC_FCB: u32 = 0x3BDC;
-    /// Sub-phase of the directory load inside an operation.
-    pub const INIT_PHASE: u32 = 0x3BE4;
-    /// Result of the operation's directory load (1 ok, 2 failed).
-    pub const INIT_RESULT: u32 = 0x3BE8;
+    /// The slot's directory cache is valid (2 words).
+    pub const LOADED: u32 = 0x3B80;
+    /// A sector request of this module is with the card driver, per slot.
+    pub const IO_PENDING: u32 = 0x3B88;
+    /// Phase of the directory load, per slot.
+    pub const LOAD_PHASE: u32 = 0x3B90;
+    /// Counter of the directory load, per slot.
+    pub const LOAD_INDEX: u32 = 0x3B98;
+    /// Counter of a format, per slot.
+    pub const TOC_INDEX: u32 = 0x3BA0;
+    /// Phase of the file function in progress, 0 when none.
+    pub const PHASE: u32 = 0x3BA8;
+    /// Counter within that phase.
+    pub const INDEX: u32 = 0x3BAC;
+    /// Two values the function in progress keeps (sector count, first
+    /// block).
+    pub const AUX: u32 = 0x3BB0;
+    /// Directory frames still to write: bit `i` is entry `i`.
+    pub const DIRTY: u32 = 0x3BB8;
+    /// Entry whose frame is written after the others, or FFh.
+    pub const LAST_ENTRY: u32 = 0x3BBC;
+    /// Slot `_bu_init` is loading.
+    pub const INIT_SLOT: u32 = 0x3BC0;
+    /// C(1Ah) find mode: 0 lists files, 1 deleted files.
+    pub const FIND_MODE: u32 = 0x3BC4;
+    /// Entry `nextfile` continues from.
+    pub const FIND_INDEX: u32 = 0x3BC8;
+    /// High-level operation under way per slot ([`super::bu_op`]), 2 words.
+    pub const BU_OP: u32 = 0x3BCC;
+    /// Asynchronous transfer: FCB, sectors done, sectors in all, buffer,
+    /// and whether a sector is out.
+    pub const ASYNC: u32 = 0x3BD4;
 }
 
-/// firstfile pattern, 20 characters and a terminator.
+/// Name pattern of the search `firstfile` started: 15h bytes.
 pub const PATTERN: u32 = 0x4160;
 
-/// Backup-unit operations (continuing [`card::bu_op`]).
+/// Operations the backup unit runs on its own after a call returned.
 pub mod bu_op {
-    /// Asynchronous read.
-    pub const READ: u32 = 2;
-    /// Asynchronous write.
-    pub const WRITE: u32 = 3;
-    /// Asynchronous write: final status probe.
-    pub const WRITE_INFO: u32 = 7;
+    /// Nothing.
+    pub const NONE: u32 = 0;
+    /// `_card_info`.
+    pub const INFO: u32 = 1;
+    /// `_card_load`.
+    pub const LOAD: u32 = 2;
+    /// Asynchronous file read.
+    pub const READ: u32 = 3;
+    /// Asynchronous file write.
+    pub const WRITE: u32 = 4;
 }
 
-/// Kernel-internal trap functions of the device.
+/// Kernel-internal trap functions of the "bu" device.
 pub mod internal {
     /// open(fcb, name, mode).
     pub const OPEN: u8 = 0x21;
@@ -86,995 +100,1080 @@ pub mod internal {
     pub const NEXTFILE: u8 = 0x27;
     /// format(fcb).
     pub const FORMAT: u8 = 0x2A;
-    /// rename(fcb, old, fcb2, new).
+    /// rename(fcb1, name1, fcb2, name2).
     pub const RENAME: u8 = 0x2B;
     /// undelete(fcb, name).
     pub const UNDELETE: u8 = 0x2C;
 }
 
-/// File error numbers (psx-spx).
+/// File error numbers (psx-spx "BIOS File Functions").
 mod err {
     pub const NOENT: u32 = 0x02;
-    pub const BUSY: u32 = 0x10;
+    pub const IO: u32 = 0x10;
     pub const EXIST: u32 = 0x11;
     pub const INVAL: u32 = 0x16;
     pub const NOSPC: u32 = 0x1C;
 }
 
+/// Open mode bit: create a new file, its block count in bits 16..31.
 const MODE_CREATE: u32 = 0x200;
+/// Open mode bit: reads and writes return at once and finish by event.
 const MODE_ASYNC: u32 = 0x8000;
 
+/// Directory entries, and the blocks they stand for (1..15).
+const ENTRIES: u32 = 15;
+/// Broken sector list entries per card.
+const BROKEN_ENTRIES: u32 = 20;
+/// Bytes of a sector, of a block.
+const SECTOR: u32 = 0x80;
+const BLOCK: u32 = 0x2000;
+/// Allocation states (psx-spx "Directory Frames").
+const FIRST: u32 = 0x51;
+const MIDDLE: u32 = 0x52;
+const LAST: u32 = 0x53;
+const FREE: u32 = 0xA0;
+const DELETED_FIRST: u32 = 0xA1;
+/// "No next block".
+const NO_NEXT: u32 = 0xFFFF;
+/// Phase constants shared by the file functions.
+const IDLE: u32 = 0;
+/// First sector of the write test frame.
+const WRITE_TEST_FRAME: u32 = 0x3F;
+
+// ------------------------------------------------------- directory cache
+
+fn var(base: u32, slot: u32) -> u32 {
+    base + 4 * slot
+}
+
+fn loaded(bus: &Bus, slot: u32) -> bool {
+    peek32(bus, var(kvar::LOADED, slot)) != 0
+}
+
+/// Address of the cached directory entry `i` (0..14, block `i + 1`) of
+/// `slot`.
+pub fn dir_entry(slot: u32, i: u32) -> u32 {
+    DIRECTORY + (slot * ENTRIES + i) * DIR_ENTRY_SIZE
+}
+
+/// Sector buffer of `slot`.
+fn buffer(slot: u32) -> u32 {
+    BU_BUFFER + slot * SECTOR
+}
+
+fn entry_state(bus: &Bus, slot: u32, i: u32) -> u32 {
+    peek32(bus, dir_entry(slot, i))
+}
+
+fn entry_size(bus: &Bus, slot: u32, i: u32) -> u32 {
+    peek32(bus, dir_entry(slot, i) + 4)
+}
+
+/// Next block of the file after entry `i`, as an entry index, or
+/// [`NO_NEXT`].
+fn entry_next(bus: &Bus, slot: u32, i: u32) -> u32 {
+    let at = dir_entry(slot, i) + 8;
+    u32::from(bus.try_read8(at).unwrap_or(0xFF)) | u32::from(bus.try_read8(at + 1).unwrap_or(0xFF)) << 8
+}
+
+fn set_next(bus: &mut Bus, slot: u32, i: u32, next: u32) {
+    let at = dir_entry(slot, i) + 8;
+    bus.write8_safe(at, next as u8);
+    bus.write8_safe(at + 1, (next >> 8) as u8);
+}
+
+/// The 15h name bytes of entry `i`: up to 20 characters and a zero.
+fn entry_name(bus: &Bus, slot: u32, i: u32) -> [u8; 21] {
+    let at = dir_entry(slot, i) + 0x0A;
+    std::array::from_fn(|k| bus.try_read8(at + k as u32).unwrap_or(0))
+}
+
+fn set_name(bus: &mut Bus, slot: u32, i: u32, name: &[u8]) {
+    let at = dir_entry(slot, i) + 0x0A;
+    for k in 0..21 {
+        let byte = if k < 20 { name.get(k).copied().unwrap_or(0) } else { 0 };
+        bus.write8_safe(at + k as u32, byte);
+    }
+}
+
+/// Leave entry `i` free, the way a freshly formatted card has it.
+fn clear_entry(bus: &mut Bus, slot: u32, i: u32) {
+    for off in (0..DIR_ENTRY_SIZE).step_by(4) {
+        poke32(bus, dir_entry(slot, i) + off, 0);
+    }
+    poke32(bus, dir_entry(slot, i), FREE);
+    set_next(bus, slot, i, NO_NEXT);
+}
+
+fn broken_entry(bus: &Bus, slot: u32, j: u32) -> u32 {
+    peek32(bus, BROKEN + 4 * (slot * BROKEN_ENTRIES + j))
+}
+
+/// Forget the cache of `slot`: no entries and no broken sectors.
+fn clear_cache(bus: &mut Bus, slot: u32) {
+    for i in 0..ENTRIES {
+        for off in (0..DIR_ENTRY_SIZE).step_by(4) {
+            poke32(bus, dir_entry(slot, i) + off, 0);
+        }
+    }
+    for j in 0..BROKEN_ENTRIES {
+        poke32(bus, BROKEN + 4 * (slot * BROKEN_ENTRIES + j), u32::MAX);
+    }
+    poke32(bus, var(kvar::LOADED, slot), 0);
+}
+
+/// Boot: both caches empty, nothing in progress.
+pub fn install(bus: &mut Bus) {
+    for addr in (kvar::LOADED..kvar::ASYNC + 20).step_by(4) {
+        poke32(bus, addr, 0);
+    }
+    for slot in 0..2 {
+        clear_cache(bus, slot);
+    }
+}
+
+/// XOR of the first 7Fh bytes of a frame in the buffer.
+fn frame_checksum(bus: &Bus, buf: u32) -> u8 {
+    (0..0x7F).fold(0, |sum, k| sum ^ bus.try_read8(buf + k).unwrap_or(0))
+}
+
+/// Whether the frame in the buffer carries its own checksum.
+fn frame_ok(bus: &Bus, buf: u32) -> bool {
+    bus.try_read8(buf + 0x7F) == Some(frame_checksum(bus, buf))
+}
+
+/// Set the checksum byte of the frame in the buffer.
+fn seal_frame(bus: &mut Bus, buf: u32) {
+    let sum = frame_checksum(bus, buf);
+    bus.write8_safe(buf + 0x7F, sum);
+}
+
+fn clear_buffer(bus: &mut Bus, buf: u32, fill: u8) {
+    for k in 0..SECTOR {
+        bus.write8_safe(buf + k, fill);
+    }
+}
+
+/// Build the frame of directory entry `i` in the buffer: the cached 20h
+/// bytes, zeros after them (psx-spx: garbage, usually zero) and the
+/// checksum.
+fn frame_from_entry(bus: &mut Bus, slot: u32, i: u32) {
+    let buf = buffer(slot);
+    clear_buffer(bus, buf, 0);
+    for off in 0..DIR_ENTRY_SIZE {
+        let byte = bus.try_read8(dir_entry(slot, i) + off).unwrap_or(0);
+        bus.write8_safe(buf + off, byte);
+    }
+    seal_frame(bus, buf);
+}
+
+/// Where the data of `sector` really is: a sector on the card's broken
+/// list lives in the replacement frame 20 frames after its list entry
+/// (psx-spx "Broken Sector List").
+fn replacement(bus: &Bus, slot: u32, sector: u32) -> u32 {
+    (0..BROKEN_ENTRIES)
+        .find(|&j| broken_entry(bus, slot, j) == sector)
+        .map_or(sector, |j| 36 + j)
+}
+
+/// The sector of byte `offset` of the file whose first block is directory
+/// entry `first`, following the chain of next-block pointers. `None` for a
+/// chain that ends or leaves the directory early.
+fn file_sector(bus: &Bus, slot: u32, first: u32, offset: u32) -> Option<u32> {
+    let mut entry = first;
+    for _ in 0..offset / BLOCK {
+        entry = entry_next(bus, slot, entry);
+        if entry >= ENTRIES {
+            return None;
+        }
+    }
+    let sector = (entry + 1) * 64 + offset % BLOCK / SECTOR;
+    Some(replacement(bus, slot, sector))
+}
+
+// ------------------------------------------------------- sector transport
+
+/// What a request to the card driver is for.
+#[derive(Copy, Clone)]
+enum Io {
+    Read,
+    Write,
+    Info,
+}
+
+/// One request through the card driver on `device`'s slot: it is made on
+/// the first call, then each call returns `None` until the driver has
+/// finished, and then its outcome ([`outcome`]). Returns the outcome
+/// [`outcome::ERROR`] when the driver refuses the request.
+fn transfer(bus: &mut Bus, device: u32, sector: u32, buf: u32, io: Io) -> Option<u32> {
+    let slot = card::slot_of(device);
+    if peek32(bus, var(kvar::IO_PENDING, slot)) == 0 {
+        let queued = match io {
+            Io::Read => card::card_read(bus, device, sector, buf),
+            Io::Write => card::card_write(bus, device, sector, buf),
+            Io::Info => card::card_info_internal(bus, device),
+        };
+        if queued == 0 {
+            return Some(outcome::ERROR);
+        }
+        poke32(bus, var(kvar::IO_PENDING, slot), 1);
+        return None;
+    }
+    if !card::idle(bus, slot) {
+        return None;
+    }
+    poke32(bus, var(kvar::IO_PENDING, slot), 0);
+    Some(card::last_outcome(bus, slot))
+}
+
+/// The SwCARD event of a finished high-level operation (psx-spx "BIOS
+/// Event Summary": 4 done, 100h busy, 2000h eject or unformatted, 8000h
+/// error).
+fn notify(bus: &mut Bus, result: u32) {
+    let spec = match result {
+        outcome::OK => 0x4,
+        outcome::TIMEOUT => 0x100,
+        outcome::CHANGED => 0x2000,
+        _ => 0x8000,
+    };
+    ex::queue_event(bus, EVENT_BU, spec);
+}
+
+/// Forget the SwCARD events of the previous operation before a new one.
+fn undeliver_events(bus: &mut Bus) {
+    for spec in [0x4, 0x100, 0x2000, 0x8000] {
+        ex::undeliver_event(bus, EVENT_BU, spec);
+    }
+}
+
+// ----------------------------------------------------- the directory load
+
+mod load {
+    /// Read sector 0 and check for "MC".
+    pub const HEADER: u32 = 0;
+    /// Write the header back to the write test frame, which clears the
+    /// card's changed flag.
+    pub const WRITE_TEST: u32 = 1;
+    /// Read the directory frames.
+    pub const DIRECTORY: u32 = 2;
+    /// Read the broken sector list.
+    pub const BROKEN: u32 = 3;
+    /// Format the card (auto format), then start over.
+    pub const FORMAT: u32 = 4;
+}
+
+/// Load the directory cache of `slot`: sector 0 must say "MC" (psx-spx;
+/// with auto format on, a card without it is formatted first), a write to
+/// the write test frame clears the card's changed flag, then the 15
+/// directory frames and the 20 broken list frames are read and kept. The
+/// card is told `_new_card` before its sector 0 read and that write, so its
+/// changed flag does not fail them. `None` while a sector is on its way,
+/// then the outcome ([`outcome::OK`] when the cache is valid; a card
+/// without "MC" counts as [`outcome::CHANGED`], which psx-spx sends as
+/// the 2000h "eject or unformatted" event). A failure leaves the cache
+/// empty.
+fn load_directory(bus: &mut Bus, slot: u32) -> Option<u32> {
+    let device = slot << 4;
+    let buf = buffer(slot);
+    loop {
+        let index = peek32(bus, var(kvar::LOAD_INDEX, slot));
+        let step = match peek32(bus, var(kvar::LOAD_PHASE, slot)) {
+            load::HEADER => {
+                card::new_card(bus);
+                match transfer(bus, device, 0, buf, Io::Read)? {
+                    outcome::OK => {
+                        let mc = bus.try_read8(buf) == Some(b'M') && bus.try_read8(buf + 1) == Some(b'C');
+                        if mc {
+                            Ok(load::WRITE_TEST)
+                        } else if peek32(bus, card::kvar::AUTO_FORMAT) != 0 && index == 0 {
+                            poke32(bus, var(kvar::LOAD_INDEX, slot), 1);
+                            Ok(load::FORMAT)
+                        } else {
+                            Err(outcome::CHANGED)
+                        }
+                    }
+                    other => Err(other),
+                }
+            }
+            load::WRITE_TEST => {
+                card::new_card(bus);
+                match transfer(bus, device, WRITE_TEST_FRAME, buf, Io::Write)? {
+                    outcome::OK => {
+                        poke32(bus, var(kvar::LOAD_INDEX, slot), 1);
+                        Ok(load::DIRECTORY)
+                    }
+                    other => Err(other),
+                }
+            }
+            load::DIRECTORY => match transfer(bus, device, index, buf, Io::Read)? {
+                outcome::OK if directory_frame_ok(bus, slot, index) => {
+                    poke32(bus, var(kvar::LOAD_INDEX, slot), index + 1);
+                    Ok(if index + 1 > ENTRIES {
+                        poke32(bus, var(kvar::LOAD_INDEX, slot), ENTRIES + 1);
+                        load::BROKEN
+                    } else {
+                        load::DIRECTORY
+                    })
+                }
+                outcome::OK => Err(outcome::ERROR),
+                other => Err(other),
+            },
+            load::BROKEN => match transfer(bus, device, index, buf, Io::Read)? {
+                outcome::OK if frame_ok(bus, buf) => {
+                    let word = peek32(bus, buf);
+                    poke32(bus, BROKEN + 4 * (slot * BROKEN_ENTRIES + index - (ENTRIES + 1)), word);
+                    poke32(bus, var(kvar::LOAD_INDEX, slot), index + 1);
+                    if index + 1 > ENTRIES + BROKEN_ENTRIES {
+                        poke32(bus, var(kvar::LOADED, slot), 1);
+                        poke32(bus, var(kvar::LOAD_PHASE, slot), 0);
+                        poke32(bus, var(kvar::LOAD_INDEX, slot), 0);
+                        return Some(outcome::OK);
+                    }
+                    Ok(load::BROKEN)
+                }
+                outcome::OK => Err(outcome::ERROR),
+                other => Err(other),
+            },
+            _ => match write_format(bus, slot)? {
+                outcome::OK => Ok(load::HEADER),
+                other => Err(other),
+            },
+        };
+        match step {
+            Ok(next) => poke32(bus, var(kvar::LOAD_PHASE, slot), next),
+            Err(result) => {
+                clear_cache(bus, slot);
+                poke32(bus, var(kvar::LOAD_PHASE, slot), 0);
+                poke32(bus, var(kvar::LOAD_INDEX, slot), 0);
+                return Some(result);
+            }
+        }
+    }
+}
+
+/// Take directory frame `index` (1..15) from the buffer into the cache if
+/// it is sound: its checksum holds and its allocation state is one of the
+/// seven psx-spx lists.
+fn directory_frame_ok(bus: &mut Bus, slot: u32, index: u32) -> bool {
+    let buf = buffer(slot);
+    let state = peek32(bus, buf);
+    let valid = matches!(state, FIRST | MIDDLE | LAST | 0xA0..=0xA3);
+    if !valid || !frame_ok(bus, buf) {
+        return false;
+    }
+    for off in (0..DIR_ENTRY_SIZE).step_by(4) {
+        let word = peek32(bus, buf + off);
+        poke32(bus, dir_entry(slot, index - 1) + off, word);
+    }
+    true
+}
+
+/// Directory frames written after changing the cache, then a probe: the
+/// frames of `DIRTY` in ascending order with `LAST_ENTRY` after the rest
+/// (the first block of a file goes last, so a write that stops half way
+/// leaves blocks nobody points at, not a file that points at garbage), and
+/// an info command, because psx-spx says a write error only shows on the
+/// next command. `None` while a sector is on its way, then the outcome.
+fn write_toc(bus: &mut Bus, slot: u32) -> Option<u32> {
+    let device = slot << 4;
+    loop {
+        let dirty = peek32(bus, kvar::DIRTY);
+        let last = peek32(bus, kvar::LAST_ENTRY);
+        let pending = |i: u32| dirty & (1 << i) != 0;
+        let next = (0..ENTRIES)
+            .find(|&i| pending(i) && i != last)
+            .or((last < ENTRIES && pending(last)).then_some(last));
+        let Some(entry) = next else {
+            let result = transfer(bus, device, 0, 0, Io::Info)?;
+            poke32(bus, kvar::LAST_ENTRY, 0xFF);
+            return Some(result);
+        };
+        frame_from_entry(bus, slot, entry);
+        match transfer(bus, device, entry + 1, buffer(slot), Io::Write)? {
+            outcome::OK => poke32(bus, kvar::DIRTY, dirty & !(1 << entry)),
+            other => {
+                poke32(bus, kvar::DIRTY, 0);
+                return Some(other);
+            }
+        }
+    }
+}
+
+/// The frame a format writes to `frame`, built in the sector buffer
+/// (psx-spx "Memory Card Data Format"): the header and its copy in the
+/// write test frame, directory frames that are free and unchained, broken
+/// list frames with no broken sector.
+fn format_frame(bus: &mut Bus, slot: u32, frame: u32) {
+    let buf = buffer(slot);
+    clear_buffer(bus, buf, 0);
+    match frame {
+        0 | WRITE_TEST_FRAME => {
+            bus.write8_safe(buf, b'M');
+            bus.write8_safe(buf + 1, b'C');
+        }
+        1..=15 => {
+            bus.write8_safe(buf, FREE as u8);
+            bus.write8_safe(buf + 8, 0xFF);
+            bus.write8_safe(buf + 9, 0xFF);
+        }
+        _ => poke32(bus, buf, u32::MAX),
+    }
+    seal_frame(bus, buf);
+}
+
+/// Format the card of `slot`: the broken list, the directory, the write
+/// test frame and last the header, then an info probe. File data is left
+/// where it is. The cache becomes an empty directory. `None` while a sector
+/// is on its way, then the outcome.
+fn write_format(bus: &mut Bus, slot: u32) -> Option<u32> {
+    const PROBE: u32 = 37;
+    let device = slot << 4;
+    loop {
+        let i = peek32(bus, var(kvar::TOC_INDEX, slot));
+        if i == PROBE {
+            let result = transfer(bus, device, 0, 0, Io::Info)?;
+            poke32(bus, var(kvar::TOC_INDEX, slot), 0);
+            if result == outcome::OK {
+                clear_cache(bus, slot);
+                for entry in 0..ENTRIES {
+                    clear_entry(bus, slot, entry);
+                }
+                poke32(bus, var(kvar::LOADED, slot), 1);
+            }
+            return Some(result);
+        }
+        let frame = match i {
+            0..=19 => 16 + i,
+            20..=34 => i - 19,
+            35 => WRITE_TEST_FRAME,
+            _ => 0,
+        };
+        format_frame(bus, slot, frame);
+        match transfer(bus, device, frame, buffer(slot), Io::Write)? {
+            outcome::OK => poke32(bus, var(kvar::TOC_INDEX, slot), i + 1),
+            other => {
+                poke32(bus, var(kvar::TOC_INDEX, slot), 0);
+                clear_cache(bus, slot);
+                return Some(other);
+            }
+        }
+    }
+}
+
+// -------------------------------------------- _bu_init, _card_load, _card_info
+
+/// A(55h)/A(70h) `_bu_init`: load the directory of both slots, one after the
+/// other, waiting for each sector. A slot without a card or without a
+/// usable one is left with an empty cache and does not stop the call.
+/// Returns 0. `None` while it waits.
+pub fn bu_init(bus: &mut Bus) -> Option<u32> {
+    loop {
+        let slot = peek32(bus, kvar::INIT_SLOT);
+        if slot >= 2 {
+            poke32(bus, kvar::INIT_SLOT, 0);
+            return Some(0);
+        }
+        load_directory(bus, slot)?;
+        poke32(bus, kvar::INIT_SLOT, slot + 1);
+    }
+}
+
+/// Whether [`bu_init`] would just keep waiting, without changing anything:
+/// a sector it asked for is still with the card driver.
+pub(crate) fn bu_init_waiting(bus: &Bus) -> bool {
+    {
+        let slot = peek32(bus, kvar::INIT_SLOT).min(1);
+        peek32(bus, var(kvar::IO_PENDING, slot)) != 0 && !card::idle(bus, slot)
+    }
+}
+
+/// Whether the slot has a high-level operation running or a request with
+/// the card driver.
+fn busy(bus: &Bus, slot: u32) -> bool {
+    peek32(bus, var(kvar::BU_OP, slot)) != bu_op::NONE || !card::idle(bus, slot)
+}
+
+/// A(ACh) `_card_load(port)`: read the directory in the background. The
+/// SwCARD event says how it went. Returns 1, or 0 when the slot is busy.
+pub fn card_load(bus: &mut Bus, device: u32) -> u32 {
+    let slot = card::slot_of(device);
+    if busy(bus, slot) || peek32(bus, var(kvar::IO_PENDING, slot)) != 0 {
+        return 0;
+    }
+    undeliver_events(bus);
+    poke32(bus, var(kvar::BU_OP, slot), bu_op::LOAD);
+    // Start the first sector now; the completion hook carries on.
+    background_step(bus, slot);
+    1
+}
+
+/// A(ABh) `_card_info(port)`: the info command, then the SwCARD event.
+/// Returns 1, or 0 when the slot is busy.
+pub fn card_info(bus: &mut Bus, device: u32) -> u32 {
+    let slot = card::slot_of(device);
+    if busy(bus, slot) {
+        return 0;
+    }
+    undeliver_events(bus);
+    poke32(bus, var(kvar::BU_OP, slot), bu_op::INFO);
+    card::card_info_internal(bus, device)
+}
+
+/// The card driver finished a command on `slot`: carry on whatever the
+/// backup unit started in the background there.
+pub fn low_level_done(bus: &mut Bus, slot: u32) {
+    match peek32(bus, var(kvar::BU_OP, slot)) {
+        bu_op::INFO => {
+            poke32(bus, var(kvar::BU_OP, slot), bu_op::NONE);
+            let result = card::last_outcome(bus, slot);
+            notify(bus, result);
+        }
+        bu_op::LOAD => background_step(bus, slot),
+        bu_op::READ | bu_op::WRITE => file_step(bus, slot),
+        _ => {}
+    }
+}
+
+/// One step of a background directory load.
+fn background_step(bus: &mut Bus, slot: u32) {
+    if let Some(result) = load_directory(bus, slot) {
+        poke32(bus, var(kvar::BU_OP, slot), bu_op::NONE);
+        notify(bus, result);
+    }
+}
+
+/// A(A7h) `bufs_cb_0`: the card operation went well.
+pub fn low_level_completed(bus: &mut Bus) {
+    notify(bus, outcome::OK);
+}
+
+/// A(A8h) `bufs_cb_1` (`which` 0): general error; A(A9h) `bufs_cb_2` (1):
+/// busy; A(AAh) `bufs_cb_3` (2): card changed or unformatted; A(AEh)
+/// `bufs_cb_4` (3): write error.
+pub fn low_level_error(bus: &mut Bus, which: u32) {
+    notify(
+        bus,
+        match which {
+            1 => outcome::TIMEOUT,
+            2 => outcome::CHANGED,
+            _ => outcome::ERROR,
+        },
+    );
+}
+
+// ------------------------------------------------------- the "bu" device
+
+/// Slot of the file's device (its FCB holds the port number).
 fn slot_of(bus: &Bus, f: u32) -> u32 {
-    let d = peek32(bus, f + fcb::DEVICE_ID) as i32;
-    let d = if d < 0 { d + 15 } else { d };
-    ((d >> 4) & 1) as u32
+    card::slot_of(device(bus, f))
 }
 
 fn device(bus: &Bus, f: u32) -> u32 {
     peek32(bus, f + fcb::DEVICE_ID)
 }
 
-fn var(base: u32, slot: u32) -> u32 {
-    base + 4 * (slot & 1)
+/// Leave the file function: nothing in progress any more.
+fn reset(bus: &mut Bus) {
+    for addr in [kvar::PHASE, kvar::INDEX, kvar::AUX, kvar::AUX + 4, kvar::DIRTY] {
+        poke32(bus, addr, 0);
+    }
+    poke32(bus, kvar::LAST_ENTRY, 0xFF);
 }
 
-fn bu_busy(bus: &Bus, slot: u32) -> bool {
-    peek32(bus, card::kvar::BU_OP + 4 * slot) != card::bu_op::NONE
-}
-
-fn set_error(bus: &mut Bus, f: u32, e: u32) {
+/// Fail with `e` in the FCB: -1.
+fn fail(bus: &mut Bus, f: u32, e: u32) -> Option<u32> {
+    reset(bus);
     poke32(bus, f + fcb::ERROR, e);
+    Some(u32::MAX)
 }
 
-fn buffer(slot: u32) -> u32 {
-    BU_BUFFER + 0x80 * (slot & 1)
-}
-
-/// Operation finished: reset the per-call state and return `v`.
+/// Succeed with `v`.
 fn done(bus: &mut Bus, v: u32) -> Option<u32> {
-    poke32(bus, kvar::PHASE, 0);
-    poke32(bus, kvar::INDEX, 0);
-    poke32(bus, kvar::AUX, 0);
-    poke32(bus, kvar::IO_PENDING, 0);
-    poke32(bus, kvar::INIT_PHASE, 0);
+    reset(bus);
     Some(v)
 }
 
-/// One synchronous sector command: `Some(0)` on success, `Some(n)` for
-/// error callback n (1..4), `None` while it runs. A command the driver
-/// refuses (slot busy, bad sector) is error 1.
-fn sector_io(bus: &mut Bus, dev: u32, sector: u32, buf: u32, write: bool) -> Option<u32> {
-    if peek32(bus, kvar::IO_PENDING) == 0 {
-        reset_status(bus);
-        let queued = if write {
-            card::card_write(bus, dev, sector, buf)
-        } else {
-            card::card_read(bus, dev, sector, buf)
-        };
-        if queued == 0 {
-            return Some(1);
+/// A write to the card went wrong: the cache cannot be trusted, drop it so
+/// the next call reloads the directory.
+fn fail_io(bus: &mut Bus, f: u32, slot: u32) -> Option<u32> {
+    poke32(bus, var(kvar::LOADED, slot), 0);
+    fail(bus, f, err::IO)
+}
+
+/// The directory of `slot` is cached: loaded now if it was not. `None`
+/// while loading; `Some(false)` when the card could not be read.
+fn ensure_directory(bus: &mut Bus, slot: u32) -> Option<bool> {
+    if loaded(bus, slot) {
+        return Some(true);
+    }
+    Some(load_directory(bus, slot)? == outcome::OK)
+}
+
+/// The guest string at `addr` as bytes (at most 20 and a zero).
+fn name_bytes(bus: &Bus, addr: u32) -> Vec<u8> {
+    (0..21)
+        .map(|i| bus.try_read8(addr.wrapping_add(i)).unwrap_or(0))
+        .take_while(|&b| b != 0)
+        .collect()
+}
+
+/// Whether `name` (a directory name, 20 characters at most) matches
+/// `pattern` the way psx-spx describes: `?` stands for any one character,
+/// `*` (only when `star` is set, firstfile and nextfile) for everything
+/// that follows, and psx-spx's bug is kept: a `?` that lands on the name's
+/// ending zero ends the comparison with a match.
+fn pattern_match(name: &[u8], pattern: &[u8], star: bool) -> bool {
+    for (i, &p) in pattern.iter().enumerate() {
+        if star && p == b'*' {
+            return true;
         }
-        poke32(bus, kvar::IO_PENDING, 1);
-        return None;
-    }
-    let status = wait_index(bus)?;
-    poke32(bus, kvar::IO_PENDING, 0);
-    Some(status)
-}
-
-/// `_card_info` as a synchronous step (after a write).
-fn info_io(bus: &mut Bus, dev: u32) -> Option<u32> {
-    if peek32(bus, kvar::IO_PENDING) == 0 {
-        reset_status(bus);
-        if card::card_info(bus, dev) == 0 {
-            return Some(1);
-        }
-        poke32(bus, kvar::IO_PENDING, 1);
-        return None;
-    }
-    let status = wait_index(bus)?;
-    poke32(bus, kvar::IO_PENDING, 0);
-    Some(status)
-}
-
-fn reset_status(bus: &mut Bus) {
-    poke32(bus, card::kvar::SUCCESS, 0);
-    for i in 0..4 {
-        poke32(bus, card::kvar::ERRORS + 4 * i, 0);
-    }
-    for spec in [0x0004, 0x8000, 0x2000, 0x0100] {
-        crate::hle_exceptions::undeliver_event(bus, card::EVENT_BU, spec);
-    }
-}
-
-/// OpenBIOS mcWaitForStatusAndReturnIndex: 0 success, i+1 for error i.
-fn wait_index(bus: &mut Bus) -> Option<u32> {
-    if peek32(bus, card::kvar::SUCCESS) != 0 {
-        reset_status(bus);
-        return Some(0);
-    }
-    let failed = (0..4).find(|&i| peek32(bus, card::kvar::ERRORS + 4 * i) != 0)?;
-    reset_status(bus);
-    Some(failed + 1)
-}
-
-// ------------------------------------------------------ directory helpers
-
-fn alloc_state(bus: &Bus, slot: u32, i: u32) -> u32 {
-    peek32(bus, dir_entry(slot, i))
-}
-
-fn next_block(bus: &Bus, slot: u32, i: u32) -> u16 {
-    (peek32(bus, dir_entry(slot, i) + 8) & 0xFFFF) as u16
-}
-
-fn set_next(bus: &mut Bus, slot: u32, i: u32, next: u16) {
-    let e = dir_entry(slot, i) + 8;
-    let w = peek32(bus, e);
-    poke32(bus, e, (w & 0xFFFF_0000) | u32::from(next));
-}
-
-fn entry_name(bus: &Bus, slot: u32, i: u32) -> String {
-    read_cstr(bus, dir_entry(slot, i) + 0x0A, 21)
-}
-
-fn set_name(bus: &mut Bus, slot: u32, i: u32, name: &str) {
-    let e = dir_entry(slot, i) + 0x0A;
-    for k in 0..21 {
-        bus.write8_safe(e + k, 0);
-    }
-    for (k, b) in name.bytes().take(20).enumerate() {
-        bus.write8_safe(e + k as u32, b);
-    }
-}
-
-fn free_entry(bus: &mut Bus, slot: u32, i: u32) {
-    poke32(bus, dir_entry(slot, i), 0xA0);
-    poke32(bus, dir_entry(slot, i) + 4, 0);
-    set_next(bus, slot, i, 0xFFFF);
-}
-
-/// OpenBIOS patternMatch: `?` matches any character; the pattern may be
-/// longer than the name only by one `?` or its end.
-fn pattern_match(name: &str, pattern: &[u8]) -> bool {
-    let mut p = 0;
-    for c in name.bytes() {
-        let pc = pattern.get(p).copied().unwrap_or(0);
-        if pc != b'?' && pc != c {
+        let n = name.get(i).copied().unwrap_or(0);
+        if p == b'?' {
+            if n == 0 {
+                return true;
+            }
+        } else if p != n {
             return false;
         }
-        p += 1;
     }
-    let pc = pattern.get(p).copied().unwrap_or(0);
-    pc == 0 || pc == b'?'
+    name.len() <= pattern.len()
 }
 
-/// First entry from `start` that is a file's first block (or a deleted
-/// one in find mode 1) with a name matching `pattern`.
-fn find_file(bus: &Bus, slot: u32, start: u32, pattern: &[u8]) -> Option<u32> {
-    let want = if peek32(bus, kvar::FIND_MODE) == 0 {
-        0x51
-    } else {
-        0xA1
-    };
-    (start..15).find(|&i| {
-        let name = entry_name(bus, slot, i);
-        alloc_state(bus, slot, i) == want && !name.is_empty() && pattern_match(&name, pattern)
+/// First entry from `start` on that is in `state` and whose name matches.
+fn find_entry(bus: &Bus, slot: u32, start: u32, state: u32, pattern: &[u8], star: bool) -> Option<u32> {
+    (start..ENTRIES).find(|&i| {
+        entry_state(bus, slot, i) == state && {
+            let name = entry_name(bus, slot, i);
+            let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+            pattern_match(&name[..len], pattern, star)
+        }
     })
 }
 
-fn cstr_bytes(bus: &Bus, addr: u32) -> Vec<u8> {
-    read_cstr(bus, addr, 64).into_bytes()
+/// Open mode and the FCB's file fields for the file whose first block is
+/// directory entry `first`.
+fn attach_file(bus: &mut Bus, f: u32, slot: u32, first: u32) {
+    poke32(bus, f + fcb::SIZE, entry_size(bus, slot, first));
+    poke32(bus, f + fcb::LBA, first);
+    poke32(bus, f + fcb::FPOS, 0);
 }
 
-/// Build directory frame `i` in the slot's buffer (cached 20h bytes, zero
-/// fill, XOR checksum).
-fn frame_from_entry(bus: &mut Bus, slot: u32, i: u32) -> u32 {
-    let buf = buffer(slot);
-    for k in 0..0x80 {
-        let b = if k < card::DIR_ENTRY_SIZE {
-            bus.try_read8(dir_entry(slot, i) + k).unwrap_or(0)
-        } else {
-            0
-        };
-        bus.write8_safe(buf + k, b);
-    }
-    checksum(bus, buf);
-    buf
+/// Phases of [`open`].
+mod open_phase {
+    /// Sector 0 is read, which tells whether the card was changed.
+    pub const CHECK: u32 = 1;
+    /// The directory is cached.
+    pub const DIRECTORY: u32 = 2;
+    /// The new file's directory frames are written.
+    pub const CREATE: u32 = 3;
 }
 
-fn checksum(bus: &mut Bus, buf: u32) {
-    let sum = (0..0x7F).fold(0u8, |acc, k| acc ^ bus.try_read8(buf + k).unwrap_or(0));
-    bus.write8_safe(buf + 0x7F, sum);
-}
-
-/// Relative sector of a file (blocks chained through the directory) to
-/// the absolute card sector; `None` past the chain.
-fn absolute_sector(bus: &Bus, slot: u32, first: u32, sector: u32) -> Option<u32> {
-    let mut block = first;
-    let mut s = sector;
-    while s > 0x3F {
-        let next = next_block(bus, slot, block);
-        if next == 0xFFFF || next >= 15 {
-            return None;
-        }
-        block = u32::from(next);
-        s -= 0x40;
-    }
-    Some(block * 0x40 + s + 0x40)
-}
-
-/// Sector after the broken-sector list's reallocation, if any.
-fn reallocated(bus: &Bus, slot: u32, sector: u32) -> u32 {
-    (0..20)
-        .find(|&i| peek32(bus, BROKEN + 0x50 * slot + 4 * i) == sector)
-        .map_or(sector, |i| i + 36)
-}
-
-// ------------------------------------------------------- directory load
-
-/// OpenBIOS buDevInit, as a sub-step of an operation: read sector 0; a
-/// card that reports "changed" gets its directory reloaded; the result is
-/// whether the card is formatted. `None` while running.
-fn dev_init(bus: &mut Bus, slot: u32, dev: u32) -> Option<bool> {
-    match peek32(bus, kvar::INIT_RESULT) {
-        1 => return Some(true),
-        2 => return Some(false),
-        _ => {}
-    }
-    let buf = buffer(slot);
-    let result = loop {
-        match peek32(bus, kvar::INIT_PHASE) {
-            0 => {
-                let status = sector_io(bus, dev, 0, buf, false)?;
-                match status {
-                    0 => {
-                        let mc = bus.try_read8(buf) == Some(b'M')
-                            && bus.try_read8(buf + 1) == Some(b'C');
-                        break mc;
-                    }
-                    3 => poke32(bus, kvar::INIT_PHASE, 1),
-                    _ => break false,
-                }
-            }
-            // Card changed: reload this slot's directory (the _bu_init
-            // sequence for one slot).
-            _ => break reload_slot(bus, slot, dev)?,
-        }
-    };
-    poke32(bus, kvar::INIT_RESULT, if result { 1 } else { 2 });
-    Some(result)
-}
-
-/// Reload one slot's directory and broken-sector list: sector 0 with the
-/// card-changed flag ignored, a write to 3Fh to clear that flag, frames
-/// 1..15 and 16..35. Uses INIT_PHASE 1.. and INDEX.
-fn reload_slot(bus: &mut Bus, slot: u32, dev: u32) -> Option<bool> {
-    let buf = buffer(slot);
-    loop {
-        let phase = peek32(bus, kvar::INIT_PHASE);
-        let index = peek32(bus, kvar::INDEX);
-        match phase {
-            1 => {
-                if peek32(bus, kvar::IO_PENDING) == 0 {
-                    card::new_card(bus);
-                }
-                if sector_io(bus, dev, 0, buf, false)? != 0
-                    || bus.try_read8(buf) != Some(b'M')
-                    || bus.try_read8(buf + 1) != Some(b'C')
-                {
-                    return Some(false);
-                }
-                poke32(bus, kvar::INIT_PHASE, 2);
-            }
-            2 => {
-                if peek32(bus, kvar::IO_PENDING) == 0 {
-                    card::new_card(bus);
-                }
-                sector_io(bus, dev, 0x3F, buf, true)?;
-                poke32(bus, kvar::INDEX, 0);
-                poke32(bus, kvar::INIT_PHASE, 3);
-            }
-            3 => {
-                if sector_io(bus, dev, index + 1, buf, false)? != 0 {
-                    return Some(false);
-                }
-                let e = dir_entry(slot, index);
-                for k in 0..card::DIR_ENTRY_SIZE {
-                    let b = bus.try_read8(buf + k).unwrap_or(0);
-                    bus.write8_safe(e + k, b);
-                }
-                if index + 1 < 15 {
-                    poke32(bus, kvar::INDEX, index + 1);
-                } else {
-                    poke32(bus, kvar::INDEX, 0);
-                    poke32(bus, kvar::INIT_PHASE, 4);
-                }
-            }
-            _ => {
-                if sector_io(bus, dev, index + 16, buf, false)? != 0 {
-                    return Some(false);
-                }
-                let word = peek32(bus, buf);
-                poke32(bus, BROKEN + 0x50 * slot + 4 * index, word);
-                if index + 1 < 20 {
-                    poke32(bus, kvar::INDEX, index + 1);
-                } else {
-                    poke32(bus, kvar::INDEX, 0);
-                    return Some(true);
-                }
-            }
-        }
-    }
-}
-
-/// Write the marked directory frames: inner blocks, a status probe, first
-/// blocks, a status probe (OpenBIOS buWriteTOC). `Some(true)` on success.
-fn write_toc(bus: &mut Bus, slot: u32, dev: u32) -> Option<bool> {
-    loop {
-        let inner = peek32(bus, kvar::MASK_INNER);
-        let first = peek32(bus, kvar::MASK_FIRST);
-        // Bit 31 of each mask: its trailing status probe is pending.
-        let (mask_var, mask) = if inner != 0 {
-            (kvar::MASK_INNER, inner)
-        } else if first != 0 {
-            (kvar::MASK_FIRST, first)
-        } else {
-            return Some(true);
-        };
-        let frames = mask & 0x7FFF;
-        if frames != 0 {
-            let i = frames.trailing_zeros();
-            if peek32(bus, kvar::IO_PENDING) == 0 {
-                frame_from_entry(bus, slot, i);
-            }
-            if sector_io(bus, dev, i + 1, buffer(slot), true)? != 0 {
-                poke32(bus, kvar::MASK_INNER, 0);
-                poke32(bus, kvar::MASK_FIRST, 0);
-                return Some(false);
-            }
-            poke32(bus, mask_var, mask & !(1 << i));
-            continue;
-        }
-        if info_io(bus, dev)? != 0 {
-            poke32(bus, kvar::MASK_INNER, 0);
-            poke32(bus, kvar::MASK_FIRST, 0);
-            return Some(false);
-        }
-        poke32(bus, mask_var, 0);
-    }
-}
-
-// ----------------------------------------------------------- the driver
-
-/// open(fcb, name, mode): 0 = opened, 1 = failed (FCB error set).
+/// open(fcb, name, mode) of the "bu" device. A synchronous open reads sector
+/// 0 first (psx-spx lists it as a pointless extra); a card that says it was
+/// changed has its directory loaded again. An existing file's size comes
+/// from its directory entry. With mode bit 9 a new file of `mode >> 16`
+/// blocks is created in the first free blocks (states A0h..A3h count as
+/// free): error 11h if the name is taken, 1Ch if the blocks do not exist.
+/// Returns 0, or -1 with the error in the FCB; `None` while waiting.
 pub fn open(bus: &mut Bus, f: u32, name: u32, mode: u32) -> Option<u32> {
     let slot = slot_of(bus, f);
-    let dev = device(bus, f);
-    if peek32(bus, kvar::PHASE) == 0 {
-        set_error(bus, f, err::BUSY);
-        if bu_busy(bus, slot) {
-            return done(bus, 1);
+    let pattern = name_bytes(bus, name);
+    if peek32(bus, kvar::PHASE) == IDLE {
+        if busy(bus, slot) {
+            return fail(bus, f, err::IO);
         }
-        reset_status(bus);
-        poke32(bus, kvar::INIT_RESULT, 0);
-        poke32(bus, kvar::PHASE, 1);
+        let first = if mode & MODE_ASYNC == 0 { open_phase::CHECK } else { open_phase::DIRECTORY };
+        poke32(bus, kvar::PHASE, first);
     }
-    if peek32(bus, kvar::PHASE) == 1 {
-        if mode & MODE_ASYNC == 0 && !dev_init(bus, slot, dev)? {
-            return done(bus, 1);
+    if peek32(bus, kvar::PHASE) == open_phase::CHECK {
+        match transfer(bus, device(bus, f), 0, buffer(slot), Io::Read)? {
+            outcome::OK => {}
+            outcome::CHANGED => poke32(bus, var(kvar::LOADED, slot), 0),
+            _ => return fail(bus, f, err::IO),
         }
-        poke32(bus, kvar::FIND_MODE, 0);
-        let pattern = cstr_bytes(bus, name);
-        let found = find_file(bus, slot, 0, &pattern);
+        poke32(bus, kvar::PHASE, open_phase::DIRECTORY);
+    }
+    if peek32(bus, kvar::PHASE) == open_phase::DIRECTORY {
+        if !ensure_directory(bus, slot)? {
+            return fail(bus, f, err::IO);
+        }
         if mode & MODE_CREATE == 0 {
-            let Some(index) = found else {
-                set_error(bus, f, err::NOENT);
-                return done(bus, 1);
+            return match find_entry(bus, slot, 0, FIRST, &pattern, false) {
+                Some(first) => {
+                    attach_file(bus, f, slot, first);
+                    done(bus, 0)
+                }
+                None => fail(bus, f, err::NOENT),
             };
-            return finish_open(bus, f, slot, index);
         }
-        if found.is_some() {
-            set_error(bus, f, err::EXIST);
-            return done(bus, 1);
-        }
-        // A 0-block file still takes one block (with size 0).
-        let blocks = (mode >> 16).max(1);
-        let free: Vec<u32> = (0..15)
-            .filter(|&i| alloc_state(bus, slot, i) & 0xF0 == 0xA0)
-            .collect();
-        if blocks as usize > free.len() {
-            set_error(bus, f, err::NOSPC);
-            return done(bus, 1);
-        }
-        let size = (mode >> 16) << 13;
-        let chain = &free[..blocks as usize];
-        let name = read_cstr(bus, name, 20);
-        let (mut inner, mut first) = (0u32, 0u32);
-        for (n, &i) in chain.iter().enumerate() {
-            let e = dir_entry(slot, i);
-            if n == 0 {
-                poke32(bus, e, 0x51);
-                poke32(bus, e + 4, size);
-                set_name(bus, slot, i, &name);
-                first |= 1 << i;
-            } else {
-                poke32(bus, e, if n + 1 == chain.len() { 0x53 } else { 0x52 });
-                inner |= 1 << i;
+        match create_file(bus, slot, &pattern, mode >> 16) {
+            Ok(first) => {
+                poke32(bus, kvar::AUX, first);
+                poke32(bus, kvar::PHASE, open_phase::CREATE);
             }
-            let next = chain.get(n + 1).map_or(0xFFFF, |&j| j as u16);
-            set_next(bus, slot, i, next);
+            Err(e) => return fail(bus, f, e),
         }
-        poke32(bus, kvar::MASK_INNER, inner);
-        poke32(bus, kvar::MASK_FIRST, first);
-        poke32(bus, kvar::AUX, chain[0]);
-        poke32(bus, kvar::PHASE, 2);
     }
-    // Phase 2: write the new directory frames.
-    let index = peek32(bus, kvar::AUX);
-    if !write_toc(bus, slot, dev)? {
-        // The retail kernel loops forever here (OpenBIOS notes); free the
-        // blocks and report the failure instead.
-        let mut i = index;
-        for _ in 0..15 {
-            let next = next_block(bus, slot, i);
-            free_entry(bus, slot, i);
-            if next == 0xFFFF || next >= 15 {
-                break;
-            }
-            i = u32::from(next);
+    // Create: the directory frames go to the card.
+    match write_toc(bus, slot)? {
+        outcome::OK => {
+            let first = peek32(bus, kvar::AUX);
+            attach_file(bus, f, slot, first);
+            done(bus, 0)
         }
-        set_error(bus, f, err::BUSY);
-        return done(bus, 1);
+        _ => fail_io(bus, f, slot),
     }
-    finish_open(bus, f, slot, index)
 }
 
-fn finish_open(bus: &mut Bus, f: u32, slot: u32, index: u32) -> Option<u32> {
-    poke32(bus, f + fcb::LBA, index);
-    poke32(bus, f + fcb::FPOS, 0);
-    set_error(bus, f, 0);
-    let size = peek32(bus, dir_entry(slot, index) + 4);
-    poke32(bus, f + fcb::SIZE, size);
-    done(bus, 0)
+/// Allocate `blocks` blocks for a file called `name` in the cache and mark
+/// their frames to be written; returns the first entry. The entries chain
+/// in ascending order, their states being 51h for the first block, 53h for
+/// the last and 52h between (psx-spx); only the first carries the size and
+/// the name.
+fn create_file(bus: &mut Bus, slot: u32, name: &[u8], blocks: u32) -> Result<u32, u32> {
+    if blocks == 0 || blocks > ENTRIES {
+        return Err(err::INVAL);
+    }
+    if find_entry(bus, slot, 0, FIRST, name, false).is_some() {
+        return Err(err::EXIST);
+    }
+    let free: Vec<u32> = (0..ENTRIES)
+        .filter(|&i| matches!(entry_state(bus, slot, i), 0xA0..=0xA3))
+        .take(blocks as usize)
+        .collect();
+    if (free.len() as u32) < blocks {
+        return Err(err::NOSPC);
+    }
+    for (k, &entry) in free.iter().enumerate() {
+        clear_entry(bus, slot, entry);
+        let last = k + 1 == free.len();
+        let state = match (k, last) {
+            (0, _) => FIRST,
+            (_, true) => LAST,
+            _ => MIDDLE,
+        };
+        poke32(bus, dir_entry(slot, entry), state);
+        set_next(bus, slot, entry, free.get(k + 1).copied().unwrap_or(NO_NEXT));
+    }
+    poke32(bus, dir_entry(slot, free[0]) + 4, blocks * BLOCK);
+    set_name(bus, slot, free[0], name);
+    poke32(bus, kvar::DIRTY, free.iter().fold(0, |mask, &i| mask | 1 << i));
+    poke32(bus, kvar::LAST_ENTRY, free[0]);
+    Ok(free[0])
 }
 
-/// close(fcb): 0, or 1 while an asynchronous operation runs.
-pub fn close(bus: &mut Bus, f: u32) -> u32 {
-    let slot = slot_of(bus, f);
-    if bu_busy(bus, slot) {
-        return 1;
-    }
-    reset_status(bus);
+/// close(fcb): nothing to do; the data is on the card already.
+pub fn close(_bus: &mut Bus, _f: u32) -> u32 {
     0
 }
 
-/// read/write(fcb, buf, len): bytes moved, or a negative error. With open
-/// mode bit 15 the first sector command is only queued (returns 0) and the
-/// rest continues on completion callbacks.
+/// read(fcb, dst, len) and write(fcb, src, len) of the "bu" device: whole
+/// sectors from the file position, which must be sector aligned and inside
+/// the file (error 16h), `len` rounded down to sectors and cut at the end of
+/// the file. A file opened with mode bit 15 returns `len` at once and the
+/// transfer finishes in the background (see [`file_step`]); otherwise the
+/// call waits for every sector. Returns the byte count, or -1 with the
+/// error in the FCB; `None` while waiting.
 pub fn read_write(bus: &mut Bus, f: u32, buf: u32, len: u32, write: bool) -> Option<u32> {
     let slot = slot_of(bus, f);
-    let dev = device(bus, f);
-    let first_block = peek32(bus, f + fcb::LBA);
-    if peek32(bus, kvar::PHASE) == 0 {
-        if bu_busy(bus, slot) {
-            return done(bus, u32::MAX);
-        }
-        reset_status(bus);
-        let offset = peek32(bus, f + fcb::FPOS);
-        if offset & 0x7F != 0 || offset >= peek32(bus, f + fcb::SIZE) {
-            set_error(bus, f, err::INVAL);
-            return done(bus, u32::MAX);
-        }
-        let count = ((len as i32) / 0x80).max(0) as u32;
-        let start = offset >> 7;
-        if peek32(bus, f + fcb::STATUS) & MODE_ASYNC != 0 {
-            return Some(start_async(bus, f, slot, dev, start, count, buf, write));
-        }
-        poke32(bus, kvar::INDEX, 0);
-        poke32(bus, kvar::AUX, count);
-        poke32(bus, kvar::OP_ERROR, 0);
-        poke32(bus, kvar::PHASE, 1);
-    }
-    let start = peek32(bus, f + fcb::FPOS) >> 7;
-    let count = peek32(bus, kvar::AUX);
-    loop {
-        let i = peek32(bus, kvar::INDEX);
-        if i >= count {
-            break;
-        }
-        let Some(abs) = absolute_sector(bus, slot, first_block, start + i) else {
-            break;
-        };
-        let sector = reallocated(bus, slot, abs);
-        let status = sector_io(bus, dev, sector, buf + 0x80 * i, write)?;
-        if status != 0 {
-            poke32(bus, kvar::OP_ERROR, status);
-            break;
-        }
-        // A write's last sector of each 40h-sector block is followed by a
-        // status probe; approximated here by one probe after the last.
-        poke32(bus, kvar::INDEX, i + 1);
-    }
-    if write && peek32(bus, kvar::INDEX) == count && count != 0 {
-        let status = info_io(bus, dev)?;
-        if status != 0 {
-            poke32(bus, kvar::OP_ERROR, status);
-            poke32(bus, kvar::INDEX, count - 1);
-        }
-    }
-    let moved = peek32(bus, kvar::INDEX) * 0x80;
+    let device = device(bus, f);
     let pos = peek32(bus, f + fcb::FPOS);
-    poke32(bus, f + fcb::FPOS, pos + moved);
-    set_error(bus, f, 0);
-    poke32(bus, card::kvar::BU_OP + 4 * slot, card::bu_op::NONE);
-    if moved != len {
-        let e = peek32(bus, kvar::OP_ERROR);
-        return done(bus, (e as i32).wrapping_neg() as u32);
+    if peek32(bus, kvar::PHASE) == IDLE {
+        let size = peek32(bus, f + fcb::SIZE);
+        if busy(bus, slot) {
+            return fail(bus, f, err::IO);
+        }
+        if pos % SECTOR != 0 || pos >= size || !loaded(bus, slot) {
+            return fail(bus, f, if loaded(bus, slot) { err::INVAL } else { err::IO });
+        }
+        let sectors = len.min(size - pos) / SECTOR;
+        if sectors == 0 {
+            return fail(bus, f, err::INVAL);
+        }
+        poke32(bus, kvar::PHASE, 1);
+        poke32(bus, kvar::AUX, sectors);
+        poke32(bus, kvar::INDEX, 0);
+        if peek32(bus, f + fcb::STATUS) & MODE_ASYNC != 0 {
+            let op = if write { bu_op::WRITE } else { bu_op::READ };
+            for (k, value) in [f, 0, sectors, buf].into_iter().enumerate() {
+                poke32(bus, kvar::ASYNC + 4 * k as u32, value);
+            }
+            poke32(bus, kvar::ASYNC + 16, 0);
+            poke32(bus, var(kvar::BU_OP, slot), op);
+            undeliver_events(bus);
+            reset(bus);
+            file_step(bus, slot);
+            return Some(sectors * SECTOR);
+        }
     }
-    done(bus, len)
+    let first = peek32(bus, f + fcb::LBA);
+    loop {
+        let done_sectors = peek32(bus, kvar::INDEX);
+        let total = peek32(bus, kvar::AUX);
+        if done_sectors == total {
+            poke32(bus, f + fcb::FPOS, pos + total * SECTOR);
+            return done(bus, total * SECTOR);
+        }
+        let Some(sector) = file_sector(bus, slot, first, pos + done_sectors * SECTOR) else {
+            return fail(bus, f, err::INVAL);
+        };
+        let at = buf.wrapping_add(done_sectors * SECTOR);
+        let io = if write { Io::Write } else { Io::Read };
+        match transfer(bus, device, sector, at, io)? {
+            outcome::OK => poke32(bus, kvar::INDEX, done_sectors + 1),
+            _ => return fail(bus, f, err::IO),
+        }
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn start_async(
+/// One step of an asynchronous file transfer, run by the card driver's
+/// completion hook (and once to start it). The sector that just finished
+/// is counted; the next one is asked for; after the last, the file position
+/// moves and the event goes out: class = the file handle, spec 4, when it
+/// went well (psx-spx "BIOS Event Summary": "card file handle done okay"),
+/// else the SwCARD error event.
+fn file_step(bus: &mut Bus, slot: u32) {
+    let f = peek32(bus, kvar::ASYNC);
+    let (done_sectors, total, buf) = (
+        peek32(bus, kvar::ASYNC + 4),
+        peek32(bus, kvar::ASYNC + 8),
+        peek32(bus, kvar::ASYNC + 12),
+    );
+    let write = peek32(bus, var(kvar::BU_OP, slot)) == bu_op::WRITE;
+    let pos = peek32(bus, f + fcb::FPOS);
+    // The first call has nothing finished yet; later ones follow a sector.
+    let started = peek32(bus, kvar::ASYNC + 16) != 0;
+    let mut finished = done_sectors;
+    if started {
+        let result = card::last_outcome(bus, slot);
+        if result != outcome::OK {
+            poke32(bus, var(kvar::BU_OP, slot), bu_op::NONE);
+            poke32(bus, kvar::ASYNC + 16, 0);
+            poke32(bus, var(kvar::LOADED, slot), 0);
+            return notify(bus, result);
+        }
+        finished += 1;
+        poke32(bus, kvar::ASYNC + 4, finished);
+    }
+    if finished == total {
+        poke32(bus, f + fcb::FPOS, pos + total * SECTOR);
+        poke32(bus, var(kvar::BU_OP, slot), bu_op::NONE);
+        poke32(bus, kvar::ASYNC + 16, 0);
+        let handle = peek32(bus, f + fcb::NUMBER);
+        return ex::queue_event(bus, handle, 0x4);
+    }
+    let first = peek32(bus, f + fcb::LBA);
+    let Some(sector) = file_sector(bus, slot, first, pos + finished * SECTOR) else {
+        poke32(bus, var(kvar::BU_OP, slot), bu_op::NONE);
+        poke32(bus, kvar::ASYNC + 16, 0);
+        return notify(bus, outcome::ERROR);
+    };
+    let at = buf.wrapping_add(finished * SECTOR);
+    let device = device(bus, f);
+    let queued = if write {
+        card::card_write(bus, device, sector, at)
+    } else {
+        card::card_read(bus, device, sector, at)
+    };
+    poke32(bus, kvar::ASYNC + 16, 1);
+    if queued == 0 {
+        poke32(bus, var(kvar::BU_OP, slot), bu_op::NONE);
+        poke32(bus, kvar::ASYNC + 16, 0);
+        notify(bus, outcome::ERROR);
+    }
+}
+
+/// Phases shared by erase, undelete and rename.
+mod edit_phase {
+    /// The directory is cached.
+    pub const DIRECTORY: u32 = 1;
+    /// The changed frames are written.
+    pub const WRITE: u32 = 2;
+}
+
+/// Run a directory edit: make sure the directory is cached, let `edit`
+/// change the cache and mark the frames to write (it returns the error to
+/// fail with, if any), then write them. Returns 0, or -1 with the error;
+/// `None` while waiting.
+fn edit_directory(
     bus: &mut Bus,
     f: u32,
-    slot: u32,
-    dev: u32,
-    start: u32,
-    count: u32,
-    buf: u32,
-    write: bool,
-) -> u32 {
-    let op = if write { bu_op::WRITE } else { bu_op::READ };
-    poke32(bus, card::kvar::BU_OP + 4 * slot, op);
-    poke32(bus, var(kvar::ASYNC_SECTOR, slot), start);
-    poke32(bus, var(kvar::ASYNC_COUNT, slot), count);
-    poke32(bus, var(kvar::ASYNC_BUFFER, slot), buf);
-    poke32(bus, var(kvar::ASYNC_FCB, slot), f);
-    reset_status(bus);
-    if count == 0 {
-        set_error(bus, f, 0);
-        poke32(bus, card::kvar::SUCCESS, 1);
-        card::bu_finish(bus, slot, 0x0004);
-        return 0;
-    }
-    let first_block = peek32(bus, f + fcb::LBA);
-    let Some(abs) = absolute_sector(bus, slot, first_block, start) else {
-        return u32::MAX;
-    };
-    let sector = reallocated(bus, slot, abs);
-    set_error(bus, f, err::BUSY);
-    let queued = if write {
-        card::card_write(bus, dev, sector, buf)
-    } else {
-        card::card_read(bus, dev, sector, buf)
-    };
-    if queued == 0 {
-        return u32::MAX;
-    }
-    set_error(bus, f, 0);
-    0
-}
-
-/// Completion callback part for asynchronous reads and writes (OpenBIOS
-/// buLowLevelOpCompleted cases 2, 3 and 7).
-pub fn async_completed(bus: &mut Bus, slot: u32, device: u32, op: u32) {
-    let f = peek32(bus, var(kvar::ASYNC_FCB, slot));
-    let fd = peek32(bus, f + fcb::NUMBER);
-    match op {
-        bu_op::WRITE_INFO => {
-            crate::hle_exceptions::queue_event(bus, fd, 0x0004);
-            let pos = peek32(bus, f + fcb::FPOS);
-            poke32(bus, f + fcb::FPOS, pos + 0x80);
-            card::bu_finish(bus, slot, 0x0004);
-        }
-        bu_op::READ | bu_op::WRITE => {
-            let left = peek32(bus, var(kvar::ASYNC_COUNT, slot)) - 1;
-            poke32(bus, var(kvar::ASYNC_COUNT, slot), left);
-            if left == 0 {
-                if op == bu_op::READ {
-                    card::bu_finish(bus, slot, 0x0004);
-                    crate::hle_exceptions::queue_event(bus, fd, 0x0004);
-                } else {
-                    poke32(bus, card::kvar::SUCCESS, 0);
-                    if card::card_info(bus, device) == 0 {
-                        poke32(bus, card::kvar::ERRORS, 1);
-                        card::bu_finish(bus, slot, 0x8000);
-                        return;
-                    }
-                    poke32(bus, card::kvar::BU_OP + 4 * slot, bu_op::WRITE_INFO);
-                }
-                return;
-            }
-            let buf = peek32(bus, var(kvar::ASYNC_BUFFER, slot)) + 0x80;
-            poke32(bus, var(kvar::ASYNC_BUFFER, slot), buf);
-            let pos = peek32(bus, f + fcb::FPOS);
-            poke32(bus, f + fcb::FPOS, pos + 0x80);
-            let rel = peek32(bus, var(kvar::ASYNC_SECTOR, slot)) + 1;
-            poke32(bus, var(kvar::ASYNC_SECTOR, slot), rel);
-            let first_block = peek32(bus, f + fcb::LBA);
-            let queued = absolute_sector(bus, slot, first_block, rel).is_some_and(|abs| {
-                let sector = reallocated(bus, slot, abs);
-                if op == bu_op::READ {
-                    card::card_read(bus, device, sector, buf) != 0
-                } else {
-                    card::card_write(bus, device, sector, buf) != 0
-                }
-            });
-            if !queued {
-                poke32(bus, card::kvar::SUCCESS, 0);
-                poke32(bus, card::kvar::ERRORS, 1);
-                card::bu_finish(bus, slot, 0x8000);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// firstfile(fcb, name, direntry): the first match, or 0.
-pub fn firstfile(bus: &mut Bus, f: u32, name: u32, direntry: u32) -> Option<u32> {
+    edit: impl FnOnce(&mut Bus, u32) -> Result<(), u32>,
+) -> Option<u32> {
     let slot = slot_of(bus, f);
-    let dev = device(bus, f);
-    if peek32(bus, kvar::PHASE) == 0 {
-        set_error(bus, f, err::BUSY);
-        if bu_busy(bus, slot) {
-            return done(bus, 0);
+    if peek32(bus, kvar::PHASE) == IDLE {
+        if busy(bus, slot) {
+            return fail(bus, f, err::IO);
         }
-        reset_status(bus);
-        poke32(bus, kvar::INIT_RESULT, 0);
-        poke32(bus, kvar::PHASE, 1);
+        poke32(bus, kvar::PHASE, edit_phase::DIRECTORY);
     }
-    if !dev_init(bus, slot, dev)? {
-        return done(bus, 0);
-    }
-    // Pattern: 19 "?" by default; the name up to a "*", which pads the
-    // rest with "?".
-    let given = cstr_bytes(bus, name);
-    let mut pattern = vec![b'?'; 19];
-    if !given.is_empty() {
-        pattern.clear();
-        let star = given.iter().position(|&c| c == b'*');
-        pattern.extend_from_slice(&given[..star.unwrap_or(given.len())]);
-        if star.is_some() {
-            pattern.resize(20, b'?');
+    if peek32(bus, kvar::PHASE) == edit_phase::DIRECTORY {
+        if !ensure_directory(bus, slot)? {
+            return fail(bus, f, err::IO);
         }
+        if let Err(e) = edit(bus, slot) {
+            return fail(bus, f, e);
+        }
+        poke32(bus, kvar::PHASE, edit_phase::WRITE);
     }
-    pattern.truncate(20);
-    for k in 0..21 {
-        bus.write8_safe(PATTERN + k, pattern.get(k as usize).copied().unwrap_or(0));
+    match write_toc(bus, slot)? {
+        outcome::OK => done(bus, 0),
+        _ => fail_io(bus, f, slot),
     }
-    poke32(bus, kvar::FIND_INDEX, u32::MAX);
-    done(bus, 0)?;
-    Some(nextfile(bus, f, direntry))
 }
 
-/// nextfile(fcb, direntry): the next match of the firstfile pattern, or 0.
-/// The direntry gets name, attribute (allocation state & F0h), size and
-/// first sector (psx-spx layout).
-pub fn nextfile(bus: &mut Bus, f: u32, direntry: u32) -> u32 {
-    let slot = slot_of(bus, f);
-    if bu_busy(bus, slot) {
-        set_error(bus, f, err::BUSY);
-        return 0;
-    }
-    reset_status(bus);
-    let pattern = cstr_bytes(bus, PATTERN);
-    let start = peek32(bus, kvar::FIND_INDEX).wrapping_add(1);
-    let Some(index) = find_file(bus, slot, start, &pattern) else {
-        set_error(bus, f, err::NOENT);
-        return 0;
-    };
-    poke32(bus, kvar::FIND_INDEX, index);
-    let name = entry_name(bus, slot, index);
-    for k in 0..0x14 {
-        let b = name.as_bytes().get(k as usize).copied().unwrap_or(0);
-        bus.write8_safe(direntry + k, b);
-    }
-    poke32(bus, direntry + 0x14, alloc_state(bus, slot, index) & 0xF0);
-    poke32(
-        bus,
-        direntry + 0x18,
-        peek32(bus, dir_entry(slot, index) + 4),
-    );
-    poke32(bus, direntry + 0x20, (index + 1) * 0x40);
-    set_error(bus, f, 0);
-    direntry
-}
-
-/// erase(fcb, name): 0 = deleted (blocks marked A1h/A2h/A3h), 1 = failed.
-pub fn erase(bus: &mut Bus, f: u32, name: u32) -> Option<u32> {
-    let slot = slot_of(bus, f);
-    let dev = device(bus, f);
-    if peek32(bus, kvar::PHASE) == 0 {
-        set_error(bus, f, err::BUSY);
-        if bu_busy(bus, slot) {
-            return done(bus, 1);
-        }
-        reset_status(bus);
-        poke32(bus, kvar::INIT_RESULT, 0);
-        poke32(bus, kvar::PHASE, 1);
-    }
-    if peek32(bus, kvar::PHASE) == 1 {
-        if !dev_init(bus, slot, dev)? {
-            return done(bus, 1);
-        }
-        poke32(bus, kvar::FIND_MODE, 0);
-        let pattern = cstr_bytes(bus, name);
-        let Some(index) = find_file(bus, slot, 0, &pattern) else {
-            set_error(bus, f, err::NOENT);
-            return done(bus, 1);
-        };
-        let (mut inner, first) = (0u32, 1u32 << index);
-        poke32(bus, dir_entry(slot, index), 0xA1);
-        let size = peek32(bus, dir_entry(slot, index) + 4) as i32;
-        let mut count = (size.max(0) >> 13) - 1;
-        let mut i = index;
-        while count > 0 {
-            let next = next_block(bus, slot, i);
-            if next == 0xFFFF || next >= 15 {
-                break;
-            }
-            i = u32::from(next);
-            match alloc_state(bus, slot, i) {
-                0x52 => poke32(bus, dir_entry(slot, i), 0xA2),
-                0x53 => poke32(bus, dir_entry(slot, i), 0xA3),
-                _ => break,
-            }
-            inner |= 1 << i;
-            count -= 1;
-        }
-        poke32(bus, kvar::MASK_INNER, inner);
-        poke32(bus, kvar::MASK_FIRST, first);
-        poke32(bus, kvar::AUX, inner | first);
-        poke32(bus, kvar::PHASE, 2);
-    }
-    if !write_toc(bus, slot, dev)? {
-        let touched = peek32(bus, kvar::AUX);
-        for i in (0..15).filter(|i| touched & (1 << i) != 0) {
-            free_entry(bus, slot, i);
-        }
-        set_error(bus, f, err::BUSY);
-        return done(bus, 1);
-    }
-    set_error(bus, f, 0);
-    done(bus, 0)
-}
-
-/// rename(fcb, old, fcb2, new): 0 = renamed, 1 = failed.
-pub fn rename(bus: &mut Bus, f: u32, old: u32, new: u32) -> Option<u32> {
-    let slot = slot_of(bus, f);
-    let dev = device(bus, f);
-    if peek32(bus, kvar::PHASE) == 0 {
-        set_error(bus, f, err::BUSY);
-        if bu_busy(bus, slot) {
-            return done(bus, 1);
-        }
-        reset_status(bus);
-        poke32(bus, kvar::INIT_RESULT, 0);
-        poke32(bus, kvar::PHASE, 1);
-    }
-    if peek32(bus, kvar::PHASE) == 1 {
-        if !dev_init(bus, slot, dev)? {
-            return done(bus, 1);
-        }
-        poke32(bus, kvar::FIND_MODE, 0);
-        if find_file(bus, slot, 0, &cstr_bytes(bus, new)).is_some() {
-            set_error(bus, f, err::EXIST);
-            return done(bus, 1);
-        }
-        let Some(index) = find_file(bus, slot, 0, &cstr_bytes(bus, old)) else {
-            set_error(bus, f, err::NOENT);
-            return done(bus, 1);
-        };
-        let name = read_cstr(bus, new, 20);
-        set_name(bus, slot, index, &name);
-        poke32(bus, kvar::MASK_INNER, 0);
-        poke32(bus, kvar::MASK_FIRST, 1 << index);
-        poke32(bus, kvar::AUX, index);
-        poke32(bus, kvar::PHASE, 2);
-    }
-    if !write_toc(bus, slot, dev)? {
-        let index = peek32(bus, kvar::AUX);
-        let name = read_cstr(bus, old, 20);
-        set_name(bus, slot, index, &name);
-        set_error(bus, f, err::BUSY);
-        return done(bus, 1);
-    }
-    set_error(bus, f, 0);
-    done(bus, 0)
-}
-
-/// format(fcb): write "MC", 15 free directory frames and 20 empty
-/// broken-sector frames. 0 = formatted, 1 = failed.
-pub fn format(bus: &mut Bus, f: u32) -> Option<u32> {
-    let slot = slot_of(bus, f);
-    let dev = device(bus, f);
-    let buf = buffer(slot);
-    if peek32(bus, kvar::PHASE) == 0 {
-        if bu_busy(bus, slot) {
-            set_error(bus, f, err::BUSY);
-            return done(bus, 1);
-        }
-        reset_status(bus);
-        poke32(bus, kvar::INDEX, 0);
-        poke32(bus, kvar::PHASE, 1);
-    }
-    loop {
-        let index = peek32(bus, kvar::INDEX);
-        if index >= 36 {
+/// The entries of the file whose first block is `first`, in chain order.
+fn chain(bus: &Bus, slot: u32, first: u32) -> Vec<u32> {
+    let mut entries = vec![first];
+    while let next @ 0..=14 = entry_next(bus, slot, *entries.last().unwrap_or(&first)) {
+        if entries.contains(&next) {
             break;
         }
-        if peek32(bus, kvar::IO_PENDING) == 0 {
-            for k in 0..0x80 {
-                bus.write8_safe(buf + k, 0);
-            }
-            match index {
-                0 => {
-                    bus.write8_safe(buf, b'M');
-                    bus.write8_safe(buf + 1, b'C');
-                    card::new_card(bus);
-                }
-                1..=15 => {
-                    free_entry(bus, slot, index - 1);
-                    set_name(bus, slot, index - 1, "");
-                    let e = dir_entry(slot, index - 1);
-                    for k in 0..card::DIR_ENTRY_SIZE {
-                        let b = bus.try_read8(e + k).unwrap_or(0);
-                        bus.write8_safe(buf + k, b);
-                    }
-                }
-                _ => {
-                    poke32(bus, buf, u32::MAX);
-                    poke32(bus, buf + 8, 0xFFFF);
-                    poke32(bus, BROKEN + 0x50 * slot + 4 * (index - 16), u32::MAX);
-                }
-            }
-            checksum(bus, buf);
-        }
-        // OpenBIOS ignores the status of each write.
-        sector_io(bus, dev, index, buf, true)?;
-        poke32(bus, kvar::INDEX, index + 1);
+        entries.push(next);
     }
-    set_error(bus, f, 0);
-    done(bus, 0)
+    entries
 }
 
-/// undelete(fcb, name): not supported (the retail function exists; no
-/// title in the compatibility list uses it). Fails with "busy".
-pub fn undelete(bus: &mut Bus, f: u32) -> u32 {
-    set_error(bus, f, err::BUSY);
-    1
+/// erase(fcb, name): the file's blocks become deleted blocks (51h to A1h,
+/// 52h to A2h, 53h to A3h), keeping their chain so the file can be brought
+/// back; the data stays where it is. Error 2 if there is no such file.
+pub fn erase(bus: &mut Bus, f: u32, name: u32) -> Option<u32> {
+    let pattern = name_bytes(bus, name);
+    edit_directory(bus, f, |bus, slot| {
+        let first = find_entry(bus, slot, 0, FIRST, &pattern, false).ok_or(err::NOENT)?;
+        let blocks = chain(bus, slot, first);
+        for &entry in &blocks {
+            let state = entry_state(bus, slot, entry);
+            poke32(bus, dir_entry(slot, entry), state + 0x50);
+        }
+        poke32(bus, kvar::DIRTY, blocks.iter().fold(0, |mask, &i| mask | 1 << i));
+        poke32(bus, kvar::LAST_ENTRY, first);
+        Ok(())
+    })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::hle_asm::*;
-    use crate::Cpu;
-
-    const PROGRAM: u32 = 0x8001_0000;
-    const RESULTS: u32 = 0x8002_0F00;
-    const STRINGS: u32 = 0x8002_0E00;
-
-    /// Argument placeholder: the result of call `i` is `RESULT | i`.
-    const RESULT: u32 = 0xFFFF_FF00;
-
-    fn program(calls: &[(i16, u32, [u32; 3])]) -> Vec<u32> {
-        let mut a = Asm::new(PROGRAM);
-        a.li(T0, 0x0000_0401);
-        a.mtc0(T0, 12);
-        a.li(S0, RESULTS);
-        a.li(S1, RESULTS);
-        for (vector, func, args) in calls {
-            for (i, v) in args.iter().enumerate() {
-                if v & 0xFFFF_FF00 == RESULT {
-                    a.lw(A0 + i as u32, (4 * (v & 0xFF)) as i16, S1);
-                } else {
-                    a.li(A0 + i as u32, *v);
-                }
-            }
-            a.addiu(T2, ZERO, *vector);
-            a.jalr(T2);
-            a.addiu(T1, ZERO, *func as i16);
-            a.sw(V0, 0, S0);
-            a.addiu(S0, S0, 4);
+/// undelete(fcb, name): the reverse of erase, for a deleted file whose
+/// blocks are all still deleted (A1h..A3h). Error 2 if there is no such
+/// deleted file, 11h if one of its blocks has been taken since.
+pub fn undelete(bus: &mut Bus, f: u32, name: u32) -> Option<u32> {
+    let pattern = name_bytes(bus, name);
+    edit_directory(bus, f, |bus, slot| {
+        let first = find_entry(bus, slot, 0, DELETED_FIRST, &pattern, false).ok_or(err::NOENT)?;
+        let blocks = chain(bus, slot, first);
+        if blocks.iter().any(|&entry| !matches!(entry_state(bus, slot, entry), 0xA1..=0xA3)) {
+            return Err(err::EXIST);
         }
-        a.label("end");
-        a.b("end");
-        a.nop();
-        a.finish()
+        for &entry in &blocks {
+            let state = entry_state(bus, slot, entry);
+            poke32(bus, dir_entry(slot, entry), state - 0x50);
+        }
+        poke32(bus, kvar::DIRTY, blocks.iter().fold(0, |mask, &i| mask | 1 << i));
+        poke32(bus, kvar::LAST_ENTRY, first);
+        Ok(())
+    })
+}
+
+/// rename(fcb1, old, new): the first block's name changes; error 2 if there
+/// is no such file, 11h if the new name is taken.
+pub fn rename(bus: &mut Bus, f: u32, old: u32, new: u32) -> Option<u32> {
+    let (old, new) = (name_bytes(bus, old), name_bytes(bus, new));
+    edit_directory(bus, f, |bus, slot| {
+        let first = find_entry(bus, slot, 0, FIRST, &old, false).ok_or(err::NOENT)?;
+        if find_entry(bus, slot, 0, FIRST, &new, false).is_some() {
+            return Err(err::EXIST);
+        }
+        set_name(bus, slot, first, &new);
+        poke32(bus, kvar::DIRTY, 1 << first);
+        Ok(())
+    })
+}
+
+/// format(fcb): [`write_format`] on the file's card. Returns 0, or -1.
+pub fn format(bus: &mut Bus, f: u32) -> Option<u32> {
+    let slot = slot_of(bus, f);
+    if peek32(bus, kvar::PHASE) == IDLE {
+        if busy(bus, slot) {
+            return fail(bus, f, err::IO);
+        }
+        poke32(bus, kvar::PHASE, 1);
     }
-
-    fn run(bus: &mut Bus, words: &[u32]) {
-        let mut cpu = Cpu::new();
-        for (i, w) in words.iter().enumerate() {
-            bus.write32(PROGRAM + 4 * i as u32, *w);
-        }
-        cpu.gprs_mut_for_test()[29] = 0x801F_FF00;
-        cpu.set_pc_for_test(PROGRAM);
-        let end = PROGRAM + 4 * (words.len() as u32 - 2);
-        for _ in 0..600_000_000u32 {
-            if cpu.pc() == end {
-                return;
-            }
-            cpu.step(bus).unwrap();
-        }
-        panic!("program did not finish, pc={:#x}", cpu.pc());
-    }
-
-    fn string(bus: &mut Bus, index: u32, s: &str) -> u32 {
-        let at = STRINGS + 0x20 * index;
-        for (k, b) in s.bytes().chain([0]).enumerate() {
-            bus.write8_safe(at + k as u32, b);
-        }
-        at
-    }
-
-    const A: i16 = 0xA0;
-    const B: i16 = 0xB0;
-
-    #[test]
-    fn files_are_created_written_listed_read_and_erased_on_the_card() {
-        let mut bus = Bus::new_without_bios();
-        bus.enable_hle_bios();
-        bus.attach_digital_pad_port1();
-        bus.attach_memcard_port1(Vec::new());
-        bus.detach_memcard_port2();
-        let name = string(&mut bus, 0, "bu00:BASLUS-00000TEST");
-        let pattern = string(&mut bus, 1, "bu00:BA*");
-        let device = string(&mut bus, 2, "bu00:");
-        let (src, dst, dirent) = (0x8003_0000, 0x8003_0100, 0x8003_0200);
-        for k in 0..0x100 {
-            bus.write8_safe(src + k, (k * 7 + 1) as u8);
-        }
-        let create = 0x0001_0000 | 0x200 | 0x3;
-        let words = program(&[
-            (B, 0x4A, [1, 0, 0]),                // 0 InitCARD2
-            (B, 0x4B, [0, 0, 0]),                // 1 StartCARD2
-            (A, 0x70, [0, 0, 0]),                // 2 _bu_init
-            (B, 0x32, [name, create, 0]),        // 3 open (create, 1 block)
-            (B, 0x35, [RESULT | 3, src, 0x100]), // 4 write 2 sectors
-            (B, 0x36, [RESULT | 3, 0, 0]),       // 5 close
-            (B, 0x32, [name, 1, 0]),             // 6 open existing
-            (B, 0x34, [RESULT | 6, dst, 0x100]), // 7 read
-            (B, 0x36, [RESULT | 6, 0, 0]),       // 8 close
-            (B, 0x42, [pattern, dirent, 0]),     // 9 firstfile
-            (B, 0x43, [dirent, 0, 0]),           // 10 nextfile: no more
-            (B, 0x45, [name, 0, 0]),             // 11 erase
-            (B, 0x32, [name, 1, 0]),             // 12 open: gone
-            (B, 0x41, [device, 0, 0]),           // 13 format
-        ]);
-        run(&mut bus, &words);
-        let r = |bus: &mut Bus, i: u32| bus.read32(RESULTS + 4 * i);
-        assert_eq!(r(&mut bus, 3), 2, "fd 2 (0 and 1 are the TTY)");
-        assert_eq!(r(&mut bus, 4), 0x100);
-        assert_eq!(r(&mut bus, 5), 2);
-        assert_eq!(r(&mut bus, 7), 0x100);
-        let back: Vec<u8> = (0..0x100)
-            .map(|k| bus.try_read8(dst + k).unwrap())
-            .collect();
-        let want: Vec<u8> = (0..0x100u32).map(|k| (k * 7 + 1) as u8).collect();
-        assert_eq!(back, want);
-        // firstfile found it: name, attribute 50h, size 2000h, block 1
-        // (first sector 40h).
-        assert_eq!(r(&mut bus, 9), dirent);
-        assert_eq!(read_cstr(&bus, dirent, 20), "BASLUS-00000TEST");
-        assert_eq!(bus.read32(dirent + 0x14), 0x50);
-        assert_eq!(bus.read32(dirent + 0x18), 0x2000);
-        assert_eq!(bus.read32(dirent + 0x20), 0x40);
-        assert_eq!(r(&mut bus, 10), 0);
-        assert_eq!(r(&mut bus, 11), 1, "erase ok");
-        assert_eq!(r(&mut bus, 12), u32::MAX, "erased file does not open");
-        assert_eq!(r(&mut bus, 13), 1, "format ok");
-
-        // The card holds what the kernel wrote: after the format, a
-        // standard empty directory.
-        let card = bus.memcard_port1_snapshot().expect("card on port 1");
-        assert_eq!(&card[..2], b"MC");
-        assert_eq!(card[0x80], 0xA0);
-        assert_eq!(card[0x80 + 0x7F], 0xA0, "free frame checksum");
-        // The erased file's data sectors are left alone by format.
-        assert_eq!(card[0x2000], 1);
+    match write_format(bus, slot)? {
+        outcome::OK => done(bus, 0),
+        _ => fail(bus, f, err::IO),
     }
 }
+
+/// Fill the direntry at `dst` for directory entry `i` (psx-spx "BIOS File
+/// Functions": name, attribute 50h for a file or A0h for a deleted one,
+/// size, an unused next pointer, first sector number, a reserved word).
+fn fill_direntry(bus: &mut Bus, slot: u32, i: u32, dst: u32) {
+    let name = entry_name(bus, slot, i);
+    for k in 0..0x14 {
+        bus.write8_safe(dst + k, if k < 20 { name[k as usize] } else { 0 });
+    }
+    let attribute = if entry_state(bus, slot, i) == FIRST { 0x50 } else { 0xA0 };
+    poke32(bus, dst + 0x14, attribute);
+    poke32(bus, dst + 0x18, entry_size(bus, slot, i));
+    poke32(bus, dst + 0x1C, 0);
+    poke32(bus, dst + 0x20, (i + 1) * 64);
+    poke32(bus, dst + 0x24, 0);
+}
+
+/// The next entry of the search from `start`: files, or deleted files when
+/// the find mode (C(1Ah)) says so. Fills the direntry and remembers where
+/// to go on; returns the direntry, or 0.
+fn next_match(bus: &mut Bus, slot: u32, start: u32, direntry: u32) -> u32 {
+    let mut pattern = Vec::new();
+    for k in 0..21 {
+        match bus.try_read8(PATTERN + k).unwrap_or(0) {
+            0 => break,
+            b => pattern.push(b),
+        }
+    }
+    let state = if peek32(bus, kvar::FIND_MODE) == 0 { FIRST } else { DELETED_FIRST };
+    match find_entry(bus, slot, start, state, &pattern, true) {
+        Some(i) => {
+            fill_direntry(bus, slot, i, direntry);
+            poke32(bus, kvar::FIND_INDEX, i + 1);
+            direntry
+        }
+        None => {
+            poke32(bus, kvar::FIND_INDEX, ENTRIES);
+            0
+        }
+    }
+}
+
+/// firstfile(fcb, name, direntry): remember the name, make sure the
+/// directory is cached (loading it takes card time; nothing else touches
+/// the card) and answer with the first match. Returns the direntry, or 0.
+pub fn firstfile(bus: &mut Bus, f: u32, name: u32, direntry: u32) -> Option<u32> {
+    let slot = slot_of(bus, f);
+    if peek32(bus, kvar::PHASE) == IDLE {
+        if busy(bus, slot) {
+            return Some(0);
+        }
+        poke32(bus, kvar::PHASE, 1);
+        for k in 0..21 {
+            let byte = if k < 20 { bus.try_read8(name.wrapping_add(k)).unwrap_or(0) } else { 0 };
+            bus.write8_safe(PATTERN + k, byte);
+        }
+    }
+    if !ensure_directory(bus, slot)? {
+        return done(bus, 0);
+    }
+    let found = next_match(bus, slot, 0, direntry);
+    done(bus, found)
+}
+
+/// nextfile(fcb, direntry): the next match of the search firstfile began,
+/// or 0.
+pub fn nextfile(bus: &mut Bus, f: u32, direntry: u32) -> u32 {
+    let slot = slot_of(bus, f);
+    if !loaded(bus, slot) {
+        return 0;
+    }
+    let start = peek32(bus, kvar::FIND_INDEX);
+    next_match(bus, slot, start, direntry)
+}
+

@@ -594,9 +594,9 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         (Table::A, 0x44) => Done(0),
 
         // A(54h)/A(71h) _96_init: reinstall the kernel CD-ROM driver, then
-        // leave the critical section as OpenBIOS initCDRom does (SYSCALL(2)
-        // through the guest exception handler), so the CD reads a game
-        // makes next can take their interrupts.
+        // leave the critical section (SYSCALL(2) through the guest exception
+        // handler), so the CD reads a game makes next can take their
+        // interrupts.
         (Table::A, 0x54) | (Table::A, 0x71) => {
             crate::hle_files::cd_init(bus);
             leave_critical_section(gprs)
@@ -610,7 +610,7 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         }
 
         // A(55h)/A(70h) _bu_init: load both slots' directories.
-        (Table::A, 0x55) | (Table::A, 0x70) => match card::bu_init(bus) {
+        (Table::A, 0x55) | (Table::A, 0x70) => match crate::hle_bu::bu_init(bus) {
             Some(v) => Done(v),
             None => Retry,
         },
@@ -619,14 +619,16 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // _card_info, A(ACh) _card_load, A(ADh) _card_auto, and the
         // bufs_cb completion callbacks A(A7h)-A(AAh), which deliver
         // SwCARD events.
-        (Table::A, 0xAB) => Done(card::card_info(bus, args[0])),
-        (Table::A, 0xAC) => Done(card::card_load(bus, args[0])),
+        (Table::A, 0xAB) => Done(crate::hle_bu::card_info(bus, args[0])),
+        (Table::A, 0xAC) => Done(crate::hle_bu::card_load(bus, args[0])),
         (Table::A, 0xAD) => Done(card::set_auto_format(bus, args[0])),
-        (Table::A, 0xA7) | (Table::A, 0xA8) | (Table::A, 0xA9) | (Table::A, 0xAA) => {
+        (Table::A, 0xA7) | (Table::A, 0xA8) | (Table::A, 0xA9) | (Table::A, 0xAA) | (Table::A, 0xAE) => {
             if func == 0xA7 {
-                card::low_level_completed(bus);
+                crate::hle_bu::low_level_completed(bus);
             } else {
-                card::low_level_error(bus, u32::from(func - 0xA8));
+                // A8..AA are 0..2, AE is 3.
+                let which = if func == 0xAE { 3 } else { u32::from(func - 0xA8) };
+                crate::hle_bu::low_level_error(bus, which);
             }
             match ex::flush_events(bus, gprs, gprs[31]) {
                 Some(target) => Jump(target),
@@ -945,7 +947,7 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
 
         // --- File layer continuations, kernel devices, CD-ROM driver ---
         (Table::Kernel, n)
-            if (files::internal::CONT_OPEN..=files::internal::CONT_TEMP).contains(&n) =>
+            if (files::internal::CONT_FIRST..=files::internal::CONT_LAST).contains(&n) =>
         {
             let v0 = gprs[2];
             let saved = files::pop_frame(bus, gprs);
@@ -964,7 +966,7 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
                 bu::internal::NEXTFILE => Some(bu::nextfile(bus, args[0], args[1])),
                 bu::internal::FORMAT => bu::format(bus, args[0]),
                 bu::internal::RENAME => bu::rename(bus, args[0], args[1], args[3]),
-                _ => Some(bu::undelete(bus, args[0])),
+                _ => bu::undelete(bus, args[0], args[1]),
             };
             match result {
                 Some(v) => match ex::flush_events_returning(bus, gprs, gprs[31], v) {
@@ -984,13 +986,13 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         },
         (Table::Kernel, card::internal::VERIFIER) => Done(card::verifier(bus)),
         (Table::Kernel, card::internal::FAST) => Jump(card::fast(bus)),
-        (Table::Kernel, card::internal::HANDLER) => {
-            card::handler(bus);
-            match ex::flush_events(bus, gprs, gprs[31]) {
+        (Table::Kernel, card::internal::HANDLER) => match card::handler(bus) {
+            Some(()) => match ex::flush_events(bus, gprs, gprs[31]) {
                 Some(target) => Jump(target),
                 None => Done(0),
-            }
-        }
+            },
+            None => Retry,
+        },
         (Table::Kernel, files::internal::TTY_INOUT) => Done(files::tty_inout(
             bus,
             args[0],
@@ -1594,7 +1596,7 @@ pub(crate) fn idle_wait(pc: u32, bus: &Bus, gprs: &[u32; 32]) -> bool {
         }
     };
     match (table, func) {
-        (Table::A, 0x55) | (Table::A, 0x70) => crate::hle_card::bu_init_waiting(bus),
+        (Table::A, 0x55) | (Table::A, 0x70) => crate::hle_bu::bu_init_waiting(bus),
         (Table::B, 0x0A) => crate::hle_exceptions::wait_event_waiting(bus, gprs[4]),
         (Table::B, 0x5D) => crate::hle_card::card_wait(bus, gprs[4]).is_none(),
         _ => false,
