@@ -2,11 +2,18 @@
 //! File and device layer of the HLE kernel, the TTY and CD-ROM devices, and
 //! the kernel's CD-ROM driver.
 //!
-//! Layout and behaviour follow psx-spx "BIOS File Functions", "BIOS CDROM
-//! Functions" and "BIOS Control Blocks" (FCB 2Ch bytes at 8648h, DCB 50h
-//! bytes at 6EE0h), with OpenBIOS `fileio/` and `cdrom/` (pcsx-redux, MIT)
-//! as the specification for the call protocol between the file functions
-//! and device drivers.
+//! Sources: psx-spx "BIOS File Functions" (the file functions, the error
+//! numbers, the firstfile/nextfile search FCB and the handles the
+//! maintenance calls take), "BIOS Control Blocks" (FCB 2Ch bytes at 8648h,
+//! DCB 50h bytes at 6EE0h and their fields), "BIOS CDROM Functions",
+//! "BIOS Event Summary" and "BIOS Interrupt/Exception Handling" (the CD-ROM
+//! events and the priority 0 chain). psx-spx does not say what a device
+//! function answers; the convention here is that open, close and the
+//! maintenance functions (format, erase, rename, undelete) answer 0 for
+//! success and anything else for failure, that read, write and in_out
+//! answer the byte count or -1, that a failing driver leaves the reason in
+//! the FCB's error field, and that firstfile and nextfile answer the
+//! direntry or 0.
 //!
 //! Device functions are called through the DCB in RAM, because games add
 //! their own devices (WipEout's "sio:") and replace driver entry points
@@ -17,8 +24,8 @@
 //! The CD-ROM driver talks to the emulated drive through its registers and
 //! DMA channel 3 (Setloc, ReadN, one DMA per sector, Pause), so seek and
 //! read timing are the drive's own. While it runs it masks the drive's
-//! interrupt output and polls the flags, as OpenBIOS does for its blocking
-//! operations; a waiting call is retried with interrupts serviced.
+//! interrupt output and polls the flags for its blocking operations; a
+//! waiting call is retried with interrupts serviced.
 
 use crate::hle_kernel::{peek32, poke32, stub_addr};
 use crate::Bus;
@@ -106,9 +113,10 @@ pub mod dcb {
     pub const CHECK: u32 = 0x4C;
 }
 
-/// Device flag: filesystem device (read/write go to the driver directly).
+/// Device flag: filesystem device (psx-spx: cdrom and bu are 14h).
 pub const DEV_FS: u32 = 0x10;
-/// Device flag: block device (in_out counts are in blocks).
+/// Device flag: block device, read and write by sector. Devices without
+/// it (the TTY) move data through in_out.
 pub const DEV_BLOCK: u32 = 0x04;
 
 /// File error numbers (psx-spx).
@@ -123,6 +131,8 @@ pub mod errno {
     pub const NODEV: u32 = 0x13;
     /// Sector alignment, fpos past the end, bad seek type.
     pub const INVAL: u32 = 0x16;
+    /// A rename between two devices.
+    pub const XDEV: u32 = 0x12;
     /// No free file handle.
     pub const MFILE: u32 = 0x18;
 }
@@ -186,21 +196,9 @@ pub const EXEC_HEADER: u32 = 0x0000_3A00;
 
 /// Kernel-internal trap functions of the file layer and devices.
 pub mod internal {
-    /// Continuation after a driver open(): FCB result.
-    pub const CONT_OPEN: u8 = 0x10;
-    /// Continuation after a filesystem read()/write(): error bookkeeping.
-    pub const CONT_FS_RW: u8 = 0x11;
-    /// Continuation after in_out(): advance the file position.
-    pub const CONT_INOUT: u8 = 0x12;
-    /// Continuation after close(): free the FCB.
-    pub const CONT_CLOSE: u8 = 0x13;
-    /// Continuation returning 1 (AddDevice after init()).
-    pub const CONT_ONE: u8 = 0x14;
-    /// Continuation returning the driver's v0 unchanged.
-    pub const CONT_PASS: u8 = 0x15;
-    /// Continuation after a driver call on a hidden FCB (format, erase,
-    /// rename, undelete): free it, 1 on success (driver 0), else 0.
-    pub const CONT_TEMP: u8 = 0x16;
+    /// Continuation of a file function: a device function it called has
+    /// returned ([`super::continue_call`]).
+    pub const CONTINUE: u8 = 0x10;
     /// Driver entry that does nothing and returns 0.
     pub const NOP: u8 = 0x1F;
     /// TTY in_out(fcb, cmd).
@@ -330,50 +328,57 @@ pub fn install(bus: &mut Bus) {
     cd_install(bus);
 }
 
-/// The kernel CD-ROM driver's IRQ handlers at priority 0, in front of the
-/// SYSCALL handler (psx-spx order: CdromDmaIrq, CdromIoIrq,
-/// SyscallException), and the five CD-ROM events the kernel opens and
-/// enables for itself.
+/// Class of the kernel's CD-ROM events (psx-spx "BIOS Event Summary").
+const CD_EVENT_CLASS: u32 = 0xF000_0003;
+/// Specs of the five events the kernel opens for the drive.
+const CD_EVENT_SPECS: [u32; 5] = [0x10, 0x20, 0x40, 0x80, 0x8000];
+
+/// Set up the kernel's CD-ROM driver: its DMA and I/O interrupt handlers go
+/// at the head of priority chain 0, ahead of the SYSCALL handler (psx-spx
+/// "Priority Chains": CdromDmaIrq, CdromIoIrq, SyscallException), and it
+/// opens and enables its five events. Each handler is one function that
+/// returns from the exception when the interrupt was its own.
 fn cd_install(bus: &mut Bus) {
-    for (hi, func) in [
+    use crate::hle_exceptions as ex;
+    for (element, func) in [
         (HI_CD_IO, internal::CD_IO_IRQ),
         (HI_CD_DMA, internal::CD_DMA_IRQ),
     ] {
-        poke32(bus, hi + 4, 0);
-        poke32(bus, hi + 8, stub_addr(3, func));
-        crate::hle_exceptions::enq_int(bus, 0, hi);
+        poke32(bus, element, 0);
+        poke32(bus, element + 4, 0);
+        poke32(bus, element + 8, stub_addr(3, func));
+        poke32(bus, element + 12, 0);
+        ex::enq_int(bus, 0, element);
     }
-    for (i, spec) in [0x10u32, 0x20, 0x40, 0x80, 0x8000].into_iter().enumerate() {
-        let ev = crate::hle_exceptions::open_event(bus, 0xF000_0003, spec, 0x2000, 0);
-        crate::hle_exceptions::set_event_enabled(bus, ev, true);
-        poke32(bus, kvar::CD_EVENTS + 4 * i as u32, ev);
+    for (i, spec) in CD_EVENT_SPECS.iter().enumerate() {
+        let event = ex::open_event(bus, CD_EVENT_CLASS, *spec, ex::EV_MODE_READY, 0);
+        ex::set_event_enabled(bus, event, true);
+        poke32(bus, kvar::CD_EVENTS + 4 * i as u32, event);
     }
     poke32(bus, crate::hle_kernel::kvar::CD_KERNEL_ACTIVE, 1);
 }
 
-/// A(71h)/A(54h) _96_init: (re)install the kernel CD-ROM driver's
-/// handlers and events (OpenBIOS `initCDRom`). A driver still installed
-/// is removed first so the chain and the event table hold one set. The
-/// drive itself is already initialised by the boot, and the HLE CD-ROM
-/// device looks paths up on the disc directly, so the drive reset and
-/// path-table read of the retail routine have nothing to do here.
+/// A(54h)/A(71h) _96_init: install the driver, replacing a set that is
+/// already there so there is never more than one.
 pub fn cd_init(bus: &mut Bus) {
     cd_remove(bus);
     cd_install(bus);
 }
 
-/// A(72h)/A(56h) _96_remove: close the kernel's CD events and remove its
-/// CD-ROM IRQ handlers.
+/// A(56h)/A(72h) _96_remove: close the driver's events and take its
+/// handlers out of the chain. psx-spx says the retail function does not
+/// manage this (its dequeue cannot reach priority 0 elements reliably);
+/// here the removal works, since [`crate::hle_exceptions::deq_int`] does.
 pub fn cd_remove(bus: &mut Bus) {
+    use crate::hle_exceptions as ex;
     if peek32(bus, crate::hle_kernel::kvar::CD_KERNEL_ACTIVE) == 0 {
         return;
     }
-    for i in 0..5 {
-        let ev = peek32(bus, kvar::CD_EVENTS + 4 * i);
-        crate::hle_exceptions::close_event(bus, ev);
+    for i in 0..CD_EVENT_SPECS.len() as u32 {
+        ex::close_event(bus, peek32(bus, kvar::CD_EVENTS + 4 * i));
     }
-    crate::hle_exceptions::deq_int(bus, 0, HI_CD_DMA);
-    crate::hle_exceptions::deq_int(bus, 0, HI_CD_IO);
+    ex::deq_int(bus, 0, HI_CD_DMA);
+    ex::deq_int(bus, 0, HI_CD_IO);
     poke32(bus, crate::hle_kernel::kvar::CD_KERNEL_ACTIVE, 0);
 }
 
@@ -406,98 +411,206 @@ fn free_fcb(bus: &Bus) -> Option<u32> {
     (0..FCB_COUNT).find(|&fd| peek32(bus, fcb_addr(fd) + fcb::STATUS) == 0)
 }
 
-/// Split "dev12:rest" into the DCB of "dev", the device number (digits
-/// read as hex, OpenBIOS splitFilepathAndFindDevice) and the address of
-/// "rest". Leading spaces are skipped.
+/// A guest byte; zero where nothing is mapped.
+fn byte_at(bus: &Bus, addr: u32) -> u8 {
+    bus.try_read8(addr).unwrap_or(0)
+}
+
+/// The DCB of the device called `name` (case-sensitive, psx-spx "Device
+/// Names").
+fn find_dcb(bus: &Bus, name: &[u8]) -> Option<u32> {
+    (0..DCB_COUNT).map(dcb_addr).find(|&d| {
+        let at = peek32(bus, d + dcb::NAME);
+        at != 0
+            && (0..=name.len() as u32)
+                .all(|i| byte_at(bus, at + i) == name.get(i as usize).copied().unwrap_or(0))
+    })
+}
+
+/// Split a path "name12:rest" (psx-spx "Device Names"): the port number is
+/// the run of hexadecimal digits (either case) that ends the name before
+/// the colon, so a device name must not end in a hex digit. Returns the DCB
+/// of the device, the port number and the address of what follows the
+/// colon. `None` when the path has no colon within 32 characters or names
+/// no device.
 pub fn find_device(bus: &Bus, path: u32) -> Option<(u32, u32, u32)> {
-    let mut p = path;
-    while bus.try_read8(p) == Some(b' ') {
-        p += 1;
+    let colon = (0..32).find(|&i| matches!(byte_at(bus, path + i), b':' | 0))?;
+    if byte_at(bus, path + colon) != b':' {
+        return None;
     }
-    let full = read_cstr(bus, p, 64);
-    let colon = full.find(':')?;
-    let dev = &full[..colon];
-    let digits = dev.find(|c: char| c.is_ascii_digit()).unwrap_or(dev.len());
-    let (name, num) = dev.split_at(digits);
-    let id = num.bytes().fold(0u32, |acc, c| {
-        let d = if c.is_ascii_digit() { c - b'0' } else { 0 };
-        acc * 0x10 + u32::from(d)
+    let digits = (0..colon)
+        .rev()
+        .take_while(|&i| byte_at(bus, path + i).is_ascii_hexdigit())
+        .count() as u32;
+    let name_len = colon - digits;
+    let port = (name_len..colon).fold(0u32, |port, i| {
+        let digit = char::from(byte_at(bus, path + i)).to_digit(16).unwrap_or(0);
+        port << 4 | digit
     });
-    let d = (0..DCB_COUNT).map(dcb_addr).find(|&d| {
-        let n = peek32(bus, d + dcb::NAME);
-        n != 0 && read_cstr(bus, n, 16) == name
-    })?;
-    Some((d, id, p + colon as u32 + 1))
+    let name: Vec<u8> = (0..name_len).map(|i| byte_at(bus, path + i)).collect();
+    Some((find_dcb(bus, &name)?, port, path + colon + 1))
 }
 
-/// Push a continuation frame and call `target(args...)`, returning into
-/// the internal continuation `cont` with `saved` available to it.
-pub fn call_then(
-    bus: &mut Bus,
-    gprs: &mut [u32; 32],
-    target: u32,
-    args: &[u32],
-    cont: u8,
-    saved: u32,
-) -> u32 {
-    let sp = gprs[29].wrapping_sub(0x18);
-    poke32(bus, sp + 0x10, gprs[31]);
-    poke32(bus, sp + 0x14, saved);
-    gprs[29] = sp;
-    for (i, a) in args.iter().enumerate() {
-        gprs[4 + i] = *a;
-    }
-    gprs[31] = stub_addr(3, cont);
-    target
+/// Set up FCB `f` for a file or search on `dcb`: access mode `mode`
+/// (nonzero marks it used), the port, position 0 and the device's flags.
+fn prepare_fcb(bus: &mut Bus, f: u32, dcb: u32, port: u32, mode: u32) {
+    poke32(bus, f + fcb::STATUS, mode);
+    poke32(bus, f + fcb::DEVICE_ID, port);
+    poke32(bus, f + fcb::TADDR, 0);
+    poke32(bus, f + fcb::TLEN, 0);
+    poke32(bus, f + fcb::FPOS, 0);
+    poke32(bus, f + fcb::DEVICE_FLAGS, peek32(bus, dcb + dcb::FLAGS));
+    poke32(bus, f + fcb::ERROR, 0);
+    poke32(bus, f + fcb::DCB, dcb);
+    poke32(bus, f + fcb::SIZE, 0);
+    poke32(bus, f + fcb::LBA, 0);
 }
 
-/// Pop the frame pushed by [`call_then`]; returns the saved word and
-/// restores `$ra` and `$sp` of the original caller.
-pub fn pop_frame(bus: &Bus, gprs: &mut [u32; 32]) -> u32 {
-    let sp = gprs[29];
-    gprs[31] = peek32(bus, sp + 0x10);
-    let saved = peek32(bus, sp + 0x14);
-    gprs[29] = sp.wrapping_add(0x18);
-    saved
-}
-
-/// What a file function asks the dispatcher to do.
+/// What a file function does next: return to its caller, or continue at a
+/// guest address (a device function it calls for the caller).
 pub enum FileCall {
-    /// Return this value now.
+    /// Return this value.
     Return(u32),
-    /// Jump to a driver (after [`call_then`] set up the frame).
+    /// Jump to the guest function; its return lands in the continuation.
     Jump(u32),
 }
 
-/// B(32h) open(path, mode).
-pub fn open(bus: &mut Bus, gprs: &mut [u32; 32], path: u32, mode: u32) -> FileCall {
-    let Some(fd) = free_fcb(bus) else {
-        set_errno(bus, errno::MFILE);
-        return FileCall::Return(u32::MAX);
-    };
-    let Some((d, id, name)) = find_device(bus, path) else {
-        set_errno(bus, errno::NODEV);
-        return FileCall::Return(u32::MAX);
-    };
-    let f = fcb_addr(fd);
-    poke32(bus, f + fcb::STATUS, mode);
-    poke32(bus, f + fcb::DEVICE_ID, id);
-    poke32(bus, f + fcb::DCB, d);
-    poke32(bus, f + fcb::DEVICE_FLAGS, peek32(bus, d + dcb::FLAGS));
-    poke32(bus, f + fcb::ERROR, 0);
-    let target = peek32(bus, d + dcb::OPEN);
-    FileCall::Jump(call_then(
-        bus,
-        gprs,
-        target,
-        &[f, name, mode],
-        internal::CONT_OPEN,
-        fd,
-    ))
+/// Set the error number and fail with -1.
+fn fail(bus: &mut Bus, e: u32) -> FileCall {
+    set_errno(bus, e);
+    FileCall::Return(u32::MAX)
 }
 
-/// B(33h) lseek(fd, offset, whence): 0 set, 1 relative, 2 (end) leaves
-/// the position unchanged as the retail kernel does.
+/// Bytes the file layer pushes on the caller's stack while a device
+/// function runs: 16 for the callee to spill its register arguments into,
+/// then the caller's `ra`, what the continuation is to do ([`then`]), the
+/// FCB or DCB it is about, and a spare word.
+const FRAME: u32 = 0x20;
+
+/// What the continuation does with the device function's result.
+mod then {
+    /// open: v0 = 0 keeps the FCB and answers its number.
+    pub const OPEN: u32 = 1;
+    /// read, write, in_out: v0 is the byte count or negative.
+    pub const TRANSFER: u32 = 2;
+    /// close: the FCB goes back first, v0 = 0 answers its number.
+    pub const CLOSE: u32 = 3;
+    /// format, erase, undelete, rename on a temporary FCB: it goes back,
+    /// v0 = 0 answers 1.
+    pub const MAINTENANCE: u32 = 4;
+    /// AddDrv after the device's init(): answer 1.
+    pub const ADD_DEVICE: u32 = 5;
+    /// DelDrv after the device's remove(): the DCB is free, answer 1.
+    pub const REMOVE_DEVICE: u32 = 6;
+    /// firstfile, nextfile: v0 goes back unchanged.
+    pub const PASS: u32 = 7;
+}
+
+/// Call the device function `target` for a file function. The caller's `ra`
+/// and what the continuation needs are kept in a frame on the caller's
+/// stack and the function returns into the continuation trap, so all state
+/// is in guest memory.
+fn call_device(
+    bus: &mut Bus,
+    gprs: &mut [u32; 32],
+    target: u32,
+    args: [u32; 4],
+    what: u32,
+    about: u32,
+) -> FileCall {
+    let sp = gprs[29].wrapping_sub(FRAME);
+    poke32(bus, sp + 0x10, gprs[31]);
+    poke32(bus, sp + 0x14, what);
+    poke32(bus, sp + 0x18, about);
+    gprs[29] = sp;
+    gprs[31] = stub_addr(3, internal::CONTINUE);
+    gprs[4..8].copy_from_slice(&args);
+    FileCall::Jump(target)
+}
+
+/// The device function at DCB offset `entry`.
+fn device_function(bus: &Bus, dcb: u32, entry: u32) -> u32 {
+    peek32(bus, dcb + entry)
+}
+
+/// A device function failed: its reason is in the FCB (a driver that left
+/// none counts as a general error). Sets the error number.
+fn failure_reason(bus: &mut Bus, f: u32) {
+    let reason = peek32(bus, f + fcb::ERROR);
+    set_errno(bus, if reason == 0 { errno::IO } else { reason });
+}
+
+fn release_fcb(bus: &mut Bus, f: u32) {
+    poke32(bus, f + fcb::STATUS, 0);
+}
+
+/// The continuation: a device function the file layer called has returned
+/// `v0`. Takes the frame off the caller's stack, restores its `ra` and
+/// answers the caller.
+pub fn continue_call(bus: &mut Bus, gprs: &mut [u32; 32], v0: u32) -> u32 {
+    let sp = gprs[29];
+    gprs[31] = peek32(bus, sp + 0x10);
+    gprs[29] = sp.wrapping_add(FRAME);
+    let what = peek32(bus, sp + 0x14);
+    let about = peek32(bus, sp + 0x18);
+    match what {
+        then::OPEN if v0 == 0 => peek32(bus, about + fcb::NUMBER),
+        then::OPEN => {
+            release_fcb(bus, about);
+            failure_reason(bus, about);
+            u32::MAX
+        }
+        then::TRANSFER if (v0 as i32) < 0 => {
+            failure_reason(bus, about);
+            u32::MAX
+        }
+        then::CLOSE => {
+            release_fcb(bus, about);
+            if v0 == 0 {
+                peek32(bus, about + fcb::NUMBER)
+            } else {
+                failure_reason(bus, about);
+                u32::MAX
+            }
+        }
+        then::MAINTENANCE => {
+            release_fcb(bus, about);
+            if v0 != 0 {
+                failure_reason(bus, about);
+            }
+            u32::from(v0 == 0)
+        }
+        then::ADD_DEVICE => 1,
+        then::REMOVE_DEVICE => {
+            poke32(bus, about + dcb::NAME, 0);
+            1
+        }
+        _ => v0,
+    }
+}
+
+/// B(32h)/A(00h) open(path, mode): the device is named by the path, a free
+/// FCB is set up for it and the device's open(fcb, name, mode) decides.
+/// Returns the handle, or -1 with the error number set: 13h for an unknown
+/// device, 18h when all 16 handles are taken, the device's own otherwise.
+pub fn open(bus: &mut Bus, gprs: &mut [u32; 32], path: u32, mode: u32) -> FileCall {
+    let Some((dcb, port, name)) = find_device(bus, path) else {
+        return fail(bus, errno::NODEV);
+    };
+    let Some(fd) = free_fcb(bus) else {
+        return fail(bus, errno::MFILE);
+    };
+    let f = fcb_addr(fd);
+    prepare_fcb(bus, f, dcb, port, mode);
+    let open = device_function(bus, dcb, dcb::OPEN);
+    call_device(bus, gprs, open, [f, name, mode, 0], then::OPEN, f)
+}
+
+/// B(33h)/A(01h) lseek(fd, offset, whence): whence 0 sets the position and 1
+/// moves it. psx-spx lists the end-relative whence 2 as broken, and here it
+/// leaves the position where it is. Nothing checks the file's size. Returns
+/// the position; -1 with 09h for an unused handle or 16h for another
+/// whence.
 pub fn lseek(bus: &mut Bus, fd: u32, offset: u32, whence: u32) -> u32 {
     let Some(f) = open_fcb(bus, fd) else {
         set_errno(bus, errno::BADF);
@@ -509,7 +622,6 @@ pub fn lseek(bus: &mut Bus, fd: u32, offset: u32, whence: u32) -> u32 {
         1 => pos.wrapping_add(offset),
         2 => pos,
         _ => {
-            poke32(bus, f + fcb::ERROR, errno::INVAL);
             set_errno(bus, errno::INVAL);
             return u32::MAX;
         }
@@ -518,141 +630,78 @@ pub fn lseek(bus: &mut Bus, fd: u32, offset: u32, whence: u32) -> u32 {
     new
 }
 
-/// B(34h) read / B(35h) write (`cmd` 1 / 2).
+/// B(34h)/A(02h) read(fd, dst, len) and B(35h)/A(03h) write(fd, src, len)
+/// (`which` 1 or 2). A block device gets the call as its read or write
+/// function; a character device gets in_out(fcb, which) with the buffer and
+/// length in the FCB. The device moves the file position. Returns the byte
+/// count, or -1: 09h for an unused handle, 16h for no length, the device's
+/// error otherwise.
 pub fn read_write(
     bus: &mut Bus,
     gprs: &mut [u32; 32],
     fd: u32,
     buf: u32,
     len: u32,
-    cmd: u32,
+    which: u32,
 ) -> FileCall {
     let Some(f) = open_fcb(bus, fd) else {
-        set_errno(bus, errno::BADF);
-        return FileCall::Return(u32::MAX);
+        return fail(bus, errno::BADF);
     };
-    let d = peek32(bus, f + fcb::DCB);
-    if peek32(bus, f + fcb::DEVICE_FLAGS) & DEV_FS != 0 {
-        let target = peek32(bus, d + if cmd == 1 { dcb::READ } else { dcb::WRITE });
-        return FileCall::Jump(call_then(
-            bus,
-            gprs,
-            target,
-            &[f, buf, len],
-            internal::CONT_FS_RW,
-            fd,
-        ));
+    if len == 0 {
+        return fail(bus, errno::INVAL);
     }
-    let mut count = len;
-    if peek32(bus, d + dcb::FLAGS) & DEV_BLOCK != 0 {
-        let block = peek32(bus, d + dcb::BLOCK).max(1);
-        if !peek32(bus, f + fcb::FPOS).is_multiple_of(block) {
-            return FileCall::Return(u32::MAX);
-        }
-        count /= block;
+    let dcb = peek32(bus, f + fcb::DCB);
+    if peek32(bus, f + fcb::DEVICE_FLAGS) & DEV_BLOCK == 0 {
+        poke32(bus, f + fcb::TADDR, buf);
+        poke32(bus, f + fcb::TLEN, len);
+        let in_out = device_function(bus, dcb, dcb::INOUT);
+        return call_device(bus, gprs, in_out, [f, which, 0, 0], then::TRANSFER, f);
     }
-    poke32(bus, f + fcb::TADDR, buf);
-    poke32(bus, f + fcb::TLEN, count);
-    let target = peek32(bus, d + dcb::INOUT);
-    FileCall::Jump(call_then(
-        bus,
-        gprs,
-        target,
-        &[f, cmd],
-        internal::CONT_INOUT,
-        fd,
-    ))
+    let entry = if which == 1 { dcb::READ } else { dcb::WRITE };
+    let transfer = device_function(bus, dcb, entry);
+    call_device(bus, gprs, transfer, [f, buf, len, 0], then::TRANSFER, f)
 }
 
-/// B(36h) close(fd).
+/// B(36h)/A(04h) close(fd): the device's close(fcb) runs and the handle is
+/// free whatever it answers. Returns the handle, or -1 (09h for an unused
+/// handle, the device's error if it refused).
 pub fn close(bus: &mut Bus, gprs: &mut [u32; 32], fd: u32) -> FileCall {
     let Some(f) = open_fcb(bus, fd) else {
-        set_errno(bus, errno::BADF);
-        return FileCall::Return(u32::MAX);
+        return fail(bus, errno::BADF);
     };
-    let target = peek32(bus, peek32(bus, f + fcb::DCB) + dcb::CLOSE);
-    FileCall::Jump(call_then(bus, gprs, target, &[f], internal::CONT_CLOSE, fd))
+    let dcb = peek32(bus, f + fcb::DCB);
+    let close = device_function(bus, dcb, dcb::CLOSE);
+    call_device(bus, gprs, close, [f, 0, 0, 0], then::CLOSE, f)
 }
 
-/// Continuations: `v0` is the driver's result, `saved` the fd.
-pub fn continuation(bus: &mut Bus, which: u8, v0: u32, saved: u32) -> u32 {
-    let f = fcb_addr(saved);
-    match which {
-        internal::CONT_OPEN => {
-            if v0 != 0 {
-                set_errno(bus, peek32(bus, f + fcb::ERROR));
-                poke32(bus, f + fcb::STATUS, 0);
-                return u32::MAX;
-            }
-            poke32(bus, f + fcb::FPOS, 0);
-            saved
-        }
-        internal::CONT_FS_RW => {
-            if (v0 as i32) < 0 {
-                set_errno(bus, peek32(bus, f + fcb::ERROR));
-            }
-            v0
-        }
-        internal::CONT_INOUT => {
-            if (v0 as i32) > 0 {
-                let pos = peek32(bus, f + fcb::FPOS);
-                poke32(bus, f + fcb::FPOS, pos.wrapping_add(v0));
-            } else if (v0 as i32) < 0 {
-                set_errno(bus, peek32(bus, f + fcb::ERROR));
-            }
-            v0
-        }
-        internal::CONT_CLOSE => {
-            poke32(bus, f + fcb::STATUS, 0);
-            if v0 != 0 {
-                set_errno(bus, peek32(bus, f + fcb::ERROR));
-                return u32::MAX;
-            }
-            saved
-        }
-        internal::CONT_ONE => 1,
-        internal::CONT_TEMP => {
-            poke32(bus, f + fcb::STATUS, 0);
-            if v0 == 0 {
-                1
-            } else {
-                set_errno(bus, peek32(bus, f + fcb::ERROR));
-                0
-            }
-        }
-        _ => v0,
-    }
-}
-
-/// B(47h) AddDevice(dcb): copy into the first free DCB and call its
-/// init(); returns 1, or 0 when all ten DCBs are used.
-pub fn add_device(bus: &mut Bus, gprs: &mut [u32; 32], src: u32) -> FileCall {
-    let Some(d) = (0..DCB_COUNT)
-        .map(dcb_addr)
-        .find(|&d| peek32(bus, d + dcb::NAME) == 0)
-    else {
+/// B(47h) AddDrv(info): the 50h-byte device description goes into the first
+/// free DCB and the device's init() runs. Returns 1, or 0 when all DCBs are
+/// taken.
+pub fn add_device(bus: &mut Bus, gprs: &mut [u32; 32], info: u32) -> FileCall {
+    let Some(slot) = (0..DCB_COUNT).find(|&i| peek32(bus, dcb_addr(i) + dcb::NAME) == 0) else {
         return FileCall::Return(0);
     };
+    let d = dcb_addr(slot);
     for off in (0..DCB_SIZE).step_by(4) {
-        let w = peek32(bus, src + off);
-        poke32(bus, d + off, w);
+        let word = peek32(bus, info.wrapping_add(off));
+        poke32(bus, d + off, word);
     }
-    let init = peek32(bus, d + dcb::INIT);
-    FileCall::Jump(call_then(bus, gprs, init, &[], internal::CONT_ONE, 0))
+    let init = device_function(bus, d, dcb::INIT);
+    call_device(bus, gprs, init, [0; 4], then::ADD_DEVICE, d)
 }
 
-/// B(48h) RemoveDevice(name): call deinit and free the DCB; 1 or 0.
+/// B(48h) DelDrv(name): the device's remove() runs and its DCB is free.
+/// Returns 1, or 0 when there is no such device.
 pub fn remove_device(bus: &mut Bus, gprs: &mut [u32; 32], name: u32) -> FileCall {
-    let wanted = read_cstr(bus, name, 16);
-    let Some(d) = (0..DCB_COUNT).map(dcb_addr).find(|&d| {
-        let n = peek32(bus, d + dcb::NAME);
-        n != 0 && read_cstr(bus, n, 16) == wanted
-    }) else {
+    let name: Vec<u8> = (0..16)
+        .map(|i| byte_at(bus, name + i))
+        .take_while(|&b| b != 0)
+        .collect();
+    let Some(d) = find_dcb(bus, &name) else {
         return FileCall::Return(0);
     };
-    poke32(bus, d + dcb::NAME, 0);
-    let deinit = peek32(bus, d + dcb::DEINIT);
-    FileCall::Jump(call_then(bus, gprs, deinit, &[], internal::CONT_ONE, 0))
+    let remove = device_function(bus, d, dcb::DEINIT);
+    call_device(bus, gprs, remove, [0; 4], then::REMOVE_DEVICE, d)
 }
 
 /// A(96h) AddCDROMDevice: install the kernel CD-ROM device when absent.
@@ -699,57 +748,48 @@ fn add_kernel_device(bus: &mut Bus, which: usize) -> u32 {
     1
 }
 
-/// B(42h) firstfile(name, direntry): the search FCB is the first free one
-/// on the first call and is kept afterwards without being marked used
-/// (psx-spx documents both). Returns the driver's direntry or 0.
+/// B(42h) firstfile2(name, direntry): psx-spx says the search runs on an FCB
+/// that is taken once, the first free one, kept for every later search and
+/// never marked used; that is how it is done here. The error number is left
+/// alone. Returns what the device's firstfile answers (the direntry, or 0);
+/// 0 for an unknown device or no free FCB.
 pub fn firstfile(bus: &mut Bus, gprs: &mut [u32; 32], name: u32, direntry: u32) -> FileCall {
+    let Some((dcb, port, rest)) = find_device(bus, name) else {
+        return FileCall::Return(0);
+    };
     let mut f = peek32(bus, kvar::FIND_FCB);
     if f == 0 {
         let Some(fd) = free_fcb(bus) else {
-            set_errno(bus, errno::MFILE);
             return FileCall::Return(0);
         };
         f = fcb_addr(fd);
         poke32(bus, kvar::FIND_FCB, f);
     }
-    let Some((d, id, rest)) = find_device(bus, name) else {
-        set_errno(bus, errno::NODEV);
-        poke32(bus, f + fcb::STATUS, 0);
-        return FileCall::Return(0);
-    };
-    poke32(bus, f + fcb::DEVICE_ID, id);
-    poke32(bus, f + fcb::DCB, d);
-    let target = peek32(bus, d + dcb::FIRSTFILE);
-    FileCall::Jump(call_then(
-        bus,
-        gprs,
-        target,
-        &[f, rest, direntry],
-        internal::CONT_PASS,
-        0,
-    ))
+    poke32(bus, f + fcb::DEVICE_ID, port);
+    poke32(bus, f + fcb::DEVICE_FLAGS, peek32(bus, dcb + dcb::FLAGS));
+    poke32(bus, f + fcb::DCB, dcb);
+    let first = device_function(bus, dcb, dcb::FIRSTFILE);
+    call_device(bus, gprs, first, [f, rest, direntry, 0], then::PASS, f)
 }
 
-/// B(43h) nextfile(direntry): continue the firstfile search.
+/// B(43h) nextfile(direntry): the device's nextfile on the search FCB of the
+/// last firstfile2. Returns the direntry, or 0.
 pub fn nextfile(bus: &mut Bus, gprs: &mut [u32; 32], direntry: u32) -> FileCall {
     let f = peek32(bus, kvar::FIND_FCB);
-    if f == 0 {
+    let dcb = peek32(bus, f + fcb::DCB);
+    if f == 0 || dcb == 0 {
         return FileCall::Return(0);
     }
-    let target = peek32(bus, peek32(bus, f + fcb::DCB) + dcb::NEXTFILE);
-    FileCall::Jump(call_then(
-        bus,
-        gprs,
-        target,
-        &[f, direntry],
-        internal::CONT_PASS,
-        0,
-    ))
+    let next = device_function(bus, dcb, dcb::NEXTFILE);
+    call_device(bus, gprs, next, [f, direntry, 0, 0], then::PASS, f)
 }
 
-/// B(41h) format(device), B(45h) erase(name), B(46h) undelete(name) and
-/// B(44h) rename(old, new): the driver function at `entry` on a hidden
-/// FCB. Returns 1 on success, 0 with errno set on failure.
+/// B(41h) format(name), B(44h) rename(old, new), B(45h) erase(name),
+/// B(46h) undelete(name): the device function at DCB offset `entry` runs on
+/// a temporary FCB (psx-spx: these calls need a free handle, and rename
+/// uses one, not two). Returns 1 when the device answers 0, else 0; the
+/// error number says why: 13h for an unknown device, 12h for a rename
+/// between two devices, 18h without a free handle, the device's own.
 pub fn device_call(
     bus: &mut Bus,
     gprs: &mut [u32; 32],
@@ -757,34 +797,38 @@ pub fn device_call(
     name: u32,
     new_name: Option<u32>,
 ) -> FileCall {
-    let Some(fd) = free_fcb(bus) else {
-        set_errno(bus, errno::MFILE);
-        return FileCall::Return(0);
+    let none = |bus: &mut Bus, e: u32| {
+        set_errno(bus, e);
+        FileCall::Return(0)
     };
-    let Some((d, id, rest)) = find_device(bus, name) else {
-        set_errno(bus, errno::NODEV);
-        return FileCall::Return(0);
+    let Some((dcb, port, rest)) = find_device(bus, name) else {
+        return none(bus, errno::NODEV);
+    };
+    let mut new_rest = 0;
+    if let Some(new_name) = new_name {
+        let Some((new_dcb, _, rest)) = find_device(bus, new_name) else {
+            return none(bus, errno::NODEV);
+        };
+        if new_dcb != dcb {
+            return none(bus, errno::XDEV);
+        }
+        new_rest = rest;
+    }
+    let Some(fd) = free_fcb(bus) else {
+        return none(bus, errno::MFILE);
     };
     let f = fcb_addr(fd);
-    let mut args = vec![f, rest];
-    if let Some(new_name) = new_name {
-        match find_device(bus, new_name) {
-            Some((d2, id2, rest2)) if d2 == d && id2 == id => args.extend([f, rest2]),
-            _ => {
-                set_errno(bus, 0x12);
-                return FileCall::Return(0);
-            }
-        }
-    }
-    poke32(bus, f + fcb::STATUS, 1);
-    poke32(bus, f + fcb::DEVICE_ID, id);
-    poke32(bus, f + fcb::DCB, d);
-    poke32(bus, f + fcb::DEVICE_FLAGS, peek32(bus, d + dcb::FLAGS));
-    poke32(bus, f + fcb::ERROR, 0);
-    let target = peek32(bus, d + entry);
-    FileCall::Jump(call_then(bus, gprs, target, &args, internal::CONT_TEMP, fd))
+    prepare_fcb(bus, f, dcb, port, 1);
+    let function = device_function(bus, dcb, entry);
+    call_device(
+        bus,
+        gprs,
+        function,
+        [f, rest, f, new_rest],
+        then::MAINTENANCE,
+        f,
+    )
 }
-
 /// TTY in_out(fcb, cmd): writes go to the host console; reads return 0
 /// (no console input).
 pub fn tty_inout(bus: &mut Bus, f: u32, cmd: u32, out: &mut dyn FnMut(u8)) -> u32 {
@@ -1128,7 +1172,8 @@ pub enum LoadStep {
 /// A(41h) LoadTest (`body` false) / A(42h) Load (`body` true): read the
 /// executable's 800h-byte header, copy bytes 10h..4Bh to `header`
 /// (psx-spx), and for Load also read the body to its load address.
-/// Returns 1 on success, 0 on failure (OpenBIOS).
+/// psx-spx gives no return value; callers test it as a flag, so it is 1 when
+/// the file was loaded and 0 when it was not.
 pub fn load_step(bus: &mut Bus, path: u32, header: u32, body: bool) -> LoadStep {
     const LOOKUP: u32 = 0;
     const HEADER: u32 = 1;
@@ -1348,9 +1393,9 @@ mod tests {
             bus.hle_bios_first_unimplemented().is_none(),
             "_96_init is implemented"
         );
-        // It ends by leaving the critical section (OpenBIOS initCDRom), so
-        // the kernel's CD reads that follow can take their interrupts.
-        assert_eq!(cpu.cop0()[12] & 0x401, 0x401);
+        // psx-spx says nothing about interrupts: the caller's state (off
+        // here) is left alone, and the reads below poll the drive anyway.
+        assert_eq!(cpu.cop0()[12] & 0x401, 0);
         let path = 0x8002_0000;
         for (i, b) in b"cdrom:\\DATA.BIN;1\0".iter().enumerate() {
             bus.write8_safe(path + i as u32, *b);
@@ -1430,5 +1475,214 @@ mod tests {
         assert_eq!(bus.read32(header), 0x8006_0000, "header copied from 10h");
         assert_eq!(bus.read32(0x8005_0000), 11, "child ran with a0=5, a1=6");
         assert_eq!(bus.read32(0x8004_000C), 1, "Exec returned 1");
+    }
+
+    /// Like [`program`], but call `i`'s v0 goes to `results + 4 * i`, a
+    /// negative vector selects A or B by its table, and `None` passes the
+    /// previous result on.
+    fn sequence(calls: &[(i16, u32, [Option<u32>; 3])], results: u32) -> Vec<u32> {
+        let mut a = Asm::new(0x8001_0000);
+        a.li(S0, results);
+        for (vector, func, args) in calls {
+            for (i, arg) in args.iter().enumerate() {
+                match arg {
+                    Some(v) => a.li(A0 + i as u32, *v),
+                    None => a.mov(A0 + i as u32, V0),
+                }
+            }
+            a.addiu(T2, ZERO, *vector);
+            a.jalr(T2);
+            a.addiu(T1, ZERO, *func as i16);
+            a.sw(V0, 0, S0);
+            a.addiu(S0, S0, 4);
+        }
+        a.label("end");
+        a.b("end");
+        a.nop();
+        a.finish()
+    }
+
+    fn put_str(bus: &mut Bus, at: u32, s: &str) {
+        for (i, b) in s.bytes().chain([0]).enumerate() {
+            bus.write8_safe(at + i as u32, b);
+        }
+    }
+
+    /// A device written in guest code, the way a game adds one: "dev" with
+    /// character-device flags. Its open answers 0, in_out answers 55h,
+    /// firstfile and nextfile answer their direntry argument, init and
+    /// remove store a marker in RAM, and every other function does nothing
+    /// and answers 0.
+    fn install_guest_device(bus: &mut Bus) -> u32 {
+        const CODE: u32 = 0x8005_0000;
+        const INFO: u32 = 0x8005_1000;
+        let mut a = Asm::new(CODE);
+        a.label("open");
+        a.jr(RA);
+        a.mov(V0, ZERO);
+        a.label("inout");
+        a.li(V0, 0x55);
+        a.jr(RA);
+        a.nop();
+        a.label("firstfile");
+        a.jr(RA);
+        a.mov(V0, A2);
+        a.label("nextfile");
+        a.jr(RA);
+        a.mov(V0, A1);
+        a.label("init");
+        a.li(T0, 0x8005_2000);
+        a.li(T1, 0x1234);
+        a.jr(RA);
+        a.sw(T1, 0, T0);
+        a.label("remove");
+        a.li(T0, 0x8005_2004);
+        a.li(T1, 0x5678);
+        a.jr(RA);
+        a.sw(T1, 0, T0);
+        let (open, inout, first, next, init, remove) = (
+            a.addr("open"),
+            a.addr("inout"),
+            a.addr("firstfile"),
+            a.addr("nextfile"),
+            a.addr("init"),
+            a.addr("remove"),
+        );
+        for (i, w) in a.finish().iter().enumerate() {
+            bus.write32(CODE + 4 * i as u32, *w);
+        }
+        put_str(bus, 0x8005_1800, "dev");
+        put_str(bus, 0x8005_1810, "GUEST");
+        let mut info = [open; 20];
+        info[0] = 0x8005_1800;
+        info[1] = 1;
+        info[2] = 1;
+        info[3] = 0x8005_1810;
+        info[4] = init;
+        info[5] = open;
+        info[6] = inout;
+        info[13] = first;
+        info[14] = next;
+        info[18] = remove;
+        for (i, w) in info.iter().enumerate() {
+            bus.write32(INFO + 4 * i as u32, *w);
+        }
+        INFO
+    }
+
+    #[test]
+    fn a_device_written_in_guest_code_is_added_used_and_removed() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let info = install_guest_device(&mut bus);
+        put_str(&mut bus, 0x8002_0000, "dev3:name");
+        put_str(&mut bus, 0x8002_0020, "dev:*");
+        put_str(&mut bus, 0x8002_0040, "dev");
+        let (dirent, buf) = (0x8003_0000, 0x8003_1000);
+        let words = sequence(
+            &[
+                (0xB0, 0x47, [Some(info), Some(0), Some(0)]), // 0 AddDrv
+                (0xB0, 0x32, [Some(0x8002_0000), Some(3), Some(0)]), // 1 open
+                (0xB0, 0x35, [None, Some(buf), Some(4)]),     // 2 write
+                (0xB0, 0x42, [Some(0x8002_0020), Some(dirent), Some(0)]), // 3
+                (0xB0, 0x32, [Some(0x8002_0000), Some(3), Some(0)]), // 4 open
+                (0xB0, 0x43, [Some(dirent + 0x40), Some(0), Some(0)]), // 5
+                (0xB0, 0x36, [Some(2), Some(0), Some(0)]),    // 6 close
+                (0xB0, 0x48, [Some(0x8002_0040), Some(0), Some(0)]), // 7 DelDrv
+                (0xB0, 0x32, [Some(0x8002_0000), Some(3), Some(0)]), // 8 open
+                (0xB0, 0x54, [Some(0), Some(0), Some(0)]),    // 9 errno
+            ],
+            0x8004_0000,
+        );
+        run(&mut bus, &words, 0x8004_0000);
+        let r = |bus: &mut Bus, i: u32| bus.read32(0x8004_0000 + 4 * i);
+        assert_eq!(r(&mut bus, 0), 1, "added");
+        assert_eq!(bus.read32(0x8005_2000), 0x1234, "init ran");
+        assert_eq!(r(&mut bus, 1), 2, "open: handle 2");
+        assert_eq!(r(&mut bus, 2), 0x55, "write goes to in_out");
+        assert_eq!(r(&mut bus, 3), dirent, "firstfile answers its direntry");
+        // The search took the first free FCB (3) without marking it used, so
+        // the next open is given it as well (the bug psx-spx describes).
+        assert_eq!(r(&mut bus, 4), 3, "search FCB is handed out again");
+        assert_eq!(r(&mut bus, 5), dirent + 0x40, "nextfile");
+        assert_eq!(r(&mut bus, 6), 2, "close returns the handle");
+        assert_eq!(r(&mut bus, 7), 1, "removed");
+        assert_eq!(bus.read32(0x8005_2004), 0x5678, "remove ran");
+        assert_eq!(r(&mut bus, 8), u32::MAX, "device is gone");
+        assert_eq!(r(&mut bus, 9), super::errno::NODEV);
+    }
+
+    #[test]
+    fn lseek_and_bad_handles_follow_the_documented_errors() {
+        let mut iso = IsoBuilder::new();
+        iso.add_file("DATA.BIN", vec![7; 5000]);
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        bus.cdrom.insert_disc(Some(Disc::from_bin(iso.build_bin())));
+        put_str(&mut bus, 0x8002_0000, "cdrom:\\DATA.BIN;1");
+        let words = sequence(
+            &[
+                (0xB0, 0x32, [Some(0x8002_0000), Some(1), Some(0)]), // 0 open
+                (0xB0, 0x33, [None, Some(0x800), Some(0)]),          // 1 set
+                (0xB0, 0x33, [Some(2), Some(0x10), Some(1)]),        // 2 move
+                (0xB0, 0x33, [Some(2), Some(0x99), Some(2)]),        // 3 from end
+                (0xB0, 0x33, [Some(2), Some(0), Some(7)]),           // 4 bad type
+                (0xB0, 0x54, [Some(0), Some(0), Some(0)]),           // 5 errno
+                (0xB0, 0x33, [Some(7), Some(0), Some(0)]),           // 6 closed
+                (0xB0, 0x54, [Some(0), Some(0), Some(0)]),           // 7 errno
+                (0xB0, 0x34, [Some(2), Some(0x8003_0000), Some(0)]), // 8 no length
+                (0xB0, 0x36, [Some(2), Some(0), Some(0)]),           // 9 close
+                (0xB0, 0x36, [Some(2), Some(0), Some(0)]),           // 10 again
+                (0xB0, 0x54, [Some(0), Some(0), Some(0)]),           // 11 errno
+            ],
+            0x8004_0000,
+        );
+        run(&mut bus, &words, 0x8004_0000);
+        let r = |bus: &mut Bus, i: u32| bus.read32(0x8004_0000 + 4 * i);
+        assert_eq!(r(&mut bus, 1), 0x800);
+        assert_eq!(r(&mut bus, 2), 0x810);
+        assert_eq!(r(&mut bus, 3), 0x810, "whence 2 does not move");
+        assert_eq!(r(&mut bus, 4), u32::MAX);
+        assert_eq!(r(&mut bus, 5), super::errno::INVAL);
+        assert_eq!(r(&mut bus, 6), u32::MAX);
+        assert_eq!(r(&mut bus, 7), super::errno::BADF);
+        assert_eq!(r(&mut bus, 8), u32::MAX, "a read needs a length");
+        assert_eq!(r(&mut bus, 9), 2);
+        assert_eq!(r(&mut bus, 10), u32::MAX, "already closed");
+        assert_eq!(r(&mut bus, 11), super::errno::BADF);
+    }
+
+    #[test]
+    fn maintenance_calls_need_a_free_handle_and_one_device() {
+        let mut iso = IsoBuilder::new();
+        iso.add_file("A.BIN", vec![1; 16]);
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        bus.cdrom.insert_disc(Some(Disc::from_bin(iso.build_bin())));
+        put_str(&mut bus, 0x8002_0000, "cdrom:\\A.BIN;1");
+        put_str(&mut bus, 0x8002_0020, "bu00:B");
+        let mut calls = vec![(
+            0xB0i16,
+            0x44u32,
+            [Some(0x8002_0000), Some(0x8002_0020), Some(0)],
+        )]; // 0 rename across devices
+        calls.push((0xB0, 0x54, [Some(0), Some(0), Some(0)])); // 1 errno
+        for _ in 0..14 {
+            calls.push((0xB0, 0x32, [Some(0x8002_0000), Some(1), Some(0)]));
+        } // 2..15 take every handle
+        calls.push((0xB0, 0x32, [Some(0x8002_0000), Some(1), Some(0)])); // 16
+        calls.push((0xB0, 0x54, [Some(0), Some(0), Some(0)])); // 17 errno
+        calls.push((0xB0, 0x45, [Some(0x8002_0000), Some(0), Some(0)])); // 18
+        calls.push((0xB0, 0x54, [Some(0), Some(0), Some(0)])); // 19 errno
+        let words = sequence(&calls, 0x8004_0000);
+        run(&mut bus, &words, 0x8004_0000);
+        let r = |bus: &mut Bus, i: u32| bus.read32(0x8004_0000 + 4 * i);
+        assert_eq!(r(&mut bus, 0), 0);
+        assert_eq!(r(&mut bus, 1), super::errno::XDEV);
+        assert_eq!(r(&mut bus, 15), 15, "the last handle");
+        assert_eq!(r(&mut bus, 16), u32::MAX, "no handle left");
+        assert_eq!(r(&mut bus, 17), super::errno::MFILE);
+        assert_eq!(r(&mut bus, 18), 0, "erase needs a handle too");
+        assert_eq!(r(&mut bus, 19), super::errno::MFILE);
     }
 }

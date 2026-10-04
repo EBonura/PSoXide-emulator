@@ -106,7 +106,7 @@ pub fn function_name(table: Table, func: u8) -> &'static str {
             crate::hle_kernel::internal::SET_PAD_OUTPUT_DATA => "SetPadOutput",
             crate::hle_exceptions::internal::SYSCALL_VERIFIER => "kernel_syscall_check",
             0x04..=0x07 => "kernel_timer_irq",
-            0x10..=0x15 => "kernel_file_continue",
+            0x10 => "kernel_file_continue",
             0x1F => "kernel_nop",
             0x20 => "kernel_tty_io",
             0x28 => "kernel_cd_open",
@@ -593,13 +593,12 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // instruction cache before this HLE handler returns.
         (Table::A, 0x44) => Done(0),
 
-        // A(54h)/A(71h) _96_init: reinstall the kernel CD-ROM driver, then
-        // leave the critical section as OpenBIOS initCDRom does (SYSCALL(2)
-        // through the guest exception handler), so the CD reads a game
-        // makes next can take their interrupts.
+        // A(54h)/A(71h) _96_init: reinstall the kernel CD-ROM driver (its
+        // handlers at priority 0 and its five events) and return. psx-spx
+        // says no more; the interrupt state is left as the caller had it.
         (Table::A, 0x54) | (Table::A, 0x71) => {
             crate::hle_files::cd_init(bus);
-            leave_critical_section(gprs)
+            Done(0)
         }
 
         // A(56h)/A(72h) _96_remove: the kernel's CD-ROM handlers and
@@ -944,12 +943,9 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         }
 
         // --- File layer continuations, kernel devices, CD-ROM driver ---
-        (Table::Kernel, n)
-            if (files::internal::CONT_OPEN..=files::internal::CONT_TEMP).contains(&n) =>
-        {
+        (Table::Kernel, files::internal::CONTINUE) => {
             let v0 = gprs[2];
-            let saved = files::pop_frame(bus, gprs);
-            Done(files::continuation(bus, n, v0, saved))
+            Done(files::continue_call(bus, gprs, v0))
         }
         (Table::Kernel, files::internal::NOP) => Done(0),
         (Table::Kernel, n) if (0x21..=0x2C).contains(&n) && n != 0x28 && n != 0x29 => {
