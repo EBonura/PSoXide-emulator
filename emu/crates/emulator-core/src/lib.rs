@@ -37,6 +37,8 @@ pub mod hle_font;
 pub mod hle_kernel;
 pub mod hle_pad;
 pub mod hle_patch;
+#[cfg(test)]
+mod hle_testkit;
 pub mod input_tape;
 pub mod irq;
 pub mod limits;
