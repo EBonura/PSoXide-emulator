@@ -1,251 +1,162 @@
-//! In-memory decoder for ECM (Error Code Modeler) disc images.
+//! In-memory reader for ECM disc images.
 //!
-//! ECM is a public container format that shrinks raw CD images by dropping
-//! the sync pattern, EDC and ECC fields a decoder can regenerate. The stream
-//! is `"ECM\0"`, then records of `(type, count)` followed by their payload,
-//! an end marker, and the EDC of the whole decoded output:
+//! An ECM file is a raw CD image with the parts a reader can recompute left
+//! out: sector sync patterns, EDC and ECC. The file is the four bytes
+//! `"ECM\0"`, then records, an end marker, and a 4-byte little-endian EDC of
+//! the whole decoded image. Each record header packs a type and a unit
+//! count, and its units follow back to back:
 //!
-//! - type 0: `count` literal bytes;
-//! - type 1: `count` Mode 1 sectors, each stored as a 3-byte address plus
-//!   2048 data bytes and expanded to 2352 bytes;
-//! - type 2: `count` Mode 2 Form 1 sectors, stored as the 4-byte subheader
-//!   plus 2048 data bytes and expanded to 2336 bytes (the sync and header
-//!   of a Mode 2 sector are emitted as type-0 literals);
-//! - type 3: `count` Mode 2 Form 2 sectors, stored as the subheader plus
-//!   2324 data bytes and expanded to 2336 bytes.
+//! | Type | Stored per unit | Decoded per unit |
+//! |---|---|---|
+//! | 0 | 1 byte | that byte |
+//! | 1 | 3-byte address + 2048 data bytes | a 2352-byte Mode 1 sector |
+//! | 2 | 4-byte subheader + 2048 data bytes | bytes 10h..92Fh of a Mode 2 Form 1 sector |
+//! | 3 | 4-byte subheader + 2324 data bytes | bytes 10h..92Fh of a Mode 2 Form 2 sector |
 //!
-//! The EDC is the CD-ROM CRC-32 (polynomial 0xD8018001, reflected) and the
-//! ECC is the ECMA-130 Reed-Solomon product code (P and Q parity), as the
-//! Yellow Book defines them. Decoding happens in memory so a read-only
-//! games folder is never written to.
+//! The sync and header of Mode 2 sectors travel as type-0 bytes. Sectors are
+//! rebuilt with psx-iso's ECMA-130 EDC/ECC, the same code the disc builder
+//! uses. Decoding happens in memory, so a read-only games folder is never
+//! written to.
 //!
 //! [`EcmImage`] decodes on demand: one pass over the record headers at open
 //! builds a checkpoint every [`CHUNK_SECTORS`] output sectors, and a read
-//! decodes only the chunks it touches. The whole-stream EDC is not checked
-//! then (that would mean decoding everything); [`decode`] still does.
+//! decodes only the chunks it touches. The trailing EDC needs the whole
+//! image, so it is checked only by [`EcmImage::verify`] and [`decode`].
 
 /// Header of every ECM stream.
 const MAGIC: &[u8; 4] = b"ECM\0";
 
 const SECTOR_BYTES: usize = 2352;
 const MODE2_BYTES: usize = 2336;
+/// Where a Mode 2 sector's decoded bytes start in the raw sector.
+const MODE2_FROM: usize = 0x10;
 
-struct Tables {
-    ecc_f: [u8; 256],
-    ecc_b: [u8; 256],
-    edc: [u32; 256],
+/// (count - 1) of the end marker.
+const END_MARKER: u32 = 0xFFFF_FFFF;
+
+/// EDC of `bytes`, continued from `edc` (0 to start a stream).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn edc_update(edc: u32, bytes: &[u8]) -> u32 {
+    psx_iso::sector_edc_continue(edc, bytes)
 }
 
-fn tables() -> &'static Tables {
-    static TABLES: std::sync::OnceLock<Tables> = std::sync::OnceLock::new();
-    TABLES.get_or_init(|| {
-        let mut t = Tables {
-            ecc_f: [0; 256],
-            ecc_b: [0; 256],
-            edc: [0; 256],
-        };
-        for i in 0..256u32 {
-            let j = (i << 1) ^ if i & 0x80 != 0 { 0x11D } else { 0 };
-            t.ecc_f[i as usize] = j as u8;
-            t.ecc_b[(i ^ j) as usize] = i as u8;
-            let mut edc = i;
-            for _ in 0..8 {
-                edc = (edc >> 1) ^ if edc & 1 != 0 { 0xD801_8001 } else { 0 };
-            }
-            t.edc[i as usize] = edc;
-        }
-        t
-    })
-}
-
-/// CD-ROM EDC (CRC-32, reflected polynomial 0xD8018001) continued from `edc`.
-pub(crate) fn edc_update(mut edc: u32, bytes: &[u8]) -> u32 {
-    let lut = &tables().edc;
-    for &b in bytes {
-        edc = (edc >> 8) ^ lut[((edc ^ u32::from(b)) & 0xFF) as usize];
-    }
-    edc
-}
-
-/// One ECC parity block (P: 86x24, Q: 52x43) over the sector from its
-/// header at byte 0x0C.
-fn ecc_block(
-    sector: &mut [u8; SECTOR_BYTES],
-    major_count: usize,
-    minor_count: usize,
-    major_mult: usize,
-    minor_inc: usize,
-    dest: usize,
-) {
-    let t = tables();
-    let size = major_count * minor_count;
-    for major in 0..major_count {
-        let mut index = (major >> 1) * major_mult + (major & 1);
-        let mut ecc_a = 0u8;
-        let mut ecc_b = 0u8;
-        for _ in 0..minor_count {
-            let temp = sector[0x0C + index];
-            index += minor_inc;
-            if index >= size {
-                index -= size;
-            }
-            ecc_a ^= temp;
-            ecc_b ^= temp;
-            ecc_a = t.ecc_f[ecc_a as usize];
-        }
-        ecc_a = t.ecc_b[(t.ecc_f[ecc_a as usize] ^ ecc_b) as usize];
-        sector[dest + major] = ecc_a;
-        sector[dest + major + major_count] = ecc_a ^ ecc_b;
-    }
-}
-
-/// P then Q parity. Mode 2 computes them with the header address zeroed.
-fn ecc_generate(sector: &mut [u8; SECTOR_BYTES], zero_address: bool) {
-    let mut address = [0u8; 4];
-    if zero_address {
-        address.copy_from_slice(&sector[0x0C..0x10]);
-        sector[0x0C..0x10].fill(0);
-    }
-    ecc_block(sector, 86, 24, 2, 86, 0x81C);
-    ecc_block(sector, 52, 43, 86, 88, 0x8C8);
-    if zero_address {
-        sector[0x0C..0x10].copy_from_slice(&address);
-    }
-}
-
-fn put_u32_le(sector: &mut [u8], at: usize, value: u32) {
-    sector[at..at + 4].copy_from_slice(&value.to_le_bytes());
-}
-
-/// Rebuild the EDC and ECC of a sector whose payload is in place.
-fn regenerate(sector: &mut [u8; SECTOR_BYTES], kind: u8) {
+/// Stored and decoded bytes of one unit of record type `kind`.
+fn unit_sizes(kind: u8) -> (u64, u64) {
     match kind {
-        1 => {
-            let edc = edc_update(0, &sector[..0x810]);
-            put_u32_le(sector, 0x810, edc);
-            sector[0x814..0x81C].fill(0);
-            ecc_generate(sector, false);
-        }
-        2 => {
-            sector.copy_within(0x14..0x18, 0x10);
-            let edc = edc_update(0, &sector[0x10..0x818]);
-            put_u32_le(sector, 0x818, edc);
-            ecc_generate(sector, true);
-        }
-        _ => {
-            sector.copy_within(0x14..0x18, 0x10);
-            let edc = edc_update(0, &sector[0x10..0x92C]);
-            put_u32_le(sector, 0x92C, edc);
-        }
+        0 => (1, 1),
+        1 => (3 + 2048, SECTOR_BYTES as u64),
+        2 => (4 + 2048, MODE2_BYTES as u64),
+        _ => (4 + 2324, MODE2_BYTES as u64),
     }
 }
 
-#[cfg(test)]
-struct Reader<'a> {
-    bytes: &'a [u8],
-    at: usize,
+/// Read a record header from the start of `bytes` (at most five bytes
+/// long): `(Some((type, count)), length)`, or `(None, length)` for the end
+/// marker.
+fn parse_header(bytes: &[u8]) -> Result<(Option<(u8, u64)>, usize), String> {
+    let first = *bytes.first().ok_or("ECM record header missing")?;
+    let kind = first & 3;
+    let mut value = u64::from((first >> 2) & 0x1F);
+    let mut shift = 5;
+    let mut len = 1;
+    let mut more = first & 0x80 != 0;
+    while more {
+        let byte = *bytes.get(len).ok_or("ECM record header truncated")?;
+        len += 1;
+        value |= u64::from(byte & 0x7F) << shift;
+        shift += 7;
+        more = byte & 0x80 != 0;
+        if shift > 35 || value > u64::from(u32::MAX) {
+            return Err("ECM record count does not fit in 32 bits".into());
+        }
+    }
+    if value == u64::from(END_MARKER) {
+        return Ok((None, len));
+    }
+    if value >= 0x8000_0000 {
+        return Err(format!("ECM record count {value:#x} is corrupt"));
+    }
+    Ok((Some((kind, value + 1)), len))
 }
 
-#[cfg(test)]
-impl Reader<'_> {
-    fn take(&mut self, n: usize) -> Result<&[u8], String> {
-        let end = self
-            .at
-            .checked_add(n)
-            .filter(|&end| end <= self.bytes.len())
-            .ok_or_else(|| format!("ECM stream truncated at byte {}", self.at))?;
-        let out = &self.bytes[self.at..end];
-        self.at = end;
-        Ok(out)
+/// Rebuild one packed sector of type 1..3 from its stored bytes into
+/// `sector`, returning the part of it the image holds.
+fn decode_unit(kind: u8, input: &[u8], sector: &mut [u8; SECTOR_BYTES]) -> core::ops::Range<usize> {
+    sector[0] = 0;
+    sector[1..11].fill(0xFF);
+    sector[11] = 0;
+    if kind == 1 {
+        sector[0x0C..0x0F].copy_from_slice(&input[..3]);
+        sector[0x0F] = 1;
+        sector[0x10..0x810].copy_from_slice(&input[3..3 + 2048]);
+        psx_iso::protect_mode1(sector);
+        return 0..SECTOR_BYTES;
     }
-
-    fn byte(&mut self) -> Result<u8, String> {
-        Ok(self.take(1)?[0])
+    sector[0x0C..0x0F].fill(0);
+    sector[0x0F] = 2;
+    sector[0x10..0x14].copy_from_slice(&input[..4]);
+    sector[0x14..0x18].copy_from_slice(&input[..4]);
+    if kind == 2 {
+        sector[0x18..0x818].copy_from_slice(&input[4..4 + 2048]);
+        psx_iso::protect_mode2_form1(sector);
+    } else {
+        sector[0x18..0x92C].copy_from_slice(&input[4..4 + 2324]);
+        psx_iso::protect_mode2_form2(sector);
     }
+    MODE2_FROM..SECTOR_BYTES
 }
 
-/// Decode a complete ECM stream into the raw image it was made from, and
-/// check its EDC. The reference the on-demand [`EcmImage`] is tested against.
-#[cfg(test)]
+/// Decode a whole ECM stream held in memory and check its trailing EDC.
+/// Used by tests and the real-image check; reads go through [`EcmImage`].
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn decode(ecm: &[u8]) -> Result<Vec<u8>, String> {
-    if ecm.len() < MAGIC.len() || &ecm[..4] != MAGIC {
+    if ecm.get(..4) != Some(MAGIC.as_slice()) {
         return Err("not an ECM stream (missing ECM header)".into());
     }
-    let mut r = Reader { bytes: ecm, at: 4 };
-    let mut out = Vec::with_capacity(ecm.len().saturating_mul(2));
+    let mut at = 4usize;
+    let mut out = Vec::new();
     let mut sector = [0u8; SECTOR_BYTES];
     loop {
-        let mut c = r.byte()?;
-        let kind = c & 3;
-        let mut num = u64::from((c >> 2) & 0x1F);
-        let mut bits = 5;
-        while c & 0x80 != 0 {
-            c = r.byte()?;
-            if bits > 31 {
-                return Err("ECM record count is too long".into());
-            }
-            num |= u64::from(c & 0x7F) << bits;
-            bits += 7;
-        }
-        if num == 0xFFFF_FFFF {
+        let rest = &ecm[at.min(ecm.len())..];
+        let (record, header_len) = parse_header(&rest[..rest.len().min(5)])?;
+        at += header_len;
+        let Some((kind, count)) = record else {
             break;
-        }
-        if num >= 0x8000_0000 {
-            return Err("ECM record count is out of range".into());
-        }
-        let count = num as usize + 1;
-        match kind {
-            0 => out.extend_from_slice(r.take(count)?),
-            1 => {
-                for _ in 0..count {
-                    sector.fill(0);
-                    sector[0x01..0x0B].fill(0xFF);
-                    sector[0x0F] = 1;
-                    sector[0x0C..0x0F].copy_from_slice(r.take(3)?);
-                    sector[0x10..0x810].copy_from_slice(r.take(0x800)?);
-                    regenerate(&mut sector, 1);
-                    out.extend_from_slice(&sector);
-                }
-            }
-            _ => {
-                let payload = if kind == 2 { 0x804 } else { 0x918 };
-                for _ in 0..count {
-                    sector.fill(0);
-                    sector[0x01..0x0B].fill(0xFF);
-                    sector[0x0F] = 2;
-                    sector[0x14..0x14 + payload].copy_from_slice(r.take(payload)?);
-                    regenerate(&mut sector, kind);
-                    out.extend_from_slice(&sector[0x10..0x10 + MODE2_BYTES]);
-                }
+        };
+        let (unit_in, _) = unit_sizes(kind);
+        let need = count
+            .checked_mul(unit_in)
+            .and_then(|n| usize::try_from(n).ok())
+            .filter(|&n| at + n <= ecm.len())
+            .ok_or_else(|| format!("ECM stream truncated at byte {at}"))?;
+        let payload = &ecm[at..at + need];
+        if kind == 0 {
+            out.extend_from_slice(payload);
+        } else {
+            for unit in payload.chunks_exact(unit_in as usize) {
+                let range = decode_unit(kind, unit, &mut sector);
+                out.extend_from_slice(&sector[range]);
             }
         }
+        at += need;
     }
-    let stored = u32::from_le_bytes(r.take(4)?.try_into().expect("four bytes"));
-    let computed = edc_update(0, &out);
-    if stored != computed {
+    let stored = ecm
+        .get(at..at + 4)
+        .ok_or_else(|| format!("ECM checksum truncated at byte {at}"))?;
+    let stored = u32::from_le_bytes([stored[0], stored[1], stored[2], stored[3]]);
+    let actual = edc_update(0, &out);
+    if stored != actual {
         return Err(format!(
-            "ECM checksum mismatch: stream says {stored:#010x}, decoded data gives {computed:#010x}"
+            "ECM checksum mismatch: stored {stored:08x}, decoded {actual:08x}"
         ));
     }
     Ok(out)
 }
 
-/// Output sectors per decoded chunk (and between index checkpoints).
 pub const CHUNK_SECTORS: u64 = 16;
 const CHUNK_BYTES: u64 = CHUNK_SECTORS * SECTOR_BYTES as u64;
 /// Decoded chunks kept for reuse (sequential reads hit these).
 const CACHED_CHUNKS: usize = 8;
-
-/// `(input bytes, output bytes)` of one unit of a record type: a literal
-/// byte, or one packed sector.
-fn unit_sizes(kind: u8) -> (u64, u64) {
-    match kind {
-        0 => (1, 1),
-        1 => (3 + 0x800, SECTOR_BYTES as u64),
-        2 => (0x804, MODE2_BYTES as u64),
-        _ => (0x918, MODE2_BYTES as u64),
-    }
-}
 
 /// Where the record stream stands at an output position: `remaining` units
 /// of `kind` start at input `in_pos` and output `out_pos`. With nothing
@@ -258,64 +169,15 @@ struct Cursor {
     remaining: u64,
 }
 
-/// Parse a record header from `bytes`: `(kind, count, header length)`, with
-/// `None` for the end marker.
-fn parse_header(bytes: &[u8]) -> Result<(Option<(u8, u64)>, usize), String> {
-    let mut at = 0usize;
-    let mut next = || -> Result<u8, String> {
-        let b = *bytes
-            .get(at)
-            .ok_or("ECM stream truncated in a record header")?;
-        at += 1;
-        Ok(b)
-    };
-    let mut c = next()?;
-    let kind = c & 3;
-    let mut num = u64::from((c >> 2) & 0x1F);
-    let mut bits = 5;
-    while c & 0x80 != 0 {
-        c = next()?;
-        if bits > 31 {
-            return Err("ECM record count is too long".into());
-        }
-        num |= u64::from(c & 0x7F) << bits;
-        bits += 7;
-    }
-    if num == 0xFFFF_FFFF {
-        return Ok((None, at));
-    }
-    if num >= 0x8000_0000 {
-        return Err("ECM record count is out of range".into());
-    }
-    Ok((Some((kind, num + 1)), at))
-}
-
-/// Decode one packed sector (`kind` 1..=3) from `input` into `sector`; the
-/// returned range of `sector` is the unit's output.
-fn decode_unit(kind: u8, input: &[u8], sector: &mut [u8; SECTOR_BYTES]) -> core::ops::Range<usize> {
-    sector.fill(0);
-    sector[0x01..0x0B].fill(0xFF);
-    if kind == 1 {
-        sector[0x0F] = 1;
-        sector[0x0C..0x0F].copy_from_slice(&input[..3]);
-        sector[0x10..0x810].copy_from_slice(&input[3..3 + 0x800]);
-        regenerate(sector, 1);
-        0..SECTOR_BYTES
-    } else {
-        let payload = if kind == 2 { 0x804 } else { 0x918 };
-        sector[0x0F] = 2;
-        sector[0x14..0x14 + payload].copy_from_slice(&input[..payload]);
-        regenerate(sector, kind);
-        0x10..0x10 + MODE2_BYTES
-    }
-}
-
 /// An ECM-packed image decoded a chunk at a time on demand.
 pub struct EcmImage {
     packed: crate::disc_image::SharedImage,
     len: u64,
     /// Stream position at the start of every chunk.
     checkpoints: Vec<Cursor>,
+    /// Where the trailing EDC of the decoded image is stored.
+    #[cfg_attr(not(test), allow(dead_code))]
+    checksum_at: u64,
     cache: std::sync::Mutex<Vec<(u64, Box<[u8]>)>>,
 }
 
@@ -340,6 +202,7 @@ impl EcmImage {
                 if payload + 4 > total {
                     return Err(format!("ECM stream truncated at byte {payload}"));
                 }
+                in_pos = payload;
                 break;
             };
             let (unit_in, unit_out) = unit_sizes(kind);
@@ -367,8 +230,38 @@ impl EcmImage {
             packed,
             len: out_pos,
             checkpoints,
+            checksum_at: in_pos,
             cache: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Decode the whole image and compare its EDC with the one stored after
+    /// the end marker.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn verify(&self) -> Result<(), String> {
+        use psx_iso::TrackSource;
+        let mut edc = 0;
+        let mut buf = vec![0u8; CHUNK_BYTES as usize];
+        let mut at = 0;
+        while at < self.len {
+            let n = (self.len - at).min(CHUNK_BYTES) as usize;
+            if !self.read_at(at, &mut buf[..n]) {
+                return Err(format!("ECM image undecodable at byte {at}"));
+            }
+            edc = edc_update(edc, &buf[..n]);
+            at += n as u64;
+        }
+        let mut stored = [0u8; 4];
+        if !self.packed.read_at(self.checksum_at, &mut stored) {
+            return Err("ECM checksum unreadable".into());
+        }
+        let stored = u32::from_le_bytes(stored);
+        if stored != edc {
+            return Err(format!(
+                "ECM checksum mismatch: stored {stored:08x}, decoded {edc:08x}"
+            ));
+        }
+        Ok(())
     }
 
     /// Decode output chunk `index`.
@@ -520,33 +413,15 @@ impl<'a> Window<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use psx_iso::TrackSource;
+    use std::sync::Arc;
 
-    /// Encode `(type, count)` the way ECM does: 2 type bits, 5 count bits,
-    /// then 7 bits per continuation byte.
-    fn record_header(kind: u8, count: u32) -> Vec<u8> {
-        let mut n = count - 1;
-        let mut out = vec![kind | (((n & 0x1F) as u8) << 2)];
-        n >>= 5;
-        while n != 0 {
-            *out.last_mut().unwrap() |= 0x80;
-            out.push((n & 0x7F) as u8);
-            n >>= 7;
-        }
-        out
-    }
-
-    fn finish(mut stream: Vec<u8>, decoded: &[u8]) -> Vec<u8> {
-        stream.extend_from_slice(&[0xFC, 0xFF, 0xFF, 0xFF, 0x3F]);
-        stream.extend_from_slice(&edc_update(0, decoded).to_le_bytes());
-        stream
-    }
-
-    /// Bit-at-a-time CRC with the same reflected polynomial, independent of
-    /// the table the decoder uses.
+    /// The EDC one bit at a time, straight from its definition: a CRC with
+    /// the reflected generator D8018001h, starting at zero.
     fn edc_bitwise(bytes: &[u8]) -> u32 {
         let mut crc = 0u32;
-        for &b in bytes {
-            crc ^= u32::from(b);
+        for &byte in bytes {
+            crc ^= u32::from(byte);
             for _ in 0..8 {
                 crc = if crc & 1 != 0 {
                     (crc >> 1) ^ 0xD801_8001
@@ -558,193 +433,278 @@ mod tests {
         crc
     }
 
+    /// A record header for `count` units of `kind` (count 0 makes the end
+    /// marker, whose stored count - 1 is FFFFFFFFh).
+    fn header(kind: u8, count: u64) -> Vec<u8> {
+        let mut rest = (count as u32).wrapping_sub(1);
+        let mut out = vec![kind | (((rest & 0x1F) as u8) << 2)];
+        rest >>= 5;
+        while rest != 0 {
+            *out.last_mut().unwrap() |= 0x80;
+            out.push((rest & 0x7F) as u8);
+            rest >>= 7;
+        }
+        out
+    }
+
+    /// Records `(kind, stored units)` packed into a stream whose trailer is
+    /// the EDC of `decoded`.
+    fn stream(records: &[(u8, Vec<u8>, u64)], decoded: &[u8]) -> Vec<u8> {
+        let mut ecm = MAGIC.to_vec();
+        for (kind, payload, count) in records {
+            ecm.extend(header(*kind, *count));
+            ecm.extend_from_slice(payload);
+        }
+        ecm.extend(header(0, 0));
+        ecm.extend_from_slice(&edc_bitwise(decoded).to_le_bytes());
+        ecm
+    }
+
+    fn pattern(len: usize, seed: u32) -> Vec<u8> {
+        (0..len as u32)
+            .map(|i| (i.wrapping_mul(31).wrapping_add(seed) >> 2) as u8)
+            .collect()
+    }
+
+    /// Multiply by alpha in GF(2^8) with the ECMA-130 field polynomial.
+    fn times_alpha(a: u8) -> u8 {
+        (a << 1) ^ if a & 0x80 != 0 { 0x1D } else { 0 }
+    }
+
+    /// Check both ECMA-130 parity equations over every P column and Q
+    /// diagonal of the 2340 bytes from the header on.
+    fn parity_holds(area: &[u8]) -> bool {
+        let word = |w: usize, plane: usize| area[2 * w + plane];
+        let check = |symbols: &[u8]| {
+            let sum = symbols.iter().fold(0, |a, &b| a ^ b);
+            let weighted = symbols.iter().fold(0, |a, &b| times_alpha(a) ^ b);
+            sum == 0 && weighted == 0
+        };
+        (0..2).all(|plane| {
+            let p = (0..43).all(|col| {
+                let s: Vec<u8> = (0..26).map(|row| word(row * 43 + col, plane)).collect();
+                check(&s)
+            });
+            let q = (0..26).all(|diag| {
+                let mut s: Vec<u8> = (0..43)
+                    .map(|i| word((diag * 43 + i * 44) % (43 * 26), plane))
+                    .collect();
+                s.push(word(43 * 26 + diag, plane));
+                s.push(word(43 * 26 + 26 + diag, plane));
+                check(&s)
+            });
+            p && q
+        })
+    }
+
     #[test]
     fn end_marker_encodes_as_the_documented_bytes() {
-        // 0xFFFFFFFF + 1 wraps; the end marker is count field 0xFFFFFFFF.
-        let mut n = 0xFFFF_FFFFu64;
-        let mut out = vec![((n & 0x1F) as u8) << 2];
-        n >>= 5;
-        while n != 0 {
-            *out.last_mut().unwrap() |= 0x80;
-            out.push((n & 0x7F) as u8);
-            n >>= 7;
-        }
-        assert_eq!(out, [0xFC, 0xFF, 0xFF, 0xFF, 0x3F]);
+        assert_eq!(header(0, 0), [0xFC, 0xFF, 0xFF, 0xFF, 0x3F]);
+        assert_eq!(
+            parse_header(&[0xFC, 0xFF, 0xFF, 0xFF, 0x3F]).unwrap(),
+            (None, 5)
+        );
+        assert_eq!(parse_header(&[0x05]).unwrap(), (Some((1, 2)), 1));
     }
 
     #[test]
     fn literal_records_round_trip_with_multibyte_counts() {
-        let data: Vec<u8> = (0..300u32).map(|i| (i * 7) as u8).collect();
-        let mut stream = MAGIC.to_vec();
-        stream.extend(record_header(0, data.len() as u32));
-        stream.extend(&data);
-        let stream = finish(stream, &data);
-        assert_eq!(decode(&stream).unwrap(), data);
+        for len in [1usize, 32, 33, 4096, 300_000] {
+            let bytes = pattern(len, len as u32);
+            let ecm = stream(&[(0, bytes.clone(), len as u64)], &bytes);
+            let (record, used) = parse_header(&ecm[4..9]).unwrap();
+            assert_eq!(record, Some((0, len as u64)));
+            assert_eq!(used, header(0, len as u64).len());
+            assert_eq!(decode(&ecm).unwrap(), bytes);
+        }
     }
 
     #[test]
     fn mode1_sector_gets_sync_header_and_a_valid_edc() {
-        let address = [0x00, 0x02, 0x16];
-        let data: Vec<u8> = (0..0x800u32).map(|i| (i ^ (i >> 3)) as u8).collect();
-        let mut stream = MAGIC.to_vec();
-        stream.extend(record_header(1, 1));
-        stream.extend(address);
-        stream.extend(&data);
-
-        let mut expected = [0u8; SECTOR_BYTES];
-        expected[0x01..0x0B].fill(0xFF);
-        expected[0x0C..0x0F].copy_from_slice(&address);
-        expected[0x0F] = 1;
-        expected[0x10..0x810].copy_from_slice(&data);
-        regenerate(&mut expected, 1);
-        let stream = finish(stream, &expected);
-
-        let out = decode(&stream).unwrap();
-        assert_eq!(out.len(), SECTOR_BYTES);
+        let mut unit = vec![0x01, 0x02, 0x03];
+        unit.extend(pattern(2048, 7));
+        let mut sector = [0u8; SECTOR_BYTES];
+        assert_eq!(decode_unit(1, &unit, &mut sector), 0..SECTOR_BYTES);
         assert_eq!(
-            &out[..12],
-            &[0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0]
+            sector[..12],
+            [0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0]
         );
-        assert_eq!(&out[0x0C..0x10], &[0x00, 0x02, 0x16, 0x01]);
-        let edc = u32::from_le_bytes(out[0x810..0x814].try_into().unwrap());
-        assert_eq!(edc, edc_bitwise(&out[..0x810]));
-        assert!(out[0x814..0x81C].iter().all(|&b| b == 0));
-        // P parity of an all-zero payload is zero; this payload is not.
-        assert!(out[0x81C..0x930].iter().any(|&b| b != 0));
+        assert_eq!(sector[0x0C..0x10], [1, 2, 3, 1]);
+        assert_eq!(sector[0x10..0x810], unit[3..]);
+        assert_eq!(
+            sector[0x810..0x814],
+            edc_bitwise(&sector[..0x810]).to_le_bytes()
+        );
+        assert!(sector[0x814..0x81C].iter().all(|&b| b == 0));
+        assert!(
+            parity_holds(&sector[0x0C..]),
+            "parity counts the real header"
+        );
     }
 
     #[test]
     fn mode2_form1_sector_duplicates_the_subheader_and_zeroes_nothing_else() {
-        let sub = [0x01, 0x02, 0x08, 0x00];
-        let data = vec![0x5Au8; 0x800];
-        let mut stream = MAGIC.to_vec();
-        stream.extend(record_header(2, 1));
-        stream.extend(sub);
-        stream.extend(&data);
-
-        let mut sector = [0u8; SECTOR_BYTES];
-        sector[0x14..0x18].copy_from_slice(&sub);
-        sector[0x18..0x818].copy_from_slice(&data);
-        regenerate(&mut sector, 2);
-        let expected = sector[0x10..0x10 + MODE2_BYTES].to_vec();
-        let stream = finish(stream, &expected);
-
-        let out = decode(&stream).unwrap();
-        assert_eq!(out.len(), MODE2_BYTES);
-        assert_eq!(&out[..8], &[0x01, 0x02, 0x08, 0x00, 0x01, 0x02, 0x08, 0x00]);
-        let edc = u32::from_le_bytes(out[0x808..0x80C].try_into().unwrap());
-        assert_eq!(edc, edc_bitwise(&out[..0x808]));
+        let mut unit = vec![0x11, 0x22, 0x08, 0x44];
+        unit.extend(pattern(2048, 9));
+        let mut sector = [0xAAu8; SECTOR_BYTES];
+        let range = decode_unit(2, &unit, &mut sector);
+        assert_eq!(range, 0x10..SECTOR_BYTES);
+        assert_eq!(sector[0x10..0x14], unit[..4]);
+        assert_eq!(sector[0x14..0x18], unit[..4]);
+        assert_eq!(sector[0x18..0x818], unit[4..]);
+        assert_eq!(
+            sector[0x818..0x81C],
+            edc_bitwise(&sector[0x10..0x818]).to_le_bytes()
+        );
+        let mut zero_header = sector;
+        zero_header[0x0C..0x10].fill(0);
+        assert!(
+            parity_holds(&zero_header[0x0C..]),
+            "parity counts the header as zero"
+        );
+        // Compare with psx-iso run on the same sector with a real header.
+        let mut reference = sector;
+        reference[0x0C..0x10].copy_from_slice(&[0x00, 0x02, 0x16, 0x02]);
+        reference[0x818..].fill(0);
+        psx_iso::protect_mode2_form1(&mut reference);
+        assert_eq!(reference[0x10..], sector[0x10..]);
     }
 
     #[test]
     fn mode2_form2_sector_has_edc_and_no_ecc() {
-        let sub = [0x01, 0x02, 0x24, 0x00];
-        let data = vec![0xA5u8; 0x914];
-        let mut stream = MAGIC.to_vec();
-        stream.extend(record_header(3, 1));
-        stream.extend(sub);
-        stream.extend(&data);
-        let mut decoded = Vec::new();
-        decoded.extend(sub);
-        decoded.extend(sub);
-        decoded.extend(&data);
-        decoded.extend(edc_bitwise(&decoded).to_le_bytes());
-        let stream = finish(stream, &decoded);
-        assert_eq!(decode(&stream).unwrap(), decoded);
+        let mut unit = vec![0x01, 0x00, 0x24, 0x00];
+        unit.extend(pattern(2324, 3));
+        let mut sector = [0u8; SECTOR_BYTES];
+        decode_unit(2, &[0; 2052], &mut sector);
+        let range = decode_unit(3, &unit, &mut sector);
+        assert_eq!(range, 0x10..SECTOR_BYTES);
+        assert_eq!(sector[0x18..0x92C], unit[4..]);
+        assert_eq!(
+            sector[0x92C..0x930],
+            edc_bitwise(&sector[0x10..0x92C]).to_le_bytes()
+        );
     }
 
-    /// A stream mixing every record type: a long literal run, a Mode 1 run
-    /// spanning several index checkpoints, and Mode 2 sectors split the way
-    /// real encoders split them (16 literal bytes, then one packed unit).
-    fn mixed_stream() -> (Vec<u8>, Vec<u8>) {
-        let mut rng = 0x1234_5678u32;
-        let mut next = move || {
-            rng ^= rng << 13;
-            rng ^= rng >> 17;
-            rng ^= rng << 5;
-            rng as u8
-        };
-        let mut stream = MAGIC.to_vec();
+    #[test]
+    fn mode1_parity_matches_psx_iso_with_a_nonzero_header() {
+        let mut unit = vec![0x12, 0x34, 0x56];
+        unit.extend(pattern(2048, 11));
+        let mut sector = [0u8; SECTOR_BYTES];
+        decode_unit(1, &unit, &mut sector);
+        let mut reference = sector;
+        reference[0x810..].fill(0);
+        psx_iso::protect_mode1(&mut reference);
+        assert_eq!(reference, sector);
+        assert!(parity_holds(&sector[0x0C..]));
+    }
+
+    /// A stream with every record type, and its decoded image.
+    fn mixed() -> (Vec<u8>, Vec<u8>) {
         let mut decoded = Vec::new();
-        let literal: Vec<u8> = (0..SECTOR_BYTES * 20 + 77).map(|_| next()).collect();
-        stream.extend(record_header(0, literal.len() as u32));
-        stream.extend(&literal);
-        decoded.extend(&literal);
-        stream.extend(record_header(1, 40));
-        for i in 0..40u32 {
-            let address = [0x00, 0x02 + (i / 75) as u8, (i % 75) as u8];
-            let data: Vec<u8> = (0..0x800).map(|_| next()).collect();
-            stream.extend(address);
-            stream.extend(&data);
-            let mut sector = [0u8; SECTOR_BYTES];
-            decode_unit(1, &[&address[..], &data[..]].concat(), &mut sector);
-            decoded.extend(sector);
+        let mut records = Vec::new();
+        let lead = pattern(5000, 1);
+        decoded.extend_from_slice(&lead);
+        records.push((0u8, lead, 5000u64));
+        let mut sector = [0u8; SECTOR_BYTES];
+        for kind in 1..=3u8 {
+            let (unit_in, _) = unit_sizes(kind);
+            let count = 21u64;
+            let mut payload = Vec::new();
+            for i in 0..count {
+                let unit = pattern(unit_in as usize, kind as u32 * 100 + i as u32);
+                let range = decode_unit(kind, &unit, &mut sector);
+                if kind != 1 {
+                    let head = pattern(16, 9);
+                    records.push((0, head.clone(), 16));
+                    decoded.extend_from_slice(&head);
+                    records.push((kind, unit.clone(), 1));
+                } else {
+                    payload.extend_from_slice(&unit);
+                }
+                decoded.extend_from_slice(&sector[range]);
+            }
+            if kind == 1 {
+                records.push((1, payload, count));
+            }
         }
-        for i in 0..50u32 {
-            let head: Vec<u8> = (0..16).map(|_| next()).collect();
-            stream.extend(record_header(0, 16));
-            stream.extend(&head);
-            decoded.extend(&head);
-            let kind = if i % 3 == 0 { 3 } else { 2 };
-            let payload = if kind == 2 { 0x804 } else { 0x918 };
-            let input: Vec<u8> = (0..payload).map(|_| next()).collect();
-            stream.extend(record_header(kind, 1));
-            stream.extend(&input);
-            let mut sector = [0u8; SECTOR_BYTES];
-            let range = decode_unit(kind, &input, &mut sector);
-            decoded.extend(&sector[range]);
-        }
-        let stream = finish(stream, &decoded);
-        (stream, decoded)
+        (stream(&records, &decoded), decoded)
     }
 
     #[test]
     fn on_demand_reads_match_the_whole_stream_decode() {
-        let (stream, decoded) = mixed_stream();
-        assert_eq!(decode(&stream).unwrap(), decoded);
-        let image = EcmImage::open(std::sync::Arc::new(stream)).unwrap();
-        use psx_iso::TrackSource;
+        let (ecm, decoded) = mixed();
+        assert_eq!(decode(&ecm).unwrap(), decoded);
+        let image = EcmImage::open(Arc::new(ecm)).unwrap();
         assert_eq!(image.len(), decoded.len() as u64);
-        let mut whole = vec![0u8; decoded.len()];
-        assert!(image.read_at(0, &mut whole));
-        assert_eq!(whole, decoded);
-        // Reads at awkward offsets and lengths, out of order, crossing chunk
-        // and record boundaries.
-        for (at, step) in (7u64..).zip(0..200u64) {
-            let len = ((step * 7919) % (3 * SECTOR_BYTES as u64)) as usize + 1;
-            let offset = (at * 104_729) % (decoded.len() as u64 - len as u64);
+        image.verify().unwrap();
+        for (offset, len) in [
+            (0usize, 100usize),
+            (4990, 30),
+            (60_000, 9000),
+            (decoded.len() - 7, 7),
+        ] {
             let mut out = vec![0u8; len];
-            assert!(image.read_at(offset, &mut out), "read {offset}+{len}");
-            assert_eq!(out, decoded[offset as usize..offset as usize + len]);
+            assert!(image.read_at(offset as u64, &mut out));
+            assert_eq!(out, decoded[offset..offset + len], "at {offset}");
         }
-        let mut past = [0u8; 2];
-        assert!(!image.read_at(decoded.len() as u64 - 1, &mut past));
+        let mut out = vec![0u8; 8];
+        assert!(!image.read_at(decoded.len() as u64 - 4, &mut out));
     }
 
     #[test]
     fn index_rejects_bad_magic_and_truncation() {
-        assert!(EcmImage::open(std::sync::Arc::new(b"NOPE".to_vec())).is_err());
-        let mut stream = MAGIC.to_vec();
-        stream.extend(record_header(0, 10));
-        stream.extend([1, 2, 3]);
-        assert!(EcmImage::open(std::sync::Arc::new(stream)).is_err());
+        let (ecm, _) = mixed();
+        let open = |bytes: Vec<u8>| EcmImage::open(Arc::new(bytes)).map(|_| ());
+        let mut bad = ecm.clone();
+        bad[0] = b'X';
+        assert!(open(bad).is_err());
+        assert!(open(ecm[..ecm.len() - 2].to_vec()).is_err());
+        assert!(open(ecm[..ecm.len() / 2].to_vec()).is_err());
+        assert!(open(ecm).is_ok());
     }
 
     #[test]
     fn rejects_bad_magic_truncation_and_checksum() {
-        assert!(decode(b"NOPE").is_err());
-        let mut stream = MAGIC.to_vec();
-        stream.extend(record_header(0, 10));
-        stream.extend([1, 2, 3]);
-        assert!(decode(&stream).unwrap_err().contains("truncated"));
+        let (ecm, _) = mixed();
+        let mut bad = ecm.clone();
+        bad[3] = 1;
+        assert!(decode(&bad).is_err());
+        assert!(decode(&ecm[..ecm.len() - 1]).is_err());
+        assert!(decode(&ecm[..ecm.len() / 3]).is_err());
+        let mut wrong = ecm.clone();
+        let last = wrong.len() - 1;
+        wrong[last] ^= 1;
+        assert!(decode(&wrong).unwrap_err().contains("checksum"));
+        let image = EcmImage::open(Arc::new(wrong)).unwrap();
+        assert!(image.verify().is_err());
+        // A count of 80000000h or more that is not the end marker.
+        assert!(parse_header(&[0xFC, 0xFF, 0xFF, 0xFF, 0x2F]).is_err());
+        // More than 32 bits of count.
+        assert!(parse_header(&[0xFC, 0xFF, 0xFF, 0xFF, 0xFF]).is_err());
+    }
 
-        let data = [9u8; 4];
-        let mut stream = MAGIC.to_vec();
-        stream.extend(record_header(0, 4));
-        stream.extend(data);
-        let mut stream = finish(stream, &data);
-        let last = stream.len() - 1;
-        stream[last] ^= 1;
-        assert!(decode(&stream).unwrap_err().contains("checksum"));
+    /// Full decode of a real image: `PSOXIDE_ECM_IMAGE=<file.img.ecm>`;
+    /// with `PSOXIDE_ECM_OUT=<file>` the decoded image is written there.
+    #[test]
+    #[ignore]
+    fn decodes_a_real_image_when_given_one() {
+        let Some(path) = std::env::var_os("PSOXIDE_ECM_IMAGE") else {
+            return;
+        };
+        let file = crate::disc_image::FileImage::open(std::path::Path::new(&path)).unwrap();
+        let image = EcmImage::open(Arc::new(file)).unwrap();
+        image.verify().unwrap();
+        if let Some(out) = std::env::var_os("PSOXIDE_ECM_OUT") {
+            use std::io::Write;
+            let mut w = std::io::BufWriter::new(std::fs::File::create(out).unwrap());
+            let mut buf = vec![0u8; CHUNK_BYTES as usize];
+            let mut at = 0;
+            while at < image.len() {
+                let n = (image.len() - at).min(CHUNK_BYTES) as usize;
+                assert!(image.read_at(at, &mut buf[..n]));
+                w.write_all(&buf[..n]).unwrap();
+                at += n as u64;
+            }
+        }
     }
 }
