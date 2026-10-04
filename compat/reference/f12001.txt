@@ -1,5 +1,6 @@
-# frame, display hash with the real BIOS, display hash on the HLE kernel
-# (same commit, same input from compat/inputs.toml; frames from the EXE entry)
+# frame, display hash with the real BIOS (emulator ad71bcc2b), display hash
+# on the HLE kernel (emulator c587034); same input from compat/inputs.toml,
+# frames from the EXE entry
 60 5aa38173c5c08a66 5aa38173c5c08a66
 120 5aa38173c5c08a66 5aa38173c5c08a66
 180 5aa38173c5c08a66 5aa38173c5c08a66
@@ -32,11 +33,11 @@
 1800 84d84a676b8ef6ea 84d84a676b8ef6ea
 1860 c5c1dc13bb4b6580 6dc007ea59997d1a
 1920 1962788febd31024 1962788febd31024
-1980 72adbe5d222474d7 1d297e4badfd0478
-2040 0c559940d70fa99d 5025c193ad0ab729
-2100 bd8bfa9148f08c12 7b03ab6961cb4344
-2160 1cdeb5f61ecd806f 9f503d5ce311c599
-2220 c869de649b7574cd bc285a7f85de55dc
+1980 72adbe5d222474d7 72adbe5d222474d7
+2040 0c559940d70fa99d 0c559940d70fa99d
+2100 bd8bfa9148f08c12 1271581f0a147a97
+2160 1cdeb5f61ecd806f 92b39ab99f36a468
+2220 c869de649b7574cd c869de649b7574cd
 2280 33f8cf70fccb8cbb 33f8cf70fccb8cbb
 2340 c2d0071001012cc5 c2d0071001012cc5
 2400 7783504030b8512c 7783504030b8512c

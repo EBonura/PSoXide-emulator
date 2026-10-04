@@ -1,5 +1,6 @@
-# frame, display hash with the real BIOS, display hash on the HLE kernel
-# (same commit, same input from compat/inputs.toml; frames from the EXE entry)
+# frame, display hash with the real BIOS (emulator ad71bcc2b), display hash
+# on the HLE kernel (emulator c587034); same input from compat/inputs.toml,
+# frames from the EXE entry
 60 cbf29ce484222325 cbf29ce484222325
 120 cbf29ce484222325 cbf29ce484222325
 180 cbf29ce484222325 cbf29ce484222325
