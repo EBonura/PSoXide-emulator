@@ -15,12 +15,9 @@
 //!
 //! Register semantics and physical clock relationships follow nocash
 //! PSX-SPX's timer and GPU timing documentation, then are checked against
-//! JaCzekanski/ps1-tests build-158 silicon captures. Portions of the original
-//! implementation were parity-matched against, and in places derived from,
-//! PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>), Copyright (C)
-//! the PCSX-Redux authors, GPL-2.0-or-later. Points of correspondence are
-//! flagged inline. PSoXide is released under GPL-2.0-or-later in part to honor
-//! this lineage; see `LICENSE` and `docs/license-audit.md`.
+//! JaCzekanski/ps1-tests build-158 silicon captures and the project's own
+//! hardware-test records (the `test_timer*` cases). See `LICENSE` and
+//! `docs/license-audit.md`.
 
 /// One of the three root counters. Fields are 16 bits on hardware but
 /// held as `u32` for uniform bus access -- upper bits read as 0.
@@ -39,7 +36,7 @@ pub struct Timer {
     /// they cross the source period.
     accum: u64,
     /// Bus cycle at which the counter was last reset (mode write).
-    /// Diagnostic -- lets us compare against Redux's `cycleStart`.
+    /// Diagnostic -- when the live count was last re-based.
     pub last_reset_cycle: u64,
     /// Number of mode writes since reset. Diagnostic.
     pub mode_write_count: u64,
@@ -120,10 +117,9 @@ pub struct Timers {
     /// `advance_to` so the bus can drive timer state lazily --
     /// once per branch-test scheduler drain and on demand from
     /// MMIO read paths -- instead of paying the per-instruction
-    /// 3-counter accumulator/divider cost. Mirrors PCSX-Redux's
-    /// `Counters::set` / `update` model where each counter holds
-    /// `cycleStart` and the live count is `(cycle - cycleStart) /
-    /// rate` evaluated lazily.
+    /// 3-counter accumulator/divider cost. Each counter's live count is
+    /// derived from the cycles elapsed since this point, divided by its
+    /// clock-source period.
     last_advance_cycle: u64,
     /// Offset between the scheduled VBlank IRQ edge and the GPU blanking
     /// signal seen by Timer 1 sync modes, measured in scanlines. Late PSone
@@ -899,7 +895,7 @@ fn fire_irq(t: &mut Timer) -> bool {
 fn dot_ticks_per_scanline(hsync_period: u64, dot_clock_divisor: u64, vblank_period: u64) -> u64 {
     // Identify the region from frame geometry, not the relative HSync period.
     // Physical NTSC scanlines are about 2172 CPU clocks while PAL is about
-    // 2167, the opposite ordering from the old Redux-parity constants. The
+    // 2167, the opposite ordering from the constants this replaced. The
     // frame remains unambiguous at 263 versus 314 lines even while a mid-frame
     // display-mode switch temporarily retains the previous HSync cadence.
     let total_lines = vblank_period / hsync_period.max(1);
