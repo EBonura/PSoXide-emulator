@@ -19,23 +19,20 @@
 //! - **6f**: audio plumbing -- volume matrix, XA decode (deferred
 //!   to Milestone F when it actually matters).
 //!
-//! **Reference**: nocash PSX-SPX "CDROM Drive" and
-//! `pcsx-redux/src/core/cdrom.cc`. Status-byte bits + IRQ types +
-//! index semantics all follow those two.
-//!
-//! This module is parity-safe at the register level -- software that
-//! reads status / queues parameters / pops responses sees the values
-//! Redux would return. Command side effects (seeking, reading) start
-//! landing in 6b onwards.
+//! **Reference**: nocash PSX-SPX "CDROM Drive". Status-byte bits, IRQ
+//! types, index semantics, the command set and the response formats follow
+//! that document.
 //!
 //! ## Provenance
 //!
-//! Portions of this module are parity-matched against, and in places
-//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
-//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
-//! correspondence are flagged inline with `Redux` references. PSoXide is
-//! released under GPL-2.0-or-later in part to honor this lineage; see
-//! `LICENSE` and `docs/license-audit.md`.
+//! The register file, FIFOs, command set and response formats are written
+//! from PSX-SPX. Cycle delays live in `cdrom/timing.rs`, which says for each
+//! one whether it comes from the project's own console records, from a
+//! PSX-SPX figure, or is only pinned by the compatibility gates. The same
+//! applies to a handful of scheduling behaviours in this file (marked
+//! "gate-pinned"): they exist because removing or changing them moves the
+//! compat or library frame hashes, and no external source describes them.
+//! See `LICENSE` and `docs/license-audit.md`.
 
 use std::collections::VecDeque;
 
@@ -158,10 +155,10 @@ struct XaCoding {
     nbits: u8,
 }
 
-/// A chained response scheduled when this event fires. Redux enqueues
-/// a command's long-running completion from inside the first-response
-/// interrupt handler, so the second deadline is relative to the actual
-/// first IRQ service cycle rather than the original command write.
+/// A chained response scheduled when this event fires. A command's
+/// long-running completion is queued when its first response is
+/// delivered, so the second deadline is relative to the actual first IRQ
+/// cycle rather than the original command write (gate-pinned).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PendingFollowup {
     command: u8,
@@ -174,8 +171,10 @@ struct PendingFollowup {
 /// while the CPU held the previous interrupt (no sector is read for it).
 const DEFERRED_DATA_READY: u8 = 0xFF;
 
-/// Cycles from the acknowledge to the held INT1 (DuckStation's
-/// `INTERRUPT_DELAY_CYCLES`).
+/// Cycles from the acknowledge to the held INT1. PSX-SPX only says there
+/// is "a small delay" between acknowledging one interrupt and the next
+/// arriving. **Pinned**: the gates hold at 500 and move at 250 (Soul Reaver)
+/// and at 1000 (Soul Reaver, Metal Slug X).
 const DEFERRED_DATA_READY_DELAY: u64 = 500;
 
 /// A deferred response: when `bus.cycles` passes `deadline` (an
@@ -263,8 +262,8 @@ pub struct CdRom {
     /// to pop via `0x1F80_1801`.
     responses: VecDeque<u8>,
     /// Command/parameter transmission busy latch (status bit 7).
-    /// Redux sets this when a command byte is written, then clears it
-    /// when the corresponding interrupt packet is materialized.
+    /// Set when a command byte is written, cleared when the corresponding
+    /// interrupt packet is materialized (PSX-SPX status bit 7, BUSYSTS).
     command_busy: bool,
     /// IRQ enable mask -- low 3 bits; an IRQ fires only if its type
     /// bit is enabled. BIOS writes via `0x1F80_1802 idx=1`.
@@ -275,9 +274,8 @@ pub struct CdRom {
     /// Scheduled events waiting for their cycle deadlines. Processed
     /// in order by [`CdRom::tick`].
     pending: VecDeque<PendingEvent>,
-    /// Internal lid / rescan timer. Redux drives this via a separate
-    /// interrupt slot (`PSXINT_CDRLID`) rather than a visible CDROM
-    /// IRQ packet.
+    /// Internal lid / rescan timer. It runs on its own deadline rather than
+    /// as a visible CDROM IRQ packet.
     lid_deadline: Option<u64>,
     /// `CdlInit` starts the lid/rescan path when its ACK is serviced,
     /// not at command-write time.
@@ -295,8 +293,9 @@ pub struct CdRom {
     /// by SeekL / ReadN to know where to go.
     setloc_msf: (u8, u8, u8),
     /// Whether a new SetLoc target is waiting to be applied to the
-    /// live read/play head. Redux doesn't move immediately on SetLoc;
-    /// it latches the target and consumes it on Seek/Read/Play.
+    /// live read/play head. SetLoc does not move the head by itself (PSX-SPX
+    /// "Setloc, Read, Pause"); the target is latched and consumed by
+    /// Seek/Read/Play.
     setloc_pending: bool,
     /// Controller-firmware GetStat service phase. Every fifth mounted-media
     /// status request crosses the maintenance pass measured on SCPH-9902.
@@ -364,9 +363,8 @@ pub struct CdRom {
     /// Per-raise log of `(cycle_when_raised, irq_type_discriminant)`
     /// tuples. Populated only when `cdrom_irq_log_cap > 0`, capped
     /// at that length to keep memory bounded in long runs. Probes
-    /// compare this sequence against Redux's silent-run CDROM-IRQ
-    /// log to pinpoint which specific IRQ fires at a divergent
-    /// cycle. Excluded from save states.
+    /// compare this sequence against a captured IRQ log to pinpoint which
+    /// specific IRQ fires at a divergent cycle. Excluded from save states.
     #[serde(skip)]
     pub cdrom_irq_log: Vec<(u64, u8)>,
     /// Max length of `cdrom_irq_log` -- 0 disables logging (the
@@ -439,15 +437,15 @@ pub struct CdRom {
     /// A count alone does not say which read fell behind; a range does.
     dropped_lba_first: u32,
     dropped_lba_last: u32,
-    /// Redux's DRQSTS/data-ready latch (status bit 6). A fresh sector
+    /// The DRQSTS/data-ready latch (PSX-SPX status bit 6). A fresh sector
     /// sets this even before software has armed a transfer via the
     /// request register; stray reads with no transfer armed clear it
     /// back down without consuming the buffered bytes.
     data_fifo_ready: bool,
     /// Set by request-register bit 7 (`0x1F80_1803` index 0). MMIO
     /// data reads may only drain the current sector while this is
-    /// armed; DMA3 reads the transfer buffer once a sector is ready,
-    /// matching Redux's `m_read` gate rather than the request latch.
+    /// armed; DMA3 reads the transfer buffer once a sector is ready, not on
+    /// the request latch (gate-pinned).
     data_transfer_active: bool,
     /// Last read sector header (MM, SS, FF, mode) -- returned by
     /// `GetlocL` after the drive has actually delivered a sector.
@@ -478,10 +476,8 @@ pub struct CdRom {
     /// Set while a read is in progress; controls whether new
     /// DataReady events chain into further sectors.
     reading: bool,
-    /// Redux delays one sector event by `cdReadTime / 2` if the CPU's
-    /// CDROM IRQ bit is still pending when the next read interrupt
-    /// matures. This latch prevents repeated long delays for the same
-    /// sector; it resets after a sector is actually delivered.
+    /// Vestigial: written on the read path but no longer read by any timing
+    /// decision. Kept only so save states keep their layout.
     read_rescheduled: bool,
     /// Next sector LBA to deliver during an active read.
     read_lba: u32,
@@ -491,13 +487,13 @@ pub struct CdRom {
     /// audio actually starts. `None` when the drive is not on its way
     /// anywhere. See [`timing::seek_cycles`] for why this exists.
     cdda_seek_done_at: Option<u64>,
-    /// Redux tracks whether the drive has already completed a seek and
-    /// uses that to pick the short 0x800-cycle SeekL/SeekP follow-up
-    /// path on subsequent seeks.
+    /// Vestigial: set after a seek but no longer read (SeekL/SeekP always
+    /// charge the measured head-travel curve). Kept only so save states
+    /// keep their layout.
     seek_done: bool,
-    /// Redux inserts a long delay before the second sector after a
-    /// relocated read starts (`m_locationChanged`). Without it we
-    /// stream multiple sectors where the hardware only delivered one.
+    /// Vestigial: set when a read relocates the head but no longer read (the
+    /// head-travel cost is charged on the first sector). Kept only so save
+    /// states keep their layout.
     location_changed: bool,
     /// Last SetMode byte written by the CPU. Bit layout:
     ///   0: CD-DA enable (for Play command)
@@ -569,15 +565,10 @@ impl CdRom {
             params: VecDeque::with_capacity(PARAM_FIFO_DEPTH),
             responses: VecDeque::with_capacity(RESPONSE_FIFO_DEPTH),
             command_busy: false,
-            // Redux initializes m_reg2 (the CDROM IRQ mask) to 0x1F on
-            // reset (cdrom.cc:1562) so all five IRQ types are enabled
-            // out of the gate. We used to start at 0, which blocked every
-            // CDROM IRQ from reaching the CPU at boot. That was masked in
-            // earlier runs because we also ignored the mask when raising
-            // (see `should_wake_cpu`); after adding the mask gate, our 0
-            // initial value caused CDROM IRQs to silently latch without
-            // waking CPU -- BIOS boot then polled the latched flag instead
-            // of getting its usual ISR-driven ack, drifting from Redux.
+            // All five IRQ types start enabled (gate-pinned). Starting at 0
+            // blocked every CDROM IRQ from reaching the CPU at boot: the BIOS
+            // then polled the latched flag instead of getting its usual
+            // ISR-driven acknowledge. See `should_wake_cpu`.
             irq_mask: 0x1F,
             irq_flag: 0,
             pending: VecDeque::new(),
@@ -1119,12 +1110,10 @@ impl CdRom {
 
     /// Like [`write8`], but threads the bus cycle through so
     /// `queue_command` can schedule first/second responses with
-    /// absolute deadlines anchored on issue time. Matches Redux's
-    /// `AddIrqQueue(cmd, delay)` which anchors on `m_regs.cycle` at
-    /// the cmd-port write. The previous "relative then rebase on
-    /// next tick" scheme lost the BIAS + memory-access cycles of
-    /// the SB that issued the command -- surfaced as a 5-cycle late
-    /// IRQ dispatch at parity step 89,198,894.
+    /// absolute deadlines anchored on issue time (the cycle of the
+    /// command-port write). The previous "relative then rebase on next
+    /// tick" scheme lost the issue cycles of the store that wrote the
+    /// command and delivered the IRQ 5 cycles late.
     pub fn write8_at(&mut self, phys: u32, value: u8, now: u64) -> bool {
         let offset = (phys - BASE) as u8;
         match (offset, self.index) {
@@ -1154,10 +1143,10 @@ impl CdRom {
                 if value & 0x40 != 0 {
                     self.params.clear();
                 }
-                // Bit 7 arms the sector-transfer buffer. Redux gates
-                // both MMIO reads and DMA behind this request latch
-                // instead of exposing any queued sector bytes
-                // immediately when DataReady fires.
+                // Bit 7 arms the sector-transfer buffer (PSX-SPX "Request
+                // register"): MMIO reads and DMA are gated behind this
+                // request latch instead of exposing queued sector bytes as
+                // soon as DataReady fires.
                 if value & 0x80 != 0 && !self.data_transfer_active {
                     self.data_transfer_active = true;
                 }
@@ -1305,7 +1294,7 @@ impl CdRom {
             // Pause: halt reads but keep motor on.
             0x09 => self.cmd_pause(),
             // Reset: abort in-flight drive activity, spin the motor,
-            // and complete after Redux's long reset delay.
+            // and complete after the long reset delay.
             0x0A => self.cmd_reset(),
             // Mute / Demute.
             0x0B => self.cmd_mute(true),
@@ -1396,9 +1385,7 @@ impl CdRom {
     }
 
     /// Schedule a second-response IRQ. `additional_delay` is time
-    /// *after* the first response interrupt actually fires. Matches
-    /// Redux's `AddIrqQueue(cmd + 0x100, delay)` path inside the
-    /// first-response handler.
+    /// *after* the first response interrupt actually fires.
     fn schedule_second_response(&mut self, bytes: Vec<u8>, additional_delay: u64) {
         self.chain_followup(IrqType::Complete, bytes, additional_delay);
     }
@@ -1515,10 +1502,9 @@ impl CdRom {
     }
 
     /// Stop the live sector stream and strip any queued DataReady work
-    /// from both the pending queue and ACK followups. Redux cancels the
-    /// read interrupt source on ReadN/Pause/Seek/Init/Reset; without
-    /// this, stale sectors from an older stream can leak into the next
-    /// command sequence.
+    /// from both the pending queue and ACK followups. Called on
+    /// ReadN/Pause/Seek/Init/Reset; without it, stale sectors from an older
+    /// stream can leak into the next command sequence.
     fn cancel_pending_data_ready_events(&mut self) {
         self.deferred_data_ready = false;
         self.pending.retain(|ev| ev.irq != IrqType::DataReady);
@@ -1554,9 +1540,9 @@ impl CdRom {
             0
         };
         self.schedule_first_response_after(vec![stat], maintenance_delay);
-        // Redux keeps STATUS_SHELLOPEN sticky until GetStat observes
-        // it, then clears the latched bit after producing the reply
-        // unless the lid is genuinely still open.
+        // The shell-open status bit stays latched until a GetStat observes
+        // it, then clears after the reply unless the lid is genuinely still
+        // open (gate-pinned).
         if self.drive_state != DriveState::LidOpen {
             self.drive_status &= !drive_status_bit::SHELL_OPEN;
         }
@@ -1615,10 +1601,10 @@ impl CdRom {
     }
 
     /// Delay from a ReadN/ReadS command to the first DataReady event.
-    /// Redux uses one full CD frame at double-speed here; the console
-    /// (records 0x94/0x95) shows one more frame period of rotational
-    /// alignment before the first sector at both speeds, so charge 1.5
-    /// frames double / 3 frames single ahead of the chained stream.
+    /// The console (hardware-test records 0x94/0x95) shows one more frame
+    /// period of rotational alignment before the first sector than the
+    /// steady rate alone gives, at both speeds, so charge 1.5 frames at
+    /// double speed and 3 frames at single speed ahead of the chained stream.
     fn initial_sector_read_cycles(&self) -> u64 {
         if self.limit_fast_data() {
             return self.sector_read_cycles();
@@ -1631,9 +1617,10 @@ impl CdRom {
     }
 
     /// Cycles between chained DataReady events once a sector stream is
-    /// active. Redux's `readInterrupt()` schedules steady double-speed
-    /// reads at `cdReadTime / 2`, not `cdReadTime`; the old value fed
-    /// XA audio at half rate, which made long music streams underrun.
+    /// active: 75 sectors per second at single speed, 150 at double speed
+    /// (PSX-SPX "CDROM - Incoming Data / Buffer Overrun Timings"). An earlier
+    /// double-speed value of a full frame fed XA audio at half rate and made
+    /// long music streams underrun.
     fn sector_read_cycles(&self) -> u64 {
         if self.limit_fast_data() {
             return CD_READ_TIME / 16;
@@ -1678,7 +1665,7 @@ impl CdRom {
         self.reset_xa_stream();
         self.schedule_first_response(vec![self.stat_byte()]);
         let stat = self.stat_byte();
-        self.schedule_second_response(vec![stat], SEEK_SECOND_RESPONSE_CYCLES);
+        self.schedule_second_response(vec![stat], STOP_SECOND_RESPONSE_CYCLES);
     }
 
     fn cmd_pause(&mut self) {
@@ -1698,11 +1685,11 @@ impl CdRom {
         let ack_stat = self.stat_byte();
         self.schedule_first_response(vec![ack_stat]);
         let stat = self.stat_byte();
-        // Redux uses a short ~7000-cycle follow-up when the drive is
-        // already spun up ("standby"), and a much longer completion
-        // only when pausing from a stopped / not-ready state. Commercial titles hit
-        // the standby path: without the short follow-up, Redux raises a
-        // general CDROM IRQ ~7k cycles later and we don't.
+        // Gate-pinned: a short follow-up when the drive is already spun up
+        // ("standby"), a much longer one only from a stopped / not-ready
+        // state. Commercial titles hit the standby path. PSX-SPX's PSone
+        // figures differ (see `cdrom/timing.rs`) and moving to them changes
+        // every compat hash.
         let delay = if was_motor_on {
             PAUSE_COMPLETE_CYCLES_STANDBY
         } else if self.mode & 0x80 != 0 {
@@ -1722,8 +1709,8 @@ impl CdRom {
     /// CdlReadToc (0x1E): re-scan the disc table-of-contents.
     /// Two-part response:
     /// - INT3 (Acknowledge) with stat, immediately.
-    /// - INT2 (Complete) with stat, ~20 M cycles later (Redux:
-    ///   `cdReadTime * 180 / 4 = 20_321_280`). No track data is
+    /// - INT2 (Complete) with stat, about one second later (PSX-SPX
+    ///   "ReadTOC": "about 1 second delay"). No track data is
     ///   returned in either response -- the BIOS queries individual
     ///   track info via GetTD after ReadTOC completes.
     ///
@@ -1735,10 +1722,6 @@ impl CdRom {
     fn cmd_read_toc(&mut self) {
         let stat = self.stat_byte();
         self.schedule_first_response(vec![stat]);
-        // Redux value: `cdReadTime * 180 / 4`. We inline the
-        // literal to avoid introducing a new named constant
-        // here.
-        const READ_TOC_SECOND_RESPONSE_CYCLES: u64 = 451_584 * 180 / 4;
         self.schedule_second_response(vec![stat], READ_TOC_SECOND_RESPONSE_CYCLES);
     }
 
@@ -1758,9 +1741,9 @@ impl CdRom {
         self.last_sector_subheader = [0; 4];
         self.last_sector_header_valid = false;
         self.seek_header_valid_at = None;
-        // Redux returns only the pre-init ACK here; the later 20480
-        // cycle work happens on the lid/rescan state machine, not as a
-        // second CPU-visible CDROM completion IRQ.
+        // Init returns only the ACK here; the later work runs on the
+        // lid/rescan state machine, not as a second CPU-visible CDROM
+        // completion IRQ (gate-pinned).
         self.schedule_first_response(vec![self.stat_byte()]);
         self.seek_done = true;
         self.motor_on = true;
@@ -1811,10 +1794,10 @@ impl CdRom {
         self.muted = false;
         let stat = self.stat_byte();
         if complete_pending && !ack_pending {
-            // Redux's `m_irqRepeated` path leaves `m_irq` pointing at
-            // CdlReset+0x100. The replacement 0x800-cycle interrupt
-            // therefore publishes the pending completion, not another
-            // ACK. A commercial BIOS reset loop depends on seeing that INT2.
+            // A Reset issued while its own completion is still pending
+            // publishes that completion again instead of a fresh ACK. A
+            // commercial BIOS reset loop depends on seeing that INT2
+            // (gate-pinned).
             self.schedule_first_complete_response(vec![stat]);
         } else {
             self.schedule_first_response(vec![stat]);
@@ -1832,10 +1815,9 @@ impl CdRom {
         self.halt_cdda();
         self.cdda_sample_index = 0;
         self.schedule_first_response(vec![self.stat_byte()]);
-        // Redux's seek-complete interrupt clears STATUS_SEEK before
-        // publishing the second response (`playInterrupt`), so the
-        // BIOS observes the motor/rotating bit only once the seek is
-        // done. Returning SEEK here makes the license boot path think
+        // The seek-complete response reports the status with the SEEK bit
+        // already clear, so the BIOS sees the motor/rotating bit only once the
+        // seek is done. Returning SEEK here makes the license boot path think
         // the drive is still unsettled.
         let stat = self.stat_byte() & !drive_status_bit::SEEKING;
         // Charge the measured mech curve for the actual head travel. The
@@ -1924,13 +1906,10 @@ impl CdRom {
             let (m, s, f) = self.setloc_msf;
             self.read_lba = msf_to_lba(m, s, f);
         }
-        // Redux arms the first ReadN/ReadS sector from inside the
-        // command ACK handler (`interrupt()`), not from the original
-        // command write. Chaining it off the ACK keeps the first
-        // DataReady deadline anchored on the actual ACK service cycle
-        // rather than `scheduling_cycle`, which otherwise lands the
-        // first sector ~0x800 cycles too early and makes commercial titles service
-        // a CDROM IRQ before Redux does.
+        // The first ReadN/ReadS sector is armed from the command's ACK, not
+        // from the command write. Chaining it off the ACK anchors the first
+        // DataReady deadline on the actual ACK cycle; anchoring on the write
+        // lands the first sector ~0x800 cycles early (gate-pinned).
         self.chain_followup(
             IrqType::DataReady,
             vec![self.stat_byte()],
@@ -1958,8 +1937,9 @@ impl CdRom {
     /// `tick` once per sector event.
     ///
     /// Returns whether this sector should raise the CPU-visible
-    /// DataReady IRQ. Redux suppresses DataReady for XA audio sectors
-    /// while STRSND is enabled, but still schedules the next sector.
+    /// DataReady IRQ. DataReady is suppressed for XA audio sectors while
+    /// XA-ADPCM is enabled (mode bit 6), but the next sector is still
+    /// scheduled.
     fn load_next_sector(&mut self) -> bool {
         let lba = self.read_lba;
         self.read_lba = self.read_lba.wrapping_add(1);
@@ -1987,8 +1967,8 @@ impl CdRom {
                 // With XA-ADPCM enabled, a Mode 2 sector flagged audio and
                 // real-time belongs to the ADPCM decoder. It is never put in
                 // the host-side sector buffer and raises no DataReady,
-                // whether or not the filter lets it play (DuckStation does
-                // the same). Touching the buffer here would wipe a data
+                // whether or not the filter lets it play. Touching the buffer
+                // here would wipe a data
                 // sector the CPU was told about but has not read yet, which
                 // is every video sector ahead of an audio one in an STR
                 // stream.
@@ -2191,12 +2171,9 @@ impl CdRom {
             start_lba
         };
         let (m, s, _f) = lba_to_msf(target_lba);
-        // PCSX-Redux's CdlGetTD path calls SetResultSize(4) but only
-        // writes stat/min/sec, leaving the fourth result byte at the
-        // controller's zero-initialized slot. The BIOS CDROM handler
-        // drains all four bytes by polling status bit 5; publishing
-        // only three makes it skip one poll/drain loop and breaks
-        // cycle parity in a commercial boot path.
+        // PSX-SPX documents GetTD as stat, minutes, seconds. A fourth zero
+        // byte is also pushed (gate-pinned: the Nightmare Creatures compat
+        // hashes move without it).
         self.schedule_first_response(vec![self.stat_byte(), bin_to_bcd(m), bin_to_bcd(s), 0x00]);
     }
 
@@ -2300,16 +2277,11 @@ impl CdRom {
     }
 
     fn cmd_test(&mut self, params: &[u8]) {
-        // Only Test 0x20 (drive version / BIOS date) is commonly used
-        // by the BIOS. Must match Redux byte-for-byte -- the BIOS's
-        // IRQ handler stores the 4-byte response into a kernel
-        // buffer, and later code paths read those bytes back to
-        // dispatch on firmware version. Parity step 89,184,517
-        // diverged on a byte out of this buffer.
-        //
-        // Redux (cdrom.cc): `Test20[] = {0x98, 0x06, 0x10, 0xC3}`.
-        // Format is YY MM DD VER -- 1998-06-10 v0xC3, matching the
-        // SCPH-550x / 700x firmware Redux targets by default.
+        // Only Test 0x20 (drive version / BIOS date) is commonly used by
+        // the BIOS, which stores the 4-byte response in a kernel buffer and
+        // dispatches on the firmware version later, so the bytes matter.
+        // Format is YY MM DD VER; 98h,06h,10h,C3h is the PU-22 entry in
+        // PSX-SPX's table of CDROM firmware versions (10 Jun 1998, vC3 (a)).
         match params.first().copied() {
             Some(0x20) => {
                 self.schedule_first_response(vec![0x98, 0x06, 0x10, 0xC3]);
@@ -2320,14 +2292,15 @@ impl CdRom {
 
     fn cmd_getid(&mut self) {
         if self.disc_present {
-            // Match PCSX-Redux's BIOS-visible response exactly:
-            // stat, licensed flags clear, two reserved zeros, then a
-            // benign four-byte controller ID. The BIOS has already
-            // verified the region/license string by reading the early
-            // data sectors; returning SCEA/SCEE here made every local
-            // disc reach the license screen and then fall back to the
-            // shell's repeated Init loop instead of continuing into the
-            // filesystem boot path.
+            // Not the licensed-disc response of PSX-SPX (stat 02h, flags 00h,
+            // type 20h, then "SCEx"): stat, zero flags and type, then the
+            // four-byte ID "PCSX". The BIOS has already verified the
+            // region/license string by reading the early data sectors, and
+            // returning SCEA/SCEE here made every local disc reach the license
+            // screen and then fall back into the shell's repeated Init loop
+            // instead of continuing into the filesystem boot path. A real-BIOS
+            // boot is the only gate for this response, and none is wired up;
+            // revisit it with one.
             let stat = self.stat_byte();
             self.schedule_first_response(vec![stat]);
             self.schedule_second_response(
@@ -2362,9 +2335,8 @@ impl CdRom {
         self.tick_with_irq_pending(cycles_now, false)
     }
 
-    /// Variant used by the full bus: Redux's CD read interrupt also
-    /// sees the CPU interrupt controller and applies one extra sector
-    /// delay if the CDROM IRQ bit is still pending there.
+    /// Variant used by the full bus, which also passes whether the CPU
+    /// interrupt controller still holds a CDROM interrupt.
     pub fn tick_with_irq_pending(&mut self, cycles_now: u64, cdrom_irq_pending: bool) -> bool {
         let mut raised = false;
 
@@ -2372,11 +2344,9 @@ impl CdRom {
         self.complete_cdda_seek(cycles_now);
 
         while let Some(front) = self.pending.front() {
-            // Redux's scheduled interrupt queue only dispatches when
-            // `target < cycle` (see `R3000Acpu::branchTest`). CDROM
-            // responses live on that queue, unlike root counters /
-            // VBlank which update on equality. Keep CDROM strict so a
-            // BIOS poll on the exact target cycle still sees no IRQ.
+            // CDROM events fire only once their deadline is strictly in
+            // the past, so a BIOS poll on the exact deadline cycle still sees
+            // no IRQ (gate-pinned; root counters and VBlank fire on equality).
             if front.deadline >= cycles_now {
                 break;
             }
@@ -2408,8 +2378,7 @@ impl CdRom {
                 // Bump the front event's deadline slightly so the
                 // next tick re-checks, rather than spinning on an
                 // already-due event every tick until the ack lands.
-                // Matches Redux's `irqReschedule` cadence exactly
-                // without ever re-running the event body.
+                // The event body is never re-run.
                 let delay = IRQ_RESCHEDULE_CYCLES;
                 if let Some(mut ev) = self.pending.pop_front() {
                     ev.deadline = cycles_now.saturating_add(delay);
@@ -2498,8 +2467,8 @@ impl CdRom {
             if !should_raise_irq {
                 continue;
             }
-            // Like Redux's `m_result`, each IRQ publishes a fresh
-            // packet rather than appending to any unread prior bytes.
+            // Each IRQ publishes a fresh packet rather than appending to any
+            // unread prior bytes.
             self.responses.clear();
             for b in ev.bytes.iter().copied() {
                 if self.responses.len() < RESPONSE_FIFO_DEPTH {
@@ -2598,21 +2567,20 @@ impl CdRom {
     /// register at 0x1F801800). Low-level writes to 0x1F801801-3
     /// are routed through this index -- reading 0x1F801803 with
     /// index=0 returns the IRQ mask, with index=1 returns the
-    /// IRQ flag. Probes compare this against Redux's to catch
-    /// index-tracking drift.
+    /// IRQ flag.
     pub fn index_value(&self) -> u8 {
         self.index
     }
 
     /// Current CDROM IRQ mask (the per-IRQ-type enable bits -- the
     /// CPU-level I_MASK is separate). Written via 0x1F801802
-    /// index=1. `setIrq` in Redux (and our raise-gate) checks
-    /// `irq_flag & irq_mask` before waking the CPU.
+    /// index=1. The raise gate checks `irq_flag & irq_mask` before waking
+    /// the CPU.
     pub fn irq_mask_value(&self) -> u8 {
         self.irq_mask
     }
 
-    /// Redux-equivalent `setIrq()` gate: the CDROM only escalates
+    /// The CDROM only escalates
     /// a latched IRQ to the PSX IRQ controller (I_STAT bit 2) when
     /// `irq_flag & irq_mask` is nonzero. When it's zero the
     /// response stays latched for polled access via 0x1F801803
@@ -2680,8 +2648,8 @@ xa_filter=({},{}) sched_cycle={} read_lba={} now={} pending=[{}]",
     }
 
     /// Front pending event as `(deadline, irq_type)`. Lets probes
-    /// compare the next latched CDROM action against Redux without
-    /// exposing the full private queue.
+    /// compare the next latched CDROM action against a reference trace
+    /// without exposing the full private queue.
     pub fn next_pending_event(&self) -> Option<(u64, IrqType)> {
         self.pending.front().map(|ev| (ev.deadline, ev.irq))
     }
@@ -2744,10 +2712,9 @@ xa_filter=({},{}) sched_cycle={} read_lba={} now={} pending=[{}]",
         self.pop_data_fifo_byte()
     }
 
-    /// Pull one byte for DMA3. Redux gates CDROM DMA on the sector
-    /// ready flag (`m_read`), not on the request-register transfer
-    /// latch that controls MMIO reads, so DMA drains the buffered
-    /// sector directly.
+    /// Pull one byte for DMA3. DMA is gated on the sector-ready flag, not
+    /// on the request-register transfer latch that controls MMIO reads, so
+    /// DMA drains the buffered sector directly (gate-pinned).
     pub fn pop_dma_data_byte(&mut self) -> u8 {
         self.data_fifo_pops = self.data_fifo_pops.saturating_add(1);
         let byte = self.data_fifo.pop_front().unwrap_or(0);
