@@ -28,12 +28,12 @@
 //!
 //! ## Provenance
 //!
-//! Implemented from public hardware documentation (nocash PSX-SPX) and
-//! parity-verified against PCSX-Redux
-//! (<https://github.com/grumpycoders/pcsx-redux>), GPL-2.0-or-later;
-//! correspondences are flagged inline with `Redux` references. PSoXide is
-//! released under GPL-2.0-or-later for compatibility with that reference.
-//! See `LICENSE` and `docs/license-audit.md`.
+//! Written from the nocash PSX-SPX "Controllers and Memory Cards"
+//! chapters: the 01h/42h/5Ah poll sequence, the configuration commands
+//! (43h, 44h, 4Dh and the query commands), the rumble mapping, and the
+//! "Memory Card Data Format" layout for a freshly formatted card. The
+//! ACK timing is the project's own measurement on an SCPH-1200 (see the
+//! `controller_test` record). See `LICENSE` and `docs/license-audit.md`.
 
 /// Logical button bit positions. `ButtonState::bits()` returns a
 /// `u16` where bit N = 1 means button N is currently held. The
@@ -1036,10 +1036,11 @@ impl DigitalPad {
         }
         match self.motor_mapping[slot] {
             0x00 => {
-                // Small motor -- binary on/off. Any value != 0xFF
-                // means off; 0xFF means on. Redux matches this
-                // in `pad/controller.cc`.
-                self.motor_small = tx == 0xFF;
+                // Small motor -- digital on/off. PSX-SPX ("Controllers
+                // - Configuration Commands", the normal-mode 42h
+                // read): the right/small motor is driven by bit 0 of
+                // the mapped byte, 0 = off, 1 = on.
+                self.motor_small = tx & 1 != 0;
             }
             0x01 => {
                 // Big motor -- strength directly from the byte.
@@ -1159,9 +1160,9 @@ pub enum MemcardEventKind {
 /// this struct just holds the live bytes and the "NEW" (never
 /// written) flag.
 pub struct MemoryCard {
-    /// Live contents. 128 KiB. Fresh cards use the same formatted
-    /// header/directory layout PCSX-Redux creates for a missing
-    /// memcard file, starting with the `MC` signature in frame 0.
+    /// Live contents. 128 KiB. Fresh cards carry the layout PSX-SPX
+    /// describes for a freshly formatted card (see `formatted_bytes`),
+    /// starting with the `MC` signature in frame 0.
     bytes: Box<[u8; MEMCARD_SIZE]>,
     /// "New card" sticky flag. Hardware sets bit 3 of the flag
     /// byte after power-on until the first successful Write, then
@@ -1184,8 +1185,11 @@ pub struct MemoryCard {
     byte_index: usize,
     /// Serial data register. Memory-card traffic is full-duplex: the
     /// byte returned for this transfer is the response prepared by the
-    /// previous transfer. PCSX-Redux models that with `m_spdr`; keep
-    /// the same one-byte delay so BIOS card probes take the same path.
+    /// previous transfer: the card cannot act on a byte before it has
+    /// been fully received, so the reply clocked out during byte N was
+    /// queued while handling byte N-1. This is a property of the model
+    /// (it keeps the reply order the BIOS card probes see), not of any
+    /// external reference.
     spdr: u8,
     /// Whether any Write has landed since construction. Feeds the
     /// `flag_new` transition and lets the frontend know whether to
@@ -1295,13 +1299,16 @@ impl MemoryCard {
     fn formatted_bytes() -> Box<[u8; MEMCARD_SIZE]> {
         let mut bytes = Box::new([0u8; MEMCARD_SIZE]);
 
-        // Matches PCSX-Redux's `MemoryCard::createMcd`: sector 0
-        // starts with the standard "MC" signature and checksum byte.
+        // PSX-SPX "Memory Card Data Format", header frame (block 0,
+        // frame 0): ASCII "MC", zeros, then byte 7Fh holding the XOR of
+        // the 127 bytes before it, 'M' ^ 'C' = 0Eh.
         bytes[0] = b'M';
         bytes[1] = b'C';
         bytes[0x7f] = 0x0e;
 
-        // Directory frames 1..=15 are marked free/formatted.
+        // Directory frames 1..=15: allocation state A0h (free,
+        // freshly formatted), next-block pointer FFFFh (none), filename
+        // and size zero, checksum = A0h ^ FFh ^ FFh = A0h.
         for frame in 1..=15 {
             let base = frame * MEMCARD_FRAME_SIZE;
             bytes[base] = 0xa0;
@@ -1310,8 +1317,11 @@ impl MemoryCard {
             bytes[base + 0x7f] = 0xa0;
         }
 
-        // Broken-sector replacement area Redux seeds after the
-        // directory. The remaining card bytes stay zeroed.
+        // Broken sector list, frames 16..=35: sector number FFFFFFFFh
+        // (none). PSX-SPX notes that some cards also hold FFFFh at
+        // 08h..09h; the XOR of those six 0xFF bytes is 0, which is the
+        // checksum already in place. The remaining card bytes stay
+        // zeroed.
         for frame in 16..36 {
             let base = frame * MEMCARD_FRAME_SIZE;
             bytes[base] = 0xff;
@@ -2121,20 +2131,21 @@ mod tests {
     }
 
     #[test]
-    fn small_motor_turns_off_with_non_ff_tx() {
-        let mut pad = DigitalPad::new();
-        pad.mode = PadMode::Analog;
-        pad.motor_mapping = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
-        pad.motor_small = true;
-        // Poll.
-        let _ = pad.exchange(0x42);
-        let _ = pad.exchange(0x00);
-        // Any non-0xFF value turns the small motor off.
-        let _ = pad.exchange(0x00);
-        for _ in 3..=7 {
+    fn small_motor_follows_bit_zero_of_mapped_byte() {
+        // PSX-SPX: the small motor is a digital on/off driven by bit 0.
+        for (tx, on) in [(0x00, false), (0x01, true), (0xFE, false), (0xFF, true)] {
+            let mut pad = DigitalPad::new();
+            pad.mode = PadMode::Analog;
+            pad.motor_mapping = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+            // Poll command, fill byte, then the mapped slot.
+            let _ = pad.exchange(0x42);
             let _ = pad.exchange(0x00);
+            let _ = pad.exchange(tx);
+            for _ in 3..=7 {
+                let _ = pad.exchange(0x00);
+            }
+            assert_eq!(pad.motor_state(), (on, 0), "tx {tx:#04x}");
         }
-        assert_eq!(pad.motor_state(), (false, 0));
     }
 
     // --- MemoryCard tests ---
