@@ -53,7 +53,7 @@ pub unsafe fn build_cmd_log_into<const N: usize>(
     log.clear();
     let mut command_index = 0u32;
     // SAFETY: contract above forwards directly to iter_packets.
-    let iter = unsafe { ot.iter_packets() };
+    let iter = unsafe { ot.packets() };
     for (packet_ptr, words) in iter {
         let words = words as usize;
         let mut offset = 0usize;
