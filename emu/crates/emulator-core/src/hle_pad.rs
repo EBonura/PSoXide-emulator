@@ -154,7 +154,7 @@ pub fn init_pad(bus: &mut Bus, buf1: u32, siz1: u32, buf2: u32, siz2: u32) -> u3
 }
 
 /// Reset SIO0 and set the controller rate and character format.
-fn setup_sio0(bus: &mut Bus) {
+pub(crate) fn setup_sio0(bus: &mut Bus) {
     bus.write16(SIO_CTRL, CTRL_RESET);
     bus.write16(SIO_MODE, MODE);
     bus.write16(SIO_BAUD, BAUD);
