@@ -55,9 +55,9 @@ bios = "in-game"
 fmv = "n/a"
 issues = ["Adventure, New, a typed name, save to card 1, then the hub; the HLE is about 0.04 s ahead of the real kernel after 20 s of loading (was 0.13 s before the CD head fix)"]
 evidence = "headless frames"
-hle_hash = "0xdf1b9dd73e8abe60"
+hle_hash = "0x80b3607cbbcc4bc6"
 bios_hash = "0x4b009f4e64024bd6"
-measured_on = "c587034"
+measured_on = "306902b18"
 
 [gt2]
 hle = "in-game"
@@ -75,9 +75,9 @@ bios = "in-game"
 fmv = "none seen"
 issues = ["Circle confirms in its menus and Cross cancels (the old 'Start ignored' was the scripted Cross backing out); FMV not reached in the run"]
 evidence = "headless frames"
-hle_hash = "0xcee825266933d95a"
+hle_hash = "0x2a35545c8404ceee"
 bios_hash = "0x166249f326e0d402"
-measured_on = "c587034"
+measured_on = "306902b18"
 
 [mslugx]
 hle = "in-game"
@@ -95,9 +95,9 @@ bios = "in-game"
 fmv = "plays"
 issues = ["the arcade opponent is random, so the fight differs between the kernels"]
 evidence = "headless frames"
-hle_hash = "0xd6a05ced785f1bfc"
+hle_hash = "0xd4386bdc379fa16f"
 bios_hash = "0xaf352eb970e4f4b9"
-measured_on = "c587034"
+measured_on = "306902b18"
 
 [re2]
 hle = "in-game"
@@ -145,9 +145,9 @@ bios = "in-game"
 fmv = "plays"
 issues = ["the arcade opponent differs between the kernels; the HLE is about 0.05 s ahead after the first 6 s of loading (was 0.22 s before the CD head fix)"]
 evidence = "headless frames"
-hle_hash = "0x38f3e57719614ae3"
+hle_hash = "0x525612d66ab0ec14"
 bios_hash = "0xf346e8a80b59a599"
-measured_on = "c587034"
+measured_on = "306902b18"
 
 [tombraider]
 hle = "in-game"
@@ -155,9 +155,9 @@ bios = "in-game"
 fmv = "plays"
 issues = ["was black after Start Game under both kernels: the CloneCD loader put track 2's pregap in track 1, and CD-DA play could not start in a pregap; both fixed"]
 evidence = "headless frames"
-hle_hash = "0xa027eb6252f4d5ee"
+hle_hash = "0x80fc26675f351296"
 bios_hash = "0xa027eb6252f4d5ee"
-measured_on = "c587034"
+measured_on = "306902b18"
 
 [wipeout]
 hle = "in-game"
@@ -165,9 +165,9 @@ bios = "in-game"
 fmv = "plays"
 issues = []
 evidence = "headless frames"
-hle_hash = "0x736a246ee670a460"
+hle_hash = "0x3ef2e5466e848726"
 bios_hash = "0xd16559d105be2f90"
-measured_on = "c587034"
+measured_on = "306902b18"
 
 [wipeout2097]
 hle = "in-game"
@@ -175,9 +175,9 @@ bios = "in-game"
 fmv = "n/a"
 issues = []
 evidence = "headless frames"
-hle_hash = "0xeef0c4ac7cf7ba1e"
+hle_hash = "0x4895208a933e7cde"
 bios_hash = "0xcd065b064e2295e8"
-measured_on = "ad71bcc2b"
+measured_on = "306902b18"
 
 [wipeout3]
 hle = "in-game"
@@ -215,9 +215,9 @@ bios = "in-game"
 fmv = "plays"
 issues = ["the first fight differs between the kernels"]
 evidence = "headless frames"
-hle_hash = "0x2ac55ce4301147e9"
+hle_hash = "0xf7b2f6d3382a532d"
 bios_hash = "0xd2a646f221d3b982"
-measured_on = "c587034"
+measured_on = "306902b18"
 
 [f12001]
 hle = "in-game"
