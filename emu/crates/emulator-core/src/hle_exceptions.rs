@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Exception core of the HLE kernel: exception vector, handler, priority
-//! chains, events, root-counter and default IRQ handlers, SYSCALL 1/2/3,
-//! and threads.
+//! Exception core of the HLE kernel: the exception vector, the handler at
+//! C(06h), ReturnFromException, the priority chains, events, threads, the
+//! root-counter and default IRQ handlers, and SYSCALL 0..3.
 //!
-//! The parts that call guest code or are patched by games run as guest
-//! MIPS code assembled at boot ([`crate::hle_asm`]): the vector at 80h,
-//! the exception handler at C(06h), ReturnFromException, DeliverEvent,
-//! the root-counter and default-IRQ verifiers. Their layout and register
-//! protocol follow psx-spx "BIOS Interrupt/Exception Handling" and the
-//! OpenBIOS handler (pcsx-redux src/mips/openbios/kernel/vectors.s, MIT),
-//! which keeps the retail offsets that Psy-Q kernel patches write to.
-//! Functions that only touch kernel structures are HLE traps. All state
-//! lives in guest RAM: the ExCB chains, EvCBs and TCBs from the table of
-//! tables, and the variables in [`kvar`].
+//! Code that calls back into the game, or that games patch or decode, is
+//! guest MIPS assembled at boot with [`crate::hle_asm`]: the vector, the
+//! handler, ReturnFromException, DeliverEvent, the root-counter and
+//! default-IRQ verifiers, Exec, GetConf and the early card routine. The
+//! rest is host code behind HLE traps. All state lives in guest RAM: the
+//! ExCB chains, EvCBs and TCBs reached through the table of tables, and
+//! the variables in [`kvar`].
+//!
+//! Sources: psx-spx "BIOS Interrupt/Exception Handling", "BIOS Control
+//! Blocks", "BIOS Event Functions", "BIOS Event Summary", "BIOS Thread
+//! Functions", "BIOS Timer Functions", "BIOS File Execute and Flush Cache",
+//! "BIOS Memory Map", "BIOS Patches" and "CPU Specifications" (interrupts
+//! on GTE commands). Where psx-spx leaves a choice open, the choice is
+//! noted where it is made.
 
 use crate::hle_asm::*;
 use crate::hle_kernel::{peek32, poke32, stub_addr, TOT};
@@ -40,6 +44,10 @@ const HI_DEFINT: u32 = KERNEL_DATA + 0x90;
 /// Default IRQ handler table: (I_STAT bit, event class, auto-ack variable)
 /// per entry, terminated by a zero bit.
 const DEFINT_TABLE: u32 = KERNEL_DATA + 0xA0;
+/// Exec nesting depth, then [`EXEC_SLOTS`] header addresses.
+const EXEC_DEPTH: u32 = KERNEL_DATA + 0x128;
+const EXEC_STACK: u32 = KERNEL_DATA + 0x12C;
+const EXEC_SLOTS: u32 = 5;
 
 /// Kernel variables used by the exception core.
 pub mod kvar {
@@ -119,501 +127,620 @@ pub fn code() -> &'static KernelCode {
     CODE.get_or_init(assemble)
 }
 
-fn assemble() -> KernelCode {
-    let mut a = Asm::new(KERNEL_CODE);
+// ------------------------------------------------------------ guest code
 
-    // getCop0CauseAndEPC: v0 = CAUSE, v1 = EPC.
-    a.label("cause_epc");
-    a.mfc0(V0, 13);
-    a.mfc0(V1, 14);
-    a.jr(RA);
-    a.nop();
+/// Offsets inside a TCB (psx-spx "BIOS Control Blocks").
+mod tcb {
+    /// Status word (1000h free, 4000h used).
+    pub const STATUS: u32 = 0x00;
+    /// Second word, set to 1000h by OpenTh.
+    pub const MODE: u32 = 0x04;
+    /// r0..r31, four bytes each.
+    pub const REGS: u32 = 0x08;
+    /// Return PC.
+    pub const EPC: u32 = 0x88;
+    pub const HI: u32 = 0x8C;
+    pub const LO: u32 = 0x90;
+    pub const SR: u32 = 0x94;
+    pub const CAUSE: u32 = 0x98;
 
-    // ReturnFromException: restore the current TCB's frame and rfe.
-    // r26/k0 is not restored (psx-spx); k1 is, last (OpenBIOS: games rely
-    // on k1 surviving interrupts).
-    a.label("rfe");
-    a.addiu(K1, ZERO, TOT as i16);
-    a.lw(K1, 8, K1);
-    a.nop();
-    a.lw(K1, 0, K1);
-    a.nop();
-    a.lw(V0, 0x90, K1);
-    a.addiu(K1, K1, 8);
-    a.mtlo(V0);
-    a.lw(V1, 0x84, K1);
-    a.lw(K0, 0x80, K1);
-    a.mthi(V1);
-    a.lw(A1, 0x8C, K1);
-    a.lw(AT, 0x04, K1);
-    a.mtc0(A1, 12);
-    for (reg, off) in (2..=25).map(|r| (r, (4 * r) as i16)) {
-        a.lw(reg, off, K1);
+    /// Offset of register `r`.
+    pub const fn reg(r: u32) -> u32 {
+        REGS + 4 * r
     }
-    a.lw(GP, 0x70, K1);
-    a.lw(SP, 0x74, K1);
-    a.lw(FP, 0x78, K1);
-    a.lw(RA, 0x7C, K1);
-    a.lw(K1, 0x6C, K1);
+}
+
+/// Table-of-tables words the guest code reads: the ExCB base, the PCB
+/// (whose first word is the current TCB) and the EvCB base and size.
+const TOT_EXCB: i16 = TOT as i16;
+const TOT_PCB: i16 = TOT as i16 + 0x08;
+const TOT_EVCB: i16 = TOT as i16 + 0x20;
+const TOT_EVCB_SIZE: i16 = TOT as i16 + 0x24;
+
+/// Root counter `n` (0..2 timers, 3 VBlank): its I_STAT/I_MASK bit.
+fn rcnt_irq_bit(n: u32) -> u32 {
+    if n == 3 {
+        1
+    } else {
+        0x10 << n
+    }
+}
+
+/// Load the current TCB into `reg`: `[[100h + 08h]]`.
+fn current_tcb_into(a: &mut Asm, reg: u32) {
+    a.lw(reg, TOT_PCB, ZERO);
+    a.nop();
+    a.lw(reg, 0, reg);
+    a.nop();
+}
+
+/// psx-spx "Interrupts vs GTE Commands": when the exception is an
+/// interrupt and the opcode at EPC is a GTE command, that command has
+/// already run, so the return address moves past it. `cause` and `epc`
+/// hold the COP0 values; `epc` is adjusted in place, `tmp` is clobbered.
+fn skip_interrupted_gte_command(a: &mut Asm, cause: u32, epc: u32, tmp: u32, done: &'static str) {
+    a.andi(tmp, cause, 0x7C);
+    a.bnez(tmp, done);
+    a.nop();
+    a.lw(tmp, 0, epc);
+    a.nop();
+    a.srl(tmp, tmp, 25);
+    a.xori(tmp, tmp, 0x25);
+    a.bnez(tmp, done);
+    a.nop();
+    a.addiu(epc, epc, 4);
+    a.label(done);
+}
+
+/// Offset in the handler of the first of its four 4-word call slots.
+pub const HANDLER_SLOTS: u32 = 0x70;
+
+/// The exception handler at C(06h).
+///
+/// Its first 70h bytes are laid out the way psx-spx's "BIOS Patches"
+/// listings show the retail kernel, because games rewrite them:
+///
+/// * +00h..+0Ch spare `nop`s;
+/// * +10h..+24h `k0` = current TCB + 8 (the register area);
+/// * +28h..+34h at, v0, v1 and ra saved there;
+/// * +38h `v1` = EPC, +40h `v0` = cause.
+///
+/// The "missing cop0r13" patch rewrites +00h..+37h with an equivalent
+/// prologue that leaves `v0` = cause; the variant that first checks
+/// +28h..+3Bh finds the words it expects and rewrites +28h..+3Fh. Either
+/// way the code from +40h on re-reads what it needs. Then come the four
+/// call slots at +70h (slot 1 is the early card routine's, slot 2 the
+/// lightgun hook's), which run with only at, v0, v1 and ra saved.
+///
+/// After the slots: save the rest of the registers, HI/LO, SR, cause and
+/// EPC (moved past an interrupted GTE command), switch to the exception
+/// stack and walk the four ExCB chains. For each element the first
+/// function runs; when it returns nonzero the second runs with that value
+/// in `a0`. Elements that finish the exception jump to
+/// ReturnFromException. When all chains are done, the exit buffer
+/// (HookEntryInt) is jumped through with `v0` = 1.
+fn assemble_handler() -> Vec<u32> {
+    let mut a = Asm::new(crate::hle_kernel::EXCEPTION_HANDLER);
+    for _ in 0..4 {
+        a.nop();
+    }
+    a.addiu(K0, ZERO, TOT_PCB - 8); // 100h
+    a.lw(K0, 8, K0);
+    a.nop();
+    a.lw(K0, 0, K0);
+    a.nop();
+    a.addi(K0, K0, tcb::REGS as i16);
+    debug_assert_eq!(a.here(), crate::hle_kernel::EXCEPTION_HANDLER + 0x28);
+    a.sw(AT, 4 * AT as i16, K0);
+    a.sw(V0, 4 * V0 as i16, K0);
+    a.sw(V1, 4 * V1 as i16, K0);
+    a.sw(RA, 4 * RA as i16, K0);
+    a.mfc0(V1, 14);
+    a.nop();
+    a.mfc0(V0, 13);
+    a.nop();
+    while a.here() < crate::hle_kernel::EXCEPTION_HANDLER + HANDLER_SLOTS {
+        a.nop();
+    }
+    for _ in 0..16 {
+        a.nop();
+    }
+
+    // Full save. The slots may have used k0, so the TCB is looked up again.
+    current_tcb_into(&mut a, K0);
+    for r in (4..=25).chain(27..=31) {
+        if r != RA {
+            a.sw(r, tcb::reg(r) as i16, K0);
+        }
+    }
+    a.mfhi(T0);
+    a.mflo(T1);
+    a.sw(T0, tcb::HI as i16, K0);
+    a.sw(T1, tcb::LO as i16, K0);
+    a.mfc0(T0, 12);
+    a.mfc0(T1, 13);
+    a.mfc0(T2, 14);
+    a.sw(T0, tcb::SR as i16, K0);
+    a.sw(T1, tcb::CAUSE as i16, K0);
+    skip_interrupted_gte_command(&mut a, T1, T2, T3, "epc_ready");
+    a.sw(T2, tcb::EPC as i16, K0);
+
+    // Chains, priority 0 first, on the kernel's exception stack.
+    a.lw(SP, kvar::EXCEPTION_SP as i16, ZERO);
+    a.mov(S0, ZERO);
+    a.label("prio");
+    a.lw(T0, TOT_EXCB, ZERO);
+    a.nop();
+    a.addu(T0, T0, S0);
+    a.lw(S1, 0, T0);
+    a.nop();
+    a.label("element");
+    a.beqz(S1, "prio_done");
+    a.nop();
+    // The next pointer is read first, so an element may unlink itself.
+    a.lw(S2, 0, S1);
+    a.lw(T1, 8, S1);
+    a.nop();
+    a.beqz(T1, "skip");
+    a.nop();
+    a.jalr(T1);
+    a.nop();
+    a.beqz(V0, "skip");
+    a.lw(T1, 4, S1);
+    a.nop();
+    a.beqz(T1, "skip");
+    a.nop();
+    a.jalr(T1);
+    a.mov(A0, V0);
+    a.label("skip");
+    a.b("element");
+    a.mov(S1, S2);
+    a.label("prio_done");
+    a.addiu(S0, S0, 8);
+    a.addiu(T0, ZERO, 0x20);
+    a.bne(S0, T0, "prio");
+    a.nop();
+
+    // Nothing ended the exception: leave through the exit buffer.
+    a.lw(T0, kvar::EXIT_JMPBUF as i16, ZERO);
+    a.nop();
+    longjmp_through(&mut a, T0);
+    a.finish()
+}
+
+/// Restore the setjmp-layout buffer at `buf` (psx-spx B(19h): ra, sp, fp,
+/// s0..s7, gp) and return into it with `v0` = 1.
+fn longjmp_through(a: &mut Asm, buf: u32) {
+    a.lw(RA, 0x00, buf);
+    a.lw(SP, 0x04, buf);
+    a.lw(FP, 0x08, buf);
+    for (k, r) in (S0..=S7).enumerate() {
+        a.lw(r, 0x0C + 4 * k as i16, buf);
+    }
+    a.lw(GP, 0x2C, buf);
+    a.jr(RA);
+    a.addiu(V0, ZERO, 1);
+}
+
+/// Restore every register but r0 and k0 from the current TCB, then return
+/// to its EPC with RFE in the jump's delay slot (psx-spx B(17h)).
+fn return_from_exception(a: &mut Asm) {
+    current_tcb_into(a, K0);
+    a.lw(T0, tcb::HI as i16, K0);
+    a.lw(T1, tcb::LO as i16, K0);
+    a.lw(T2, tcb::SR as i16, K0);
+    a.mthi(T0);
+    a.mtlo(T1);
+    a.mtc0(T2, 12);
+    for r in (1..=25).chain(27..=31) {
+        a.lw(r, tcb::reg(r) as i16, K0);
+    }
+    a.lw(K0, tcb::EPC as i16, K0);
+    a.nop();
     a.jr(K0);
     a.rfe();
+}
 
-    // DeliverEvent(class, spec): every EvCB that is enabled/busy (2000h)
-    // with this class and spec becomes ready (mode 2000h) or has its
-    // callback called (mode 1000h).
-    a.label("deliver_event");
+/// B(07h) DeliverEvent(class, spec): every EvCB that is enabled and busy
+/// with this class and spec either becomes ready (mode 2000h) or has its
+/// callback called (mode 1000h, staying busy).
+fn deliver_event(a: &mut Asm) {
     a.addiu(SP, SP, -24);
-    a.sw(RA, 0, SP);
-    a.sw(S0, 4, SP);
-    a.sw(S1, 8, SP);
-    a.sw(S2, 12, SP);
-    a.sw(S3, 16, SP);
+    a.sw(RA, 20, SP);
+    a.sw(S0, 16, SP);
+    a.sw(S1, 12, SP);
+    a.sw(S2, 8, SP);
+    a.sw(S3, 4, SP);
     a.mov(S2, A0);
     a.mov(S3, A1);
-    a.addiu(T0, ZERO, (TOT + 0x20) as i16);
-    a.lw(S0, 0, T0);
-    a.lw(S1, 4, T0);
+    a.lw(S0, TOT_EVCB, ZERO);
+    a.lw(S1, TOT_EVCB_SIZE, ZERO);
     a.nop();
     a.addu(S1, S0, S1);
     a.label("de_loop");
     a.sltu(T0, S0, S1);
     a.beqz(T0, "de_done");
     a.nop();
-    a.lw(T0, 4, S0);
-    a.ori(T1, ZERO, 0x2000);
+    a.lw(T0, 0x04, S0);
+    a.addiu(T1, ZERO, EV_BUSY as i16);
     a.bne(T0, T1, "de_next");
-    a.nop();
-    a.lw(T0, 0, S0);
+    a.lw(T0, 0x00, S0);
     a.nop();
     a.bne(T0, S2, "de_next");
-    a.nop();
-    a.lw(T0, 8, S0);
+    a.lw(T0, 0x08, S0);
     a.nop();
     a.bne(T0, S3, "de_next");
-    a.nop();
-    a.lw(T0, 12, S0);
-    a.ori(T1, ZERO, 0x2000);
+    a.lw(T0, 0x0C, S0);
+    a.addiu(T1, ZERO, EV_MODE_READY as i16);
     a.bne(T0, T1, "de_callback");
-    a.nop();
-    a.ori(T1, ZERO, 0x4000);
-    a.sw(T1, 4, S0);
+    a.addiu(T1, ZERO, EV_MODE_CALLBACK as i16);
+    a.addiu(T2, ZERO, EV_READY as i16);
     a.b("de_next");
-    a.nop();
+    a.sw(T2, 0x04, S0);
     a.label("de_callback");
-    a.ori(T1, ZERO, 0x1000);
     a.bne(T0, T1, "de_next");
+    a.lw(T2, 0x10, S0);
     a.nop();
-    a.lw(T0, 16, S0);
+    a.beqz(T2, "de_next");
     a.nop();
-    a.beqz(T0, "de_next");
-    a.nop();
-    a.jalr(T0);
+    a.jalr(T2);
     a.nop();
     a.label("de_next");
-    a.addiu(S0, S0, 0x1C);
     a.b("de_loop");
-    a.nop();
+    a.addiu(S0, S0, EVCB_SIZE as i16);
     a.label("de_done");
-    a.lw(RA, 0, SP);
-    a.lw(S0, 4, SP);
-    a.lw(S1, 8, SP);
-    a.lw(S2, 12, SP);
-    a.lw(S3, 16, SP);
+    a.lw(RA, 20, SP);
+    a.lw(S0, 16, SP);
+    a.lw(S1, 12, SP);
+    a.lw(S2, 8, SP);
+    a.lw(S3, 4, SP);
     a.jr(RA);
     a.addiu(SP, SP, 24);
+}
 
-    // Root-counter verifiers (OpenBIOS T0..T3verifier): if the IRQ is
-    // enabled and pending, DeliverEvent(F200000n, 2) and return 1.
-    const RCNT_LABELS: [(&str, &str); 4] = [
-        ("rcnt0", "rcnt0_no"),
-        ("rcnt1", "rcnt1_no"),
-        ("rcnt2", "rcnt2_no"),
-        ("rcnt3", "rcnt3_no"),
-    ];
-    for (n, (label, no)) in RCNT_LABELS.iter().enumerate() {
-        let bit = rcnt_irq_bit(n);
-        a.label(label);
-        a.lui(T1, IO_HI);
-        a.lw(T2, I_MASK, T1);
-        a.lw(T3, I_STAT, T1);
-        a.andi(T2, T2, bit as u16);
-        a.beqz(T2, no);
-        a.andi(T3, T3, bit as u16);
-        a.beqz(T3, no);
-        a.nop();
-        a.addiu(SP, SP, -8);
-        a.sw(RA, 0, SP);
-        a.lui(A0, 0xF200);
-        a.ori(A0, A0, n as u16);
-        a.jal("deliver_event");
-        a.addiu(A1, ZERO, 2);
-        a.lw(RA, 0, SP);
-        a.addiu(SP, SP, 8);
-        a.jr(RA);
-        a.addiu(V0, ZERO, 1);
-        a.label(no);
-        a.jr(RA);
-        a.mov(V0, ZERO);
-    }
-
-    // Default IRQ verifier (OpenBIOS IRQVerifier, lossless variant): for
-    // each enabled and pending IRQ, DeliverEvent(class, 1000h) and, when
-    // SetIrqAutoAck enabled it, acknowledge it. Always returns 0.
-    a.label("defint");
+/// Root-counter verifier `n`: when the counter's IRQ is both enabled and
+/// pending, deliver F2000000h+n / 0002h and return 1; otherwise 0.
+fn rcnt_verifier(a: &mut Asm, n: u32, skip: &'static str) {
+    a.lui(T0, IO_HI);
+    a.lw(T1, I_STAT, T0);
+    a.lw(T2, I_MASK, T0);
+    a.nop();
+    a.and(T1, T1, T2);
+    a.andi(T1, T1, rcnt_irq_bit(n) as u16);
+    a.beqz(T1, skip);
+    a.mov(V0, ZERO);
     a.addiu(SP, SP, -8);
-    a.sw(RA, 0, SP);
-    a.sw(S0, 4, SP);
+    a.sw(RA, 4, SP);
+    a.li(A0, 0xF200_0000 + n);
+    a.jal("deliver_event");
+    a.addiu(A1, ZERO, 2);
+    a.lw(RA, 4, SP);
+    a.addiu(SP, SP, 8);
+    a.addiu(V0, ZERO, 1);
+    a.label(skip);
+    a.jr(RA);
+    a.nop();
+}
+
+/// InitDefInt's verifier: for each IRQ in [`DEFINT`] order that is enabled
+/// and pending, deliver its class with spec 1000h (psx-spx "Default IRQ
+/// Handler Events"). The IRQs whose SetIrqAutoAck flag is set are then
+/// acknowledged together, after the scan. psx-spx does not say when the
+/// acknowledge happens; doing it once at the end means a delivery's
+/// callback still sees its IRQ pending. Always returns 0, so the chain
+/// goes on.
+fn defint_verifier(a: &mut Asm) {
+    a.addiu(SP, SP, -24);
+    a.sw(RA, 20, SP);
+    a.sw(S0, 16, SP);
+    a.sw(S1, 12, SP);
+    a.sw(S2, 8, SP);
+    a.lui(S1, IO_HI);
+    a.mov(S2, ZERO);
     a.li(S0, DEFINT_TABLE);
     a.label("di_loop");
     a.lw(T0, 0, S0);
     a.nop();
     a.beqz(T0, "di_done");
-    a.lui(T1, IO_HI);
-    a.lw(T2, I_STAT, T1);
-    a.lw(T3, I_MASK, T1);
+    a.lw(T1, I_STAT, S1);
+    a.lw(T2, I_MASK, S1);
+    a.and(T1, T1, T0);
     a.nop();
-    a.and(T2, T2, T3);
-    a.and(T2, T2, T0);
-    a.beqz(T2, "di_next");
+    a.and(T1, T1, T2);
+    a.beqz(T1, "di_next");
+    a.lw(T3, 8, S0);
     a.nop();
+    a.lw(T3, 0, T3);
+    a.nop();
+    a.beqz(T3, "di_deliver");
+    a.nop();
+    a.or(S2, S2, T0);
+    a.label("di_deliver");
     a.lw(A0, 4, S0);
     a.jal("deliver_event");
-    a.ori(A1, ZERO, 0x1000);
-    a.lw(T1, 8, S0);
-    a.lw(T0, 0, S0);
-    a.lw(T1, 0, T1);
-    a.nop();
-    a.beqz(T1, "di_next");
-    a.nor(T2, T0, ZERO);
-    a.lui(T1, IO_HI);
-    a.sw(T2, I_STAT, T1);
+    a.addiu(A1, ZERO, 0x1000);
     a.label("di_next");
     a.b("di_loop");
     a.addiu(S0, S0, 12);
     a.label("di_done");
-    a.lw(RA, 0, SP);
-    a.lw(S0, 4, SP);
-    a.addiu(SP, SP, 8);
+    a.beqz(S2, "di_out");
+    a.nor(T0, S2, ZERO);
+    a.sw(T0, I_STAT, S1);
+    a.label("di_out");
+    a.lw(RA, 20, SP);
+    a.lw(S0, 16, SP);
+    a.lw(S1, 12, SP);
+    a.lw(S2, 8, SP);
+    a.addiu(SP, SP, 24);
     a.jr(RA);
     a.mov(V0, ZERO);
+}
+
+/// A(43h) Exec(header, param1, param2), psx-spx: the caller's ra, sp, fp,
+/// gp and s0 go into the header's reserved words (+28h..+3Bh), the memfill region is cleared a word at a time, sp and fp
+/// become stack base + offset when the base is nonzero, gp comes from the
+/// header, and the entry runs with param1/param2 in a0/a1. If it returns,
+/// the saved registers come back and Exec returns 1.
+///
+/// psx-spx names the five registers but not their slots. Formula One 2001
+/// fixes them: its boot stub Execs each part of the game and, after one
+/// returns, crashes unless the words read sp at +28h, fp at +2Ch, gp at
+/// +30h and ra at +34h (s0 takes the last word). Other orders were tried
+/// against its hle_compat run.
+///
+/// The executable owns every register while it runs, so the header
+/// address is kept on a short kernel stack ([`EXEC_STACK`]) rather than in
+/// a register; nested Execs push and pop it.
+fn exec(a: &mut Asm) {
+    a.sw(SP, 0x28, A0);
+    a.sw(FP, 0x2C, A0);
+    a.sw(GP, 0x30, A0);
+    a.sw(RA, 0x34, A0);
+    a.sw(S0, 0x38, A0);
+    // Push the header; past the last slot the newest replaces the top.
+    a.lw(T0, EXEC_DEPTH as i16, ZERO);
+    a.addiu(T1, ZERO, EXEC_SLOTS as i16);
+    a.sltu(T1, T0, T1);
+    a.bnez(T1, "ex_push");
+    a.nop();
+    a.addiu(T0, ZERO, EXEC_SLOTS as i16 - 1);
+    a.label("ex_push");
+    a.sll(T1, T0, 2);
+    a.sw(A0, EXEC_STACK as i16, T1);
+    a.addiu(T0, T0, 1);
+    a.sw(T0, EXEC_DEPTH as i16, ZERO);
+    a.mov(S0, A0);
+    a.lw(T0, 0x18, S0);
+    a.lw(T1, 0x1C, S0);
+    a.nop();
+    a.beqz(T1, "ex_stack");
+    a.addu(T1, T0, T1);
+    a.label("ex_fill");
+    a.sw(ZERO, 0, T0);
+    a.addiu(T0, T0, 4);
+    a.sltu(T2, T0, T1);
+    a.bnez(T2, "ex_fill");
+    a.nop();
+    a.label("ex_stack");
+    a.lw(T0, 0x20, S0);
+    a.lw(T1, 0x24, S0);
+    a.nop();
+    a.beqz(T0, "ex_gp");
+    a.addu(T0, T0, T1);
+    a.mov(SP, T0);
+    a.mov(FP, T0);
+    a.label("ex_gp");
+    a.lw(GP, 0x04, S0);
+    a.lw(T2, 0x00, S0);
+    a.mov(A0, A1);
+    a.jalr(T2);
+    a.mov(A1, A2);
+    // Pop the header and restore the caller from it.
+    a.lw(T0, EXEC_DEPTH as i16, ZERO);
+    a.nop();
+    a.addiu(T0, T0, -1);
+    a.sw(T0, EXEC_DEPTH as i16, ZERO);
+    a.sll(T1, T0, 2);
+    a.lw(T2, EXEC_STACK as i16, T1);
+    a.nop();
+    a.lw(RA, 0x34, T2);
+    a.lw(SP, 0x28, T2);
+    a.lw(FP, 0x2C, T2);
+    a.lw(GP, 0x30, T2);
+    a.lw(S0, 0x38, T2);
+    a.jr(RA);
+    a.addiu(V0, ZERO, 1);
+}
+
+/// A(9Dh) GetConf(&events, &threads, &stacktop). The first two words are
+/// a `lui`/`lw` pair whose immediates address the stacktop word: psx-spx
+/// "set_conf_without_realloc" shows games decoding them to find the
+/// three configuration words (threads, events, stacktop) and writing
+/// them directly.
+fn get_conf(a: &mut Asm) {
+    use crate::hle_kernel::kvar::{CONF_EVENT, CONF_STACK, CONF_TCB};
+    a.lui(T0, (CONF_STACK >> 16) as u16);
+    a.lw(T1, CONF_STACK as u16 as i16, T0);
+    a.lw(T2, CONF_EVENT as u16 as i16, T0);
+    a.lw(T3, CONF_TCB as u16 as i16, T0);
+    a.sw(T1, 0, A2);
+    a.sw(T2, 0, A0);
+    a.jr(RA);
+    a.sw(T3, 0, A1);
+}
+
+/// Offset in the early card routine of the words games replace.
+pub const CARD_EARLY_PATCHED: u32 = 0x28;
+/// Offset in the early card routine where those replacements continue.
+pub const CARD_EARLY_RESUME: u32 = 0x3C;
+
+/// The early card IRQ routine that InitCARD2 calls from handler slot 1
+/// (psx-spx "early_card_irq_patch"). It runs with only at, v0, v1 and ra
+/// saved. When a sector's data phase is running and IRQ7 is enabled, it
+/// checks IRQ7 is pending (+28h..+3Bh, with `v1` = 1F800000h: the part
+/// games replace with a wait for the card's ACK line), then at +3Ch hands
+/// the byte to the card driver, which returns from the exception. In
+/// every other case it returns to the handler.
+fn card_early(a: &mut Asm) {
+    let start = a.here();
+    a.lui(V1, IO_HI);
+    a.lw(V0, crate::hle_card::kvar::DATA_PHASE as i16, ZERO);
+    a.lw(AT, I_MASK, V1);
+    a.beqz(V0, "ce_return");
+    a.andi(AT, AT, 0x80);
+    a.beqz(AT, "ce_return");
+    a.nop();
+    while a.here() < start + CARD_EARLY_PATCHED {
+        a.nop();
+    }
+    a.lw(V0, I_STAT, V1);
+    a.nop();
+    a.andi(V0, V0, 0x80);
+    a.beqz(V0, "ce_return");
+    a.nop();
+    debug_assert_eq!(a.here(), start + CARD_EARLY_RESUME);
+    a.j_abs(stub_addr(3, crate::hle_card::internal::FAST));
+    a.nop();
+    a.label("ce_return");
+    a.jr(RA);
+    a.nop();
+}
+
+/// Where the card driver continues after moving an early data byte:
+/// restore at, v0, v1 and ra from the TCB and return from the exception,
+/// past an interrupted GTE command like the full handler.
+fn card_fast_rfe(a: &mut Asm) {
+    current_tcb_into(a, K0);
+    a.mfc0(V0, 13);
+    a.mfc0(V1, 14);
+    a.nop();
+    skip_interrupted_gte_command(a, V0, V1, AT, "cf_epc");
+    a.sw(V1, tcb::EPC as i16, K0);
+    a.lw(AT, tcb::reg(AT) as i16, K0);
+    a.lw(V0, tcb::reg(V0) as i16, K0);
+    a.lw(V1, tcb::reg(V1) as i16, K0);
+    a.lw(RA, tcb::reg(RA) as i16, K0);
+    a.lw(K0, tcb::EPC as i16, K0);
+    a.nop();
+    a.jr(K0);
+    a.rfe();
+}
+
+fn assemble() -> KernelCode {
+    let mut a = Asm::new(KERNEL_CODE);
+
+    a.label("return_from_exception");
+    return_from_exception(&mut a);
+
+    a.label("deliver_event");
+    deliver_event(&mut a);
+
+    const VERIFIERS: [&str; 4] = ["rcnt0", "rcnt1", "rcnt2", "rcnt3"];
+    const SKIPS: [&str; 4] = ["rcnt0_no", "rcnt1_no", "rcnt2_no", "rcnt3_no"];
+    for n in 0..4 {
+        a.label(VERIFIERS[n]);
+        rcnt_verifier(&mut a, n as u32, SKIPS[n]);
+    }
+
+    a.label("defint");
+    defint_verifier(&mut a);
 
     // After DeliverEvent(F0000010h, 1000h) for an unresolved exception:
-    // call A(40h) SystemErrorUnresolvedException through the A0 vector,
-    // returning to ReturnFromException.
-    a.label("unresolved");
-    a.li(RA, 0); // patched below with the rfe address
+    // A(40h) through the A0 vector, so a replaced entry is honoured, and
+    // back to ReturnFromException if it returns.
+    a.label("unresolved_glue");
+    a.li(RA, 0);
+    let ra_fix = a.here() - 8;
     a.addiu(T1, ZERO, 0x40);
     a.addiu(T0, ZERO, 0xA0);
     a.jr(T0);
     a.nop();
 
-    // ChangeTh helper: SYSCALL(3) with a1 = new TCB; the handler returns
-    // past the syscall.
+    // SYSCALL with a0 already set; the handler returns past it.
     a.label("syscall_stub");
     a.syscall();
     a.jr(RA);
     a.nop();
 
-    // A(43h) Exec(header, a1, a2) (psx-spx; register protocol from
-    // OpenBIOS psxexec.s): save s0/ra/sp/fp/gp in the header's reserved
-    // words, zero-fill the memfill region, set sp=fp=base+offset when a
-    // stack base is given, gp from the header, call the entry with
-    // (a1, a2), then restore and return 1.
     a.label("exec");
-    a.sw(S0, 0x38, A0);
-    a.sw(RA, 0x34, A0);
-    a.sw(SP, 0x28, A0);
-    a.sw(FP, 0x2C, A0);
-    a.sw(GP, 0x30, A0);
-    a.lw(T0, 0x1C, A0);
-    a.lw(T3, 0x20, A0);
-    a.beqz(T0, "exec_nobss");
-    a.mov(S0, A0);
-    a.lw(T1, 0x18, A0);
-    a.label("exec_bss");
-    a.addi(T0, T0, -4);
-    a.sw(ZERO, 0, T1);
-    a.bgtz(T0, "exec_bss");
-    a.addi(T1, T1, 4);
-    a.label("exec_nobss");
-    a.beqz(T3, "exec_nostack");
-    a.lw(T2, 0x00, S0);
-    a.lw(T1, 0x24, S0);
-    a.nop();
-    a.addu(SP, T3, T1);
-    a.mov(FP, SP);
-    a.label("exec_nostack");
-    a.lw(GP, 0x04, S0);
-    a.mov(A0, A1);
-    a.jalr(T2);
-    a.mov(A1, A2);
-    a.lw(RA, 0x34, S0);
-    a.lw(SP, 0x28, S0);
-    a.lw(FP, 0x2C, S0);
-    a.lw(GP, 0x30, S0);
-    a.lw(S0, 0x38, S0);
-    a.jr(RA);
-    a.addiu(V0, ZERO, 1);
+    exec(&mut a);
 
-    // A(9Dh) GetConf(&events, &tcbs, &stack). Guest code because games
-    // read this entry's first two instructions to find the config words:
-    // Metal Gear Solid takes the `lui` immediate and the `lw` offset as
-    // the address of the stack word and writes the TCB, EvCB and stack
-    // words at -8, -4 and 0 from it.
     a.label("get_conf");
-    a.lui(T0, (crate::hle_kernel::kvar::CONF_STACK >> 16) as u16);
-    a.lw(T1, crate::hle_kernel::kvar::CONF_STACK as i16, T0);
-    a.lw(T2, crate::hle_kernel::kvar::CONF_EVENT as i16, T0);
-    a.lw(T3, crate::hle_kernel::kvar::CONF_TCB as i16, T0);
-    a.sw(T2, 0, A0);
-    a.sw(T3, 0, A1);
-    a.jr(RA);
-    a.sw(T1, 0, A2);
+    get_conf(&mut a);
 
-    // Early memory card IRQ routine (psx-spx "early_card_irq_patch";
-    // structure from OpenBIOS sio0/cardfasttrack.s, MIT). Called with
-    // at/v0/v1/ra saved and k0 = the current frame. While a sector's data
-    // bytes move and IRQ7 is pending and enabled, it moves one byte and
-    // returns from the exception directly. Games replace the five words
-    // at +28h with a jump to their own code that expects v1 = 1F800000h,
-    // re-checks I_MASK bit 7 and continues at +3Ch, so that layout is kept.
     a.label("card_early");
-    a.lw(V0, crate::hle_card::kvar::DATA_PHASE as i16, ZERO);
-    a.lui(V1, IO_HI);
-    a.beqz(V0, "card_early_exit");
-    a.nop();
-    a.lw(V0, I_STAT, V1);
-    a.nop();
-    a.andi(V0, V0, 0x80);
-    a.beqz(V0, "card_early_exit");
-    a.nop();
-    a.nop();
-    // +28h: the words games replace.
-    a.lw(V0, I_MASK, V1);
-    a.nop();
-    a.andi(V0, V0, 0x80);
-    a.beqz(V0, "card_early_exit");
-    a.nop();
-    // +3Ch
-    a.j_abs(stub_addr(3, crate::hle_card::internal::FAST));
-    a.nop();
-    a.label("card_early_exit");
-    a.jr(RA);
-    a.nop();
-    a.label("card_fast_rfe");
-    a.lw(AT, 0x04, K0);
-    a.lw(V0, 0x08, K0);
-    a.lw(V1, 0x0C, K0);
-    a.lw(RA, 0x7C, K0);
-    a.lw(K0, 0x80, K0);
-    a.nop();
-    a.jr(K0);
-    a.rfe();
+    card_early(&mut a);
 
-    // "JMP $" lockup (LoadExec part 4).
+    a.label("card_fast_rfe");
+    card_fast_rfe(&mut a);
+
     a.label("hang");
     a.b("hang");
     a.nop();
 
-    let rfe = a.addr("rfe");
-    let deliver_event = a.addr("deliver_event");
-    let exec = a.addr("exec");
-    let hang = a.addr("hang");
-    let card_early = a.addr("card_early");
-    let get_conf = a.addr("get_conf");
-    let card_fast_rfe = a.addr("card_fast_rfe");
-    debug_assert_eq!(a.addr("card_early_exit") - card_early, 0x44);
-    let rcnt_verifier = [
-        a.addr("rcnt0"),
-        a.addr("rcnt1"),
-        a.addr("rcnt2"),
-        a.addr("rcnt3"),
-    ];
-    let defint_verifier = a.addr("defint");
-    let unresolved_glue = a.addr("unresolved");
-    let syscall_stub = a.addr("syscall_stub");
-    let cause_epc = a.addr("cause_epc");
-    let mut words = a.finish();
-    // Fill in `li ra, rfe` in the unresolved glue.
-    let glue = ((unresolved_glue - KERNEL_CODE) / 4) as usize;
-    words[glue] |= rfe >> 16;
-    words[glue + 1] |= rfe & 0xFFFF;
-    assert!(KERNEL_CODE + 4 * words.len() as u32 <= KERNEL_CODE_END);
-
-    KernelCode {
-        handler: assemble_handler(cause_epc),
-        words,
+    let rfe = a.addr("return_from_exception");
+    let layout = KernelCode {
+        words: Vec::new(),
+        handler: assemble_handler(),
         return_from_exception: rfe,
-        deliver_event,
-        rcnt_verifier,
-        defint_verifier,
-        unresolved_glue,
-        syscall_stub,
-        exec,
-        get_conf,
-        card_early,
-        card_fast_rfe,
-        hang,
-    }
+        deliver_event: a.addr("deliver_event"),
+        rcnt_verifier: VERIFIERS.map(|l| a.addr(l)),
+        defint_verifier: a.addr("defint"),
+        unresolved_glue: a.addr("unresolved_glue"),
+        syscall_stub: a.addr("syscall_stub"),
+        exec: a.addr("exec"),
+        get_conf: a.addr("get_conf"),
+        card_early: a.addr("card_early"),
+        card_fast_rfe: a.addr("card_fast_rfe"),
+        hang: a.addr("hang"),
+    };
+    let mut words = a.finish();
+    // `li ra, ReturnFromException` in the glue, now that it is known.
+    let at = ((ra_fix - KERNEL_CODE) / 4) as usize;
+    words[at] |= rfe >> 16;
+    words[at + 1] |= rfe & 0xFFFF;
+    assert!(KERNEL_CODE + 4 * words.len() as u32 <= KERNEL_CODE_END);
+    assert!(
+        crate::hle_kernel::EXCEPTION_HANDLER + 4 * layout.handler.len() as u32
+            <= crate::hle_kernel::EXCEPTION_HANDLER_END
+    );
+    KernelCode { words, ..layout }
 }
 
-/// The exception handler at C(06h). Offsets up to the patch slots match
-/// the retail/OpenBIOS layout: games patch +00h..+37h (psx-spx
-/// "patch_missing_cop0r13_in_exception_handler"), read
-/// and write +70h.. (memory card and lightgun patches).
-fn assemble_handler(cause_epc: u32) -> Vec<u32> {
-    let base = crate::hle_kernel::EXCEPTION_HANDLER;
-    let mut a = Asm::new(base);
-    for _ in 0..4 {
-        a.nop();
-    }
-    // k0 = &current TCB registers.
-    a.addiu(K0, ZERO, TOT as i16);
-    a.lw(K0, 8, K0);
-    a.nop();
-    a.lw(K0, 0, K0);
-    a.nop();
-    a.addi(K0, K0, 8);
-    a.sw(AT, 0x04, K0);
-    a.sw(V0, 0x08, K0);
-    a.sw(V1, 0x0C, K0);
-    a.sw(RA, 0x7C, K0);
-    a.jal_abs(cause_epc);
-    a.nop();
-    // Interrupted in front of a GTE command: the command already ran, so
-    // resume after it (psx-spx "Interrupts vs GTE Commands").
-    a.andi(V0, V0, 0x3C);
-    a.bnez(V0, "no_cop2");
-    a.nop();
-    a.lw(V0, 0, V1);
-    a.nop();
-    a.srl(V0, V0, 24);
-    a.andi(V0, V0, 0xFE);
-    a.addiu(AT, ZERO, 0x4A);
-    a.bne(V0, AT, "no_cop2");
-    a.nop();
-    a.addi(V1, V1, 4);
-    a.label("no_cop2");
-    a.sw(V1, 0x80, K0);
-    debug_assert_eq!(a.here(), base + 0x70);
-    // Four 4-word patch slots (memory card, lightgun, ...).
-    for _ in 0..16 {
-        a.nop();
-    }
-    for (reg, off) in [(A0, 0x10), (5, 0x14), (6, 0x18), (7, 0x1C)] {
-        a.sw(reg, off, K0);
-    }
-    a.mfc0(A0, 12);
-    a.nop();
-    a.sw(A0, 0x8C, K0);
-    a.mfc0(A1, 13);
-    a.nop();
-    a.sw(A1, 0x90, K0);
-    a.sw(K1, 0x6C, K0);
-    for reg in 16..=23 {
-        a.sw(reg, (4 * reg) as i16, K0);
-    }
-    for reg in 8..=15 {
-        a.sw(reg, (4 * reg) as i16, K0);
-    }
-    a.sw(24, 0x60, K0);
-    a.sw(25, 0x64, K0);
-    a.sw(GP, 0x70, K0);
-    a.sw(SP, 0x74, K0);
-    a.sw(FP, 0x78, K0);
-    a.mfhi(A0);
-    a.nop();
-    a.sw(A0, 0x84, K0);
-    a.mflo(A0);
-    a.nop();
-    a.sw(A0, 0x88, K0);
-    // Kernel stack; s3 walks the four ExCB priority slots.
-    a.lw(SP, kvar::EXCEPTION_SP as i16, ZERO);
-    a.addiu(S3, ZERO, TOT as i16);
-    a.lw(S3, 0, S3);
-    a.mov(GP, ZERO);
-    a.mov(FP, SP);
-    a.addi(S4, S3, 0x20);
-    a.label("prio");
-    a.lw(S6, 0, S3);
-    a.nop();
-    a.beqz(S6, "next_prio");
-    a.nop();
-    a.label("handlers");
-    a.lw(S1, 8, S6);
-    a.lw(S0, 4, S6);
-    a.beqz(S1, "next_handler");
-    a.nop();
-    a.jalr(S1);
-    a.nop();
-    a.beqz(V0, "next_handler");
-    a.nop();
-    a.beqz(S0, "next_handler");
-    a.mov(A0, V0);
-    a.jalr(S0);
-    a.nop();
-    a.label("next_handler");
-    a.lw(S6, 0, S6);
-    a.nop();
-    a.bnez(S6, "handlers");
-    a.nop();
-    a.label("next_prio");
-    a.addi(S3, S3, 8);
-    a.bne(S4, S3, "prio");
-    a.nop();
-    // Nobody returned from the exception: longjmp to the exit buffer
-    // with r2 = 1 (psx-spx HookEntryInt).
-    a.lw(A0, kvar::EXIT_JMPBUF as i16, ZERO);
-    a.nop();
-    a.lw(RA, 0x00, A0);
-    a.lw(GP, 0x2C, A0);
-    a.lw(SP, 0x04, A0);
-    a.lw(FP, 0x08, A0);
-    for reg in 16..=23 {
-        a.lw(reg, (0x0C + 4 * (reg - 16)) as i16, A0);
-    }
-    a.jr(RA);
-    a.addiu(V0, ZERO, 1);
-    let words = a.finish();
-    assert!(base + 4 * words.len() as u32 <= crate::hle_kernel::EXCEPTION_HANDLER_END);
-    words
-}
+// ---------------------------------------------------------------- install
 
-fn rcnt_irq_bit(n: usize) -> u32 {
-    // Timers 0..2 are IRQ 4..6, "timer 3" is VBlank (IRQ 0).
-    [1 << 4, 1 << 5, 1 << 6, 1][n]
-}
-
-/// Default IRQ handler order and events (OpenBIOS IRQVerifier; timer 2
-/// reuses the timer 1 class, as the retail BIOS does).
+/// Default IRQ events (psx-spx "Default IRQ Handler Events"), in the order
+/// psx-spx lists them: (I_STAT bit, event class). IRQ6 shares timer 1's
+/// class, as psx-spx records.
 const DEFINT: [(u32, u32); 11] = [
-    (2, 0xF000_0003),  // CDROM
-    (9, 0xF000_0009),  // SPU
-    (1, 0xF000_0002),  // GPU
-    (10, 0xF000_000A), // PIO / IRQ10
-    (8, 0xF000_000B),  // SIO
-    (0, 0xF000_0001),  // VBlank
-    (4, 0xF000_0005),  // timer 0
-    (5, 0xF000_0006),  // timer 1
-    (6, 0xF000_0006),  // timer 2
-    (7, 0xF000_0008),  // controller
-    (3, 0xF000_0004),  // DMA
+    (0, 0xF000_0001),
+    (1, 0xF000_0002),
+    (2, 0xF000_0003),
+    (3, 0xF000_0004),
+    (4, 0xF000_0005),
+    (5, 0xF000_0006),
+    (6, 0xF000_0006),
+    (7, 0xF000_0008),
+    (9, 0xF000_0009),
+    (10, 0xF000_000A),
+    (8, 0xF000_000B),
 ];
 
 fn write_words(bus: &mut Bus, base: u32, words: &[u32]) {
-    for (i, w) in words.iter().enumerate() {
-        poke32(bus, base + 4 * i as u32, *w);
+    for (i, word) in words.iter().enumerate() {
+        poke32(bus, base + 4 * i as u32, *word);
     }
 }
 
-/// C(07h) InstallExceptionHandlers: the four-word vector at 80h, and its
-/// copy at 0 with the first word already smashed to 3 (psx-spx "Garbage
-/// Area"; R-Types needs a nonzero halfword at 0).
+/// C(07h) InstallExceptionHandlers: the four-word jump to C(06h) at 80h,
+/// and a copy at 0 whose first word then holds 3 (psx-spx "BIOS Memory
+/// Map", garbage area: games read [0..9], and R-Type needs the halfword at
+/// 0 to be nonzero).
 pub fn install_vector(bus: &mut Bus) {
+    let handler = crate::hle_kernel::EXCEPTION_HANDLER;
     let mut a = Asm::new(VECTOR);
-    let h = crate::hle_kernel::EXCEPTION_HANDLER;
-    a.lui(K0, (h >> 16) as u16);
-    a.addiu(K0, K0, h as i16);
+    a.lui(K0, (handler >> 16) as u16);
+    a.addiu(K0, K0, handler as u16 as i16);
     a.jr(K0);
     a.nop();
     let words = a.finish();
@@ -622,145 +749,202 @@ pub fn install_vector(bus: &mut Bus) {
     poke32(bus, 0, 3);
 }
 
-/// Write the exception core into RAM and enqueue the default handlers.
+/// Lay out the exception core: guest code, table entries for the guest
+/// routines, the default exit buffer, chain element descriptors, kernel
+/// variables, the vector, and the default handlers.
 pub fn install(bus: &mut Bus) {
+    use crate::hle_kernel::{A0_TABLE, B0_TABLE, EXCEPTION_HANDLER};
     let code = code();
-    install_vector(bus);
-    write_words(bus, crate::hle_kernel::EXCEPTION_HANDLER, &code.handler);
     write_words(bus, KERNEL_CODE, &code.words);
-    let b0 = crate::hle_kernel::B0_TABLE;
-    poke32(bus, b0 + 4 * 0x07, code.deliver_event);
-    poke32(bus, b0 + 4 * 0x17, code.return_from_exception);
-    poke32(bus, crate::hle_kernel::A0_TABLE + 4 * 0x43, code.exec);
-    poke32(bus, crate::hle_kernel::A0_TABLE + 4 * 0x9D, code.get_conf);
+    write_words(bus, EXCEPTION_HANDLER, &code.handler);
+    for (entry, target) in [
+        (B0_TABLE + 4 * 0x07, code.deliver_event),
+        (B0_TABLE + 4 * 0x17, code.return_from_exception),
+        (A0_TABLE + 4 * 0x43, code.exec),
+        (A0_TABLE + 4 * 0x9D, code.get_conf),
+    ] {
+        poke32(bus, entry, target);
+    }
 
-    // Default exit buffer: ReturnFromException on the exception stack
-    // (stack top minus 4, psx-spx), other registers 0.
+    // psx-spx B(18h): ReturnFromException, the exception stacktop minus 4,
+    // and zero for fp, s0..s7 and gp.
+    write_words(bus, DEFAULT_JMPBUF, &[0; 12]);
     poke32(bus, DEFAULT_JMPBUF, code.return_from_exception);
     poke32(bus, DEFAULT_JMPBUF + 4, EXCEPTION_STACK_TOP - 4);
     poke32(bus, kvar::EXIT_JMPBUF, DEFAULT_JMPBUF);
     poke32(bus, kvar::EXCEPTION_SP, EXCEPTION_STACK_TOP);
 
-    // Handler descriptors.
-    poke32(
-        bus,
-        HI_SYSCALL + 8,
-        stub_addr(3, internal::SYSCALL_VERIFIER),
-    );
+    descriptor(bus, HI_SYSCALL, 0, stub_addr(3, internal::SYSCALL_VERIFIER));
     for n in 0..4u32 {
-        let hi = HI_RCNT + 16 * n;
-        poke32(bus, hi + 4, stub_addr(3, internal::RCNT_HANDLER + n as u8));
-        poke32(bus, hi + 8, code.rcnt_verifier[n as usize]);
+        descriptor(
+            bus,
+            HI_RCNT + 16 * n,
+            stub_addr(3, internal::RCNT_HANDLER + n as u8),
+            code.rcnt_verifier[n as usize],
+        );
+        // ChangeClearRCnt is on for all four until a game turns it off.
+        poke32(bus, kvar::RCNT_AUTOACK + 4 * n, 1);
     }
-    poke32(bus, HI_DEFINT + 8, code.defint_verifier);
+    descriptor(bus, HI_DEFINT, 0, code.defint_verifier);
     for (i, (irq, class)) in DEFINT.iter().enumerate() {
-        let e = DEFINT_TABLE + 12 * i as u32;
-        poke32(bus, e, 1 << irq);
-        poke32(bus, e + 4, *class);
-        poke32(bus, e + 8, kvar::IRQ_AUTOACK + 4 * irq);
+        let entry = DEFINT_TABLE + 12 * i as u32;
+        poke32(bus, entry, 1 << irq);
+        poke32(bus, entry + 4, *class);
+        poke32(bus, entry + 8, kvar::IRQ_AUTOACK + 4 * irq);
     }
+    poke32(bus, DEFINT_TABLE + 12 * DEFINT.len() as u32, 0);
+    poke32(bus, kvar::DQ_COUNT, 0);
+    write_words(bus, EXEC_DEPTH, &[0; 1 + EXEC_SLOTS as usize]);
+
+    install_vector(bus);
     enqueue_defaults(bus);
 }
 
-/// The kernel's default chain elements (psx-spx "Priority Chains"):
-/// SYSCALL handler at priority 0, timers and VBlank at 1, the default IRQ
-/// handler at 3. Boot leaves the timer hardware alone: its state at EXE
-/// entry comes from the entry-state profile.
+/// Fill a chain element (psx-spx "Priority Chains"): next, second
+/// function, first function, unused.
+fn descriptor(bus: &mut Bus, at: u32, second: u32, first: u32) {
+    poke32(bus, at, 0);
+    poke32(bus, at + 4, second);
+    poke32(bus, at + 8, first);
+    poke32(bus, at + 12, 0);
+}
+
+/// The handlers psx-spx lists as present after boot that belong to the
+/// exception core: the SYSCALL handler (priority 0), the timer and VBlank
+/// handlers (priority 1) and the default IRQ handler (priority 3). The CD,
+/// pad and card drivers add their own. Also used by SetConf, which
+/// re-enqueues the defaults after reallocating the control blocks.
 pub fn enqueue_defaults(bus: &mut Bus) {
     enqueue_syscall_handler(bus, 0);
     enqueue_rcnt(bus, 1, false);
     enqueue_defint(bus, 3);
 }
 
-fn excb(bus: &Bus) -> u32 {
-    peek32(bus, TOT)
+// ----------------------------------------------------------------- chains
+
+/// ExCB for `prio` (0..3), or `None`.
+fn excb(bus: &Bus, prio: u32) -> Option<u32> {
+    let base = peek32(bus, TOT);
+    (base != 0 && prio < 4).then_some(base + 8 * prio)
 }
 
-/// C(02h) SysEnqIntRP: insert at the head of the priority chain.
-pub fn enq_int(bus: &mut Bus, prio: u32, handler: u32) {
-    let slot = excb(bus) + 8 * (prio & 3);
-    let first = peek32(bus, slot);
-    poke32(bus, slot, handler);
-    poke32(bus, handler, first);
+/// Remove `element` from every chain, so enqueueing it again cannot make
+/// a chain point at itself.
+fn unlink_everywhere(bus: &mut Bus, element: u32) {
+    for prio in 0..4 {
+        deq_int(bus, prio, element);
+    }
 }
 
-/// C(03h) SysDeqIntRP: unlink `handler` from the chain. psx-spx documents
-/// the retail function as able to remove only the first element; this
-/// follows OpenBIOS and searches the whole chain. Returns the element or 0.
-pub fn deq_int(bus: &mut Bus, prio: u32, handler: u32) -> u32 {
-    let slot = excb(bus) + 8 * (prio & 3);
-    let mut prev = slot;
-    let mut cur = peek32(bus, slot);
-    for _ in 0..0x1000 {
-        if cur == 0 {
+/// C(02h) SysEnqIntRP(prio, element): insert at the head of the chain
+/// (psx-spx "Priority Chains").
+pub fn enq_int(bus: &mut Bus, prio: u32, element: u32) {
+    let Some(head) = excb(bus, prio) else {
+        return;
+    };
+    poke32(bus, element, peek32(bus, head));
+    poke32(bus, head, element);
+}
+
+/// C(03h) SysDeqIntRP(prio, element): unlink `element` wherever it is in
+/// the chain. psx-spx documents that the retail function only removes
+/// the first element reliably and reads garbage after that; the HLE
+/// removes it anywhere, because the kernel's own drivers dequeue and
+/// requeue their elements in chains games also use. Returns the element,
+/// or 0 when it was not in the chain.
+pub fn deq_int(bus: &mut Bus, prio: u32, element: u32) -> u32 {
+    let Some(head) = excb(bus, prio) else {
+        return 0;
+    };
+    let mut link = head;
+    for _ in 0..256 {
+        let current = peek32(bus, link);
+        if current == 0 {
             return 0;
         }
-        if cur == handler {
-            let next = peek32(bus, cur);
-            poke32(bus, prev, next);
-            return cur;
+        if current == element {
+            poke32(bus, link, peek32(bus, element));
+            return element;
         }
-        prev = cur;
-        cur = peek32(bus, cur);
+        link = current;
     }
     0
 }
 
-/// C(01h) EnqueueSyscallHandler.
+/// C(01h) EnqueueSyscallHandler(prio).
 pub fn enqueue_syscall_handler(bus: &mut Bus, prio: u32) {
+    unlink_everywhere(bus, HI_SYSCALL);
     enq_int(bus, prio, HI_SYSCALL);
 }
 
-/// C(00h) EnqueueTimerAndVblankIrqs: auto-ack on, four chain elements;
-/// with `touch_hw` also masks the four IRQs and clears the timers
-/// (OpenBIOS enqueueRCntIrqs).
+/// C(00h) EnqueueTimerAndVblankIrqs(prio): the three timers and VBlank,
+/// enqueued so the chain reads VBlank, timer 2, timer 1, timer 0 (psx-spx
+/// "Priority Chains"). Called by a game (`touch_hw`), it also masks those
+/// four IRQs and stops and clears the three timers.
 pub fn enqueue_rcnt(bus: &mut Bus, prio: u32, touch_hw: bool) {
     if touch_hw {
         let mask = bus.read32(0x1F80_1074);
         bus.write32(0x1F80_1074, mask & !0x71);
+        for t in 0..3 {
+            for reg in [4, 8, 0] {
+                bus.write16(timer_reg(t, reg), 0);
+            }
+        }
     }
     for n in 0..4 {
-        poke32(bus, kvar::RCNT_AUTOACK + 4 * n, 1);
-        enq_int(bus, prio, HI_RCNT + 16 * n);
-    }
-    if touch_hw {
-        for t in 0..3u32 {
-            let base = 0x1F80_1100 + 0x10 * t;
-            bus.write16(base + 4, 0);
-            bus.write16(base + 8, 0);
-            bus.write16(base, 0);
-        }
+        let element = HI_RCNT + 16 * n;
+        unlink_everywhere(bus, element);
+        enq_int(bus, prio, element);
     }
 }
 
-/// C(0Ch) InitDefInt: clear every IRQ auto-ack flag and enqueue the
-/// default IRQ handler.
+/// C(0Ch) InitDefInt(prio): all SetIrqAutoAck flags off, then the default
+/// IRQ verifier into the chain.
 pub fn enqueue_defint(bus: &mut Bus, prio: u32) {
     for irq in 0..11 {
         poke32(bus, kvar::IRQ_AUTOACK + 4 * irq, 0);
     }
+    unlink_everywhere(bus, HI_DEFINT);
     enq_int(bus, prio, HI_DEFINT);
 }
 
-// ------------------------------------------------------------------ events
+// ----------------------------------------------------------------- events
 
-/// EvCB status values (psx-spx).
+/// EvCB status: free.
 pub const EV_FREE: u32 = 0;
-/// Disabled.
+/// EvCB status: disabled.
 pub const EV_DISABLED: u32 = 0x1000;
-/// Enabled, waiting (busy).
+/// EvCB status: enabled, waiting.
 pub const EV_BUSY: u32 = 0x2000;
-/// Enabled, delivered (ready).
+/// EvCB status: enabled, delivered.
 pub const EV_READY: u32 = 0x4000;
-/// Mode: mark ready instead of calling back.
+/// EvCB mode: mark the event ready.
 pub const EV_MODE_READY: u32 = 0x2000;
-
-fn evcb(bus: &Bus, index: u32) -> u32 {
-    peek32(bus, TOT + 0x20) + 0x1C * index
-}
+/// EvCB mode: call the callback and stay busy.
+pub const EV_MODE_CALLBACK: u32 = 0x1000;
+/// Bytes per EvCB.
+const EVCB_SIZE: u32 = crate::hle_kernel::EVCB_SIZE;
+/// Event handles are F1000000h + index (psx-spx "BIOS Memory Map").
+const EVENT_HANDLE: u32 = 0xF100_0000;
 
 fn evcb_count(bus: &Bus) -> u32 {
-    peek32(bus, TOT + 0x24) / 0x1C
+    peek32(bus, TOT + 0x24) / EVCB_SIZE
+}
+
+fn evcb(bus: &Bus, index: u32) -> u32 {
+    peek32(bus, TOT + 0x20) + EVCB_SIZE * index
+}
+
+/// The EvCB of `event`, if the handle names one.
+fn evcb_of(bus: &Bus, event: u32) -> Option<u32> {
+    let index = event & 0xFFFF;
+    (index < evcb_count(bus)).then(|| evcb(bus, index))
+}
+
+/// EvCB address of `event` (0 for a handle that names none).
+#[cfg(test)]
+fn event_addr(bus: &Bus, event: u32) -> u32 {
+    evcb_of(bus, event).unwrap_or(0)
 }
 
 /// C(04h) get_free_EvCB_slot.
@@ -768,52 +952,53 @@ pub fn free_evcb(bus: &Bus) -> Option<u32> {
     (0..evcb_count(bus)).find(|&i| peek32(bus, evcb(bus, i) + 4) == EV_FREE)
 }
 
-/// B(08h) OpenEvent: returns F1000000h | slot, or FFFFFFFFh.
+/// B(08h) OpenEvent: a free EvCB, disabled, or FFFFFFFFh.
 pub fn open_event(bus: &mut Bus, class: u32, spec: u32, mode: u32, func: u32) -> u32 {
-    let Some(slot) = free_evcb(bus) else {
+    let Some(index) = free_evcb(bus) else {
         return u32::MAX;
     };
-    let e = evcb(bus, slot);
+    let e = evcb(bus, index);
     poke32(bus, e, class);
     poke32(bus, e + 4, EV_DISABLED);
     poke32(bus, e + 8, spec);
     poke32(bus, e + 12, mode);
     poke32(bus, e + 16, func);
-    0xF100_0000 | slot
-}
-
-fn event_addr(bus: &Bus, event: u32) -> u32 {
-    evcb(bus, event & 0xFFFF)
+    EVENT_HANDLE | index
 }
 
 /// B(09h) CloseEvent.
 pub fn close_event(bus: &mut Bus, event: u32) {
-    let e = event_addr(bus, event);
-    poke32(bus, e + 4, EV_FREE);
+    if let Some(e) = evcb_of(bus, event) {
+        poke32(bus, e + 4, EV_FREE);
+    }
 }
 
-/// B(0Ch)/B(0Dh) EnableEvent/DisableEvent: only an open event changes.
+/// B(0Ch) EnableEvent / B(0Dh) DisableEvent. A free EvCB stays free.
 pub fn set_event_enabled(bus: &mut Bus, event: u32, enabled: bool) {
-    let e = event_addr(bus, event);
-    if peek32(bus, e + 4) != EV_FREE {
-        poke32(bus, e + 4, if enabled { EV_BUSY } else { EV_DISABLED });
+    if let Some(e) = evcb_of(bus, event) {
+        if peek32(bus, e + 4) != EV_FREE {
+            poke32(bus, e + 4, if enabled { EV_BUSY } else { EV_DISABLED });
+        }
     }
 }
 
-/// B(0Bh) TestEvent: consumes a ready event.
+/// B(0Bh) TestEvent: true once for a ready event, which goes back to busy.
 pub fn test_event(bus: &mut Bus, event: u32) -> bool {
-    let e = event_addr(bus, event);
-    if peek32(bus, e + 4) == EV_READY {
-        poke32(bus, e + 4, EV_BUSY);
-        return true;
+    match evcb_of(bus, event) {
+        Some(e) if peek32(bus, e + 4) == EV_READY => {
+            poke32(bus, e + 4, EV_BUSY);
+            true
+        }
+        _ => false,
     }
-    false
 }
 
-/// B(0Ah) WaitEvent state: `Some(result)` when it returns now, `None`
-/// while an enabled event is still busy.
+/// B(0Ah) WaitEvent: `Some(1)` once the event is ready (it goes back to
+/// busy), `Some(0)` when it is not enabled, `None` while it is waiting.
 pub fn wait_event(bus: &mut Bus, event: u32) -> Option<u32> {
-    let e = event_addr(bus, event);
+    let Some(e) = evcb_of(bus, event) else {
+        return Some(0);
+    };
     match peek32(bus, e + 4) {
         EV_READY => {
             poke32(bus, e + 4, EV_BUSY);
@@ -824,66 +1009,74 @@ pub fn wait_event(bus: &mut Bus, event: u32) -> Option<u32> {
     }
 }
 
-/// Whether [`wait_event`] would wait again without changing anything.
+/// Whether [`wait_event`] would keep waiting without changing anything.
 pub(crate) fn wait_event_waiting(bus: &Bus, event: u32) -> bool {
-    peek32(bus, event_addr(bus, event) + 4) == EV_BUSY
+    evcb_of(bus, event).is_some_and(|e| peek32(bus, e + 4) == EV_BUSY)
 }
 
-/// B(20h) UnDeliverEvent: ready mark-ready events of this class and spec
+/// B(20h) UnDeliverEvent: ready mark-ready events with this class and spec
 /// go back to busy.
 pub fn undeliver_event(bus: &mut Bus, class: u32, spec: u32) {
     for i in 0..evcb_count(bus) {
         let e = evcb(bus, i);
         if peek32(bus, e + 4) == EV_READY
+            && peek32(bus, e + 12) == EV_MODE_READY
             && peek32(bus, e) == class
             && peek32(bus, e + 8) == spec
-            && peek32(bus, e + 12) == EV_MODE_READY
         {
             poke32(bus, e + 4, EV_BUSY);
         }
     }
 }
 
-// ----------------------------------------------------------------- threads
+// ---------------------------------------------------------------- threads
 
-fn tcb(bus: &Bus, index: u32) -> u32 {
-    peek32(bus, TOT + 0x10) + crate::hle_kernel::TCB_SIZE * index
-}
+/// Thread handles are FF000000h + index (psx-spx "BIOS Thread Functions").
+const THREAD_HANDLE: u32 = 0xFF00_0000;
 
 fn tcb_count(bus: &Bus) -> u32 {
     peek32(bus, TOT + 0x14) / crate::hle_kernel::TCB_SIZE
 }
 
+fn tcb_at(bus: &Bus, index: u32) -> u32 {
+    peek32(bus, TOT + 0x10) + crate::hle_kernel::TCB_SIZE * index
+}
+
 /// C(05h) get_free_TCB_slot.
 pub fn free_tcb(bus: &Bus) -> Option<u32> {
-    (0..tcb_count(bus)).find(|&i| peek32(bus, tcb(bus, i)) == crate::hle_kernel::TCB_FREE)
+    (0..tcb_count(bus))
+        .find(|&i| peek32(bus, tcb_at(bus, i) + tcb::STATUS) == crate::hle_kernel::TCB_FREE)
 }
 
-/// B(0Eh) OpenTh(pc, sp, gp): returns FF000000h | slot or FFFFFFFFh.
-/// SR is left as it was (psx-spx documents this).
+/// B(0Eh) OpenTh(pc, sp, gp): a free TCB marked used, with its return PC,
+/// sp = fp and gp set; the other registers stay as they were. Returns the
+/// handle or FFFFFFFFh.
 pub fn open_thread(bus: &mut Bus, pc: u32, sp: u32, gp: u32) -> u32 {
-    let Some(slot) = free_tcb(bus) else {
+    let Some(index) = free_tcb(bus) else {
         return u32::MAX;
     };
-    let t = tcb(bus, slot);
-    poke32(bus, t, crate::hle_kernel::TCB_USED);
-    poke32(bus, t + 4, 0x1000);
-    poke32(bus, t + 8 + 4 * 29, sp);
-    poke32(bus, t + 8 + 4 * 30, sp);
-    poke32(bus, t + 8 + 4 * 28, gp);
-    poke32(bus, t + crate::hle_bios::TCB_RETURN_PC, pc);
-    0xFF00_0000 | slot
+    let t = tcb_at(bus, index);
+    poke32(bus, t + tcb::STATUS, crate::hle_kernel::TCB_USED);
+    poke32(bus, t + tcb::MODE, 0x1000);
+    poke32(bus, t + tcb::EPC, pc);
+    poke32(bus, t + tcb::reg(SP), sp);
+    poke32(bus, t + tcb::reg(FP), sp);
+    poke32(bus, t + tcb::reg(GP), gp);
+    THREAD_HANDLE | index
 }
 
-/// B(0Fh) CloseTh.
+/// B(0Fh) CloseTh: the TCB becomes free.
 pub fn close_thread(bus: &mut Bus, thread: u32) {
-    let t = tcb(bus, thread & 0xFFFF);
-    poke32(bus, t, crate::hle_kernel::TCB_FREE);
+    let index = thread & 0xFFFF;
+    if index < tcb_count(bus) {
+        let t = tcb_at(bus, index);
+        poke32(bus, t + tcb::STATUS, crate::hle_kernel::TCB_FREE);
+    }
 }
 
-/// TCB address for ChangeTh's SYSCALL(3).
+/// TCB address of a thread handle, for ChangeTh's SYSCALL(3).
 pub fn thread_tcb(bus: &Bus, thread: u32) -> u32 {
-    tcb(bus, thread & 0xFFFF)
+    tcb_at(bus, thread & 0xFFFF)
 }
 
 // ------------------------------------------------------------ syscall path
@@ -898,61 +1091,78 @@ pub enum SyscallAction {
     Deliver(u32, u32, u32),
 }
 
-/// Default SYSCALL/exception verifier (OpenBIOS syscallVerifier), acting
-/// on the frame saved in the current TCB.
+/// SR bits SYSCALL 1/2 clear and set: IEp (bit 2, which RFE moves back to
+/// IEc) and the IRQ mask bit IM2 (bit 10).
+const CRITICAL_BITS: u32 = 0x0404;
+
+/// The SYSCALL handler (priority 0), reading the frame the handler saved
+/// in the current TCB (psx-spx "BIOS Function Summary", SYS functions, and
+/// "Unresolved Exception Events"):
+///
+/// * an interrupt is not its business;
+/// * a SYSCALL returns past the instruction: 0 does nothing, 1
+///   (EnterCriticalSection) clears IEp and IM2 and returns whether both
+///   were set, 2 (ExitCriticalSection) sets them, 3 makes the TCB in a1
+///   current (the old thread gets v0 = 1), and any other number delivers
+///   F0000010h/4000h;
+/// * any other exception delivers F0000010h/1000h and goes on to A(40h).
 pub fn syscall_verifier(bus: &mut Bus) -> SyscallAction {
-    use crate::hle_bios::{TCB_CAUSE, TCB_REGISTERS, TCB_RETURN_PC, TCB_SR};
     let t = crate::hle_kernel::current_tcb(bus);
-    let cause = peek32(bus, t + TCB_CAUSE);
-    match cause & 0x3C {
-        0x00 => SyscallAction::Pass,
-        0x20 => {
-            let epc = peek32(bus, t + TCB_RETURN_PC);
-            poke32(bus, t + TCB_RETURN_PC, epc.wrapping_add(4));
-            let reg = |r: u32| t + TCB_REGISTERS + 4 * r;
-            match peek32(bus, reg(4)) {
-                0 => SyscallAction::Return,
+    let excode = (peek32(bus, t + tcb::CAUSE) >> 2) & 0x1F;
+    match excode {
+        0 => SyscallAction::Pass,
+        8 => {
+            let epc = peek32(bus, t + tcb::EPC);
+            poke32(bus, t + tcb::EPC, epc.wrapping_add(4));
+            let sr = peek32(bus, t + tcb::SR);
+            match peek32(bus, t + tcb::reg(A0)) {
+                0 => {}
                 1 => {
-                    let sr = peek32(bus, t + TCB_SR);
-                    poke32(bus, reg(2), u32::from(sr & 0x404 == 0x404));
-                    poke32(bus, t + TCB_SR, sr & !0x404);
-                    SyscallAction::Return
+                    let was = u32::from(sr & CRITICAL_BITS == CRITICAL_BITS);
+                    poke32(bus, t + tcb::SR, sr & !CRITICAL_BITS);
+                    poke32(bus, t + tcb::reg(V0), was);
                 }
-                2 => {
-                    let sr = peek32(bus, t + TCB_SR);
-                    poke32(bus, t + TCB_SR, sr | 0x404);
-                    SyscallAction::Return
-                }
+                2 => poke32(bus, t + tcb::SR, sr | CRITICAL_BITS),
                 3 => {
-                    let new = peek32(bus, reg(5));
-                    poke32(bus, reg(2), 1);
+                    poke32(bus, t + tcb::reg(V0), 1);
                     let pcb = peek32(bus, TOT + 8);
-                    poke32(bus, pcb, new);
-                    SyscallAction::Return
+                    if pcb != 0 {
+                        poke32(bus, pcb, peek32(bus, t + tcb::reg(A1)));
+                    }
                 }
-                _ => SyscallAction::Deliver(0xF000_0010, 0x4000, code().return_from_exception),
+                _ => {
+                    return SyscallAction::Deliver(
+                        0xF000_0010,
+                        0x4000,
+                        code().return_from_exception,
+                    )
+                }
             }
+            SyscallAction::Return
         }
         _ => SyscallAction::Deliver(0xF000_0010, 0x1000, code().unresolved_glue),
     }
 }
 
-/// Root-counter handler `n` (OpenBIOS T0..T3handler): with auto-ack on,
-/// acknowledge the IRQ and return from the exception.
+/// Second function of root counter `n`'s chain element: with
+/// ChangeClearRCnt on, acknowledge the IRQ and end the exception (true);
+/// otherwise let the chain go on.
 pub fn rcnt_handler(bus: &mut Bus, n: u8) -> bool {
-    let n = u32::from(n & 3);
-    if peek32(bus, kvar::RCNT_AUTOACK + 4 * n) == 0 {
+    let n = u32::from(n);
+    if n > 3 || peek32(bus, kvar::RCNT_AUTOACK + 4 * n) == 0 {
         return false;
     }
-    bus.write32(0x1F80_1070, !rcnt_irq_bit(n as usize));
+    bus.write32(0x1F80_1070, !rcnt_irq_bit(n));
     true
 }
 
 /// C(0Ah) ChangeClearRCnt(t, flag): returns the previous flag.
 pub fn change_clear_rcnt(bus: &mut Bus, t: u32, flag: u32) -> u32 {
-    let var = kvar::RCNT_AUTOACK + 4 * (t & 3);
-    let old = peek32(bus, var);
-    poke32(bus, var, flag);
+    if t > 3 {
+        return 0;
+    }
+    let old = peek32(bus, kvar::RCNT_AUTOACK + 4 * t);
+    poke32(bus, kvar::RCNT_AUTOACK + 4 * t, flag);
     old
 }
 
@@ -1023,8 +1233,7 @@ fn timer_reg(t: u32, reg: u32) -> u32 {
 /// B(02h) init_timer(t, reload, flags), psx-spx: for t = 0..2, mode 0,
 /// target = reload, then mode 48h (49h when flags bit 4), OR 100h when
 /// flags bit 0 is clear, OR 10h when flags bit 12 is set. Returns 1, or
-/// 0 for t > 2. (OpenBIOS applies 100h when bit 0 is set; this follows
-/// psx-spx.)
+/// 0 for t > 2.
 pub fn init_timer(bus: &mut Bus, t: u32, reload: u32, flags: u32) -> u32 {
     let t = t & 0xFFFF;
     if t > 2 {
