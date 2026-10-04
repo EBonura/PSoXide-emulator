@@ -107,15 +107,17 @@ mod tests {
     #[test]
     fn build_cmd_log_extracts_opcode_and_data_words() {
         let mut ot: OrderingTable<8> = OrderingTable::new();
-        ot.clear();
 
         // Hand-built packet imitating a flat triangle:
-        //   packet[0] = tag (set by `insert`)
+        //   packet[0] = tag (set by `add_raw`)
         //   packet[1] = 0x20RRGGBB (opcode 0x20, mono triangle)
         //   packet[2..4] = vertex words
         let mut packet: [u32; 5] = [0, 0x2080_4020, 0x0001_0002, 0x0003_0004, 0x0005_0006];
+        let mut frame = ot.frame();
+        // SAFETY: `packet` is a live, aligned local that nothing touches
+        // while the table links it.
         unsafe {
-            ot.insert(2, packet.as_mut_ptr(), 4);
+            frame.add_raw(2, packet.as_mut_ptr(), 4);
         }
 
         let log = unsafe { build_cmd_log(&ot) };
@@ -134,13 +136,15 @@ mod tests {
     #[test]
     fn build_cmd_log_preserves_dma_order() {
         let mut ot: OrderingTable<4> = OrderingTable::new();
-        ot.clear();
 
         let mut a: [u32; 2] = [0, 0xAA00_0000];
         let mut b: [u32; 2] = [0, 0xBB00_0000];
+        let mut frame = ot.frame();
+        // SAFETY: `a` and `b` are live, aligned locals that nothing touches
+        // while the table links them.
         unsafe {
-            ot.insert(1, a.as_mut_ptr(), 1);
-            ot.insert(1, b.as_mut_ptr(), 1);
+            frame.add_raw(1, a.as_mut_ptr(), 1);
+            frame.add_raw(1, b.as_mut_ptr(), 1);
         }
 
         let log = unsafe { build_cmd_log(&ot) };
@@ -156,7 +160,6 @@ mod tests {
     #[test]
     fn build_cmd_log_splits_multi_command_packets() {
         let mut ot: OrderingTable<8> = OrderingTable::new();
-        ot.clear();
 
         let mut packet: [u32; 9] = [
             0,
@@ -169,8 +172,11 @@ mod tests {
             0x0005_0006,
             0x0000_0000,
         ];
+        let mut frame = ot.frame();
+        // SAFETY: `packet` is a live, aligned local that nothing touches
+        // while the table links it.
         unsafe {
-            ot.insert(2, packet.as_mut_ptr(), 8);
+            frame.add_raw(2, packet.as_mut_ptr(), 8);
         }
 
         let log = unsafe { build_cmd_log(&ot) };
@@ -185,10 +191,12 @@ mod tests {
     #[test]
     fn build_cmd_log_into_reuses_the_output_allocation() {
         let mut ot: OrderingTable<4> = OrderingTable::new();
-        ot.clear();
         let mut packet: [u32; 2] = [0, 0xE100_0000];
+        let mut frame = ot.frame();
+        // SAFETY: `packet` is a live, aligned local that nothing touches
+        // while the table links it.
         unsafe {
-            ot.insert(1, packet.as_mut_ptr(), 1);
+            frame.add_raw(1, packet.as_mut_ptr(), 1);
         }
 
         let mut log = Vec::with_capacity(32);
