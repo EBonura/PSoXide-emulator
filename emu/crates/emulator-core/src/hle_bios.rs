@@ -726,9 +726,10 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         (Table::B, 0x12) => Done(crate::hle_pad::init_pad(
             bus, args[0], args[1], args[2], args[3],
         )),
-        // StartPAD2/StopPAD2 (and StartCARD2/StopCARD2 below) end by
-        // leaving the critical section, as OpenBIOS sio0/driver.c does:
-        // v0 = 1, then SYSCALL(2) through the guest exception handler.
+        // StartPAD2/StopPAD2 (and StartCARD2/StopCARD2 below) return with
+        // interrupts on: v0 = 1, then SYSCALL(2) through the guest exception
+        // handler. psx-spx is silent; Nightmare Creatures calls StartPAD2
+        // inside a critical section and then waits for a card event.
         (Table::B, 0x13) => {
             gprs[2] = crate::hle_pad::start_pad(bus);
             leave_critical_section(gprs)
@@ -737,8 +738,8 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             gprs[2] = crate::hle_pad::stop_pad(bus);
             leave_critical_section(gprs)
         }
-        // PAD_init2 runs StartPAD2 for the types it accepts, so it leaves
-        // the critical section too (OpenBIOS initPadHighLevel).
+        // PAD_init2 runs StartPAD2 for the types it accepts (psx-spx), so it
+        // returns with interrupts on too.
         (Table::B, 0x15) => {
             let v0 = crate::hle_pad::pad_init2(bus, args[0], args[1], args[2], args[3], sp);
             if v0 == 0 {
