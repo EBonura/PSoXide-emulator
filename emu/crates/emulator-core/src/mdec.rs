@@ -120,9 +120,10 @@ const RESET_BUSY_CYCLES: u64 = 39;
 /// A control write landing this soon after the reset write is overwritten by
 /// the reset: it is lost, and the status port reads back the written word
 /// until the reset completes. Silicon brackets this span without measuring
-/// it. In PSoXide's write timing the PSn00bSDK order puts its enable 2
-/// cycles behind the reset and lost it in 8 runs of 8 (from idle and from
-/// busy), as did the v1.25 driver's build on the v1.25 disc; the same driver
+/// it. In PSoXide's write timing an open-source library's order (reset and
+/// enable back to back) puts its enable 2 cycles behind the reset and lost it
+/// in 8 runs of 8 (from idle and from busy), as did the v1.25 driver's build
+/// on the v1.25 disc; the same driver
 /// rebuilt for v1.26 put it 7 cycles behind and kept it in 8 of 8, including
 /// resets from busy.
 const RESET_CAPTURE_CYCLES: u64 = 5;
@@ -1760,7 +1761,7 @@ mod tests {
 
     #[test]
     fn control_write_right_behind_a_reset_is_lost_and_later_one_holds() {
-        // PSn00bSDK order (2 cycles behind): lost, reads back, long reset.
+        // Enable written 2 cycles behind the reset: lost, reads back, long reset.
         let mut m = Mdec::new();
         m.write32_at(MDEC_CTRL_STAT, 0x8000_0000, 100);
         m.write32_at(MDEC_CTRL_STAT, 0x6000_0000, 102);
