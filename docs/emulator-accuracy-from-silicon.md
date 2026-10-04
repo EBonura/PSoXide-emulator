@@ -127,7 +127,7 @@ modelled 39-cycle window.
 
 A control write that lands a few cycles behind the reset is swallowed: the port
 reads the written word back until the reset completes, and the DMA enables it
-carried are gone. PSn00bSDK's order (reset and enable back to back, 2 cycles
+carried are gone. An open-source library's order (reset and enable back to back, 2 cycles
 apart in PSoXide's write timing) failed 8 of 8 runs from idle and from busy,
 stuck at its first table upload with status 0xA004001F and DMA0 idle (CHCR
 0x01000201, 0 words moved). The v1.25 driver, whose build left the enable 2
