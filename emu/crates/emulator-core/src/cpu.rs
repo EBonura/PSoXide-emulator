@@ -3780,7 +3780,7 @@ impl Cpu {
     /// Route a side-loaded EXE's address error through the unresolved-handler
     /// slot A(40h) of the RAM A0 table, when the guest has replaced it. The
     /// interrupted frame goes to the current thread's TCB (`[[0x108]]`),
-    /// whose layout matches psn00bsdk's `Thread::registers`, so existing
+    /// laid out as psx-spx "BIOS Control Blocks" documents, so existing
     /// homebrew handlers can inspect CAUSE, change the saved return PC, and
     /// return.
     fn stage_hle_unresolved_exception(&mut self, bus: &mut Bus) {
@@ -5542,6 +5542,215 @@ mod tests {
         assert_eq!(cpu.gprs[5], 0xCAFE_BABE);
         assert_eq!(cpu.cop0[12] & 0x401, 0x401);
         assert_eq!(bus.read32(0x1F80_1070) & 1, 0, "VBlank acknowledged");
+    }
+
+    #[test]
+    fn hle_exception_vector_and_its_garbage_copy_follow_psx_spx() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        // psx-spx "BIOS Memory Map": lui k0,0 / addiu k0,k0,0C80h / jr k0 /
+        // nop at 80h, the same at 0 with the first word smashed to 3.
+        let vector = [0x3C1A_0000, 0x275A_0C80, 0x0340_0008, 0];
+        for (i, w) in vector.iter().enumerate() {
+            assert_eq!(bus.read32(0x80 + 4 * i as u32), *w);
+        }
+        assert_eq!(bus.read32(0), 3);
+        assert_eq!(bus.read32(4), vector[1]);
+    }
+
+    #[test]
+    fn hle_handler_keeps_the_layout_kernel_patches_expect() {
+        use crate::hle_asm::*;
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let base = crate::hle_kernel::EXCEPTION_HANDLER;
+        assert_eq!(bus.read32(crate::hle_kernel::C0_TABLE + 4 * 6), base);
+        // +28h..+3Bh: the words psx-spx's verifying patch compares.
+        let mut a = Asm::new(0);
+        a.sw(AT, 4, K0);
+        a.sw(V0, 8, K0);
+        a.sw(V1, 0xC, K0);
+        a.sw(RA, 0x7C, K0);
+        a.mfc0(V1, 14);
+        a.nop();
+        for (i, w) in a.finish().iter().enumerate() {
+            assert_eq!(bus.read32(base + 0x28 + 4 * i as u32), *w);
+        }
+        // Four empty 4-word slots at +70h.
+        for i in 0..16 {
+            assert_eq!(bus.read32(base + 0x70 + 4 * i), 0);
+        }
+    }
+
+    #[test]
+    fn hle_interrupt_on_a_gte_command_returns_past_it() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let mut cpu = Cpu::new();
+        // A GTE command at 80010000h, as if an interrupt arrived on it, with
+        // no IRQ left pending: every chain passes and the default exit
+        // buffer leads to ReturnFromException.
+        put_code(&mut bus, 0x8001_0000, &[0x4A00_0001, 0, 0x1000_FFFF, 0]);
+        cpu.cop0[13] = 0;
+        cpu.cop0[14] = 0x8001_0000;
+        cpu.cop0[12] = 0x404;
+        cpu.pc = 0x8000_0080;
+        for _ in 0..5000 {
+            if cpu.pc == 0x8001_0000 || cpu.pc == 0x8001_0004 {
+                break;
+            }
+            cpu.step(&mut bus).unwrap();
+        }
+        assert_eq!(cpu.pc, 0x8001_0004);
+        assert_eq!(cpu.cop0[12] & 1, 1, "RFE restored IEc");
+    }
+
+    #[test]
+    fn hle_chain_second_function_gets_the_first_ones_value() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let mut cpu = Cpu::new();
+        // First function: v0 = 55h. Second: [80020000h] = a0. Both return.
+        put_code(&mut bus, 0x8003_0000, &[0x03E0_0008, 0x2402_0055]);
+        put_code(
+            &mut bus,
+            0x8003_0100,
+            &[0x3C08_8002, 0x03E0_0008, 0xAD04_0000],
+        );
+        let element = 0x8004_0000;
+        bus.write32(element + 4, 0x8003_0100);
+        bus.write32(element + 8, 0x8003_0000);
+        crate::hle_exceptions::enq_int(&mut bus, 0, element);
+        // li a0,0; syscall; b .; nop
+        put_code(&mut bus, 0x8001_0000, &[0x2404_0000, 0x0C, 0x1000_FFFF, 0]);
+        cpu.pc = 0x8001_0000;
+        run_until(&mut cpu, &mut bus, 0x8001_0008, 3000);
+        assert_eq!(bus.read32(0x8002_0000), 0x55);
+    }
+
+    #[test]
+    fn hle_change_thread_switches_and_comes_back_with_one() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let mut cpu = Cpu::new();
+        let thread = crate::hle_exceptions::open_thread(&mut bus, 0x8003_0000, 0x8004_0000, 0x1234);
+        assert_eq!(thread, 0xFF00_0001);
+        // Main: ChangeTh(thread) through the B0 vector, then spin.
+        // li a0,thread (lui/ori); li t1,10h; li t2,B0h; jalr t2; nop; b .; nop
+        put_code(
+            &mut bus,
+            0x8001_0000,
+            &[
+                0x3C04_FF00,
+                0x3484_0001,
+                0x2409_0010,
+                0x240A_00B0,
+                0x0140_F809,
+                0,
+                0x1000_FFFF,
+                0,
+            ],
+        );
+        // Thread: ChangeTh(FF000000h) back.
+        put_code(
+            &mut bus,
+            0x8003_0000,
+            &[
+                0x3C04_FF00,
+                0x2409_0010,
+                0x240A_00B0,
+                0x0140_F809,
+                0,
+                0x1000_FFFF,
+                0,
+            ],
+        );
+        cpu.gprs[29] = 0x801F_FF00;
+        cpu.pc = 0x8001_0000;
+        run_until(&mut cpu, &mut bus, 0x8003_0000, 5000);
+        assert_eq!(cpu.gprs[29], 0x8004_0000, "sp from OpenTh");
+        assert_eq!(cpu.gprs[28], 0x1234, "gp from OpenTh");
+        run_until(&mut cpu, &mut bus, 0x8001_0018, 5000);
+        assert_eq!(cpu.gprs[2], 1);
+        assert_eq!(cpu.gprs[29], 0x801F_FF00);
+    }
+
+    #[test]
+    fn hle_deliver_event_calls_callbacks_or_marks_ready() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let mut cpu = Cpu::new();
+        // Callback: [80020000h] = 77h.
+        put_code(
+            &mut bus,
+            0x8003_0000,
+            &[0x3C08_8002, 0x2409_0077, 0x03E0_0008, 0xAD09_0000],
+        );
+        let callback =
+            crate::hle_exceptions::open_event(&mut bus, 0xF300_0001, 4, 0x1000, 0x8003_0000);
+        let ready = crate::hle_exceptions::open_event(&mut bus, 0xF300_0001, 4, 0x2000, 0);
+        let other = crate::hle_exceptions::open_event(&mut bus, 0xF300_0001, 8, 0x2000, 0);
+        for ev in [callback, ready, other] {
+            crate::hle_exceptions::set_event_enabled(&mut bus, ev, true);
+        }
+        put_code(&mut bus, 0x8001_0000, &[0x1000_FFFF, 0]);
+        cpu.gprs[4] = 0xF300_0001;
+        cpu.gprs[5] = 4;
+        cpu.gprs[9] = 0x07;
+        cpu.gprs[29] = 0x801F_FF00;
+        cpu.gprs[31] = 0x8001_0000;
+        cpu.pc = 0xB0;
+        run_until(&mut cpu, &mut bus, 0x8001_0000, 5000);
+        assert_eq!(bus.read32(0x8002_0000), 0x77);
+        assert!(
+            !crate::hle_exceptions::test_event(&mut bus, callback),
+            "callbacks stay busy"
+        );
+        assert!(crate::hle_exceptions::test_event(&mut bus, ready));
+        assert!(!crate::hle_exceptions::test_event(&mut bus, other));
+    }
+
+    #[test]
+    fn hle_deq_int_unlinks_an_element_anywhere_in_the_chain() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let (a, b, c) = (0x8004_0000, 0x8004_0010, 0x8004_0020);
+        for e in [a, b, c] {
+            crate::hle_exceptions::enq_int(&mut bus, 2, e);
+        }
+        assert_eq!(crate::hle_exceptions::deq_int(&mut bus, 2, b), b);
+        assert_eq!(crate::hle_exceptions::deq_int(&mut bus, 2, b), 0);
+        let excb = bus.read32(crate::hle_kernel::TOT);
+        assert_eq!(bus.read32(excb + 16), c);
+        assert_eq!(bus.read32(c), a);
+    }
+
+    #[test]
+    fn hle_default_irq_handler_delivers_and_acknowledges_when_asked() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let mut cpu = Cpu::new();
+        // Let VBlank reach priority 3: the root-counter handler keeps the
+        // IRQ, and the default handler acknowledges IRQ0 itself.
+        crate::hle_exceptions::change_clear_rcnt(&mut bus, 3, 0);
+        crate::hle_exceptions::set_irq_autoack(&mut bus, 0, 1);
+        let ev = crate::hle_exceptions::open_event(&mut bus, 0xF000_0001, 0x1000, 0x2000, 0);
+        crate::hle_exceptions::set_event_enabled(&mut bus, ev, true);
+        bus.write32(0x1F80_1074, 1);
+        put_code(&mut bus, 0x8001_0000, &[0x1000_FFFF, 0]);
+        cpu.pc = 0x8001_0000;
+        cpu.cop0[12] = 0x401;
+        let mut delivered = false;
+        for _ in 0..3_000_000 {
+            cpu.step(&mut bus).unwrap();
+            if crate::hle_exceptions::test_event(&mut bus, ev) {
+                delivered = true;
+                break;
+            }
+        }
+        assert!(delivered);
+        run_until(&mut cpu, &mut bus, 0x8001_0000, 5000);
+        assert_eq!(bus.read32(0x1F80_1070) & 1, 0, "IRQ0 acknowledged");
     }
 
     #[test]

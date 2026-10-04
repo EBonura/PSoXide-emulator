@@ -21,12 +21,20 @@ pub const T0: u32 = 8;
 pub const T1: u32 = 9;
 pub const T2: u32 = 10;
 pub const T3: u32 = 11;
+pub const T4: u32 = 12;
+pub const T5: u32 = 13;
+pub const T6: u32 = 14;
+pub const T7: u32 = 15;
 pub const S0: u32 = 16;
 pub const S1: u32 = 17;
 pub const S2: u32 = 18;
 pub const S3: u32 = 19;
 pub const S4: u32 = 20;
+pub const S5: u32 = 21;
 pub const S6: u32 = 22;
+pub const S7: u32 = 23;
+pub const T8: u32 = 24;
+pub const T9: u32 = 25;
 pub const K0: u32 = 26;
 pub const K1: u32 = 27;
 pub const GP: u32 = 28;
@@ -122,6 +130,9 @@ impl Asm {
     pub fn and(&mut self, rd: u32, rs: u32, rt: u32) {
         self.r(rs, rt, rd, 0, 0x24);
     }
+    pub fn or(&mut self, rd: u32, rs: u32, rt: u32) {
+        self.r(rs, rt, rd, 0, 0x25);
+    }
     pub fn nor(&mut self, rd: u32, rs: u32, rt: u32) {
         self.r(rs, rt, rd, 0, 0x27);
     }
@@ -142,6 +153,9 @@ impl Asm {
     }
     pub fn ori(&mut self, rt: u32, rs: u32, imm: u16) {
         self.i(0x0D, rs, rt, u32::from(imm));
+    }
+    pub fn xori(&mut self, rt: u32, rs: u32, imm: u16) {
+        self.i(0x0E, rs, rt, u32::from(imm));
     }
     pub fn lui(&mut self, rt: u32, imm: u16) {
         self.i(0x0F, 0, rt, u32::from(imm));

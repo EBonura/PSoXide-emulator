@@ -22,7 +22,7 @@
 //! | `0x1000..0x15FF` | trap stubs, one word per function |
 //! | `0x1600..0x25FF` | exception stack |
 //! | `0x2600..0x2FFF` | kernel routines (ReturnFromException, DeliverEvent, ...) |
-//! | `0x3000..0x31FF` | kernel data (exit buffer, chain elements, IRQ table, device names) |
+//! | `0x3000..0x31FF` | kernel data (exit buffer, chain elements, IRQ table, Exec header stack, device names) |
 //! | `0x3200..0x3A4F` | CD sector buffer, Exec header |
 //! | `0x3B00..0x4175` | memory card: [`crate::hle_card::kvar`], [`crate::hle_bu::kvar`], sector buffers, directory cache, broken-sector lists, find pattern |
 //! | `0x43D0..0x5DFF` | B(5Bh) entry and patch zone (retail address) |
