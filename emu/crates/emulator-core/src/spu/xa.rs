@@ -2,17 +2,35 @@
 //!
 //! ## Provenance
 //!
-//! Implemented from public hardware documentation (nocash PSX-SPX) and
-//! parity-verified against PCSX-Redux
-//! (<https://github.com/grumpycoders/pcsx-redux>), GPL-2.0-or-later; the
-//! ADPCM filter coefficients are hardware constants. PSoXide is released
-//! under GPL-2.0-or-later for compatibility with that reference. See
-//! `LICENSE` and `docs/license-audit.md`.
+//! Written from the nocash PSX-SPX chapter "CDROM XA Audio ADPCM
+//! Compression": the header byte layout, the `decode_28_nibbles`
+//! procedure and the pos/neg filter tables. Nothing here is taken from
+//! another emulator. The decoded sector layout lives with the CD-ROM
+//! sector reader in `cdrom.rs`; this module owns only the per-block
+//! arithmetic.
+//!
+//! One block is 28 samples. Each sample is widened to 16 bits (a 4-bit
+//! sample is shifted left by 12, an 8-bit sample by 8), shifted right by
+//! the block's range, then added to a two-tap prediction made from the
+//! two previous samples of the same channel.
+//!
+//! ## Numeric model
+//!
+//! PSX-SPX's pseudocode keeps 16-bit integer history and rounds each
+//! prediction with `+32` before the divide by 64. This decoder does not
+//! follow that rounding: the history keeps four fractional bits (units of
+//! 1/16 of an output step), the prediction is truncated, and only the
+//! sample handed to the SPU is clamped, not the history. That model is
+//! what the project's compatibility references were recorded with, and it
+//! matters: Crash Team Racing reads the SPU's CD-input capture buffer, and
+//! with the textbook rounding its frame hashes diverge from frame 1628 of
+//! the compat run. There is no silicon capture of XA output that decides
+//! between the two, so the choice is recorded here rather than argued.
 
-/// Per-channel decoder history for XA ADPCM blocks. The filter
-/// uses the last two decoded samples (`y0` = most recent,
-/// `y1` = second-most-recent) as feedback. Callers hold one of
-/// these per stereo channel (or one total for mono).
+/// Per-channel decoder history for XA ADPCM blocks. The predictor needs
+/// the last two output samples of the channel (`y0` the newest, `y1` the
+/// one before it). Callers hold one of these per stereo channel (a mono
+/// stream uses a single one).
 #[derive(Default, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct XaDecoderState {
     y0: i32,
@@ -20,7 +38,7 @@ pub struct XaDecoderState {
 }
 
 impl XaDecoderState {
-    /// Fresh decoder history -- silence as prev samples.
+    /// Fresh decoder history: silence as the previous samples.
     pub fn new() -> Self {
         Self { y0: 0, y1: 0 }
     }
@@ -32,71 +50,65 @@ impl XaDecoderState {
     }
 }
 
-/// XA ADPCM filter coefficients `k0, k1` in Q10 form. Four filter
-/// IDs match the real-hardware decode table. Pattern matches
-/// Redux's `decode_xa.cc::s_K0/s_K1` at `(1<<SHC = 1024)`.
-const XA_FILTER: [(i32, i32); 4] = [(0, 0), (960, 0), (1840, -832), (1568, -880)];
+/// Predictor weights applied to the newest previous sample, indexed by the
+/// block's filter number, in 1/64 units (PSX-SPX `pos_xa_adpcm_table`).
+/// XA defines filters 0..=3 only.
+const XA_FILTER_NEWEST: [i32; 4] = [0, 60, 115, 98];
 
-/// Decode 28 ADPCM samples (one "sound unit") from an XA block.
-/// - `filter_range` -- packed byte: high nibble = filter ID (0..=3,
-///   values >3 are reserved), low nibble = range (output shift).
-/// - `data` -- seven 16-bit packed words, laid out exactly like
-///   Redux's `decode_xa.cc` before it calls `ADPCM_DecodeBlock16`.
-///   Each word carries four 4-bit samples.
-/// - `state` -- in/out filter history; mutates across calls within a
-///   sound group.
+/// Predictor weights applied to the older previous sample, in 1/64 units
+/// (PSX-SPX `neg_xa_adpcm_table`).
+const XA_FILTER_OLDER: [i32; 4] = [0, 0, -52, -55];
+
+/// Largest range value that is used as written. PSX-SPX: ranges 13..=15
+/// are reserved and behave like a range of 9.
+const XA_MAX_RANGE: u8 = 12;
+const XA_RESERVED_RANGE_AS: u8 = 9;
+
+/// Fractional bits carried by the decoder history (see "Numeric model").
+const HISTORY_FRAC_BITS: u32 = 4;
+
+/// Decode one 28-sample XA-ADPCM block.
 ///
-/// Writes 28 output samples into `out[0], out[stride], out[2*stride], ...`.
-/// Stride = 2 for interleaved stereo, 1 for mono.
+/// - `header` is the block's header byte: bits 0..=3 hold the range (the
+///   right shift applied to the widened sample), bits 4..=5 the filter
+///   number. Bits 6..=7 are unused and ignored.
+/// - `widened` holds the block's samples already sign-extended and shifted
+///   up to 16 bits (`nibble << 12` for 4-bit data, `byte << 8` for 8-bit).
+/// - `state` is the channel's history, updated in place.
+///
+/// Each output is `(widened >> range) + prediction`, where the prediction
+/// is `newest * pos + older * neg` in 1/64 units, truncated. The value is
+/// clamped to the signed 16-bit range on the way out; the history keeps
+/// the unclamped value with four extra fractional bits and wraps like a
+/// 32-bit register if it ever overflows (only reachable with garbage
+/// input, since a stable stream stays near the 16-bit range).
 pub fn xa_decode_block(
     state: &mut XaDecoderState,
-    filter_range: u8,
-    data: &[u16],
-    out: &mut [i16],
-    stride: usize,
+    header: u8,
+    widened: &[i16; 28],
+    out: &mut [i16; 28],
 ) {
-    let filter_id = ((filter_range >> 4) & 0x0F).min(3) as usize;
-    let range = (filter_range & 0x0F) as u32;
-    let (k0, k1) = XA_FILTER[filter_id];
-    let mut y0 = state.y0;
-    let mut y1 = state.y1;
+    let range = match header & 0x0F {
+        r if r > XA_MAX_RANGE => XA_RESERVED_RANGE_AS,
+        r => r,
+    };
+    let filter = ((header >> 4) & 0x03) as usize;
+    // 1/64 weights applied to a history with four fractional bits: scale
+    // them to 1/1024 and shift the sum by 10, so the fraction survives.
+    let pos = XA_FILTER_NEWEST[filter] << HISTORY_FRAC_BITS;
+    let neg = XA_FILTER_OLDER[filter] << HISTORY_FRAC_BITS;
 
-    // Match Redux's `ADPCM_DecodeBlock16` exactly: unpack one packed
-    // 16-bit word into x0..x3 (high nibble first), run the IIR filter,
-    // clamp in Q4, then emit 16-bit PCM.
-    for (i, &word) in data.iter().take(7).enumerate() {
-        let expand = |shift: u32| -> i32 {
-            let nib = ((((word as u32) << shift) & 0xF000) as u16) as i16 as i32;
-            (nib >> range) << 4
-        };
-
-        let mut x3 = expand(0);
-        let mut x2 = expand(4);
-        let mut x1 = expand(8);
-        let mut x0 = expand(12);
-
-        x0 += (y0 * k0 + y1 * k1) >> 10;
-        y1 = y0;
-        y0 = x0;
-        x1 += (y0 * k0 + y1 * k1) >> 10;
-        y1 = y0;
-        y0 = x1;
-        x2 += (y0 * k0 + y1 * k1) >> 10;
-        y1 = y0;
-        y0 = x2;
-        x3 += (y0 * k0 + y1 * k1) >> 10;
-        y1 = y0;
-        y0 = x3;
-
-        let decoded = [x0, x1, x2, x3];
-        for (n, &sample) in decoded.iter().enumerate() {
-            let clamped = sample.clamp(-32768 << 4, 32767 << 4);
-            let idx = (i * 4 + n) * stride;
-            if idx < out.len() {
-                out[idx] = (clamped >> 4) as i16;
-            }
-        }
+    let (mut newest, mut older) = (state.y0, state.y1);
+    for (dst, &sample) in out.iter_mut().zip(widened) {
+        let predicted = newest
+            .wrapping_mul(pos)
+            .wrapping_add(older.wrapping_mul(neg))
+            >> 10;
+        let value = ((i32::from(sample) >> range) << HISTORY_FRAC_BITS).wrapping_add(predicted);
+        *dst = (value >> HISTORY_FRAC_BITS).clamp(-0x8000, 0x7FFF) as i16;
+        older = newest;
+        newest = value;
     }
-    state.y0 = y0;
-    state.y1 = y1;
+    state.y0 = newest;
+    state.y1 = older;
 }

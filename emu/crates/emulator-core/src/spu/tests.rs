@@ -1085,26 +1085,98 @@ fn interpolation_ring_preserves_previous_block_tail() {
 #[test]
 fn xa_decoder_silent_block_stays_silent() {
     let mut state = XaDecoderState::new();
-    let data = [0u16; 14];
-    let mut out = [0i16; 28];
-    xa_decode_block(&mut state, 0x00, &data, &mut out, 1);
+    let mut out = [1i16; 28];
+    xa_decode_block(&mut state, 0x00, &[0; 28], &mut out);
     assert!(out.iter().all(|&s| s == 0));
 }
 
 #[test]
-fn xa_decoder_nonzero_block_produces_output() {
+fn xa_decoder_filter_zero_only_scales_by_range() {
+    // PSX-SPX: a 4-bit sample is widened with `<< 12` and shifted right
+    // by the range, so with range 12 it comes out unchanged.
+    let mut widened = [0i16; 28];
+    widened[0] = 1 << 12;
+    widened[1] = -1 << 12;
+    widened[2] = 7 << 12;
+    widened[3] = -8 << 12;
     let mut state = XaDecoderState::new();
-    let mut data = [0u16; 14];
-    // Fill with non-zero pattern to exercise the filter.
-    for (i, w) in data.iter_mut().enumerate() {
-        *w = (i as u16) * 0x1234;
-    }
     let mut out = [0i16; 28];
-    xa_decode_block(&mut state, 0x01, &data, &mut out, 1);
-    assert!(
-        out.iter().any(|&s| s != 0),
-        "some samples should be nonzero"
-    );
+    xa_decode_block(&mut state, 0x0C, &widened, &mut out);
+    assert_eq!(&out[..5], &[1, -1, 7, -8, 0]);
+}
+
+#[test]
+fn xa_decoder_filter_one_predicts_from_the_newest_sample() {
+    // Filter 1 weighs the newest previous sample by 60/64 (truncated):
+    // 4096 -> 3840 -> 3600.
+    let mut widened = [0i16; 28];
+    widened[0] = 4096;
+    let mut state = XaDecoderState::new();
+    let mut out = [0i16; 28];
+    xa_decode_block(&mut state, 0x10, &widened, &mut out);
+    assert_eq!(&out[..3], &[4096, 3840, 3600]);
+}
+
+#[test]
+fn xa_decoder_filter_two_uses_both_previous_samples() {
+    // Filter 2: 115/64 on the newest sample, -52/64 on the older one.
+    // History in 1/16 steps (older = 0, newest = 16000): 1000 -> 1796 (the
+    // exact 1796.875 is truncated on output) -> 2416.
+    let mut widened = [0i16; 28];
+    widened[0] = 1000;
+    let mut state = XaDecoderState::new();
+    let mut out = [0i16; 28];
+    xa_decode_block(&mut state, 0x20, &widened, &mut out);
+    assert_eq!(&out[..3], &[1000, 1796, 2416]);
+}
+
+#[test]
+fn xa_decoder_history_keeps_fractions_below_one_output_step() {
+    // A sample of 1 followed by silence. With whole-sample history the
+    // 60/64 prediction would keep rounding back up to 1; with four
+    // fractional bits it decays through 15/16 and 14/16 of a step.
+    let mut widened = [0i16; 28];
+    widened[0] = 1 << 12;
+    let mut state = XaDecoderState::new();
+    let mut out = [0i16; 28];
+    xa_decode_block(&mut state, 0x1C, &widened, &mut out);
+    assert_eq!(&out[..3], &[1, 0, 0]);
+}
+
+#[test]
+fn xa_decoder_clamps_output_but_not_history() {
+    // Filter 1, a loud tail: the second-to-last sample is 0x7000 and the
+    // last would be 0x7000 + 60/64 of it, well past the 16-bit range.
+    let mut widened = [0i16; 28];
+    widened[26] = 0x7000;
+    widened[27] = 0x7000;
+    let mut state = XaDecoderState::new();
+    let mut out = [0i16; 28];
+    xa_decode_block(&mut state, 0x10, &widened, &mut out);
+    assert_eq!(out[26], 0x7000);
+    assert_eq!(out[27], i16::MAX);
+    // The next block still sees the unclamped 55552: 60/64 of it is
+    // 52080, far above what the clamped 32767 would predict (30720).
+    let mut next = [0i16; 28];
+    xa_decode_block(&mut state, 0x10, &[0; 28], &mut next);
+    assert_eq!(next[0], i16::MAX);
+}
+
+#[test]
+fn xa_decoder_reserved_range_acts_like_nine_and_high_header_bits_are_ignored() {
+    let mut widened = [0i16; 28];
+    widened[0] = 0x4000;
+    for header in [0x0D, 0x0E, 0x0F] {
+        let mut state = XaDecoderState::new();
+        let mut out = [0i16; 28];
+        xa_decode_block(&mut state, header, &widened, &mut out);
+        assert_eq!(out[0], 0x4000 >> 9, "header {header:#04x}");
+    }
+    let mut plain = [0i16; 28];
+    xa_decode_block(&mut XaDecoderState::new(), 0x19, &widened, &mut plain);
+    let mut dirty = [0i16; 28];
+    xa_decode_block(&mut XaDecoderState::new(), 0xD9, &widened, &mut dirty);
+    assert_eq!(plain, dirty);
 }
 
 // -- Volume register decoding --
