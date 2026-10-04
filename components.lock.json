@@ -3,16 +3,13 @@
   "components": {
     "sdk": {
       "repository": "EBonura/PSoXide",
-      "revision": "fa71d2778dfe538c7ba38213532284ebe4c639c9",
+      "revision": "a770c4a27c7f5df9b48f816aa527b8dda5392424",
       "paths": [
         "sdk",
         "crates",
         "tools/mkisopsx",
         "tools/psoxide-link",
-        "tools/hazard_scan.py",
-        "tools/hazard_patch.py",
         "tools/guest_symbol_gate.sh",
-        "tools/check_mfc0.py",
         "assets/audio/freesfx",
         "assets/textures/brick-wall.psxt",
         "assets/textures/floor.psxt",
