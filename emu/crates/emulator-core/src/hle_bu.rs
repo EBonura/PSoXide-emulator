@@ -496,13 +496,13 @@ fn directory_frame_ok(bus: &mut Bus, slot: u32, index: u32) -> bool {
     true
 }
 
-/// Directory frames written after changing the cache, then a probe: the
-/// frames of `DIRTY` in ascending order with `LAST_ENTRY` after the rest
-/// (the first block of a file goes last, so a write that stops half way
-/// leaves blocks nobody points at, not a file that points at garbage). A
-/// write error shows on the next command (psx-spx), and the previous
-/// kernel's card traffic has no probe after the last frame either. `None`
-/// while a sector is on its way, then the outcome.
+/// Directory frames written after changing the cache: the frames of `DIRTY`
+/// in ascending order with `LAST_ENTRY` after the rest (the first block of a
+/// file goes last, so a write that stops half way leaves blocks nobody points
+/// at, not a file that points at garbage). A write error shows on the next
+/// command (psx-spx) and nothing probes for it here; the previous kernel's
+/// card traffic has no probe after the last frame either. `None` while a
+/// sector is on its way, then the outcome.
 fn write_toc(bus: &mut Bus, slot: u32) -> Option<u32> {
     let device = slot << 4;
     loop {
