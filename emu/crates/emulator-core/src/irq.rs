@@ -13,12 +13,12 @@
 //!
 //! ## Provenance
 //!
-//! Implemented from public hardware documentation (nocash PSX-SPX) and
-//! parity-verified against PCSX-Redux
-//! (<https://github.com/grumpycoders/pcsx-redux>), GPL-2.0-or-later;
-//! correspondences are flagged inline with `Redux` references. PSoXide is
-//! released under GPL-2.0-or-later for compatibility with that reference.
-//! See `LICENSE` and `docs/license-audit.md`.
+//! Written from the nocash PSX-SPX "Interrupts" chapter: the 11 source
+//! bits, `I_STAT` as write-0-to-acknowledge, `I_MASK` as a plain write,
+//! and the single CPU interrupt line formed by OR-ing the masked bits.
+//! The register file is exercised by the hardware-test disc's interrupt
+//! cases (`test_irq_mask_roundtrip`, `test_irq_gpu_ack_path`). See
+//! `LICENSE` and `docs/license-audit.md`.
 
 /// Source-bit positions inside `I_STAT` / `I_MASK`. Kept as a typed enum
 /// so calling sites read as intent (`irq.raise(IrqSource::VBlank)`)
@@ -79,7 +79,7 @@ pub struct Irq {
     #[serde(skip)]
     mask_write_log: Vec<u32>,
     /// First 16 (cycle, value) pairs of `I_MASK` writes. Diagnostic --
-    /// helps cross-check when our writes happen vs Redux's.
+    /// helps correlate our writes with a captured console timeline.
     #[serde(skip)]
     mask_write_events: Vec<(u64, u32)>,
     /// First 16 (cycle, value) pairs of `I_STAT` writes. Diagnostic.
@@ -118,9 +118,10 @@ impl Irq {
     }
 
     /// Raise interrupt `source` -- set its bit in `I_STAT` regardless
-    /// of the mask. Matches real PSX hardware and PCSX-Redux's
-    /// `setIRQ` (an unconditional `istat |= bit`). Mask gating happens
-    /// at delivery time (`pending`), not at latch time.
+    /// of the mask. PSX-SPX describes `I_STAT` as the request latch set
+    /// on a source's false-to-true edge (the callers decide what an edge
+    /// is); mask gating happens at delivery time (`pending`), not at
+    /// latch time.
     pub fn raise(&mut self, source: IrqSource) {
         let idx = source as usize;
         if idx < self.raise_counts.len() {
@@ -196,7 +197,7 @@ impl Irq {
 
     /// Like [`write_stat`] but also tags the event with the bus
     /// cycle. Used by the bus so diagnostics can correlate writes
-    /// against Redux's timeline.
+    /// against a captured console timeline.
     pub fn write_stat_at(&mut self, value: u32, cycles: u64) {
         self.write_stat(value);
         if self.stat_write_events.len() < 16 {
