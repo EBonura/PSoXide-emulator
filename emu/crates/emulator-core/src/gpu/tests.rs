@@ -1257,8 +1257,8 @@ fn flat_textured_model_pair_cyclic_rotation_matches_quad_bitexact() {
         let tri1_rotation = (next() % 3) as usize;
         let tri1_verts = rotate3([verts[1], verts[3], verts[2]], tri1_rotation);
         let tri1_uvs = rotate3([uvs[1], uvs[3], uvs[2]], tri1_rotation);
-        let tri1 = TriTextured::with_material_packet_texcoords(tri1_verts, tri1_uvs, material);
-        let tri0 = TriTextured::with_material_packet_texcoords(tri0_verts, tri0_uvs, material);
+        let tri1 = TriTextured::with_material(tri1_verts, tri1_uvs, material);
+        let tri0 = TriTextured::with_material(tri0_verts, tri0_uvs, material);
         submit_packet(&mut tris, &tri1, TriTextured::WORDS);
         submit_packet(&mut tris, &tri0, TriTextured::WORDS);
 
@@ -1543,7 +1543,7 @@ fn textured_gouraud_quad_matches_two_triangle_split_bitexact() {
 /// Unlike `textured_gouraud_quad_matches_two_triangle_split_bitexact`,
 /// which hand-assembles GP0 words, this drives the *exact struct bytes
 /// the engine emits* -- the same SDK constructors the `WorldRenderPass`
-/// leaf paths call (`TriTexturedGouraud::with_material_packet_texcoords`
+/// leaf paths call (`TriTexturedGouraud::with_material`
 /// and `QuadTexturedGouraud::with_packet_material_packed_uv_words`),
 /// including the leading GP0(E2) texture-window word that the
 /// hand-assembled sweep omits. A regression here is exactly the
@@ -1609,13 +1609,13 @@ fn tri_textured_gouraud_struct_rasterizes_and_matches_quad() {
     // Path A: the two leaf packets `submit_textured_gouraud_triangle`
     // emits when it splits the quad on the 0-2 diagonal.
     let mut a = make_gpu();
-    let tri0 = TriTexturedGouraud::with_material_packet_texcoords(
+    let tri0 = TriTexturedGouraud::with_material(
         [verts[0], verts[1], verts[2]],
         [uvs[0], uvs[1], uvs[2]],
         [colors[0], colors[1], colors[2]],
         material,
     );
-    let tri1 = TriTexturedGouraud::with_material_packet_texcoords(
+    let tri1 = TriTexturedGouraud::with_material(
         [verts[0], verts[2], verts[3]],
         [uvs[0], uvs[2], uvs[3]],
         [colors[0], colors[2], colors[3]],
