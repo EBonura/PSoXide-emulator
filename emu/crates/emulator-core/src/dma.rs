@@ -1,24 +1,17 @@
 //! DMA controller -- 7 channels plus global control registers.
 //!
 //! Channel layout (each is 16 bytes at `0x1F80_1080 + 0x10 * ch`):
-//! - `+0x0` base address (RAM address the channel transfers to/from)
-//! - `+0x4` block control (count + block size for block/list modes)
-//! - `+0x8` channel control (direction, sync mode, start trigger, …)
+//! - `+0x0` MADR, the RAM address the channel transfers to or from
+//! - `+0x4` BCR, block count and size (or word count in sync mode 0)
+//! - `+0x8` CHCR, direction, step, sync mode and the start/busy bits
 //!
 //! Global:
-//! - `0x1F80_10F0` DPCR -- per-channel enables + priority bits
-//! - `0x1F80_10F4` DICR -- IRQ enables + pending flags
+//! - `0x1F80_10F0` DPCR, per-channel enable and priority
+//! - `0x1F80_10F4` DICR, interrupt enables and flags
 //!
-//! **Phase 2g scope:** register backing + MMIO dispatch only. No actual
-//! transfers fire yet. When a channel's `channel_control` start bit is
-//! written, we record the intent but don't move bytes -- the channel's
-//! owning subsystem (GPU for ch 2, SPU for ch 4, CD-ROM for ch 3, …)
-//! isn't online. OTC (ch 6) is self-contained and will be the first
-//! real transfer path; it lands in the follow-up commit that wires
-//! ticking.
-//!
-//! Channel identity (for the `IrqSource::Dma` side):
-//!
+//! This module holds the register file and the DICR interrupt logic. The
+//! bus owns the transfers themselves, except OTC (channel 6), which only
+//! needs RAM and is run from here.
 //!
 //! | ch | consumer     |
 //! |----|--------------|
@@ -32,57 +25,69 @@
 //!
 //! ## Provenance
 //!
-//! Portions of this module are parity-matched against, and in places
-//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
-//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
-//! correspondence are flagged inline with `Redux` references. PSoXide is
-//! released under GPL-2.0-or-later in part to honor this lineage; see
+//! Written from the nocash PSX-SPX "DMA Channels" chapter: the channel
+//! register layout, DPCR enable bits, the DICR bit map with its flag and
+//! master-flag rules, and the OTC (reverse clear ordering table) behaviour.
+//! Completion latency is not modelled here; the bus schedules it. See
 //! `LICENSE` and `docs/license-audit.md`.
 
 /// Number of DMA channels.
 pub const NUM_CHANNELS: usize = 7;
 
 /// OTC CHCR exposes only the start/busy and manual-trigger bits; direction
-/// and decrement are hardwired, and all other software writes read back zero.
+/// and step are hardwired (PSX-SPX: D6_CHCR reads back 11000002h at most),
+/// and all other software writes read back zero.
 const OTC_CHCR_WRITABLE: u32 = (1 << 24) | (1 << 28) | (1 << 30);
 const OTC_CHCR_FIXED: u32 = 1 << 1;
+
+/// CHCR bit 24: start / busy.
+const CHCR_START: u32 = 1 << 24;
+/// CHCR bit 28: manual start trigger.
+const CHCR_TRIGGER: u32 = 1 << 28;
+
+/// DICR bits that software can write directly: the unused-but-stored low
+/// bits 0..=5, the bus-error flag at 15 is excluded, and the per-channel
+/// enables plus master enable at 16..=23.
+const DICR_WRITABLE: u32 = 0x003F | 0x00FF_0000;
+/// DICR bit 15, the bus error flag. Forces the master flag.
+const DICR_BUS_ERROR: u32 = 1 << 15;
+/// DICR bit 23, the master enable.
+const DICR_MASTER_ENABLE: u32 = 1 << 23;
+/// DICR bits 24..=30, the per-channel flags (write 1 to clear).
+const DICR_FLAGS: u32 = 0x7F00_0000;
+/// DICR bit 31, the master flag (read only, computed).
+const DICR_MASTER_FLAG: u32 = 1 << 31;
 
 /// Per-channel register state.
 #[derive(Default, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct DmaChannel {
-    /// `MADR` -- base address (destination for RAM-bound transfers,
-    /// source otherwise). Lower 24 bits are the physical RAM offset;
-    /// upper bits read back as written but aren't consulted during
-    /// transfers.
+    /// `MADR`: base address. The low 24 bits are the RAM offset; upper bits
+    /// read back as written but are not used during transfers.
     pub base: u32,
-    /// `BCR` -- block control. Format depends on sync mode; for block
-    /// mode, lower 16 bits are block size and upper 16 bits are count.
+    /// `BCR`: block control. In block mode the low 16 bits are the block
+    /// size and the high 16 bits the block count.
     pub block_control: u32,
-    /// `CHCR` -- channel control (direction / step / sync / start).
+    /// `CHCR`: channel control (direction, step, sync mode, start).
     pub channel_control: u32,
 }
 
-/// Global controller state + 7 channels.
+/// Global controller state and the 7 channels.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Dma {
     /// Per-channel register blocks.
     pub channels: [DmaChannel; NUM_CHANNELS],
-    /// `DPCR` -- DMA Primary Control Register (per-channel enables +
-    /// priority). Reset value is `0x0765_4321` on hardware but the BIOS
-    /// writes it early so the reset default doesn't matter for us.
+    /// `DPCR`: per-channel enable (bit `4 * n + 3`) and priority. The
+    /// BIOS writes it early, so the reset value does not matter here.
     pub dpcr: u32,
-    /// `DICR` -- DMA Interrupt Register (IRQ enable + pending bits).
+    /// `DICR` as software wrote it: enables, the unused low bits and the
+    /// per-channel flags. Bit 31 is not stored; see [`Dma::read32`].
     pub dicr: u32,
     /// Per-channel count of CHCR writes with the start bit set.
-    /// Diagnostic only -- tells us which channels software is using
-    /// and how often. Cleared on `new()`, never decremented. Excluded
-    /// from save states.
+    /// Diagnostic only, excluded from save states.
     #[serde(skip)]
     pub start_trigger_counts: [u64; NUM_CHANNELS],
-    /// Mirror of `start_trigger_counts` that survives cargo-naming
-    /// nuance -- a second counter bumped in the same place so a
-    /// probe can distinguish "channel never touched" from "channel
-    /// touched but we haven't picked it up." Excluded from save states.
+    /// Per-channel count of CHCR writes of any kind. Diagnostic only,
+    /// excluded from save states.
     #[serde(skip)]
     pub chcr_write_count: [u64; NUM_CHANNELS],
 }
@@ -90,9 +95,9 @@ pub struct Dma {
 impl Dma {
     /// Low edge of the controller's MMIO range.
     pub const BASE: u32 = 0x1F80_1080;
-    /// High edge (exclusive). DPCR sits at `BASE + 0x70`, DICR at
-    /// `BASE + 0x74`; we round the range up to the next 16-byte
-    /// boundary so the dispatch check is a single `contains`.
+    /// High edge (exclusive): DPCR is at `BASE + 0x70` and DICR at
+    /// `BASE + 0x74`; the range is rounded up so the dispatch check is a
+    /// single comparison.
     pub const END: u32 = 0x1F80_10F8;
     /// Channel stride within the DMA window.
     pub const STRIDE: u32 = 0x10;
@@ -101,7 +106,7 @@ impl Dma {
     /// Offset of DICR from [`Dma::BASE`].
     pub const DICR_OFFSET: u32 = 0x74;
 
-    /// All channels + both global regs cleared.
+    /// All channels and both global registers cleared.
     pub fn new() -> Self {
         Self {
             channels: [DmaChannel::default(); NUM_CHANNELS],
@@ -117,144 +122,121 @@ impl Dma {
         (Self::BASE..Self::END).contains(&phys)
     }
 
-    /// `true` when DPCR has channel `ch` enabled. Mirrors Redux's
-    /// `isDMAEnabled<n>()` in `psxmem.h`: the enable bit for
-    /// channel N is DPCR bit `N*4 + 3`. Software writes DPCR to
-    /// selectively enable/disable channels before starting a
-    /// transfer -- if the channel is off, the CHCR start-bit write
-    /// MUST NOT kick the DMA. Skipping this check lets Crash's
-    /// intro issue CHCR writes that Redux ignores, producing extra
-    /// DMA completions on our side and a +2488-cycle drift in the
-    /// first fold after the Sony logo.
+    /// `true` when DPCR has channel `ch` enabled (PSX-SPX: bit `4 * ch + 3`).
+    /// A CHCR start write to a disabled channel must not start a transfer.
     pub fn is_channel_enabled(&self, ch: usize) -> bool {
-        debug_assert!(ch < NUM_CHANNELS);
-        let bit = 1u32 << (ch * 4 + 3);
-        self.dpcr & bit != 0
+        self.dpcr & (1 << (ch * 4 + 3)) != 0
+    }
+
+    /// DICR as software reads it: the stored bits plus the computed master
+    /// flag, `bit15 | (bit23 & any flag)` (PSX-SPX).
+    fn dicr_read(&self) -> u32 {
+        self.dicr & !DICR_MASTER_FLAG
+            | if self.master_flag() {
+                DICR_MASTER_FLAG
+            } else {
+                0
+            }
+    }
+
+    fn master_flag(&self) -> bool {
+        self.dicr & DICR_BUS_ERROR != 0
+            || (self.dicr & DICR_MASTER_ENABLE != 0 && self.dicr & DICR_FLAGS != 0)
     }
 
     /// Read a 32-bit word. `phys` must be inside [`Dma::BASE`]..[`Dma::END`].
     pub fn read32(&self, phys: u32) -> u32 {
-        let offset = phys - Self::BASE;
-        match offset {
+        let rel = phys - Self::BASE;
+        match rel {
             Self::DPCR_OFFSET => self.dpcr,
-            Self::DICR_OFFSET => self.dicr_with_master_flag(),
+            Self::DICR_OFFSET => self.dicr_read(),
             _ => {
                 let (ch, field) = decode(phys);
-                if ch >= NUM_CHANNELS {
-                    return 0;
-                }
-                let c = &self.channels[ch];
-                match field {
-                    0x0 => c.base,
-                    0x4 => c.block_control,
-                    0x8 => c.channel_control,
+                match (self.channels.get(ch), field) {
+                    (Some(c), 0x0) => c.base,
+                    (Some(c), 0x4) => c.block_control,
+                    (Some(c), 0x8) => c.channel_control,
                     _ => 0,
                 }
             }
         }
     }
 
-    /// Read a byte from the DMA register window.
-    ///
-    /// Some games poke global DMA registers byte-wise. In particular,
-    /// Some commercial titles toggle channel-specific DICR IRQ-enable bits through
-    /// `sb` at `DICR+2` while streaming FMV chunks; routing those reads
-    /// through the live register state keeps the later writeback honest.
+    /// Read a byte; partial reads see the live register bytes. Some titles
+    /// toggle channel DICR enables with `sb` at `DICR+2` while streaming FMV.
     pub fn read8(&self, phys: u32) -> u8 {
         let word = self.read32(phys & !3);
-        ((word >> ((phys & 3) * 8)) & 0xFF) as u8
+        (word >> ((phys & 3) * 8)) as u8
     }
 
-    /// Read a little-endian halfword from the DMA register window.
+    /// Read a little-endian halfword from the DMA register window (built from
+    /// two byte reads, so an odd address straddles two registers).
     pub fn read16(&self, phys: u32) -> u16 {
-        u16::from_le_bytes([self.read8(phys), self.read8(phys.wrapping_add(1))])
+        u16::from(self.read8(phys)) | u16::from(self.read8(phys + 1)) << 8
     }
 
     /// Write a 32-bit word. `phys` must be inside [`Dma::BASE`]..[`Dma::END`].
     ///
-    /// Returns `true` when a DICR write transitions the DMA master IRQ
-    /// flag from clear to set, matching Redux's `psxhw.cc` side effect.
-    /// Channel-control start bits are recorded here; transfer execution
-    /// is still owned by the bus/peripheral layer.
+    /// Returns `true` when a DICR write takes the master interrupt flag from
+    /// clear to set (PSX-SPX: the 0-to-1 edge raises IRQ3). CHCR start bits
+    /// are counted here; running the transfer belongs to the bus.
     pub fn write32(&mut self, phys: u32, value: u32) -> bool {
-        let offset = phys - Self::BASE;
-        match offset {
-            Self::DPCR_OFFSET => {
-                self.dpcr = value;
-                false
-            }
-            Self::DICR_OFFSET => self.write_dicr(value),
-            _ => {
-                let (ch, field) = decode(phys);
-                if ch >= NUM_CHANNELS {
-                    return false;
-                }
-                let c = &mut self.channels[ch];
-                match field {
-                    0x0 => c.base = value & 0x00FF_FFFF,
-                    0x4 => c.block_control = value,
-                    0x8 => {
-                        c.channel_control = if ch == 6 {
-                            (value & OTC_CHCR_WRITABLE) | OTC_CHCR_FIXED
-                        } else {
-                            value
-                        };
-                        if (value >> 24) & 1 != 0 {
-                            self.start_trigger_counts[ch] += 1;
-                            self.chcr_write_count[ch] = self.chcr_write_count[ch].saturating_add(1);
-                        }
-                    }
-                    _ => {}
-                }
-                false
-            }
+        let rel = phys - Self::BASE;
+        if rel == Self::DICR_OFFSET {
+            return self.write_dicr(value);
         }
-    }
-
-    /// Write a byte to the DMA register window.
-    ///
-    /// Redux lets byte/halfword writes in this range update the raw
-    /// backing register bytes. That is subtly different from a 32-bit
-    /// DICR write: partial writes do not run DICR's write-one-to-clear
-    /// path and do not dispatch DMA channel starts.
-    pub fn write8(&mut self, phys: u32, value: u8) -> bool {
-        let word_addr = phys & !3;
-        let shift = (phys & 3) * 8;
-        let mask = 0xFFu32 << shift;
-        let word = (self.read32(word_addr) & !mask) | ((value as u32) << shift);
-        self.write_raw32(word_addr, word);
+        self.write_raw32(phys, value);
+        if rel < Self::DPCR_OFFSET && rel % Self::STRIDE == 8 && value & CHCR_START != 0 {
+            let ch = (rel / Self::STRIDE) as usize;
+            self.chcr_write_count[ch] += 1;
+            self.start_trigger_counts[ch] += 1;
+        }
         false
     }
 
-    /// Write a little-endian halfword to the DMA register window.
+    /// Write a byte. A partial write patches the stored register bytes only:
+    /// it does not run DICR's write-one-to-clear and does not count or start
+    /// a channel.
+    pub fn write8(&mut self, phys: u32, value: u8) -> bool {
+        let shift = (phys & 3) * 8;
+        let word = self.read_stored(phys & !3);
+        let patched = word & !(0xFF << shift) | (value as u32) << shift;
+        self.write_raw32(phys & !3, patched);
+        false
+    }
+
+    /// Write a little-endian halfword as two byte writes; see [`Dma::write8`].
     pub fn write16(&mut self, phys: u32, value: u16) -> bool {
-        let [lo, hi] = value.to_le_bytes();
-        let mut edge = self.write8(phys, lo);
-        edge |= self.write8(phys.wrapping_add(1), hi);
-        edge
+        self.write8(phys, value as u8);
+        self.write8(phys + 1, (value >> 8) as u8)
+    }
+
+    /// A register's stored value, without the computed DICR master flag.
+    fn read_stored(&self, phys: u32) -> u32 {
+        if phys - Self::BASE == Self::DICR_OFFSET {
+            self.dicr
+        } else {
+            self.read32(phys)
+        }
     }
 
     fn write_raw32(&mut self, phys: u32, value: u32) {
-        let offset = phys - Self::BASE;
-        match offset {
+        let rel = phys - Self::BASE;
+        match rel {
             Self::DPCR_OFFSET => self.dpcr = value,
-            Self::DICR_OFFSET => self.dicr = value,
+            Self::DICR_OFFSET => self.dicr = value & !DICR_MASTER_FLAG,
             _ => {
                 let (ch, field) = decode(phys);
-                if ch >= NUM_CHANNELS {
+                let Some(c) = self.channels.get_mut(ch) else {
                     return;
-                }
-                let c = &mut self.channels[ch];
+                };
                 match field {
                     0x0 => c.base = value & 0x00FF_FFFF,
                     0x4 => c.block_control = value,
-                    0x8 => {
-                        c.channel_control = if ch == 6 {
-                            (value & OTC_CHCR_WRITABLE) | OTC_CHCR_FIXED
-                        } else {
-                            value
-                        }
+                    0x8 if ch == 6 => {
+                        c.channel_control = (value & OTC_CHCR_WRITABLE) | OTC_CHCR_FIXED;
                     }
+                    0x8 => c.channel_control = value,
                     _ => {}
                 }
             }
@@ -268,139 +250,78 @@ impl Default for Dma {
     }
 }
 
-// --- DICR semantics ---
+// --- DICR semantics (PSX-SPX "DMA Channels", DICR) ---
 //
-// Layout (Redux/PCSX-style):
-//   bits  0..5  : Unknown (R/W)
-//   bits  6..14 : Reserved (always 0)
-//   bit   15    : Bus-error flag
-//   bits 16..22 : Per-channel IRQ enable (R/W) -- DMA0..DMA6
-//   bit   23    : IRQ master enable (R/W)
-//   bits 24..30 : Per-channel IRQ flag (R, W1C) -- DMA0..DMA6
-//   bit   31    : IRQ master flag (stored by Redux, not purely derived)
-//
-// Redux stores bit 31 explicitly and raises IRQ 8 from two places:
-// DMA completion and CPU writes to DICR that make the master flag
-// transition. Matching that detail matters because BIOS code can leave
-// a per-channel flag pending while toggling the master enable later.
+//   bits  0..5  : stored, no documented effect
+//   bit   15    : bus error flag
+//   bits 16..22 : per-channel interrupt enable, DMA0..DMA6
+//   bit   23    : master enable
+//   bits 24..30 : per-channel interrupt flag (read, write 1 to clear)
+//   bit   31    : master flag, computed on every write:
+//                 b15 | (b23 & any of b24..b30)
+// The IRQ3 request is the 0-to-1 edge of the master flag.
 impl Dma {
-    const DICR_RW_MASK: u32 = 0x00FF_003F;
-    const DICR_FLAG_MASK: u32 = 0x7F00_0000;
-    const DICR_MASTER_ENABLE: u32 = 1 << 23;
-    const DICR_MASTER_FLAG: u32 = 1 << 31;
-    const DICR_ERROR_OR_FLAGS: u32 = 0x7F00_8000;
-
     fn write_dicr(&mut self, value: u32) -> bool {
-        // DICR write semantics, parity-matched against Redux `psxhw.cc`:
-        // - bits 24..30 are write-1-to-clear flags
-        // - bits 0..5 and 16..23 are regular writable state
-        // - writing master-enable while a flag is pending raises IRQ 8
-        let mut icr = self.dicr;
-        let ack_mask = (value & Self::DICR_FLAG_MASK) ^ Self::DICR_FLAG_MASK;
-        let was_not_triggered = icr & Self::DICR_MASTER_FLAG == 0;
-        let has_error = value & 0x0000_8000 != 0;
-        let is_enabled = value & Self::DICR_MASTER_ENABLE != 0;
-
-        icr &= ack_mask;
-        icr |= value & Self::DICR_RW_MASK;
-
-        let mut triggered = false;
-        if (icr & Self::DICR_ERROR_OR_FLAGS) != 0 && (has_error || is_enabled) {
-            icr |= Self::DICR_MASTER_FLAG;
-            triggered = true;
-        }
-        self.dicr = icr;
-        was_not_triggered && triggered
+        let before = self.master_flag();
+        // Writing 1 to a flag clears it; the writable bits are replaced.
+        let flags = self.dicr & DICR_FLAGS & !(value & DICR_FLAGS);
+        self.dicr = self.dicr & DICR_BUS_ERROR | (value & DICR_WRITABLE) | flags;
+        !before && self.master_flag()
     }
 
-    fn dicr_with_master_flag(&self) -> u32 {
-        self.dicr
-    }
-
-    /// Notify the DICR that DMA channel `ch` has completed. Sets the
-    /// channel's IRQ flag (bit `24+ch`) when the matching enable bit
-    /// (`16+ch`) is set, and returns `true` when the master IRQ flag
-    /// transitions from clear to set as a result -- that's the edge the
-    /// main IRQ controller should treat as a `Dma` raise.
+    /// Channel `ch` has finished a transfer. Sets its DICR flag (bit
+    /// `24 + ch`) when its enable bit (`16 + ch`) is set, and returns `true`
+    /// when that takes the master flag from clear to set: the edge the
+    /// interrupt controller treats as a DMA request.
     pub fn notify_channel_done(&mut self, ch: usize) -> bool {
-        if ch >= NUM_CHANNELS {
+        // PSX-SPX: the flag is set only when both the channel's enable and
+        // the master enable are on.
+        let enabled = self.dicr & (1 << (16 + ch)) != 0 && self.dicr & DICR_MASTER_ENABLE != 0;
+        if !enabled {
             return false;
         }
-        if self.dicr & Self::DICR_MASTER_ENABLE == 0 {
-            return false;
-        }
-        let enable_bit = 1 << (16 + ch);
-        if self.dicr & enable_bit == 0 {
-            return false;
-        }
-        let prev_master = self.dicr & Self::DICR_MASTER_FLAG != 0;
+        let before = self.master_flag();
         self.dicr |= 1 << (24 + ch);
-        self.dicr |= Self::DICR_MASTER_FLAG;
-        !prev_master
+        !before && self.master_flag()
     }
 }
 
 // --- Transfer execution ---
-
 impl Dma {
-    /// Run the OTC (channel 6) transfer if its start bit is set.
+    /// Run the OTC (channel 6) transfer if its start and manual-trigger bits
+    /// are both set; otherwise RAM is left untouched.
     ///
-    /// OTC builds an ordering-table linked list with `MADR` as the
-    /// **head** (highest address) and the terminator at the tail
-    /// (`MADR - (count-1)*4`, the lowest address). Each non-terminator
-    /// word holds a 24-bit pointer to the next address, descending by
-    /// 4 each step.
+    /// OTC builds an ordering-table linked list: MADR is the head (highest
+    /// address), each word holds the 24-bit address of the next word
+    /// 4 bytes lower, and the word at the lowest address is the terminator
+    /// `0x00FF_FFFF` (PSX-SPX: "reverse clear OT"). BCR is the word count.
     ///
-    /// Mirrors Redux's `dma6` (psxdma.cc:113-119):
-    /// ```c
-    /// while (bcr--) { *mem-- = (madr - 4) & 0xffffff; madr -= 4; }
-    /// mem++;        *mem = 0xffffff;   // overwrites last chain ptr
-    /// ```
-    /// Crucially, the terminator overwrites the chain pointer the loop
-    /// just wrote at the lowest address -- so the structure ends up:
-    /// `madr → madr-4 → … → madr-(count-2)*4 → terminator`.
+    /// CHCR start/busy is not cleared here: the caller schedules the
+    /// completion, so polling CHCR keeps seeing busy until then.
     ///
-    /// CHCR start (24) and busy (28) bits are NOT cleared here -- the
-    /// caller schedules a delayed completion (Redux's
-    /// `scheduleGPUOTCDMAIRQ(size)`) so BIOS polls of CHCR keep
-    /// observing the busy state for `size` cycles after kickoff.
-    ///
-    /// Returns the word count transferred (0 if start bit was clear).
-    /// Called by [`crate::Bus`] after every CHCR write.
+    /// Returns the word count transferred (0 if not started). Called by
+    /// [`crate::Bus`] after every CHCR write.
     pub fn run_otc(&mut self, ram: &mut [u8]) -> u32 {
-        let ch = &self.channels[6];
-        // Manual OTC requires BOTH Start/Busy (24) and Trigger (28).
-        // A start bit without the manual trigger must leave RAM untouched.
-        if ch.channel_control & 0x1100_0000 != 0x1100_0000 {
+        let otc = self.channels[6];
+        if otc.channel_control & (CHCR_START | CHCR_TRIGGER) != (CHCR_START | CHCR_TRIGGER) {
             return 0;
         }
-
-        let base = ch.base & 0x001F_FFFC;
-        let count = match ch.block_control & 0xFFFF {
-            0 => 0x1_0000, // hardware: 0 means 65536
+        let count = match otc.block_control & 0xFFFF {
+            0 => 0x1_0000,
             n => n,
         };
-
-        // Chain pointers: at address `base - i*4`, write a pointer
-        // to `base - (i+1)*4` (the address one step further down).
-        let mut addr = base;
-        for _ in 0..count {
-            let next = addr.wrapping_sub(4) & 0x00FF_FFFF;
-            let offset = (addr & 0x001F_FFFF) as usize;
-            if offset + 4 <= ram.len() {
-                ram[offset..offset + 4].copy_from_slice(&next.to_le_bytes());
-            }
-            addr = addr.wrapping_sub(4);
+        let mask = ram.len() as u32 - 1;
+        let mut addr = otc.base & 0x00FF_FFFC;
+        for i in 0..count {
+            let next = if i + 1 == count {
+                0x00FF_FFFF
+            } else {
+                addr.wrapping_sub(4) & 0x00FF_FFFF
+            };
+            let at = (addr & mask) as usize;
+            ram[at..at + 4].copy_from_slice(&next.to_le_bytes());
+            addr = addr.wrapping_sub(4) & 0x00FF_FFFC;
         }
-        // Overwrite the last chain entry (at the lowest address) with
-        // the terminator. `addr` after the loop is one step past the
-        // last write, so the tail is `addr + 4`.
-        let tail = addr.wrapping_add(4) & 0x001F_FFFF;
-        let offset = tail as usize;
-        if offset + 4 <= ram.len() {
-            ram[offset..offset + 4].copy_from_slice(&0x00FF_FFFFu32.to_le_bytes());
-        }
-
         count
     }
 }
@@ -522,8 +443,8 @@ mod tests {
     fn dicr_write_can_raise_master_irq_edge() {
         let mut dma = Dma::new();
         // Simulate a pending GPU-DMA flag with the channel enable set,
-        // but master IRQ still clear. Redux raises IRQ 8 when software
-        // writes DICR with master enable in this state.
+        // but the master flag still clear. Writing DICR with the master
+        // enable on in this state is a 0 to 1 edge on the master flag.
         dma.dicr = (1 << (16 + 2)) | (1 << (24 + 2));
         let edge = dma.write32(0x1F80_10F4, (1 << (16 + 2)) | (1 << 23));
         assert!(edge, "DICR write should create a master IRQ edge");
@@ -585,10 +506,10 @@ mod tests {
     #[test]
     fn otc_does_not_clear_start_and_busy_bits_synchronously() {
         // Bus is responsible for clearing the busy bits at the
-        // scheduled completion cycle (Redux's `gpuotcInterrupt`); the
+        // scheduled completion cycle; the
         // DMA module itself just transfers data. Start AND busy bits
         // both stay set during the "virtual transfer window" so BIOS
-        // polling of CHCR sees the same sequence Redux produces.
+        // polling of CHCR sees the busy state until then.
         //
         // Preventing duplicate runs is done at the bus level via the
         // CHCR-write-only trigger -- only a CHCR write with bit 24 set
@@ -634,5 +555,39 @@ mod tests {
     fn write_u32(ram: &mut [u8], offset: u32, value: u32) {
         let o = offset as usize;
         ram[o..o + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    #[test]
+    fn dicr_flag_needs_both_the_channel_enable_and_the_master_enable() {
+        let mut dma = Dma::new();
+        dma.write32(0x1F80_10F4, 1 << (16 + 3)); // channel 3 enable only
+        assert!(!dma.notify_channel_done(3));
+        assert_eq!(dma.read32(0x1F80_10F4) & (1 << 27), 0);
+    }
+
+    #[test]
+    fn dicr_master_flag_is_computed_and_ignores_the_written_bit_31() {
+        let mut dma = Dma::new();
+        // Writing bit 31 with nothing pending does not set it.
+        dma.write32(0x1F80_10F4, 0x8000_0000);
+        assert_eq!(dma.read32(0x1F80_10F4), 0);
+        // A flag raises it only while the master enable is on.
+        dma.write32(0x1F80_10F4, (1 << 17) | (1 << 23));
+        assert!(dma.notify_channel_done(1));
+        assert_ne!(dma.read32(0x1F80_10F4) & (1 << 31), 0);
+        dma.write32(0x1F80_10F4, 1 << 17); // master enable off, flag kept
+        assert_eq!(dma.read32(0x1F80_10F4) & (1 << 31), 0);
+        // Turning the master enable back on is a 0 to 1 edge.
+        assert!(dma.write32(0x1F80_10F4, (1 << 17) | (1 << 23)));
+    }
+
+    #[test]
+    fn dicr_partial_writes_do_not_acknowledge_flags() {
+        let mut dma = Dma::new();
+        dma.write32(0x1F80_10F4, (1 << 17) | (1 << 23));
+        dma.notify_channel_done(1);
+        // A byte write of 1 to the flag does not clear it, unlike a word write.
+        dma.write8(0x1F80_10F7, 0x02);
+        assert_ne!(dma.read32(0x1F80_10F4) & (1 << 25), 0);
     }
 }
