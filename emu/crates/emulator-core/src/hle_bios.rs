@@ -378,11 +378,11 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
     match (table, func) {
         // --- A-table ---
         //
-        // Numbering and semantics follow the OpenBIOS `romA0table`
-        // (pcsx-redux src/mips/openbios/kernel/handlers.c, MIT, used as a
-        // specification only) after its `patchA0table`, which aliases
-        // A(00h..09h) to B(32h..3Bh) and A(3Bh..3Eh) to B(3Ch..3Fh), and the
-        // psx-spx "BIOS Memory Fill/Copy/Compare" and "BIOS String Functions"
+        // Numbering and semantics follow psx-spx: its function summary, "BIOS
+        // File Functions" and "BIOS TTY Console" (which list A(00h)..A(09h)
+        // as aliases of B(32h)..B(3Bh) and A(3Bh)..A(3Eh) as aliases of
+        // B(3Ch)..B(3Fh)), "BIOS Memory Fill/Copy/Compare" and "BIOS String
+        // Functions"
         // descriptions. The functions psx-spx documents as buggy keep
         // their bugs (memmove, memcmp/bcmp); strtok, strstr and strpbrk
         // are not implemented yet and fall through to the unimplemented
@@ -663,8 +663,8 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         }
 
         // A(9Fh) SetMem(megabytes): 2 clears RAM_SIZE bits 8-9, 8 sets them,
-        // and the size is recorded at [0x60] (psx-spx; OpenBIOS
-        // kernel/misc.c setMemSize). Other values change nothing.
+        // and the size is recorded at [0x60] (psx-spx: the retail variant
+        // only knows 2 and 8). Other values change nothing.
         (Table::A, 0x9F) => {
             set_mem_size(bus, args[0]);
             Done(0)
@@ -856,12 +856,13 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             Done(base)
         }
 
-        // B(5Bh) ChangeClearPAD(flag): pad/card handler VBlank auto-ack.
-        // Returns the previous setting (OpenBIOS setSIO0AutoAck).
+        // B(5Bh) ChangeClearPAD(flag): the pad/card handler's VBlank
+        // auto-acknowledge, which psx-spx's "Patches" notes say this call
+        // can disable. psx-spx gives no return value, so v0 is left as it
+        // was.
         (Table::B, 0x5B) => {
-            let previous = k::peek32(bus, k::kvar::SIO0_AUTO_ACK);
             k::poke32(bus, k::kvar::SIO0_AUTO_ACK, args[0]);
-            Done(previous)
+            Done(gprs[2])
         }
 
         // B(4Ah) InitCARD2, B(4Bh) StartCARD2, B(4Ch) StopCARD2, B(4Dh)
@@ -1963,9 +1964,15 @@ mod tests {
         // A(9Dh) GetConf is guest code (see hle_kernel's tests); the
         // words it reads hold the SYSTEM.CNF defaults.
         assert_eq!(crate::hle_kernel::get_conf(&bus), (0x10, 4, 0x801F_FF00));
-        // B(5Bh) returns the previous auto-ack setting.
-        assert_eq!(call(&mut bus, 0xB0, 0x5B, [0, 0, 0, 0]), 1);
-        assert_eq!(call(&mut bus, 0xB0, 0x5B, [1, 0, 0, 0]), 0);
+        // B(5Bh) sets the pad/card handler's auto-ack flag, which is on at
+        // boot (psx-spx's patch notes call turning it off an option).
+        let auto_ack =
+            |bus: &Bus| crate::hle_kernel::peek32(bus, crate::hle_kernel::kvar::SIO0_AUTO_ACK);
+        assert_eq!(auto_ack(&bus), 1);
+        call(&mut bus, 0xB0, 0x5B, [0, 0, 0, 0]);
+        assert_eq!(auto_ack(&bus), 0);
+        call(&mut bus, 0xB0, 0x5B, [1, 0, 0, 0]);
+        assert_eq!(auto_ack(&bus), 1);
         // B(00h) allocates from the kernel heap set up at boot.
         let k = call(&mut bus, 0xB0, 0x00, [8, 0, 0, 0]);
         assert!((0xA000_E000..0xA001_0000).contains(&k), "{k:#x}");
