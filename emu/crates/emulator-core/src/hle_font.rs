@@ -1,153 +1,144 @@
-//! The character font behind B(51h) Krom2RawAdd and B(53h) Krom2Offset.
+// SPDX-License-Identifier: GPL-2.0-or-later
+//! The HLE kernel's Shift-JIS font (B(51h) Krom2RawAdd, B(53h) Krom2Offset).
 //!
-//! Games ask the kernel where the bitmap of a Shift-JIS character is and
-//! copy it from there (Chrono Cross draws its name-entry grid this way). A
-//! retail kernel points into the font in Sony's ROM, which PSoXide does not
-//! ship. This module serves an original font instead, drawn for PSoXide in
-//! `hle_font_glyphs.txt`, from the same ROM area and in the same cell format,
-//! so the games' own drawing code works unchanged:
+//! psx-spx "BIOS Character Sets" fixes the interface: charset 2 (16x15
+//! pixel cells, 8140h..84BEh) sits at BFC66000h in the ROM, charset 3
+//! (889Fh..9872h) at BFC69D68h, and Krom2RawAdd answers the address of a
+//! character or -1. A cell is 16x15 one-bit pixels, 2 bytes a row, 30 bytes.
 //!
-//! - a cell is 16x15 pixels at one bit per pixel, two bytes a row (first
-//!   byte the left half, bit 7 the leftmost pixel): 30 bytes;
-//! - bank 1, at ROM offset [`BANK1_ROM_OFFSET`], holds the non-kanji rows
-//!   1-8 of JIS X 0208, only the cells the standard assigns, in JIS order
-//!   (524 cells: symbols, full-width digits and Latin letters, kana, Greek,
-//!   Cyrillic, box drawing);
-//! - bank 2 follows it and holds the level-1 kanji, rows 16-47, 94 cells a
-//!   row (row 47 has 51).
+//! The layout inside the banks is the JIS X 0208 chart. Charset 2 is its
+//! rows 1 to 8 with only the assigned cells kept, in code order: 524 cells,
+//! and 524 * 30 bytes is exactly the 3D68h between the two charsets. Charset
+//! 3 is the level 1 kanji, rows 16 to 46 whole and row 47 up to cell 51:
+//! 31 * 94 + 51 cells. A Shift-JIS code is turned into its JIS row and cell
+//! by the standard pairing of two rows to a lead byte.
 //!
-//! Both layouts follow from the JIS X 0208 code chart, and psx-spx documents
-//! the cell format, the two code ranges and the -1 answer outside them. A
-//! code inside a range that the standard leaves unassigned resolves through
-//! the run of consecutive codes before it, as a range-table lookup does.
-//! Assigned cells with no glyph drawn yet show an outlined box, so a missing
-//! character is visible rather than silently blank.
+//! A code that is not an assigned cell of either bank is answered with the
+//! error value (-1 for Krom2RawAdd, FFFFh for Krom2Offset). psx-spx says
+//! nothing about unassigned codes inside the ranges; there is no cell to
+//! point at, so it is an error here too.
+//!
+//! Krom2Offset counts in cells from the start of the charset, and the
+//! address is the charset base plus 30 bytes a cell.
+//!
+//! The glyphs are drawn for PSoXide (hle_font_glyphs.txt); an assigned cell
+//! without a drawing shows an outlined box.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-/// Bytes per 16x15 cell.
+/// Bytes of one character cell.
 pub const CELL_BYTES: usize = 30;
-/// ROM offset of bank 1 (the address games receive is `0xBFC0_0000` plus
-/// this plus the cell's offset).
+/// ROM offset of charset 2 (psx-spx: BFC66000h).
 pub const BANK1_ROM_OFFSET: usize = 0x6_6000;
-/// Cells in bank 1.
+/// Cells of charset 2: the assigned cells of JIS X 0208 rows 1 to 8.
 pub const BANK1_CELLS: usize = 524;
-/// ROM offset of bank 2, straight after bank 1.
+/// ROM offset of charset 3 (psx-spx: BFC69D68h).
 pub const BANK2_ROM_OFFSET: usize = BANK1_ROM_OFFSET + BANK1_CELLS * CELL_BYTES;
-/// Cells in bank 2: rows 16-46 full, row 47 to cell 51.
+/// Cells of charset 3: the level 1 kanji, JIS X 0208 rows 16 to 47.
 pub const BANK2_CELLS: usize = 31 * 94 + 51;
-
+/// Where the BIOS ROM is mapped.
 const ROM_BASE: u32 = 0xBFC0_0000;
-const BANK1_CODES: std::ops::RangeInclusive<u16> = 0x8140..=0x84BE;
-const BANK2_CODES: std::ops::RangeInclusive<u16> = 0x889F..=0x9872;
 
-/// JIS X 0208 rows 1-8: the assigned cells of each row, as inclusive ranges.
+/// The assigned cells of JIS X 0208 rows 1 to 8, as inclusive runs of cell
+/// numbers (1 to 94) per row: symbols; more symbols with gaps; digits and
+/// Latin letters; hiragana; katakana; Greek; Cyrillic; box drawing.
 const BANK1_ASSIGNED: [&[(u8, u8)]; 8] = [
-    &[(1, 94)],                                                   // symbols
-    &[(1, 14), (26, 33), (42, 48), (60, 74), (82, 89), (94, 94)], // symbols
-    &[(16, 25), (33, 58), (65, 90)],                              // digits, Latin
-    &[(1, 83)],                                                   // hiragana
-    &[(1, 86)],                                                   // katakana
-    &[(1, 24), (33, 56)],                                         // Greek
-    &[(1, 33), (49, 81)],                                         // Cyrillic
-    &[(1, 32)],                                                   // box drawing
+    &[(1, 94)],
+    &[(1, 14), (26, 33), (42, 48), (60, 74), (82, 89), (94, 94)],
+    &[(16, 25), (33, 58), (65, 90)],
+    &[(1, 83)],
+    &[(1, 86)],
+    &[(1, 24), (33, 56)],
+    &[(1, 33), (49, 81)],
+    &[(1, 32)],
 ];
 
-/// Shift-JIS code of JIS row `row`, cell `cell` (both from 1).
+/// The Shift-JIS code of cell `cell` (1 to 94) of JIS row `row` (1 to 94):
+/// two rows share a lead byte, odd rows take trail bytes 40h..7Eh and
+/// 80h..9Eh, even rows 9Fh..FCh.
 fn sjis(row: u8, cell: u8) -> u16 {
-    let lead = u16::from(row.div_ceil(2)) + 0x80;
+    let lead = u16::from(row.div_ceil(2)) + if row <= 62 { 0x80 } else { 0xC0 };
     let trail = if row % 2 == 1 {
-        u16::from(cell) + 0x3F + u16::from(cell >= 64)
+        u16::from(cell) + if cell <= 63 { 0x3F } else { 0x40 }
     } else {
         u16::from(cell) + 0x9E
     };
     lead << 8 | trail
 }
 
-/// Bank 1 as runs of consecutive codes: (first code, its cell index).
-fn bank1_runs() -> &'static [(u16, u16)] {
-    static RUNS: OnceLock<Vec<(u16, u16)>> = OnceLock::new();
-    RUNS.get_or_init(|| {
-        let mut runs = Vec::new();
-        let mut previous = None;
-        let mut index = 0u16;
-        for (row, ranges) in (1u8..).zip(BANK1_ASSIGNED) {
-            for &(first, last) in ranges {
-                for cell in first..=last {
-                    let code = sjis(row, cell);
-                    if previous.is_none_or(|p: u16| code != p + 1) {
-                        runs.push((code, index));
-                    }
-                    previous = Some(code);
-                    index += 1;
-                }
-            }
-        }
-        runs
-    })
+/// The JIS row and cell of a Shift-JIS code with a lead byte of 81h..9Fh,
+/// or `None` for a code that is not a character position.
+fn jis(code: u16) -> Option<(u8, u8)> {
+    let (lead, trail) = ((code >> 8) as u8, code as u8);
+    if !(0x81..=0x9F).contains(&lead) {
+        return None;
+    }
+    let first_row = (lead - 0x81) * 2 + 1;
+    match trail {
+        0x40..=0x7E => Some((first_row, trail - 0x3F)),
+        0x80..=0x9E => Some((first_row, trail - 0x40)),
+        0x9F..=0xFC => Some((first_row + 1, trail - 0x9E)),
+        _ => None,
+    }
 }
 
-/// Cell of an assigned bank-1 code, if the standard assigns it.
+/// Index of the cell of `code` in charset 2: its place among the assigned
+/// cells of rows 1 to 8, in code order.
 fn bank1_assigned_cell(code: u16) -> Option<u16> {
-    let mut index = 0u16;
-    for (row, ranges) in (1u8..).zip(BANK1_ASSIGNED) {
-        for &(first, last) in ranges {
-            for cell in first..=last {
-                if sjis(row, cell) == code {
-                    return Some(index);
-                }
-                index += 1;
-            }
+    let (row, cell) = jis(code)?;
+    let runs = BANK1_ASSIGNED.get(usize::from(row).checked_sub(1)?)?;
+    let before: u16 = BANK1_ASSIGNED[..usize::from(row) - 1]
+        .iter()
+        .flat_map(|runs| runs.iter())
+        .map(|&(first, last)| u16::from(last - first) + 1)
+        .sum();
+    let mut within = 0;
+    for &(first, last) in *runs {
+        if (first..=last).contains(&cell) {
+            return Some(before + within + u16::from(cell - first));
         }
+        within += u16::from(last - first) + 1;
     }
     None
 }
 
-/// Bank 2 cell of a level-1 kanji code (94 cells a JIS row).
+/// Index of the cell of `code` in charset 3: rows 16 to 46 whole, then the
+/// first 51 cells of row 47.
 fn bank2_cell(code: u16) -> Option<u16> {
-    if !BANK2_CODES.contains(&code) {
-        return None;
-    }
-    let (lead, trail) = (code >> 8, code & 0xFF);
-    let odd_row_cell = match trail {
-        0x40..=0x7E => Some(trail - 0x3F),
-        0x80..=0x9E => Some(trail - 0x40),
-        _ => None,
-    };
-    let (row, cell) = match (odd_row_cell, trail) {
-        (Some(cell), _) => ((lead - 0x80) * 2 - 1, cell),
-        (None, 0x9F..=0xFC) => ((lead - 0x80) * 2, trail - 0x9E),
+    let (row, cell) = jis(code)?;
+    let limit = match row {
+        16..=46 => 94,
+        47 => 51,
         _ => return None,
     };
-    (16..=47).contains(&row).then(|| (row - 16) * 94 + cell - 1)
+    (cell <= limit).then(|| u16::from(row - 16) * 94 + u16::from(cell - 1))
 }
 
-/// B(53h) Krom2Offset: the cell index of `code` within its bank.
+/// B(53h) Krom2Offset: the cell index of `code` within its charset, FFFFh
+/// when the code has no cell.
 pub fn krom2_offset(code: u32) -> u16 {
-    let code = code as u16;
-    if BANK1_CODES.contains(&code) {
-        let runs = bank1_runs();
-        let run = runs.partition_point(|&(first, _)| first <= code) - 1;
-        let (first, index) = runs[run];
-        index + (code - first)
-    } else {
-        bank2_cell(code).unwrap_or(0)
-    }
+    let Ok(code) = u16::try_from(code) else {
+        return u16::MAX;
+    };
+    bank1_assigned_cell(code)
+        .or_else(|| bank2_cell(code))
+        .unwrap_or(u16::MAX)
 }
 
-/// B(51h) Krom2RawAdd: the address of `code`'s cell, or -1 outside both
-/// banks.
+/// B(51h) Krom2RawAdd: the ROM address of the cell of `code`, or -1.
 pub fn krom2_raw_add(code: u32) -> u32 {
-    let code16 = code as u16;
-    let base = if BANK1_CODES.contains(&code16) {
-        BANK1_ROM_OFFSET
-    } else if bank2_cell(code16).is_some() {
-        BANK2_ROM_OFFSET
+    let Ok(code) = u16::try_from(code) else {
+        return u32::MAX;
+    };
+    let (base, cell) = if let Some(cell) = bank1_assigned_cell(code) {
+        (BANK1_ROM_OFFSET, cell)
+    } else if let Some(cell) = bank2_cell(code) {
+        (BANK2_ROM_OFFSET, cell)
     } else {
         return u32::MAX;
     };
-    ROM_BASE + (base + usize::from(krom2_offset(code)) * CELL_BYTES) as u32
+    ROM_BASE + (base + usize::from(cell) * CELL_BYTES) as u32
 }
 
 /// Parse the glyph file: a `XXXX name` line (Shift-JIS code in hex) followed
@@ -240,15 +231,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bank1_layout_follows_the_jis_chart() {
+    fn codes_map_to_jis_rows_and_back() {
+        assert_eq!(sjis(1, 1), 0x8140);
+        assert_eq!(sjis(2, 1), 0x819F);
+        assert_eq!(sjis(1, 64), 0x8180);
+        assert_eq!(sjis(3, 16), 0x824F);
+        assert_eq!(sjis(16, 1), 0x889F);
+        assert_eq!(sjis(47, 51), 0x9872);
+        for row in 1..=47u8 {
+            for cell in 1..=94u8 {
+                assert_eq!(jis(sjis(row, cell)), Some((row, cell)), "{row}-{cell}");
+            }
+        }
+        assert_eq!(jis(0x817F), None);
+        assert_eq!(jis(0x0041), None);
+    }
+
+    #[test]
+    fn bank1_holds_the_assigned_cells_of_rows_1_to_8() {
         // Space, full-width 0 and A, hiragana a, the last box-drawing cell.
         assert_eq!(krom2_offset(0x8140), 0);
         assert_eq!(krom2_offset(0x824F), 147);
         assert_eq!(krom2_offset(0x8260), 157);
         assert_eq!(krom2_offset(0x829F), 209);
         assert_eq!(krom2_offset(0x84BE), 523);
-        assert_eq!(bank1_runs().len(), 19);
+        let assigned: usize = BANK1_ASSIGNED
+            .iter()
+            .flat_map(|runs| runs.iter())
+            .map(|&(first, last)| usize::from(last - first) + 1)
+            .sum();
+        assert_eq!(assigned, BANK1_CELLS);
         assert_eq!(BANK2_ROM_OFFSET, BANK1_ROM_OFFSET + 0x3D68);
+        // Gaps in the chart have no cell: row 2 has cells 1 to 14, then 26 to 33.
+        assert_eq!(krom2_offset(u32::from(sjis(2, 14))), 94 + 13);
+        assert_eq!(krom2_offset(u32::from(sjis(2, 15))), u16::MAX);
+        assert_eq!(krom2_offset(u32::from(sjis(2, 25))), u16::MAX);
+        assert_eq!(krom2_offset(u32::from(sjis(2, 26))), 94 + 14);
     }
 
     #[test]
@@ -263,12 +281,13 @@ mod tests {
     }
 
     #[test]
-    fn raw_add_answers_minus_one_outside_the_banks() {
+    fn raw_add_answers_minus_one_for_codes_without_a_cell() {
         assert_eq!(krom2_raw_add(0x8260), 0xBFC6_6000 + 157 * 30);
         assert_eq!(krom2_raw_add(0x889F), 0xBFC6_6000 + 0x3D68);
         assert_eq!(krom2_raw_add(0x0041), u32::MAX);
         assert_eq!(krom2_raw_add(0x84BF), u32::MAX);
         assert_eq!(krom2_raw_add(0x9873), u32::MAX);
+        assert_eq!(krom2_raw_add(0x1_8260), u32::MAX);
     }
 
     #[test]
