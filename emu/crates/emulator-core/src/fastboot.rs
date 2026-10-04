@@ -65,9 +65,10 @@ pub fn fast_boot_disc(
         }
     }
     apply_hle_entry_state(bus);
-    // OpenBIOS enables display immediately before Exec. Some retail
-    // games rely on inheriting that shell state instead of issuing
-    // GP1(03h) themselves during early startup.
+    // The entry state measured under the retail kernel has the display
+    // enabled (GPUSTAT bit 23 clear; see the entry state test below), and
+    // some retail games rely on inheriting that instead of issuing GP1(03h)
+    // themselves during early startup.
     bus.write32(GP1_ADDR, 0x0300_0000);
     cpu.seed_from_exe_with_args(boot.exe.initial_pc, boot.exe.initial_gp, Some(sp), 1, 0);
     cpu.seed_frame_pointer(fp);
