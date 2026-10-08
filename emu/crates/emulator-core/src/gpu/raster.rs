@@ -9,10 +9,9 @@
 // paths) and psx-gpu-render's compute-span encoder all consume the SAME
 // setup, so CPU and GPU coverage cannot drift.
 //
-// The old Redux-parity scanline-delta rasterizer that lived here was
-// retired once hardware proved Redux samples pixel CORNERS while
-// silicon samples pixel CENTERS (hardware-tests GPU read-back
-// battery).
+// An earlier scanline-delta rasterizer that lived here was retired once
+// hardware proved it sampled pixel CORNERS while silicon samples pixel
+// CENTERS (hardware-tests GPU read-back battery).
 
 /// Hardware extent rule: any triangle whose vertex pairs span more than 1023
 /// pixels horizontally or 511 vertically is silently dropped on real PS1

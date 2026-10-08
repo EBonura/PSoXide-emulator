@@ -285,8 +285,7 @@ impl Interpreter {
         }
         Some(GpuEvent::Fill {
             cmd: fifo[0],
-            // Hardware coordinate rounding (PSX-SPX, Redux cmdFillRect,
-            // CPU fill_rect): X snaps DOWN to a 16-pixel boundary and
+            // Hardware coordinate rounding (PSX-SPX, CPU fill_rect): X snaps DOWN to a 16-pixel boundary and
             // width rounds UP to the next multiple of 16. Decoding the
             // raw fields instead fills a narrower rect and leaves bands
             // of stale pixels at the edges (alttp gameplay, replay_bisect
@@ -567,8 +566,8 @@ impl Default for Interpreter {
 }
 
 /// Polyline end sentinel -- both halves carry the `0x5xxx` pattern.
-/// Same rule as `emulator-core::Gpu::ingest_polyline_word` (Redux:
-/// `(word & 0xF000F000) == 0x50005000`).
+/// Same rule as `emulator-core::Gpu::ingest_polyline_word`:
+/// `(word & 0xF000F000) == 0x50005000`.
 #[inline]
 fn is_polyline_terminator(word: u32) -> bool {
     (word & 0xF000_F000) == 0x5000_5000

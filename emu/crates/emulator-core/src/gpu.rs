@@ -13,12 +13,17 @@
 //!
 //! ## Provenance
 //!
-//! Portions of this module are parity-matched against, and in places
-//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
-//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
-//! correspondence are flagged inline with `Redux` references. PSoXide is
-//! released under GPL-2.0-or-later in part to honor this lineage; see
-//! `LICENSE` and `docs/license-audit.md`.
+//! GP0/GP1 command decoding, the GPUSTAT bit map, VRAM transfers, fills,
+//! rectangles, blending and dithering follow nocash PSX-SPX and this
+//! project's hardware-test captures (the silicon-verified triangle coverage
+//! rule replaced an earlier scanline-delta rasterizer in 2026-06). Where a
+//! behaviour is marked `gate-pinned` it was first chosen to reproduce a
+//! PCSX-Redux soft-renderer result and stays because the compat frame
+//! hashes depend on it; the console has not been measured against it: the
+//! power-on display ranges used by the display hash, the display-hash rule
+//! that an unconfigured display is an empty image, and the order in which
+//! quads are split into triangles. This module has not been rewritten
+//! clean-room as a whole. See `LICENSE` and `docs/PROVENANCE.md`.
 
 mod blend;
 mod commands;
@@ -155,8 +160,8 @@ pub struct Gpu {
     /// request -- returned on the next GPUREAD while a VRAM download
     /// isn't active. Matches hardware's "GPU info" latch.
     gpuread_latch: u32,
-    /// Raw environment command payloads returned by Redux for GP1
-    /// query sub-ops 2..=5. The decoded fields above drive rendering;
+    /// Raw environment command payloads returned for GP1 query sub-ops
+    /// 2..=5. The decoded fields above drive rendering;
     /// these preserve the CPU-visible readback contract.
     texture_window_raw: u32,
     drawing_start_raw: u32,
@@ -322,7 +327,7 @@ pub struct Gpu {
     /// `pixel_owner[y*VRAM_WIDTH + x]`. Paired with `cmd_log`
     /// this lets us answer "which command drew the pixel at
     /// (x, y)?" after a run, the essential first step in
-    /// diagnosing per-pixel parity divergences against Redux.
+    /// diagnosing per-pixel divergences against a reference image.
     ///
     /// Allocating is opt-in because the buffer is 2 MiB -- tiny
     /// in absolute terms but enough to want control over when it
@@ -424,12 +429,9 @@ pub struct Gpu {
     display_24bpp: bool,
     /// `true` after the BIOS / game has written GP1 0x07 (V-range) or
     /// GP1 0x08 (display mode). Before that, `display_area` reports
-    /// (0, 0) -- matching Redux's `takeScreenShot`, which also hands
-    /// back a zero-sized image until its internal
-    /// `updateDisplayIfChanged` runs (triggered by those same two
-    /// GP1 writes). Parity tools rely on this to avoid seeing a
-    /// spurious "dimension mismatch" before the first configured
-    /// frame even exists.
+    /// (0, 0) and the display hash is that of an empty image until those two
+    /// GP1 writes happen (gate-pinned: the compat hash lists were recorded
+    /// with this rule).
     display_configured: bool,
 
     /// Count of executed GP0 packets by opcode byte (the high 8 bits
@@ -750,13 +752,10 @@ impl Gpu {
             display_start_y: 0,
             display_width: 320,
             display_height_480: false,
-            // Power-on V- and H-range defaults, matching Redux's
-            // `SoftGPU::impl::initBackend` which zeroes `Range.x0 =
-            // Range.x1 = Range.y0 = Range.y1 = 0`. Crucially the
-            // BIOS writes GP1 0x08 (display mode) *before* GP1 0x07
-            // (v-range), and because Redux derives Height from
-            // `y1 - y0` -- both zero -- its `takeScreenShot` height
-            // is 0 during that window. Earlier we defaulted these
+            // Power-on V- and H-range defaults: all zero. The BIOS writes
+            // GP1 0x08 (display mode) *before* GP1 0x07 (v-range), and the
+            // display height derives from `y1 - y0` -- both zero -- so the
+            // reported height is 0 during that window (gate-pinned). Earlier we defaulted these
             // to 0x10/0x100, which made our screenshot height 240
             // during the same window and broke lockstep parity at
             // step 19.3 M on Crash's BIOS handoff.
@@ -853,17 +852,15 @@ impl Gpu {
     /// Snapshot of the currently-configured display area, for the
     /// frontend's framebuffer panel. Cheap to call each frame. The
     /// `height` is derived from the V-range + 480-mode flag (see
-    /// [`Gpu::effective_display_height`]) so it matches what Redux's
-    /// screenshot path reports -- letting milestone parity tests
-    /// compare byte-for-byte.
+    /// [`Gpu::effective_display_height`]) so milestone tests can compare
+    /// frames byte-for-byte.
     pub fn display_area(&self) -> DisplayArea {
         // Live register view, even before GP1 0x07/0x08 have been written
         // after a reset: silicon scans out the (persisting) ranges the
         // moment GP1 0x03 re-enables the display, which is how the demo
         // disc's chain-loader screen is visible on a console. This used to
-        // return 0x0 until reconfiguration (Redux's `takeScreenShot`
-        // semantics), which hid that whole phase from --dump-hw and the
-        // GUI panel; the Redux-parity gating now lives in
+        // return 0x0 until reconfiguration, which hid that whole phase from
+        // --dump-hw and the GUI panel; the gating now lives in
         // [`Gpu::display_hash`], the only consumer that needs it.
         DisplayArea {
             x: self.display_start_x,
@@ -875,22 +872,17 @@ impl Gpu {
     }
 
     /// FNV-1a-64 over the visible display area's 15bpp pixel bytes,
-    /// for Redux-parity comparisons. Rows are packed tightly (no
-    /// stride padding) so a given (width, height, bpp) maps to a
-    /// specific byte sequence -- identical to what Redux's
-    /// `PCSX.GPU.takeScreenShot()` produces server-side on the
-    /// oracle path.
+    /// for frame comparisons. Rows are packed tightly (no stride padding)
+    /// so a given (width, height, bpp) maps to a specific byte sequence.
     ///
     /// Returns `(hash, width, height, byte_len)`. If the display
     /// area extends past VRAM the rows are clipped at the VRAM
-    /// edge and the row count is reduced -- matching Redux's
-    /// behaviour.
+    /// edge and the row count is reduced.
     pub fn display_hash(&self) -> (u64, u32, u32, usize) {
         if !self.display_configured {
-            // Match Redux's `takeScreenShot`: zero-sized image until
-            // GP1 0x07 or 0x08 has been written after a reset, so the
-            // milestone parity hashes compare apples to apples from the
-            // very first instruction onward.
+            // A zero-sized image until GP1 0x07 or 0x08 has been written
+            // after a reset (gate-pinned: the compat hash lists were
+            // recorded with this rule).
             return (psx_hw::hash::Fnv1a64::new().finish(), 0, 0, 0);
         }
         let da = self.display_area();
@@ -2149,8 +2141,8 @@ impl Gpu {
             //   0x03 -- draw area top-left  (E3 readback)
             //   0x04 -- draw area bottom-right (E4)
             //   0x05 -- draw offset (E5)
-            // Redux masks the query to three bits and leaves the
-            // latch untouched for 0, 1, 6 and 7.
+            // The query index is masked to three bits; the latch is left
+            // untouched for 0, 1, 6 and 7.
             0x10 => match value & 0x07 {
                 0x02 => self.gpuread_latch = self.texture_window_raw,
                 0x03 => self.gpuread_latch = self.drawing_start_raw,
@@ -2158,8 +2150,7 @@ impl Gpu {
                 0x05 => self.gpuread_latch = self.drawing_offset_raw,
                 _ => {}
             },
-            // GP1 0x00 -- GPU reset. Matches Redux's `CtrlReset`:
-            // clears the display-enable flag + RGB24/interlace bits
+            // GP1 0x00 -- GPU reset: clears the display-enable flag + RGB24/interlace bits
             // and resets DrawOffset, but **does not** touch the
             // V/H-ranges or DisplayPosition. The BIOS writes those
             // via the explicit GP1 0x05 / 0x06 / 0x07 commands
@@ -2244,9 +2235,9 @@ impl Gpu {
             // GP1 0x07 -- Vertical display range. Bits 0..=9 = top
             // scanline, bits 10..=19 = bottom scanline. Effective
             // rendered rows = (y2 - y1), doubled in 480-interlaced
-            // mode. Redux's `takeScreenShot` dimensions come from
-            // this, not from the GP1(08h) mode bit -- matching it is
-            // what gets us 640×478 instead of 640×480 at boot.
+            // mode. The reported display dimensions come from this, not
+            // from the GP1(08h) mode bit, which gives 640×478 instead of
+            // 640×480 at boot (gate-pinned).
             0x07 => {
                 self.v_range_y1 = (value & 0x3FF) as u16;
                 self.v_range_y2 = ((value >> 10) & 0x3FF) as u16;
@@ -2299,8 +2290,9 @@ impl Gpu {
     }
 
     /// Current dot-clock divisor: system clocks per pixel-clock tick.
-    /// Indexed by the current display resolution. Values match Redux's
-    /// `HDotClock` array in `src/core/psxcounters.cc`.
+    /// Indexed by the current display resolution: 10, 8, 5, 4 and 7 system
+    /// clocks per dot for 256, 320, 512, 640 and 368 pixel modes (PSX-SPX
+    /// "Timers").
     ///
     /// Used by Timer 0 when its source is set to "dot clock" (mode
     /// bits 8..9 = 1 or 3). Games that sync to horizontal raster
@@ -2319,9 +2311,8 @@ impl Gpu {
 
     /// Effective vertical pixel count shown on the video output --
     /// derived from V-range (`GP1(07h)`) and the 480-mode flag
-    /// (`GP1(08h)` bit 2). Matches Redux's
-    /// `PCSX.GPU.takeScreenShot()` height, so using this value for
-    /// pixel-parity regression tests lines up byte-for-byte.
+    /// (`GP1(08h)` bit 2); the compat frame hashes are taken over this
+    /// height.
     ///
     /// Formula:
     /// ```text
@@ -2471,10 +2462,8 @@ impl Gpu {
             // + dither/display/transparency flags. We extract the
             // subset the texture rasterizer needs AND mirror bits
             // 0..=10 into `GpuStatus::raw`, since those are
-            // observable via GPUSTAT reads. Redux's softgpu does
-            // the equivalent in `gpuWriteStatus` / `sCommand0xE1`,
-            // and the BIOS polls GPUSTAT right after each E1h to
-            // verify the command took effect. Leaving the status
+            // observable via GPUSTAT reads; the BIOS polls GPUSTAT right
+            // after each E1h to verify the command took effect. Leaving the status
             // bits stale produces a GPUSTAT divergence that doesn't
             // surface until the poll.
             //
@@ -2749,9 +2738,9 @@ impl Gpu {
         self.rasterize_triangle(v0, v1, v2, color, mode);
     }
 
-    /// GP0 0x28..=0x2B -- monochrome 4-vertex quad. Redux draws the
-    /// lower/right half first, then the upper/left half, so pixels on
-    /// the shared diagonal are owned by `(v0, v1, v2)`.
+    /// GP0 0x28..=0x2B -- monochrome 4-vertex quad. The lower/right half is
+    /// drawn first, then the upper/left half, so pixels on the shared
+    /// diagonal are owned by `(v0, v1, v2)` (gate-pinned).
     fn draw_monochrome_quad(&mut self) {
         let cmd = self.gp0_fifo[0];
         let color = rgb24_to_bgr15(cmd & 0x00FF_FFFF);
@@ -2780,8 +2769,8 @@ impl Gpu {
     }
 
     /// GP0 0x38..=0x3B -- Gouraud quad. 4 × (colour+vertex) =
-    /// 8 words, split in Redux order so the first half wins the
-    /// shared diagonal.
+    /// 8 words, split in the same order as the monochrome quad so the first
+    /// half wins the shared diagonal.
     fn draw_shaded_quad(&mut self) {
         let cmd = self.gp0_fifo[0];
         let c0 = cmd & 0x00FF_FFFF;
@@ -3041,8 +3030,7 @@ impl Gpu {
     /// index whose entry is 0 → transparent). Checking `idx == 0`
     /// instead is a common simplification that renders those pixels
     /// opaque black, producing the infamous "TM on a black box"
-    /// regression. Matches Redux's `getTextureTransCol*` which all
-    /// start with `if (color == 0) return;`.
+    /// regression (a texel of 0x0000 is transparent).
     ///
     /// The incoming `u` / `v` are run through the GP0 0xE2 texture
     /// window first: `U' = (U & ~mask) | (offset & mask)` per axis.
@@ -3196,8 +3184,8 @@ impl Gpu {
         // the shared `tri_raster_setup`: walk the long edge (a->c) and
         // the two short edges (a->b, b->c) in Q32.32, plot
         // [tri_span_x(left), tri_span_x(right)) per scanline
-        // (right-exclusive). Center-sampled; the Redux scanline-delta
-        // path it replaces sampled pixel corners, which real hardware
+        // (right-exclusive). Center-sampled; the scanline-delta path it
+        // replaces sampled pixel corners, which real hardware
         // (ledger HWB-005) rejects on every diagonal-edged triangle.
         // Flat fill has no determinant bail (`require_attrs = false`):
         // collinear triangles still walk their (empty-ish) spans.
@@ -3256,7 +3244,8 @@ impl Gpu {
         );
     }
 
-    /// GP0 0x2C..=0x2F -- textured quad. 9 words; split in Redux order.
+    /// GP0 0x2C..=0x2F -- textured quad. 9 words; split like the monochrome
+    /// quad.
     fn draw_textured_quad(&mut self) {
         let cmd = self.gp0_fifo[0];
         let v0 = self.decode_vertex(self.gp0_fifo[1]);
@@ -3335,7 +3324,7 @@ impl Gpu {
     }
 
     /// GP0 0x3C..=0x3F -- textured + Gouraud-shaded quad. 12 words;
-    /// split in Redux order.
+    /// split like the monochrome quad.
     /// Words: `[cmd+c0, v0, uv0+clut, c1, v1, uv1+texpage, c2, v2, uv2,
     ///          c3, v3, uv3]`.
     fn draw_textured_shaded_quad(&mut self) {
@@ -3373,10 +3362,10 @@ impl Gpu {
 
     /// Fast path for the common 2D-sprite case: a flat textured quad
     /// whose vertex order is top-left, top-right, bottom-left,
-    /// bottom-right. Redux renders flat textured quads with a true
-    /// four-edge scanline walker, not by splitting the primitive into
-    /// two triangles; using the same row-wide UV interpolation removes
-    /// diagonal sampling seams in BIOS text and loading-screen sprites.
+    /// bottom-right. It is rendered with a four-edge scanline walker, not by
+    /// splitting the primitive into two triangles; the row-wide UV
+    /// interpolation removes diagonal sampling seams in BIOS text and
+    /// loading-screen sprites (gate-pinned).
     #[allow(clippy::too_many_arguments)]
     fn rasterize_axis_aligned_textured_quad(
         &mut self,
@@ -4081,7 +4070,7 @@ impl Gpu {
     /// canonical sentinels.
     fn ingest_polyline_word(&mut self, word: u32) {
         // Sentinel check -- both halves have the terminator pattern.
-        // Redux uses `(word & 0xF000F000) == 0x50005000`.
+        // Terminator: `(word & 0xF000F000) == 0x50005000`.
         if is_polyline_terminator(word) {
             self.polyline = None;
             self.polyline_cmd_log_index = None;
@@ -4254,7 +4243,7 @@ impl Gpu {
         let x = (xy & 0x3FF) as u16;
         let y = ((xy >> 16) & 0x1FF) as u16;
         // Hardware uses a wrap-around convention: width/height of 0
-        // means 1024 / 512 respectively. Matches Redux.
+        // means 1024 / 512 respectively.
         let (w, h) = vram_transfer_size(wh);
         let remaining = vram_transfer_words(wh);
         self.work.vram_upload_pixels = self
@@ -4341,7 +4330,7 @@ impl Gpu {
     /// GP0 0x02 -- monochrome fill rectangle, ignores draw mode /
     /// clipping / blending. Writes `color` directly into VRAM.
     ///
-    /// Packet layout (Redux `GPU::cmdFillRect`):
+    /// Packet layout:
     ///   word 0: `0x02RRGGBB`      -- opcode + 24-bit RGB
     ///   word 1: `0xYYYYXXXX`      -- top-left: X is 16-pixel-aligned
     ///   word 2: `0xHHHHWWWW`      -- width is rounded up to 16 pixels
@@ -4656,7 +4645,7 @@ fn vram_transfer_words(wh: u32) -> u32 {
     (u32::from(w) * u32::from(h)).div_ceil(2)
 }
 
-/// Redux's polyline end test, `(word & 0xF000F000) == 0x50005000`.
+/// The polyline end test, `(word & 0xF000F000) == 0x50005000`.
 fn is_polyline_terminator(word: u32) -> bool {
     word & 0xF000_F000 == 0x5000_5000
 }

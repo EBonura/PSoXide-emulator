@@ -1,6 +1,6 @@
 /// Convert a 24-bit RGB value (as written by the CPU in GP0 packets)
-/// into the 15-bit BGR word VRAM stores. Matches Redux / PS1
-/// hardware: the 3 high bits of each channel are discarded.
+/// into the 15-bit BGR word VRAM stores, as on PS1 hardware: the 3 high
+/// bits of each channel are discarded.
 pub(super) fn rgb24_to_bgr15(rgb24: u32) -> u16 {
     let r = ((rgb24 >> 3) & 0x1F) as u16;
     let g = (((rgb24 >> 8) >> 3) & 0x1F) as u16;
@@ -186,8 +186,7 @@ pub(super) fn blend_pixel(bg: u16, fg: u16, mode: BlendMode) -> u16 {
         BlendMode::Add => ((br + fr).min(31), (bgg + fgg).min(31), (bb + fb).min(31)),
         BlendMode::Sub => ((br - fr).max(0), (bgg - fgg).max(0), (bb - fb).max(0)),
         // Full-back + quarter-front -- `fg / 4` via integer division
-        // is the same as Redux's `(fg & 0x1c) >> 2` for 5-bit
-        // channels: both truncate the low 2 bits then shift.
+        // truncates the low 2 bits of a 5-bit channel.
         BlendMode::AddQuarter => (
             (br + fr / 4).min(31),
             (bgg + fgg / 4).min(31),

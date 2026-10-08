@@ -5,7 +5,7 @@
 // base_v + dy)`, so parity vs the CPU rasterizer is bit-exact.
 //
 // Sampling, modulation, and RMW logic mirrors `tex_tri.wgsl` line-
-// for-line. See that file for the per-helper quirks (Redux blend
+// for-line. See that file for the per-helper quirks (the blend
 // math, raw-texture skip, per-texel semi-trans rule).
 
 struct TexRect {
