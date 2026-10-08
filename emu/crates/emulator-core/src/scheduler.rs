@@ -1,70 +1,52 @@
-//! Unified event scheduler. Slot layout and dispatch shape are kept
-//! parity-compatible with PCSX-Redux's interrupt scheduler (the
-//! `m_regs.interrupt` / `m_regs.intTargets` / `lowestTarget` triple in
-//! `src/core/r3000a.h::scheduleInterrupt`) so per-slot cycle deltas
-//! line up against the parity oracle.
+//! Unified event scheduler: a deadline queue keyed by bus-cycle count.
 //!
-//! Background: every subsystem that needs to fire an IRQ "N cycles
-//! from now" -- CDROM command acks, GPU DMA completions, SPU async,
-//! MDEC decode finish, etc. -- registers an event with this
-//! scheduler. On every branchTest-equivalent (end of each CPU
-//! delay-slot retirement in `Cpu::step`) we ask the scheduler which
-//! slots are due and dispatch their handlers.
+//! Every subsystem that needs something to happen "N cycles from now" (a
+//! CD-ROM response, a DMA completion, an SPU mix tick, the end of a pad
+//! byte, VBlank) registers one event here. The CPU loop asks the scheduler
+//! which events are due at each instruction boundary and the bus dispatches
+//! the handlers with a `match` on the returned [`EventSlot`].
 //!
-//! Before this module, each subsystem had its own ad-hoc timer
-//! (`Bus::next_vblank_cycle`, `Bus::pending_dma_completions`,
-//! `CdRom::pending`). That let subsystem timings drift
-//! independently of Redux's tuned per-slot constants. Centralising
-//! the queue is the groundwork for Redux-accurate per-slot cycle
-//! deltas in the next sessions; this session only lays down the
-//! infrastructure with no subsystems migrated yet.
+//! Design:
 //!
-//! Design decisions:
-//!
-//! - **Fixed-slot enum, not a binary heap.** Redux has exactly 14
-//!   interrupt slots -- each a singleton (at most one outstanding
-//!   event per subsystem-event-kind). We follow suit: `targets[16]`
-//!   indexed by [`EventSlot`], + one `u32` bitmap of active slots.
-//!   Enumerating the handful of active slots on each tick is
-//!   O(popcount), cheaper than a heap insert/pop once you amortise
-//!   across many schedule-and-cancel sequences.
-//! - **`lowest_target` cache.** Early-exit for the common case
-//!   where nothing's due -- callers can skip the slot walk entirely
-//!   with a single comparison.
-//! - **No handler callbacks stored here.** Redux uses C++ function
-//!   pointers; we keep the data pure and dispatch in [`Bus`] via a
-//!   `match` on the returned `EventSlot`. Avoids box-dyn / lifetime
-//!   noise and makes the firing order deterministic.
+//! - **One pending event per slot.** Each [`EventSlot`] names a
+//!   subsystem-event kind and holds at most one deadline; scheduling it
+//!   again replaces the old deadline. A fixed array indexed by slot plus a
+//!   bitmap of the pending ones is cheaper than a heap at this size.
+//! - **O(1) "is anything due".** The earliest pending deadline is cached, so
+//!   the common case is a single comparison.
+//! - **Deterministic order.** Due events come out earliest deadline first;
+//!   two events with the same deadline come out in slot order (the slot's
+//!   discriminant is its priority, lower first).
+//! - **A deadline is due only strictly in the past.** An event for cycle `T`
+//!   is visible to software from the first instruction boundary after the
+//!   CPU clock has passed `T`, never on the boundary where it equals `T`.
+//!   [`Scheduler::take_slot_due_inclusive`] is the exception for events that
+//!   fire on equality (root counters, VBlank).
+//! - **No handlers stored.** The scheduler is plain data and serialises
+//!   with the rest of the machine state.
 //!
 //! ## Provenance
 //!
-//! Portions of this module are parity-matched against, and in places
-//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
-//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
-//! correspondence are flagged inline with `Redux` references. PSoXide is
-//! released under GPL-2.0-or-later in part to honor this lineage; see
-//! `LICENSE` and `docs/license-audit.md`.
+//! Written from this project's own requirements: the event set, the slot
+//! names, the priority order and the strict-deadline rule are fixed by the
+//! gate suite (compat frame hashes, hardware-test records, ps1-tests), not
+//! by an outside design. See `LICENSE` and `docs/license-audit.md`.
 
-/// A scheduled-event slot. Names mirror Redux's `PSXINT_*` constants
-/// 1:1 so cross-referencing the Redux source stays trivial. The
-/// discriminants are the bit positions in [`Scheduler::active`] so
-/// a slot index is `slot as u32`.
-///
-/// Subsystems currently don't use any of these -- they still run
-/// their own timers. The names / indices are stable so migrations
-/// in future sessions don't churn identifiers.
+/// A scheduled-event slot. The discriminant is the slot's position in the
+/// pending bitmap and its tie-break priority (lower fires first when two
+/// events share a deadline); the numbering is part of the save-state format.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum EventSlot {
-    /// Controller / memory-card SIO0 command complete.
-    Sio = 0,
-    /// Link-cable SIO1.
+    /// Controller / memory-card port (SIO0) byte or ACK complete.
+    Sio0 = 0,
+    /// Serial port (SIO1).
     Sio1 = 1,
-    /// CDROM command response (first- and second-response delays).
-    Cdr = 2,
-    /// CDROM sector-data-ready from ReadN / ReadS.
-    CdRead = 3,
-    /// GPU DMA (channel 2) transfer complete.
+    /// CD-ROM command response (first and second response delays).
+    CdResponse = 2,
+    /// CD-ROM sector ready from ReadN / ReadS.
+    CdSector = 3,
+    /// GPU DMA (channel 2) complete.
     GpuDma = 4,
     /// MDEC output DMA (channel 1) complete.
     MdecOutDma = 5,
@@ -72,87 +54,75 @@ pub enum EventSlot {
     SpuDma = 6,
     /// MDEC input DMA (channel 0) complete.
     MdecInDma = 7,
-    /// GPU OTC DMA (channel 6) complete.
-    GpuOtcDma = 8,
-    /// CDROM DMA (channel 3) complete.
-    CdrDma = 9,
-    /// CDROM Play (CdlPlay / CdlStop second response).
-    CdrPlay = 10,
-    /// CDROM decoded-buffer interrupt.
-    CdrDbuf = 11,
-    /// CDROM lid-open / RESCAN_CD transitions.
-    CdrLid = 12,
-    /// SPU async (periodic mix callback).
-    SpuAsync = 13,
-    /// VBlank -- not a Redux slot (Redux drives VBlank off its counter
-    /// base-rate), but we wire it here so our existing VBlank
-    /// scheduler can migrate in a later session without adding a
-    /// sibling queue.
+    /// OTC DMA (channel 6) complete.
+    OtcDma = 8,
+    /// CD-ROM DMA (channel 3) complete.
+    CdDma = 9,
+    /// CD-DA play / stop completion.
+    CdPlayStop = 10,
+    /// CD-ROM decoded-buffer interrupt.
+    CdBufferReady = 11,
+    /// CD-ROM lid-open and rescan transitions.
+    CdLid = 12,
+    /// Periodic SPU mixing tick.
+    SpuMix = 13,
+    /// Vertical blank.
     VBlank = 14,
 }
 
-/// Total slots in the `targets` array / `active` bitmap. One more
-/// than the highest [`EventSlot`] discriminant; the extra entry
-/// keeps indexing safe if a future slot is added.
+/// Total slots in the `targets` array and pending bitmap: one more than the
+/// highest [`EventSlot`] discriminant, so a new slot never indexes out of
+/// range.
 pub const SLOT_COUNT: usize = 16;
 
 impl EventSlot {
-    /// Convert a raw slot index (from e.g. bitmap iteration) back
-    /// to a typed slot. Returns `None` for indices outside the
-    /// defined range.
+    /// Convert a raw slot index (from bitmap iteration) back to a slot.
+    /// Returns `None` outside the defined range.
     pub fn from_index(idx: u32) -> Option<Self> {
         Some(match idx {
-            0 => Self::Sio,
+            0 => Self::Sio0,
             1 => Self::Sio1,
-            2 => Self::Cdr,
-            3 => Self::CdRead,
+            2 => Self::CdResponse,
+            3 => Self::CdSector,
             4 => Self::GpuDma,
             5 => Self::MdecOutDma,
             6 => Self::SpuDma,
             7 => Self::MdecInDma,
-            8 => Self::GpuOtcDma,
-            9 => Self::CdrDma,
-            10 => Self::CdrPlay,
-            11 => Self::CdrDbuf,
-            12 => Self::CdrLid,
-            13 => Self::SpuAsync,
+            8 => Self::OtcDma,
+            9 => Self::CdDma,
+            10 => Self::CdPlayStop,
+            11 => Self::CdBufferReady,
+            12 => Self::CdLid,
+            13 => Self::SpuMix,
             14 => Self::VBlank,
             _ => return None,
         })
     }
 
-    /// Bitmap position -- `1 << self.bit()` gives the mask.
+    /// Bitmap position: `1 << self.bit()` is the slot's mask.
     #[inline]
     pub fn bit(self) -> u32 {
         self as u32
     }
 }
 
-/// Singleton-per-slot event scheduler. Each slot may hold at most
-/// one outstanding event; re-scheduling the same slot replaces the
-/// previous deadline (matches Redux's behaviour -- see
-/// `scheduleInterrupt` which unconditionally overwrites
-/// `m_regs.intTargets[interrupt]`).
+/// The deadline queue. See the module documentation for the ordering rules.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Scheduler {
-    /// Absolute bus-cycle at which each slot's event is due.
-    /// Meaningful only when the slot's bit is set in `active`.
+    /// Absolute bus cycle at which each slot's event is due; meaningful
+    /// only while the slot's bit is set in `pending`.
     targets: [u64; SLOT_COUNT],
-    /// Bitmap of currently-pending slots.
-    active: u32,
-    /// Smallest `targets[i]` among active slots -- cached so the
-    /// common "nothing's due" path is one compare, not a walk.
-    /// `u64::MAX` when no slot is active.
-    lowest_target: u64,
-    /// Cumulative count of [`Scheduler::schedule`] calls. Diagnostic
-    /// only -- lets tests + the probe CLI see how busy the queue has
-    /// been without inspecting handler counts per subsystem. Excluded
-    /// from save states.
+    /// Bitmap of slots with an event outstanding.
+    pending: u32,
+    /// Earliest deadline among pending slots (`u64::MAX` when none), cached
+    /// so "nothing is due" is one comparison.
+    earliest: u64,
+    /// Number of [`Scheduler::schedule`] calls. Diagnostic, excluded from
+    /// save states.
     #[serde(skip)]
     total_scheduled: u64,
-    /// Cumulative count of [`Scheduler::take_due`] returns that
-    /// were `Some`. Matches Redux's "events fired" quantity. Excluded
-    /// from save states.
+    /// Number of events returned as due. Diagnostic, excluded from save
+    /// states.
     #[serde(skip)]
     total_fired: u64,
 }
@@ -164,224 +134,148 @@ impl Default for Scheduler {
 }
 
 impl Scheduler {
-    /// Fresh scheduler with no pending events.
+    /// A scheduler with nothing pending.
     pub const fn new() -> Self {
         Self {
             targets: [0; SLOT_COUNT],
-            active: 0,
-            lowest_target: u64::MAX,
+            pending: 0,
+            earliest: u64::MAX,
             total_scheduled: 0,
             total_fired: 0,
         }
     }
 
-    /// Register an event for `slot` to fire at `now + delta` bus
-    /// cycles. Replaces any previous pending event for the same
-    /// slot (the old deadline is discarded without firing).
-    ///
-    /// Mirrors Redux's `scheduleInterrupt(interrupt, eCycle)`. `now`
-    /// is the current bus-cycle count (caller passes `bus.cycles`).
+    /// Arrange for `slot` to fire at `now + delta`, replacing any event
+    /// already pending for it (the old deadline is dropped without firing).
     pub fn schedule(&mut self, slot: EventSlot, now: u64, delta: u64) {
         let target = now.saturating_add(delta);
         self.targets[slot as usize] = target;
-        self.active |= 1 << slot.bit();
-        if target < self.lowest_target {
-            self.lowest_target = target;
-        }
+        self.pending |= 1 << slot.bit();
+        self.earliest = self.earliest.min(target);
         self.total_scheduled = self.total_scheduled.saturating_add(1);
     }
 
-    /// Is this slot currently pending?
+    /// Is an event pending for `slot`?
     #[inline]
     pub fn is_pending(&self, slot: EventSlot) -> bool {
-        self.active & (1 << slot.bit()) != 0
+        self.pending & (1 << slot.bit()) != 0
     }
 
-    /// Bitmap of all currently-pending slots. Diagnostic.
+    /// Bitmap of all pending slots. Diagnostic.
     #[inline]
     pub fn pending_bitmap(&self) -> u32 {
-        self.active
+        self.pending
     }
 
-    /// Fetch the scheduled deadline for `slot`, or `None` if the
-    /// slot isn't pending.
+    /// The deadline for `slot`, or `None` if nothing is pending for it.
     pub fn target(&self, slot: EventSlot) -> Option<u64> {
-        if self.is_pending(slot) {
-            Some(self.targets[slot as usize])
-        } else {
-            None
-        }
+        self.is_pending(slot).then(|| self.targets[slot as usize])
     }
 
-    /// Cancel any pending event for `slot`. No-op if nothing was
-    /// scheduled. Callers use this when a subsystem's state
-    /// transition invalidates an in-flight event (e.g. CDROM
-    /// Pause cancels the pending sector-ready IRQ).
+    /// Drop the event pending for `slot`, if any. Used when a subsystem state
+    /// change invalidates an in-flight event (a CD-ROM Pause cancels the
+    /// pending sector-ready interrupt).
     pub fn cancel(&mut self, slot: EventSlot) {
-        let mask = 1 << slot.bit();
-        if self.active & mask != 0 {
-            self.active &= !mask;
-            self.recompute_lowest();
+        let bit = 1 << slot.bit();
+        if self.pending & bit != 0 {
+            self.pending &= !bit;
+            self.refresh_earliest();
         }
     }
 
-    /// Remove and return `slot` when its target is `<= now`.
-    ///
-    /// Most Redux scheduled interrupts are strict (`target < cycle`),
-    /// which is what [`Scheduler::take_due`] models. Root counters are
-    /// different: `branchTest` calls `Counters::update()` when
-    /// `cycle >= m_psxNextCounter`. VBlank is currently represented as
-    /// a scheduler slot in PSoXide, so the bus uses this helper to keep
-    /// counter/VBlank timing inclusive without weakening DMA/CDROM
-    /// interrupt timing.
+    /// Remove and return `slot`'s deadline when it is `<= now` (inclusive).
+    /// For events that fire on the cycle itself rather than strictly after:
+    /// root counters and VBlank.
     pub fn take_slot_due_inclusive(&mut self, slot: EventSlot, now: u64) -> Option<u64> {
-        let mask = 1 << slot.bit();
-        if self.active & mask == 0 {
+        if !self.is_pending(slot) {
             return None;
         }
         let target = self.targets[slot as usize];
         if target > now {
             return None;
         }
-        self.active &= !mask;
-        self.recompute_lowest();
+        self.pending &= !(1 << slot.bit());
+        self.refresh_earliest();
         self.total_fired = self.total_fired.saturating_add(1);
         Some(target)
     }
 
-    /// Remove and return the earliest-deadline slot whose target is
-    /// `< now`, along with that original target cycle. `None` if
-    /// nothing's due. Callers invoke this in a loop to drain every
-    /// due event on each tick; the returned target is what a
-    /// periodic handler (VBlank, SPU async) uses to reschedule its
-    /// *next* event -- scheduling from `now` instead would drift the
-    /// period every time the drain lagged the target.
-    ///
-    /// Returning slots in earliest-target order (not lowest-bit
-    /// order) matches Redux's `branchTest`, which uses
-    /// `lowestTarget` to pick the next event -- important when two
-    /// events share a target cycle and the handlers interact.
+    /// The next event, by earliest deadline then slot priority, among the
+    /// pending slots not in `excluded`; only when its deadline is strictly
+    /// before `now`.
+    fn next_due(&self, now: u64, excluded: u32) -> Option<(EventSlot, u64)> {
+        let mut bits = self.pending & !excluded;
+        let mut best: Option<(u64, u32)> = None;
+        while bits != 0 {
+            let idx = bits.trailing_zeros();
+            bits &= bits - 1;
+            let target = self.targets[idx as usize];
+            // Slots are visited in priority order, so a later slot only wins
+            // with a strictly earlier deadline.
+            if best.map_or(true, |(t, _)| target < t) {
+                best = Some((target, idx));
+            }
+        }
+        let (target, idx) = best?;
+        if target >= now {
+            return None;
+        }
+        EventSlot::from_index(idx).map(|slot| (slot, target))
+    }
+
+    /// Remove and return the earliest due event with its original deadline,
+    /// or `None` if nothing is strictly past due. Callers loop to drain every
+    /// due event; periodic handlers (VBlank, SPU mix) reschedule from the
+    /// returned deadline, not from `now`, so a late drain does not stretch
+    /// the period. Events sharing a deadline come out in slot order.
     pub fn take_due(&mut self, now: u64) -> Option<(EventSlot, u64)> {
-        // Redux's `branchTest` only enters the per-slot walk when
-        // `lowestTarget < cycle`, not `<=`. That one-cycle strictness
-        // matters: a DMA scheduled for cycle 46247457 must *not*
-        // latch its IRQ on the exact branch-test where the CPU cycle
-        // first equals 46247457. It becomes visible on the next
-        // branch-test after the CPU has moved past the target.
-        if self.active == 0 || now <= self.lowest_target {
-            return None;
-        }
-
-        // Find the slot with the smallest target that's <= now.
-        let mut best_idx: Option<u32> = None;
-        let mut best_target = u64::MAX;
-        let mut bits = self.active;
-        while bits != 0 {
-            let idx = bits.trailing_zeros();
-            let target = self.targets[idx as usize];
-            if target <= now && target < best_target {
-                best_target = target;
-                best_idx = Some(idx);
-            }
-            bits &= bits - 1; // clear lowest set bit
-        }
-
-        let idx = best_idx?;
-        self.active &= !(1 << idx);
-        self.recompute_lowest();
-        self.total_fired = self.total_fired.saturating_add(1);
-        EventSlot::from_index(idx).map(|s| (s, best_target))
+        self.take_due_excluding(now, 0)
     }
 
-    /// Like [`Scheduler::take_due`], but ignores slots whose bits are
-    /// set in `excluded_mask`. Used by the per-instruction bias tick
-    /// for events that Redux only services from `branchTest`.
+    /// Like [`Scheduler::take_due`] but never returns the slots in
+    /// `excluded_mask`. Used by the per-instruction tick for events that are
+    /// only serviced at branch boundaries.
     pub fn take_due_excluding(&mut self, now: u64, excluded_mask: u32) -> Option<(EventSlot, u64)> {
-        let active = self.active & !excluded_mask;
-        if active == 0 {
+        // Nothing can be strictly past due unless the earliest deadline is.
+        if now <= self.earliest {
             return None;
         }
-
-        let mut best_idx: Option<u32> = None;
-        let mut best_target = u64::MAX;
-        let mut bits = active;
-        while bits != 0 {
-            let idx = bits.trailing_zeros();
-            let target = self.targets[idx as usize];
-            if target <= now && target < best_target {
-                best_target = target;
-                best_idx = Some(idx);
-            }
-            bits &= bits - 1;
-        }
-        if now <= best_target {
-            return None;
-        }
-
-        let idx = best_idx?;
-        self.active &= !(1 << idx);
-        self.recompute_lowest();
+        let (slot, target) = self.next_due(now, excluded_mask)?;
+        self.pending &= !(1 << slot.bit());
+        self.refresh_earliest();
         self.total_fired = self.total_fired.saturating_add(1);
-        EventSlot::from_index(idx).map(|s| (s, best_target))
+        Some((slot, target))
     }
 
-    /// Look at what the scheduler would fire next, without removing
-    /// it. Useful for tests and diagnostic printouts.
+    /// What [`Scheduler::take_due`] would return next, without removing it.
     pub fn peek_due(&self, now: u64) -> Option<EventSlot> {
-        if self.active == 0 || now <= self.lowest_target {
-            return None;
-        }
-        let mut best_idx: Option<u32> = None;
-        let mut best_target = u64::MAX;
-        let mut bits = self.active;
-        while bits != 0 {
-            let idx = bits.trailing_zeros();
-            let target = self.targets[idx as usize];
-            if target <= now && target < best_target {
-                best_target = target;
-                best_idx = Some(idx);
-            }
-            bits &= bits - 1;
-        }
-        best_idx.and_then(EventSlot::from_index)
+        self.next_due(now, 0).map(|(slot, _)| slot)
     }
 
-    /// Next scheduled target across all active slots. `u64::MAX` if
-    /// nothing's pending. Matches Redux's `m_regs.lowestTarget` --
-    /// handy for a future "fast-forward to next event" optimisation
-    /// in the step loop.
+    /// Earliest pending deadline, `u64::MAX` when nothing is pending.
     #[inline]
     pub fn lowest_target(&self) -> u64 {
-        self.lowest_target
+        self.earliest
     }
 
-    /// Cumulative count of scheduled events since construction.
-    /// Diagnostic.
+    /// Number of events scheduled since construction. Diagnostic.
     pub fn total_scheduled(&self) -> u64 {
         self.total_scheduled
     }
 
-    /// Cumulative count of fired events since construction.
+    /// Number of events fired since construction. Diagnostic.
     pub fn total_fired(&self) -> u64 {
         self.total_fired
     }
 
-    fn recompute_lowest(&mut self) {
-        if self.active == 0 {
-            self.lowest_target = u64::MAX;
-            return;
-        }
-        let mut lowest = u64::MAX;
-        let mut bits = self.active;
+    fn refresh_earliest(&mut self) {
+        let mut earliest = u64::MAX;
+        let mut bits = self.pending;
         while bits != 0 {
-            let idx = bits.trailing_zeros() as usize;
-            let target = self.targets[idx];
-            if target < lowest {
-                lowest = target;
-            }
+            earliest = earliest.min(self.targets[bits.trailing_zeros() as usize]);
             bits &= bits - 1;
         }
-        self.lowest_target = lowest;
+        self.earliest = earliest;
     }
 }
 
@@ -411,22 +305,22 @@ mod tests {
     #[test]
     fn take_due_before_deadline_returns_none() {
         let mut s = Scheduler::new();
-        s.schedule(EventSlot::Cdr, 100, 500);
+        s.schedule(EventSlot::CdResponse, 100, 500);
         assert!(s.take_due(599).is_none());
         // Still pending.
-        assert!(s.is_pending(EventSlot::Cdr));
+        assert!(s.is_pending(EventSlot::CdResponse));
     }
 
     #[test]
     fn take_due_strictly_after_deadline_fires_and_clears() {
         let mut s = Scheduler::new();
-        s.schedule(EventSlot::Cdr, 100, 500);
+        s.schedule(EventSlot::CdResponse, 100, 500);
         assert!(
             s.take_due(600).is_none(),
-            "exact target must wait one branchTest"
+            "exact target must wait one boundary"
         );
-        assert_eq!(s.take_due(601), Some((EventSlot::Cdr, 600)));
-        assert!(!s.is_pending(EventSlot::Cdr));
+        assert_eq!(s.take_due(601), Some((EventSlot::CdResponse, 600)));
+        assert!(!s.is_pending(EventSlot::CdResponse));
         // Draining again returns None.
         assert!(s.take_due(601).is_none());
         assert_eq!(s.total_fired(), 1);
@@ -439,8 +333,8 @@ mod tests {
         // Sio first because its target is smaller.
         let mut s = Scheduler::new();
         s.schedule(EventSlot::GpuDma, 100, 1000);
-        s.schedule(EventSlot::Sio, 100, 200);
-        assert_eq!(s.take_due(5000), Some((EventSlot::Sio, 300)));
+        s.schedule(EventSlot::Sio0, 100, 200);
+        assert_eq!(s.take_due(5000), Some((EventSlot::Sio0, 300)));
         assert_eq!(s.take_due(5000), Some((EventSlot::GpuDma, 1100)));
         assert!(s.take_due(5000).is_none());
     }
@@ -448,27 +342,27 @@ mod tests {
     #[test]
     fn re_scheduling_same_slot_replaces_deadline() {
         let mut s = Scheduler::new();
-        s.schedule(EventSlot::CdRead, 100, 1000);
-        s.schedule(EventSlot::CdRead, 100, 500);
-        assert_eq!(s.target(EventSlot::CdRead), Some(600));
+        s.schedule(EventSlot::CdSector, 100, 1000);
+        s.schedule(EventSlot::CdSector, 100, 500);
+        assert_eq!(s.target(EventSlot::CdSector), Some(600));
         assert_eq!(s.lowest_target(), 600);
     }
 
     #[test]
     fn cancel_removes_slot_and_recomputes_lowest() {
         let mut s = Scheduler::new();
-        s.schedule(EventSlot::Sio, 0, 100);
-        s.schedule(EventSlot::Cdr, 0, 200);
+        s.schedule(EventSlot::Sio0, 0, 100);
+        s.schedule(EventSlot::CdResponse, 0, 200);
         assert_eq!(s.lowest_target(), 100);
-        s.cancel(EventSlot::Sio);
-        assert!(!s.is_pending(EventSlot::Sio));
+        s.cancel(EventSlot::Sio0);
+        assert!(!s.is_pending(EventSlot::Sio0));
         assert_eq!(s.lowest_target(), 200);
     }
 
     #[test]
     fn cancel_of_non_pending_slot_is_noop() {
         let mut s = Scheduler::new();
-        s.cancel(EventSlot::Cdr);
+        s.cancel(EventSlot::CdResponse);
         assert_eq!(s.pending_bitmap(), 0);
     }
 
@@ -506,7 +400,7 @@ mod tests {
     #[test]
     fn simultaneous_deadlines_both_fire() {
         let mut s = Scheduler::new();
-        s.schedule(EventSlot::Sio, 0, 100);
+        s.schedule(EventSlot::Sio0, 0, 100);
         s.schedule(EventSlot::VBlank, 0, 100);
         assert!(s.take_due(100).is_none(), "exact target must not fire yet");
         let first = s.take_due(101);
@@ -518,7 +412,7 @@ mod tests {
         // should report target 100.
         let mut fired = [first.unwrap().0, second.unwrap().0];
         fired.sort_by_key(|s| s.bit());
-        assert_eq!(fired, [EventSlot::Sio, EventSlot::VBlank]);
+        assert_eq!(fired, [EventSlot::Sio0, EventSlot::VBlank]);
         assert_eq!(first.unwrap().1, 100);
         assert_eq!(second.unwrap().1, 100);
     }
@@ -539,7 +433,7 @@ mod tests {
     #[test]
     fn saturating_schedule_on_large_delta_does_not_wrap() {
         let mut s = Scheduler::new();
-        s.schedule(EventSlot::SpuAsync, u64::MAX - 10, 100);
-        assert_eq!(s.target(EventSlot::SpuAsync), Some(u64::MAX));
+        s.schedule(EventSlot::SpuMix, u64::MAX - 10, 100);
+        assert_eq!(s.target(EventSlot::SpuMix), Some(u64::MAX));
     }
 }

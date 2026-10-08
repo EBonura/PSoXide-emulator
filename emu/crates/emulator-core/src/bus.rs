@@ -288,7 +288,7 @@ pub struct Bus {
     /// [`crate::scheduler`] for the model.
     ///
     /// Migration status: DMA channel completions (slots `GpuDma`,
-    /// `GpuOtcDma`, `CdrDma`, `MdecInDma`, `MdecOutDma`, `SpuDma`)
+    /// `OtcDma`, `CdDma`, `MdecInDma`, `MdecOutDma`, `SpuDma`)
     /// run through the scheduler. VBlank, CDROM command / read
     /// events, SPU async, SIO -- still on their legacy per-subsystem
     /// timers; migrations land in follow-up commits.
@@ -488,7 +488,7 @@ impl Bus {
                 s.schedule(crate::scheduler::EventSlot::VBlank, 0, FIRST_VBLANK_CYCLE);
                 // SPU uses its serialized absolute sample deadline directly in
                 // the inclusive bus event drain. No scheduler slot is needed,
-                // including when restoring older states with no SpuAsync slot.
+                // including when restoring older states with no SpuMix slot.
                 s
             },
             mmio_trace: MmioTrace::new(),
@@ -1197,7 +1197,7 @@ impl Bus {
 
     /// Advance the SIO0 byte/ACK timers to the current bus cycle,
     /// forward any newly latched controller IRQ to `I_STAT`, and
-    /// (re)schedule [`EventSlot::Sio`] for whatever deadline is
+    /// (re)schedule [`EventSlot::Sio0`] for whatever deadline is
     /// next pending. With the scheduler firing the wake-up, the
     /// per-instruction poll is no longer needed -- `Bus::tick`
     /// dropped its `service_sio0` call. Read paths still call
@@ -1211,17 +1211,17 @@ impl Bus {
         self.reschedule_sio0_event();
     }
 
-    /// (Re)plant the [`EventSlot::Sio`] entry on the scheduler so
+    /// (Re)plant the [`EventSlot::Sio0`] entry on the scheduler so
     /// the next deadline (transfer / ack / ack-end) wakes us up
     /// without us polling every instruction. Cancels any prior
-    /// pending Sio event when SIO0 has gone idle.
+    /// pending Sio0 event when SIO0 has gone idle.
     fn reschedule_sio0_event(&mut self) {
         if let Some(deadline) = self.sio0.next_deadline() {
             let delta = deadline.saturating_sub(self.cycles);
             self.scheduler
-                .schedule(crate::scheduler::EventSlot::Sio, self.cycles, delta);
+                .schedule(crate::scheduler::EventSlot::Sio0, self.cycles, delta);
         } else {
-            self.scheduler.cancel(crate::scheduler::EventSlot::Sio);
+            self.scheduler.cancel(crate::scheduler::EventSlot::Sio0);
         }
     }
 
@@ -1253,7 +1253,7 @@ impl Bus {
         self.advance_cycles(n);
         self.drain_scheduler_events_without_cdr_dma();
         // SIO0 used to be polled here (every instruction).
-        // It's now woken up by `EventSlot::Sio` from the scheduler
+        // It's now woken up by `EventSlot::Sio0` from the scheduler
         // -- see `drain_scheduler_events_inner`. Read paths still
         // call `service_sio0` synchronously so MMIO loads observe
         // any deadline that's already due.
@@ -1294,7 +1294,7 @@ impl Bus {
             self.irq.raise(IrqSource::Cdrom);
         }
         // SIO0 wake-up comes from the scheduler dispatch above
-        // (`EventSlot::Sio` in `drain_scheduler_events_inner`),
+        // (`EventSlot::Sio0` in `drain_scheduler_events_inner`),
         // not from a separate poll. The `take_due` walk is
         // strict-greater-than, so events that were due as of
         // `now` will fire next branch test; SIO0's parity
@@ -1332,7 +1332,7 @@ impl Bus {
     fn drain_scheduler_events_inner(&mut self, include_cdr_dma: bool, include_sio: bool) {
         // SPU clock edges are inclusive, unlike the legacy strict DMA slots.
         // Its existing serialized deadline also works for older saves that
-        // never scheduled SpuAsync. Frontends only drain the produced samples.
+        // never scheduled SpuMix. Frontends only drain the produced samples.
         if self.cycles < self.scheduler.lowest_target().min(self.spu_sample_deadline) {
             return;
         }
@@ -1389,7 +1389,7 @@ impl Bus {
         if include_sio {
             while self
                 .scheduler
-                .take_slot_due_inclusive(EventSlot::Sio, now)
+                .take_slot_due_inclusive(EventSlot::Sio0, now)
                 .is_some()
             {
                 self.service_sio0();
@@ -1404,10 +1404,10 @@ impl Bus {
 
         let mut exclude_mask = 0u32;
         if !include_cdr_dma {
-            exclude_mask |= 1 << EventSlot::CdrDma.bit();
+            exclude_mask |= 1 << EventSlot::CdDma.bit();
         }
         if !include_sio {
-            exclude_mask |= 1 << EventSlot::Sio.bit();
+            exclude_mask |= 1 << EventSlot::Sio0.bit();
         }
         while let Some((slot, target)) = if exclude_mask == 0 {
             self.scheduler.take_due(now)
@@ -1441,7 +1441,7 @@ impl Bus {
                         dma_edge = true;
                     }
                 }
-                EventSlot::CdrDma => {
+                EventSlot::CdDma => {
                     if self.complete_dma_channel(3) {
                         dma_edge = true;
                     }
@@ -1453,7 +1453,7 @@ impl Bus {
                     }
                     self.service_spu_irq();
                 }
-                EventSlot::GpuOtcDma => {
+                EventSlot::OtcDma => {
                     if self.complete_dma_channel(6) {
                         dma_edge = true;
                     }
@@ -1475,7 +1475,7 @@ impl Bus {
                     self.scheduler
                         .schedule(EventSlot::VBlank, target, self.vblank_period);
                 }
-                EventSlot::SpuAsync => {
+                EventSlot::SpuMix => {
                     // No production path schedules this legacy slot. The
                     // inclusive sample deadline above owns the SPU clock.
                     self.run_spu_to_current_cycle();
@@ -1484,13 +1484,13 @@ impl Bus {
                 // of these today would silently do nothing; they're
                 // listed so `match` stays exhaustive as migrations
                 // roll in.
-                EventSlot::Sio
+                EventSlot::Sio0
                 | EventSlot::Sio1
-                | EventSlot::Cdr
-                | EventSlot::CdRead
-                | EventSlot::CdrPlay
-                | EventSlot::CdrDbuf
-                | EventSlot::CdrLid => {}
+                | EventSlot::CdResponse
+                | EventSlot::CdSector
+                | EventSlot::CdPlayStop
+                | EventSlot::CdBufferReady
+                | EventSlot::CdLid => {}
             }
         }
         // CDROM DMA completion is observed by Redux at the exact
@@ -1500,7 +1500,7 @@ impl Bus {
         if include_cdr_dma
             && self
                 .scheduler
-                .take_slot_due_inclusive(EventSlot::CdrDma, now)
+                .take_slot_due_inclusive(EventSlot::CdDma, now)
                 .is_some()
             && self.complete_dma_channel(3)
         {
@@ -2442,7 +2442,7 @@ impl Bus {
                         let target = self.cycles + delay;
                         self.log_dma_schedule(&label, delay, target);
                         self.scheduler
-                            .schedule(EventSlot::CdrDma, self.cycles, delay);
+                            .schedule(EventSlot::CdDma, self.cycles, delay);
                     }
                 }
             }
@@ -2482,7 +2482,7 @@ impl Bus {
                     let target = self.cycles + completion_delay as u64;
                     self.log_dma_schedule("GpuOtc", completion_delay as u64, target);
                     self.scheduler.schedule(
-                        EventSlot::GpuOtcDma,
+                        EventSlot::OtcDma,
                         self.cycles,
                         completion_delay as u64,
                     );
@@ -4879,7 +4879,7 @@ mod tests {
         bus.write16(Sio0::BASE + 0x0E, 0x0001); // ACK after 8 cycles
         bus.write8(Sio0::BASE, 0x01);
 
-        assert_eq!(bus.scheduler.target(EventSlot::Sio), Some(8));
+        assert_eq!(bus.scheduler.target(EventSlot::Sio0), Some(8));
         bus.tick(9);
         assert_eq!(
             bus.irq.stat() & (1 << (IrqSource::Controller as u32)),
@@ -4907,7 +4907,7 @@ mod tests {
         bus.run_dma_channel(3);
         assert_eq!(read_ram_u32(&bus.ram[..], 0), 0);
         assert_eq!(bus.dma.channels[3].channel_control & (1 << 24), 0);
-        assert_eq!(bus.scheduler.target(EventSlot::CdrDma), None);
+        assert_eq!(bus.scheduler.target(EventSlot::CdDma), None);
     }
 
     #[test]
@@ -4923,7 +4923,7 @@ mod tests {
 
         assert_eq!(read_ram_u32(&bus.ram[..], 0), 0x0403_0201);
         assert_ne!(bus.dma.channels[3].channel_control & (1 << 24), 0);
-        assert_eq!(bus.scheduler.target(EventSlot::CdrDma), Some(1));
+        assert_eq!(bus.scheduler.target(EventSlot::CdDma), Some(1));
 
         bus.tick(1);
         assert_ne!(bus.dma.channels[3].channel_control & (1 << 24), 0);
@@ -4974,7 +4974,7 @@ mod tests {
 
         bus.run_dma_channel(3);
 
-        assert_eq!(bus.scheduler.target(EventSlot::CdrDma), Some(101));
+        assert_eq!(bus.scheduler.target(EventSlot::CdDma), Some(101));
     }
 
     /// Built on the word-count transport; the FIFO tests switch it on.
@@ -6160,7 +6160,7 @@ mod tests {
 
         // 16 data cycles + one DRAM row-address setup cycle.
         assert_eq!(bus.cycles, 117);
-        assert_eq!(bus.scheduler.target(EventSlot::GpuOtcDma), Some(119));
+        assert_eq!(bus.scheduler.target(EventSlot::OtcDma), Some(119));
         assert_eq!(bus.dma.channels[6].channel_control, 0x1100_0002);
 
         // Two cycles after the CPU regains the bus reaches the completion

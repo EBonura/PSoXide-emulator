@@ -1276,7 +1276,7 @@ impl Spu {
     /// construction -- subsequent reschedules happen inside the drain
     /// handler. We tick every [`SAMPLE_CYCLES`] cycles.
     pub fn seed_scheduler(scheduler: &mut Scheduler, now: u64) {
-        scheduler.schedule(EventSlot::SpuAsync, now, SAMPLE_CYCLES);
+        scheduler.schedule(EventSlot::SpuMix, now, SAMPLE_CYCLES);
     }
 
     /// Current SPUCNT value.
@@ -2160,7 +2160,7 @@ impl Spu {
     // ============================================================
 
     /// Produce one stereo sample's worth of audio. Called from the bus
-    /// each time `EventSlot::SpuAsync` fires. Returns the number of
+    /// each time `EventSlot::SpuMix` fires. Returns the number of
     /// samples produced (currently always 1 -- future batching could
     /// amortise voice-state fetches across several samples).
     pub fn tick_sample(&mut self, now: u64) -> usize {
