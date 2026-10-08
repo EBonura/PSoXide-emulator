@@ -5102,7 +5102,9 @@ mod tests {
         let mut bus = empty_list_walk(512);
         bus.tick(20);
         assert!(bus.gpu_list_walk_is_moving());
-        let idle = Bus::new(synthetic_bios()).unwrap().ram_read_stalls(0x8000_0200);
+        let idle = Bus::new(synthetic_bios())
+            .unwrap()
+            .ram_read_stalls(0x8000_0200);
         // Land the read away from the DRAM refresh slot of a fresh machine.
         let busy = bus.ram_read_stalls(0x8000_0200);
         assert!(busy >= idle + GPU_LIST_RAM_READ_WAIT, "{busy} vs {idle}");
