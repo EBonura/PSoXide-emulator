@@ -13,10 +13,9 @@
 //!    which streams 256 pixels (16×16) per macroblock into RAM --
 //!    typically destined for VRAM via a follow-up GPU draw.
 //!
-//! Reference implementations consulted as parity oracles:
-//! - PCSX-Redux `src/core/mdec.{h,cc}` (GPL-2.0-or-later) -- behavioural
-//!   reference for the AAN IDCT + YUV→RGB pipeline + scaling constants.
-//! - PSX-SPX "Macroblock Decoder (MDEC)" chapter for register semantics.
+//! Written from nocash PSX-SPX "Macroblock Decoder (MDEC)" and checked
+//! against the console captures in the public ps1-tests `mdec` programs
+//! (see Provenance).
 //!
 //! MMIO map:
 //!
@@ -34,12 +33,29 @@
 //!
 //! ## Provenance
 //!
-//! Portions of this module are parity-matched against, and in places
-//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
-//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
-//! correspondence are flagged inline with `Redux` references. PSoXide is
-//! released under GPL-2.0-or-later in part to honor this lineage; see
-//! `LICENSE` and `docs/license-audit.md`.
+//! - **Register file, commands, status word**: PSX-SPX. The reset timing
+//!   window, the swallowed control write and the idle status word are
+//!   measurements from this project's console (hardware tests v1.26).
+//! - **Block decode**: PSX-SPX's run-length format, the uploaded
+//!   quantisation tables and the uploaded 8x8 IDCT matrix, applied in two
+//!   passes. The intermediate roundings were fitted against the console
+//!   captures that ship with the ps1-tests `mdec` programs (MIT licence):
+//!   mono output matches at the console's 5-bit precision; colour output
+//!   agrees with the console frame to within one LSB on most bytes, and
+//!   the exact internal precision of the hardware's colour path is not
+//!   known (the remaining differences are listed in the emulator
+//!   provenance document).
+//! - **Colour conversion**: PSX-SPX's coefficients (1.402, 0.3437, 0.7143,
+//!   1.772) in 16.16 fixed point, rounded once at the output depth. 15-bit
+//!   output rounds each field to the nearest multiple of eight; that
+//!   choice matches the console frame in 96% of pixels against 92% for
+//!   rounding to a byte first.
+//! - **Scheduling**: output-driven decode and the coupling of the input
+//!   DMA's completion to the output drain are pinned by the compat FMV
+//!   hashes and the ps1-tests MDEC programs, not by a source.
+//!
+//! This module no longer contains any code derived from another emulator.
+//! See `LICENSE` and `docs/license-audit.md`.
 
 // ===============================================================
 //  Register addresses + command constants.
@@ -137,84 +153,12 @@ const DSIZE: usize = 8;
 const DSIZE2: usize = DSIZE * DSIZE;
 const BLOCKS_PER_MACROBLOCK: usize = 6;
 
-const fn zero_u8_block() -> [u8; DSIZE2] {
-    [0; DSIZE2]
-}
-
-const fn zero_i16_block() -> [i16; DSIZE2] {
-    [0; DSIZE2]
-}
-
-// ===============================================================
-//  Scaling constants (AAN IDCT).
-// ===============================================================
-
-const AAN_CONST_BITS: i32 = 12;
-const AAN_PRESCALE_BITS: i32 = 16;
-const AAN_CONST_SIZE: i32 = 24;
-const AAN_CONST_SCALE: i32 = AAN_CONST_SIZE - AAN_CONST_BITS;
-const AAN_PRESCALE_SIZE: i32 = 20;
-const AAN_PRESCALE_SCALE: i32 = AAN_PRESCALE_SIZE - AAN_PRESCALE_BITS;
-const AAN_EXTRA: i32 = 12;
-
-/// `SCALER(x, n) = ((x) + ((1 << n) >> 1)) >> n` -- rounded divide by 2^n.
-#[inline]
-fn scaler(x: i32, n: i32) -> i32 {
-    (x + ((1 << n) >> 1)) >> n
-}
-
-#[inline]
-fn scale(x: i32, n: i32) -> i32 {
-    x >> n
-}
-
-#[inline]
-fn muls(v: i32, c: i32) -> i32 {
-    scale(v.wrapping_mul(c), AAN_CONST_BITS)
-}
-
-// Pre-scaled IDCT constants.
-fn fix_1_082392200() -> i32 {
-    scaler(18_159_528, AAN_CONST_SCALE)
-}
-fn fix_1_414213562() -> i32 {
-    scaler(23_726_566, AAN_CONST_SCALE)
-}
-fn fix_1_847759065() -> i32 {
-    scaler(31_000_253, AAN_CONST_SCALE)
-}
-fn fix_2_613125930() -> i32 {
-    scaler(43_840_978, AAN_CONST_SCALE)
-}
-
-/// Zig-zag scan order -- maps sequential coefficient index (0..63) to
-/// the position in the 8×8 block where it belongs. RLE-encoded
-/// coefficients stream in this order; the decoder sprays them out of
-/// zigzag into row-major before IDCT.
-const ZIG_ZAG_SCAN: [usize; DSIZE2] = [
-    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
-    13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
-    52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
-];
-
 /// Row-major form used by the fixed-point matrix IDCT. Keeping the transpose
 /// here (rather than after the two rounded passes) is observable at ±1 LSB.
 const ZIG_ZAG_MATRIX: [usize; DSIZE2] = [
     0, 8, 1, 2, 9, 16, 24, 17, 10, 3, 4, 11, 18, 25, 32, 40, 33, 26, 19, 12, 5, 6, 13, 20, 27, 34,
     41, 48, 56, 49, 42, 35, 28, 21, 14, 7, 15, 22, 29, 36, 43, 50, 57, 58, 51, 44, 37, 30, 23, 31,
     38, 45, 52, 59, 60, 53, 46, 39, 47, 54, 61, 62, 55, 63,
-];
-
-/// AAN prescaled forward-DCT coefficients. Multiplied into the
-/// quantization tables during upload so the IDCT can be table-driven.
-const AAN_SCALES: [i32; DSIZE2] = [
-    1_048_576, 1_454_417, 1_370_031, 1_232_995, 1_048_576, 823_861, 567_485, 289_301, 1_454_417,
-    2_017_334, 1_900_287, 1_710_213, 1_454_417, 1_142_728, 787_125, 401_273, 1_370_031, 1_900_287,
-    1_790_031, 1_610_986, 1_370_031, 1_076_426, 741_455, 377_991, 1_232_995, 1_710_213, 1_610_986,
-    1_449_849, 1_232_995, 968_758, 667_292, 340_183, 1_048_576, 1_454_417, 1_370_031, 1_232_995,
-    1_048_576, 823_861, 567_485, 289_301, 823_861, 1_142_728, 1_076_426, 968_758, 823_861, 647_303,
-    445_870, 227_303, 567_485, 787_125, 741_455, 667_292, 567_485, 445_870, 307_121, 156_569,
-    289_301, 401_273, 377_991, 340_183, 289_301, 227_303, 156_569, 79_818,
 ];
 
 /// Bus lines MDEC can report data-in / data-out requests on. Lets the
@@ -239,25 +183,19 @@ pub enum MdecState {
 pub struct Mdec {
     /// Last write to the command register (`reg0`).
     reg0: u32,
-    /// Current status register (`reg1`). PCSX-Redux exposes the latched
-    /// value directly rather than synthesizing empty/DREQ/format bits
-    /// when software reads the status port.
+    /// Latched status register. The words the status port shows are built
+    /// from this plus the FIFO and DMA state in [`Mdec::status_word`].
     reg1: u32,
-    /// Luminance quantization table (64 × 16-bit pre-scaled). `DSIZE2`
+    /// Luminance quantisation table, as uploaded (zig-zag order). `DSIZE2`
     /// (64) is past serde's built-in 32-element array cap, so this
     /// round-trips through [`crate::serde_big_array::array`].
     #[serde(with = "crate::serde_big_array::array")]
-    iq_y: [i32; DSIZE2],
-    /// Chrominance quantization table.
+    quant_y: [u8; DSIZE2],
+    /// Chrominance quantisation table, as uploaded.
     #[serde(with = "crate::serde_big_array::array")]
-    iq_uv: [i32; DSIZE2],
-    /// Raw silicon quantization tables used by the matrix-IDCT path.
-    #[serde(default = "zero_u8_block", with = "crate::serde_big_array::array")]
-    raw_iq_y: [u8; DSIZE2],
-    #[serde(default = "zero_u8_block", with = "crate::serde_big_array::array")]
-    raw_iq_uv: [u8; DSIZE2],
+    quant_uv: [u8; DSIZE2],
     /// Host-provided 8x8 IDCT matrix, transposed on upload as in hardware.
-    #[serde(default = "zero_i16_block", with = "crate::serde_big_array::array")]
+    #[serde(with = "crate::serde_big_array::array")]
     scale_table: [i16; DSIZE2],
     /// Buffered RLE halfwords received via DMA0 since the decode
     /// command was issued. Drained during decode_macroblocks.
@@ -330,10 +268,8 @@ impl Mdec {
         Self {
             reg0: 0,
             reg1: status_idle(),
-            iq_y: [0; DSIZE2],
-            iq_uv: [0; DSIZE2],
-            raw_iq_y: [0; DSIZE2],
-            raw_iq_uv: [0; DSIZE2],
+            quant_y: [0; DSIZE2],
+            quant_uv: [0; DSIZE2],
             scale_table: [0; DSIZE2],
             rl_queue: std::collections::VecDeque::new(),
             out_queue: std::collections::VecDeque::new(),
@@ -512,11 +448,11 @@ impl Mdec {
         }
     }
 
-    /// Called by the bus when DMA channel 1's scheduled completion
-    /// fires. Redux keeps MDEC-in DMA busy for decode commands until
-    /// the output side has consumed the decoded frame; this returns
-    /// `true` exactly when channel 0 may be completed alongside
-    /// channel 1.
+    /// Called by the bus when DMA channel 1's scheduled completion fires.
+    /// A decode command's input transfer stays busy until the output side
+    /// has drained the decoded frame (the compat FMV hashes and the
+    /// ps1-tests MDEC programs pin this); this returns `true` exactly when
+    /// channel 0 may be completed alongside channel 1.
     pub fn complete_dma_out(&mut self) -> bool {
         // The frame is finished only when every halfword still queued is
         // FE00 padding. A leading FE00 alone is not enough: a block that
@@ -701,104 +637,6 @@ impl Mdec {
         }
     }
 
-    #[allow(dead_code)]
-    fn command_write_direct_fifo_legacy(&mut self, value: u32) {
-        // Detect whether this word is a new command or parameter data.
-        // Bits 31..29 of a real command contain one of the defined
-        // codes (1, 2, 3). If we're awaiting parameter data, treat the
-        // word as two RLE halfwords instead.
-        if self.reg1 & MDEC1_BUSY == 0 {
-            // Not decoding -- this might be a fresh command or
-            // quantization-table payload depending on the command.
-            let cmd = (value >> 29) & 0x7;
-            match cmd {
-                1 => {
-                    // Decode macroblocks. Parameter count is in the
-                    // low 16 bits (number of parameter *words*).
-                    self.reg0 = value;
-                    self.reg1 |= MDEC1_BUSY;
-                    self.expected_param_words = value & 0xFFFF;
-                    self.commands_seen = self.commands_seen.saturating_add(1);
-                    // Mirror cmd flags into status reg.
-                    if value & MDEC0_STP != 0 {
-                        self.reg1 |= MDEC1_STP;
-                    } else {
-                        self.reg1 &= !MDEC1_STP;
-                    }
-                    self.reg1 = (self.reg1 & !MDEC1_OUTPUT_DEPTH_MASK)
-                        | (((value >> MDEC0_DEPTH_SHIFT) & MDEC0_DEPTH_MASK) << 25);
-                    self.rl_queue.clear();
-                }
-                2 => {
-                    // Quantization table upload -- 128 bytes (64 Y + 64 UV)
-                    // streamed in as 32 parameter words (4 bytes per word).
-                    self.reg0 = value;
-                    self.reg1 |= MDEC1_BUSY;
-                    self.expected_param_words = value & 0xFFFF;
-                    self.commands_seen = self.commands_seen.saturating_add(1);
-                    self.rl_queue.clear();
-                }
-                3 => {
-                    // Cosine table upload -- 32 parameter words.
-                    // The MDEC doesn't actually use a host-supplied
-                    // cosine table; we accept the upload and discard.
-                    self.reg0 = value;
-                    self.reg1 |= MDEC1_BUSY;
-                    self.expected_param_words = value & 0xFFFF;
-                    self.commands_seen = self.commands_seen.saturating_add(1);
-                    self.rl_queue.clear();
-                }
-                _ => {
-                    // Unknown / no-op command.
-                    self.reg0 = value;
-                    self.commands_seen = self.commands_seen.saturating_add(1);
-                }
-            }
-            return;
-        }
-
-        // Busy -- this word is parameter / RLE data.
-        self.params_seen = self.params_seen.saturating_add(1);
-        let cmd = self.command_code();
-        match cmd {
-            1 => {
-                // RLE coefficient data -- two halfwords per word.
-                self.rl_queue.push_back(value as u16);
-                self.rl_queue.push_back((value >> 16) as u16);
-                // Check if we have enough to decode a macroblock (8 KiB
-                // worst case per block; normally a few hundred bytes).
-                // We decode eagerly when we see an end-of-data sentinel
-                // or when the parameter-count runs out.
-                if self.expected_param_words > 0 {
-                    self.expected_param_words -= 1;
-                    if self.expected_param_words == 0 {
-                        self.decode_until_output_words(1);
-                    }
-                }
-            }
-            2 => {
-                // Quantization table upload -- 64 Y bytes then 64 UV bytes.
-                // 32 words × 4 bytes = 128 bytes total.
-                let total_words = if self.reg0 & 1 != 0 { 32 } else { 16 };
-                self.absorb_quant_word_at(total_words - self.expected_param_words, value);
-                if self.expected_param_words > 0 {
-                    self.expected_param_words -= 1;
-                    if self.expected_param_words == 0 {
-                        self.reg1 &= !MDEC1_BUSY;
-                    }
-                }
-            }
-            3 if self.expected_param_words > 0 => {
-                // Cosine table -- discard.
-                self.expected_param_words -= 1;
-                if self.expected_param_words == 0 {
-                    self.reg1 &= !MDEC1_BUSY;
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn control_write(&mut self, value: u32) {
         if value & MDEC1_RESET != 0 {
             // Reset -- clears state but preserves quantization tables
@@ -825,43 +663,23 @@ impl Mdec {
         lo | (hi << 16)
     }
 
-    /// Absorb one 32-bit word of quantization-table data. The upload
-    /// is 32 words: first 16 words (64 bytes) for iq_y, next 16 for
-    /// iq_uv. We decode each byte, multiply by the AAN prescale, and
-    /// slot into the iq table at the zigzag position.
+    /// Take one 32-bit word of a quantisation-table upload. The upload is
+    /// the 64 luminance bytes followed (when bit 0 of the command asked for
+    /// it) by the 64 chrominance bytes, four bytes per word, low byte first.
     fn absorb_quant_word_at(&mut self, word_index: u32, value: u32) {
-        let bytes = value.to_le_bytes();
-        for (byte_index, &b) in bytes.iter().enumerate() {
+        for (byte_index, byte) in value.to_le_bytes().into_iter().enumerate() {
             let pos = word_index as usize * 4 + byte_index;
-            if pos < 64 {
-                self.raw_iq_y[pos] = b;
-                self.iq_y[pos] =
-                    (b as i32) * scaler(AAN_SCALES[ZIG_ZAG_SCAN[pos]], AAN_PRESCALE_SCALE);
-            } else if pos < 128 {
-                let uv_pos = pos - 64;
-                self.raw_iq_uv[uv_pos] = b;
-                self.iq_uv[uv_pos] =
-                    (b as i32) * scaler(AAN_SCALES[ZIG_ZAG_SCAN[uv_pos]], AAN_PRESCALE_SCALE);
+            match pos {
+                0..=63 => self.quant_y[pos] = byte,
+                64..=127 => self.quant_uv[pos - 64] = byte,
+                _ => {}
             }
         }
     }
 
     fn absorb_quant_upload(&mut self, words: &[u32]) {
         for (word_index, &value) in words.iter().enumerate() {
-            let bytes = value.to_le_bytes();
-            for (byte_index, &b) in bytes.iter().enumerate() {
-                let pos = word_index * 4 + byte_index;
-                if pos < 64 {
-                    self.raw_iq_y[pos] = b;
-                    self.iq_y[pos] =
-                        (b as i32) * scaler(AAN_SCALES[ZIG_ZAG_SCAN[pos]], AAN_PRESCALE_SCALE);
-                } else if pos < 128 {
-                    let uv_pos = pos - 64;
-                    self.raw_iq_uv[uv_pos] = b;
-                    self.iq_uv[uv_pos] =
-                        (b as i32) * scaler(AAN_SCALES[ZIG_ZAG_SCAN[uv_pos]], AAN_PRESCALE_SCALE);
-                }
-            }
+            self.absorb_quant_word_at(word_index as u32, value);
         }
     }
 
@@ -893,9 +711,11 @@ impl Mdec {
     }
 
     /// Decode enough macroblocks to make at least `min_words` 32-bit
-    /// words available. Redux decodes from the RLE stream during DMA1
-    /// rather than eagerly during DMA0; matching that order prevents a
-    /// single frame's end marker from cutting off later DMA1 chunks.
+    /// words available. Decoding is driven by the output side (the data
+    /// port and DMA1) rather than eagerly when the input arrives, as the
+    /// hardware's small output FIFO makes the decoder wait for its reader;
+    /// this also keeps a frame's end marker from cutting off later DMA1
+    /// chunks.
     fn decode_until_output_words(&mut self, min_words: usize) {
         let min_halfwords = min_words.saturating_mul(2);
         while self.out_queue.len() < min_halfwords && self.can_continue_decode() {
@@ -916,15 +736,20 @@ impl Mdec {
             return self.decode_one_mono_block();
         }
 
-        let mut blocks = [[0i32; DSIZE2]; BLOCKS_PER_MACROBLOCK];
-        for (bi, block) in blocks.iter_mut().enumerate() {
-            let iqtab = if bi < 2 { &self.iq_uv } else { &self.iq_y };
-            if !decode_block(&mut self.rl_queue, block, iqtab) {
+        // Stream order is Cr, Cb, Y1, Y2, Y3, Y4; the two chroma blocks use
+        // the chrominance table and the four luma blocks the luminance one.
+        let mut blocks = [[0i16; DSIZE2]; BLOCKS_PER_MACROBLOCK];
+        for (index, block) in blocks.iter_mut().enumerate() {
+            let quant = if index < 2 {
+                &self.quant_uv
+            } else {
+                &self.quant_y
+            };
+            if !decode_block(&mut self.rl_queue, block, quant) {
                 return false;
             }
+            idct(&self.scale_table, block);
         }
-        // Convert YUV→RGB and push output. Block order:
-        //   0: Cr, 1: Cb, 2..5: Y1..Y4
         self.emit_macroblock_output(&blocks);
         self.macroblocks_decoded = self.macroblocks_decoded.saturating_add(1);
         true
@@ -932,10 +757,10 @@ impl Mdec {
 
     fn decode_one_mono_block(&mut self) -> bool {
         let mut block = [0i16; DSIZE2];
-        if !decode_block_silicon(&mut self.rl_queue, &mut block, &self.raw_iq_y) {
+        if !decode_block(&mut self.rl_queue, &mut block, &self.quant_y) {
             return false;
         }
-        idct_silicon(&self.scale_table, &mut block);
+        idct(&self.scale_table, &mut block);
 
         let add = if self.reg0 & MDEC0_SIGNED != 0 {
             0
@@ -974,34 +799,34 @@ impl Mdec {
         true
     }
 
-    /// YUV→RGB conversion + output packing. Fills `out_queue` with
-    /// either 15-bit RGB halfwords or 24-bit RGB byte triplets (still
-    /// queued as halfwords for uniform storage).
-    fn emit_macroblock_output(&mut self, blocks: &[[i32; DSIZE2]; BLOCKS_PER_MACROBLOCK]) {
-        // Block 0 = Cr, Block 1 = Cb, Blocks 2..5 = Y1..Y4.
-        let cr = &blocks[0];
-        let cb = &blocks[1];
-        let y_blocks: [&[i32; DSIZE2]; 4] = [&blocks[2], &blocks[3], &blocks[4], &blocks[5]];
-
-        let rgb24 = self.output_depth() == 2;
-        let mask_bit_15 = self.reg0 & MDEC0_STP != 0;
-
-        if rgb24 {
-            // 24-bit (RGB888) -- 16×16 pixels × 3 bytes = 768 bytes = 384 halfwords.
-            let mut image = [0u8; 16 * 16 * 3];
-            yuv_to_rgb24(&mut image, cr, cb, y_blocks);
-            // Pack bytes into halfwords little-endian: [b0|b1], [b2|b3], ...
-            for chunk in image.chunks(2) {
-                let lo = chunk[0] as u16;
-                let hi = chunk.get(1).copied().unwrap_or(0) as u16;
-                self.out_queue.push_back(lo | (hi << 8));
+    /// Convert a decoded macroblock to pixels and queue them, row by row:
+    /// 15-bit pixels as one halfword each, 24-bit pixels as R, G, B bytes
+    /// packed little-endian into halfwords.
+    fn emit_macroblock_output(&mut self, blocks: &[[i16; DSIZE2]; BLOCKS_PER_MACROBLOCK]) {
+        let signed = self.reg0 & MDEC0_SIGNED != 0;
+        let pixels = (0..16).flat_map(|y| (0..16).map(move |x| (x, y)));
+        if self.output_depth() == 2 {
+            let mut bytes = [0u8; 16 * 16 * 3];
+            for ((x, y), out) in pixels.zip(bytes.chunks_exact_mut(3)) {
+                let rgb = macroblock_pixel(blocks, x, y);
+                for (dst, component) in out.iter_mut().zip(rgb) {
+                    *dst = output_byte(component, signed);
+                }
+            }
+            for pair in bytes.chunks_exact(2) {
+                self.out_queue
+                    .push_back(u16::from(pair[0]) | (u16::from(pair[1]) << 8));
             }
         } else {
-            // 15-bit (RGB555) -- 16×16 pixels × 2 bytes = 512 bytes = 256 halfwords.
-            let mut image = [0u16; 16 * 16];
-            yuv_to_rgb15(&mut image, cr, cb, y_blocks, mask_bit_15);
-            for px in image {
-                self.out_queue.push_back(px);
+            let bit15 = if self.reg0 & MDEC0_STP != 0 {
+                0x8000
+            } else {
+                0
+            };
+            for (x, y) in pixels {
+                let [r, g, b] = macroblock_pixel(blocks, x, y)
+                    .map(|component| output_field15(component, signed));
+                self.out_queue.push_back(r | (g << 5) | (b << 10) | bit15);
             }
         }
     }
@@ -1026,10 +851,14 @@ const fn status_idle() -> u32 {
 //  Block-level decode: RLE → coefficients → IDCT.
 // ===============================================================
 
-/// Decode the fixed-point coefficient representation consumed by the PS1's
-/// uploaded IDCT matrix. This is used for mono output, where the public
-/// silicon corpus is sensitive to the hardware's intermediate rounding.
-fn decode_block_silicon(
+/// Read one block from the RLE stream into the fixed-point coefficients the
+/// IDCT matrix consumes: the DC term and each AC term are dequantised with
+/// the uploaded table (and the block's quantisation scale for AC terms),
+/// rounded and saturated to 15 bits, and placed in matrix order. Returns
+/// `false` when the stream ends before the block does. The intermediate
+/// rounding is observable on silicon (ps1-tests' mono and frame programs),
+/// so each step is kept exactly.
+fn decode_block(
     rl: &mut std::collections::VecDeque<u16>,
     block: &mut [i16; DSIZE2],
     quant: &[u8; DSIZE2],
@@ -1087,7 +916,12 @@ fn decode_block_silicon(
     true
 }
 
-fn idct_silicon(scale_table: &[i16; DSIZE2], block: &mut [i16; DSIZE2]) {
+/// Two-pass 8x8 inverse DCT as the hardware performs it: each pass multiplies
+/// by the uploaded matrix, adds half an LSB and drops 15 fractional bits; the
+/// second pass saturates its result to signed 9 bits and then to -128..=127.
+/// The first pass stores its result transposed, which is observable at one
+/// LSB when the two roundings differ.
+fn idct(scale_table: &[i16; DSIZE2], block: &mut [i16; DSIZE2]) {
     let mut temp = [0i16; DSIZE2];
     for column in 0..DSIZE {
         for x in 0..DSIZE {
@@ -1105,69 +939,9 @@ fn idct_silicon(scale_table: &[i16; DSIZE2], block: &mut [i16; DSIZE2]) {
                 sum += i64::from(temp[column * DSIZE + u]) * i64::from(scale_table[x * DSIZE + u]);
             }
             let rounded = ((sum + 0x4000) >> 15) as i32;
-            block[column * DSIZE + x] = sign_extend_9(rounded).clamp(-128, 127) as i16;
+            block[column * DSIZE + x] = rounded.clamp(-128, 127) as i16;
         }
     }
-}
-
-/// Decode one 8×8 block's worth of RLE coefficients into `block`,
-/// applying dequantization via `iqtab` and the AAN IDCT. Returns
-/// `false` when we hit the end of data before completing the block.
-fn decode_block(
-    rl: &mut std::collections::VecDeque<u16>,
-    block: &mut [i32; DSIZE2],
-    iqtab: &[i32; DSIZE2],
-) -> bool {
-    // First word: quantization scale (high 6 bits) + DC coefficient (low 10).
-    let head = loop {
-        match rl.pop_front() {
-            // FE00h at the start of a new block is DMA padding, not an
-            // empty Cr/Cb/Y block. Commercial room images pad MDEC streams this way.
-            Some(MDEC_END_OF_DATA) => continue,
-            Some(v) => break v,
-            None => return false,
-        }
-    };
-    let q_scale = rle_run(head);
-    block.fill(0);
-    block[0] = scaler(iqtab[0] * rle_val(head), AAN_EXTRA - 3);
-
-    let mut k: usize = 0;
-    let mut used_col: i32 = 0;
-    loop {
-        let rl_word = match rl.pop_front() {
-            Some(v) => v,
-            None => return false,
-        };
-        if rl_word == MDEC_END_OF_DATA {
-            break;
-        }
-        let run = rle_run(rl_word) as usize;
-        k += run + 1;
-        if k > 63 {
-            // Broken stream -- bail gracefully.
-            break;
-        }
-        let pos = ZIG_ZAG_SCAN[k];
-        block[pos] = scaler(rle_val(rl_word) * iqtab[k] * q_scale, AAN_EXTRA);
-        // Track used columns to accelerate IDCT.
-        if pos > 7 {
-            used_col |= 1 << (pos & 7);
-        }
-        // Reaching the final zig-zag coefficient completes the block even
-        // without an FE00 marker. The public mono corpus uses this exact
-        // full-block encoding and silicon immediately exposes its output.
-        if k == DSIZE2 - 1 {
-            break;
-        }
-    }
-    if k == 0 {
-        // Only DC coefficient -- fill the block uniformly.
-        idct(block, -1);
-    } else {
-        idct(block, used_col);
-    }
-    true
 }
 
 /// Extract the quantization-scale / run-length field from an RLE word
@@ -1190,247 +964,79 @@ fn sign_extend_9(value: i32) -> i32 {
     (value << 23) >> 23
 }
 
-/// AAN-optimized 2D IDCT on an 8×8 block. Implements Redux's hybrid
-/// row/column traversal: walks columns first (skipping columns with
-/// only a DC coefficient when possible via `used_col`), then rows.
-fn idct(block: &mut [i32; DSIZE2], used_col: i32) {
-    if used_col == -1 {
-        let v = block[0];
-        block.fill(v);
-        return;
-    }
-
-    // Column pass.
-    for i in 0..DSIZE {
-        if used_col & (1 << i) == 0 {
-            // Column either empty or has only DC -- splat DC down.
-            if block[i] != 0 {
-                fill_col(block, i, block[i]);
-            }
-            continue;
-        }
-
-        let ptr = |r: usize| block[r * DSIZE + i];
-        let z10 = ptr(0) + ptr(4);
-        let z11 = ptr(0) - ptr(4);
-        let z13 = ptr(2) + ptr(6);
-        let z12 = muls(ptr(2) - ptr(6), fix_1_414213562()) - z13;
-
-        let tmp0 = z10 + z13;
-        let tmp3 = z10 - z13;
-        let tmp1 = z11 + z12;
-        let tmp2 = z11 - z12;
-
-        let z13 = ptr(3) + ptr(5);
-        let z10 = ptr(3) - ptr(5);
-        let z11 = ptr(1) + ptr(7);
-        let z12 = ptr(1) - ptr(7);
-
-        let tmp7 = z11 + z13;
-        let z5 = (z12 - z10) * fix_1_847759065();
-        let tmp6 = scale(z10 * fix_2_613125930() + z5, AAN_CONST_BITS) - tmp7;
-        let tmp5 = muls(z11 - z13, fix_1_414213562()) - tmp6;
-        let tmp4 = scale(z12 * fix_1_082392200() - z5, AAN_CONST_BITS) + tmp5;
-
-        block[i] = tmp0 + tmp7;
-        block[7 * DSIZE + i] = tmp0 - tmp7;
-        block[DSIZE + i] = tmp1 + tmp6;
-        block[6 * DSIZE + i] = tmp1 - tmp6;
-        block[2 * DSIZE + i] = tmp2 + tmp5;
-        block[5 * DSIZE + i] = tmp2 - tmp5;
-        block[4 * DSIZE + i] = tmp3 + tmp4;
-        block[3 * DSIZE + i] = tmp3 - tmp4;
-    }
-
-    // Row pass.
-    if used_col == 1 {
-        for i in 0..DSIZE {
-            let v = block[DSIZE * i];
-            fill_row(block, i, v);
-        }
-    } else {
-        for i in 0..DSIZE {
-            let base = i * DSIZE;
-            let p = |j: usize| block[base + j];
-            let z10 = p(0) + p(4);
-            let z11 = p(0) - p(4);
-            let z13 = p(2) + p(6);
-            let z12 = muls(p(2) - p(6), fix_1_414213562()) - z13;
-
-            let tmp0 = z10 + z13;
-            let tmp3 = z10 - z13;
-            let tmp1 = z11 + z12;
-            let tmp2 = z11 - z12;
-
-            let z13 = p(3) + p(5);
-            let z10 = p(3) - p(5);
-            let z11 = p(1) + p(7);
-            let z12 = p(1) - p(7);
-
-            let tmp7 = z11 + z13;
-            let z5 = (z12 - z10) * fix_1_847759065();
-            let tmp6 = scale(z10 * fix_2_613125930() + z5, AAN_CONST_BITS) - tmp7;
-            let tmp5 = muls(z11 - z13, fix_1_414213562()) - tmp6;
-            let tmp4 = scale(z12 * fix_1_082392200() - z5, AAN_CONST_BITS) + tmp5;
-
-            block[base] = tmp0 + tmp7;
-            block[base + 7] = tmp0 - tmp7;
-            block[base + 1] = tmp1 + tmp6;
-            block[base + 6] = tmp1 - tmp6;
-            block[base + 2] = tmp2 + tmp5;
-            block[base + 5] = tmp2 - tmp5;
-            block[base + 4] = tmp3 + tmp4;
-            block[base + 3] = tmp3 - tmp4;
-        }
-    }
-}
-
-fn fill_col(block: &mut [i32; DSIZE2], col: usize, v: i32) {
-    for r in 0..DSIZE {
-        block[r * DSIZE + col] = v;
-    }
-}
-
-fn fill_row(block: &mut [i32; DSIZE2], row: usize, v: i32) {
-    let base = row * DSIZE;
-    for j in 0..DSIZE {
-        block[base + j] = v;
-    }
-}
-
 // ===============================================================
-//  YUV → RGB conversion.
+//  YUV -> RGB conversion and output packing.
 // ===============================================================
 
-// JPEG-scale YUV→RGB (Y/Cb/Cr[-128..127] → R/G/B[0..255]):
-//   R = Y + 1.400*Cr
-//   G = Y - 0.343*Cb - 0.711*Cr
-//   B = Y + 1.765*Cb
+/// Colour-space conversion fixed point: coefficients and results carry 16
+/// fractional bits, so rounding happens once, at the output depth.
+const CSC_SHIFT: u32 = 16;
+/// `1.402`, the weight of Cr in red (PSX-SPX "MDEC Decompression").
+const CSC_CR_TO_R: i32 = 91_881;
+/// `0.3437`, the weight of Cb in green.
+const CSC_CB_TO_G: i32 = 22_525;
+/// `0.7143`, the weight of Cr in green.
+const CSC_CR_TO_G: i32 = 46_813;
+/// `1.772`, the weight of Cb in blue.
+const CSC_CB_TO_B: i32 = 116_130;
+/// The output range of one component, in the same fixed point.
+const CSC_MIN: i32 = -128 << CSC_SHIFT;
+const CSC_MAX: i32 = 127 << CSC_SHIFT;
 
+/// Convert one pixel's luma and chroma (each in -128..=127) to red, green
+/// and blue in 16.16 fixed point, saturated to -128.0..=127.0.
 #[inline]
-fn mulr(a: i32) -> i32 {
-    1434 * a
-}
-#[inline]
-fn mulb(a: i32) -> i32 {
-    1807 * a
-}
-#[inline]
-fn mulg2(a: i32, b: i32) -> i32 {
-    -351 * a - 728 * b
-}
-#[inline]
-fn muly(a: i32) -> i32 {
-    a << 10
+fn yuv_to_rgb(y: i32, cb: i32, cr: i32) -> [i32; 3] {
+    let y = y << CSC_SHIFT;
+    [
+        y + CSC_CR_TO_R * cr,
+        y - CSC_CB_TO_G * cb - CSC_CR_TO_G * cr,
+        y + CSC_CB_TO_B * cb,
+    ]
+    .map(|component| component.clamp(CSC_MIN, CSC_MAX))
 }
 
+/// The 24-bit output byte for a component: rounded to the nearest integer,
+/// then offset into 0..=255 unless the command asked for signed output, in
+/// which case the two's-complement byte is delivered as is.
 #[inline]
-fn clamp5(c: i32) -> i32 {
-    if c < -16 {
-        0
-    } else if c > 31 - 16 {
-        31
+fn output_byte(component: i32, signed: bool) -> u8 {
+    let rounded = (component + (1 << (CSC_SHIFT - 1))) >> CSC_SHIFT;
+    (if signed { rounded } else { rounded + 128 }) as u8
+}
+
+/// The 5-bit field of a 15-bit output pixel for a component: the unsigned
+/// byte value is rounded to the nearest multiple of eight (ties upward,
+/// working from the unrounded component), saturating at 31. Signed output
+/// reduces the two's-complement byte the same way.
+#[inline]
+fn output_field15(component: i32, signed: bool) -> u16 {
+    if signed {
+        (u16::from(output_byte(component, true)) + 4) >> 3
     } else {
-        c + 16
+        // (value + 128 + 4) / 8, floored, from 16.16 fixed point.
+        let biased = i64::from(component) + (132i64 << CSC_SHIFT);
+        ((biased >> (CSC_SHIFT + 3)) as u16).min(31)
     }
 }
 
+/// Pixel `(x, y)` of a 16x16 macroblock from its six decoded blocks (in
+/// stream order: Cr, Cb, Y1..Y4). Chroma is shared by each 2x2 pixel group;
+/// luma comes from the quadrant block the pixel falls in.
 #[inline]
-fn clamp8(c: i32) -> i32 {
-    if c < -128 {
-        0
-    } else if c > 255 - 128 {
-        255
-    } else {
-        c + 128
-    }
-}
-
-#[inline]
-fn scale8(c: i32) -> i32 {
-    scaler(c, 20)
-}
-#[inline]
-fn scale5(c: i32) -> i32 {
-    scaler(c, 23)
-}
-
-#[inline]
-fn make_rgb15(r: i32, g: i32, b: i32, a: u16) -> u16 {
-    (a | ((b as u16) << 10) | ((g as u16) << 5) | (r as u16)).to_le()
-}
-
-/// Produce one 16×16 image from one macroblock's 4 Y blocks plus a
-/// shared Cr + Cb block, output as 15-bit RGB halfwords.
-fn yuv_to_rgb15(
-    image: &mut [u16; 16 * 16],
-    cr: &[i32; DSIZE2],
-    cb: &[i32; DSIZE2],
-    y_blocks: [&[i32; DSIZE2]; 4],
-    mask_bit_15: bool,
-) {
-    let mask = if mask_bit_15 { 0x8000 } else { 0 };
-    // 16×16 output split into 4 quadrants of 8×8:
-    //   top-left = Y1, top-right = Y2, bottom-left = Y3, bottom-right = Y4
-    // Cb/Cr are 8×8 for the entire macroblock -- each pixel of Cb/Cr
-    // corresponds to a 2×2 block of Y pixels.
-    for qy in 0..2 {
-        for qx in 0..2 {
-            let y = y_blocks[qy * 2 + qx];
-            for row in 0..8 {
-                for col in 0..8 {
-                    let out_row = qy * 8 + row;
-                    let out_col = qx * 8 + col;
-                    let out_idx = out_row * 16 + out_col;
-                    // Cb/Cr are chroma-subsampled: one entry per
-                    // 2×2 Y block. The Cb/Cr entry coords are
-                    // (out_row/2, out_col/2).
-                    let cidx = (out_row / 2) * DSIZE + (out_col / 2);
-                    let y_val = muly(y[row * DSIZE + col]);
-                    let r_contrib = mulr(cr[cidx]);
-                    let g_contrib = mulg2(cb[cidx], cr[cidx]);
-                    let b_contrib = mulb(cb[cidx]);
-                    let r = clamp5(scale5(y_val + r_contrib));
-                    let g = clamp5(scale5(y_val + g_contrib));
-                    let b = clamp5(scale5(y_val + b_contrib));
-                    image[out_idx] = make_rgb15(r, g, b, mask);
-                }
-            }
-        }
-    }
-}
-
-/// 24-bit RGB output. Pixels are packed as `[R, G, B]` triplets in
-/// row-major order.
-fn yuv_to_rgb24(
-    image: &mut [u8; 16 * 16 * 3],
-    cr: &[i32; DSIZE2],
-    cb: &[i32; DSIZE2],
-    y_blocks: [&[i32; DSIZE2]; 4],
-) {
-    for qy in 0..2 {
-        for qx in 0..2 {
-            let y = y_blocks[qy * 2 + qx];
-            for row in 0..8 {
-                for col in 0..8 {
-                    let out_row = qy * 8 + row;
-                    let out_col = qx * 8 + col;
-                    let pixel_idx = (out_row * 16 + out_col) * 3;
-                    let cidx = (out_row / 2) * DSIZE + (out_col / 2);
-                    let y_val = muly(y[row * DSIZE + col]);
-                    let r_contrib = mulr(cr[cidx]);
-                    let g_contrib = mulg2(cb[cidx], cr[cidx]);
-                    let b_contrib = mulb(cb[cidx]);
-                    let r = clamp8(scale8(y_val + r_contrib));
-                    let g = clamp8(scale8(y_val + g_contrib));
-                    let b = clamp8(scale8(y_val + b_contrib));
-                    image[pixel_idx] = r as u8;
-                    image[pixel_idx + 1] = g as u8;
-                    image[pixel_idx + 2] = b as u8;
-                }
-            }
-        }
-    }
+fn macroblock_pixel(
+    blocks: &[[i16; DSIZE2]; BLOCKS_PER_MACROBLOCK],
+    x: usize,
+    y: usize,
+) -> [i32; 3] {
+    let chroma = (y / 2) * DSIZE + x / 2;
+    let luma_block = 2 + (y / DSIZE) * 2 + x / DSIZE;
+    let luma = (y % DSIZE) * DSIZE + x % DSIZE;
+    yuv_to_rgb(
+        i32::from(blocks[luma_block][luma]),
+        i32::from(blocks[1][chroma]),
+        i32::from(blocks[0][chroma]),
+    )
 }
 
 // ===============================================================
@@ -1534,8 +1140,8 @@ mod tests {
             m.write32(MDEC_CMD_DATA, 0x1010_1010);
         }
         assert_eq!(m.read32(MDEC_CTRL_STAT) & MDEC1_BUSY, 0);
-        assert!(m.iq_y.iter().all(|&value| value != 0));
-        assert!(m.iq_uv.iter().all(|&value| value != 0));
+        assert!(m.quant_y.iter().all(|&value| value == 0x10));
+        assert!(m.quant_uv.iter().all(|&value| value == 0x10));
 
         m.write32(MDEC_CMD_DATA, 0x6000_0000);
         for _ in 0..32 {
@@ -1568,11 +1174,21 @@ mod tests {
     }
 
     #[test]
-    fn idct_dc_only_fills_block_with_dc() {
-        let mut block = [0i32; DSIZE2];
-        block[0] = 42;
-        idct(&mut block, -1);
-        assert!(block.iter().all(|&v| v == 42));
+    fn idct_applies_the_matrix_in_both_passes_with_rounding() {
+        // A diagonal matrix of 0.5 (0x4000 in 1.15 fixed point) halves the
+        // block once per pass.
+        let mut scale = [0i16; DSIZE2];
+        for i in 0..DSIZE {
+            scale[i * DSIZE + i] = 0x4000;
+        }
+        let mut block = [0i16; DSIZE2];
+        block[0] = 400;
+        block[DSIZE + 1] = 6;
+        idct(&scale, &mut block);
+        assert_eq!(block[0], 100);
+        // 6 / 4 = 1.5 rounds up to 2.
+        assert_eq!(block[DSIZE + 1], 2);
+        assert_eq!(block.iter().filter(|&&v| v != 0).count(), 2);
     }
 
     #[test]
@@ -1592,18 +1208,51 @@ mod tests {
         let _ = rle_run(word);
     }
 
+    fn bytes(y: i32, cb: i32, cr: i32) -> [u8; 3] {
+        yuv_to_rgb(y, cb, cr).map(|component| output_byte(component, false))
+    }
+
     #[test]
-    fn make_rgb15_packs_correctly() {
-        // R=0, G=0, B=0, no mask → 0x0000.
-        assert_eq!(make_rgb15(0, 0, 0, 0), 0);
-        // R=31, G=0, B=0 → 0x001F.
-        assert_eq!(make_rgb15(31, 0, 0, 0), 0x001F);
-        // R=0, G=31, B=0 → 0x03E0.
-        assert_eq!(make_rgb15(0, 31, 0, 0), 0x03E0);
-        // R=0, G=0, B=31 → 0x7C00.
-        assert_eq!(make_rgb15(0, 0, 31, 0), 0x7C00);
-        // Mask bit → 0x8000.
-        assert_eq!(make_rgb15(0, 0, 0, 0x8000), 0x8000);
+    fn grey_pixels_keep_their_luma_in_every_component() {
+        for y in [-128, -1, 0, 1, 127] {
+            assert_eq!(bytes(y, 0, 0), [(y + 128) as u8; 3]);
+        }
+    }
+
+    #[test]
+    fn chroma_moves_the_components_by_the_documented_weights() {
+        // Cr = 64: red +1.402 * 64 = 89.7, green -0.7143 * 64 = -45.7.
+        assert_eq!(bytes(0, 0, 64), [128 + 90, 128 - 46, 128]);
+        // Cb = 64: blue +1.772 * 64 = 113.4, green -0.3437 * 64 = -22.0.
+        assert_eq!(bytes(0, 64, 0), [128, 128 - 22, 128 + 113]);
+    }
+
+    #[test]
+    fn components_saturate_to_the_signed_byte_range() {
+        assert_eq!(bytes(127, 0, 127), [255, 128 + 36, 255]);
+        // Green is the one component the opposite chroma pulls back up:
+        // -128 + 0.3437 * 128 + 0.7143 * 128 = 7.4.
+        assert_eq!(bytes(-128, -128, -128), [0, 128 + 7, 0]);
+    }
+
+    #[test]
+    fn signed_output_keeps_the_twos_complement_byte() {
+        let rgb = yuv_to_rgb(-1, 0, 0);
+        assert_eq!(output_byte(rgb[0], true), 0xFF);
+        assert_eq!(output_byte(yuv_to_rgb(5, 0, 0)[0], true), 5);
+    }
+
+    #[test]
+    fn fifteen_bit_fields_round_to_the_nearest_multiple_of_eight() {
+        let field = |y: i32| output_field15(yuv_to_rgb(y, 0, 0)[0], false);
+        // Byte values 0..=3 round to 0, 4..=11 to 1, and the top saturates.
+        assert_eq!(field(-128), 0);
+        assert_eq!(field(-125), 0); // byte 3
+        assert_eq!(field(-124), 1); // byte 4
+        assert_eq!(field(-117), 1); // byte 11
+        assert_eq!(field(-116), 2); // byte 12
+        assert_eq!(field(127), 31);
+        assert_eq!(field(123), 31); // byte 251: (251 + 4) / 8 = 31
     }
 
     #[test]
@@ -1666,20 +1315,20 @@ mod tests {
             0x0010,
             MDEC_END_OF_DATA,
         ]);
-        let mut block = [0i32; DSIZE2];
-        let iqtab = [1i32; DSIZE2];
+        let mut block = [0i16; DSIZE2];
+        let quant = [1u8; DSIZE2];
 
-        assert!(decode_block(&mut rl, &mut block, &iqtab));
+        assert!(decode_block(&mut rl, &mut block, &quant));
         assert!(rl.is_empty());
     }
 
     #[test]
     fn rle_block_decode_returns_false_for_padding_only_stream() {
         let mut rl = std::collections::VecDeque::from([MDEC_END_OF_DATA, MDEC_END_OF_DATA]);
-        let mut block = [0i32; DSIZE2];
-        let iqtab = [1i32; DSIZE2];
+        let mut block = [0i16; DSIZE2];
+        let quant = [1u8; DSIZE2];
 
-        assert!(!decode_block(&mut rl, &mut block, &iqtab));
+        assert!(!decode_block(&mut rl, &mut block, &quant));
         assert!(rl.is_empty());
     }
 
@@ -1727,10 +1376,10 @@ mod tests {
         let mut encoded = vec![0x0400];
         encoded.extend(std::iter::repeat_n(0u16, 63));
         let mut rl = std::collections::VecDeque::from(encoded);
-        let mut block = [0i32; DSIZE2];
-        let iqtab = [1i32; DSIZE2];
+        let mut block = [0i16; DSIZE2];
+        let quant = [1u8; DSIZE2];
 
-        assert!(decode_block(&mut rl, &mut block, &iqtab));
+        assert!(decode_block(&mut rl, &mut block, &quant));
         assert!(rl.is_empty());
     }
 
