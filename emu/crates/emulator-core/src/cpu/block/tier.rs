@@ -482,7 +482,6 @@ impl Cpu {
         }
         st.uncounted = 0;
         self.cursor.block = 0;
-        self.apply_redux_bios_kernel_call_intercept();
         if !bus.post_op_quiet() {
             bus.drain_scheduler_events_post_op();
             self.batch_new_limits(bus, st);
@@ -604,7 +603,8 @@ impl Cpu {
             if now >= run.limit || now >= run.boundary_until || run.slow_boundary != 0 {
                 return None;
             }
-            // `apply_redux_bios_kernel_call_intercept`'s vectors.
+            // The kernel-call vectors (A0/B0/C0) are never entered by the
+            // block tier: the HLE hooks and BIOS trampolines run there.
             let base = (run.target >> 20) & 0x0FFC;
             if matches!(base, 0x000 | 0x800 | 0xA00) && run.target & (RAM_BYTES - 1) < 0x100 {
                 return None;

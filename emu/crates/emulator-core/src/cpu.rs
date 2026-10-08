@@ -1,19 +1,24 @@
 //! MIPS R3000A CPU.
 //!
-//! Instruction set coverage grows one opcode at a time, each added
-//! alongside a parity assertion against PCSX-Redux. The decoder itself
-//! is intentionally a flat match on the primary opcode field -- we'll
-//! refactor to a jump table only if a profiler says to.
+//! Instruction set coverage is checked opcode by opcode against the MIPS
+//! architecture and the PSX-SPX CPU chapters. The decoder itself is
+//! intentionally a flat match on the primary opcode field -- we'll refactor
+//! to a jump table only if a profiler says to.
 //!
 //! ## Provenance
 //!
-//! Portions of this module are parity-matched against, and in places
-//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
-//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. The MIPS
-//! R3000A instruction set is standard; the inline `Redux` references mark
-//! where edge-case and timing behaviour is matched to Redux. PSoXide is
-//! released under GPL-2.0-or-later in part to honor this lineage; see
-//! `LICENSE` and `docs/license-audit.md`.
+//! The instruction semantics, load-delay and branch-delay rules, COP0
+//! exception entry and the GTE interrupt interaction come from the MIPS
+//! architecture and nocash PSX-SPX; instruction costs and load-shadow
+//! behaviour are fitted to this project's console measurements (hardware
+//! tests CPU timing records). Three behaviours are `gate-pinned`: the
+//! interrupt line is sampled only at branch boundaries, CAUSE is rewritten
+//! (not merged) at exception entry, and the cycle for an instruction is
+//! charged before it executes. All three were first chosen to reproduce a
+//! PCSX-Redux trace while the project still had a real-BIOS path and they
+//! stay because the compat frame hashes depend on them; the console has not
+//! been measured against them. This module has not been rewritten
+//! clean-room as a whole. See `LICENSE` and `docs/PROVENANCE.md`.
 
 use psx_hw::memory;
 use psx_trace::InstructionRecord;
@@ -688,8 +693,7 @@ pub struct Cpu {
     /// Latched on the *clean* (depth 0 → 1) entry: `true` iff the
     /// outermost exception was an `Interrupt` (cause=0). Stays set
     /// until `isr_depth` returns to 0 via the final RFE. Mirrors
-    /// the `!m_wasInISR && cause == 0` condition in Redux's
-    /// `debug.cc:235` early-return that hides the IRQ-handler body
+    /// the condition the trace recorder uses to hide an IRQ-handler body
     /// from the recorded trace. Syscall-entered spans clear this to
     /// false and stay that way until the outermost RFE.
     clean_irq_entry: bool,
@@ -829,7 +833,7 @@ impl Cpu {
     }
 
     /// `true` while the CPU is inside any exception handler (at any
-    /// nesting depth). Mirrors Redux's `m_inISR`. Diagnostic.
+    /// nesting depth). Diagnostic.
     #[inline]
     pub fn in_isr(&self) -> bool {
         self.isr_depth > 0
@@ -838,11 +842,9 @@ impl Cpu {
     /// `true` iff we're still inside the span of a *clean* IRQ
     /// entry -- i.e. the outermost handler on the exception stack
     /// was entered via `Interrupt` (cause=0) from user mode. Stays
-    /// set across nested exceptions until the outermost RFE. The
-    /// parity harness uses this to decide whether to aggregate
-    /// handler-body steps into the pre-IRQ record, matching
-    /// Redux's `debug.cc:235` early-return which hides the trace
-    /// body of clean IRQ entries.
+    /// set across nested exceptions until the outermost RFE. Trace
+    /// tooling uses this to decide whether to aggregate handler-body
+    /// steps into the pre-IRQ record.
     #[inline]
     pub fn in_irq_handler(&self) -> bool {
         self.clean_irq_entry
@@ -1787,8 +1789,7 @@ impl Cpu {
         let outcome = self.execute_one::<false>(bus)?;
         let (cop2_data, cop2_ctl) = self.snapshot_cop2();
         Ok(InstructionRecord {
-            // Trace records report bus cycles (same unit Redux's
-            // `m_regs.cycle` uses). `self.tick` keeps counting
+            // Trace records report bus cycles; `self.tick` keeps counting
             // retired instructions for diagnostics.
             tick: bus.cycles(),
             pc: outcome.record_pc,
@@ -1913,11 +1914,11 @@ impl Cpu {
     fn execute_one_inner(&mut self, bus: &mut Bus) -> Result<ExecutedInstruction, ExecutionError> {
         // Diagnostic only -- track how many steps the IRQ pin was high.
         // We deliberately do NOT mirror the pin into `cop0[13].IP[2]`:
-        // PCSX-Redux's CAUSE register is only written at exception
-        // entry, never live-updated, so software `mfc0 v0, $13` reads
-        // see only what the last exception stored. Mirroring the live
-        // pin would surface as IP[2]=1 in syscall handlers' CAUSE
-        // reads (e.g. step 19258368) and break parity.
+        // CAUSE is only written at exception entry, never live-updated, so
+        // software `mfc0 v0, $13` reads see only what the last exception
+        // stored. Mirroring the live pin would surface as IP[2]=1 in
+        // syscall handlers' CAUSE reads (gate-pinned; the console's
+        // behaviour is unmeasured).
         if bus.external_interrupt_pending() {
             self.irq_line_high_steps = self.irq_line_high_steps.saturating_add(1);
         }
@@ -2069,15 +2070,12 @@ impl Cpu {
         instr: u32,
         gte_irq_taken_after: bool,
     ) -> Result<ExecutedInstruction, ExecutionError> {
-        // BIAS charged BEFORE the opcode runs -- matches Redux's
-        // `m_regs.cycle += BIAS` at psxinterpreter.cc:1631, which is
-        // *ahead* of the opcode dispatch. Any MMIO reads the opcode
-        // issues (Timer counters, GPUSTAT, CDROM status) therefore
-        // observe the POST-BIAS cycle. Placing the tick after the
-        // opcode would have them observe the pre-BIAS cycle, drifting
-        // Timer 1's counter behind Redux's by ~2 cycles per memory
-        // access -- which showed as a 34-count offset at step
-        // 19,472,447's Timer 1 read.
+        // The instruction's cycle cost is charged BEFORE the opcode runs.
+        // Any MMIO reads the opcode issues (Timer counters, GPUSTAT, CDROM
+        // status) therefore observe the post-issue cycle. Charging after
+        // the opcode would have them observe the earlier cycle, which
+        // shifts Timer 1 reads by the issue cost per memory access
+        // (gate-pinned).
         let issue_cycles = if self.hides_in_load_shadow(instr, bus) {
             0
         } else {
@@ -2099,7 +2097,7 @@ impl Cpu {
         // Architectural delay slot, taken branch or not: what Cause.BD and
         // EPC report for a fault here. `in_delay_slot` keeps meaning "a
         // taken branch redirects after this", which also gates the
-        // Redux-style interrupt check below.
+        // branch-boundary interrupt check below.
         let in_branch_delay = std::mem::take(&mut self.branch_delay_next) || in_delay_slot;
         self.executing_in_branch_delay = in_branch_delay;
 
@@ -2160,25 +2158,22 @@ impl Cpu {
             self.observe_wait_loop(instr, pc_before, branch_after_this, profiled_access);
         }
 
-        // Hardware-IRQ check, end-of-step. Mirrors Redux's `branchTest`,
-        // which only runs when the just-retired instruction was a delay
-        // slot (`if (m_inDelaySlot) ... branchTest()`). Doing it after
-        // the instruction (rather than before the next) means the trace
-        // record still shows the regular instruction at this step, and
-        // the interrupt-vector PC shows up at the *next* step -- exactly
-        // how Redux's trace reads.
+        // Hardware-IRQ check, end-of-step. It only runs when the
+        // just-retired instruction was a delay slot (gate-pinned, see the
+        // module notes). Doing it after the instruction (rather than before
+        // the next) means the trace record still shows the regular
+        // instruction at this step, and the interrupt-vector PC shows up at
+        // the *next* step.
         //
         // But BEFORE that IRQ check: drain scheduler events against
         // the POST-opcode cycle count. Otherwise peripheral events
         // whose deadline falls during this instruction's memory-
-        // access cycles (BIAS passed them, but `add_cycles` did not)
-        // don't raise their IRQ bit in time for this step's check,
+        // access cycles (the issue cost passed them, but `add_cycles` did
+        // not) don't raise their IRQ bit in time for this step's check,
         // and the IRQ only dispatches at the NEXT delay slot -- a
-        // consistent 5-6 instruction delay that compounds into the
-        // Crash 900M -6% drift. Redux's `branchTest` calls
-        // `counters->update()` inline for the same reason.
+        // consistent 5-6 instruction delay that compounds into a visible
+        // drift over a long run.
         if in_delay_slot {
-            self.apply_redux_bios_kernel_call_intercept();
             bus.drain_scheduler_events_post_op();
         }
         if gte_irq_taken_after && self.pending_exception_pc.is_none() {
@@ -2192,9 +2187,8 @@ impl Cpu {
                 .expect("enter_exception staged a vector");
         } else if in_delay_slot && self.should_take_interrupt(bus) {
             self.should_take_interrupt_steps = self.should_take_interrupt_steps.saturating_add(1);
-            // Redux passes `bd=0` to `exception(0x400, 0)`: the IRQ
-            // is taken cleanly between instructions, not in a delay
-            // slot of its own.
+            // The IRQ is taken cleanly between instructions, not in a
+            // delay slot of its own.
             self.enter_exception(ExceptionCode::Interrupt, self.pc, false);
             self.pc = self
                 .pending_exception_pc
@@ -2209,30 +2203,9 @@ impl Cpu {
         })
     }
 
-    /// PCSX-Redux runs a small kernel-call intercept immediately after
-    /// a branch-delay slot lands on the BIOS A0/B0 trampolines, before
-    /// its debug trace record is emitted. It mostly mirrors TTY output
-    /// to the host, but A(03h)/B(35h) `write(fd=1, ptr, size)` also
-    /// stores `size` in `$v0`. Keeping that visible side effect here
-    /// preserves lockstep parity while still letting the real BIOS code
-    /// run on the following instructions.
-    fn apply_redux_bios_kernel_call_intercept(&mut self) {
-        let base = (self.pc >> 20) & 0x0FFC;
-        if !matches!(base, 0x000 | 0x800 | 0xA00) {
-            return;
-        }
-        let pc = self.pc & ((memory::ram::SIZE as u32) - 1);
-        let call = self.gpr(9) & 0xFF;
-        let is_stdout_write = (pc == 0xA0 && call == 0x03) || (pc == 0xB0 && call == 0x35);
-        if is_stdout_write && self.gpr(4) == 1 {
-            self.set_gpr(2, self.gpr(6));
-        }
-    }
-
     /// Snapshot all 64 GTE registers using the software-visible
-    /// `MFC2`/`CFC2` accessors so the recorded values match what
-    /// Redux's `regs.CP2D.r` / `regs.CP2C.r` expose. Pure read; no
-    /// side effects.
+    /// `MFC2`/`CFC2` accessors, so the recorded values are what a
+    /// program sees. Pure read; no side effects.
     #[cfg(feature = "trace-cop2")]
     fn snapshot_cop2(&self) -> ([u32; 32], [u32; 32]) {
         let mut data = [0u32; 32];
@@ -2560,7 +2533,7 @@ impl Cpu {
     /// of a load followed by k `addiu` on another register, clocks a turn:
     /// 7, 8, 9, 9, 9, 9 (k = 6), 11 (k = 8). The first two instructions behind
     /// a load pay in full; the next four are free; after that the wait is
-    /// over. The pcsx-redux load-timings test describes the same shape.
+    /// over.
     fn hides_in_load_shadow(&mut self, instr: u32, bus: &Bus) -> bool {
         let Some(shadow) = self.load_shadow.as_mut() else {
             return false;
@@ -3064,8 +3037,7 @@ impl Cpu {
     }
 
     fn op_rfe(&mut self) -> Result<(), ExecutionError> {
-        // Mirrors Redux's `psxRFE` (psxinterpreter.cc:779): restore
-        // the previous KU/IE pair by shifting SR[5:0] right by two.
+        // Restore the previous KU/IE pair by shifting SR[5:0] right by two.
         //
         // Exception-depth bookkeeping: decrement the handler-depth
         // counter. When it reaches zero we've exited the outermost
@@ -3282,8 +3254,8 @@ impl Cpu {
     /// Also: LWL/LWR preserve bytes in the destination they don't
     /// overwrite, so the delay-slot value of `rt` matters -- the
     /// previous instruction's committing load gets **merged**, not
-    /// squashed (the opposite of non-load writes). Redux's model
-    /// peeks at the staged `rt` via the pending-load slot.
+    /// squashed (the opposite of non-load writes). The staged `rt` is read
+    /// from the pending-load slot.
     fn op_lwl(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
         let rs = ((instr >> 21) & 0x1F) as u8;
         let rt = ((instr >> 16) & 0x1F) as u8;
@@ -3294,7 +3266,7 @@ impl Cpu {
         // its staged value instead of the current register file --
         // that's what matches hardware's LWL-LWR-merge convention.
         let current = self.staged_gpr(rt);
-        // PSX-SPX + Redux `LWL_SHIFT`/`LWL_MASK` tables:
+        // LWL lane table (MIPS architecture, PSX-SPX):
         //   (addr & 3): 0 → shift=24 mask=0x00FFFFFF
         //               1 → shift=16 mask=0x0000FFFF
         //               2 → shift=8  mask=0x000000FF
@@ -3603,10 +3575,10 @@ impl Cpu {
     /// raised during the instruction before a GTE command is taken after
     /// the command has executed, with EPC pointing at the command. A handler
     /// that returns to EPC therefore runs it twice; the BIOS handler and
-    /// psx-rt step EPC over it. This is DuckStation's model.
+    /// psx-rt step EPC over it.
     ///
-    /// Interrupts are otherwise dispatched at branch boundaries (Redux's
-    /// `branchTest`), so this samples the line at the two boundaries around
+    /// Interrupts are otherwise dispatched at branch boundaries
+    /// (gate-pinned), so this samples the line at the two boundaries around
     /// the instruction before each GTE command: armed at the start of that
     /// instruction when nothing is pending, and returning `true` (take the
     /// interrupt after this step) when the command starts with one pending.
@@ -3646,7 +3618,7 @@ impl Cpu {
     }
 
     /// `true` when the CPU should take an interrupt exception right
-    /// now. Mirrors PCSX-Redux's `branchTest`:
+    /// now:
     ///   `(I_STAT & I_MASK) && ((SR & 0x401) == 0x401)`
     /// -- i.e. some hardware source is both pending and enabled,
     /// SR.IM[2] (hardware-IRQ mask, bit 10) is on, and SR.IEc (global
@@ -3666,8 +3638,7 @@ impl Cpu {
         // also parks EPC pointing at it, so the ISR's return
         // advances PC past the GTE op -- effectively losing it.
         //
-        // Reference: `psx-spx`'s "Interrupts vs GTE Commands"
-        // section; Redux mirrors the fix at `r3000a.cc:411`.
+        // Reference: `psx-spx`'s "Interrupts vs GTE Commands" section.
         //
         // `peek_instruction` is side-effect-free; it returns `None`
         // for non-code addresses, which we treat as "not a GTE
@@ -3700,14 +3671,12 @@ impl Cpu {
     /// stages the exception-vector PC for [`Cpu::step`] to apply.
     ///
     /// - **CAUSE**: *overwrite* with `(ExcCode << 2) | (BD bit) | (IP[2]
-    ///   for Interrupt)`. Mirrors PCSX-Redux's `m_regs.CP0.n.Cause = code`
-    ///   in `R3000Acpu::exception` -- Redux blows the whole register
-    ///   away on every exception, including IP bits, so software-side
-    ///   `mfc0 v0, $13` reads only ever see what the most recent
-    ///   exception parked there. We have to mirror this exactly: if we
-    ///   preserved IP[2] (the natural real-hardware behaviour) BIOS
-    ///   syscall handlers would observe `CAUSE = 0x420` while Redux
-    ///   sees `0x20`, breaking GPR parity.
+    ///   for Interrupt)`. The whole register is rewritten on every
+    ///   exception, including the IP bits, so software-side `mfc0 v0, $13`
+    ///   reads only ever see what the most recent exception parked there
+    ///   (gate-pinned: preserving IP[2], as the architecture does, would
+    ///   show `CAUSE = 0x420` instead of `0x20` in syscall handlers and
+    ///   shift the compat hashes).
     /// - **SR**: push the 3-level KU/IE stack -- bits `SR[5:0]` become
     ///   `(SR[3:0] << 2)`, with the new current pair (bits 1..0)
     ///   entering kernel-mode / interrupts-disabled.
@@ -3734,11 +3703,8 @@ impl Cpu {
         // Latch `clean_irq_entry` only on the outermost entry (depth
         // 0 → 1) and only if that entry was an IRQ. Nested
         // exceptions inside an IRQ handler don't flip the latch --
-        // the parity harness keeps aggregating through them until
-        // the outermost RFE brings the depth back to zero.
-        // Matches Redux's `m_wasInISR` which is snapshotted at
-        // `startStepping()` and governs the `debug.cc:235`
-        // early-return for the whole stepIn span.
+        // trace tooling keeps aggregating through them until the
+        // outermost RFE brings the depth back to zero.
         if self.isr_depth == 0 {
             self.clean_irq_entry = matches!(code, ExceptionCode::Interrupt);
         }
@@ -3889,12 +3855,6 @@ fn mult_cycles(rs: u32, signed: bool) -> u32 {
     }
 }
 
-/// Cycle cost per instruction -- matches PCSX-Redux's simple-interpreter
-/// `BIAS = 2` (every instruction adds 2 to its cycle counter before
-/// any opcode-specific accounting). Some opcodes on real hardware cost
-/// more (MULT ≈ 7–13, DIV ≈ 36, memory stalls by region) and Redux
-/// models a handful of those in its accurate mode; when our parity
-/// probes reveal a divergence where the extra cycles matter, specific
 /// MIPS R3000 exception codes (CAUSE.ExcCode). Only the ones we
 /// actively raise are listed; the rest arrive as they're implemented.
 #[repr(u8)]
@@ -4455,26 +4415,6 @@ mod tests {
     }
 
     #[test]
-    fn redux_bios_write_intercept_updates_v0_on_trampoline_delay_slot() {
-        let mut bus = Bus::new(synthetic_bios_with_words(&[
-            0x0140_0008, // jr $t2
-            0x2409_0035, // addiu $t1,$zero,0x35 (B0 write)
-        ]))
-        .unwrap();
-        let mut cpu = Cpu::new();
-        cpu.gprs[4] = 1; // stdout
-        cpu.gprs[6] = 0x20; // size
-        cpu.gprs[10] = 0x0000_00B0; // BIOS B table trampoline
-
-        cpu.step(&mut bus).expect("jr decodes");
-        let record = cpu.step_traced(&mut bus).expect("delay slot decodes");
-
-        assert_eq!(record.pc, 0xBFC0_0004);
-        assert_eq!(cpu.pc(), 0x0000_00B0);
-        assert_eq!(record.gprs[2], 0x20);
-    }
-
-    #[test]
     fn addi_traps_on_signed_overflow() {
         // $t0 = 0x7FFFFFFF (i32::MAX). ADDI $t1, $t0, 1 overflows.
         // Post-step: $t1 should be unchanged (not 0x80000000), and
@@ -4718,8 +4658,7 @@ mod tests {
     }
 
     /// Truth-table regression for LWL / LWR / SWL / SWR unaligned
-    /// ops. Matches PSX-SPX + PCSX-Redux's `LWL_SHIFT` / `LWL_MASK`
-    /// / `LWR_*` / `SWL_*` / `SWR_*` tables exactly. LWL was
+    /// ops against the lane tables of the MIPS architecture (PSX-SPX). LWL was
     /// previously inverted (shift = (addr & 3) * 8 instead of
     /// (3 - (addr & 3)) * 8), which corrupted every unaligned
     /// word load -- the root cause of an observed commercial stack
@@ -4727,8 +4666,8 @@ mod tests {
     /// strings via lwl/lwr pairs, and one of those overwrote the
     /// saved $ra.
     #[test]
-    fn lwl_truth_table_matches_redux() {
-        // Redux's canonical tables from r3000a.h:
+    fn lwl_truth_table() {
+        // The architecture's lane tables:
         //   LWL_MASK  = {0x00FFFFFF, 0x0000FFFF, 0x000000FF, 0x00000000}
         //   LWL_SHIFT = {24, 16, 8, 0}
         // Result formula: rt = (rt & mask) | (mem << shift)
@@ -4754,7 +4693,7 @@ mod tests {
     }
 
     #[test]
-    fn lwr_truth_table_matches_redux() {
+    fn lwr_truth_table() {
         // LWR_MASK  = {0x00000000, 0xFF000000, 0xFFFF0000, 0xFFFFFF00}
         // LWR_SHIFT = {0, 8, 16, 24}
         // For Mem = 0x12345678, Reg = 0xAABBCCDD:
@@ -5246,7 +5185,7 @@ mod tests {
     }
 
     #[test]
-    fn swl_truth_table_matches_redux() {
+    fn swl_truth_table() {
         // SWL_MASK  = {0xFFFFFF00, 0xFFFF0000, 0xFF000000, 0x00000000}
         // SWL_SHIFT = {24, 16, 8, 0}  (applied as reg >> shift)
         // For Mem = 0xAABBCCDD, Reg = 0x12345678:
@@ -5270,7 +5209,7 @@ mod tests {
     }
 
     #[test]
-    fn swr_truth_table_matches_redux() {
+    fn swr_truth_table() {
         // SWR_MASK  = {0x00000000, 0x000000FF, 0x0000FFFF, 0x00FFFFFF}
         // SWR_SHIFT = {0, 8, 16, 24}  (applied as reg << shift)
         // For Mem = 0xAABBCCDD, Reg = 0x12345678:
@@ -5311,11 +5250,8 @@ mod tests {
         assert_eq!(exc_code, expected_code, "ExcCode mismatch");
         assert_eq!(cpu.cop0[8], expected_bad, "BadVaddr mismatch");
         assert_eq!(cpu.cop0[14], lw_pc, "EPC mismatch");
-        // SR.BEV is 0 at reset (Cpu::new) -- and Redux's r3000a.cc
-        // reset value `0x10900000` also leaves bit 22 clear despite
-        // a misleading "BEV = 1" comment. Both sides therefore land
-        // on the non-BEV vector for traps fired before SR gets
-        // explicitly configured.
+        // SR.BEV is 0 at reset (Cpu::new), so traps fired before SR gets
+        // explicitly configured land on the non-BEV vector.
         assert_eq!(cpu.pc(), 0x8000_0080, "vector mismatch");
     }
 
