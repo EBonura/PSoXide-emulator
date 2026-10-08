@@ -32,7 +32,8 @@ const VRAM_W_F: f32 = 1024.0;
 const VRAM_H_F: f32 =  512.0;
 
 @group(0) @binding(0) var vram: texture_2d<u32>;
-// Texture filter in `.x`: 0 = nearest (PSX-native), 1 = bilinear. Global per
+// Texture filter in `.x`: 0 = nearest (PSX-native), 1 = bilinear, 2 = smooth
+// (Catmull-Rom), 3 = edge (edge-directed). Global per
 // frame; set by the toolbar toggle. `.y` holds the internal-resolution
 // multiplier S, used to map a fragment back to its PSX-native pixel.
 @group(0) @binding(1) var<uniform> u_texfilter: vec4<u32>;
@@ -270,6 +271,182 @@ fn tex_corner(flags: u32, tex_window: u32, uvf: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(bgr15_to_rgb(w), 1.0);
 }
 
+// ---------------------------------------------------------------------------
+// Smooth (u_texfilter.x == 2) and Edge (== 3) texture filters.
+// Specified in docs/texture-filters-spec.md; section numbers below refer to it.
+// ---------------------------------------------------------------------------
+
+// One raw filter tap (spec section 2): the texel at integer offset (dx, dy) from
+// the cell origin `b`, fetched through the window and CLUT exactly like the
+// nearest path. `.a` is 1 for an opaque texel and 0 for a transparent one.
+fn filter_tap(flags: u32, tex_window: u32, b: vec2<f32>, dx: f32, dy: f32) -> vec4<f32> {
+    let uv8 = apply_tex_window(page_uv(b + vec2<f32>(dx, dy)), tex_window);
+    let w = sample_texel(flags, uv8);
+    if w == 0u {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    return vec4<f32>(bgr15_to_rgb(w), 1.0);
+}
+
+// A transparent inner tap takes its opaque neighbour inside the cell (the one in
+// the same row first, then the one in the same column), so the colours at a
+// cut-out edge continue outwards instead of picking up whatever lies beyond.
+fn resolve_inner(own: vec4<f32>, row_mate: vec4<f32>, col_mate: vec4<f32>, nearest: vec3<f32>) -> vec3<f32> {
+    if own.a > 0.0 {
+        return own.rgb;
+    }
+    if row_mate.a > 0.0 {
+        return row_mate.rgb;
+    }
+    if col_mate.a > 0.0 {
+        return col_mate.rgb;
+    }
+    return nearest;
+}
+
+// An outer tap that is transparent takes the resolved inner tap whose
+// coordinates are its own clamped into the cell.
+fn resolve_outer(own: vec4<f32>, clamped: vec3<f32>) -> vec3<f32> {
+    if own.a > 0.0 {
+        return own.rgb;
+    }
+    return clamped;
+}
+
+// Catmull-Rom weights for the taps at -1, 0, 1, 2 (spec section 4.1).
+fn catmull_rom_weights(t: f32) -> vec4<f32> {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    return vec4<f32>(
+        -0.5 * t3 + t2 - 0.5 * t,
+        1.5 * t3 - 2.5 * t2 + 1.0,
+        -1.5 * t3 + 2.0 * t2 + 0.5 * t,
+        0.5 * t3 - 0.5 * t2,
+    );
+}
+
+// Separable Catmull-Rom over the 4x4 taps, clamped per channel to the range of
+// the sample's own 2x2 cell (spec sections 4.1 and 4.3).
+fn filter_smooth(flags: u32, tex_window: u32, b: vec2<f32>, f: vec2<f32>, nearest: vec3<f32>) -> vec3<f32> {
+    // Raw inner taps, then their resolved colours.
+    let ra = filter_tap(flags, tex_window, b, 0.0, 0.0);
+    let rb = filter_tap(flags, tex_window, b, 1.0, 0.0);
+    let rc = filter_tap(flags, tex_window, b, 0.0, 1.0);
+    let rd = filter_tap(flags, tex_window, b, 1.0, 1.0);
+    var inner = array<vec3<f32>, 4>(
+        resolve_inner(ra, rb, rc, nearest),
+        resolve_inner(rb, ra, rd, nearest),
+        resolve_inner(rc, rd, ra, nearest),
+        resolve_inner(rd, rc, rb, nearest),
+    );
+    let lo = min(min(inner[0], inner[1]), min(inner[2], inner[3]));
+    let hi = max(max(inner[0], inner[1]), max(inner[2], inner[3]));
+    let wx = catmull_rom_weights(f.x);
+    let wy = catmull_rom_weights(f.y);
+    var acc = vec3<f32>(0.0);
+    for (var j = 0; j < 4; j++) {
+        var row = vec3<f32>(0.0);
+        for (var i = 0; i < 4; i++) {
+            var c: vec3<f32>;
+            if i == 1 || i == 2 {
+                if j == 1 || j == 2 {
+                    c = inner[(j - 1) * 2 + (i - 1)];
+                } else {
+                    let own = filter_tap(flags, tex_window, b, f32(i - 1), f32(j - 1));
+                    c = resolve_outer(own, inner[clamp(j - 1, 0, 1) * 2 + (i - 1)]);
+                }
+            } else {
+                let own = filter_tap(flags, tex_window, b, f32(i - 1), f32(j - 1));
+                c = resolve_outer(own, inner[clamp(j - 1, 0, 1) * 2 + clamp(i - 1, 0, 1)]);
+            }
+            row += wx[i] * c;
+        }
+        acc += wy[j] * row;
+    }
+    return clamp(acc, lo, hi);
+}
+
+// Colour distance, spec section 3.
+fn cdist(a: vec3<f32>, b: vec3<f32>) -> f32 {
+    let d = abs(a - b);
+    return (d.x + d.y + d.z) * (1.0 / 3.0);
+}
+
+// Linear blend whose transition tightens as the two colours differ more
+// (spec section 3: sharpen + edge_mix).
+fn edge_mix(a: vec3<f32>, b: vec3<f32>, f: f32) -> vec3<f32> {
+    let g = smoothstep(0.08, 0.25, cdist(a, b));
+    return mix(a, b, mix(f, smoothstep(0.3, 0.7, f), g));
+}
+
+// How well an apex colour `p` continues past the diagonal line of colour
+// `line_c` (spec section 5.6). 1 = a real edge, 0 = an isolated texel.
+fn apex_support(p: vec3<f32>, far: vec3<f32>, line_c: vec3<f32>) -> f32 {
+    let dfp = cdist(far, p);
+    let dfl = cdist(far, line_c);
+    let u = dfp / (dfp + dfl + 0.0001);
+    let rel = smoothstep(0.04, 0.12, cdist(p, line_c));
+    return mix(1.0, 1.0 - smoothstep(0.35, 0.65, u), rel);
+}
+
+// Edge-directed interpolation (spec section 5).
+fn filter_edge(flags: u32, tex_window: u32, b: vec2<f32>, f: vec2<f32>, nearest: vec3<f32>) -> vec3<f32> {
+    let ra = filter_tap(flags, tex_window, b, 0.0, 0.0);
+    let rb = filter_tap(flags, tex_window, b, 1.0, 0.0);
+    let rc = filter_tap(flags, tex_window, b, 0.0, 1.0);
+    let rd = filter_tap(flags, tex_window, b, 1.0, 1.0);
+    let ta = resolve_inner(ra, rb, rc, nearest);
+    let tb = resolve_inner(rb, ra, rd, nearest);
+    let tc = resolve_inner(rc, rd, ra, nearest);
+    let td = resolve_inner(rd, rc, rb, nearest);
+    let tz = resolve_outer(filter_tap(flags, tex_window, b, -1.0, -1.0), ta);
+    let ty = resolve_outer(filter_tap(flags, tex_window, b, 2.0, -1.0), tb);
+    let tv = resolve_outer(filter_tap(flags, tex_window, b, -1.0, 2.0), tc);
+    let tw = resolve_outer(filter_tap(flags, tex_window, b, 2.0, 2.0), td);
+
+    // Axis rendering (5.4).
+    let axis = edge_mix(edge_mix(ta, tb, f.x), edge_mix(tc, td, f.x), f.y);
+
+    // Orientation (5.3).
+    let cm = 2.0 * cdist(ta, td) + cdist(tz, ta) + cdist(td, tw);
+    let ca = 2.0 * cdist(tb, tc) + cdist(ty, tb) + cdist(tc, tv);
+    let r = abs(cm - ca) / (cm + ca + 0.0001);
+    let o = smoothstep(0.35, 0.8, r) * smoothstep(0.1, 0.3, max(cm, ca));
+    if o <= 0.0 {
+        return axis;
+    }
+
+    // Diagonal rendering (5.5) and isolated-texel support (5.6).
+    var diag: vec3<f32>;
+    var sup: f32;
+    if cm < ca {
+        // Main chain A-D is the line; apexes B and C.
+        let s = f.x - f.y;
+        let line_c = 0.5 * (ta + td);
+        if s >= 0.0 {
+            let q = clamp(f.y / max(1.0 - s, 0.0001), 0.0, 1.0);
+            diag = edge_mix(mix(ta, td, q), tb, s);
+        } else {
+            let q = clamp(f.x / max(1.0 + s, 0.0001), 0.0, 1.0);
+            diag = edge_mix(mix(ta, td, q), tc, -s);
+        }
+        sup = min(apex_support(tb, ty, line_c), apex_support(tc, tv, line_c));
+    } else {
+        // Anti chain B-C is the line; apexes A and D.
+        let u = f.x + f.y;
+        let line_c = 0.5 * (tb + tc);
+        if u < 1.0 {
+            let q = clamp(f.y / max(u, 0.0001), 0.0, 1.0);
+            diag = edge_mix(mix(tb, tc, q), ta, 1.0 - u);
+        } else {
+            let q = clamp((1.0 - f.x) / max(2.0 - u, 0.0001), 0.0, 1.0);
+            diag = edge_mix(mix(tb, tc, q), td, u - 1.0);
+        }
+        sup = min(apex_support(ta, tz, line_c), apex_support(td, tw, line_c));
+    }
+    return mix(axis, diag, o * sup);
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let textured = (in.flags & FLAG_TEXTURED) != 0u;
@@ -310,6 +487,18 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let acc = mix(mix(c00, c10, fr.x), mix(c01, c11, fr.x), fr.y);
         if acc.a > 0.0039 {
             tex_rgb = acc.rgb / acc.a;
+        }
+    } else if u_texfilter.x == 2u || u_texfilter.x == 3u {
+        // Smooth / Edge: see docs/texture-filters-spec.md. The silhouette and
+        // STP tests above already ran on the nearest texel; a tap that lands on
+        // a transparent texel is replaced by an opaque neighbour (spec section 2).
+        let p = in.uv - vec2<f32>(0.5, 0.5);
+        let b = floor(p);
+        let f = p - b;
+        if u_texfilter.x == 2u {
+            tex_rgb = filter_smooth(in.flags, in.tex_window, b, f, tex_rgb);
+        } else {
+            tex_rgb = filter_edge(in.flags, in.tex_window, b, f, tex_rgb);
         }
     }
     let raw = (in.flags & FLAG_RAW_TEXTURE) != 0u;
