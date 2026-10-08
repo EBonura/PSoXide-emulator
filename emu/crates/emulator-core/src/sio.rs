@@ -166,6 +166,11 @@ pub struct Sio0 {
     /// While `slow_pad`: set once a byte was clocked before the device was
     /// ready; the rest of the packet then returns `0xFF` until deselect.
     slow_desynced: bool,
+    /// Cycles from the end of a pad byte to the start of its `/ACK` pulse.
+    /// [`PAD_ACK_DELAY_TICKS`] unless [`Sio0::set_pad_ack_timing`] changed it.
+    pad_ack_delay: u64,
+    /// Cycles `/ACK` stays asserted. [`ACK_PULSE_TICKS`] by default.
+    ack_pulse: u64,
 }
 
 impl Sio0 {
@@ -206,7 +211,19 @@ impl Sio0 {
             slow_pad: false,
             slow_ready_cycle: None,
             slow_desynced: false,
+            pad_ack_delay: PAD_ACK_DELAY_TICKS,
+            ack_pulse: ACK_PULSE_TICKS,
         }
+    }
+
+    /// Set how late a pad pulses `/ACK` after a byte and how long it holds
+    /// it, in CPU cycles. Real controllers differ (the SCPH-110 acknowledges
+    /// the byte before its buttons late, a clone early), and a driver that
+    /// paces on the pulse has to read all of them. Memory cards keep their own
+    /// timing. The defaults model no extra delay and a 100-cycle pulse.
+    pub fn set_pad_ack_timing(&mut self, delay: u64, pulse: u64) {
+        self.pad_ack_delay = delay;
+        self.ack_pulse = pulse.max(1);
     }
 
     /// Enable or disable the slow original-controller timing model. When on, a
@@ -432,7 +449,7 @@ impl Sio0 {
                         // time makes digital polls stop before the high
                         // button byte.
                         self.ack_input = true;
-                        self.ack_end_deadline = Some(deadline.saturating_add(ACK_PULSE_TICKS));
+                        self.ack_end_deadline = Some(deadline.saturating_add(self.ack_pulse));
                     }
                     if (ack_pulse || dsr_timeout)
                         && self.ctrl & ctrl_bit::ACK_IRQ_ENABLE != 0
@@ -526,14 +543,15 @@ impl Sio0 {
             if self.slow_pad && self.slow_desynced {
                 // The device missed the clock; it returns idle and does not
                 // advance its state machine.
-                (0xFF, false, true, PAD_ACK_DELAY_TICKS)
+                (0xFF, false, true, self.pad_ack_delay)
             } else {
+                let pad_ack_delay = self.pad_ack_delay;
                 let port = self.active_port();
                 let result = port.exchange_detailed_at(value, now);
                 let ack_delay_ticks = if port.selected_is_memcard() {
                     MEMCARD_ACK_DELAY_TICKS
                 } else {
-                    PAD_ACK_DELAY_TICKS
+                    pad_ack_delay
                 };
                 (
                     result.rx,
@@ -543,7 +561,7 @@ impl Sio0 {
                 )
             }
         } else {
-            (0xFF, false, true, PAD_ACK_DELAY_TICKS)
+            (0xFF, false, true, self.pad_ack_delay)
         };
         // A missing device returns 0xFF with no ACK/DSR IRQ for that byte.
         // One commercial title polls port 2 during the BIOS pad handler;
@@ -1299,5 +1317,39 @@ mod tests {
             0,
             "ACK pulse should self-clear"
         );
+    }
+
+    #[test]
+    fn pad_ack_timing_moves_the_pulse_and_sets_its_width() {
+        use crate::pad::{DigitalPad, PortDevice};
+
+        let (delay, pulse) = (700, 2_500);
+        let mut sio = Sio0::new();
+        sio.set_pad_ack_timing(delay, pulse);
+        sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
+        sio.write16(
+            Sio0::BASE + 0xA,
+            ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE,
+        );
+        sio.write8_at(Sio0::BASE, 0x01, 100);
+        let start = 100 + DEFAULT_TRANSFER_TICKS + delay;
+        sio.tick(start - 1);
+        assert_eq!(
+            sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::ACK_INPUT,
+            0,
+            "no pulse before the configured delay"
+        );
+        assert!(!sio.take_pending_irq());
+        sio.tick(start);
+        assert_ne!(sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::ACK_INPUT, 0);
+        assert!(sio.take_pending_irq(), "IRQ7 follows the pulse's start");
+        sio.tick(start + pulse - 1);
+        assert_ne!(
+            sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::ACK_INPUT,
+            0,
+            "the pulse is held for the configured width"
+        );
+        sio.tick(start + pulse);
+        assert_eq!(sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::ACK_INPUT, 0);
     }
 }
