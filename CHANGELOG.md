@@ -12,8 +12,10 @@
 - XA audio is converted from 37.8 or 18.9 kHz to 44.1 kHz with the PSX-SPX
   25-point zigzag filter instead of by repeating the nearest sample, which put
   the images of the source band up to 22 kHz and cost about 14 dB of
-  signal-to-error ratio on music. The converter's history is part of the CD
-  state, so save states move to format 11; older save states no longer load.
+  signal-to-error ratio on music. The SPU repeats the last CD frame over an
+  underrun of up to four samples instead of dropping to zero (a click). The
+  converter's history and that repeat state are part of save states, which
+  move to format 11; older save states no longer load.
 
 - Clean-room rewrites from PSX-SPX and console measurements: the event
   scheduler, the DMA register file and DICR logic, the MDEC colour path, and
