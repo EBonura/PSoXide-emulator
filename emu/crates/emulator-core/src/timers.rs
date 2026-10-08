@@ -477,6 +477,16 @@ impl Timers {
         self.quiet_until = 0;
         let (idx, off) = decode(phys);
         let mode = self.timers[idx].mode;
+        // Timer 1 on the HBlank source counts line pulses from the video
+        // timing, which keep coming whatever the CPU is reading. Holding it
+        // would not just freeze the displayed value for the wait clocks: the
+        // hold drops those clocks from the line phase, so a loop that polls
+        // the counter sees it run slow (5.6% over a 606 ms interval in
+        // tight polling, 8993 counts where 9506 are due). Nothing measured
+        // on a console holds this source, so the read leaves it running.
+        if idx == 1 && mode & (1 << 8) != 0 {
+            return;
+        }
         // Both of the zero cases hold no extra cycles: an IRQ-configured
         // counter 2, and any counter that resets at target.
         let configured_extra = if (idx == 2 && mode & (MODE_IRQ_ON_TARGET | MODE_IRQ_ON_WRAP) != 0)
@@ -1083,6 +1093,44 @@ mod tests {
         t.advance_to(6, NTSC_HSYNC, 8);
         assert_eq!(t.read32(0x1F80_1100), 2);
         assert_eq!(t.read32(0x1F80_1110), 4);
+    }
+
+    #[test]
+    fn polling_the_hblank_counter_does_not_slow_it() {
+        // A tight loop reading Timer 1 (HBlank source) every 7 clocks for
+        // many lines must see one count per line, not one per line plus the
+        // clocks the reads would otherwise take away.
+        let mut t = Timers::new();
+        t.write32(0x1F80_1114, 1 << 8, 0);
+        let mut now = 100u64;
+        t.advance_to(now, NTSC_HSYNC, 8);
+        let start = t.read32(0x1F80_1110) & 0xFFFF;
+        let end_cycle = now + 606 * 33_868;
+        let mut reads = 0u64;
+        while now < end_cycle {
+            t.hold_counter_for_read(0x1F80_1110, 2);
+            now += 7;
+            t.advance_to(now, NTSC_HSYNC, 8);
+            reads += 1;
+        }
+        assert!(reads > 1_000_000);
+        let counted = u64::from((t.read32(0x1F80_1110) & 0xFFFF).wrapping_sub(start) & 0xFFFF);
+        let due = (now - 100) / NTSC_HSYNC;
+        // The 16-bit counter wraps; compare modulo 65536.
+        assert_eq!(counted, due % 0x1_0000, "counted {counted}, due {due}");
+    }
+
+    #[test]
+    fn polling_the_system_clock_counter_still_holds_it() {
+        // The latch on the system-clock path is console-measured and stays.
+        let mut t = Timers::new();
+        t.write32(0x1F80_1124, 0, 0);
+        t.advance_to(100, 2172, 8);
+        let start = t.read32(0x1F80_1120) & 0xFFFF;
+        t.hold_counter_for_read(0x1F80_1120, 2);
+        t.advance_to(110, 2172, 8);
+        let counted = (t.read32(0x1F80_1120) & 0xFFFF).wrapping_sub(start) & 0xFFFF;
+        assert_eq!(counted, 8);
     }
 
     #[test]
