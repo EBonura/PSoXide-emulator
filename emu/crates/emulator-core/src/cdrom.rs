@@ -2475,7 +2475,21 @@ impl CdRom {
                     // ~52 ms double, first included). The old flat x30 here
                     // put a ~400 ms cliff on the second sector instead.
                     self.location_changed = false;
-                    self.schedule_sector_event_at(cycles_now, self.sector_read_cycles());
+                    // Chain from the sector's own deadline, not from the tick
+                    // that happened to service it. The disc turns at a fixed
+                    // rate; chaining from `cycles_now` added the tick's
+                    // lateness (about 12 cycles per sector on average) to
+                    // every period, so a stream ran 50 ppm slow and the XA
+                    // audio it fed starved the SPU about twice a second. A
+                    // tick more than a period late has nothing to catch up
+                    // to and restarts from `cycles_now`.
+                    let period = self.sector_read_cycles();
+                    let base = if ev.deadline.saturating_add(period) > cycles_now {
+                        ev.deadline
+                    } else {
+                        cycles_now
+                    };
+                    self.schedule_sector_event_at(base, period);
                 }
             }
             if !should_raise_irq {

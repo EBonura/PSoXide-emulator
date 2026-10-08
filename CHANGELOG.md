@@ -9,14 +9,18 @@
   interpolation written from scratch from `docs/texture-filters-spec.md`: it
   smooths diagonal staircases and keeps flat areas and orthogonal pixel-art
   edges crisp.
-- XA audio is converted from 37.8 or 18.9 kHz to 44.1 kHz with the PSX-SPX
-  25-point zigzag filter instead of by repeating the nearest sample, which put
-  the images of the source band up to 22 kHz and cost about 14 dB of
-  signal-to-error ratio on music. The SPU repeats the last CD frame over an
-  underrun of up to four samples instead of dropping to zero (a click). The
-  converter's history and that repeat state are part of save states, which
-  move to format 11; older save states no longer load.
-
+- FMV and XA audio no longer click or sound harsh. Two causes. Each CD sector
+  was chained from the cycle the CPU happened to service the last one, so a
+  stream ran about 50 ppm slower than the disc turns and the XA audio it fed
+  the SPU ran dry about twice a second (a zero sample, heard as a click);
+  sectors now chain from their own deadline, and a short underrun repeats the
+  last CD frame instead of dropping to zero. The 37.8/18.9 kHz to 44.1 kHz
+  conversion repeated the nearest sample, which put the images of the source
+  band up to 22 kHz and cost about 14 dB of signal-to-error ratio on music;
+  it now uses the PSX-SPX 25-point zigzag filter. Save states move to
+  format 11; older save states no longer load. CD sector arrival times move
+  by up to a few cycles per sector, so game frame hashes that depend on CD
+  timing move with them.
 - Clean-room rewrites from PSX-SPX and console measurements: the event
   scheduler, the DMA register file and DICR logic, the MDEC colour path, and
   the SPU voice engine (ADSR and volume sweeps, noise generator, pitch
