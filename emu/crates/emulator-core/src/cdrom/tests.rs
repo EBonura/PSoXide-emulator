@@ -1283,8 +1283,14 @@ fn xa_decode_silent_stereo_sector_has_full_frame_count() {
     let mut left = crate::spu::XaDecoderState::new();
     let mut right = crate::spu::XaDecoderState::new();
     let coding = parse_xa_coding(raw[19]).expect("valid XA coding");
-    let samples = decode_xa_audio_sector(&raw, coding, &mut left, &mut right)
-        .expect("common 4-bit stereo XA should decode");
+    let samples = decode_xa_audio_sector(
+        &raw,
+        coding,
+        &mut left,
+        &mut right,
+        &mut crate::spu::XaResampler::new(),
+    )
+    .expect("common 4-bit stereo XA should decode");
 
     assert_eq!(samples.len(), 2352);
     assert!(samples.iter().all(|&(l, r)| l == 0 && r == 0));
@@ -1300,8 +1306,14 @@ fn xa_decode_silent_mono_sector_has_full_frame_count() {
     let mut left = crate::spu::XaDecoderState::new();
     let mut right = crate::spu::XaDecoderState::new();
     let coding = parse_xa_coding(raw[19]).expect("valid XA coding");
-    let samples = decode_xa_audio_sector(&raw, coding, &mut left, &mut right)
-        .expect("4-bit mono XA should decode");
+    let samples = decode_xa_audio_sector(
+        &raw,
+        coding,
+        &mut left,
+        &mut right,
+        &mut crate::spu::XaResampler::new(),
+    )
+    .expect("4-bit mono XA should decode");
 
     assert_eq!(samples.len(), 4704);
     assert!(samples.iter().all(|&(l, r)| l == 0 && r == 0));
@@ -1324,11 +1336,9 @@ fn xa_decode_4bit_stereo_blocks_follow_the_documented_layout() {
         freq: 37_800,
         nbits: 4,
     };
-    let samples = decode_xa_audio_sector(&raw, coding, &mut left, &mut right).unwrap();
+    let samples = decode_xa_native(&raw, coding, &mut left, &mut right).unwrap();
     assert_eq!(samples[0], (1, -1));
-    // The nearest-sample resampler repeats source frames, so look for the
-    // second source frame anywhere in the output.
-    assert!(samples.contains(&(2, 7)));
+    assert_eq!(samples[1], (2, 7));
 }
 
 #[test]
@@ -1347,7 +1357,7 @@ fn xa_decode_8bit_stereo_blocks_use_one_byte_per_block() {
         freq: 37_800,
         nbits: 8,
     };
-    let samples = decode_xa_audio_sector(&raw, coding, &mut left, &mut right).unwrap();
+    let samples = decode_xa_native(&raw, coding, &mut left, &mut right).unwrap();
     assert_eq!(samples[0], (5, -5));
 }
 
@@ -1365,8 +1375,14 @@ fn xa_decode_uses_stream_coding_not_each_sector_byte() {
         freq: 37_800,
         nbits: 4,
     };
-    let samples = decode_xa_audio_sector(&raw, coding, &mut left, &mut right)
-        .expect("stream coding should drive decode after the first sector");
+    let samples = decode_xa_audio_sector(
+        &raw,
+        coding,
+        &mut left,
+        &mut right,
+        &mut crate::spu::XaResampler::new(),
+    )
+    .expect("stream coding should drive decode after the first sector");
 
     assert_eq!(samples.len(), 2352);
     assert!(samples.iter().all(|&(l, r)| l == 0 && r == 0));
@@ -1686,4 +1702,92 @@ fn a_delivery_waits_for_a_sector_the_image_has_not_supplied() {
     assert!(cd.tick(first_due + 200));
     assert_eq!(cd.irq_flag, IrqType::DataReady as u8);
     assert_eq!(cd.data_fifo.front().copied(), Some(0x5A));
+}
+
+/// Reference decoder for a 4-bit stereo XA sector, written from the PSX-SPX
+/// "CDROM XA Audio ADPCM Compression" pseudocode (16-bit history, +32
+/// rounding, divide by 64) and independent of `decode_xa_native`.
+fn spec_decode_4bit_stereo(raw: &[u8]) -> Vec<(i16, i16)> {
+    const POS: [i32; 4] = [0, 60, 115, 98];
+    const NEG: [i32; 4] = [0, 0, -52, -55];
+    let mut hist = [[0i32; 2]; 2]; // [channel][old, older]
+    let (mut left, mut right) = (Vec::new(), Vec::new());
+    for portion in 0..18 {
+        let src = &raw[24 + portion * 128..24 + (portion + 1) * 128];
+        for blk in 0..4 {
+            for nibble in 0..2 {
+                let header = src[4 + blk * 2 + nibble];
+                let shift = 12 - i32::from(header & 0x0F);
+                let filter = usize::from((header & 0x30) >> 4);
+                let ch = nibble;
+                for j in 0..28 {
+                    let raw4 = i32::from((src[16 + blk + j * 4] >> (nibble * 4)) & 0x0F);
+                    let t = if raw4 >= 8 { raw4 - 16 } else { raw4 };
+                    let predicted =
+                        (hist[ch][0] * POS[filter] + hist[ch][1] * NEG[filter] + 32) >> 6;
+                    let s = ((t << shift) + predicted).clamp(-0x8000, 0x7FFF);
+                    hist[ch][1] = hist[ch][0];
+                    hist[ch][0] = s;
+                    if ch == 0 {
+                        left.push(s as i16);
+                    } else {
+                        right.push(s as i16);
+                    }
+                }
+            }
+        }
+    }
+    left.into_iter().zip(right).collect()
+}
+
+#[test]
+fn xa_decode_matches_a_reference_written_from_the_spec() {
+    // A pseudo-random first sector with realistic (non-saturating) headers (range 4..=12,
+    // every filter): the block layout must match the spec decoder and the
+    // numeric model (four fractional history bits, truncation) must stay
+    // within a few output steps of the textbook rounding.
+    let mut seed = 0x1234_5678u32;
+    let mut next = move || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (seed >> 16) as u8
+    };
+    let mut raw = vec![0u8; psx_iso::SECTOR_BYTES];
+    for byte in raw[24..24 + 18 * 128].iter_mut() {
+        *byte = next();
+    }
+    for portion in 0..18 {
+        let base = 24 + portion * 128;
+        for blk in 0..8 {
+            let header = ((next() % 4) << 4) | (9 + next() % 4);
+            raw[base + 4 + blk] = header;
+        }
+        // Bytes 0..4 and 12..16 repeat the header bytes 4..8 and 8..12.
+        for k in 0..4 {
+            raw[base + k] = raw[base + 4 + k];
+            raw[base + 12 + k] = raw[base + 8 + k];
+        }
+    }
+    let coding = XaCoding {
+        stereo: true,
+        freq: 37_800,
+        nbits: 4,
+    };
+    let mut left = crate::spu::XaDecoderState::new();
+    let mut right = crate::spu::XaDecoderState::new();
+    let got = decode_xa_native(&raw, coding, &mut left, &mut right).unwrap();
+    let want = spec_decode_4bit_stereo(&raw);
+    assert_eq!((got.len(), want.len()), (2016, 2016));
+    let worst = got
+        .iter()
+        .zip(&want)
+        .map(|(g, w)| {
+            (i32::from(g.0) - i32::from(w.0))
+                .abs()
+                .max((i32::from(g.1) - i32::from(w.1)).abs())
+        })
+        .max()
+        .unwrap();
+    // Measured 12 on this seed: the model truncates with four fractional
+    // history bits where the textbook rounds a 16-bit history.
+    assert!(worst <= 16, "deviation from the spec decoder: {worst}");
 }

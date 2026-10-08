@@ -45,7 +45,7 @@ pub const SAVESTATE_MAGIC: &[u8; 8] = b"PSOX001\0";
 /// On-disk format version, independent of the PSoXide crate
 /// version. Bumped when the payload layout changes in a way that
 /// can't round-trip through the current deserializer.
-pub const SAVESTATE_FORMAT_VERSION: u32 = 10;
+pub const SAVESTATE_FORMAT_VERSION: u32 = 11;
 /// Oldest payload schema this build can deserialize. Version 2 added
 /// architectural instruction-cache state; version 3 adds the SPU transfer
 /// FIFO; version 4 adds the CPU data-bus hold latch and HLE exception-return
@@ -59,11 +59,12 @@ pub const SAVESTATE_FORMAT_VERSION: u32 = 10;
 /// parameter-count state; version 10 reworks the MDEC tables (the
 /// quantisation tables are kept as uploaded) and the SPU's voice counter,
 /// interpolation window, envelope pacer, noise timer and reverb channel
-/// phase. Postcard encodes fields positionally, so serde defaults cannot
-/// make older MDEC or SPU payloads safe to decode.
+/// phase; version 11 adds the CD-XA sample-rate converter's history and the
+/// SPU's CD underrun repeat state. Postcard encodes fields positionally, so
+/// serde defaults cannot make older MDEC, CD or SPU payloads safe to decode.
 /// Older states cannot resume faithfully because one of those pieces of
 /// in-flight hardware state was never serialized.
-pub const SAVESTATE_MIN_SUPPORTED_VERSION: u32 = 10;
+pub const SAVESTATE_MIN_SUPPORTED_VERSION: u32 = 11;
 
 /// Errors from save-state load / save.
 #[derive(Debug, Error)]
