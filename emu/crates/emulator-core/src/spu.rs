@@ -383,6 +383,9 @@ impl Voice {
     fn key_off(&mut self) {
         if self.phase != AdsrPhase::Off {
             self.phase = AdsrPhase::Release;
+            // The release segment starts its own countdown, not what is
+            // left of the previous segment's.
+            self.pacer.reset();
         }
     }
 
@@ -414,6 +417,7 @@ impl Voice {
         if self.envelope >= 0x7FFF {
             self.envelope = 0x7FFF;
             self.phase = AdsrPhase::Decay;
+            self.pacer.reset();
         }
         self.envelope
     }
@@ -426,6 +430,7 @@ impl Voice {
         }
         if self.envelope < sustain_threshold(self.adsr_lo) {
             self.phase = AdsrPhase::Sustain;
+            self.pacer.reset();
         }
         self.envelope
     }
