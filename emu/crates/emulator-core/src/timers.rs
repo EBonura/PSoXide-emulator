@@ -17,7 +17,7 @@
 //! PSX-SPX's timer and GPU timing documentation, then are checked against
 //! JaCzekanski/ps1-tests build-158 silicon captures and the project's own
 //! hardware-test records (the `test_timer*` cases). See `LICENSE` and
-//! `docs/license-audit.md`.
+//! `docs/PROVENANCE.md`.
 
 /// One of the three root counters. Fields are 16 bits on hardware but
 /// held as `u32` for uniform bus access -- upper bits read as 0.

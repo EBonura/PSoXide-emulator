@@ -18,7 +18,7 @@
 //! and the single CPU interrupt line formed by OR-ing the masked bits.
 //! The register file is exercised by the hardware-test disc's interrupt
 //! cases (`test_irq_mask_roundtrip`, `test_irq_gpu_ack_path`). See
-//! `LICENSE` and `docs/license-audit.md`.
+//! `LICENSE` and `docs/PROVENANCE.md`.
 
 /// Source-bit positions inside `I_STAT` / `I_MASK`. Kept as a typed enum
 /// so calling sites read as intent (`irq.raise(IrqSource::VBlank)`)

@@ -150,6 +150,5 @@ unhandled.
 ## References
 
 - Nocash PSX-SPX -- "GPU"
-- PCSX-Redux `src/core/gpu.cc` + `src/gpu/soft/` -- our primary reference oracle
 - PSoXide-2 `emulator/gpu/` -- still worth reading for rasterizer design
 - `emulator_core::gpu` -- our impl

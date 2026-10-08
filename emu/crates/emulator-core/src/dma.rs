@@ -29,7 +29,7 @@
 //! register layout, DPCR enable bits, the DICR bit map with its flag and
 //! master-flag rules, and the OTC (reverse clear ordering table) behaviour.
 //! Completion latency is not modelled here; the bus schedules it. See
-//! `LICENSE` and `docs/license-audit.md`.
+//! `LICENSE` and `docs/PROVENANCE.md`.
 
 /// Number of DMA channels.
 pub const NUM_CHANNELS: usize = 7;

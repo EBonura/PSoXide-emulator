@@ -86,5 +86,4 @@ Peripherals own the `raise` side -- Timer N raises `IrqSource::Timer(N)`, the GP
 ## References
 
 - Nocash PSX-SPX -- "Interrupts"
-- PCSX-Redux `src/core/psxhw.cc` -- the `readHardwareRegister` / `writeHardwareRegister` paths for 0x1F801070/74
 - `emulator_core::irq` -- our impl + the acknowledge-semantics unit tests

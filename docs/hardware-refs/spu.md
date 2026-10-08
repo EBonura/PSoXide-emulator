@@ -103,6 +103,5 @@ impl Spu {
 ## References
 
 - Nocash PSX-SPX -- "Sound Processing Unit (SPU)" (easily the longest section)
-- PCSX-Redux `src/spu/` -- the reference implementation
 - PSoXide-2 `emulator/spu/` -- prior art, worth reading for voice structure
 - `emulator_core::spu` -- our Phase 3a stub

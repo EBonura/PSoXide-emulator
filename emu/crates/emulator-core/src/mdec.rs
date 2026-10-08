@@ -55,7 +55,7 @@
 //!   hashes and the ps1-tests MDEC programs, not by a source.
 //!
 //! This module no longer contains any code derived from another emulator.
-//! See `LICENSE` and `docs/license-audit.md`.
+//! See `LICENSE` and `docs/PROVENANCE.md`.
 
 // ===============================================================
 //  Register addresses + command constants.

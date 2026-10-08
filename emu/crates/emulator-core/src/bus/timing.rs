@@ -2,17 +2,16 @@
 //!
 //! ## Provenance
 //!
-//! The video-timing constants here are parity-matched against, and
-//! derived from, PCSX-Redux's `psxcounters.cc`
-//! (<https://github.com/grumpycoders/pcsx-redux>), Copyright (C) the
-//! PCSX-Redux authors, GPL-2.0-or-later, so VBlank fires on the same
-//! cycle on both sides. PSoXide is released under GPL-2.0-or-later in
-//! part to honor this lineage; see `LICENSE` and `docs/license-audit.md`.
+//! Line lengths and frame lengths come from PSX-SPX's video clocks and the
+//! CPU/video-clock ratio (263 lines NTSC, 314 PAL). The scanline on which
+//! the first VBlank starts is a gate-pinned choice (the compat frame hashes
+//! depend on it; it was first set to match a PCSX-Redux trace) and is not
+//! measured. See `LICENSE` and `docs/PROVENANCE.md`.
 
 // --- Video-timing constants ---
 //
 // Physical beam cadence, derived from PSX-SPX's measured video clocks per
-// scanline and the CPU/video-clock ratio. The old Redux-parity values divided
+// scanline and the CPU/video-clock ratio. Earlier values divided
 // by nominal 60/50 Hz and made scanlines too short; real non-interlaced PS1
 // refresh is not exactly 60/50 Hz, which is directly visible to Timer 0/1.
 //
@@ -20,8 +19,8 @@
 //   PAL : about 3406 video clocks/line -> 2167 CPU clocks
 //
 // `FIRST_VBLANK_CYCLE` is derived from the per-region VBlank-start
-// scanline × HSync; kept as NTSC default to preserve existing parity
-// tests. PAL builds call [`Bus::set_pal_mode`] before running, which
+// scanline × HSync; kept as NTSC default to preserve the existing frame
+// hashes. PAL builds call [`Bus::set_pal_mode`] before running, which
 // re-seeds the VBlank scheduler and updates the tick-rate knobs.
 
 pub(super) const HSYNC_CYCLES_NTSC: u64 = 2172;

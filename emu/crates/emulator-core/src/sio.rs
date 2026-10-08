@@ -34,7 +34,7 @@
 //! The older delayed-byte scaffolding (`queued_tx`, `transfer_busy`,
 //! `awaiting_ack`, the `ack_delay_ticks` path) is not exercised by the
 //! current exchange path and is kept only until it can be removed with a
-//! save-state layout change. See `LICENSE` and `docs/license-audit.md`.
+//! save-state layout change. See `LICENSE` and `docs/PROVENANCE.md`.
 
 mod stat_bit {
     // Layout facts come from the shared hardware-model crate, the same

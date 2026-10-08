@@ -32,7 +32,7 @@
 //! applies to a handful of scheduling behaviours in this file (marked
 //! "gate-pinned"): they exist because removing or changing them moves the
 //! compat or library frame hashes, and no external source describes them.
-//! See `LICENSE` and `docs/license-audit.md`.
+//! See `LICENSE` and `docs/PROVENANCE.md`.
 
 use std::collections::VecDeque;
 

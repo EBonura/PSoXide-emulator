@@ -30,7 +30,7 @@
 //! Written from this project's own requirements: the event set, the slot
 //! names, the priority order and the strict-deadline rule are fixed by the
 //! gate suite (compat frame hashes, hardware-test records, ps1-tests), not
-//! by an outside design. See `LICENSE` and `docs/license-audit.md`.
+//! by an outside design. See `LICENSE` and `docs/PROVENANCE.md`.
 
 /// A scheduled-event slot. The discriminant is the slot's position in the
 /// pending bitmap and its tie-break priority (lower fires first when two

@@ -141,7 +141,7 @@ the two; silicon does not pin it closer.
 
 The console's FMV cuts spent, per frame, 1077k cycles on the bitstream, 952k
 on MDEC decode plus column upload and 265k waiting, and showed 127 of 224
-frames. PSoXide's default (Redux's 8 cycles per DMA1 word) gives the same
+frames. PSoXide's default (8 cycles per DMA1 word, pinned by the compat hashes) gives the same
 player 1318k / 679k / 323k and shows 156. With DMA1 at 24 cycles per word
 (`PSOXIDE_MDEC_OUT_CYCLES_PER_WORD=24`, a diagnostic override) the whole
 75 s movie profiles at 1016k / 960k / 291k with 43% of frames late, the
