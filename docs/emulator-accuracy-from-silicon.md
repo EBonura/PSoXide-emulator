@@ -137,17 +137,15 @@ the four runs that reset a busy MDEC. So the loss is bounded by the write
 spacing, not by the whole busy window. `RESET_CAPTURE_CYCLES` (5) sits between
 the two; silicon does not pin it closer.
 
-#### Decode throughput (v1.26 FMV profile, not modelled by default)
+#### Decode throughput (v1.26 FMV profile)
 
 The console's FMV cuts spent, per frame, 1077k cycles on the bitstream, 952k
 on MDEC decode plus column upload and 265k waiting, and showed 127 of 224
-frames. PSoXide's default (8 cycles per DMA1 word, pinned by the compat hashes) gives the same
-player 1318k / 679k / 323k and shows 156. With DMA1 at 24 cycles per word
-(`PSOXIDE_MDEC_OUT_CYCLES_PER_WORD=24`, a diagnostic override) the whole
+frames. With DMA1 at 8 cycles per word the same player profiled at
+1318k / 679k / 323k and showed 156. With DMA1 at 24 cycles per word the whole
 75 s movie profiles at 1016k / 960k / 291k with 43% of frames late, the
-console's 43%. That puts the MDEC's throughput at roughly a third of what the
-default models; making 24 the default needs its own gate run, since every
-FMV game's timing moves.
+console's 43%. 24 is now the default (`MDEC_OUT_CYCLES_PER_WORD` in `bus.rs`).
+It is a throughput fit to this one workload, not a measured per-word latency.
 
 Also modelled from the same capture: DMA0 moves nothing until the MDEC raises
 its data-in request (enable set and parameter words outstanding), the status
