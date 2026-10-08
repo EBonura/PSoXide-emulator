@@ -73,8 +73,10 @@ run four times slower instead of using a rate offset; the pitch step is capped
 at 0x4000 and the modulated step uses the documented factor; a voice that
 modulates the next is no longer muted from the mix; the reverb alternates
 left and right passes on successive samples and its addresses wrap by a true
-modulo. The emulator's compat display hashes do not see audio; the audio
-change is quantified in the commit history.
+modulo. The compat display hashes do not see audio. Against the previous mixer,
+Crash Bandicoot's first 35 seconds differ in 4.9% of the samples with a
+root-mean-square difference of 0.2 LSB on a signal of 1062 (about -74 dB);
+seven of the 20 compat titles produce byte-identical audio for their whole run.
 
 Legacy scalings kept because nothing measured contradicts them (flagged in
 `spu.rs`): the reverb output volume is applied as Q14, and the main volume
@@ -98,7 +100,11 @@ Each is marked `gate-pinned` in the code.
   GP1 display-mode switch; DMA completion costs (one cycle per word for the
   GPU linked list and the CD burst rule); MDEC DMA1 at 8 cycles per word.
   The v1.26 console profile suggests about 24 for DMA1 (see
-  `emulator-accuracy-from-silicon.md`).
+  `emulator-accuracy-from-silicon.md`). Running the 20 compat titles with
+  `PSOXIDE_MDEC_OUT_CYCLES_PER_WORD=24` changes the frame hashes of 15 of
+  them (RE2 and Marvel vs. Capcom most) and leaves five
+  untouched; all 20 still run to the end. Making 24 the default is a
+  deliberate re-baseline that has not been approved, so 8 stays.
 - **Video timing** (`bus/timing.rs`): the scanline of the first VBlank.
 - **GPU** (`gpu.rs`, `psx-gpu-render`): the GPUSTAT reset value (apart from
   bit 31, which follows the console), the zero power-on display ranges and
