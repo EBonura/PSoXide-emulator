@@ -12,6 +12,10 @@
   exponentially rising envelopes, reverb channel timing and a modulating
   voice's audibility follow PSX-SPX. Save states move to format 10; older
   save states no longer load.
+- MDEC output DMA now costs 24 cycles per word instead of 8, fitted to the
+  console's v1.26 FMV player profile (decode time per frame and the share of
+  late frames). FMV timing in games moves with it; the
+  `PSOXIDE_MDEC_OUT_CYCLES_PER_WORD` override is removed.
 - BIOS support is gone: every disc and EXE boots on the built-in HLE kernel.
   The BIOS path setting, `PSOXIDE_BIOS`, the `--bios`, `--bios-boot` and
   `--bios-warmup-steps` options, the web BIOS upload and the real-BIOS
