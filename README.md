@@ -1,5 +1,7 @@
 # PSoXide Emulator
 
+> **Built with agentic coding.** AI coding agents write most of the code in PSoXide. I direct them, review what they produce, and test the results in the emulator and on a real PlayStation.
+
 A Rust PlayStation emulator for playing, debugging and profiling homebrew.
 The CPU, GPU, SPU, CD-ROM, controller and memory-card implementation lives
 here, alongside the desktop and browser frontends.
