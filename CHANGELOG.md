@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Clean-room rewrites from PSX-SPX and console measurements: the event
+  scheduler, the DMA register file and DICR logic, the MDEC colour path, and
+  the SPU voice engine (ADSR and volume sweeps, noise generator, pitch
+  modulation, reverb). `docs/PROVENANCE.md` lists what is rewritten and what
+  still carries behaviour matched to PCSX-Redux traces. Behaviour changes:
+  MDEC colour output now matches the console frame of ps1-tests more closely
+  (FMV frames differ from earlier builds); the SPU noise generator,
+  exponentially rising envelopes, reverb channel timing and a modulating
+  voice's audibility follow PSX-SPX. Save states move to format 10; older
+  save states no longer load.
 - BIOS support is gone: every disc and EXE boots on the built-in HLE kernel.
   The BIOS path setting, `PSOXIDE_BIOS`, the `--bios`, `--bios-boot` and
   `--bios-warmup-steps` options, the web BIOS upload and the real-BIOS
