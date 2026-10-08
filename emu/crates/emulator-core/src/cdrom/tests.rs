@@ -558,7 +558,7 @@ fn read_command_uses_initial_delay_then_steady_stream_delay() {
         .expect("steady DataReady scheduled");
     assert_eq!(
         next_data_ready.deadline,
-        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2 + 1 + CD_READ_TIME / 2
+        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2 + CD_READ_TIME / 2
     );
 }
 
@@ -700,7 +700,7 @@ fn xa_audio_sector_suppresses_dataready_irq_but_keeps_streaming() {
         .expect("suppressed audio sector should still chain the read stream");
     assert_eq!(
         next_data_ready.deadline,
-        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2 + 1 + CD_READ_TIME / 2
+        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2 + CD_READ_TIME / 2
     );
 }
 
@@ -940,12 +940,66 @@ fn relocated_read_charges_travel_on_first_sector_then_streams_at_cadence() {
         .expect("read stream should continue after first sector");
     assert_eq!(
         next_sector.deadline,
-        first_sector_deadline + 1 + CD_READ_TIME / 2
+        first_sector_deadline + CD_READ_TIME / 2
     );
     assert!(
         !cd.location_changed,
         "the travel latch should clear once the stream is running"
     );
+}
+
+#[test]
+fn streaming_cadence_does_not_accumulate_the_lateness_of_each_tick() {
+    // Every sector is serviced a little after its deadline (the CPU only
+    // reaches the drive at branch boundaries). The next sector is chained
+    // from the deadline, so the stream stays on the disc's own 150 sectors
+    // a second however late each tick is.
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 64])));
+    cd.mode = 0x80; // double speed, plain data
+    cd.scheduling_cycle = 1_000;
+    cd.setloc_msf = (0x00, 0x02, 0x00);
+    cd.cmd_read();
+    let ack_deadline = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES;
+    assert!(cd.tick(ack_deadline + 1));
+    cd.irq_flag = 0;
+    let mut deadline = ack_deadline + 1 + CD_READ_TIME * 3 / 2;
+    for sector in 0..30u64 {
+        let lateness = 1 + (sector * 37) % 300;
+        cd.tick(deadline + lateness);
+        cd.irq_flag = 0;
+        deadline += CD_READ_TIME / 2;
+        let next = cd
+            .pending
+            .iter()
+            .find(|ev| ev.irq == IrqType::DataReady)
+            .expect("the stream continues")
+            .deadline;
+        assert_eq!(next, deadline, "after sector {sector}");
+    }
+}
+
+#[test]
+fn a_tick_more_than_a_period_late_restarts_the_cadence_from_now() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 64])));
+    cd.mode = 0x80;
+    cd.scheduling_cycle = 1_000;
+    cd.setloc_msf = (0x00, 0x02, 0x00);
+    cd.cmd_read();
+    let ack_deadline = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES;
+    assert!(cd.tick(ack_deadline + 1));
+    cd.irq_flag = 0;
+    let first = ack_deadline + 1 + CD_READ_TIME * 3 / 2;
+    let now = first + CD_READ_TIME * 5; // the CPU was away for five frames
+    cd.tick(now);
+    let next = cd
+        .pending
+        .iter()
+        .find(|ev| ev.irq == IrqType::DataReady)
+        .expect("the stream continues")
+        .deadline;
+    assert_eq!(next, now + CD_READ_TIME / 2);
 }
 
 #[test]
