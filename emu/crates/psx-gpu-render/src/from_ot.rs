@@ -28,7 +28,7 @@ use psx_gpu::ot::OrderingTable;
 /// GP0 command, matching the emulator's live command log.
 ///
 /// # Safety
-/// Same invariant `OrderingTable::iter_packets` requires: every
+/// Same invariant `OrderingTable::packets` requires: every
 /// chained packet must be live, writable, 4-byte-aligned RAM for the
 /// duration of the call. Primitives produced by the SDK's
 /// [`PrimitiveArena`](psx_gpu::PrimitiveArena) satisfy this; bespoke
@@ -52,7 +52,7 @@ pub unsafe fn build_cmd_log_into<const N: usize>(
 ) {
     log.clear();
     let mut command_index = 0u32;
-    // SAFETY: contract above forwards directly to iter_packets.
+    // SAFETY: contract above forwards directly to `OrderingTable::packets`.
     let iter = unsafe { ot.packets() };
     for (packet_ptr, words) in iter {
         let words = words as usize;
