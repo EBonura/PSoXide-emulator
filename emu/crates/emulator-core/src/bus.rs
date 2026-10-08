@@ -146,6 +146,19 @@ struct ExperimentalGpuList {
     headers: u32,
 }
 
+/// Cycles the MDEC output DMA (DMA1) takes per 32-bit word it moves.
+///
+/// Source: this project's console profile of the v1.26 FMV player
+/// (`docs/emulator-accuracy-from-silicon.md`, "Decode throughput"). On the
+/// console one frame's MDEC decode plus column upload costs about 952k
+/// cycles. With 24 cycles per word the same player profiles at 1016k / 960k /
+/// 291k cycles (bitstream / decode / wait) over the whole movie with 43% of
+/// frames late, matching the console's 43%. The earlier value of 8 was a
+/// constant inherited from another emulator and gave about a third of the
+/// console's decode time. The number is a throughput fit to one workload,
+/// not a measured per-word latency.
+const MDEC_OUT_CYCLES_PER_WORD: u64 = 24;
+
 /// Start of the on-die I/O registers. Any CPU access at or above it may
 /// change GPU or DMA state.
 const IO_SPACE_START: u32 = 0x1F80_1000;
@@ -2585,23 +2598,6 @@ impl Bus {
         }
     }
 
-    /// Cycles DMA1 takes per decoded word. 8 is the default, pinned by the
-    /// compat FMV hashes. `PSOXIDE_MDEC_OUT_CYCLES_PER_WORD` overrides it for player
-    /// experiments: silicon's MDEC throughput is not measured yet, and the
-    /// v1.26 FMV profile puts a whole frame's decode-plus-upload near 952k
-    /// cycles, several times what 8 gives. Diagnostic only, like
-    /// `PSOXIDE_WEDGE_DMA`.
-    fn mdec_out_cycles_per_word() -> u64 {
-        static CYCLES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-        *CYCLES.get_or_init(|| {
-            std::env::var("PSOXIDE_MDEC_OUT_CYCLES_PER_WORD")
-                .ok()
-                .and_then(|v| v.trim().parse::<u64>().ok())
-                .filter(|&v| v > 0)
-                .unwrap_or(8)
-        })
-    }
-
     fn try_schedule_ready_mdec_out(&mut self) {
         use crate::scheduler::EventSlot;
 
@@ -2617,9 +2613,8 @@ impl Bus {
             return;
         }
         if let Some(mdec_words) = self.run_dma_mdec_out() {
-            // Output DMA completes after a fixed cycle count per 32-bit word
-            // (8 by default, see `mdec_out_cycles_per_word`).
-            let delay = mdec_words as u64 * Self::mdec_out_cycles_per_word();
+            // Output DMA completes after a fixed cycle count per 32-bit word.
+            let delay = mdec_words as u64 * MDEC_OUT_CYCLES_PER_WORD;
             let target = self.cycles + delay;
             self.log_dma_schedule("MdecOut", delay, target);
             self.scheduler
@@ -6169,11 +6164,14 @@ mod tests {
         bus.dma.channels[1].channel_control = 0x0100_0200;
         bus.run_dma_channel(1);
 
-        assert_eq!(bus.scheduler.target(EventSlot::MdecOutDma), Some(192 * 8));
+        assert_eq!(
+            bus.scheduler.target(EventSlot::MdecOutDma),
+            Some(192 * MDEC_OUT_CYCLES_PER_WORD)
+        );
         assert_ne!(bus.dma.channels[0].channel_control & (1 << 24), 0);
         assert_ne!(bus.dma.channels[1].channel_control & (1 << 24), 0);
 
-        bus.tick(192 * 8 + 1);
+        bus.tick((192 * MDEC_OUT_CYCLES_PER_WORD + 1) as u32);
         assert_eq!(bus.dma.channels[0].channel_control & (1 << 24), 0);
         assert_eq!(bus.dma.channels[1].channel_control & (1 << 24), 0);
     }
@@ -6198,7 +6196,10 @@ mod tests {
         bus.run_dma_channel(0);
 
         assert_eq!(bus.scheduler.target(EventSlot::MdecInDma), None);
-        assert_eq!(bus.scheduler.target(EventSlot::MdecOutDma), Some(192 * 8));
+        assert_eq!(
+            bus.scheduler.target(EventSlot::MdecOutDma),
+            Some(192 * MDEC_OUT_CYCLES_PER_WORD)
+        );
         assert_ne!(read_ram_u32(&bus.ram[..], 0x200), 0);
     }
 
@@ -6219,8 +6220,11 @@ mod tests {
         bus.dma.channels[1].channel_control = 0x0100_0200;
         bus.run_dma_channel(1);
 
-        assert_eq!(bus.scheduler.target(EventSlot::MdecOutDma), Some(32 * 8));
-        bus.tick(32 * 8 + 1);
+        assert_eq!(
+            bus.scheduler.target(EventSlot::MdecOutDma),
+            Some(32 * MDEC_OUT_CYCLES_PER_WORD)
+        );
+        bus.tick((32 * MDEC_OUT_CYCLES_PER_WORD + 1) as u32);
         assert_eq!(bus.dma.channels[1].channel_control & (1 << 24), 0);
         assert_eq!(read_ram_u32(&bus.ram[..], 0x200), 0x8888_8888);
     }
