@@ -84,7 +84,7 @@ pub enum ScaleMode {
 
 /// Sample-time texture filter, cycled from the toolbar. Maps to the
 /// `u_texfilter` uniform the fragment shader reads. Seam-free filtering isn't
-/// possible on PSX's packed VRAM (matches DuckStation).
+/// possible on PSX's packed VRAM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextureFilter {
     /// PSX-native point sampling.

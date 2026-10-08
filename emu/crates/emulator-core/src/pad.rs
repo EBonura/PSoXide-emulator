@@ -1854,7 +1854,7 @@ mod tests {
     }
 
     #[test]
-    fn config_query_0x46_matches_duckstation_constants() {
+    fn config_query_0x46_response_bytes() {
         let mut pad = DigitalPad::new();
         pad.mode = PadMode::Config;
 
@@ -1890,7 +1890,7 @@ mod tests {
     }
 
     #[test]
-    fn config_queries_0x47_and_0x4c_match_duckstation_constants() {
+    fn config_queries_0x47_and_0x4c_response_bytes() {
         let mut pad = DigitalPad::new();
         pad.mode = PadMode::Config;
 
