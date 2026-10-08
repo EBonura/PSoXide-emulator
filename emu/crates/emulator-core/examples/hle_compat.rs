@@ -578,6 +578,12 @@ fn run_frames(
 ) -> (String, u64, u64, std::collections::BTreeSet<u64>) {
     apply_sample(bus, tape, start_frame);
     let mut frame_hashes = hash_log.as_ref().map(|_| String::new());
+    // With `--hash-log`, the SPU's mixed output is hashed per frame too
+    // (FNV-1a over each stereo sample), so a change to the SPU model shows
+    // as the first frame where the audio parts. Written next to the display
+    // log as `<id>.hle.audio.txt`.
+    let mut audio_hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut audio_log = hash_log.as_ref().map(|_| String::new());
     let cap = frames
         .saturating_mul(STEPS_PER_FRAME_CAP)
         .saturating_add(10_000_000);
@@ -608,7 +614,15 @@ fn run_frames(
             );
         }
         bus.run_spu_to_current_cycle();
-        bus.spu.discard_audio();
+        if audio_log.is_some() {
+            for (left, right) in bus.spu.drain_audio() {
+                for byte in left.to_le_bytes().into_iter().chain(right.to_le_bytes()) {
+                    audio_hash = (audio_hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+        } else {
+            bus.spu.discard_audio();
+        }
         let vblank = bus.irq().raise_counts()[0] - base_vblank;
         if vblank != last_vblank {
             last_vblank = vblank;
@@ -619,6 +633,9 @@ fn run_frames(
             }
             if let Some(log) = frame_hashes.as_mut() {
                 log.push_str(&format!("{vblank} {:016x}\n", bus.gpu.display_hash().0));
+            }
+            if let Some(log) = audio_log.as_mut() {
+                log.push_str(&format!("{vblank} {audio_hash:016x}\n"));
             }
             if let Some((every, base)) = periodic {
                 if vblank.is_multiple_of(*every) && vblank < frames {
@@ -655,10 +672,11 @@ fn run_frames(
             break "step_cap".to_string();
         }
     };
-    if let (Some(path), Some(log)) = (hash_log, frame_hashes) {
+    if let (Some(path), Some(log), Some(audio)) = (hash_log, frame_hashes, audio_log) {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
+        let _ = std::fs::write(path.with_extension("audio.txt"), audio);
         let _ = std::fs::write(path, log);
     }
     (stop, last_vblank, steps, hashes)
