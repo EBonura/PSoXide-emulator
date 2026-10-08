@@ -943,7 +943,7 @@ pub fn read_write(bus: &mut Bus, f: u32, buf: u32, len: u32, write: bool) -> Opt
         if busy(bus, slot) {
             return fail(bus, f, err::IO);
         }
-        if pos % SECTOR != 0 || pos >= size || !loaded(bus, slot) {
+        if !pos.is_multiple_of(SECTOR) || pos >= size || !loaded(bus, slot) {
             return fail(
                 bus,
                 f,

@@ -1559,6 +1559,13 @@ fn decoded(word: u32, class: OpClass, flags: u8) -> DecodedOp {
     }
 }
 
+/// Whether `phys` is where the HLE BIOS takes over from the interpreter
+/// before a fetch: the A0/B0/C0 vectors and the exception-return stub.
+fn hle_hook(phys: u32) -> bool {
+    matches!(phys, 0xA0 | 0xB0 | 0xC0)
+        || phys == memory::to_physical(crate::hle_bios::EXCEPTION_RETURN_STUB)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1772,11 +1779,4 @@ mod tests {
         assert_eq!(classify(0x0000_000C), Some(OpClass::Terminator)); // syscall
         assert_eq!(classify(0xFC00_0000), None);
     }
-}
-
-/// Whether `phys` is where the HLE BIOS takes over from the interpreter
-/// before a fetch: the A0/B0/C0 vectors and the exception-return stub.
-fn hle_hook(phys: u32) -> bool {
-    matches!(phys, 0xA0 | 0xB0 | 0xC0)
-        || phys == memory::to_physical(crate::hle_bios::EXCEPTION_RETURN_STUB)
 }

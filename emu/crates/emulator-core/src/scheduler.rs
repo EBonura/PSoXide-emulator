@@ -216,7 +216,7 @@ impl Scheduler {
             let target = self.targets[idx as usize];
             // Slots are visited in priority order, so a later slot only wins
             // with a strictly earlier deadline.
-            if best.map_or(true, |(t, _)| target < t) {
+            if best.is_none_or(|(t, _)| target < t) {
                 best = Some((target, idx));
             }
         }
