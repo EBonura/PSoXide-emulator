@@ -731,6 +731,31 @@ fn cd_audio_input_routes_through_cd_volume() {
 }
 
 #[test]
+fn cd_audio_underrun_repeats_the_last_frame_briefly_then_goes_silent() {
+    let mut s = Spu::new();
+    s.main_vol_l.write(0x7FFF);
+    s.main_vol_r.write(0x7FFF);
+    s.write16(SPUCNT, SPUCNT_CD_AUDIO_ENABLE);
+    s.write16(CD_VOL_L, 0x7FFF);
+    s.write16(CD_VOL_R, 0x7FFF);
+    // Nothing queued yet: silence, and no repeat of a frame never played.
+    s.tick_sample(SAMPLE_CYCLES);
+    assert_eq!(s.drain_audio()[0], (0, 0));
+    s.feed_cd_audio(&[(0x4000, 0x4000), (0x2000, 0x2000)]);
+    for n in 2..=12 {
+        s.tick_sample(SAMPLE_CYCLES * n);
+    }
+    let out = s.drain_audio();
+    let nonzero: Vec<bool> = out.iter().map(|&(l, _)| l != 0).collect();
+    // Two real frames, CD_UNDERRUN_HOLD_SAMPLES repeats of the second, then
+    // silence.
+    let expected_on = 2 + usize::from(CD_UNDERRUN_HOLD_SAMPLES);
+    assert!(nonzero[..expected_on].iter().all(|&on| on), "{nonzero:?}");
+    assert!(nonzero[expected_on..].iter().all(|&on| !on), "{nonzero:?}");
+    assert_eq!(out[1], out[2], "the held frame repeats the second frame");
+}
+
+#[test]
 fn main_volume_scales_the_final_mix() {
     // Main volume is applied as the final stage (PSX-SPX /
     // PSX-SPX): out = (clamp(dry + wet) * main_vol_raw) >> 15. Raw 0 silences

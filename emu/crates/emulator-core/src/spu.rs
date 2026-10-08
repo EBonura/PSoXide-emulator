@@ -195,6 +195,10 @@ pub const ADPCM_SAMPLES_PER_BLOCK: usize = 28;
 
 /// Host-facing audio output buffer cap. Frontend drains periodically;
 /// if it falls behind we discard the oldest samples.
+/// Output samples a CD frame is repeated for when the CD queue runs dry
+/// mid-stream; longer gaps are silence.
+const CD_UNDERRUN_HOLD_SAMPLES: u8 = 4;
+
 const OUTPUT_BUFFER_CAP: usize = 44100 * 2; // 2 seconds of stereo samples
 
 // ===============================================================
@@ -767,6 +771,10 @@ pub struct Spu {
     /// output: consuming it can mutate SPU RAM/capture state, so it
     /// must round-trip through save states.
     cd_audio_in: std::collections::VecDeque<(i16, i16)>,
+    /// Last CD frame mixed, repeated over a short underrun (see `tick_sample`).
+    cd_last_frame: (i16, i16),
+    /// Consecutive output samples the CD queue was empty for.
+    cd_underrun_run: u8,
 
     /// Absolute cycle count at which we last produced an audio sample.
     /// Used to catch up when the scheduler delivers a burst of ticks.
@@ -870,6 +878,8 @@ impl Spu {
             reverb_cfg: [0; 32],
             audio_out: std::collections::VecDeque::with_capacity(OUTPUT_BUFFER_CAP),
             cd_audio_in: std::collections::VecDeque::with_capacity(OUTPUT_BUFFER_CAP),
+            cd_last_frame: (0, 0),
+            cd_underrun_run: CD_UNDERRUN_HOLD_SAMPLES,
             last_sample_cycle: 0,
             samples_produced: 0,
             decode_irq_cursor: 0,
@@ -1861,7 +1871,28 @@ impl Spu {
         // CD input is routed to the main mix or the reverb bus.
         let mut cd_cap_l: i32 = 0;
         let mut cd_cap_r: i32 = 0;
-        if let Some((cd_l, cd_r)) = self.cd_audio_in.pop_front() {
+        // A momentary underrun repeats the previous frame instead of dropping
+        // to zero. The controller's decoder keeps its output FIFO fed at the
+        // sample rate; here a sector can land a fraction of a sample late
+        // against the SPU's clock, and a zero in the middle of music is a
+        // click, while a repeated frame is a one-sample delay nobody hears.
+        // After [`CD_UNDERRUN_HOLD_SAMPLES`] the input counts as stopped.
+        let cd_frame = match self.cd_audio_in.pop_front() {
+            Some(frame) => {
+                self.cd_last_frame = frame;
+                self.cd_underrun_run = 0;
+                Some(frame)
+            }
+            None if self.cd_underrun_run < CD_UNDERRUN_HOLD_SAMPLES => {
+                self.cd_underrun_run += 1;
+                Some(self.cd_last_frame).filter(|&frame| frame != (0, 0))
+            }
+            None => {
+                self.cd_last_frame = (0, 0);
+                None
+            }
+        };
+        if let Some((cd_l, cd_r)) = cd_frame {
             // CD_VOL regs are Q15 signed -- range -0x8000..=0x7FFF.
             // `>> 15` brings them back to i16 scale. Always consume
             // the stream so timing stays live while muted/disabled;
