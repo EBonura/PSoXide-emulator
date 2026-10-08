@@ -1,8 +1,6 @@
 # PSoXide Emulator
 
 > **Largely written with agentic coding.** I direct the agents and test their work in two places: this emulator, which profiles every cycle, and a real PlayStation, which shows me where the emulator is wrong. Working between them is where the accuracy and the speed come from. [How PSoXide is built](https://ebonura.github.io/PSoXide/how-its-built/)
->
-> **AI-generated content:** code. The fonts are third-party and credited in [emu/crates/frontend/assets/fonts/PROVENANCE.md](emu/crates/frontend/assets/fonts/PROVENANCE.md).
 
 A Rust PlayStation emulator for playing, debugging and profiling homebrew.
 The CPU, GPU, SPU, CD-ROM, controller and memory-card implementation lives
