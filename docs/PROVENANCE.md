@@ -28,6 +28,18 @@ that pin behaviour), and its history stays in git.
   emulator-core test suite. These pin behaviour that no document or
   measurement covers; such behaviour is marked `gate-pinned` in the code.
 
+## Gate baseline after the MDEC DMA1 change
+
+The gates were re-run with MDEC DMA1 at 24 cycles per word. The ps1-tests
+result is unchanged (58 of 61 cases; the three MDEC programs only end on a
+different idle cycle count). Of the 20 compat titles, five keep their display
+hashes (Crash Bandicoot, Crash Team Racing, Metal Gear Solid, Metal Slug X,
+Valkyrie Profile) and fifteen change from the first FMV frame on, because the
+decode now takes about three times as long. The 16 library boots and the
+v0.43 demo discs are unchanged. The HLE columns of `compat/reference/` and
+`compat/reference.toml` still hold the earlier numbers and are re-run when the
+kernel's timing is next re-recorded.
+
 ## Rewritten from the documentation (no remaining derivation known)
 
 | Area | Written from | Notes |
@@ -39,6 +51,7 @@ that pin behaviour), and its history stays in git.
 | XA-ADPCM decoder (`spu/xa.rs`) | PSX-SPX "CDROM XA Audio ADPCM Compression" | Done earlier (EMU-R04). The 4-fractional-bit history is pinned by the compat hashes. |
 | MDEC (`mdec.rs`) | PSX-SPX "MDEC", this project's v1.26 reset measurements, the ps1-tests `mdec` captures | The AAN IDCT and its colour conversion are gone. Colour blocks use the same run-length decode, dequantisation and uploaded-matrix IDCT as mono blocks, and PSX-SPX's conversion coefficients in 16.16 fixed point, rounded once at the output depth. |
 | SPU voice engine, envelopes, noise, reverb (`spu.rs`, `spu/envelope.rs`) | PSX-SPX "SPU ADPCM Samples/Pitch", "SPU Volume and ADSR Generator", "SPU Noise Generator", "SPU Reverb Formula" | See the SPU notes below. |
+| MDEC DMA1 cost (`bus.rs`, `MDEC_OUT_CYCLES_PER_WORD`) | this project's v1.26 console FMV profile | 24 cycles per word. It is a throughput fit to one workload (the v1.26 FMV player: 43% of frames late, as on the console), not a measured per-word latency. The earlier value of 8 was a constant inherited from the previous engine and is gone. |
 | CD-ROM delays (`cdrom/timing.rs`) | spec arithmetic, console records, PSX-SPX figures | Three values are still pinned, see below. |
 | HLE kernel | See `hle-bios-provenance.md` | |
 
@@ -98,13 +111,7 @@ Each is marked `gate-pinned` in the code.
 - **Bus** (`bus.rs`): CD-ROM and SIO0 events are serviced at branch
   boundaries; the VBlank already scheduled keeps its line cadence across a
   GP1 display-mode switch; DMA completion costs (one cycle per word for the
-  GPU linked list and the CD burst rule); MDEC DMA1 at 8 cycles per word.
-  The v1.26 console profile suggests about 24 for DMA1 (see
-  `emulator-accuracy-from-silicon.md`). Running the 20 compat titles with
-  `PSOXIDE_MDEC_OUT_CYCLES_PER_WORD=24` changes the frame hashes of 15 of
-  them (RE2 and Marvel vs. Capcom most) and leaves five
-  untouched; all 20 still run to the end. Making 24 the default is a
-  deliberate re-baseline that has not been approved, so 8 stays.
+  GPU linked list and the CD burst rule).
 - **Video timing** (`bus/timing.rs`): the scanline of the first VBlank.
 - **GPU** (`gpu.rs`, `psx-gpu-render`): the GPUSTAT reset value (apart from
   bit 31, which follows the console), the zero power-on display ranges and
