@@ -456,7 +456,7 @@ pub struct LaunchArgs {
     /// toolbar toggle. Pair with `--dump-hw` for a single-frame edge render.
     #[arg(long)]
     pub wireframe: bool,
-    /// Sample-time texture filter for `--dump-hw`: none|bilinear|smooth|edge|all (all writes one file per filter).
+    /// Sample-time texture filter for `--dump-hw`: none|edge|all (all writes one file per filter; xbr is an alias of edge).
     #[arg(long, default_value = "none")]
     pub texture_filter: String,
 }
@@ -753,6 +753,10 @@ fn run_headless_launch(
             .as_ref()
             .map(|samples| (samples.len() as u64).saturating_add(args.input_tape_delay_ticks))
     });
+    // Reject a bad --texture-filter before the (possibly long) run, not after.
+    if !args.texture_filter.eq_ignore_ascii_case("all") {
+        parse_texture_filter(&args.texture_filter)?;
+    }
     let capture_gpu_commands = args.dump_hw.is_some() || args.gpu_frame_stats_log.is_some();
 
     let mut cpu = Cpu::new();
@@ -2173,12 +2177,15 @@ fn run_headless_launch(
             for name in TEXTURE_FILTER_NAMES {
                 let mut file = path.file_stem().unwrap_or_default().to_os_string();
                 file.push(format!("-{name}.ppm"));
-                fallback =
-                    dump_hw_ppm(&bus, &path.with_file_name(file), parse_texture_filter(name))?;
+                fallback = dump_hw_ppm(
+                    &bus,
+                    &path.with_file_name(file),
+                    parse_texture_filter(name)?,
+                )?;
             }
             fallback
         } else {
-            dump_hw_ppm(&bus, &path, parse_texture_filter(&args.texture_filter))?
+            dump_hw_ppm(&bus, &path, parse_texture_filter(&args.texture_filter)?)?
         };
         if emit_summary {
             if let Some(reason) = fallback {
@@ -3098,14 +3105,19 @@ fn region_label(e: &LibraryEntry) -> &'static str {
 }
 
 /// Names `--texture-filter` accepts, in shader-mode order.
-const TEXTURE_FILTER_NAMES: [&str; 4] = ["none", "bilinear", "smooth", "edge"];
+const TEXTURE_FILTER_NAMES: [&str; 2] = ["none", "edge"];
 
-fn parse_texture_filter(s: &str) -> u32 {
+/// Map a `--texture-filter` value to the shader mode. `xbr` is accepted as an
+/// alias of `edge` so old scripts keep working; anything else, including the
+/// removed `bilinear`, `smooth` and `jinc2`, is an error rather than a silent
+/// fall back to no filter.
+fn parse_texture_filter(s: &str) -> Result<u32, String> {
     match s.to_ascii_lowercase().as_str() {
-        "bilinear" => 1,
-        "smooth" => 2,
-        "edge" => 3,
-        _ => 0,
+        "none" => Ok(0),
+        "edge" | "xbr" => Ok(1),
+        other => Err(format!(
+            "unknown --texture-filter value '{other}': expected none, edge or all"
+        )),
     }
 }
 
@@ -4040,13 +4052,19 @@ mod texture_filter_cli_tests {
 
     #[test]
     fn names_map_to_shader_modes_case_insensitively() {
-        assert_eq!(parse_texture_filter("none"), 0);
-        assert_eq!(parse_texture_filter("bilinear"), 1);
-        assert_eq!(parse_texture_filter("Smooth"), 2);
-        assert_eq!(parse_texture_filter("EDGE"), 3);
-        assert_eq!(parse_texture_filter("nonsense"), 0);
+        assert_eq!(parse_texture_filter("none"), Ok(0));
+        assert_eq!(parse_texture_filter("EDGE"), Ok(1));
+        assert_eq!(parse_texture_filter("xbr"), Ok(1));
         for (mode, name) in super::TEXTURE_FILTER_NAMES.iter().enumerate() {
-            assert_eq!(parse_texture_filter(name), mode as u32);
+            assert_eq!(parse_texture_filter(name), Ok(mode as u32));
+        }
+    }
+
+    #[test]
+    fn removed_and_unknown_names_are_rejected() {
+        for name in ["bilinear", "smooth", "jinc2", "nonsense", ""] {
+            let err = parse_texture_filter(name).unwrap_err();
+            assert!(err.contains("--texture-filter"), "{err}");
         }
     }
 }

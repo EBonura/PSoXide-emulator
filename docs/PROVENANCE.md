@@ -142,24 +142,24 @@ The GetID response bytes return the ID string `PCSX` rather than the licensed
 response PSX-SPX documents, because a real-BIOS boot is the only thing that
 reads it and no gate covers that path.
 
-## Texture filters (Smooth and Edge)
+## Texture filter (Edge)
 
-The hardware renderer's two upscaling texture filters, Smooth and Edge
+The hardware renderer's upscaling texture filter, Edge
 (`psx-gpu-render/src/shaders/prim.wgsl`, functions from `filter_tap` to
-`filter_edge`), are original work. They replace two earlier filters that were
-ports of third-party shaders and were removed in 56e7aff. The specification
-`docs/texture-filters-spec.md` was written first, from the mathematics alone,
-and the shader was written from that specification.
+`filter_edge`), is original work. It replaces two earlier filters that were
+ports of third-party shaders and were removed in 56e7aff, and the bilinear
+mode that sat beside them (also removed; the toggle is now None and Edge). The
+specification `docs/texture-filters-spec.md` was written first, from the
+mathematics alone, and the shader was written from that specification.
 
-What was consulted, all of it mathematics and none of it source code: the
-Catmull-Rom cubic as the cubic Hermite spline with central-difference tangents,
-barycentric coordinates in a triangle, the smoothstep polynomial, and a plain
-L1 colour distance. The anti-ringing clamp, the diagonal-chain orientation
-test, the isolated-texel support test and the way the axis and diagonal
+What was consulted, all of it mathematics and none of it source code:
+barycentric coordinates in a triangle, the smoothstep polynomial and a plain L1
+colour distance. The diagonal-chain orientation test, the isolated-texel
+support test, the transparent-tap rule and the way the axis and diagonal
 renderings share their cell edges are this project's own design. No shader,
 upscaler or filter source from DuckStation, beetle-psx, libretro or slang
 shader packs, ReShade, xBRZ, ScaleFX or any other project was read, and the
-removed implementations were not opened while writing these.
+removed implementations were not opened while writing this one.
 
 ## Other credits and non-derivations
 
