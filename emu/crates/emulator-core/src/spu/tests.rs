@@ -167,7 +167,7 @@ fn koff_queues_and_transitions_to_release() {
 }
 
 #[test]
-fn kon_wins_over_same_sample_koff_for_redux_parity() {
+fn kon_wins_over_same_sample_koff() {
     let mut s = Spu::new();
     s.write16(KOFF_LO, 0x0001);
     s.write16(KON_LO, 0x0001);
@@ -176,7 +176,7 @@ fn kon_wins_over_same_sample_koff_for_redux_parity() {
     assert_eq!(
         s.voices[0].phase,
         AdsrPhase::Attack,
-        "Redux StartSound clears Stop, so same-batch KON must not immediately release"
+        "a key-on in the same batch as a key-off must not release the voice"
     );
 }
 
@@ -358,7 +358,7 @@ fn adpcm_silence_block_decodes_to_zero_samples() {
 }
 
 #[test]
-fn adpcm_decode_uses_redux_shift_direction() {
+fn adpcm_decode_shifts_the_scaled_nibble_right() {
     let mut s = Spu::new();
     let mut block = [0u8; 16];
     // Predictor 0, shift 0. The first packed byte contains two
@@ -376,11 +376,8 @@ fn adpcm_decode_uses_redux_shift_direction() {
 
 #[test]
 fn adpcm_decode_clamps_each_sample_to_i16_like_hardware() {
-    // Finding #9 (inverse of the old `keeps_unclamped` pin): hardware and
-    // both parity oracles (PSX-SPX Clamp16, PSX-SPX
-    // clamp(-0x8000,0x7fff), nocash MinMax(-8000h,+7FFFh))
-    // saturate each decoded sample to i16 BEFORE it feeds the predictor
-    // history. With predictor 1 and max-positive nibbles the prediction
+    // Hardware (nocash: MinMax(-8000h,+7FFFh)) saturates each decoded
+    // sample to i16 BEFORE it feeds the predictor history. With predictor 1 and max-positive nibbles the prediction
     // overshoots +0x7FFF on sample 1, so it must read back clamped.
     let mut s = Spu::new();
     let mut block = [0u8; 16];
@@ -418,9 +415,7 @@ fn adpcm_flag_1_2_loops_back_to_loop_addr() {
 fn adpcm_end_flag_with_repeat_bit_loops_even_with_other_bits_set() {
     // The repeat bit (bit 1) is tested on its own: any loop-end block with
     // bit 1 set loops, regardless of the other flag bits, so 0x7 loops the
-    // same as 0x3 (PSX-SPX). The old `flags == 0x3` guard --
-    // inherited from PEOPS/PCSX-Redux as a loop-hang workaround -- wrongly
-    // force-stopped 0x7; this is the inverse assertion of that behavior.
+    // same as 0x3 (PSX-SPX).
     let mut s = Spu::new();
     s.voices[0].loop_addr = 0x100;
     s.voices[0].loop_addr_locked = true; // ignore flag-4 self-update of loop_addr
@@ -464,7 +459,7 @@ fn adpcm_stop_flag_turns_voice_off_after_final_block_is_consumed() {
     let mut s = Spu::new();
     s.voices[0].phase = AdsrPhase::Attack;
     s.voices[0].envelope = 0x7FFF;
-    s.voices[0].sample_pos = 0x10000;
+    s.voices[0].counter = COUNTER_ONE;
     s.voices[0].sample_index = ADPCM_SAMPLES_PER_BLOCK;
     s.voices[0].stop_after_block = true;
 
@@ -506,8 +501,7 @@ fn adpcm_flag_4_ignored_when_software_locked_loop_addr() {
 fn adsr_attack_linear_ramps_envelope_up() {
     let mut s = Spu::new();
     // Linear attack, rate=0 (fastest linear rate).
-    s.voices[0].adsr.attack_rate = 0;
-    s.voices[0].adsr.attack_exp = false;
+    s.voices[0].adsr_lo = 0; // linear attack, shift 0
     s.voices[0].phase = AdsrPhase::Attack;
     // After a single step, envelope should have risen from 0.
     s.voices[0].step_envelope();
@@ -521,8 +515,7 @@ fn adsr_attack_linear_ramps_envelope_up() {
 #[test]
 fn adsr_attack_saturates_and_transitions_to_decay() {
     let mut s = Spu::new();
-    s.voices[0].adsr.attack_rate = 0;
-    s.voices[0].adsr.attack_exp = false;
+    s.voices[0].adsr_lo = 0; // linear attack, shift 0
     s.voices[0].phase = AdsrPhase::Attack;
     // Force envelope near max and step once -- should transition.
     s.voices[0].envelope = 0x7FFE;
@@ -534,9 +527,8 @@ fn adsr_attack_saturates_and_transitions_to_decay() {
 #[test]
 fn adsr_decay_reaches_sustain_and_transitions() {
     let mut s = Spu::new();
-    s.voices[0].adsr.decay_rate = 0;
-    s.voices[0].adsr.sustain_level = 0;
-    s.voices[0].adsr.release_exp = true;
+    s.voices[0].adsr_lo = 0; // decay shift 0, sustain level 0
+    s.voices[0].adsr_hi = 1 << 5;
     s.voices[0].phase = AdsrPhase::Decay;
     s.voices[0].envelope = 0x7FFF;
     for _ in 0..10000 {
@@ -555,16 +547,16 @@ fn adsr_decay_is_independent_of_release_mode_bit() {
     // EnvelopeMode::Exponential; PSX-SPX: "decay mode is always
     // Exponential decrease"). The release-mode bit must not change it.
     let mut linear = Voice::default();
-    linear.adsr.decay_rate = 0;
-    linear.adsr.release_exp = false;
+    linear.adsr_lo = 0;
+    linear.adsr_hi = 0;
     linear.phase = AdsrPhase::Decay;
     linear.envelope = 0x7000;
     linear.step_envelope();
 
     let mut exponential = linear.clone();
-    exponential.adsr.release_exp = true;
+    exponential.adsr_hi = 1 << 5;
     exponential.envelope = 0x7000;
-    exponential.envelope_sub = 0;
+    exponential.pacer.reset();
     exponential.step_envelope();
 
     // Exponential decrement from 0x7000: 0x7000 + ((dec*0x7000)>>15) = 0x3800.
@@ -578,8 +570,7 @@ fn adsr_decay_is_independent_of_release_mode_bit() {
 #[test]
 fn adsr_release_linear_decays_to_zero_and_stops_voice() {
     let mut s = Spu::new();
-    s.voices[0].adsr.release_rate = 0;
-    s.voices[0].adsr.release_exp = false;
+    s.voices[0].adsr_hi = 0; // linear release, shift 0
     s.voices[0].phase = AdsrPhase::Release;
     s.voices[0].envelope = 0x1000;
     for _ in 0..10000 {
@@ -598,10 +589,9 @@ fn adsr_release_stops_when_envelope_reaches_zero() {
     // PSX-SPX transition Release->Off when the level reaches the target
     // (0 for Release), i.e. at exactly 0, not only on strict underflow.
     let mut voice = Voice::default();
-    voice.adsr.release_rate = 0;
-    voice.adsr.release_exp = false;
+    voice.adsr_hi = 0;
     voice.phase = AdsrPhase::Release;
-    voice.envelope = -envelope_numerator_decrease(0);
+    voice.envelope = 8 << 11; // exactly one release step at shift 0
 
     voice.step_envelope();
     assert_eq!(voice.envelope, 0);
@@ -820,24 +810,30 @@ fn write_reverb_cfg(s: &mut Spu, reg: usize, value: u16) {
 fn configure_passthrough_reverb(s: &mut Spu) {
     use reverb_reg::*;
 
-    write_reverb_cfg(s, IIR_ALPHA, 0x7FFF);
-    write_reverb_cfg(s, ACC_COEF_A, 0x7FFF);
-    write_reverb_cfg(s, IN_COEF_L, 0x7FFF);
-    write_reverb_cfg(s, IN_COEF_R, 0x7FFF);
+    write_reverb_cfg(s, V_IIR, 0x7FFF);
+    write_reverb_cfg(s, V_COMB1, 0x7FFF);
+    write_reverb_cfg(s, V_LIN, 0x7FFF);
+    write_reverb_cfg(s, V_RIN, 0x7FFF);
 
-    // Separate L/R and A/B destinations so the test fixture doesn't
-    // stomp one channel with another while using a tiny synthetic
-    // preset. Real games write full preset tables here.
-    write_reverb_cfg(s, IIR_DEST_A0, 0);
-    write_reverb_cfg(s, IIR_DEST_A1, 1);
-    write_reverb_cfg(s, IIR_DEST_B0, 2);
-    write_reverb_cfg(s, IIR_DEST_B1, 3);
-    write_reverb_cfg(s, ACC_SRC_A0, 0);
-    write_reverb_cfg(s, ACC_SRC_A1, 1);
-    write_reverb_cfg(s, MIX_DEST_A0, 0);
-    write_reverb_cfg(s, MIX_DEST_A1, 1);
-    write_reverb_cfg(s, MIX_DEST_B0, 2);
-    write_reverb_cfg(s, MIX_DEST_B1, 3);
+    // Separate L/R and A/B cells so the test fixture doesn't stomp one
+    // channel with another while using a tiny synthetic preset. Real games
+    // write full preset tables here.
+    write_reverb_cfg(s, M_LSAME, 0);
+    write_reverb_cfg(s, M_RSAME, 1);
+    write_reverb_cfg(s, M_LDIFF, 2);
+    write_reverb_cfg(s, M_RDIFF, 3);
+    write_reverb_cfg(s, M_LCOMB1, 0);
+    write_reverb_cfg(s, M_RCOMB1, 1);
+    write_reverb_cfg(s, M_LAPF1, 0);
+    write_reverb_cfg(s, M_RAPF1, 1);
+    write_reverb_cfg(s, M_LAPF2, 2);
+    write_reverb_cfg(s, M_RAPF2, 3);
+}
+
+/// One left pass and one right pass of the reverb with silent input.
+fn run_reverb_pair(s: &mut Spu) {
+    s.mix_reverb(0, 0);
+    s.mix_reverb(0, 0);
 }
 
 #[test]
@@ -860,42 +856,36 @@ fn reverb_base_roundtrips_and_resets_work_cursor() {
 }
 
 #[test]
-fn reverb_address_wrap_below_base_matches_redux() {
+fn reverb_address_before_the_base_wraps_to_the_end_of_the_buffer() {
     let mut s = Spu::new();
     s.write16(REVERB_BASE, 0x1000);
     s.reverb.curr_addr = s.reverb_base_halfword();
 
-    assert_eq!(s.reverb_ram_index(-1, 0), 0x3FFFB);
+    // One halfword before mBASE is the last halfword of RAM.
+    assert_eq!(s.reverb_ram_index(0, -1), SPU_RAM_HALFWORDS - 1);
 }
 
 #[test]
-fn reverb_address_wrap_closed_form_matches_redux_loops() {
-    // Reference: Redux's two while-loops, which the closed form replaces.
-    fn redux(start: i32, mut idx: i32) -> i32 {
-        while idx > 0x3FFFF {
-            idx = start + (idx - 0x40000);
-        }
-        while idx < start {
-            idx = 0x3FFFF - (start - idx);
-        }
-        idx.clamp(0, SPU_RAM_HALFWORDS as i32 - 1)
-    }
+fn reverb_addresses_wrap_within_the_work_area() {
     let mut s = Spu::new();
     // 0xFFFE is where psx-spu's init parks the work area: eight halfwords at
-    // the top of RAM, where the loops ran thousands of times per tap.
+    // the top of RAM.
     for base in [0x1000u16, 0xE128, 0xFFFE] {
         s.write16(REVERB_BASE, base);
         let start = s.reverb_base_halfword() as i32;
+        let span = SPU_RAM_HALFWORDS as i32 - start;
         for curr in [start, start + 3, 0x3FFFF] {
             s.reverb.curr_addr = curr as u32;
             for offset in [-0x4000, -0x11, -1, 0, 1, 0x11, 0x3FFF, 0x7FFF] {
                 for extra in [0, 1, -1] {
-                    let idx = curr + offset * 4 + extra;
-                    assert_eq!(
-                        s.reverb_ram_index(offset, extra),
-                        redux(start, idx) as usize,
-                        "base {base:#x} curr {curr:#x} offset {offset} extra {extra}"
+                    let idx = s.reverb_ram_index(offset, extra) as i32;
+                    assert!(
+                        (start..start + span).contains(&idx),
+                        "base {base:#x} curr {curr:#x} offset {offset}: {idx:#x} outside the work area"
                     );
+                    // Moving a whole work area's worth lands on the same cell.
+                    let shifted = curr + offset * 4 + extra + span;
+                    assert_eq!((shifted - start).rem_euclid(span) + start, idx);
                 }
             }
         }
@@ -921,23 +911,27 @@ fn reverb_network_turns_bus_input_into_wet_output() {
 }
 
 #[test]
-fn reverb_output_depth_uses_redux_q14_unity() {
+fn reverb_output_depth_register_is_q14() {
     assert_eq!(Spu::scale_reverb_output(0x4000, 0x4000), 0x4000);
     assert_eq!(Spu::scale_reverb_output(0x4000, 0x3FFF), 0x3FFF);
     assert_eq!(Spu::scale_reverb_output(0x4000, 0xC000u16 as i16), -0x4000);
 }
 
 #[test]
-fn reverb_hold_sample_matches_redux_left_right_asymmetry() {
+fn reverb_channels_alternate_and_hold_their_output() {
     let mut s = Spu::new();
     s.write16(REVERB_BASE, 0x1000);
-    s.reverb.process_this_sample = false;
-    s.reverb.last_l = 10;
     s.reverb.wet_l = 30;
-    s.reverb.last_r = 100;
     s.reverb.wet_r = 300;
 
-    assert_eq!(s.mix_reverb(0, 0), (10, 300));
+    // The left pass recomputes only the left output; the right output holds
+    // until the right pass, and the address advances once per pair.
+    let start = s.reverb.curr_addr;
+    let (_, r) = s.mix_reverb(0, 0);
+    assert_eq!(r, 300);
+    assert_eq!(s.reverb.curr_addr, start);
+    let (_, _) = s.mix_reverb(0, 0);
+    assert_eq!(s.reverb.curr_addr, start + 1);
 }
 
 #[test]
@@ -963,8 +957,8 @@ fn reverb_wet_path_is_scaled_by_main_volume() {
         s.voices[0].raw_pitch = 0x1000;
         s.voices[0].sample_buf = [0x4000; ADPCM_SAMPLES_PER_BLOCK];
         s.voices[0].sample_index = 0;
-        s.voices[0].sample_pos = 0;
-        s.voices[0].interp_ring = [0x4000; 4];
+        s.voices[0].counter = 0;
+        s.voices[0].taps = [0x4000; 4];
 
         for n in 0..12 {
             s.tick_sample(n * SAMPLE_CYCLES);
@@ -1056,7 +1050,7 @@ fn gaussian_interp_of_silence_is_silence() {
 fn gaussian_interp_nonzero_input_produces_output() {
     // All four samples at max positive -- output should be non-
     // zero and in range.
-    let out = gauss_interpolate([0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF], 0x800);
+    let out = gauss_interpolate([0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF], 0x80);
     assert!(out > 0);
 }
 
@@ -1074,12 +1068,12 @@ fn gaussian_interp_handles_frac_past_0x10000() {
 #[test]
 fn interpolation_ring_preserves_previous_block_tail() {
     let mut voice = Voice::default();
-    voice.push_interpolation_sample(10);
-    voice.push_interpolation_sample(20);
-    voice.push_interpolation_sample(30);
-    voice.push_interpolation_sample(40);
-    voice.push_interpolation_sample(50);
-    assert_eq!(voice.interpolation_window(), [20, 30, 40, 50]);
+    voice.push_tap(10);
+    voice.push_tap(20);
+    voice.push_tap(30);
+    voice.push_tap(40);
+    voice.push_tap(50);
+    assert_eq!(voice.taps, [20, 30, 40, 50]);
 }
 
 #[test]
@@ -1203,92 +1197,102 @@ fn audio_queue_caps_at_max() {
     assert!(s.audio_queue_len() <= OUTPUT_BUFFER_CAP);
 }
 
-// -- Noise generator (Dr. Hell algorithm) --
+// -- Noise generator --
 
 #[test]
 fn noise_seed_is_one() {
-    // The LFSR feedback table NoiseWaveAdd[0] = 1, so a zero
-    // seed would still flip the low bit on first step. But
-    // hardware/Redux start at 1 -- keep the same so traces
-    // line up if/when we wire SPU into the parity oracle.
+    // The noise level powers on as 1 (a zero level would still take in a
+    // 1 on its first update, since the XNOR of four clear bits is 1).
     let s = Spu::new();
     assert_eq!(s.noise_val, 1);
 }
 
 #[test]
 fn noise_advances_when_clock_set() {
-    // noise_clock = (spucnt >> 8) & 0x3F. clock>>2 = bits 13:10
-    // of spucnt. Set those four bits to 0xF for the fastest
-    // shift rate: threshold = (0x8000 >> 15) << 16 = 0x10000.
-    // Per-sample increment is 0x10000 + NOISE_FREQ_ADD[step],
-    // so the LFSR shifts at least once per tick.
+    // SPUCNT bits 13..10 = 15 is the fastest shift: the timer reload is
+    // 0x20000 >> 15 = 4, equal to the smallest step, so the level changes
+    // on every sample.
     let mut s = Spu::new();
     s.write16(SPUCNT, 0x3C00);
-    let v0 = s.noise_val;
-    s.noise_tick();
-    assert_ne!(s.noise_val, v0, "noise should shift at fastest rate");
+    for _ in 0..8 {
+        let v0 = s.noise_val;
+        s.noise_tick();
+        assert_ne!(s.noise_val, v0, "noise should shift at the fastest rate");
+    }
 }
 
 #[test]
-fn noise_period_grows_with_shift() {
-    // At shift=0 the LFSR shifts roughly once every 0x8000
-    // counter-units (0x8000 / 0x10000 per sample → many samples).
-    // Verify it does NOT shift in a single tick at slow rate.
+fn noise_period_grows_with_lower_shift() {
+    // The first sample always updates (the timer powers on at zero);
+    // afterwards shift 0 waits (0x20000 - 4) / 4 samples for the next one.
     let mut s = Spu::new();
-    s.write16(SPUCNT, 0x0000); // shift = 0
-    let v0 = s.noise_val;
+    s.write16(SPUCNT, 0x0000); // shift 0, step 4
     s.noise_tick();
-    // Single tick adds 0x10000 < 0x8000_0000 -- no shift.
-    assert_eq!(s.noise_val, v0);
+    let after_first = s.noise_val;
+    for _ in 0..30_000 {
+        s.noise_tick();
+    }
+    assert_eq!(s.noise_val, after_first);
+    for _ in 0..3_000 {
+        s.noise_tick();
+    }
+    assert_ne!(s.noise_val, after_first);
+}
+
+#[test]
+fn noise_level_takes_in_the_xnor_of_bits_15_12_11_10() {
+    let mut s = Spu::new();
+    s.write16(SPUCNT, 0x3C00);
+    // Bits 15/12/11/10 all clear: XNOR is 1.
+    s.noise_val = 0;
+    s.noise_tick();
+    assert_eq!(s.noise_val, 1);
+    // Bit 15 only: XNOR is 0, and the old bit 15 shifts out.
+    s.noise_val = i16::MIN;
+    s.noise_tick();
+    assert_eq!(s.noise_val, 0);
+    // Bits 15 and 12: XNOR is 1.
+    s.noise_val = (0x9000u16) as i16;
+    s.noise_tick();
+    assert_eq!(s.noise_val as u16, 0x2001);
 }
 
 // -- FMod / pitch modulation --
 
 #[test]
-fn fmod_modulator_voice_suppressed_from_lr_mix() {
-    // Voice 0 = modulator (its sample feeds voice 1's pitch).
-    // Voice 1 = modulated. Both are configured to emit a known
-    // non-zero sample; only voice 1 should reach the audible mix.
-    let mut s = Spu::new();
-    s.main_vol_l.write(0x3FFF);
-    s.main_vol_r.write(0x3FFF);
-    s.write16(SPUCNT, SPUCNT_UNMUTE);
-
-    // Mark voice 1 as pitch-modulated by voice 0.
-    s.write16(PMON_LO, 0x0002);
-
-    // Configure both voices: full envelope, full volume,
-    // last_sample seeded directly so we don't depend on ADPCM.
-    for v in 0..2 {
-        let base = VOICE_BASE + (v as u32) * 16;
-        s.write16(base + voice_offset::VOLUME_L, 0x3FFF);
-        s.write16(base + voice_offset::VOLUME_R, 0x3FFF);
-        s.voices[v].phase = AdsrPhase::Sustain;
-        s.voices[v].envelope = 0x7FFF;
-        s.voices[v].last_sample = 0x4000;
-        // Block decode of zeros -- voice mixes its envelope * sample.
-        s.voices[v].sample_buf = [0x4000; ADPCM_SAMPLES_PER_BLOCK];
-        s.voices[v].sample_index = 0;
-    }
-
-    s.tick_sample(SAMPLE_CYCLES);
-    let (l, r) = s.drain_audio()[0];
-
-    // Voice 0 (modulator) should NOT contribute. Voice 1 alone
-    // would produce one full-scale sample's worth of output.
-    // Bound it: total must be < 2× single-voice level.
-    let voice_only = (0x4000_i32 * 0x3FFF) >> 14;
+fn fmod_modulator_voice_stays_audible() {
+    // Voice 0 modulates voice 1's pitch. Both emit a known non-zero sample
+    // and both reach the mix: a modulator is silenced only by its volume.
+    let render = |voices: std::ops::Range<usize>| {
+        let mut s = Spu::new();
+        s.main_vol_l.write(0x3FFF);
+        s.main_vol_r.write(0x3FFF);
+        s.write16(SPUCNT, SPUCNT_UNMUTE);
+        s.write16(PMON_LO, 0x0002); // voice 1 is modulated by voice 0
+        for v in voices {
+            let base = VOICE_BASE + (v as u32) * 16;
+            s.write16(base + voice_offset::VOLUME_L, 0x3FFF);
+            s.write16(base + voice_offset::VOLUME_R, 0x3FFF);
+            s.voices[v].phase = AdsrPhase::Sustain;
+            s.voices[v].envelope = 0x7FFF;
+            s.voices[v].last_sample = 0x4000;
+            s.voices[v].sample_buf = [0x4000; ADPCM_SAMPLES_PER_BLOCK];
+            s.voices[v].sample_index = 0;
+        }
+        s.tick_sample(SAMPLE_CYCLES);
+        s.drain_audio()[0]
+    };
+    let (alone_l, alone_r) = render(1..2);
+    let (both_l, both_r) = render(0..2);
+    assert!(alone_l > 0 && alone_r > 0, "voice 1 still plays");
     assert!(
-        (l as i32) < voice_only * 3 / 2,
-        "voice 0 leaked into L: l={l}"
+        both_l > alone_l,
+        "voice 0 must add to L: {both_l} vs {alone_l}"
     );
     assert!(
-        (r as i32) < voice_only * 3 / 2,
-        "voice 0 leaked into R: r={r}"
+        both_r > alone_r,
+        "voice 0 must add to R: {both_r} vs {alone_r}"
     );
-    // And greater than zero -- voice 1 still played.
-    assert!(l > 0);
-    assert!(r > 0);
 }
 
 #[test]
@@ -1305,7 +1309,7 @@ fn spucnt_mute_zeroes_voice_sample_history() {
     let (l, r) = s.drain_audio()[0];
 
     assert_eq!((l, r), (0, 0));
-    assert_eq!(s.voices[0].interpolation_window(), [0, 0, 0, 0]);
+    assert_eq!(s.voices[0].taps, [0, 0, 0, 0]);
 }
 
 #[test]
@@ -1358,11 +1362,9 @@ fn off_noise_voice_stays_silent() {
 
 #[test]
 fn single_block_loop_with_flag7_keeps_playing() {
-    // Finding #2: a single ADPCM block that sets loop-start+repeat+end
-    // (flags 0x7) must loop and keep sounding, not force-off after one
-    // block. The old `flags == 3` guard (inherited from PEOPS/PCSX-Redux)
-    // killed 0x7; PSX-SPX test the repeat bit (bit 1) on its
-    // own, so 0x7 loops just like 0x3.
+    // A single ADPCM block that sets loop-start+repeat+end (flags 0x7)
+    // must loop and keep sounding, not force-off after one block: the
+    // repeat bit (bit 1) is tested on its own, so 0x7 loops just like 0x3.
     let mut s = Spu::new();
     // Unmute the voice sample path: with SPUCNT bit 14 clear, decoded
     // samples are zeroed before entering the interpolation history (see
@@ -1384,7 +1386,7 @@ fn single_block_loop_with_flag7_keeps_playing() {
     s.voices[0].envelope = 0x7FFF;
     s.voices[0].current_addr = 0x20;
     s.voices[0].sample_index = ADPCM_SAMPLES_PER_BLOCK; // force first decode
-    s.voices[0].sample_pos = 0x10000;
+    s.voices[0].counter = COUNTER_ONE;
 
     // Play well past one block (28 samples). The voice must stay on and
     // keep emitting once the interpolation window has filled.
@@ -1427,7 +1429,7 @@ fn endx_latches_after_loop_end_block_finishes_not_when_decoded() {
     s.voices[0].envelope = 0x7FFF;
     s.voices[0].current_addr = 0x20;
     s.voices[0].sample_index = ADPCM_SAMPLES_PER_BLOCK; // force first decode
-    s.voices[0].sample_pos = 0x10000;
+    s.voices[0].counter = COUNTER_ONE;
 
     // First fetch decodes the loop-end block but must NOT latch ENDX yet;
     // it is only pending.
@@ -1516,12 +1518,11 @@ fn adsr_decay_is_always_exponential_regardless_of_release_mode() {
     // level in ~840 steps; a (wrong) linear decay would reach it in ~416.
     let count_steps = |release_exp: bool| -> u32 {
         let mut v = Voice::default();
-        v.adsr.decay_rate = 8;
-        v.adsr.sustain_level = 2;
-        v.adsr.release_exp = release_exp;
+        v.adsr_lo = (8 << 4) | 2;
+        v.adsr_hi = if release_exp { 1 << 5 } else { 0 };
         v.phase = AdsrPhase::Decay;
         v.envelope = 0x7FFF;
-        v.envelope_sub = 0;
+        v.pacer.reset();
         let mut steps = 0u32;
         while v.phase == AdsrPhase::Decay && steps < 100_000 {
             v.step_envelope();
@@ -1553,11 +1554,11 @@ fn adsr_decay_single_step_matches_exponential_with_linear_release_mode() {
     // Linear. Cross-checked against PSX-SPX exponential
     // decrease `(step * level) >> 15`.
     let mut v = Voice::default();
-    v.adsr.decay_rate = 0;
-    v.adsr.release_exp = false; // Linear release mode
+    v.adsr_lo = 0;
+    v.adsr_hi = 0; // linear release mode
     v.phase = AdsrPhase::Decay;
     v.envelope = 0x7000;
-    v.envelope_sub = 0;
+    v.pacer.reset();
     v.step_envelope();
     assert_eq!(
         v.envelope, 0x3800,
@@ -1576,8 +1577,7 @@ fn adsr_release_exponential_reaches_off_at_zero() {
     // level reaches the target (0 for Release). Previously the voice was
     // stuck in Release forever because the Off gate tested `< 0`.
     let mut v = Voice::default();
-    v.adsr.release_rate = 0;
-    v.adsr.release_exp = true;
+    v.adsr_hi = 1 << 5;
     v.phase = AdsrPhase::Release;
     v.envelope = 0x7FFF;
 
@@ -1639,7 +1639,7 @@ fn volume_envelope_increasing_linear_sweep_ramps_each_tick() {
 #[test]
 fn volume_envelope_decreasing_linear_sweep_falls_to_zero() {
     // rate 0x10, decreasing linear: step -1024 per sample from a
-    // positive starting level, clamped at 0. Matches both oracles.
+    // positive starting level, clamped at 0.
     let mut env = VolumeEnvelope::new();
     env.current = 0x4000; // prior level the sweep ramps down from
     env.write(0x8000 | (1 << 13) | 0x0010);
@@ -1725,8 +1725,8 @@ fn negative_fixed_voice_volume_inverts_output_sign() {
         s.voices[0].envelope = 0x7FFF;
         s.voices[0].sample_buf = [0x4000; ADPCM_SAMPLES_PER_BLOCK];
         s.voices[0].sample_index = 0;
-        s.voices[0].sample_pos = 0;
-        s.voices[0].interp_ring = [0x4000; 4];
+        s.voices[0].counter = 0;
+        s.voices[0].taps = [0x4000; 4];
         s.tick_sample(SAMPLE_CYCLES);
         s.drain_audio()[0]
     };
@@ -1749,94 +1749,72 @@ fn negative_fixed_voice_volume_inverts_output_sign() {
 
 // ---- reverb accuracy tests ----
 #[test]
-fn reverb_wet_output_is_apf2_result_not_mix_dest_sum() {
-    // the SPU spec the wet sample is the APF2 output
-    // (`LeftOutput = Lout*vLOUT`), NOT the old (MIX_DEST_A + MIX_DEST_B)/3.
-    // With every reverb coefficient zero except a unity output volume, and
-    // FB_ALPHA=FB_X=0, the APF chain collapses to `out = FB_B`, i.e. the
-    // value read from the MIX_DEST_B tap (captured before the MDB write).
-    // The old formula would instead read both MIX_DEST cells *after* the
-    // writes (MIX_DEST_A=0, MIX_DEST_B overwritten) and divide by 3 -> 0.
+fn reverb_wet_output_is_the_second_all_pass_result() {
+    // The wet sample is the output of the second all-pass filter times the
+    // output volume. With every coefficient zero except a unity output
+    // volume, both all-pass stages pass their delayed tap straight through
+    // (`out = out * 0 + [m - d]`), so the wet sample is the value in the
+    // second all-pass buffer cell, and no stage writes (master bit clear).
     use reverb_reg::*;
     let mut s = Spu::new();
     s.write16(REVERB_BASE, 0x1000); // base active; curr_addr = 0x4000
     s.write16(REVERB_VOL_L, 0x4000); // unity in scale_reverb_output (/0x4000)
     s.write16(REVERB_VOL_R, 0x4000);
 
-    // Distinct, non-overlapping cells. FB_SRC_A/B stay 0 so the APF taps
-    // read MIX_DEST_A/B directly. IIR_DEST cells (4,5,6,7) and their -1
-    // neighbours never touch the seeded MIX_DEST_B cells (10,11).
-    write_reverb_cfg(&mut s, IIR_DEST_A0, 4);
-    write_reverb_cfg(&mut s, IIR_DEST_A1, 5);
-    write_reverb_cfg(&mut s, IIR_DEST_B0, 6);
-    write_reverb_cfg(&mut s, IIR_DEST_B1, 7);
-    write_reverb_cfg(&mut s, MIX_DEST_A0, 8);
-    write_reverb_cfg(&mut s, MIX_DEST_A1, 9);
-    write_reverb_cfg(&mut s, MIX_DEST_B0, 10);
-    write_reverb_cfg(&mut s, MIX_DEST_B1, 11);
+    write_reverb_cfg(&mut s, M_LSAME, 4);
+    write_reverb_cfg(&mut s, M_RSAME, 5);
+    write_reverb_cfg(&mut s, M_LDIFF, 6);
+    write_reverb_cfg(&mut s, M_RDIFF, 7);
+    write_reverb_cfg(&mut s, M_LAPF1, 8);
+    write_reverb_cfg(&mut s, M_RAPF1, 9);
+    write_reverb_cfg(&mut s, M_LAPF2, 10);
+    write_reverb_cfg(&mut s, M_RAPF2, 11);
 
-    // Seed the APF2 (MIX_DEST_B) feedback taps; out = FB_B = these cells.
-    let idx_b0 = s.reverb_ram_index(10, 0);
-    let idx_b1 = s.reverb_ram_index(11, 0);
-    s.ram[idx_b0] = 1234i16 as u16;
-    s.ram[idx_b1] = (-567i16) as u16;
+    let idx_l = s.reverb_ram_index(10, 0);
+    let idx_r = s.reverb_ram_index(11, 0);
+    s.ram[idx_l] = 1234i16 as u16;
+    s.ram[idx_r] = (-567i16) as u16;
 
-    s.run_reverb_step(0, 0);
-
-    // APF2 output passes FB_B straight through (FB_X=0), then unity vLOUT.
-    assert_eq!(
-        s.reverb.wet_l, 1234,
-        "wet L must be the APF2 output (FB_B), not (MIX_DEST_A+MIX_DEST_B)/3"
-    );
-    assert_eq!(
-        s.reverb.wet_r, -567,
-        "wet R must be the APF2 output (FB_B), preserving sign"
-    );
+    let (l, _) = s.mix_reverb(0, 0);
+    let (_, r) = s.mix_reverb(0, 0);
+    assert_eq!(l, 1234, "left wet must be the second all-pass result");
+    assert_eq!(r, -567, "right wet must keep its sign");
 }
 
 #[test]
-fn reverb_iir_dest_reads_one_cell_behind_write() {
-    // the SPU spec the same/different-side IIR reflection reads
-    // [mLSAME-2] (one halfword behind, PSX-SPX ReverbRead(..,-1)) and
-    // writes the result at the cell itself (offset 0). PSoXide read at +0
-    // and wrote at +1. With IIR_ALPHA=0 the feedback term is exactly the
-    // value at the -1 tap (mul_q15(x, 32768) == x), so the cell written
-    // back must equal the seeded -1 cell, and the old +1 cell stays clear.
+fn reverb_reflection_reads_one_cell_behind_its_write() {
+    // A reflection filter reads [mLSAME-2] (one halfword behind) and writes
+    // its result at the cell itself. With vIIR = 0 the result is exactly the
+    // value in the cell behind, so the cell written must equal the seeded
+    // -1 cell, and the cell ahead stays clear.
     use reverb_reg::*;
     let mut s = Spu::new();
     s.write16(REVERB_BASE, 0x1000);
     s.write16(SPUCNT, SPUCNT_REVERB_MASTER_ENABLE);
-    // IIR_ALPHA=0 -> inv_iir_alpha=32768 -> iir = read(IIR_DEST-1) exactly.
-    write_reverb_cfg(&mut s, IIR_ALPHA, 0);
+    write_reverb_cfg(&mut s, V_IIR, 0);
 
-    write_reverb_cfg(&mut s, IIR_DEST_A0, 8); // write cell, base+32
-    write_reverb_cfg(&mut s, IIR_DEST_A1, 9);
-    write_reverb_cfg(&mut s, IIR_DEST_B0, 12);
-    write_reverb_cfg(&mut s, IIR_DEST_B1, 13);
-    // Keep MIX_DEST off the cells under test.
-    write_reverb_cfg(&mut s, MIX_DEST_A0, 20);
-    write_reverb_cfg(&mut s, MIX_DEST_A1, 21);
-    write_reverb_cfg(&mut s, MIX_DEST_B0, 22);
-    write_reverb_cfg(&mut s, MIX_DEST_B1, 23);
+    write_reverb_cfg(&mut s, M_LSAME, 8); // write cell, base+32
+    write_reverb_cfg(&mut s, M_RSAME, 9);
+    write_reverb_cfg(&mut s, M_LDIFF, 12);
+    write_reverb_cfg(&mut s, M_RDIFF, 13);
+    // Keep the all-pass buffers off the cells under test.
+    write_reverb_cfg(&mut s, M_LAPF1, 20);
+    write_reverb_cfg(&mut s, M_RAPF1, 21);
+    write_reverb_cfg(&mut s, M_LAPF2, 22);
+    write_reverb_cfg(&mut s, M_RAPF2, 23);
 
-    let idx_behind = s.reverb_ram_index(8, -1); // base+31, the correct read tap
-    let idx_at = s.reverb_ram_index(8, 0); // base+32, the correct write target
-    let idx_ahead = s.reverb_ram_index(8, 1); // base+33, the old (wrong) write target
+    let idx_behind = s.reverb_ram_index(8, -1); // base+31, the read tap
+    let idx_at = s.reverb_ram_index(8, 0); // base+32, the write target
+    let idx_ahead = s.reverb_ram_index(8, 1); // base+33
     s.ram[idx_behind] = 1000i16 as u16;
 
-    s.run_reverb_step(0, 0);
+    run_reverb_pair(&mut s);
 
-    // Read came from -1 (value 1000) and was written back at +0.
     assert_eq!(
         s.ram[idx_at], 1000i16 as u16,
-        "IIR_DEST must read one cell behind (-1) and write at the cell (+0)"
+        "the reflection must read one cell behind (-1) and write at the cell (+0)"
     );
-    // The old +1 write target must be untouched.
-    assert_eq!(
-        s.ram[idx_ahead], 0,
-        "IIR_DEST must no longer write one cell ahead (+1)"
-    );
-    // The seeded -1 source cell is only read, never written here.
+    assert_eq!(s.ram[idx_ahead], 0, "it must not write one cell ahead (+1)");
     assert_eq!(s.ram[idx_behind], 1000i16 as u16);
 }
 
@@ -1894,8 +1872,8 @@ fn pa5_master_off_reverb_reads_dma_work_area_until_output_depth_is_zero() {
 
     s.write16(REVERB_VOL_L, 0);
     s.write16(REVERB_VOL_R, 0);
-    // The interpolator legitimately drains the already-computed wet sample
-    // for two 22.05 kHz reverb ticks after vLOUT changes.
+    // Each channel holds its last computed output until its next pass, so
+    // allow two full pairs for the new volume to reach both outputs.
     for _ in 0..4 {
         let _ = s.mix_reverb(0, 0);
     }
@@ -1969,7 +1947,7 @@ fn adpcm_reserved_shift_13_to_15_acts_as_shift_9() {
     let mut s = Spu::new();
     let mut block = [0u8; 16];
     // ADPCM header byte: shift is the LOW nibble (bits 0..3), filter the
-    // high nibble (PSX-SPX `shift_filter` BitField<0,4>/<4,4>). So
+    // high nibble. So
     // shift 15 with predictor 0 is 0x0F, NOT 0xF0 (which would be shift 0).
     block[0] = 0x0F; // predictor 0, shift 15 (reserved)
     block[2] = 0x01; // sample0 nibble = 1, sample1 nibble = 0
@@ -2027,8 +2005,7 @@ fn adpcm_decode_clamps_predictor_history_to_i16() {
 #[test]
 fn gaussian_table_is_hardware_nocash_table() {
     // The shipped table must be the 512-entry nocash/hardware Gaussian
-    // table (byte-identical to PSX-SPX
-    // ), NOT the legacy PEOPS 1024-entry curve (peak 0x519).
+    // table (peak 0x59B3), not an 11-bit 1024-entry curve (peak 0x519).
     assert_eq!(GAUSS_TABLE.len(), 0x200);
     assert_eq!(GAUSS_TABLE[0], -1);
     assert_eq!(GAUSS_TABLE[0x1FF], 0x59B3);
@@ -2040,10 +2017,10 @@ fn gaussian_table_is_hardware_nocash_table() {
 
 #[test]
 fn gaussian_interp_matches_hardware_golden_vector() {
-    // Golden 4-tap window at phase i=250 (counter fraction 0xFA13).
-    // The hardware/PSX-SPX result is 13344; the old
-    // PEOPS table produced 9153, so this discriminates the two curves.
-    let out = gauss_interpolate([-31831, -31193, 32367, -31905], 0xFA13);
+    // Golden 4-tap window at phase i=250 (counter fraction 0xFA1).
+    // The hardware table gives 13344; the 11-bit curve gives 9153, so this
+    // discriminates the two.
+    let out = gauss_interpolate([-31831, -31193, 32367, -31905], 0xFA1);
     assert_eq!(out, 13344);
 }
 
@@ -2064,17 +2041,16 @@ fn gaussian_interp_dc_gain_has_hardware_droop() {
 }
 
 #[test]
-fn gaussian_interp_phase_index_is_high_byte_of_frac() {
-    // The phase selector is the high byte of the 16-bit fractional
-    // cursor: i = (frac >> 8) & 0xFF. A window with a single non-zero
-    // newest tap (samples[3]) scales purely by GAUSS_TABLE[i].
-    for frac in [0x0000u32, 0x0123, 0x8000, 0xFA13, 0xFFFF] {
-        let i = ((frac >> 8) & 0xFF) as usize;
+fn gaussian_interp_phase_index_is_bits_4_to_11_of_the_counter() {
+    // A window with a single non-zero newest tap scales purely by
+    // GAUSS_TABLE[i], where i = (counter >> 4) & 0xFF.
+    for counter in [0x000u32, 0x012, 0x800, 0xFA1, 0xFFF] {
+        let i = ((counter >> 4) & 0xFF) as usize;
         let expected = saturate_i16((GAUSS_TABLE[i] * 0x4000) >> 15);
         assert_eq!(
-            gauss_interpolate([0, 0, 0, 0x4000], frac),
+            gauss_interpolate([0, 0, 0, 0x4000], counter),
             expected,
-            "frac={frac:#06x}"
+            "counter={counter:#06x}"
         );
     }
 }
@@ -2207,8 +2183,8 @@ fn voice1_voice3_outputs_written_to_capture_buffers() {
     s.voices[1].envelope = 0x7FFF;
     s.voices[1].sample_buf = [0x4000; ADPCM_SAMPLES_PER_BLOCK];
     s.voices[1].sample_index = 0;
-    s.voices[1].sample_pos = 0;
-    s.voices[1].interp_ring = [0x4000; 4];
+    s.voices[1].counter = 0;
+    s.voices[1].taps = [0x4000; 4];
 
     s.tick_sample(SAMPLE_CYCLES);
 

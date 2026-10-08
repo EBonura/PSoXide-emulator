@@ -51,12 +51,13 @@ impl XaDecoderState {
 }
 
 /// Predictor weights applied to the newest previous sample, indexed by the
-/// block's filter number, in 1/64 units (PSX-SPX `pos_xa_adpcm_table`).
+/// block's filter number, in 1/64 units (PSX-SPX "CDROM XA Audio ADPCM
+/// Compression").
 /// XA defines filters 0..=3 only.
 const XA_FILTER_NEWEST: [i32; 4] = [0, 60, 115, 98];
 
 /// Predictor weights applied to the older previous sample, in 1/64 units
-/// (PSX-SPX `neg_xa_adpcm_table`).
+/// (same table).
 const XA_FILTER_OLDER: [i32; 4] = [0, 0, -52, -55];
 
 /// Largest range value that is used as written. PSX-SPX: ranges 13..=15

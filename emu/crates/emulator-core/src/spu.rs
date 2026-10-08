@@ -2,63 +2,67 @@
 //!
 //! The SPU is a 24-voice ADPCM sample engine with per-voice ADSR
 //! envelopes, pitch-controlled playback, a 512 KiB sample RAM, and
-//! stereo output mixed at 44.1 kHz. This module is the real thing --
-//! ADPCM decode, voice state machine, ADSR, stereo mixing. What's
-//! explicitly **not** modelled yet (each a follow-up session):
+//! stereo output mixed at 44.1 kHz.
 //!
-//! - XA ADPCM streaming (CD-DA audio / in-game speech) is decoded by
-//!   the CDROM module; the SPU exposes [`xa_decode_block`] for it but
-//!   does not call it from `tick_sample`.
-//!
-//! Already in: 1024-entry Gaussian sample interpolation (`GAUSS_TABLE`)
-//! and hardware-accurate voice/main volume decode: fixed signed-Q15
-//! levels (bit15=0, including negative phase-inverted volumes) and a
-//! fully animated sweep envelope (bit15=1), matching PSX-SPX and
-//! the PSX hardware volume-sweep behaviour.
-//!
-//! Reference implementations consulted as parity oracles:
-//! - PCSX-Redux `src/spu/{spu,adsr,registers,dma}.cc` (GPL-2.0-or-later)
-//!   -- behavioural reference for ADSR rate tables and voice state model.
-//! - psx-spx "SPU" chapter for register layout + ADPCM filter table.
-//! - Neill Corlett's SPU envelope notes (quoted in `adsr.cc`).
+//! Not modelled: the external audio input (nothing feeds it on a console).
+//! XA-ADPCM and CD-DA samples arrive already decoded from the CD-ROM
+//! module through [`Spu::feed_cd_audio`].
 //!
 //! Pipeline per 44.1 kHz sample:
 //!
-//! 1. For each voice, skip `Off` envelopes, advance ADPCM read
-//!    position by `raw_pitch / 0x1000` of a sample, decode the next
-//!    16-byte ADPCM block when `sample_index` reaches 28, apply loop
-//!    flags, interpolate at the fractional position, advance ADSR,
-//!    then apply per-voice L/R volume.
-//! 2. Sum all 24 voices into `(sum_l, sum_r)`.
-//! 3. Feed EON-enabled voices and CD reverb input into the Neill/Redux
-//!    reverb network in SPU RAM.
-//! 4. For PCSX-Redux parity, route the dry voice/CD sum directly to
-//!    output; Redux stores but does not apply main-volume writes in
-//!    its SPU mixer. Then add wet reverb output and saturate to i16.
-//! 5. Push (l, r) to the host-facing output ring.
+//! 1. For each voice, take in the decoded ADPCM samples its pitch counter
+//!    has passed (decoding the next 16-byte block when the current one is
+//!    used up and acting on its loop flags), interpolate at the counter's
+//!    fractional position through the 4-point Gaussian table, step the
+//!    ADSR envelope, apply it, then apply the per-voice L/R volumes. A
+//!    noise voice substitutes the shared noise generator's level for the
+//!    interpolated sample.
+//! 2. Sum the voices into `(sum_l, sum_r)`; voices enabled for reverb (and
+//!    the CD input, when routed there) also feed the reverb bus.
+//! 3. Mix in the CD input at its volume, write the four capture buffers,
+//!    run the reverb for this sample, add its wet output, saturate, and
+//!    scale by the main volume.
+//! 4. Push `(l, r)` to the host-facing output ring.
 //!
-//! SPU IRQ: if SPUCNT bit 6 (IRQEnable) is set and the IRQ address
-//! matches a voice sample-read pointer, a transfer FIFO access, or
-//! Redux's decoded/capture-buffer cursor in low SPU RAM, we latch
-//! STATUS bit 6 and signal the bus.
+//! SPU IRQ: if SPUCNT bit 6 (IRQ enable) is set and the IRQ address matches
+//! a voice's block read, a transfer FIFO access or the capture-buffer
+//! cursor in low SPU RAM, STATUS bit 6 latches and the bus is signalled.
 //!
 //! Sample rate: 44_100 Hz. PSX clock is 33_868_800 Hz, so 1 sample =
-//! 768 cycles. We tick the SPU from the scheduler every [`SAMPLE_CYCLES`]
-//! cycles.
+//! 768 cycles. The scheduler ticks the SPU every [`SAMPLE_CYCLES`] cycles.
 //!
 //! ## Provenance
 //!
-//! Portions of this module are parity-matched against, and in places
-//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
-//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
-//! correspondence are flagged inline with `Redux` references. PSoXide is
-//! released under GPL-2.0-or-later in part to honor this lineage; see
-//! `LICENSE` and `docs/license-audit.md`.
+//! The voice engine is written from nocash PSX-SPX: ADPCM blocks and loop
+//! flags ("SPU ADPCM Samples"), the pitch counter and pitch modulation
+//! ("SPU ADPCM Pitch"), the ADSR and volume sweeps ("SPU Volume and ADSR
+//! Generator", in `envelope.rs`), the noise generator, and the reverb
+//! formulas ("SPU Reverb Formula"). The Gaussian table is the hardware
+//! constant PSX-SPX lists. Transfer FIFO, DMA, SPUSTAT mirroring, capture
+//! buffers, key-on latency and the IRQ rules are this project's own
+//! measurements on its console (hardware tests PA2-PA5, SB1-SB4). Where a
+//! value is a legacy scaling kept because nothing measured contradicts it,
+//! the code says so:
+//!
+//! - the reverb output volume register is applied as Q14 (0x4000 = unity)
+//!   and the main volume register word as signed Q15, both as the earlier
+//!   mixer did; the documented Q15 treatment of the reverb output volume
+//!   would halve the wet level;
+//! - a reverb work area at or below 0x0200, or 0xFFFF, is treated as off.
+//!
+//! This module no longer contains code derived from another emulator.
+//! See `LICENSE` and `docs/PROVENANCE.md`.
 
 use crate::scheduler::{EventSlot, Scheduler};
 
+mod envelope;
 mod xa;
 pub use xa::{xa_decode_block, XaDecoderState};
+
+use envelope::{
+    attack_slope, decay_slope, release_slope, sustain_slope, sustain_threshold, Pacer,
+    VolumeEnvelope,
+};
 
 // ===============================================================
 //  Register addresses -- voice bank + global + reverb config.
@@ -195,51 +199,16 @@ const OUTPUT_BUFFER_CAP: usize = 44100 * 2; // 2 seconds of stereo samples
 //  ADPCM filter table (5 filters × 2 coefficients, matches PSX-SPX).
 // ===============================================================
 
-/// ADPCM prediction filter coefficients: `(s_1_weight, s_2_weight)` in Q6.
-///
-/// Applied as `fa = raw + (s_1 * f[0] + s_2 * f[1]) >> 6` during block decode.
-/// Filters 0..4 are the canonical set used by the real hardware; filters 5..15
-/// use the same coefficients (SPU-SPX notes that only the lower 3 bits of the
-/// predictor field matter, so 0..7 clamp to 0..4 -- we clamp explicitly).
-const ADPCM_FILTER_TABLE: [(i32, i32); 5] = [(0, 0), (60, 0), (115, -52), (98, -55), (122, -60)];
+/// ADPCM prediction filters: weights, in 64ths, of the previous sample and the
+/// one before it (PSX-SPX "SPU ADPCM Samples" and the CD-XA ADPCM tables).
+/// The header's filter field is capped at 4, the last defined filter.
+/// One whole sample of a voice's counter (12 fractional bits).
+const COUNTER_ONE: u32 = 1 << 12;
+/// A new note's starting counter: three whole samples to take in before the
+/// first output.
+const NEW_NOTE_COUNTER: u32 = 3 * COUNTER_ONE;
 
-// ===============================================================
-//  ADSR envelope rate tables. Generated to match Redux's
-//  `EnvelopeTables` output exactly so envelope ticks line up
-//  sample-for-sample against the parity oracle.
-// ===============================================================
-
-/// Envelope tick-period denominator for each rate (0..=127).
-///
-/// Rate < 48: 1 (increment/decrement happens every sample).
-/// Rate >= 48: `1 << ((rate >> 2) - 11)` (doubles every 4 rate units).
-const fn envelope_denominator(rate: usize) -> i32 {
-    if rate < 48 {
-        1
-    } else {
-        1i32 << ((rate >> 2) - 11)
-    }
-}
-
-/// Envelope positive increment numerator: applied on increment ticks.
-const fn envelope_numerator_increase(rate: usize) -> i32 {
-    let step = 7 - (rate as i32 & 3);
-    if rate < 48 {
-        step << (11 - (rate >> 2))
-    } else {
-        step
-    }
-}
-
-/// Envelope negative decrement numerator.
-const fn envelope_numerator_decrease(rate: usize) -> i32 {
-    let step = -8 + (rate as i32 & 3);
-    if rate < 48 {
-        step << (11 - (rate >> 2))
-    } else {
-        step
-    }
-}
+const ADPCM_FILTERS: [(i32, i32); 5] = [(0, 0), (60, 0), (115, -52), (98, -55), (122, -60)];
 
 // ===============================================================
 //  ADSR phase + per-voice envelope state.
@@ -256,200 +225,9 @@ enum AdsrPhase {
     Release,
 }
 
-/// Decoded ADSR configuration -- parsed from the 32-bit `(adsr_lo | adsr_hi<<16)`
-/// register pair. We decode once at write time and stash the bit-fields so the
-/// hot path (envelope tick per sample) is pure arithmetic.
-#[derive(Copy, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-struct AdsrConfig {
-    attack_rate: i32,   // 0..=127 (with mode bit folded in)
-    attack_exp: bool,   // linear vs exponential slope
-    decay_rate: i32,    // 0..=15
-    sustain_level: i32, // 0..=15 (target = (N+1) * 0x800)
-    sustain_rate: i32,  // 0..=127 (with mode bits folded in)
-    sustain_exp: bool,
-    sustain_increase: bool, // 1 = rising, 0 = falling
-    release_rate: i32,      // 0..=31
-    release_exp: bool,
-}
-
-/// Parse the low 16 bits of the ADSR register pair into `(ar, ar_exp, dr, sl)`.
-fn parse_adsr_lo(lo: u16, cfg: &mut AdsrConfig) {
-    cfg.attack_exp = (lo & (1 << 15)) != 0;
-    cfg.attack_rate = ((lo >> 8) & 0x7F) as i32;
-    cfg.decay_rate = ((lo >> 4) & 0xF) as i32;
-    cfg.sustain_level = (lo & 0xF) as i32;
-}
-
-/// Parse the high 16 bits of the ADSR register pair into `(sm, sd, sr, rm, rr)`.
-fn parse_adsr_hi(hi: u16, cfg: &mut AdsrConfig) {
-    cfg.sustain_exp = (hi & (1 << 15)) != 0;
-    cfg.sustain_increase = (hi & (1 << 14)) == 0;
-    cfg.sustain_rate = ((hi >> 6) & 0x7F) as i32;
-    cfg.release_exp = (hi & (1 << 5)) != 0;
-    cfg.release_rate = (hi & 0x1F) as i32;
-}
-
 // ===============================================================
 //  Voice state.
 // ===============================================================
-
-/// One SPU volume channel. Holds the raw 16-bit register value so
-/// reads round-trip verbatim, plus the hardware `current` level in
-/// full signed Q15 (-0x8000..=0x7FFF). Voice/main volume registers
-/// support a fixed level (bit15=0, signed 15-bit value * 2, so bit14
-/// is a genuine negative phase) and an animated sweep envelope
-/// (bit15=1, ramped linear/exponential up/down each sample). CD,
-/// external, and reverb-output volumes are plain fixed signed values
-/// written via [`write_signed_q15`]. The sweep math is a direct port
-/// of the PSX hardware volume sweep
-/// and the per-voice volume envelope;
-/// the level is applied as `(sample * current) >> 15`.
-#[derive(Copy, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-struct VolumeEnvelope {
-    /// The last 16-bit word written to the register. `reads` echo
-    /// this so software verification paths see the exact config.
-    raw: u16,
-    /// Current signed Q15 level, -0x8000..=0x7FFF. Applied to samples
-    /// as `(sample * current) >> 15`, matching both parity oracles.
-    current: i16,
-    /// True only while a sweep (bit15=1) is animating; `tick` is a
-    /// no-op for fixed levels and for never-ticking rates.
-    sweep_active: bool,
-    /// Sweep envelope state (mirrors PSX-SPX `VolumeEnvelope`).
-    sweep_counter: u32,
-    /// Counter increment. MUST be u32: the rate-0x7F "never ticks" case
-    /// shifts 0x8000 right by 20 (`(0x7F>>2)-11`), which a u16 would mask
-    /// to `>>4`=0x0800 (a nonzero, wrongly-active increment) in release
-    /// builds. A wider integer width is what makes the over-shift collapse
-    /// to 0 as the PSX hardware requires.
-    sweep_increment: u32,
-    sweep_step: i16,
-    sweep_rate: u8,
-    sweep_decreasing: bool,
-    sweep_exponential: bool,
-    sweep_phase_invert: bool,
-}
-
-impl VolumeEnvelope {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    /// Accept a new 16-bit voice/main volume register value.
-    ///
-    /// bit15=0: fixed volume. Bits 0..14 are a signed 15-bit value
-    /// representing Volume/2, so `current = signed15 * 2` (a set bit14
-    /// is a real negative/phase-inverted volume). bit15=1: configure a
-    /// sweep envelope and leave `current` at its prior level, ramping
-    /// from there each `tick`. Matches PSX-SPX
-    /// the old PCSX-Redux-style fabricated
-    /// sweep gain + sign-masked fixed level are gone (SPU_AUDIT #5/#6/#14).
-    fn write(&mut self, raw: u16) {
-        self.raw = raw;
-        if raw & 0x8000 != 0 {
-            // Sweep mode: program the envelope, keep current_level.
-            self.sweep_reset(
-                (raw & 0x7F) as u8,
-                raw & (1 << 13) != 0, // decreasing
-                raw & (1 << 14) != 0, // exponential
-                raw & (1 << 12) != 0, // phase-invert
-            );
-            self.sweep_active = self.sweep_increment > 0;
-        } else {
-            // Fixed mode: signed 15-bit field (bits 0..14) * 2.
-            let field = ((raw & 0x7FFF) as i16) << 1 >> 1; // sign-extend bit14
-            self.current = field.wrapping_mul(2);
-            self.sweep_active = false;
-        }
-    }
-
-    /// Accept a fixed signed Q15 volume register. CD input, external
-    /// input, and reverb output volumes are plain signed volumes, not
-    /// voice/main sweep registers with bit-14 phase semantics.
-    fn write_signed_q15(&mut self, raw: u16) {
-        self.raw = raw;
-        self.current = raw as i16;
-        self.sweep_active = false;
-    }
-
-    /// Configure the sweep envelope. Direct port of PSX-SPX
-    /// `VolumeEnvelope::Reset(rate, rate_mask=0x7F, ...)` /
-    /// PSX-SPX `Envelope::reset`.
-    fn sweep_reset(&mut self, rate: u8, decreasing: bool, exponential: bool, phase_invert: bool) {
-        self.sweep_rate = rate;
-        self.sweep_decreasing = decreasing;
-        self.sweep_exponential = exponential;
-        // psx-spx: phase bit has no effect in exponential-decrease mode.
-        self.sweep_phase_invert = phase_invert && !(decreasing && exponential);
-        self.sweep_counter = 0;
-        self.sweep_increment = 0x8000;
-
-        let base_step = 7 - (rate as i32 & 3);
-        let neg = (decreasing ^ phase_invert) || (decreasing && exponential);
-        let mut step = if neg { !base_step } else { base_step };
-        if rate < 44 {
-            step <<= 11 - (rate >> 2);
-        } else if rate >= 48 {
-            self.sweep_increment >>= (rate >> 2) - 11;
-            // Rate 0x7F (all bits set under the 0x7F mask) never ticks.
-            if (rate & 0x7F) != 0x7F {
-                self.sweep_increment = self.sweep_increment.max(1);
-            }
-        }
-        self.sweep_step = step as i16;
-    }
-
-    /// Advance one SPU sample. Ramps `current` per the configured
-    /// sweep; a no-op for fixed levels (`sweep_active == false`).
-    /// Direct port of PSX-SPX `VolumeEnvelope::Tick`.
-    fn tick(&mut self) {
-        if !self.sweep_active {
-            return;
-        }
-        let mut this_increment = self.sweep_increment;
-        let mut this_step = self.sweep_step as i32;
-        if self.sweep_exponential {
-            if self.sweep_decreasing {
-                this_step = (this_step * self.current as i32) >> 15;
-            } else if self.current >= 0x6000 {
-                if self.sweep_rate < 40 {
-                    this_step >>= 2;
-                } else if self.sweep_rate >= 44 {
-                    this_increment >>= 2;
-                } else {
-                    this_step >>= 1;
-                    this_increment >>= 1;
-                }
-            }
-        }
-        self.sweep_counter += this_increment;
-        if self.sweep_counter & 0x8000 == 0 {
-            return;
-        }
-        self.sweep_counter = 0;
-        let new_level = self.current as i32 + this_step;
-        if !self.sweep_decreasing {
-            let clamped = new_level.clamp(-0x8000, 0x7FFF);
-            self.current = clamped as i16;
-            let limit = if this_step < 0 { -0x8000 } else { 0x7FFF };
-            self.sweep_active = clamped != limit;
-        } else {
-            let clamped = if self.sweep_phase_invert {
-                new_level.clamp(-0x8000, 0)
-            } else {
-                new_level.max(0)
-            };
-            self.current = clamped as i16;
-            self.sweep_active = clamped != 0;
-        }
-    }
-
-    /// Read-back value -- always returns the raw register the CPU
-    /// wrote, not the animated current level.
-    fn reg_read(&self) -> u16 {
-        self.raw
-    }
-}
 
 /// Per-voice runtime state. Holds decode buffers, ADSR envelope,
 /// volumes, and loop pointers. Kept plain (no padding or SIMD) --
@@ -479,57 +257,47 @@ struct Voice {
     /// 16-bit word, or `loop_addr >> 3` when the decoder sets the loop.
     loop_addr_raw: u16,
     /// True if software wrote REPEAT_ADDR directly since voice start;
-    /// suppresses the ADPCM flag-4 loop-start auto-update (matches
-    /// Redux's `IgnoreLoop`).
+    /// suppresses the ADPCM loop-start flag's update of the repeat address.
     loop_addr_locked: bool,
     /// Raw ADSR_LO / ADSR_HI words. Stored so reads echo them back.
     adsr_lo: u16,
     adsr_hi: u16,
-    /// Decoded ADSR parameters.
-    adsr: AdsrConfig,
     /// Current ADSR phase.
     phase: AdsrPhase,
     /// Envelope level, 0..=0x7FFF (Q15). Multiplies the decoded sample.
     envelope: i32,
-    /// Envelope sub-sample counter (`EnvelopeVolF` in Redux); compared
-    /// to `denominator[rate]` to decide whether to step the envelope
-    /// this sample.
-    envelope_sub: i32,
+    /// Spaces the envelope's level updates (see [`envelope::Slope`]).
+    pacer: Pacer,
     /// Current byte address into SPU RAM for the *next* ADPCM block to
     /// decode. Updated after each block consumed.
     current_addr: u32,
     /// Decoded samples from the most recent 16-byte block (28 samples).
     /// Indexed by `sample_index`. Each sample is saturated to i16
     /// (-0x8000..=0x7FFF) at decode time before it is stored here and fed
-    /// back into the ADPCM predictor history, matching real hardware and
-    /// both parity oracles (the IIR runs on the 16-bit-saturated value).
+    /// back into the ADPCM predictor history, as on real hardware (the
+    /// filter runs on the 16-bit-saturated value).
     sample_buf: [i32; ADPCM_SAMPLES_PER_BLOCK],
     /// Index into `sample_buf`; when it reaches 28 we decode the next
     /// block before taking the next sample.
     sample_index: usize,
-    /// Redux-style fixed-point sample cursor (`spos`). Each output
-    /// sample consumes decoded input samples while this stays above
-    /// `0x10000`, then adds the pitch step (`raw_pitch << 4`) for the
-    /// next call. Starting at `0x30000` primes the Gaussian window
-    /// with three decoded samples before the first audible output.
-    sample_pos: u32,
-    /// Rolling 4-sample interpolation ring. Redux stores decoded
-    /// samples into `SB[29..32]` and runs the Gaussian window over the
-    /// ring so block boundaries still see the previous block's tail.
-    /// Without this history, the interpolator falls back to zeros at
-    /// every 28-sample ADPCM edge and the output gets audibly gritty.
-    interp_ring: [i16; 4],
-    /// Next insertion slot in `interp_ring`. Also the logical
-    /// "oldest sample" index when reading the Gaussian window.
-    interp_pos: usize,
+    /// Position within the sample stream, with 12 fractional bits (PSX-SPX
+    /// "SPU ADPCM Pitch"): every output sample adds the voice's pitch step,
+    /// and each time the counter passes a whole sample the next decoded
+    /// sample is taken in. A new note starts at three whole samples so the
+    /// interpolator's window is full before the first output.
+    counter: u32,
+    /// The four most recent decoded samples, oldest first: the interpolator's
+    /// window. It carries across ADPCM block boundaries, so the previous
+    /// block's tail is still seen when the next one starts.
+    taps: [i16; 4],
     /// Previous two decoded samples -- ADPCM filter history. Preserved
     /// across block boundaries; reset on KON.
     s_1: i32,
     s_2: i32,
     /// Set when a decoded block had the stop flag without a valid
-    /// loop. The current 28-sample block must still play out fully;
-    /// Redux only turns the voice off when the decoder reaches the
-    /// *next* block boundary.
+    /// loop. The current 28-sample block must still play out fully; the
+    /// voice is turned off when the decoder reaches the *next* block
+    /// boundary.
     stop_after_block: bool,
     /// ENDX latch is deferred: a decoded loop-end (flag-1) block sets
     /// this, and ENDX is latched at the *next* block boundary in
@@ -569,16 +337,14 @@ impl Default for Voice {
             loop_addr_locked: false,
             adsr_lo: 0,
             adsr_hi: 0,
-            adsr: AdsrConfig::default(),
             phase: AdsrPhase::Off,
             envelope: 0,
-            envelope_sub: 0,
+            pacer: Pacer::default(),
             current_addr: 0,
             sample_buf: [0; ADPCM_SAMPLES_PER_BLOCK],
             sample_index: ADPCM_SAMPLES_PER_BLOCK, // forces decode on first tick
-            sample_pos: 0x30000,
-            interp_ring: [0; 4],
-            interp_pos: 0,
+            counter: NEW_NOTE_COUNTER,
+            taps: [0; 4],
             s_1: 0,
             s_2: 0,
             stop_after_block: false,
@@ -597,12 +363,11 @@ impl Voice {
         self.phase = AdsrPhase::Attack;
         self.start_delay = 8;
         self.envelope = 0;
-        self.envelope_sub = 0;
+        self.pacer.reset();
         self.current_addr = self.start_addr;
         self.sample_index = ADPCM_SAMPLES_PER_BLOCK;
-        self.sample_pos = 0x30000;
-        self.interp_ring = [0; 4];
-        self.interp_pos = 0;
+        self.counter = NEW_NOTE_COUNTER;
+        self.taps = [0; 4];
         self.s_1 = 0;
         self.s_2 = 0;
         self.stop_after_block = false;
@@ -621,18 +386,9 @@ impl Voice {
         }
     }
 
-    fn push_interpolation_sample(&mut self, sample: i16) {
-        self.interp_ring[self.interp_pos] = sample;
-        self.interp_pos = (self.interp_pos + 1) & 3;
-    }
-
-    fn interpolation_window(&self) -> [i16; 4] {
-        [
-            self.interp_ring[self.interp_pos],
-            self.interp_ring[(self.interp_pos + 1) & 3],
-            self.interp_ring[(self.interp_pos + 2) & 3],
-            self.interp_ring[(self.interp_pos + 3) & 3],
-        ]
+    /// Take a decoded sample into the interpolation window.
+    fn push_tap(&mut self, sample: i16) {
+        self.taps = [self.taps[1], self.taps[2], self.taps[3], sample];
     }
 
     /// Advance the ADSR envelope by one sample. Returns the current
@@ -652,15 +408,8 @@ impl Voice {
     }
 
     fn step_attack(&mut self) -> i32 {
-        let mut rate = self.adsr.attack_rate;
-        if self.adsr.attack_exp && self.envelope >= 0x6000 {
-            rate = (rate + 8).min(127);
-        }
-        let denom = envelope_denominator(rate as usize);
-        self.envelope_sub += 1;
-        if self.envelope_sub >= denom {
-            self.envelope_sub = 0;
-            self.envelope += envelope_numerator_increase(rate as usize);
+        if let Some(delta) = self.pacer.tick(attack_slope(self.adsr_lo), self.envelope) {
+            self.envelope += delta;
         }
         if self.envelope >= 0x7FFF {
             self.envelope = 0x7FFF;
@@ -670,84 +419,27 @@ impl Voice {
     }
 
     fn step_decay(&mut self) -> i32 {
-        // Decay rate is 0..=15, scaled to a 7-bit rate by *4. Decay is
-        // ALWAYS an exponential decrease on real hardware -- it is not
-        // gated on the release-mode bit (which is an independent ADSR
-        // field). PSX-SPX resets the decay envelope with
-        // exponential=true unconditionally ( UpdateADSREnvelope),
-        // PSX-SPX hard-codes EnvelopeMode::Exponential for Decay, and
-        // PSX-SPX states "decay mode is always Exponential decrease, and
-        // thus cannot be set".
-        let rate = (self.adsr.decay_rate * 4).min(127);
-        let denom = envelope_denominator(rate as usize);
-        self.envelope_sub += 1;
-        if self.envelope_sub >= denom {
-            self.envelope_sub = 0;
-            let dec = envelope_numerator_decrease(rate as usize);
-            self.envelope += (dec * self.envelope) >> 15;
+        // Decay is always an exponential decrease; the release-mode bit
+        // belongs to the release segment only.
+        if let Some(delta) = self.pacer.tick(decay_slope(self.adsr_lo), self.envelope) {
+            self.envelope = (self.envelope + delta).max(0);
         }
-        if self.envelope < 0 {
-            self.envelope = 0;
-        }
-        // Sustain level target: (sustain_level + 1) * 0x800 -- but the
-        // Redux check uses the high nibble of envelope directly, which
-        // is simpler and matches hardware.
-        if ((self.envelope >> 11) & 0xF) <= self.adsr.sustain_level {
+        if self.envelope < sustain_threshold(self.adsr_lo) {
             self.phase = AdsrPhase::Sustain;
         }
         self.envelope
     }
 
     fn step_sustain(&mut self) -> i32 {
-        let mut rate = self.adsr.sustain_rate;
-        if self.adsr.sustain_increase {
-            // Rising sustain -- matches Attack structurally.
-            if self.adsr.sustain_exp && self.envelope >= 0x6000 {
-                rate = (rate + 8).min(127);
-            }
-            let denom = envelope_denominator(rate as usize);
-            self.envelope_sub += 1;
-            if self.envelope_sub >= denom {
-                self.envelope_sub = 0;
-                self.envelope += envelope_numerator_increase(rate as usize);
-            }
-            if self.envelope > 0x7FFF {
-                self.envelope = 0x7FFF;
-            }
-        } else {
-            // Falling sustain -- structurally like Release but without
-            // the voice-off transition.
-            let denom = envelope_denominator(rate as usize);
-            self.envelope_sub += 1;
-            if self.envelope_sub >= denom {
-                self.envelope_sub = 0;
-                if self.adsr.sustain_exp {
-                    let dec = envelope_numerator_decrease(rate as usize);
-                    self.envelope += (dec * self.envelope) >> 15;
-                } else {
-                    self.envelope += envelope_numerator_decrease(rate as usize);
-                }
-            }
-            if self.envelope < 0 {
-                self.envelope = 0;
-            }
+        if let Some(delta) = self.pacer.tick(sustain_slope(self.adsr_hi), self.envelope) {
+            self.envelope = (self.envelope + delta).clamp(0, 0x7FFF);
         }
         self.envelope
     }
 
     fn step_release(&mut self) -> i32 {
-        // Release rate 0..=31 scales to 7-bit rate by *4.
-        let rate = (self.adsr.release_rate * 4).min(127);
-        let denom = envelope_denominator(rate as usize);
-        self.envelope_sub += 1;
-        if self.envelope_sub >= denom {
-            self.envelope_sub = 0;
-            if self.adsr.release_exp {
-                let dec = envelope_numerator_decrease(rate as usize);
-                self.envelope += (dec * self.envelope) >> 15;
-            } else {
-                self.envelope += envelope_numerator_decrease(rate as usize);
-            }
+        if let Some(delta) = self.pacer.tick(release_slope(self.adsr_hi), self.envelope) {
+            self.envelope += delta;
         }
         if self.envelope <= 0 {
             self.envelope = 0;
@@ -761,71 +453,119 @@ impl Voice {
 //  Reverb state.
 // ===============================================================
 
+/// Indices of the reverb registers in [`Spu::reverb_cfg`], in address order
+/// from 0x1F801DC0 (PSX-SPX "SPU Reverb Registers"). `d` registers are
+/// displacements, `m` registers buffer addresses and `v` registers volumes;
+/// all addresses count in units of 8 bytes. Left/right pairs sit next to
+/// each other.
 mod reverb_reg {
-    pub const FB_SRC_A: usize = 0;
-    pub const FB_SRC_B: usize = 1;
-    pub const IIR_ALPHA: usize = 2;
-    pub const ACC_COEF_A: usize = 3;
-    pub const ACC_COEF_B: usize = 4;
-    pub const ACC_COEF_C: usize = 5;
-    pub const ACC_COEF_D: usize = 6;
-    pub const IIR_COEF: usize = 7;
-    pub const FB_ALPHA: usize = 8;
-    pub const FB_X: usize = 9;
-    pub const IIR_DEST_A0: usize = 10;
-    pub const IIR_DEST_A1: usize = 11;
-    pub const ACC_SRC_A0: usize = 12;
-    pub const ACC_SRC_A1: usize = 13;
-    pub const ACC_SRC_B0: usize = 14;
-    pub const ACC_SRC_B1: usize = 15;
-    pub const IIR_SRC_A0: usize = 16;
-    pub const IIR_SRC_A1: usize = 17;
-    pub const IIR_DEST_B0: usize = 18;
-    pub const IIR_DEST_B1: usize = 19;
-    pub const ACC_SRC_C0: usize = 20;
-    pub const ACC_SRC_C1: usize = 21;
-    pub const ACC_SRC_D0: usize = 22;
-    pub const ACC_SRC_D1: usize = 23;
-    pub const IIR_SRC_B1: usize = 24;
-    pub const IIR_SRC_B0: usize = 25;
-    pub const MIX_DEST_A0: usize = 26;
-    pub const MIX_DEST_A1: usize = 27;
-    pub const MIX_DEST_B0: usize = 28;
-    pub const MIX_DEST_B1: usize = 29;
-    pub const IN_COEF_L: usize = 30;
-    pub const IN_COEF_R: usize = 31;
+    pub const D_APF1: usize = 0;
+    pub const D_APF2: usize = 1;
+    pub const V_IIR: usize = 2;
+    pub const V_COMB1: usize = 3;
+    pub const V_COMB2: usize = 4;
+    pub const V_COMB3: usize = 5;
+    pub const V_COMB4: usize = 6;
+    pub const V_WALL: usize = 7;
+    pub const V_APF1: usize = 8;
+    pub const V_APF2: usize = 9;
+    pub const M_LSAME: usize = 10;
+    pub const M_RSAME: usize = 11;
+    pub const M_LCOMB1: usize = 12;
+    pub const M_RCOMB1: usize = 13;
+    pub const M_LCOMB2: usize = 14;
+    pub const M_RCOMB2: usize = 15;
+    pub const D_LSAME: usize = 16;
+    pub const D_RSAME: usize = 17;
+    pub const M_LDIFF: usize = 18;
+    pub const M_RDIFF: usize = 19;
+    pub const M_LCOMB3: usize = 20;
+    pub const M_RCOMB3: usize = 21;
+    pub const M_LCOMB4: usize = 22;
+    pub const M_RCOMB4: usize = 23;
+    pub const D_LDIFF: usize = 24;
+    pub const D_RDIFF: usize = 25;
+    pub const M_LAPF1: usize = 26;
+    pub const M_RAPF1: usize = 27;
+    pub const M_LAPF2: usize = 28;
+    pub const M_RAPF2: usize = 29;
+    pub const V_LIN: usize = 30;
+    pub const V_RIN: usize = 31;
 }
 
+/// The registers one channel's reverb pass reads.
+struct ReverbChannel {
+    /// Same-side reflection: target, and the displaced source it mixes in.
+    m_same: usize,
+    d_same: usize,
+    /// Different-side reflection: target, and the other channel's
+    /// displaced source.
+    m_diff: usize,
+    d_other_diff: usize,
+    /// The four comb filter source addresses.
+    m_comb: [usize; 4],
+    m_apf1: usize,
+    m_apf2: usize,
+    v_in: usize,
+}
+
+const REVERB_LEFT: ReverbChannel = ReverbChannel {
+    m_same: reverb_reg::M_LSAME,
+    d_same: reverb_reg::D_LSAME,
+    m_diff: reverb_reg::M_LDIFF,
+    d_other_diff: reverb_reg::D_RDIFF,
+    m_comb: [
+        reverb_reg::M_LCOMB1,
+        reverb_reg::M_LCOMB2,
+        reverb_reg::M_LCOMB3,
+        reverb_reg::M_LCOMB4,
+    ],
+    m_apf1: reverb_reg::M_LAPF1,
+    m_apf2: reverb_reg::M_LAPF2,
+    v_in: reverb_reg::V_LIN,
+};
+
+const REVERB_RIGHT: ReverbChannel = ReverbChannel {
+    m_same: reverb_reg::M_RSAME,
+    d_same: reverb_reg::D_RSAME,
+    m_diff: reverb_reg::M_RDIFF,
+    d_other_diff: reverb_reg::D_LDIFF,
+    m_comb: [
+        reverb_reg::M_RCOMB1,
+        reverb_reg::M_RCOMB2,
+        reverb_reg::M_RCOMB3,
+        reverb_reg::M_RCOMB4,
+    ],
+    m_apf1: reverb_reg::M_RAPF1,
+    m_apf2: reverb_reg::M_RAPF2,
+    v_in: reverb_reg::V_RIN,
+};
+
 /// Runtime state for the SPU reverb work area. The coefficient and
-/// offset registers live in `Spu::reverb_cfg`; this only tracks the
-/// moving cursor and 22.05 kHz wet-output interpolation history.
+/// offset registers live in `Spu::reverb_cfg`; this tracks the moving
+/// buffer address and the two channels' latest outputs.
+///
+/// The hardware spends one 44.1 kHz cycle on the left channel and the next
+/// on the right, advancing the buffer address once per pair (so the effect
+/// runs at 22.05 kHz); each channel's output holds until it is next
+/// computed.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct ReverbState {
-    /// Current reverb work-address in SPU RAM halfwords. The reverb
-    /// buffer spans `reverb_base_halfword..=0x3ffff` and wraps there.
+    /// Current buffer address in SPU RAM halfwords.
     curr_addr: u32,
-    /// Previous and current wet samples at the 22.05 kHz reverb rate.
-    last_l: i32,
-    last_r: i32,
+    /// Latest output of each channel, volume applied.
     wet_l: i32,
     wet_r: i32,
-    /// The hardware reverb core advances at half the SPU sample rate.
-    /// We process on every other 44.1 kHz tick and linearly hold the
-    /// second sample.
-    process_this_sample: bool,
+    /// True when the next processed sample is the right channel's.
+    right_next: bool,
 }
 
 impl ReverbState {
     fn new() -> Self {
-        Self {
-            process_this_sample: true,
-            ..Self::default()
-        }
+        Self::default()
     }
 
     fn reset_output(&mut self) {
-        self.last_l = 0;
-        self.last_r = 0;
         self.wet_l = 0;
         self.wet_r = 0;
     }
@@ -896,8 +636,8 @@ pub struct Spu {
     main_vol_l: VolumeEnvelope,
     /// Main output volume Right.
     main_vol_r: VolumeEnvelope,
-    /// Current-main-volume registers. PCSX-Redux stores these in its
-    /// raw SPU regArea; main-volume writes do not update them.
+    /// Current-main-volume registers, read back at 0x1F801DB8/BA. Writes to
+    /// the main volume registers do not update them.
     current_main_vol_l: u16,
     current_main_vol_r: u16,
     /// Reverb output volume Left.
@@ -1028,11 +768,10 @@ pub struct Spu {
     /// Excluded from save states.
     #[serde(skip)]
     samples_produced: u64,
-    /// Redux's decoded/capture-buffer IRQ cursor. When enabled, the
-    /// first 0x1000 bytes of SPU RAM are treated as four 0x400-byte
-    /// capture rings; the cursor advances by one halfword per output
-    /// sample and can trigger SPU IRQs for games that synchronize audio
-    /// streaming on that low-memory address range.
+    /// Capture-buffer IRQ cursor. The first 0x1000 bytes of SPU RAM hold
+    /// four 0x400-byte capture rings; the cursor advances by one halfword
+    /// per output sample and can trigger SPU IRQs for games that
+    /// synchronise audio streaming on that low-memory address range.
     decode_irq_cursor: u32,
     /// SPU capture-buffer write index (byte offset 0..=0x3FE, even).
     /// Per the PSX-SPX spec the SPU mirrors CD-L/R and Voice1/Voice3 into
@@ -1050,12 +789,9 @@ pub struct Spu {
     /// shift). Voices with their NON_LO/HI bit set emit this value
     /// instead of their ADPCM sample.
     noise_val: i16,
-    /// Sub-sample counter for the noise clock. The noise shift
-    /// register advances every `2^shift` SPU samples scaled by
-    /// the noise step field -- matching the hardware "noise rate"
-    /// table. Simplified here to a cycle counter that rolls over
-    /// based on SPUCNT bits 8-13.
-    noise_counter: u32,
+    /// Countdown to the next noise-level update (see [`Spu::noise_tick`]),
+    /// zero at power-on.
+    noise_timer: i32,
 }
 
 impl Default for Spu {
@@ -1132,10 +868,8 @@ impl Spu {
             decode_irq_cursor: 0,
             capture_buffer_pos: 0,
             irq_pending: false,
-            // Redux/hardware reset value -- must be non-zero or the
-            // LFSR's NoiseWaveAdd lookup is stuck at index 0 forever.
             noise_val: 1,
-            noise_counter: 0,
+            noise_timer: 0,
         }
     }
 
@@ -1198,48 +932,26 @@ impl Spu {
         self.write16(TRANSFER_CTRL, 0x0004);
     }
 
-    /// Advance the noise generator by one SPU sample. Port of
-    /// PCSX-Redux's `NoiseClock` (Dr. Hell / Xebra algorithm), which
-    /// in turn matches measurements from a real PSX SPU.
-    ///
-    /// SPUCNT bits 13:8 form a single 6-bit `noise_clock` field
-    /// (high 4 bits = shift, low 2 bits = step). The threshold is
-    /// `(0x8000 >> (clock >> 2)) << 16`. Each sample we add `0x10000`
-    /// plus a fractional `NoiseFreqAdd[clock & 3]` to a 32-bit
-    /// counter; whenever it crosses the threshold the LFSR shifts
-    /// left and feeds in the new low bit from `NoiseWaveAdd[(val>>10) & 63]`.
+    /// Advance the noise generator by one SPU sample (PSX-SPX "SPU Noise
+    /// Generator"). SPUCNT bits 13..10 are the shift and bits 9..8 the step
+    /// (4 to 7). Every sample the timer drops by the step; when it goes
+    /// negative the 16-bit noise level shifts left, taking in the XNOR of
+    /// its bits 15, 12, 11 and 10, and the timer is topped up by
+    /// `0x20000 >> shift` (twice if one top-up is not enough).
     fn noise_tick(&mut self) {
-        // Hardware "form" table -- bit pattern injected into the
-        // LFSR low bit when it shifts.
-        const NOISE_WAVE_ADD: [u8; 64] = [
-            1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0,
-            1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1,
-            1, 0, 1, 0, 0, 1,
-        ];
-        // Hardware "fraction" table -- sub-sample increment per
-        // step value (low 2 bits of clock); index 4 is the
-        // wraparound threshold.
-        const NOISE_FREQ_ADD: [u32; 5] = [0, 84, 140, 180, 210];
-
-        let clock = ((self.spucnt >> 8) & 0x3F) as u32;
-        let level = (0x8000u32 >> (clock >> 2)) << 16;
-
-        self.noise_counter = self.noise_counter.wrapping_add(0x10000);
-
-        let step_idx = (clock & 3) as usize;
-        self.noise_counter = self.noise_counter.wrapping_add(NOISE_FREQ_ADD[step_idx]);
-        if (self.noise_counter & 0xFFFF) >= NOISE_FREQ_ADD[4] {
-            self.noise_counter = self.noise_counter.wrapping_add(0x10000);
-            self.noise_counter = self.noise_counter.wrapping_sub(NOISE_FREQ_ADD[step_idx]);
+        let shift = (self.spucnt >> 10) & 0xF;
+        let step = 4 + i32::from((self.spucnt >> 8) & 3);
+        self.noise_timer -= step;
+        if self.noise_timer >= 0 {
+            return;
         }
-
-        if self.noise_counter >= level {
-            while self.noise_counter >= level {
-                self.noise_counter = self.noise_counter.wrapping_sub(level);
-            }
-            let v = self.noise_val as u16;
-            let new_bit = NOISE_WAVE_ADD[((v as u32 >> 10) & 63) as usize] as u16;
-            self.noise_val = ((v << 1) | new_bit) as i16;
+        let level = self.noise_val as u16;
+        let parity = !((level >> 15) ^ (level >> 12) ^ (level >> 11) ^ (level >> 10)) & 1;
+        self.noise_val = ((level << 1) | parity) as i16;
+        let reload = 0x2_0000 >> shift;
+        self.noise_timer += reload;
+        if self.noise_timer < 0 {
+            self.noise_timer += reload;
         }
     }
 
@@ -1609,10 +1321,11 @@ impl Spu {
 
     fn write_reverb_base(&mut self, value: u16) {
         self.reverb_base_raw = value;
-        // Redux treats the decode/capture-buffer region and 0xffff as
-        // "reverb off"; keep the register readable, but disable the
-        // effective work area so games don't accidentally smear over
-        // low SPU RAM when they are just clearing the mixer.
+        // A work area at or inside the capture-buffer region, or the
+        // cleared value 0xFFFF, is treated as "reverb off": keep the
+        // register readable, but disable the effective work area so games
+        // don't smear over low SPU RAM when they are just clearing the
+        // mixer. Hardware has no such rule; this is an unmeasured guard.
         if value == 0xFFFF || value <= 0x0200 {
             self.reverb_base = 0;
             self.reverb.curr_addr = 0;
@@ -1692,11 +1405,7 @@ impl Spu {
                 // manual range. Games also poll the live generated value:
                 // Some titles wait for every voice to reach zero.
                 //
-                // This deliberately diverges from the Redux parity trace --
-                // Redux's SPU runs on an unpumped background thread during an
-                // oracle trace, so its `readRegister` case 12 returns a stale
-                // 1 -- but per the hardware > Redux oracle priority the live
-                // envelope is the correct, hardware-accurate value.
+                // The live envelope is the hardware's value.
                 self.voices[v]
                     .envelope
                     .clamp(i16::MIN as i32, i16::MAX as i32) as i16 as u16
@@ -1720,11 +1429,9 @@ impl Spu {
             }
             voice_offset::ADSR_LO => {
                 voice.adsr_lo = value;
-                parse_adsr_lo(value, &mut voice.adsr);
             }
             voice_offset::ADSR_HI => {
                 voice.adsr_hi = value;
-                parse_adsr_hi(value, &mut voice.adsr);
             }
             voice_offset::ADSR_CURRENT => {
                 // Manual writes are signed 16-bit. The ADSR generator will
@@ -1819,10 +1526,8 @@ impl Spu {
     /// **and** the sticky IRQ9 flag (SPUSTAT bit 6) is not already set.
     /// Once latched, no further IRQ can fire until software acknowledges
     /// by clearing SPUCNT bit 6 (which clears the SPUSTAT flag in
-    /// `write_spucnt`). Mirrors PSX-SPX `is_irq_triggerable`
-    /// (`irq9_enable && !irq9_flag`) and PSX-SPX `IsRAMIRQTriggerable`
-    /// (`SPUCNT.irq9_enable && !SPUSTAT.irq9_flag`); nocash PSX-SPX: SPUSTAT.6
-    /// is a sticky flag that blocks re-latching until acknowledged.
+    /// `write_spucnt`); PSX-SPX: SPUSTAT bit 6 is a sticky flag that blocks
+    /// re-latching until acknowledged.
     fn irq_triggerable(&self) -> bool {
         (self.spucnt & (1 << 6)) != 0 && (self.spustat & (1 << 6)) == 0
     }
@@ -1919,7 +1624,7 @@ impl Spu {
     }
 
     // ============================================================
-    //  Reverb -- Neill/Redux work-area network.
+    //  Reverb (PSX-SPX "SPU Reverb Formula").
     // ============================================================
 
     fn reverb_base_halfword(&self) -> u32 {
@@ -1930,229 +1635,127 @@ impl Spu {
         self.reverb_base != 0 && self.reverb_base < SPU_RAM_BYTES as u32
     }
 
+    /// A reverb register as a signed 16-bit value.
     fn reverb_cfg_s(&self, idx: usize) -> i32 {
-        self.reverb_cfg[idx] as i16 as i32
+        i32::from(self.reverb_cfg[idx] as i16)
     }
 
-    fn reverb_cfg_u(&self, idx: usize) -> i32 {
-        self.reverb_cfg[idx] as i32
-    }
-
-    fn reverb_ram_index(&self, offset: i32, extra_halfwords: i32) -> usize {
+    /// The SPU RAM halfword a reverb access lands on. `offset` is a register
+    /// value in 8-byte units relative to the current buffer address and
+    /// `extra` a further halfword displacement. The buffer occupies the top
+    /// of RAM from `mBASE`; an address past the end wraps to its start and
+    /// one before the start wraps to its end.
+    fn reverb_ram_index(&self, offset: i32, extra: i32) -> usize {
         let start = self.reverb_base_halfword() as i32;
         if start >= SPU_RAM_HALFWORDS as i32 {
             return 0;
         }
-
-        // Redux wraps the reverb work address with two while-loops, not
-        // a clean modulo. The below-start case is subtly off by one
-        // (`0x3ffff - delta`), so keep that quirk for parity.
-        // Closed form of those loops: each above-end pass subtracts the work
-        // area's size, each below-start pass adds one less than it. A work
-        // area parked at the top of RAM (psx-spu's init writes mBASE=0xFFFE,
-        // eight halfwords) turned the loops into thousands of iterations per
-        // tap per sample.
-        let span = 0x40000 - start;
-        let mut idx = self.reverb.curr_addr as i32 + offset.saturating_mul(4) + extra_halfwords;
-        if idx > 0x3FFFF {
-            idx -= span * ((idx - 0x3FFFF + span - 1) / span);
-        }
-        if idx < start {
-            let step = (span - 1).max(1);
-            idx += step * ((start - idx + step - 1) / step);
-        }
-        idx.clamp(0, SPU_RAM_HALFWORDS as i32 - 1) as usize
+        let span = SPU_RAM_HALFWORDS as i32 - start;
+        let at = self.reverb.curr_addr as i32 + offset.saturating_mul(4) + extra;
+        (start + (at - start).rem_euclid(span)) as usize
     }
 
     fn reverb_read(&self, offset: i32) -> i32 {
-        self.ram[self.reverb_ram_index(offset, 0)] as i16 as i32
+        i32::from(self.ram[self.reverb_ram_index(offset, 0)] as i16)
     }
 
-    /// Reverb read with an extra signed halfword offset, mirroring
-    /// the hardware `ReverbRead(address, offset)`. The IIR_DEST same/
-    /// different-side reflection taps read one cell *behind* the write
-    /// target (`[mLSAME-2]` in nocash = -1 halfword).
-    fn reverb_read_at(&self, offset: i32, extra_halfwords: i32) -> i32 {
-        self.ram[self.reverb_ram_index(offset, extra_halfwords)] as i16 as i32
+    /// Read the halfword before the one `offset` selects: the previous value
+    /// of the cell the reflection filters are about to overwrite.
+    fn reverb_read_before(&self, offset: i32) -> i32 {
+        i32::from(self.ram[self.reverb_ram_index(offset, -1)] as i16)
     }
 
-    fn reverb_write(&mut self, offset: i32, extra_halfwords: i32, value: i32) {
-        let idx = self.reverb_ram_index(offset, extra_halfwords);
+    fn reverb_write(&mut self, offset: i32, value: i32) {
+        let idx = self.reverb_ram_index(offset, 0);
         self.ram[idx] = saturate_i16(value) as u16;
     }
 
-    fn mul_q15(a: i32, b: i32) -> i32 {
-        ((a as i64 * b as i64) / 32768).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+    /// Multiply by a signed 16-bit volume, dividing the product by 0x8000.
+    fn reverb_mul(a: i32, volume: i32) -> i32 {
+        ((i64::from(a) * i64::from(volume)) >> 15) as i32
     }
 
+    /// Apply the reverb output volume register. The register is taken as
+    /// Q14 here (0x4000 is unity); see the Provenance notes in the module
+    /// header.
     fn scale_reverb_output(sample: i32, vol: i16) -> i32 {
-        ((sample as i64 * vol as i64) / 0x4000).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+        ((i64::from(sample) * i64::from(vol)) / 0x4000)
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
     }
 
+    /// Advance the reverb by one 44.1 kHz sample and return the current
+    /// wet output of both channels.
     fn mix_reverb(&mut self, input_l: i32, input_r: i32) -> (i32, i32) {
         if !self.reverb_active() {
             self.reverb.reset_output();
             return (0, 0);
         }
-
-        let processed_this_sample = self.reverb.process_this_sample;
-        if processed_this_sample {
-            // PA5 on real SCPH hardware proved that clearing the reverb-master
-            // bit disables only the IIR/MIX_DEST writes. The read/APF/output
-            // side keeps traversing SPU RAM: a later DMA into the BIOS reverb
-            // work area immediately changed the audible wet output even with
-            // SPUCNT=0xC000 and EON=0. Always evaluate the network here and
-            // gate its RAM writes inside `run_reverb_step`.
-            self.run_reverb_step(input_l, input_r);
-
-            let mut next_addr = self.reverb.curr_addr.saturating_add(1);
-            if next_addr >= SPU_RAM_HALFWORDS as u32 || next_addr < self.reverb_base_halfword() {
-                next_addr = self.reverb_base_halfword();
+        // Clearing the reverb master bit stops only the writes: the read,
+        // all-pass and output stages keep traversing SPU RAM (PA5 on the
+        // project's console: a DMA into the work area changed the audible
+        // wet output with the master bit and EON clear), so the network
+        // always runs and `reverb_channel` gates its stores.
+        if self.reverb.right_next {
+            self.reverb.wet_r =
+                self.reverb_channel(&REVERB_RIGHT, input_r, self.reverb_vol_r.current);
+            // The buffer address advances once per left/right pair.
+            let mut next = self.reverb.curr_addr + 1;
+            if next >= SPU_RAM_HALFWORDS as u32 || next < self.reverb_base_halfword() {
+                next = self.reverb_base_halfword();
             }
-            self.reverb.curr_addr = next_addr;
-        }
-
-        let out = if processed_this_sample {
-            let l = self.reverb.last_l + (self.reverb.wet_l - self.reverb.last_l) / 2;
-            let r = self.reverb.last_r + (self.reverb.wet_r - self.reverb.last_r) / 2;
-            // Redux's right-channel helper promotes iLastRVBRight to
-            // iRVBRight after returning the interpolated sample. The
-            // left helper does not do this, so the held sample on the
-            // next 44.1 kHz tick is asymmetric: previous-left/current-right.
-            self.reverb.last_r = self.reverb.wet_r;
-            (l, r)
+            self.reverb.curr_addr = next;
         } else {
-            (self.reverb.last_l, self.reverb.wet_r)
-        };
-        self.reverb.process_this_sample = !self.reverb.process_this_sample;
-        out
+            self.reverb.wet_l =
+                self.reverb_channel(&REVERB_LEFT, input_l, self.reverb_vol_l.current);
+        }
+        self.reverb.right_next = !self.reverb.right_next;
+        (self.reverb.wet_l, self.reverb.wet_r)
     }
 
-    fn run_reverb_step(&mut self, input_l: i32, input_r: i32) {
+    /// One channel's reverb pass: input volume, same-side and different-side
+    /// reflections (written back to the buffer), four comb filters, two
+    /// all-pass filters, then the output volume.
+    fn reverb_channel(&mut self, ch: &ReverbChannel, input: i32, out_volume: i16) -> i32 {
         use reverb_reg::*;
+        let writes = self.spucnt & SPUCNT_REVERB_MASTER_ENABLE != 0;
+        let v_iir = self.reverb_cfg_s(V_IIR);
+        let v_wall = self.reverb_cfg_s(V_WALL);
+        let lin = Self::reverb_mul(input, self.reverb_cfg_s(ch.v_in));
 
-        let writes_enabled = self.spucnt & SPUCNT_REVERB_MASTER_ENABLE != 0;
-
-        let iir_coef = self.reverb_cfg_s(IIR_COEF);
-        let iir_alpha = self.reverb_cfg_s(IIR_ALPHA);
-        let in_coef_l = self.reverb_cfg_s(IN_COEF_L);
-        let in_coef_r = self.reverb_cfg_s(IN_COEF_R);
-
-        let iir_input_a0 = Self::mul_q15(self.reverb_read(self.reverb_cfg_s(IIR_SRC_A0)), iir_coef)
-            + Self::mul_q15(input_l, in_coef_l);
-        let iir_input_a1 = Self::mul_q15(self.reverb_read(self.reverb_cfg_s(IIR_SRC_A1)), iir_coef)
-            + Self::mul_q15(input_r, in_coef_r);
-        let iir_input_b0 = Self::mul_q15(self.reverb_read(self.reverb_cfg_s(IIR_SRC_B0)), iir_coef)
-            + Self::mul_q15(input_l, in_coef_l);
-        let iir_input_b1 = Self::mul_q15(self.reverb_read(self.reverb_cfg_s(IIR_SRC_B1)), iir_coef)
-            + Self::mul_q15(input_r, in_coef_r);
-
-        let inv_iir_alpha = 32768 - iir_alpha;
-        let iir_a0 = Self::mul_q15(iir_input_a0, iir_alpha)
-            + Self::mul_q15(
-                self.reverb_read_at(self.reverb_cfg_s(IIR_DEST_A0), -1),
-                inv_iir_alpha,
-            );
-        let iir_a1 = Self::mul_q15(iir_input_a1, iir_alpha)
-            + Self::mul_q15(
-                self.reverb_read_at(self.reverb_cfg_s(IIR_DEST_A1), -1),
-                inv_iir_alpha,
-            );
-        let iir_b0 = Self::mul_q15(iir_input_b0, iir_alpha)
-            + Self::mul_q15(
-                self.reverb_read_at(self.reverb_cfg_s(IIR_DEST_B0), -1),
-                inv_iir_alpha,
-            );
-        let iir_b1 = Self::mul_q15(iir_input_b1, iir_alpha)
-            + Self::mul_q15(
-                self.reverb_read_at(self.reverb_cfg_s(IIR_DEST_B1), -1),
-                inv_iir_alpha,
-            );
-
-        if writes_enabled {
-            self.reverb_write(self.reverb_cfg_s(IIR_DEST_A0), 0, iir_a0);
-            self.reverb_write(self.reverb_cfg_s(IIR_DEST_A1), 0, iir_a1);
-            self.reverb_write(self.reverb_cfg_s(IIR_DEST_B0), 0, iir_b0);
-            self.reverb_write(self.reverb_cfg_s(IIR_DEST_B1), 0, iir_b1);
+        // Reflections: [m] = (in + [d] * vWALL - [m-1]) * vIIR + [m-1],
+        // where m-1 is the cell just behind the one being written.
+        for (m, d) in [
+            (ch.m_same, self.reverb_cfg_s(ch.d_same)),
+            (ch.m_diff, self.reverb_cfg_s(ch.d_other_diff)),
+        ] {
+            let target = self.reverb_cfg_s(m);
+            let behind = self.reverb_read_before(target);
+            let mixed = lin + Self::reverb_mul(self.reverb_read(d), v_wall) - behind;
+            if writes {
+                self.reverb_write(target, Self::reverb_mul(mixed, v_iir) + behind);
+            }
         }
 
-        let acc0 = Self::mul_q15(
-            self.reverb_read(self.reverb_cfg_s(ACC_SRC_A0)),
-            self.reverb_cfg_s(ACC_COEF_A),
-        ) + Self::mul_q15(
-            self.reverb_read(self.reverb_cfg_s(ACC_SRC_B0)),
-            self.reverb_cfg_s(ACC_COEF_B),
-        ) + Self::mul_q15(
-            self.reverb_read(self.reverb_cfg_s(ACC_SRC_C0)),
-            self.reverb_cfg_s(ACC_COEF_C),
-        ) + Self::mul_q15(
-            self.reverb_read(self.reverb_cfg_s(ACC_SRC_D0)),
-            self.reverb_cfg_s(ACC_COEF_D),
-        );
-        let acc1 = Self::mul_q15(
-            self.reverb_read(self.reverb_cfg_s(ACC_SRC_A1)),
-            self.reverb_cfg_s(ACC_COEF_A),
-        ) + Self::mul_q15(
-            self.reverb_read(self.reverb_cfg_s(ACC_SRC_B1)),
-            self.reverb_cfg_s(ACC_COEF_B),
-        ) + Self::mul_q15(
-            self.reverb_read(self.reverb_cfg_s(ACC_SRC_C1)),
-            self.reverb_cfg_s(ACC_COEF_C),
-        ) + Self::mul_q15(
-            self.reverb_read(self.reverb_cfg_s(ACC_SRC_D1)),
-            self.reverb_cfg_s(ACC_COEF_D),
-        );
-
-        let fb_src_a = self.reverb_cfg_u(FB_SRC_A);
-        let fb_src_b = self.reverb_cfg_s(FB_SRC_B);
-        let mix_dest_a0 = self.reverb_cfg_s(MIX_DEST_A0);
-        let mix_dest_a1 = self.reverb_cfg_s(MIX_DEST_A1);
-        let mix_dest_b0 = self.reverb_cfg_s(MIX_DEST_B0);
-        let mix_dest_b1 = self.reverb_cfg_s(MIX_DEST_B1);
-        let fb_a0 = self.reverb_read(mix_dest_a0 - fb_src_a);
-        let fb_a1 = self.reverb_read(mix_dest_a1 - fb_src_a);
-        let fb_b0 = self.reverb_read(mix_dest_b0 - fb_src_b);
-        let fb_b1 = self.reverb_read(mix_dest_b1 - fb_src_b);
-        let fb_alpha = self.reverb_cfg_s(FB_ALPHA);
-        let fb_x = self.reverb_cfg_s(FB_X);
-
-        // Late Reverb APF1 (All-Pass Filter 1, input = comb-filter ACC).
-        // MIX_DEST_A is the APF1 buffer, FB_SRC_A its delay tap:
-        //   [mLAPF1] = ACC - vAPF1*[mLAPF1-dAPF1]
-        //   Lout     = [mLAPF1]*vAPF1 + [mLAPF1-dAPF1]
-        // reverb_write clamps to i16 when storing; the carried value stays
-        // unclamped, exactly like PSX-SPX calculate_*_reverb (whose
-        // apply_volume = `>>15`, the same convention as mul_q15).
-        let mda0 = acc0 - Self::mul_q15(fb_a0, fb_alpha);
-        let mda1 = acc1 - Self::mul_q15(fb_a1, fb_alpha);
-        if writes_enabled {
-            self.reverb_write(mix_dest_a0, 0, mda0);
-            self.reverb_write(mix_dest_a1, 0, mda1);
-        }
-        let apf1_l = Self::mul_q15(mda0, fb_alpha) + fb_a0;
-        let apf1_r = Self::mul_q15(mda1, fb_alpha) + fb_a1;
-
-        // Late Reverb APF2 (All-Pass Filter 2, input = APF1 output).
-        // MIX_DEST_B is the APF2 buffer, FB_SRC_B its delay tap:
-        //   [mLAPF2] = APF1 - vAPF2*[mLAPF2-dAPF2]
-        //   Lout     = [mLAPF2]*vAPF2 + [mLAPF2-dAPF2]
-        let mdb0 = apf1_l - Self::mul_q15(fb_b0, fb_x);
-        let mdb1 = apf1_r - Self::mul_q15(fb_b1, fb_x);
-        if writes_enabled {
-            self.reverb_write(mix_dest_b0, 0, mdb0);
-            self.reverb_write(mix_dest_b1, 0, mdb1);
+        // Early echo: the four comb taps, each with its own volume.
+        let combs = [V_COMB1, V_COMB2, V_COMB3, V_COMB4];
+        let mut out = 0;
+        for (m, v) in ch.m_comb.into_iter().zip(combs) {
+            out += Self::reverb_mul(self.reverb_read(self.reverb_cfg_s(m)), self.reverb_cfg_s(v));
         }
 
-        self.reverb.last_l = self.reverb.wet_l;
-        self.reverb.last_r = self.reverb.wet_r;
-        // Wet output is the APF2 result (`LeftOutput = Lout*vLOUT`, nocash SPU
-        // Reverb Formula), NOT the old invented (MIX_DEST_A + MIX_DEST_B)/3.
-        // Matches PSX-SPX `Clamp16(FB_B + ((MDB*FB_X)>>15))` and PSX-SPX
-        // self.left_out/right_out (the post-APF2 Lout).
-        let out_l = Self::mul_q15(mdb0, fb_x) + fb_b0;
-        let out_r = Self::mul_q15(mdb1, fb_x) + fb_b1;
-        self.reverb.wet_l = Self::scale_reverb_output(out_l, self.reverb_vol_l.current);
-        self.reverb.wet_r = Self::scale_reverb_output(out_r, self.reverb_vol_r.current);
+        // Two all-pass filters in series:
+        //   out = out - v * [m - d];  [m] = out;  out = out * v + [m - d]
+        for (m, d, v) in [(ch.m_apf1, D_APF1, V_APF1), (ch.m_apf2, D_APF2, V_APF2)] {
+            let target = self.reverb_cfg_s(m);
+            let delayed = self.reverb_read(target - self.reverb_cfg_s(d));
+            let v = self.reverb_cfg_s(v);
+            out -= Self::reverb_mul(delayed, v);
+            if writes {
+                self.reverb_write(target, out);
+            }
+            out = Self::reverb_mul(out, v) + delayed;
+        }
+        Self::scale_reverb_output(out, out_volume)
     }
 
     // ============================================================
@@ -2175,22 +1778,18 @@ impl Spu {
             }
         }
         // KON / KOFF are applied at the END of this tick (after the
-        // sample is emitted), not here -- see the apply_kon_koff() call
-        // below. PSX-SPX runs update_keystatus() after push_sample
-        // (spu.rs:577-580) and PSX-SPX runs KeyOff/KeyOn after
-        // WriteToCaptureBuffer (-2558, gated on i==0); per
-        // PSX-SPX a KON/KOFF write is latched and acted on at the next
-        // 44.1 kHz tick, so a keyed-on voice's first Attack sample lands
-        // on the sample AFTER the one in progress.
+        // sample is emitted and the capture buffers written), not here --
+        // see the apply_kon_koff() call below. A KON/KOFF write is latched
+        // and acted on at the next 44.1 kHz tick, so a keyed-on voice's
+        // first Attack sample lands on the sample AFTER the one in
+        // progress (the SB4 silicon capture shows this).
 
-        // 1b. Advance noise generator -- one LFSR-step pass per
-        //     sample (the noise_tick's internal counter gates
-        //     actual register updates).
+        // 1b. Advance the noise generator by one sample.
         self.noise_tick();
 
         // 1c. Advance the global volume sweeps. Per-voice volume sweeps
         //     are ticked in `tick_voice` after each voice's sample is
-        //     applied (apply-then-tick, matching PSX-SPX).
+        //     applied (apply, then tick).
         //     CD/external/reverb volumes are fixed (`write_signed_q15`,
         //     a no-op tick); main volume may be sweep-programmed.
         self.main_vol_l.tick();
@@ -2203,12 +1802,10 @@ impl Spu {
         self.reverb_vol_r.tick();
 
         // 2. For each voice, step envelope + ADPCM playback, accumulate
-        //    stereo contribution. Modulator voices (the N-1 voice when
-        //    PMon bit N is set) update `last_sample` for the modulated
-        //    voice's FMod read, but their own L/R contribution is
-        //    **suppressed** from the audible mix -- matches Redux's
-        //    `if (FMod == 2) iFMod[ns] = sval; else { SSumL/R += ... }`
-        //    branch (`spu.cc:689`).
+        //    stereo contribution. A voice that modulates the next one
+        //    publishes its output in `last_sample` for that voice's pitch
+        //    and stays audible like any other voice (software silences a
+        //    modulator by setting its volume to zero).
         // Each accumulator receives at most 24 i16 voice samples and one
         // Q15-scaled i16 CD sample: its magnitude is at most 25 * 32768.
         // i32 addition is exact here; final output saturation stays below.
@@ -2235,14 +1832,11 @@ impl Spu {
             if l != 0 || r != 0 {
                 self.dbg_voiced_samples[v] = self.dbg_voiced_samples[v].saturating_add(1);
             }
-            let is_modulator = v + 1 < NUM_VOICES && (self.pmon & (1 << (v + 1))) != 0;
-            if !is_modulator {
-                sum_l += l as i32;
-                sum_r += r as i32;
-                if self.reverb_on & (1 << v) != 0 {
-                    reverb_in_l += l as i32;
-                    reverb_in_r += r as i32;
-                }
+            sum_l += i32::from(l);
+            sum_r += i32::from(r);
+            if self.reverb_on & (1 << v) != 0 {
+                reverb_in_l += i32::from(l);
+                reverb_in_r += i32::from(r);
             }
         }
         self.dbg_sample_idx = self.dbg_sample_idx.wrapping_add(1);
@@ -2306,18 +1900,17 @@ impl Spu {
         }
 
         // 4. Process the wet reverb bus, then apply MAIN VOLUME as the final
-        //    stage. PSX-SPX both scale the clamped (dry+wet)
-        //    sum by the raw signed-Q15 main-volume register: `(s * vol) >> 15`.
-        //    PSoXide previously dropped this (claiming PCSX-Redux did too), which
-        //    left output ~2x too loud and clipped the un-attenuated 24-voice sum
-        //    far more often than hardware or either oracle.
+        //    stage: the clamped (dry + wet) sum is scaled by the main-volume
+        //    register word as a signed Q15 value, `(s * vol) >> 15`. Leaving
+        //    it out makes the output about twice as loud as the console
+        //    and clips the 24-voice sum far more often.
         let (wet_l, wet_r) = self.mix_reverb(reverb_in_l, reverb_in_r);
         let dry_l = sum_l;
         let dry_r = sum_r;
         let mixed_l = saturate_i16(dry_l.saturating_add(wet_l)) as i32;
         let mixed_r = saturate_i16(dry_r.saturating_add(wet_r)) as i32;
-        let out_l = saturate_i16((mixed_l * self.main_vol_l.raw as i16 as i32) >> 15);
-        let out_r = saturate_i16((mixed_r * self.main_vol_r.raw as i16 as i32) >> 15);
+        let out_l = saturate_i16((mixed_l * self.main_vol_l.raw() as i16 as i32) >> 15);
+        let out_r = saturate_i16((mixed_r * self.main_vol_r.raw() as i16 as i32) >> 15);
         self.dbg_dry_energy = self
             .dbg_dry_energy
             .saturating_add(dry_l.unsigned_abs() as u64 + dry_r.unsigned_abs() as u64);
@@ -2334,10 +1927,8 @@ impl Spu {
         self.tick_decode_buffer_irq();
 
         // 6. Apply pending KON / KOFF AFTER this sample was emitted and
-        //    the capture buffer was written, matching PSX-SPX
-        //    update_keystatus() (spu.rs:580) and the hardware post-
-        //    WriteToCaptureBuffer KeyOff/KeyOn (-2558). The
-        //    keyed voice therefore first contributes on the NEXT tick.
+        //    the capture buffer was written. The keyed voice therefore first
+        //    contributes on the NEXT tick.
         self.apply_kon_koff();
         self.samples_produced = self.samples_produced.saturating_add(1);
         1
@@ -2457,11 +2048,25 @@ impl Spu {
         (saturate_i16(l), saturate_i16(r))
     }
 
-    /// Fetch the current voice's interpolated sample. This mirrors
-    /// Redux's `spos` + `StoreInterpolationVal` flow: consume decoded
-    /// samples into a rolling 4-sample ring while `sample_pos >=
-    /// 0x10000`, then run the Gaussian window over that ring using the
-    /// remaining fractional position.
+    /// The pitch step of voice `v` for this sample (PSX-SPX "SPU ADPCM
+    /// Pitch"): the pitch register, optionally modulated by the previous
+    /// voice's output, capped at 0x4000 (four times the sample rate).
+    fn voice_step(&self, v: usize) -> u32 {
+        let pitch = u32::from(self.voices[v].raw_pitch);
+        let step = if v > 0 && self.pmon & (1 << v) != 0 {
+            // The modulator's output (-0x8000..=0x7FFF) shifted to
+            // 0..=0xFFFF scales the pitch, read as a signed 16-bit number.
+            let factor = i32::from(self.voices[v - 1].last_sample) + 0x8000;
+            let signed_pitch = i32::from(pitch as u16 as i16);
+            (((signed_pitch * factor) >> 15) as u32) & 0xFFFF
+        } else {
+            pitch
+        };
+        step.min(0x4000)
+    }
+
+    /// Voice `v`'s next interpolated sample, advancing its counter by one
+    /// output sample's worth of pitch.
     fn fetch_voice_sample(&mut self, v: usize) -> i16 {
         // Voices in Off contribute nothing.
         if self.voices[v].phase == AdsrPhase::Off {
@@ -2470,43 +2075,14 @@ impl Spu {
         let noise_mode = self.noise_on & (1 << v) != 0;
         let feeds_fmod = v + 1 < NUM_VOICES && (self.pmon & (1 << (v + 1))) != 0;
         let mute_voice_sample = (self.spucnt & SPUCNT_UNMUTE) == 0 && !feeds_fmod;
+        let step = self.voice_step(v);
 
-        // Determine effective pitch. PMOn: voice N takes its pitch
-        // from voice N-1's most recent post-ADSR sample. Formula is
-        // Redux's `FModChangeFrequency` (spu.cc:266):
-        //
-        //     NP = ((32768 + iFMod[ns]) * raw_pitch) / 32768
-        //     NP = clamp(NP, 1, 0x3FFF)
-        //
-        // Voice 0 cannot be modulated (no preceding voice). The
-        // modulator voice's own L/R output is suppressed from the
-        // audible mix in `tick_sample`.
-        // The sample-rate register stores the full 16-bit written value so
-        // reads echo it back like hardware; the rate counter clamps to
-        // 0x3FFF here (values above that don't speed playback further).
-        let mut pitch = (self.voices[v].raw_pitch as u32).min(0x3FFF);
-        if v > 0 && self.pmon & (1 << v) != 0 {
-            let prev = self.voices[v - 1].last_sample as i32;
-            let np = ((0x8000 + prev) * pitch as i32) / 0x8000;
-            pitch = (np.clamp(1, 0x3FFF)) as u32;
-        }
-        if pitch == 0 {
-            pitch = 1;
-        }
-
-        // Consume decoded samples into the interpolation ring until
-        // the fixed-point cursor is back inside the current source
-        // sample. This preserves the previous block's tail across
-        // ADPCM boundaries instead of substituting zeros.
-        while self.voices[v].sample_pos >= 0x10000 {
+        // Take in every source sample the counter has passed. Crossing the
+        // end of a block first settles that block: ENDX latches only once
+        // the block's last sample has been consumed, and a block without
+        // the repeat bit ends the note.
+        while self.voices[v].counter >= COUNTER_ONE {
             if self.voices[v].sample_index >= ADPCM_SAMPLES_PER_BLOCK {
-                // Block boundary: the current block's 28 samples have all
-                // been consumed. If it was a loop-end block, latch ENDX now
-                // -- after the block finished playing -- even if the voice
-                // is about to stop. This matches PSX-SPX,
-                // which set ENDX at the boundary crossing (using the just-
-                // finished block's flags), not when the loop-end block was
-                // first decoded a block earlier.
                 if self.voices[v].endx_pending {
                     self.endx_latched |= 1 << v;
                     self.voices[v].endx_pending = false;
@@ -2526,130 +2102,85 @@ impl Spu {
             let sample = if mute_voice_sample {
                 0
             } else {
-                // Redux applies SPUCNT's mute bit before storing into
-                // the interpolation history, and clamps the raw decoded
-                // value to -32767..32767 on that same path.
-                voice.sample_buf[voice.sample_index].clamp(-32767, 32767) as i16
+                voice.sample_buf[voice.sample_index].clamp(-0x8000, 0x7FFF) as i16
             };
             voice.sample_index += 1;
-            voice.push_interpolation_sample(sample);
-            voice.sample_pos -= 0x10000;
+            voice.push_tap(sample);
+            voice.counter -= COUNTER_ONE;
         }
 
+        // A noise voice keeps decoding and stepping as usual; only its
+        // audible sample is replaced by the shared noise level.
         let out = if noise_mode {
-            // Redux still advances the sample cursor / decode state for
-            // noise voices, but substitutes the final audible sample
-            // with the shared noise generator output.
             self.noise_val
         } else {
-            let window = self.voices[v].interpolation_window();
-            gauss_interpolate(window, self.voices[v].sample_pos)
+            gauss_interpolate(self.voices[v].taps, self.voices[v].counter)
         };
-        self.voices[v].sample_pos = self.voices[v].sample_pos.saturating_add(pitch << 4);
+        self.voices[v].counter += step;
         out
     }
 
-    /// Decode the next 16-byte ADPCM block at `current_addr` into the
-    /// voice's sample buffer, update `s_1`/`s_2` filter history, handle
-    /// loop flags, and advance `current_addr` to the following block.
-    /// On a flag-1 terminator the voice either loops to `loop_addr` or
-    /// stops playing.
+    /// Decode the 16-byte ADPCM block at voice `v`'s read address into its
+    /// sample buffer, act on the block's flags, and move the read address on
+    /// (to the repeat address after a loop-end block).
+    ///
+    /// Block layout (PSX-SPX "SPU ADPCM Samples"): byte 0 holds the shift in
+    /// its low nibble and the filter in its high nibble; byte 1 the flags;
+    /// bytes 2..16 the 28 samples as 4-bit signed nibbles, low nibble first.
+    /// A sample is its nibble scaled to 16 bits and shifted right by the
+    /// shift, plus the two previous samples weighted by the filter's pair
+    /// of coefficients (in 64ths); the result saturates to 16 bits before
+    /// it becomes history. Shifts above 12 behave like 9.
     fn decode_next_block(&mut self, v: usize) {
-        // Snapshot voice state we need for decoding.
         let current = self.voices[v].current_addr;
-        let irq_enabled = self.irq_triggerable();
-        let irq_target = self.irq_addr & !0xF;
 
-        // IRQ match check: if the block being decoded covers the IRQ
-        // address, raise SPU IRQ.
-        if irq_enabled && (current & !0xF) == irq_target {
+        // An enabled IRQ address inside the block being read raises the IRQ.
+        if self.irq_triggerable() && (current & !0xF) == (self.irq_addr & !0xF) {
             self.spustat |= 1 << 6;
             self.irq_pending = true;
         }
 
-        // Read block header + flags + 14 data bytes from SPU RAM.
         let block = read_adpcm_block(&self.ram[..], current);
-
-        let predictor = (block[0] >> 4) as usize;
-        let predictor = predictor.min(ADPCM_FILTER_TABLE.len() - 1);
-        // Reserved shift values 13..15 act the same as shift=9 on real
-        // hardware (nocash PSX-SPX; PSX-SPX `ADPCMBlock::GetShift`,
-        // PSX-SPX `decode_block`). Clamping to 12 instead would attenuate
-        // those nibbles by ~3 extra bits, so map >12 to 9.
+        let filter = usize::from(block[0] >> 4).min(ADPCM_FILTERS.len() - 1);
         let raw_shift = block[0] & 0x0F;
-        let shift = (if raw_shift > 12 { 9 } else { raw_shift }) as u32;
+        let shift = u32::from(if raw_shift > 12 { 9 } else { raw_shift });
         let flags = block[1];
 
-        // Decode 28 samples (4-bit nibbles, little-endian within bytes:
-        // byte[n] low nibble → sample 2n, high nibble → sample 2n+1).
         let voice = &mut self.voices[v];
-        let (f1, f2) = ADPCM_FILTER_TABLE[predictor];
+        let (weight1, weight2) = ADPCM_FILTERS[filter];
         for i in 0..ADPCM_SAMPLES_PER_BLOCK {
-            let byte = block[2 + (i >> 1)] as i32;
-            let nibble = if i & 1 == 0 {
-                byte & 0x0F
-            } else {
-                (byte >> 4) & 0x0F
-            };
-            // Decode path:
-            //   s   = sign_extend_4bit(nibble) << 12
-            //   raw = s >> shift_factor
-            //   fa  = raw + (s_1*f1 + s_2*f2) >> 6
-            // The 4-bit nibble is sign-extended then scaled by the header
-            // shift (smaller shift = louder), matching real hardware.
-            let signed = ((nibble << 28) >> 28) << 12;
-            let raw = signed >> shift;
-            let fa = raw + ((voice.s_1 * f1) >> 6) + ((voice.s_2 * f2) >> 6);
-            // Saturate to 16 bits BEFORE feeding the IIR predictor history,
-            // exactly like hardware: nocash `old = MinMax(sample, -8000h,
-            // +7FFFh)`, PSX-SPX `Clamp16(sample)`, PSX-SPX
-            // `sample.clamp(-0x8000, 0x7fff)`. Storing the
-            // unclamped i32 let prev1/prev2 drift on loud/bass voices.
-            let clamped = fa.clamp(-0x8000, 0x7FFF);
-            voice.sample_buf[i] = clamped;
+            let byte = i32::from(block[2 + (i >> 1)]);
+            let nibble = if i & 1 == 0 { byte & 0xF } else { byte >> 4 };
+            let scaled = (((nibble << 28) >> 28) << 12) >> shift;
+            let predicted = ((voice.s_1 * weight1) >> 6) + ((voice.s_2 * weight2) >> 6);
+            let sample = (scaled + predicted).clamp(-0x8000, 0x7FFF);
+            voice.sample_buf[i] = sample;
             voice.s_2 = voice.s_1;
-            voice.s_1 = clamped;
+            voice.s_1 = sample;
         }
         voice.sample_index = 0;
-        // Count blocks decoded since key-on. The first decoded block is the
-        // voice's "first block" (decoded_block_count == 1) -- the window in
-        // which a REPEAT_ADDR write must not lock the loop address (see
-        // write_voice_reg / PSX-SPX first-block).
+        // The first block of a note is the window in which a write to the
+        // repeat address still yields to the sample's own loop-start flag.
         voice.decoded_block_count = voice.decoded_block_count.saturating_add(1);
 
-        // Advance current_addr for the next block.
-        let block_bytes = ADPCM_BLOCK_BYTES as u32;
-        let next_addr = (current + block_bytes) & (SPU_RAM_BYTES as u32 - 1);
-
-        // Handle ADPCM block flags:
-        //   bit 0 (flag 1) -- end of sample: jump to loop_addr on next
-        //     block (if flag 2 is set) or stop the voice (flag 2 clear).
-        //   bit 1 (flag 2) -- repeat: suppresses stop on flag 1.
-        //   bit 2 (flag 4) -- loop-start: updates loop_addr to this
-        //     block's address (unless software has locked it via
-        //     REPEAT_ADDR write).
+        // Flag bit 2 (loop start): this block becomes the repeat target,
+        // unless software has written the repeat address itself.
         if flags & 0x4 != 0 && !voice.loop_addr_locked {
             voice.loop_addr = current;
             voice.loop_addr_raw = (current >> 3) as u16;
         }
         if flags & 0x1 != 0 {
-            // Loop-end (bit 0). Defer the ENDX latch to the next block
-            // boundary (it must fire only after this block's 28 samples
-            // have played -- flushed in fetch_voice_sample), and redirect
-            // playback to the loop address unconditionally, exactly as
-            // PSX-SPX do on loop_end. The voice is stopped
-            // only when the repeat bit (bit 1) is clear -- tested on its
-            // own, not via the whole-byte `flags == 0x3` value that
-            // PEOPS/PCSX-Redux used as a loop-hang guard, which wrongly
-            // force-killed single-block loops encoded as 0x7. A noise
-            // voice is never stopped by these flags.
+            // Flag bit 0 (loop end): after this block plays, ENDX latches
+            // and playback continues at the repeat address; without bit 1
+            // (repeat) the note ends there. Noise voices are never ended by
+            // flags.
             let noise = self.noise_on & (1 << v) != 0;
             let voice = &mut self.voices[v];
             voice.endx_pending = true;
             voice.current_addr = voice.loop_addr;
             voice.stop_after_block = (flags & 0x2 == 0) && !noise;
         } else {
-            voice.current_addr = next_addr;
+            voice.current_addr = (current + ADPCM_BLOCK_BYTES as u32) & (SPU_RAM_BYTES as u32 - 1);
             voice.stop_after_block = false;
         }
     }
@@ -2659,18 +2190,12 @@ impl Spu {
 //  Gaussian interpolation table (PSX hardware).
 // ===============================================================
 
-/// 512-entry PSX hardware Gaussian interpolation coefficient table
-/// (the nocash PSX-SPX table). Byte-identical to the tables shipped by
-/// PSX-SPX (``) and PSX-SPX
-/// (``); the first 16 entries are -1 and the
-/// peak coefficient is `GAUSS_TABLE[0x1FF] == 0x59B3`. Indexed in a
-/// butterfly by the 8-bit interpolation phase `i = (frac >> 8) & 0xFF`
-/// via taps `T[0xFF-i], T[0x1FF-i], T[0x100+i], T[i]`; each product
-/// with an i16 sample is accumulated in i32 and the sum is shifted
-/// right by 15. Per-phase 4-tap sum is ~0x7F80 (the real SPU's
-/// deliberate ~0.4% gain droop), so unity-DC output is ~32639, not
-/// full scale. The previous build shipped the legacy PEOPS/old-PCSX
-/// 11-bit table (peak 0x519, `>> 11`, `& !2047`), a different curve.
+/// The SPU's 512-entry Gaussian interpolation table (the nocash PSX-SPX
+/// table, a hardware constant). The first 16 entries are -1 and the peak is
+/// `GAUSS_TABLE[0x1FF] == 0x59B3`. A phase `i` in 0..=0xFF selects the four
+/// weights `T[0xFF-i]`, `T[0x1FF-i]`, `T[0x100+i]` and `T[i]` for the oldest
+/// to newest sample; their sum is about 0x7F80, which is the deliberate gain
+/// droop of the real SPU (a full-scale DC input comes out near 32639).
 const GAUSS_TABLE: [i32; 0x200] = [
     -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001,
     -0x001, -0x001, -0x001, -0x001, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0001,
@@ -2717,26 +2242,17 @@ const GAUSS_TABLE: [i32; 0x200] = [
     0x5997, 0x599E, 0x59A4, 0x59A9, 0x59AD, 0x59B0, 0x59B2, 0x59B3,
 ];
 
-/// Sample four points through the hardware Gaussian table at the
-/// current fractional position, matching PSX-SPX `Voice::interpolate`
-/// (-614) and PSX-SPX `Interpolate` (-2040).
-/// `samples` is the rolling ring window `[oldest, older, newer, newest]`
-/// (== PSX-SPX `s[-3..=0]`); `frac` is the 16.16 fixed-point cursor
-/// remainder (nominally `0..0xFFFF`).
-///
-/// The 8-bit phase `i = (frac >> 8) & 0xFF` is exactly PSoXide's prior
-/// phase selector: `((frac >> 6) & !3) >> 2 == (frac >> 8) & 0xFF` for
-/// every `frac` (verified across all 0x10000 values), so the 16x
-/// fixed-point scale is unchanged -- only the table and the
-/// butterfly/`>> 15` arithmetic differ. The `& 0xFF` also bounds every
-/// table access to 0..=0x1FF, keeping out-of-range `frac` panic-free.
-fn gauss_interpolate(samples: [i16; 4], frac: u32) -> i16 {
-    let i = ((frac >> 8) & 0xFF) as usize;
-    let mut out = GAUSS_TABLE[0xFF - i] * samples[0] as i32;
-    out += GAUSS_TABLE[0x1FF - i] * samples[1] as i32;
-    out += GAUSS_TABLE[0x100 + i] * samples[2] as i32;
-    out += GAUSS_TABLE[i] * samples[3] as i32;
-    saturate_i16(out >> 15)
+/// Interpolate between the four most recent samples (oldest first) at the
+/// fractional position held in a voice's counter: the phase index is bits
+/// 4..11 of the counter. The four weighted samples are summed and the sum
+/// shifted down 15 places.
+fn gauss_interpolate(taps: [i16; 4], counter: u32) -> i16 {
+    let i = ((counter >> 4) & 0xFF) as usize;
+    let sum = GAUSS_TABLE[0xFF - i] * i32::from(taps[0])
+        + GAUSS_TABLE[0x1FF - i] * i32::from(taps[1])
+        + GAUSS_TABLE[0x100 + i] * i32::from(taps[2])
+        + GAUSS_TABLE[i] * i32::from(taps[3]);
+    saturate_i16(sum >> 15)
 }
 
 // ===============================================================
