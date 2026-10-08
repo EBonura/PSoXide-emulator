@@ -10,8 +10,8 @@
 //! same machine state.
 
 use emulator_core::spu::{
-    Spu, EON_HI, EON_LO, KON_HI, KON_LO, NON_LO, PMON_LO, REVERB_BASE, REVERB_CFG_BASE, REVERB_VOL_L,
-    REVERB_VOL_R, SAMPLE_CYCLES, SPUCNT, VOICE_BASE,
+    Spu, EON_HI, EON_LO, KON_HI, KON_LO, NON_LO, PMON_LO, REVERB_BASE, REVERB_CFG_BASE,
+    REVERB_VOL_L, REVERB_VOL_R, SAMPLE_CYCLES, SPUCNT, VOICE_BASE,
 };
 use std::time::Instant;
 
@@ -72,7 +72,9 @@ fn main() {
             spu.tick_sample(now);
             if spu.audio_queue_len() > 4096 {
                 for (l, r) in spu.drain_audio() {
-                    checksum = checksum.wrapping_mul(31).wrapping_add(l as u64 ^ (r as u64) << 16);
+                    checksum = checksum
+                        .wrapping_mul(31)
+                        .wrapping_add(l as u64 ^ (r as u64) << 16);
                 }
             }
         }
