@@ -1381,7 +1381,6 @@ impl Cpu {
             self.irq_line_high_steps = self.irq_line_high_steps.saturating_add(uncounted);
         }
         self.cursor.block = 0;
-        self.apply_redux_bios_kernel_call_intercept();
         if !bus.post_op_quiet() {
             bus.drain_scheduler_events_post_op();
             b.limit = bus.quiet_limit().min(b.until_cycle);
