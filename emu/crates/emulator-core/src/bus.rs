@@ -6,12 +6,16 @@
 //!
 //! ## Provenance
 //!
-//! Portions of this module are parity-matched against, and in places
-//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
-//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
-//! correspondence are flagged inline with `Redux` references. PSoXide is
-//! released under GPL-2.0-or-later in part to honor this lineage; see
-//! `LICENSE` and `docs/license-audit.md`.
+//! The memory map, region wait states, register decoding and device wiring
+//! come from nocash PSX-SPX and from this project's own hardware-test
+//! captures (several cycle costs name the records). Where a timing or an
+//! event-service point is marked `gate-pinned`, it was first chosen to
+//! reproduce a PCSX-Redux trace while the project still had a real-BIOS
+//! path, and it stays because the compat frame hashes or the library boots
+//! depend on it; no silicon measurement supports or contradicts it. This
+//! module has not been rewritten clean-room as a whole; the DMA register
+//! file, the scheduler, the SPU, the MDEC and the SIO model it drives have.
+//! See `LICENSE` and `docs/PROVENANCE.md`.
 
 use psx_hw::memory::{self, to_physical};
 use thiserror::Error;
@@ -282,9 +286,8 @@ pub struct Bus {
     // [`EventSlot::VBlank`]. Seeded at `FIRST_VBLANK_CYCLE` by
     // `Bus::new`; every VBlank handler invocation re-schedules the
     // next one `VBLANK_PERIOD_CYCLES` later.
-    /// Unified event scheduler -- the 15-slot queue that owns
-    /// DMA / CDROM / VBlank / SPU / MDEC / SIO timings, matching
-    /// Redux's `m_regs.interrupt` + `intTargets`. See
+    /// Unified event scheduler: the queue of per-slot deadlines that owns
+    /// DMA / CDROM / VBlank / SPU / MDEC / SIO timings. See
     /// [`crate::scheduler`] for the model.
     ///
     /// Migration status: DMA channel completions (slots `GpuDma`,
@@ -311,9 +314,7 @@ pub struct Bus {
     pub telemetry: GuestTelemetry,
     /// When true, the CPU replaces fetches at `0xA0` / `0xB0` / `0xC0`
     /// with a host-Rust implementation of the BIOS syscall they
-    /// dispatch to. Off by default so parity tests stay bit-exact
-    /// against Redux (which does the real BIOS ROM dispatch).
-    /// Turned on by [`Bus::enable_hle_bios`] -- typically right after
+    /// dispatch to. Off by default; turned on by [`Bus::enable_hle_bios`] -- typically right after
     /// side-loading an EXE that wants BIOS services but skipped the
     /// BIOS's own init.
     pub hle_bios_enabled: bool,
@@ -346,11 +347,11 @@ pub struct Bus {
     /// the VBlank scheduler. Flipped by [`Bus::set_pal_mode`];
     /// defaults to NTSC for existing parity tests.
     hsync_cycles: u64,
-    /// HSync cadence used by the VBlank scheduler. Redux changes
-    /// the active PAL/NTSC thresholds on GP1 display-mode writes,
-    /// but the base counter's target can retain its previous cadence;
-    /// keeping this separate from Timer 1's HBlank source preserves
-    /// that phase.
+    /// HSync cadence used by the VBlank scheduler. A GP1 display-mode write
+    /// switches the PAL/NTSC thresholds at once, but the VBlank already
+    /// scheduled keeps the previous line cadence; keeping this separate from
+    /// Timer 1's HBlank source preserves that phase. Pinned by the PAL
+    /// titles' compat frame hashes; the console's behaviour is unmeasured.
     vblank_hsync_cycles: u64,
     /// VBlank period in cycles -- one full non-interlaced field at the
     /// current video region. 571_236 for NTSC, 680_438 for PAL at the
@@ -650,10 +651,10 @@ impl Bus {
             } else {
                 total_scanlines - current_scanline + start_scanline
             };
-            // Redux's base counter target is not recalculated by the
-            // display-mode write, so the next VBlank remains aligned
-            // to the old hsync cadence while using the new region's
-            // VBlank-start scanline.
+            // The scheduled VBlank is not recalculated by the display-mode
+            // write, so the next one remains aligned to the old hsync
+            // cadence while using the new region's VBlank-start scanline
+            // (gate-pinned, see `vblank_hsync_cycles`).
             remaining_lines
                 .saturating_mul(vblank_hsync)
                 .saturating_sub(line_phase)
@@ -664,11 +665,10 @@ impl Bus {
         self.vblank_hsync_cycles = vblank_hsync;
         self.vblank_period = period;
         self.scheduler.cancel(crate::scheduler::EventSlot::VBlank);
-        // Preserve current scanline phase across the region switch.
-        // Redux's auto-video path changes the active video setting
-        // from GP1 display-mode writes, but the counter phase keeps
-        // marching; restarting from scanline 0 makes PAL games miss
-        // the next VBlank by a large fraction of a frame.
+        // Preserve the current scanline phase across the region switch:
+        // the beam keeps running when GP1 changes the video mode, and
+        // restarting from scanline 0 makes PAL games miss the next VBlank
+        // by a large fraction of a frame.
         self.scheduler
             .schedule(crate::scheduler::EventSlot::VBlank, self.cycles, delay);
     }
@@ -1240,14 +1240,13 @@ impl Bus {
     ///
     /// CDROM is deliberately NOT processed here -- only at
     /// `drain_scheduler_events_post_op`, which the CPU calls at
-    /// branch-delay-slot boundaries. That matches Redux's
-    /// `branchTest` timing (psxinterpreter.cc:1650) where CDROM
-    /// `interrupt()` fires at end-of-delay-slot, not on every
-    /// instruction. Ticking CDROM on every BIAS makes our ACK
-    /// land one or two instructions earlier than Redux's -- long
-    /// enough for a CDROM-polling spin-wait (e.g. a commercial title's BIOS
-    /// ReadTOC-Ack wait at step ~90M) to see a different register
-    /// byte than Redux and exit the loop early.
+    /// branch-delay-slot boundaries. The controller's interrupt then lands
+    /// at the end of a delay slot rather than after every instruction;
+    /// servicing it on every cycle tick moves the ACK one or two
+    /// instructions earlier, enough for a CDROM-polling spin-wait (a
+    /// commercial title's ReadTOC-ACK wait) to see a different register
+    /// byte and leave its loop early. Pinned by the compat hashes; the
+    /// console's exact interrupt-to-instruction alignment is unmeasured.
     #[inline]
     pub fn tick(&mut self, n: u32) {
         self.advance_cycles(n);
@@ -1264,8 +1263,7 @@ impl Bus {
     /// check. Ensures any scheduler event whose target was crossed
     /// DURING the opcode (not just at the BIAS tick that starts the
     /// instruction) raises its IRQ bit in time for the same step's
-    /// exception dispatch. Redux achieves the same effect via
-    /// `branchTest` → `counters->update()`.
+    /// exception dispatch.
     pub fn drain_scheduler_events_post_op(&mut self) {
         if self.limits.pending() {
             self.maybe_activate_limits();
@@ -1275,8 +1273,7 @@ impl Bus {
         // and this one lands in `I_STAT` in time for the same
         // step's exception dispatch. Per-instruction `Bus::tick`
         // doesn't touch timers anymore; this is the only path that
-        // matters for IRQ visibility. Mirrors Redux's
-        // `Counters::update` call at the top of `branchTest`. Skipped while
+        // matters for IRQ visibility. Skipped while
         // no timer can cross anything (`Timers::quiet_until`): the next
         // advance covers the interval with exactly the same result.
         self.last_post_op_cycle = self.cycles;
@@ -1297,14 +1294,13 @@ impl Bus {
         // (`EventSlot::Sio0` in `drain_scheduler_events_inner`),
         // not from a separate poll. The `take_due` walk is
         // strict-greater-than, so events that were due as of
-        // `now` will fire next branch test; SIO0's parity
+        // `now` will fire at the next branch boundary; SIO0's timing
         // tolerance is well within that window.
     }
 
     /// Walk every scheduler slot whose deadline has passed and
-    /// dispatch its handler. Mirrors Redux's `branchTest` interrupt
-    /// loop (`core/r3000a.cc`), which uses a single 15-slot queue
-    /// to drive DMA / CDROM / SPU / MDEC / SIO completions.
+    /// dispatch its handler. One queue drives DMA / CDROM / SPU / MDEC /
+    /// SIO completions.
     ///
     /// DMA channel completions all funnel through the shared
     /// `Dma` IRQ line: each per-channel slot clears CHCR bit 24
@@ -1355,10 +1351,10 @@ impl Bus {
         // before doing anything else, which is enough to keep
         // timer IRQs firing at parity-relevant cycles.
 
-        // Redux updates root counters with `cycle >= nextCounter`
-        // before walking the strict interrupt-slot queue. VBlank is
-        // our root-counter-style event, so handle it inclusively here
-        // instead of via `take_due`'s generic `target < now` rule.
+        // Root counters fire when the cycle count reaches their target,
+        // before the strict slot queue is walked. VBlank is a
+        // root-counter-style event, so handle it inclusively here instead
+        // of via `take_due`'s generic `target < now` rule.
         // Advance the lazy timer bank while the old VBlank target is still
         // installed. Timer 1 sync modes must cross/reset at that edge; doing
         // this after rescheduling loses the boundary entirely.
@@ -1380,12 +1376,10 @@ impl Bus {
                 .schedule(EventSlot::VBlank, target, self.vblank_period);
         }
 
-        // SIO0 IRQ delivery follows Redux's interrupt queue: due SIO
-        // targets are processed at the branch-test/post-op drain, not
-        // from the per-instruction BIAS tick. Processing them from
-        // `Bus::tick` can make I_STAT bit 7 visible a few
-        // instructions early inside BIOS/game interrupt handlers
-        // (first observed route drift at 266,946,810).
+        // SIO0 IRQ delivery waits for the branch-boundary drain, not the
+        // per-instruction BIAS tick. Processing due SIO targets from
+        // `Bus::tick` can make I_STAT bit 7 visible a few instructions
+        // early inside BIOS/game interrupt handlers (gate-pinned).
         if include_sio {
             while self
                 .scheduler
@@ -1463,8 +1457,7 @@ impl Bus {
                     // Toggle GPUSTAT bit 31 (interlace / field flag)
                     // -- some BIOS and game code polls this instead
                     // of (or in addition to) the VBlank IRQ to detect
-                    // frame boundaries. Matches Redux's
-                    // `SoftGPU::vblank` which XORs the same bit.
+                    // frame boundaries.
                     self.gpu.toggle_vblank_field();
                     // Tell the timer bank -- Timer 1 sync-mode-1
                     // resets its counter on this pulse.
@@ -1493,9 +1486,9 @@ impl Bus {
                 | EventSlot::CdLid => {}
             }
         }
-        // CDROM DMA completion is observed by Redux at the exact
-        // target boundary in retail boot paths (license-sector
-        // DMA lands here). Keep the generic scheduler strict for the
+        // CDROM DMA completion is observed at the exact target boundary in
+        // retail boot paths (the license-sector DMA lands here); the
+        // compat hashes pin it. Keep the generic scheduler strict for the
         // other interrupt slots, but let CDR DMA finish on equality.
         if include_cdr_dma
             && self
@@ -1533,15 +1526,12 @@ impl Bus {
     }
 
     /// Advance the cycle counter without running peripheral schedulers.
-    /// Used by load/store opcodes to charge the per-data-access cycle
-    /// (Redux's `m_regs.cycle += 1` inside `read8/16/32` and
-    /// `write8/16/32` in `psxmem.cc`). VBlank / DMA6 / CDROM schedulers
-    /// still see the accumulated cycle count when `tick()` runs at end
-    /// of instruction -- matching Redux's `psxBranchTest`, which only
-    /// runs after delay slots and observes the post-BIAS,
-    /// post-data-access total. Timers, however, see every cycle so
-    /// their counter values stay in lock-step with Redux's cycle-derived
-    /// `count = (now - cycle_start) / rate` model.
+    /// Used by load/store opcodes to charge the per-data-access cycle.
+    /// VBlank / DMA6 / CDROM schedulers still see the accumulated cycle
+    /// count when `tick()` runs at end of instruction, and the branch
+    /// boundary observes the post-BIAS, post-data-access total. Timers see
+    /// every cycle so their counters are always a function of the current
+    /// cycle count.
     pub fn add_cycles(&mut self, n: u32) {
         self.advance_cycles(n);
     }
@@ -1915,7 +1905,7 @@ impl Bus {
 
     /// Inner cycle-advancement helper shared by `tick` and `add_cycles`.
     /// Any cycle delta must flow through this function so the timer
-    /// bank's accumulator matches Redux's lazy-read timer model.
+    /// bank's lazily evaluated counters stay consistent.
     ///
     /// Runs for every instruction, so the common case (no limit oracle,
     /// no GPU list walk, no GPU DMA waiting on a request) is kept small
@@ -2333,13 +2323,12 @@ impl Bus {
     }
 
     /// Run DMA on a single channel after its CHCR was just written
-    /// with the start bit set. Mirrors Redux's per-channel
-    /// `dmaExec<N>` dispatch in `psxhw.cc` -- each CHCR write goes
-    /// to exactly one channel's handler, NOT a sweep across every
-    /// channel. That distinction matters: if another channel's
-    /// transfer was still in-flight (start bit set, awaiting its
-    /// scheduled completion), a sweep re-runs it and schedules a
-    /// second target that overwrites the first.
+    /// with the start bit set. Each CHCR write goes to exactly one
+    /// channel's handler, NOT a sweep across every channel. That
+    /// distinction matters: if another channel's transfer was still
+    /// in-flight (start bit set, awaiting its scheduled completion), a
+    /// sweep re-runs it and schedules a second target that overwrites
+    /// the first.
     /// Channels named by `PSOXIDE_WEDGE_DMA` (a bitmask, decimal or
     /// `0x`-prefixed) latch busy forever instead of transferring, the way
     /// a real controller does when a kick never completes.
@@ -2374,12 +2363,11 @@ impl Bus {
         // Each channel: run the transfer now (so memory / GPU state is
         // up-to-date for any immediate follow-up reads), but defer the
         // CHCR start-bit clear and DMA IRQ raise to the channel's
-        // scheduled completion cycle. Redux schedules one cycle per
-        // word transferred (`scheduleGPUOTCDMAIRQ(size)`, etc.), which
-        // keeps the BIOS's "poll CHCR until done" loop matching our
-        // trace step-for-step. An immediate IRQ raise triggers the
-        // handler ~1 hblank early and diverges the trace by dozens of
-        // instructions.
+        // scheduled completion cycle, one cycle per word transferred
+        // unless a channel's own model says otherwise. Software polling
+        // CHCR must see the start bit set for that window; an immediate
+        // IRQ raise reaches the handler about an hblank early and shifts
+        // the game's instruction trace (gate-pinned).
         use crate::scheduler::EventSlot;
         if ch <= 1 && crate::env_flag!("PSOXIDE_TRACE_MDEC_DMA") {
             let channel = self.dma.channels[ch];
@@ -2466,7 +2454,8 @@ impl Bus {
                     // the CPU cannot execute the following CHCR read until the
                     // ordering table is finished. PS1 DRAM hyper-page mode is
                     // one cycle per word plus one row-address setup per 16
-                    // words (the same measured model used by DuckStation).
+                    // words, which reproduces the console's OTC clear time in
+                    // the timed OTC hardware-test records.
                     let otc_cycles = if self.limits.on(crate::limits::GPU) {
                         0
                     } else {
@@ -2490,8 +2479,8 @@ impl Bus {
                 }
             }
             _ => {
-                // Channel 5 (PIO) + invalid indices -- skip silently.
-                // Matches Redux's `#if 0` guard that disables PIO DMA.
+                // Channel 5 (PIO) + invalid indices -- skip silently: no
+                // PS1 peripheral uses the expansion-port DMA channel.
             }
         }
     }
@@ -2596,8 +2585,8 @@ impl Bus {
         }
     }
 
-    /// Cycles DMA1 takes per decoded word. 8 is Redux's model and the
-    /// default. `PSOXIDE_MDEC_OUT_CYCLES_PER_WORD` overrides it for player
+    /// Cycles DMA1 takes per decoded word. 8 is the default, pinned by the
+    /// compat FMV hashes. `PSOXIDE_MDEC_OUT_CYCLES_PER_WORD` overrides it for player
     /// experiments: silicon's MDEC throughput is not measured yet, and the
     /// v1.26 FMV profile puts a whole frame's decode-plus-upload near 952k
     /// cycles, several times what 8 gives. Diagnostic only, like
@@ -2628,8 +2617,8 @@ impl Bus {
             return;
         }
         if let Some(mdec_words) = self.run_dma_mdec_out() {
-            // Redux's MDEC model schedules output DMA by byte count
-            // multiplied by MDEC_BIAS=2.0, i.e. 8 cycles per 32-bit word.
+            // Output DMA completes after a fixed cycle count per 32-bit word
+            // (8 by default, see `mdec_out_cycles_per_word`).
             let delay = mdec_words as u64 * Self::mdec_out_cycles_per_word();
             let target = self.cycles + delay;
             self.log_dma_schedule("MdecOut", delay, target);
@@ -2746,7 +2735,7 @@ impl Bus {
         let bcr = ch.block_control;
         // BCR length is a count of 32-bit DMA words. Each transferred word
         // maps to TWO 16-bit SPU-RAM halfwords, so the SPU receives twice
-        // this many halfwords (Redux's writeDMAMem `size` = 2 x BCR product).
+        // this many halfwords.
         // Completion timing is governed by the SPU FIFO engine, not merely
         // the much faster main-RAM DMA bus transaction.
         let (word_count, block_words): (u32, u32) = match sync_mode {
@@ -2817,12 +2806,11 @@ impl Bus {
         if (ch.channel_control >> 24) & 1 == 0 {
             return None;
         }
-        // Redux rejects DMA3 kicks only until a sector is ready in
-        // the transfer buffer (`m_read == 0`). It does not require
-        // the request-register bit that gates MMIO data reads; the
-        // BIOS kicks DMA before that latch is armed in one commercial
-        // CDROM handler and expects CHCR bit 24 to remain busy for
-        // the scheduled DMA window.
+        // A DMA3 kick is rejected only until a sector is ready in the
+        // transfer buffer. It does not require the request-register bit
+        // that gates MMIO data reads: one commercial CDROM handler kicks
+        // DMA before that latch is armed and expects CHCR bit 24 to remain
+        // busy for the scheduled DMA window.
         if self.cdrom.data_fifo_len() == 0 {
             return Some(0);
         }
@@ -2859,11 +2847,10 @@ impl Bus {
                 return Some(0);
             }
         };
-        // Redux falls back to the active sector size when BCR asks
-        // for zero words (for example Ape Escape programs `0001/0000`
-        // and expects a full 2048-byte transfer). Our FIFO already
-        // holds the exact transfer payload, so derive the word count
-        // from its live length.
+        // A BCR asking for zero words falls back to the active sector size
+        // (Ape Escape programs `0001/0000` and expects a full 2048-byte
+        // transfer). The FIFO already holds the exact transfer payload, so
+        // derive the word count from its live length.
         let total_words = if requested_words == 0 {
             self.cdrom.data_fifo_words()
         } else {
@@ -2925,9 +2912,9 @@ impl Bus {
     ///   clocks per block, and five fixed setup clocks.
     /// - **GPU→RAM download**: about 2.195 cycles per packed 32-bit word,
     ///   calibrated against the public 320×240 `gpu/bandwidth` silicon run.
-    /// - **Linked list**: `total_words`, per Redux L568:
-    ///   `scheduleGPUDMAIRQ(size)` where size is the
-    ///   `gpuDmaChainSize` traversed count.
+    /// - **Linked list**: one cycle per word traversed, headers included
+    ///   (gate-pinned; the console's list-walk cost is only measured for
+    ///   the cases in the list-busy hardware tests).
     fn run_dma_gpu(&mut self) -> Option<u32> {
         let ch = &self.dma.channels[2];
         if (ch.channel_control >> 24) & 1 == 0 {
@@ -2979,10 +2966,9 @@ impl Bus {
             _ => 0, // prohibited mode 3
         };
         self.service_gpu_irq();
-        // Start bit stays set until the scheduled completion event
-        // fires -- Redux's `gpuInterrupt` is where `clearDMABusy<2>()`
-        // is called. BIOS polling of CHCR bit 24 during the transfer
-        // window must read 1 until the IRQ fires.
+        // The start bit stays set until the scheduled completion event
+        // fires: software polling CHCR bit 24 during the transfer window
+        // must read 1 until the IRQ fires.
         Some(completion)
     }
 
@@ -3213,14 +3199,12 @@ impl Bus {
                 let word = read_ram_u32(&self.ram[..], word_addr);
                 self.gpu.gp0_push_dma(word);
             }
-            // Redux charges `(header >> 24) + 1` per node (see
-            // `gpuDmaChainSize:474`). The `+1` covers the header
-            // fetch; payload accounts for the rest.
+            // Each node costs its payload word count plus one cycle for
+            // the header fetch.
             total_words = total_words.saturating_add(word_count + 1);
             // End-of-chain: hardware uses *any* pointer with bit 23
             // set (0x800000) as the terminator, not just the common
-            // 0x00FF_FFFF sentinel. Matches Redux's
-            // `while (!(addr & 0x800000))` at gpu.cc:483.
+            // 0x00FF_FFFF sentinel (PSX-SPX "DMA Channel 2").
             if (header & 0x800000) != 0 {
                 return gpu_command_linked_cycles(total_words, node_count);
             }
@@ -3756,11 +3740,8 @@ impl Bus {
             if self.dma.write32(phys, value) {
                 self.irq.raise(IrqSource::Dma);
             }
-            // Only a CHCR write with bit 24 set starts a transfer --
-            // matches Redux's `dmaExec<N>` dispatcher in `psxhw.cc`,
-            // which runs from the per-channel `case 0x1f80_1088/98/
-            // a8/b8/c8/e8` arms. Crucially it runs ONLY channel N,
-            // not a sweep across all channels.
+            // Only a CHCR write with bit 24 set starts a transfer, and it
+            // runs ONLY channel N, not a sweep across all channels.
             //
             // Earlier we called `maybe_run_dma()` (iterates every
             // channel) on every CHCR trigger. If another channel's
@@ -3933,7 +3914,7 @@ impl Bus {
         // CPU data bus (silicon: `cpu/io-access-bitwidth`). The CPU aligns
         // store data to the lanes the address selects, so a store to byte
         // 1..3 of a register arrives as the source word shifted by the byte
-        // offset, with zero below it (DuckStation models the same).
+        // offset, with zero below it.
         if phys >= IO_SPACE_START {
             self.gpu_quiet_until = 0;
         }
@@ -4050,10 +4031,10 @@ impl Bus {
         if phys >= IO_SPACE_START {
             self.gpu_quiet_until = 0;
         }
-        // Expansion-2 debug console char-out (PCSX-Redux convention,
-        // 0x1F802080): the port the public test suites print to
-        // (JaCzekanski ps1-tests, Redux homebrew). Forward to stdout so
-        // their console-verified corpora run headless with capturable TTY.
+        // Expansion-2 debug console char-out at 0x1F802080: the port the
+        // public test suites print to (the ps1-tests programs, homebrew).
+        // Forward to stdout so their console-verified corpora run
+        // headless with a capturable TTY.
         if phys == 0x1F80_2080 {
             use std::io::Write;
             let mut out = std::io::stdout().lock();
@@ -4081,7 +4062,7 @@ impl Bus {
         if CdRom::contains(phys) {
             // Thread `self.cycles` through so the CDROM scheduler
             // anchors response-IRQ deadlines on the exact cycle at
-            // the cmd-port write, matching Redux's `AddIrqQueue`.
+            // the cmd-port write.
             if self.cdrom.write8_at(phys, value, self.cycles) {
                 self.irq.raise(IrqSource::Cdrom);
             }
@@ -4378,9 +4359,9 @@ fn write_ram_u32(ram: &mut [u8], phys: u32, value: u32) {
     }
 }
 
-/// Halfword read from a RAM slice at a physical RAM offset. SPU DMA is
-/// halfword-based in Redux: the BCR product counts 16-bit samples and
-/// the completion delay is half that product.
+/// Halfword read from a RAM slice at a physical RAM offset. SPU DMA moves
+/// halfwords: the BCR product counts 32-bit words, each feeding two samples,
+/// and the completion delay is half that product.
 fn read_ram_u16(ram: &[u8], phys: u32) -> u16 {
     let offset = (phys & 0x001F_FFFF) as usize;
     if offset + 2 <= ram.len() {
@@ -4688,8 +4669,8 @@ mod tests {
     /// The other on-die 32-bit registers latch the complete data bus like
     /// DMA does (silicon: `cpu/io-access-bitwidth` reads the whole source
     /// word back from I_MASK and T0_TARGET after an aligned `sb`), so a
-    /// store to byte 1..3 of one of them lands shifted onto its lanes, as
-    /// DuckStation models. Before, the timers took the unshifted word, the
+    /// store to byte 1..3 of one of them lands shifted onto its lanes.
+    /// Before, the timers took the unshifted word, the
     /// interrupt controller ignored the store entirely, GPU and MDEC took
     /// the unshifted word, and memory control kept only the addressed byte.
     #[test]
@@ -4732,7 +4713,7 @@ mod tests {
 
     /// The SPU and the two serial ports sit on a 16-bit bus. A byte store
     /// to an odd address is shifted onto the high byte lane of its
-    /// halfword (DuckStation), except on the SPU, which ignores it
+    /// halfword, except on the SPU, which ignores it
     /// (psx-spx "SPU Bus-Width": 8-bit writes to odd addresses are ignored,
     /// even ones act as 16-bit writes of the low source halfword).
     #[test]
@@ -4771,8 +4752,7 @@ mod tests {
     }
 
     /// Byte and halfword loads from the upper lanes of I_STAT / I_MASK read
-    /// the register shifted down (DuckStation), instead of the I/O echo
-    /// buffer.
+    /// the register shifted down, instead of the I/O echo buffer.
     #[test]
     fn narrow_irq_reads_select_the_addressed_byte_lanes() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
@@ -4866,7 +4846,7 @@ mod tests {
 
     #[test]
     fn vblank_source_index_is_0() {
-        // Sanity: IrqSource::VBlank is bit 0, matching Redux's setIrq(0x01).
+        // Sanity: IrqSource::VBlank is bit 0 of I_STAT (PSX-SPX).
         assert_eq!(IrqSource::VBlank as u32, 0);
     }
 
@@ -4891,7 +4871,7 @@ mod tests {
         assert_ne!(
             bus.irq.stat() & (1 << (IrqSource::Controller as u32)),
             0,
-            "Redux raises the SIO IRQ from the branch-test interrupt queue"
+            "the SIO IRQ is raised from the branch-boundary drain"
         );
     }
 
@@ -4962,7 +4942,7 @@ mod tests {
     }
 
     #[test]
-    fn cdrom_burst_dma_uses_redux_quarter_rate_completion_delay() {
+    fn cdrom_burst_dma_completes_after_a_quarter_of_its_words() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
         bus.cycles = 100;
         bus.cdrom
