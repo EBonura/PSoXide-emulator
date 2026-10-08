@@ -456,7 +456,7 @@ pub struct LaunchArgs {
     /// toolbar toggle. Pair with `--dump-hw` for a single-frame edge render.
     #[arg(long)]
     pub wireframe: bool,
-    /// Sample-time texture filter for `--dump-hw`: none|xbr.
+    /// Sample-time texture filter for `--dump-hw`: none|bilinear.
     #[arg(long, default_value = "none")]
     pub texture_filter: String,
 }
@@ -3085,7 +3085,7 @@ fn region_label(e: &LibraryEntry) -> &'static str {
 
 fn parse_texture_filter(s: &str) -> u32 {
     match s.to_ascii_lowercase().as_str() {
-        "xbr" => 3,
+        "bilinear" => 1,
         _ => 0,
     }
 }

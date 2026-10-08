@@ -90,23 +90,23 @@ pub enum TextureFilter {
     /// PSX-native point sampling.
     #[default]
     None,
-    /// Edge-directed xBR (best on 3D; soft/odd on 2D/tiled backgrounds).
-    Xbr,
+    /// Bilinear between the four nearest texels, with binary-alpha edges.
+    Bilinear,
 }
 
 impl TextureFilter {
     /// Cycle to the next mode (wraps).
     pub fn next(self) -> Self {
         match self {
-            TextureFilter::None => TextureFilter::Xbr,
-            TextureFilter::Xbr => TextureFilter::None,
+            TextureFilter::None => TextureFilter::Bilinear,
+            TextureFilter::Bilinear => TextureFilter::None,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             TextureFilter::None => "None",
-            TextureFilter::Xbr => "xBR",
+            TextureFilter::Bilinear => "Bilinear",
         }
     }
 
@@ -114,7 +114,7 @@ impl TextureFilter {
     pub fn mode(self) -> u32 {
         match self {
             TextureFilter::None => 0,
-            TextureFilter::Xbr => 3,
+            TextureFilter::Bilinear => 1,
         }
     }
 }
