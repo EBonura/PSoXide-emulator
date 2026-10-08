@@ -16,6 +16,25 @@
   underrun of up to four samples instead of dropping to zero (a click). The
   converter's history and that repeat state are part of save states, which
   move to format 11; older save states no longer load.
+- CD sectors chain from their own deadline instead of from the cycle the CPU
+  serviced the previous one. A streaming read ran about 50 ppm slower than
+  the disc turns, so the XA audio it fed the SPU ran dry about twice a second
+  and each gap was a click. A tick more than a sector period late restarts the
+  cadence from the current cycle. Sector arrival times move by a few cycles
+  per sector, so frame hashes of games that stream from the disc move with it.
+- The CD drive's audio, data and motor transitions follow console measurements
+  (hardware tests v1.28, medians): Pause from CD-DA completes 123.1 ms after
+  the command; Stop shows the motor until 606 ms; a data read on a stopped
+  drive pays the spin-up (four sectors in 1978 ms) and a read issued during
+  the spin-down waits it out first (first sector 2721 ms); the first data
+  sector after CD-DA arrives 945 ms after the read, and the first Play after
+  data reaches PLAYING in 1006 ms. A CD-DA Pause used to complete in 3.9 ms
+  and a read after audio in 356 ms. Games that pause or stop audio and read
+  the disc afterwards see the new latencies, and with the sector change above
+  14 of the 20 compat games render some frames differently (their final
+  frame hash moves in 8). The drive's spin-down deadline and its
+  head-on-a-CD-DA-track flag are part of save states, which move to format
+  12; older save states no longer load.
 - Clean-room rewrites from PSX-SPX and console measurements: the event
   scheduler, the DMA register file and DICR logic, the MDEC colour path, and
   the SPU voice engine (ADSR and volume sweeps, noise generator, pitch

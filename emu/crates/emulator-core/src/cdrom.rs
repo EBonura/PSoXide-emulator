@@ -285,6 +285,18 @@ pub struct CdRom {
     /// motor has completed spinning up. Gates commands that need the
     /// motor (Seek, Read, Play).
     motor_on: bool,
+    /// Cycle at which a Stop finishes spinning the motor down. Until then
+    /// the status byte still reports the motor on (console: motor-off shows
+    /// at the Stop completion, 606 ms after the command) while `motor_on`
+    /// already says the drive is stopping. `None` when no Stop is in flight.
+    /// Saved with the state, so a restore mid spin-down finishes it on time.
+    spindown_until: Option<u64>,
+    /// The head last went to a CD-DA track and has not gone back to data
+    /// since. The next data operation then pays
+    /// [`AUDIO_TO_DATA_SETTLE_CYCLES`], and a Play with this clear pays
+    /// [`DATA_TO_AUDIO_SETTLE_CYCLES`]. Saved with the state, so a restore
+    /// while the head sits on a CD-DA track still pays the settle.
+    head_on_audio: bool,
     /// Whether a disc is currently inserted. For "no-disc" boots
     /// this stays `false`, and commands that expect a disc (GetID,
     /// ReadN) return error responses.
@@ -579,6 +591,8 @@ impl CdRom {
             lid_bootstrap_pending: false,
             drive_state: DriveState::Stopped,
             motor_on: false,
+            spindown_until: None,
+            head_on_audio: false,
             disc_present: false,
             setloc_msf: (0, 0, 0),
             setloc_pending: false,
@@ -1030,6 +1044,8 @@ impl CdRom {
         self.cdda_sector = None;
         self.disc_present = self.disc.is_some();
         self.motor_on = self.disc_present;
+        self.spindown_until = None;
+        self.head_on_audio = false;
         self.drive_state = if self.disc_present {
             DriveState::Standby
         } else {
@@ -1237,6 +1253,7 @@ impl CdRom {
 
     fn queue_command(&mut self, command: u8, now: u64) {
         self.commands_dispatched += 1;
+        self.update_spindown(now);
         self.last_command = command;
         if (command as usize) < self.command_hist.len() {
             self.command_hist[command as usize] += 1;
@@ -1347,6 +1364,55 @@ impl CdRom {
     }
 
     // --- Command handlers ---
+
+    /// Finish a Stop whose spin-down time has passed: the status byte stops
+    /// reporting the motor.
+    fn update_spindown(&mut self, now: u64) {
+        if self.spindown_until.is_some_and(|until| now >= until) {
+            self.spindown_until = None;
+        }
+    }
+
+    /// Cycles between a command and its acknowledge, as scheduled.
+    fn first_response_delay(&self) -> u64 {
+        self.first_response_deadline()
+            .saturating_sub(self.scheduling_cycle)
+    }
+
+    /// What the head costs before a data operation (Read, Seek) can start
+    /// delivering, beyond the seek curve: waiting out a Stop's spin-down and
+    /// spinning up again, spinning up from rest, or coming back from a CD-DA
+    /// track. Moves the drive to "spinning, head on data". See the constants
+    /// in `timing.rs` for the console measurements.
+    ///
+    /// Records `0x303` (audio to data), `0x314` and `0x315` (Stop) measured
+    /// reads; applying the same cost to a SeekL is an extension of them (the
+    /// mechanism is the head or spindle, not the read), and Play after Stop
+    /// is left unmodelled because nothing measured it.
+    fn data_head_penalty(&mut self) -> u64 {
+        let now = self.scheduling_cycle;
+        let penalty = if let Some(until) = self.spindown_until.take() {
+            // The read interrupts the Stop. Its completion never happens.
+            self.drop_pending_command_irq(0x08, IrqType::Complete);
+            until
+                .saturating_sub(now)
+                .saturating_add(SPIN_UP_CYCLES)
+                .saturating_add(STOP_ABORT_RESTART_CYCLES)
+        } else if !self.motor_on {
+            SPIN_UP_CYCLES
+        } else if self.head_on_audio {
+            AUDIO_TO_DATA_SETTLE_CYCLES
+        } else {
+            0
+        };
+        self.motor_on = true;
+        self.head_on_audio = false;
+        if self.limit_fast_data() {
+            0
+        } else {
+            penalty
+        }
+    }
 
     /// Absolute deadline for a command's first (acknowledge) response.
     /// The controller sub-CPU responds from its firmware loop. A mounted disc
@@ -1528,7 +1594,7 @@ impl CdRom {
 
     fn stat_byte(&self) -> u8 {
         let mut s = self.drive_status & !(drive_status_bit::MOTOR_ON | drive_status_bit::READING);
-        if self.motor_on {
+        if self.motor_on || self.spindown_until.is_some() {
             s |= drive_status_bit::MOTOR_ON;
         }
         if self.reading {
@@ -1660,6 +1726,12 @@ impl CdRom {
     }
 
     fn cmd_stop(&mut self) {
+        // A spinning drive (or one already braking) takes the console's
+        // 606 ms to stop and shows the motor until then; the acknowledge
+        // still carries the motor bit and the completion clears it. A drive
+        // that is already stopped answers with the older pinned delay.
+        let braking_until = self.spindown_until;
+        let was_spinning = self.motor_on || braking_until.is_some();
         self.motor_on = false;
         self.drive_state = DriveState::Stopped;
         self.lid_deadline = None;
@@ -1669,10 +1741,21 @@ impl CdRom {
         self.location_changed = false;
         self.halt_cdda();
         self.cdda_sample_index = 0;
+        self.head_on_audio = false;
         self.reset_xa_stream();
+        let completion_delay = if was_spinning {
+            let until = braking_until.unwrap_or_else(|| {
+                self.scheduling_cycle
+                    .saturating_add(STOP_FROM_SPINNING_CYCLES)
+            });
+            self.spindown_until = Some(until);
+            until.saturating_sub(self.first_response_deadline())
+        } else {
+            STOP_SECOND_RESPONSE_CYCLES
+        };
         self.schedule_first_response(vec![self.stat_byte()]);
-        let stat = self.stat_byte();
-        self.schedule_second_response(vec![stat], STOP_SECOND_RESPONSE_CYCLES);
+        let stat = self.stat_byte() & !drive_status_bit::MOTOR_ON;
+        self.schedule_second_response(vec![stat], completion_delay);
     }
 
     fn cmd_pause(&mut self) {
@@ -1697,7 +1780,12 @@ impl CdRom {
         // state. Commercial titles hit the standby path. PSX-SPX's PSone
         // figures differ (see `cdrom/timing.rs`) and moving to them changes
         // every compat hash.
-        let delay = if was_motor_on {
+        let delay = if self.cmd_issued_during_cdda {
+            // Console (record 0x301): leaving CD-DA takes 123 ms from the
+            // command, measured at the poll, so count it from the command
+            // rather than from the acknowledge.
+            PAUSE_FROM_CDDA_CYCLES.saturating_sub(self.first_response_delay())
+        } else if was_motor_on {
             PAUSE_COMPLETE_CYCLES_STANDBY
         } else if self.mode & 0x80 != 0 {
             PAUSE_COMPLETE_CYCLES_ACTIVE * 2
@@ -1709,6 +1797,7 @@ impl CdRom {
 
     fn cmd_motor_on(&mut self) {
         self.motor_on = true;
+        self.spindown_until = None;
         self.drive_state = DriveState::Standby;
         self.schedule_first_response(vec![self.stat_byte()]);
     }
@@ -1744,6 +1833,8 @@ impl CdRom {
         self.clear_data_fifo();
         self.reset_xa_stream();
         self.muted = false;
+        self.spindown_until = None;
+        self.head_on_audio = false;
         self.last_sector_header = [0; 4];
         self.last_sector_subheader = [0; 4];
         self.last_sector_header_valid = false;
@@ -1794,6 +1885,8 @@ impl CdRom {
         self.seek_header_valid_at = None;
         self.mode = 0x20;
         self.motor_on = true;
+        self.spindown_until = None;
+        self.head_on_audio = false;
         self.drive_state = DriveState::Standby;
         self.lid_deadline = None;
         self.lid_bootstrap_pending = false;
@@ -1837,7 +1930,9 @@ impl CdRom {
             let (m, s, f) = self.setloc_msf;
             msf_to_lba(m, s, f)
         };
-        let delay = self.seek_travel_cycles(target_lba.abs_diff(self.read_lba));
+        let delay = self
+            .seek_travel_cycles(target_lba.abs_diff(self.read_lba))
+            .saturating_add(self.data_head_penalty());
         self.work.seeks = self.work.seeks.saturating_add(1);
         // The drive confirms a logical seek by reading the target's
         // header; until then GetlocL has nothing to report.
@@ -1896,11 +1991,11 @@ impl CdRom {
         // flat 30, i.e. ~400 ms at single speed regardless of distance;
         // the console delivers 8 sectors of a near re-seek in ~105 ms,
         // records 0x94/0x95.)
-        let mut travel = 0;
+        let mut travel = self.data_head_penalty();
         if self.setloc_pending {
             let (m, s, f) = self.setloc_msf;
             let target = msf_to_lba(m, s, f);
-            travel = self.seek_travel_cycles(target.abs_diff(self.read_lba));
+            travel = travel.saturating_add(self.seek_travel_cycles(target.abs_diff(self.read_lba)));
             self.work.seeks = self.work.seeks.saturating_add(1);
             // The head is moving: no header to report until the first
             // sector at the target arrives (psx-spx GetlocL).
@@ -2269,9 +2364,20 @@ impl CdRom {
         // such poll answers correctly by accident.
         self.drive_status &= !drive_status_bit::PLAYING;
         self.drive_status |= drive_status_bit::SEEKING;
+        // Coming from data the head also has to settle onto the audio track
+        // (console record 0x305); a Play that finds it already there does not.
+        // A Play over a Stop's spin-down simply ends the Stop.
+        self.spindown_until = None;
+        let settle = if self.head_on_audio {
+            0
+        } else {
+            DATA_TO_AUDIO_SETTLE_CYCLES
+        };
+        self.head_on_audio = true;
         self.cdda_seek_done_at = Some(
             self.scheduling_cycle
-                .saturating_add(seek_cycles(from_lba.abs_diff(self.read_lba))),
+                .saturating_add(seek_cycles(from_lba.abs_diff(self.read_lba)))
+                .saturating_add(settle),
         );
         self.schedule_first_response(vec![self.stat_byte()]);
     }
@@ -2355,6 +2461,7 @@ impl CdRom {
         let mut raised = false;
 
         self.tick_lid_state_machine(cycles_now);
+        self.update_spindown(cycles_now);
         self.complete_cdda_seek(cycles_now);
 
         while let Some(front) = self.pending.front() {
@@ -2475,7 +2582,21 @@ impl CdRom {
                     // ~52 ms double, first included). The old flat x30 here
                     // put a ~400 ms cliff on the second sector instead.
                     self.location_changed = false;
-                    self.schedule_sector_event_at(cycles_now, self.sector_read_cycles());
+                    // Chain from the sector's own deadline, not from the tick
+                    // that happened to service it. The disc turns at a fixed
+                    // rate; chaining from `cycles_now` added the tick's
+                    // lateness (about 12 cycles per sector on average) to
+                    // every period, so a stream ran 50 ppm slow and the XA
+                    // audio it fed starved the SPU about twice a second. A
+                    // tick more than a period late has nothing to catch up
+                    // to and restarts from `cycles_now`.
+                    let period = self.sector_read_cycles();
+                    let base = if ev.deadline.saturating_add(period) > cycles_now {
+                        ev.deadline
+                    } else {
+                        cycles_now
+                    };
+                    self.schedule_sector_event_at(base, period);
                 }
             }
             if !should_raise_irq {

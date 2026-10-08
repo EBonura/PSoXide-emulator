@@ -92,6 +92,91 @@ pub(super) const LID_PREPARE_SEEK_CYCLES: u64 = CD_READ_TIME * 26;
 /// 75` (**spec**). Single speed delivers a sector per frame, double speed two.
 pub(super) const CD_READ_TIME: u64 = 451_584;
 
+/// Silicon transitions between audio, data and a stopped motor.
+///
+/// Measured on the project console on 2026-10-08 with hardware tests v1.28
+/// (the CD STREAM cases, records `0x2F0` to `0x315`; the report is the
+/// `cdstream_cdda` and `cdstream_motor` rows). Every figure below is the
+/// median of the console's three repetitions where there are three, and the
+/// single sample otherwise; the table in `CHANGELOG.md` has the emulator's
+/// reading of each. The model keeps the median and does not add jitter:
+/// determinism matters more here (parity suites and headless captures must
+/// replay identically). Tolerance used when comparing an emulator capture
+/// with the console: inside the console's own min..max, or within 10% of
+/// the median where the console took a single sample.
+///
+/// How the settle terms below were fitted: each is the console median minus
+/// the time the same operation takes in the emulator with the term at zero,
+/// both read through the same hardware-tests v1.28 harness (the CD cases
+/// run headless on the emulator, before and after the change). The
+/// harness times with Timer 1 counting HBlanks. Where the guest polls that
+/// counter in a tight loop the emulator reads it low: a drive wait that
+/// takes 606.0 ms of CPU cycles reads 572 ms, because the counter advances
+/// once per 2280 CPU cycles there against 2172 when free-running (a trace
+/// of the Stop case; the timers' read-hold model is the likely cause, not
+/// investigated further). The stream-based rows below read within 1% of
+/// the cycle time, so they are the ones the fits use.
+///
+/// Pause complete after CD-DA, counted from the Pause command (record
+/// `0x301`, `t_pause`): console 120.1 to 125.4 ms, median 123.1 (the
+/// median is the middle of three). The drive acknowledges in 0.8 ms and
+/// then takes this long to leave the controller idle. In CPU cycles the
+/// emulator completes at exactly this figure; the harness reads it 5.6%
+/// low (116 ms) for the Timer 1 reason above. A Pause from any other state
+/// keeps its older, gate-pinned figures ([`PAUSE_COMPLETE_CYCLES_STANDBY`]):
+/// the console has no measurement for Pause from a data read (record
+/// `0x300` is 62 ms, but it includes the transport's own latency).
+pub(super) const PAUSE_FROM_CDDA_CYCLES: u64 = 1231 * MS / 10;
+
+/// Extra time the first sector of a data operation takes when the head was
+/// last on a CD-DA track (record `0x303`: 923 to 1000 ms, median 945, after
+/// a Pause; the same read with no Pause at all took 886 ms and with the
+/// transport's recovery Pause 1213 ms, one sample each). Added on top of
+/// the seek curve and the ordinary first-sector delay, which the harness
+/// reads as 356 ms for the same read with this term at zero. The median of
+/// the proper hand-off (Pause, wait, read) is the one modelled, because it
+/// is what the transport does. 945 - 356 = 589 ms; the first fit at 590 ms
+/// left the harness reading 938, so 597 ms is the value that reads 945.
+/// The drive does not shorten it with
+/// idle time: the proper hand-off waits about a quarter of a second between
+/// the Pause and the read and still pays it in full.
+pub(super) const AUDIO_TO_DATA_SETTLE_CYCLES: u64 = 597 * MS;
+
+/// Extra time a Play takes to reach PLAYING when the head was last doing
+/// data (record `0x305`: Play after SetLoc to the PLAYING bit, 848 to
+/// 1076 ms, median 1006 over three resumes). The seek curve alone reads
+/// 337 ms for that hop, so the remainder is 1006 - 337 = 669 ms, and 675 ms
+/// makes the harness read 1006 (the first fit at 669 ms read 1000).
+pub(super) const DATA_TO_AUDIO_SETTLE_CYCLES: u64 = 675 * MS;
+
+/// Stop complete, counted from the Stop command: the motor-off flag in the
+/// status byte clears at the same moment (records `0x314`, 606 ms for both;
+/// one sample). Stopping an already stopped drive keeps
+/// [`STOP_SECOND_RESPONSE_CYCLES`]. Exactly 606 ms in CPU cycles; the
+/// harness reads 572 ms (Timer 1 reading low, see above).
+pub(super) const STOP_FROM_SPINNING_CYCLES: u64 = 606 * MS;
+
+/// Extra first-sector time of a data read on a drive whose motor is off.
+/// The console's settled read (record `0x314`, 4 sectors in 1978 ms; the
+/// later three take 27 ms at double speed, as in record `0x315`, so the
+/// first arrives at about 1951 ms) against the 202 ms the same read costs
+/// on a spinning drive in the emulator (the harness reads 229 ms for four
+/// sectors with this term at zero, minus the same 27 ms): 1951 - 202 =
+/// 1749 ms.
+pub(super) const SPIN_UP_CYCLES: u64 = 1749 * MS;
+
+/// A read issued while the Stop is still spinning the motor down (record
+/// `0x315`, first sector 2721 ms after the read command, `0x313`: 2748 ms
+/// for 4). The read waits out the rest of the spin-down, then pays the
+/// spin-up, then a further 2721 - 605 - 1951 = 165 ms the console does not
+/// explain (about one more read latency: the aborted spin-down seems to
+/// leave the head needing a fresh seek). One sample. The harness reads
+/// 2651 ms with these terms, 2.6% under the console and inside the
+/// single-sample tolerance; the shortfall is the Timer 1 effect on the
+/// spin-down part of the wait, so the term stays at the console-derived
+/// figure rather than being fitted to the biased reading.
+pub(super) const STOP_ABORT_RESTART_CYCLES: u64 = 165 * MS;
+
 /// Extra first-response latency for a command issued *while CD-DA audio is
 /// playing*, added on top of the applicable first-response delay.
 ///
@@ -115,7 +200,7 @@ pub(super) const CDDA_BUSY_RESPONSE_CYCLES: u64 = CD_READ_TIME / 4; // ≈ 112,8
 /// PSX system clock. `CD_READ_TIME * 75`.
 const MASTER_CLOCK: u64 = CD_READ_TIME * 75; // 33,868,800
 /// One millisecond of system clock.
-const MS: u64 = MASTER_CLOCK / 1000;
+pub(super) const MS: u64 = MASTER_CLOCK / 1000;
 /// Sectors in a full 72-minute sweep, the longest travel a disc can ask for.
 const MAX_SLED_LBA: u64 = 72 * 60 * 75; // 324,000
 
