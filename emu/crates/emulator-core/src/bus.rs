@@ -146,6 +146,19 @@ struct ExperimentalGpuList {
     headers: u32,
 }
 
+/// Setup clocks of a linked-list node with no payload (see
+/// [`Bus::advance_experimental_gpu_list`]); every fourth node adds one.
+const EMPTY_NODE_SETUP_CYCLES: u32 = 8;
+
+/// Clocks a CPU read of main RAM waits while the GPU linked-list DMA is
+/// walking nodes. hwtest record 0xFE: 64 RAM loads started right after
+/// kicking a 512-node empty list cost 770 clocks on a launch PAL console
+/// against 513 with the channel idle, 4.0 a load. The same loads next to
+/// 128 cached nops cost nothing (record 0x36), and a walk that is waiting
+/// on a full GPU FIFO leaves the CPU alone (list-busy cases 230 and 231, 76.83
+/// against 76.77 clocks an iteration).
+const GPU_LIST_RAM_READ_WAIT: u32 = 4;
+
 /// Cycles the MDEC output DMA (DMA1) takes per 32-bit word it moves.
 ///
 /// Source: this project's console profile of the v1.26 FMV player
@@ -1598,6 +1611,35 @@ impl Bus {
         stalls
     }
 
+    /// Whether the GPU linked-list DMA is walking nodes right now, as
+    /// opposed to idle or parked on a GPU that cannot take the next word.
+    /// Only a walk that is making progress competes with the CPU for main
+    /// RAM.
+    #[inline(always)]
+    fn gpu_list_walk_is_moving(&self) -> bool {
+        let Some(list) = self.experimental_gpu_list.as_ref() else {
+            return false;
+        };
+        self.gpu_list_walk_is_moving_slow(list)
+    }
+
+    #[inline(never)]
+    fn gpu_list_walk_is_moving_slow(&self, list: &ExperimentalGpuList) -> bool {
+        if self.dma.channels[2].channel_control & (1 << 24) == 0 || !self.dma.is_channel_enabled(2)
+        {
+            return false;
+        }
+        if list.setup_cycles > 0 {
+            true
+        } else if list.need_header {
+            self.gpu.dma_fifo_requests_node()
+        } else if list.remaining > 0 {
+            self.gpu_dma_overflow_drops || self.gpu.dma_fifo_has_room()
+        } else {
+            true
+        }
+    }
+
     /// [`Bus::cpu_read_stalls`] for a main-RAM address: the six-cycle
     /// access (`MemoryControl::read_stalls` answers six for every RAM
     /// width), code-fetch contention and the DRAM refresh wait.
@@ -1605,7 +1647,10 @@ impl Bus {
     pub(crate) fn ram_read_stalls(&mut self, virt: u32) -> u32 {
         self.ram_load_from_cached_code =
             !self.code_fetch_on_ram_bus && self.cycles >= self.code_fill_busy_until;
-        let stalls = self.ram_load_stalls_with_code_contention(6);
+        let mut stalls = self.ram_load_stalls_with_code_contention(6);
+        if self.gpu_list_walk_is_moving() {
+            stalls += GPU_LIST_RAM_READ_WAIT;
+        }
         let access_gap = self.cycles.saturating_sub(self.last_cpu_ram_access_cycle);
         self.last_cpu_ram_access_cycle = self.cycles;
         let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
@@ -1837,7 +1882,12 @@ impl Bus {
         }
         let issued = now + wait;
         let newest = if len == 0 { 0 } else { queue[len - 1] };
-        let completion = (issued + Self::WRITE_QUEUE_FIRST).max(newest + Self::WRITE_QUEUE_PERIOD);
+        let mut completion =
+            (issued + Self::WRITE_QUEUE_FIRST).max(newest + Self::WRITE_QUEUE_PERIOD);
+        if self.gpu_list_walk_is_moving() {
+            completion += u64::from(GPU_LIST_RAM_READ_WAIT);
+        }
+        let queue = &mut self.write_queue;
         queue[len] = completion;
         self.ram_write_buffer_ready_cycle = completion;
         wait as u32
@@ -3141,8 +3191,18 @@ impl Bus {
                 list.next = header & 0x00ff_ffff;
                 list.word = list.address.wrapping_add(4);
                 list.need_header = false;
-                // Reference-model assumptions, not new silicon timing claims.
-                list.setup_cycles = if list.remaining == 0 { 10 } else { 15 };
+                // A node with a payload keeps the reference-model setup
+                // (not a silicon timing claim). An empty one is measured:
+                // hwtest records 0x33/0x34 walk 256 and 1024 empty packets
+                // in 2654 and 10509 clocks on a launch PAL console, a slope
+                // of 10.23 a node. The header fetch and the hop to the next
+                // node take a clock each here, which leaves 8.25 of setup:
+                // eight, and a ninth on every fourth node (10.25 a node).
+                list.setup_cycles = if list.remaining == 0 {
+                    EMPTY_NODE_SETUP_CYCLES + u32::from(list.headers % 4 == 0)
+                } else {
+                    15
+                };
             }
         } else if list.remaining > 0 {
             if !self.gpu_dma_overflow_drops && !self.gpu.dma_fifo_has_room() {
@@ -4989,6 +5049,65 @@ mod tests {
         bus.dma.channels[2].base = 0x300;
         bus.dma.channels[2].channel_control = 0x0100_0401;
         bus
+    }
+
+    /// A bus with the GPU DMA channel kicked on `nodes` empty packets (the
+    /// header word is only the link), as hwtest records 0x33/0x34 and 0xFE do.
+    fn empty_list_walk(nodes: u32) -> Bus {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.dma.dpcr = 1 << (2 * 4 + 3);
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        for index in 0..nodes {
+            let link = if index + 1 == nodes {
+                0x00ff_ffff
+            } else {
+                0x1000 + (index + 1) * 4
+            };
+            write_ram_u32(&mut bus.ram[..], 0x1000 + index * 4, link);
+        }
+        bus.dma.channels[2].base = 0x1000;
+        bus.dma.channels[2].channel_control = 0x0100_0401;
+        bus.run_dma_channel(2);
+        bus
+    }
+
+    /// Clocks until the channel's busy bit clears.
+    fn clocks_until_dma_done(bus: &mut Bus) -> u64 {
+        let start = bus.cycles();
+        while bus.dma.channels[2].channel_control & (1 << 24) != 0 {
+            assert!(bus.cycles() - start < 1_000_000, "walk did not finish");
+            bus.tick(1);
+        }
+        bus.cycles() - start
+    }
+
+    #[test]
+    fn an_empty_node_costs_about_ten_and_a_quarter_clocks() {
+        // Silicon, hwtest records 0x33/0x34 (launch PAL console): 256 and
+        // 1024 empty nodes in 2654 and 10509 clocks including the probe's own
+        // kick and poll, a slope of 10.23 a node.
+        let mut short = empty_list_walk(256);
+        let mut long = empty_list_walk(1024);
+        let short = clocks_until_dma_done(&mut short);
+        let long = clocks_until_dma_done(&mut long);
+        let slope = (long - short) as f64 / 768.0;
+        assert!((10.1..10.4).contains(&slope), "slope {slope}");
+    }
+
+    #[test]
+    fn main_ram_reads_wait_while_a_list_walk_is_moving() {
+        // Silicon, hwtest record 0xFE: 64 RAM loads during a 512-node empty
+        // walk cost 770 clocks against 513 idle, four more a load. The loads
+        // are charged from the same entry point the CPU uses.
+        let mut bus = empty_list_walk(512);
+        bus.tick(20);
+        assert!(bus.gpu_list_walk_is_moving());
+        let idle = Bus::new(synthetic_bios()).unwrap().ram_read_stalls(0x8000_0200);
+        // Land the read away from the DRAM refresh slot of a fresh machine.
+        let busy = bus.ram_read_stalls(0x8000_0200);
+        assert!(busy >= idle + GPU_LIST_RAM_READ_WAIT, "{busy} vs {idle}");
+        clocks_until_dma_done(&mut bus);
+        assert!(!bus.gpu_list_walk_is_moving());
     }
 
     #[test]
