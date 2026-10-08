@@ -10,16 +10,31 @@
 //! The core default has a digital controller and memory card on port 1,
 //! plus a memory card on port 2. Frontend launches replace the card
 //! backing with the per-game save file, while parity probes use the
-//! same fresh-card default as Redux's portable profile.
+//! same fresh (formatted, empty) card default.
 //!
 //! ## Provenance
 //!
-//! Portions of this module are parity-matched against, and in places
-//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
-//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
-//! correspondence are flagged inline with `Redux` references. PSoXide is
-//! released under GPL-2.0-or-later in part to honor this lineage; see
-//! `LICENSE` and `docs/license-audit.md`.
+//! The register map, the STAT/CTRL bit meanings, the BAUD relation and
+//! the pad and memory card byte protocols are written from nocash PSX-SPX
+//! ("Serial Interfaces (SIO)" and "Controllers and Memory Cards"). The
+//! exchange timing is a model, and each part says what pins it:
+//!
+//! - **Byte exchange is synchronous**: the received byte is visible in
+//!   DATA as soon as the transmit byte is written; only the interrupt
+//!   follows after the baud-clocked transfer time (gate-pinned, along with
+//!   the SCPH-1200 ACK measurement used for the ACK pulse).
+//! - **A missing device** returns 0xFF and produces no ACK and no IRQ
+//!   (PSX-SPX: IRQ7 follows the /ACK edge). A timeout IRQ there gave a
+//!   commercial title that polls an empty port 2 extra IRQ7 passes inside
+//!   one folded ISR (gate-pinned).
+//! - **No second IRQ is scheduled while STAT.IRQ is still latched**; the
+//!   bit stays set until CTRL.ACK clears it (PSX-SPX "SIO0_STAT"), and the
+//!   compat hashes expect no new IRQ in between (gate-pinned).
+//!
+//! The older delayed-byte scaffolding (`queued_tx`, `transfer_busy`,
+//! `awaiting_ack`, the `ack_delay_ticks` path) is not exercised by the
+//! current exchange path and is kept only until it can be removed with a
+//! save-state layout change. See `LICENSE` and `docs/license-audit.md`.
 
 mod stat_bit {
     // Layout facts come from the shared hardware-model crate, the same
@@ -73,11 +88,11 @@ const MODE_WRITE_MASK: u16 = 0x013F;
 /// Serial-transfer time for one byte when BAUD is zero. Matches the
 /// BIOS's common `0x88 * 8 = 1088`-cycle setup.
 const DEFAULT_TRANSFER_TICKS: u64 = 1088;
-/// Legacy pad ACK pulse width. The data byte itself is made available
-/// synchronously like Redux; the delayed event represents the IRQ/ACK
-/// edge, not byte delivery.
+/// Extra delay between the end of a pad byte and its ACK. The data byte
+/// itself is made available synchronously; the delayed event represents
+/// the IRQ/ACK edge, not byte delivery.
 const PAD_ACK_DELAY_TICKS: u64 = 0;
-/// Memory cards share the same SIO baud-clocked IRQ timing in Redux.
+/// Memory cards use the same baud-clocked IRQ timing as pads.
 const MEMCARD_ACK_DELAY_TICKS: u64 = 0;
 /// `/ACK` is a pulse, not a sticky level.
 const ACK_PULSE_TICKS: u64 = 100;
@@ -105,20 +120,20 @@ pub struct Sio0 {
     /// Sticky SIO IRQ bit exposed in `STAT` bit 9. Writing CTRL.ACK
     /// clears it; the bus-level interrupt controller is separate.
     irq_latched: bool,
-    /// Last byte produced by the selected device. Redux makes the
-    /// byte visible in DATA immediately; this copy is retained for the
-    /// older transfer-deadline scaffolding and diagnostics.
+    /// Last byte produced by the selected device. The byte is visible in
+    /// DATA immediately; this copy is retained for the older
+    /// transfer-deadline scaffolding and diagnostics.
     pending_rx: u8,
-    /// Legacy one-byte TX holding register. The Redux-aligned path
-    /// currently accepts DATA writes synchronously, so this remains
-    /// empty unless the older deadline path is re-enabled.
+    /// Legacy one-byte TX holding register. DATA writes are accepted
+    /// synchronously, so this stays empty unless the older deadline path is
+    /// re-enabled.
     queued_tx: Option<u8>,
     /// Whether the current byte will be followed by a delayed SIO
     /// event.
     pending_ack: bool,
     /// Whether the current byte should raise an IRQ without a visible
-    /// ACK pulse. Kept for the legacy delayed-byte path; Redux-style
-    /// missing devices leave this false.
+    /// ACK pulse. Kept for the legacy delayed-byte path; missing devices
+    /// leave this false.
     pending_dsr_timeout: bool,
     /// Legacy shifter state for the older delayed-byte path.
     transfer_busy: bool,
@@ -162,8 +177,8 @@ impl Sio0 {
     /// All registers zero, port 1 pre-populated with a digital pad and
     /// a fresh memory card, port 2 with a fresh memory card. The
     /// frontend replaces port 1's card backing on game launch; keeping
-    /// a default card here matches Redux's portable startup profile
-    /// and lets BIOS/game card probes observe an inserted card.
+    /// a default card here lets BIOS/game card probes observe an inserted
+    /// card.
     pub fn new() -> Self {
         Self {
             mode: 0,
@@ -306,10 +321,9 @@ impl Sio0 {
 
     /// Earliest pending state-machine deadline across the three
     /// timers, or `None` if SIO0 is idle. The bus uses this to
-    /// (re)schedule [`EventSlot::Sio`] so the per-instruction
+    /// (re)schedule [`EventSlot::Sio0`] so the per-instruction
     /// `Bus::tick` poll can be retired in favour of one event-driven
-    /// wake-up. Mirrors the role of `intCycle[PSXINT_SIO]` in
-    /// PCSX-Redux's `branchTest`.
+    /// wake-up.
     pub fn next_deadline(&self) -> Option<u64> {
         let mut next: Option<u64> = None;
         let consider = |cur: &mut Option<u64>, candidate: Option<u64>| {
@@ -342,9 +356,8 @@ impl Sio0 {
         (Self::BASE..Self::BASE + Self::SIZE).contains(&phys)
     }
 
-    /// `SIO0_STAT`. Redux completes byte exchange synchronously; the
-    /// baud-clocked delay is for the later SIO IRQ event, not DATA
-    /// visibility.
+    /// `SIO0_STAT`. Byte exchange completes synchronously; the baud-clocked
+    /// delay is for the later SIO IRQ event, not DATA visibility.
     fn stat(&self) -> u32 {
         let mut s = 0;
         if self.queued_tx.is_none() {
@@ -532,10 +545,10 @@ impl Sio0 {
         } else {
             (0xFF, false, true, PAD_ACK_DELAY_TICKS)
         };
-        // Redux returns 0xff for a missing device but does not schedule
-        // an ACK/DSR IRQ for that byte. One commercial title polls port 2 during the BIOS
-        // pad handler; raising a timeout IRQ there invents extra IRQ7
-        // passes inside the same folded ISR.
+        // A missing device returns 0xFF with no ACK/DSR IRQ for that byte.
+        // One commercial title polls port 2 during the BIOS pad handler;
+        // raising a timeout IRQ there invents extra IRQ7 passes inside the
+        // same folded ISR.
         let dsr_timeout = false;
         self.pending_rx = rx;
         self.pending_ack = ack;
@@ -884,7 +897,7 @@ mod tests {
         assert_ne!(
             stat & stat_bit::RX_NOT_EMPTY,
             0,
-            "Redux makes the response byte visible immediately"
+            "the response byte is visible immediately"
         );
         assert_eq!(
             stat & stat_bit::ACK_INPUT,
@@ -901,7 +914,7 @@ mod tests {
         assert_eq!(
             sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::IRQ,
             0,
-            "IRQ must not fire before the Redux baud-clocked delay"
+            "IRQ must not fire before the baud-clocked delay"
         );
 
         sio.tick(DEFAULT_TRANSFER_TICKS);
@@ -969,7 +982,7 @@ mod tests {
         assert_eq!(
             sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::IRQ,
             0,
-            "Redux does not schedule ACK/DSR IRQs for missing devices"
+            "no ACK/DSR IRQ is scheduled for a missing device"
         );
         assert!(!sio.take_pending_irq());
     }
@@ -1030,7 +1043,7 @@ mod tests {
         sio.tick(second_start + DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS);
         assert!(
             !sio.take_pending_irq(),
-            "Redux does not schedule another SIO IRQ while STAT.IRQ is still latched"
+            "no further SIO IRQ is scheduled while STAT.IRQ is still latched"
         );
 
         sio.write16(
@@ -1090,7 +1103,7 @@ mod tests {
     }
 
     #[test]
-    fn redux_style_transmit_keeps_tx_ready_high_while_irq_is_delayed() {
+    fn transmit_keeps_tx_ready_high_while_irq_is_delayed() {
         use crate::pad::{DigitalPad, PortDevice};
 
         let mut sio = Sio0::new();
@@ -1106,7 +1119,7 @@ mod tests {
         assert_ne!(
             stat & stat_bit::TX_READY_2,
             0,
-            "Redux completes the byte synchronously and keeps TX_READY_2 high"
+            "the byte completes synchronously and TX_READY_2 stays high"
         );
         assert_ne!(
             stat & stat_bit::RX_NOT_EMPTY,
@@ -1123,7 +1136,7 @@ mod tests {
         assert_ne!(
             stat & stat_bit::IRQ,
             0,
-            "IRQ should latch at the Redux baud-clocked deadline"
+            "IRQ should latch at the baud-clocked deadline"
         );
     }
 
