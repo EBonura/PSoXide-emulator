@@ -20,12 +20,7 @@
 //!    IRQ raise histogram, CPU final-PC, and `cycles()`. Any one
 //!    of those drifting fails the test with a pointer at the
 //!    faulty subsystem.
-//! 3. **Redux-verified per-example hashes** (when captured). The
-//!    `redux_display_hash: Some(h)` slot is the Redux-on-the-same-
-//!    binary answer, locked in. Psoxide.1 had READMEs for each
-//!    example but no goldens anywhere -- regressions were caught
-//!    by hand.
-//! 4. **Tests ARE examples**. There's no "test fixture" separate
+//! 3. **Tests ARE examples**. There's no "test fixture" separate
 //!    from the binary `make run-<name>` builds. Break the test,
 //!    run the example in the frontend, watch what's wrong.
 //!
@@ -77,7 +72,7 @@ pub struct SdkExampleState {
     /// writes the user never sees.
     pub vram_hash: u64,
     /// FNV-1a-64 over the visible-display rectangle only. Comparable
-    /// byte-for-byte to Redux's `PCSX.GPU.takeScreenShot`.
+    /// byte-for-byte to a screenshot of the display area.
     pub display_hash: u64,
     /// Visible display size in pixels `(width, height)`.
     pub display_size: (u32, u32),
@@ -99,9 +94,7 @@ pub struct SdkExampleState {
     pub bus_cycles: u64,
 }
 
-/// Per-example golden. `redux_display_hash: Some(h)` is a Redux-on-
-/// the-same-binary verification; `None` means not captured yet (the
-/// self-regression still pins, but correctness is unverified).
+/// Per-example golden: a self-regression pin of one SDK example's output.
 #[derive(Debug, Clone)]
 pub struct SdkGolden {
     /// Example binary name, without `.exe` suffix.
@@ -120,8 +113,6 @@ pub struct SdkGolden {
     pub spu_samples: u64,
     /// Expected CPU final-PC.
     pub final_pc: u32,
-    /// Redux-verified display hash. `Some(h)` = pixel parity confirmed.
-    pub redux_display_hash: Option<u64>,
 }
 
 /// Skip a test gracefully if its prerequisites aren't on disk.
@@ -265,13 +256,6 @@ fn assert_sdk_golden(state: &SdkExampleState, golden: &SdkGolden) {
         state.final_pc, golden.final_pc,
         "{name}: final PC drifted - control-flow / IRQ-timing regression",
     );
-    if let Some(expected) = golden.redux_display_hash {
-        assert_eq!(
-            state.display_hash, expected,
-            "{name}: display hash doesn't match Redux's for the same binary - \
-             we're rendering the wrong pixels.",
-        );
-    }
 }
 
 /// Capture-mode helper for bootstrapping a new golden. Prints every
@@ -295,7 +279,6 @@ fn print_capture(state: &SdkExampleState, example: &str, vblanks: u64) {
     eprintln!("        vblank_raises: {},", state.vblank_raises);
     eprintln!("        spu_samples: {},", state.spu_samples);
     eprintln!("        final_pc: 0x{:08x},", state.final_pc);
-    eprintln!("        redux_display_hash: None, // TODO: capture via display_parity_at");
     eprintln!("    }}");
     eprintln!(
         "[capture]   (debug: cpu_ticks={}, bus_cycles={}, irq_histogram={:?})",
@@ -318,12 +301,9 @@ fn print_capture(state: &SdkExampleState, example: &str, vblanks: u64) {
 /// the output in the frontend and pinned the values.
 ///
 /// Captured 2026-04-19 against the emulator state on `main` at that
-/// date (scanline-delta rasterizer + CHCR-only DMA trigger). None
-/// of these have `redux_display_hash` pinned yet -- that comes from
-/// running `display_parity_at` with the same .exe side-loaded into
-/// Redux, which needs a Redux-side side-load harness we haven't
-/// built. For now these are self-regression only: they catch any
-/// future change to emulator OR SDK output for this example.
+/// date (scanline-delta rasterizer + CHCR-only DMA trigger). These are
+/// self-regression pins only: they catch any future change to emulator OR
+/// SDK output for this example.
 ///
 /// **If a parity-accuracy change shifts the cycle count, these
 /// hashes will drift.** That's intentional -- it surfaces the
@@ -347,7 +327,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             vblank_raises: 2,
             spu_samples: 735,
             final_pc: 0x8001_0480,
-            redux_display_hash: None,
         }),
         // Two 4bpp CLUT textures cooked by `psxed tex` from 512×512
         // pre-cropped source JPGs -- a brick wall + a cobblestone
@@ -364,7 +343,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             vblank_raises: 2,
             spu_samples: 735,
             final_pc: 0x8001_130c,
-            redux_display_hash: None,
         }),
         "hello-ot" => Some(SdkGolden {
             example: "hello-ot",
@@ -375,7 +353,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             vblank_raises: 2,
             spu_samples: 735,
             final_pc: 0x8001_05e4,
-            redux_display_hash: None,
         }),
         "hello-input" => Some(SdkGolden {
             example: "hello-input",
@@ -386,7 +363,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             vblank_raises: 4,
             spu_samples: 2205,
             final_pc: 0x8001_0bb4,
-            redux_display_hash: None,
         }),
         "hello-gte" => Some(SdkGolden {
             example: "hello-gte",
@@ -397,7 +373,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             vblank_raises: 2,
             spu_samples: 735,
             final_pc: 0x8001_0acc,
-            redux_display_hash: None,
         }),
         // showcase-text exercises all 6 draw paths in psx-font:
         // rect, scaled, rotated, affine, gradient, scaled-gradient.
@@ -418,7 +393,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             // Refreshed after engine render-helper growth changed
             // frame-boundary timing for this animation capture.
             final_pc: 0x8001_0e9c,
-            redux_display_hash: None,
         }),
         // hello-audio: SPU init + 4 voices configured + ADPCM
         // uploaded. With no pad input in the test harness, no key-on
@@ -436,7 +410,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             vblank_raises: 3,
             spu_samples: 1470,
             final_pc: 0x8001_0d0c,
-            redux_display_hash: None,
         }),
         // First mini-game. At the 8-VBlank checkpoint the ball
         // has bounced off the right paddle and is coming back
@@ -459,7 +432,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             vblank_raises: 8,
             spu_samples: 5145,
             final_pc: 0x8001_17c8,
-            redux_display_hash: None,
         }),
         // magikAAAAArp Pong variant. 8 VBlanks captures the textured
         // cube ball early in its rotation with the first rally still
@@ -474,7 +446,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             vblank_raises: 8,
             spu_samples: 5145,
             final_pc: 0x8001_1ab8,
-            redux_display_hash: None,
         }),
         // Second mini-game. 60 VBlanks captures one serve-arc +
         // brick-break region with effects active (gradient BG,
@@ -500,7 +471,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             vblank_raises: 60,
             spu_samples: 44100,
             final_pc: 0x8001_3968,
-            redux_display_hash: None,
         }),
         // Third mini-game. Space Invaders: 5×10 alien grid, ship
         // at bottom, bullet + bomb pools, wave progression. At
@@ -533,7 +503,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             vblank_raises: 120,
             spu_samples: 88200,
             final_pc: 0x8001_1540,
-            redux_display_hash: None,
         }),
         // Flagship 3D showcase. Starfield + Suzanne (Blender
         // monkey) + Utah teapot (Martin Newell), each decimated
@@ -567,7 +536,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             // policy, command sorting, and OT insertion for the
             // CPU-lit cube layer.
             final_pc: 0x8001_147c,
-            redux_display_hash: None,
         }),
 
         // Now lit via the GTE's NCCS pipeline -- 3 directional
@@ -593,7 +561,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             // The showcase uses 128 OT slots to make depth-bucket
             // artifacts easier to inspect under real GTE load.
             final_pc: 0x8001_3b7c,
-            redux_display_hash: None,
         }),
         // PS1-commercial textured-Gouraud pipeline: per-vertex RTPS
         // + NCDS feeds depth-cue-blended colours into textured-Gouraud
@@ -618,7 +585,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             // Pixels unchanged; render loop now uses `OtFrame`,
             // `PrimitiveArena`, and `DepthBand` for the GTE OTZ map.
             final_pc: 0x8001_130c,
-            redux_display_hash: None,
         }),
         "showcase-particles" => Some(SdkGolden {
             example: "showcase-particles",
@@ -631,7 +597,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             // Standalone `psx-fx::ParticlePool` demo: fixed pool,
             // OT-backed RectFlat arena, auto emitter, and HUD.
             final_pc: 0x8001_0f94,
-            redux_display_hash: None,
         }),
         // First engine-domain example. Exercises `App::run`'s
         // main loop, the `Scene` trait, `Ctx` frame counter, and
@@ -645,7 +610,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             vblank_raises: 4,
             spu_samples: 2205,
             final_pc: 0x8001_07d8,
-            redux_display_hash: None,
         }),
         _ => None,
     }
