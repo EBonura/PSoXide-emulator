@@ -90,10 +90,6 @@ pub enum TextureFilter {
     /// PSX-native point sampling.
     #[default]
     None,
-    /// Bilinear between the four nearest texels, with binary-alpha edges.
-    Bilinear,
-    /// Catmull-Rom over 4x4 texels with an anti-ringing clamp.
-    Smooth,
     /// Edge-directed interpolation: smooths diagonals, keeps orthogonal
     /// pixel-art edges and flat areas crisp.
     Edge,
@@ -103,9 +99,7 @@ impl TextureFilter {
     /// Cycle to the next mode (wraps).
     pub fn next(self) -> Self {
         match self {
-            TextureFilter::None => TextureFilter::Bilinear,
-            TextureFilter::Bilinear => TextureFilter::Smooth,
-            TextureFilter::Smooth => TextureFilter::Edge,
+            TextureFilter::None => TextureFilter::Edge,
             TextureFilter::Edge => TextureFilter::None,
         }
     }
@@ -113,8 +107,6 @@ impl TextureFilter {
     pub fn label(self) -> &'static str {
         match self {
             TextureFilter::None => "None",
-            TextureFilter::Bilinear => "Bilinear",
-            TextureFilter::Smooth => "Smooth",
             TextureFilter::Edge => "Edge",
         }
     }
@@ -123,9 +115,7 @@ impl TextureFilter {
     pub fn mode(self) -> u32 {
         match self {
             TextureFilter::None => 0,
-            TextureFilter::Bilinear => 1,
-            TextureFilter::Smooth => 2,
-            TextureFilter::Edge => 3,
+            TextureFilter::Edge => 1,
         }
     }
 }
@@ -4052,28 +4042,15 @@ mod texture_filter_tests {
             seen.push(f);
             f = f.next();
         }
-        assert_eq!(
-            seen,
-            [
-                TextureFilter::None,
-                TextureFilter::Bilinear,
-                TextureFilter::Smooth,
-                TextureFilter::Edge
-            ]
-        );
+        assert_eq!(seen, [TextureFilter::None, TextureFilter::Edge]);
     }
 
     #[test]
     fn modes_and_labels_are_distinct_and_match_the_shader_values() {
-        let all = [
-            TextureFilter::None,
-            TextureFilter::Bilinear,
-            TextureFilter::Smooth,
-            TextureFilter::Edge,
-        ];
+        let all = [TextureFilter::None, TextureFilter::Edge];
         let modes: Vec<u32> = all.iter().map(|f| f.mode()).collect();
-        assert_eq!(modes, [0, 1, 2, 3]);
+        assert_eq!(modes, [0, 1]);
         let labels: Vec<&str> = all.iter().map(|f| f.label()).collect();
-        assert_eq!(labels, ["None", "Bilinear", "Smooth", "Edge"]);
+        assert_eq!(labels, ["None", "Edge"]);
     }
 }

@@ -1,32 +1,32 @@
-# Texture filter specification: Smooth and Edge
+# Texture filter specification: Edge
 
-This document specifies the two texture filters that sit beside Bilinear in
-the hardware renderer. It was written first, from the mathematics below and
-nothing else, and `prim.wgsl` is an implementation of it. No shader, filter or
-scaler source from any other project was read for this work (see
-`PROVENANCE.md`).
+This document specifies the Edge texture filter of the hardware renderer. It
+was written first, from the mathematics below and nothing else, and
+`prim.wgsl` is an implementation of it. No shader, filter or scaler source
+from any other project was read for this work (see `PROVENANCE.md`). The
+filter was first drafted together with a second resampler (a clamped
+Catmull-Rom cubic) and a plain bilinear mode; only None and Edge ship, and the
+section numbers below keep their original values so that references in the
+shader stay valid. Section 4 is therefore empty.
 
-## 1. Where the filters run
+## 1. Where the filter runs
 
 The hardware renderer draws every textured PS1 primitive at an internal
 resolution of S times the native one. For each fragment the pixel shader
 receives an interpolated texture coordinate `uv` (in texel units, the same
 space as the 8-bit U/V of the GPU) and fetches texels from the VRAM texture.
-The existing toggle `u_texfilter.x` selects how:
+The toggle `u_texfilter.x` selects how:
 
 | value | name | taps | description |
 |---|---|---|---|
 | 0 | None | 1 | the texel containing `uv` (PS1-native point sampling) |
-| 1 | Bilinear | 4 | 2x2 linear blend, unchanged by this work |
-| 2 | Smooth | 16 | separable Catmull-Rom, clamped (section 4) |
-| 3 | Edge | 8 | edge-directed interpolation (section 5) |
+| 1 | Edge | 8 | edge-directed interpolation (section 5) |
 
-None and Bilinear are not touched. Everything below applies only to values 2
-and 3.
+None is not touched. Everything below applies only to value 1.
 
 ## 2. Taps and what a tap means
 
-A filter reads texel colours around the sample position. Let
+The filter reads texel colours around the sample position. Let
 
     p = uv - (0.5, 0.5)        (texel centres sit at integer + 0.5)
     b = floor(p)               (integer coordinates of the top-left tap)
@@ -42,7 +42,7 @@ and `f = (fx, fy)` says where inside the A-B-C-D cell the sample falls. A tap
 nearest-texel path fetches one:
 
 1. the coordinate is truncated and wrapped to 8 bits (negative coordinates
-   clamp to 0 first, as the Bilinear path does);
+   clamp to 0 first);
 2. the texture window (GP0 E2) is applied to the 8-bit coordinate;
 3. the texel is read through the page's colour depth, so 4 and 8 bit pages go
    through the CLUT and 15 bit pages are read directly;
@@ -55,8 +55,8 @@ neighbourhood the game actually sampled.
 
 **Transparency.** A texel word of exactly zero is transparent. The primitive's
 silhouette, and the semi-transparency (STP) pass tests, are decided by the
-nearest texel alone, before any filter runs, exactly as for Bilinear. So when
-a filter runs, the nearest texel `N` is known to be opaque. A transparent tap
+nearest texel alone, before the filter runs. So when
+the filter runs, the nearest texel `N` is known to be opaque. A transparent tap
 must contribute no colour of its own, so it is replaced before filtering:
 
 1. An inner tap (A, B, C or D) that is transparent takes the colour of its
@@ -67,16 +67,14 @@ must contribute no colour of its own, so it is replaced before filtering:
 2. An outer tap that is transparent takes the resolved inner tap obtained by
    clamping its own offsets into the cell (`i` and `j` into 0..1).
 
-The effect is the same as Bilinear's binary alpha, a transparent neighbour
-leaves no colour of its own in the visible edge, but it keeps every weight
-sum equal to 1. (Bilinear drops the tap and renormalises; with the negative
-lobes of a cubic that renormalisation can divide by something near zero.) The
-same rule is what keeps a texture's own border clean when the quad is drawn
-next to unrelated VRAM contents, which are as likely to be transparent as not.
+A transparent neighbour thus leaves no colour of its own in the visible edge
+(binary alpha), and every weight sum stays equal to 1. The same rule keeps a
+texture's own border clean when the quad is drawn next to unrelated VRAM
+contents, which are as likely to be transparent as not.
 
-All blending happens on the display-code values, in the same space Bilinear
-blends in. The modulate step that follows (tint multiply, dither) is shared
-and unchanged.
+All blending happens on the display-code values (the gamma-encoded 5-to-8 bit
+codes, not linear light). The modulate step that follows (tint multiply,
+dither) is shared and unchanged.
 
 ## 3. Colour distance
 
@@ -107,70 +105,9 @@ different texels (a hard edge) switch over in a band about 0.4 texel wide.
 Properties used later: `edge_mix(a, b, f) = edge_mix(b, a, 1 - f)`, and it
 returns `a` at `f = 0` and `b` at `f = 1`.
 
-## 4. Smooth: windowed cubic with an anti-ringing clamp
+## 4. (not used)
 
-### 4.1 Kernel
-
-The kernel is the Catmull-Rom cubic (the cubic Hermite spline whose tangent at
-each sample is half the difference of its neighbours), applied separably over
-the 4x4 taps `T(i,j)`, `i,j in -1..2`. For a fraction `t` the four weights
-for the taps at -1, 0, 1, 2 are
-
-    w(-1) = ( -t^3 + 2 t^2 - t ) / 2
-    w( 0) = ( 3 t^3 - 5 t^2 + 2 ) / 2
-    w( 1) = ( -3 t^3 + 4 t^2 + t ) / 2
-    w( 2) = ( t^3 - t^2 ) / 2
-
-They sum to 1 for every `t`, `w(0) = 1` and the rest 0 at `t = 0`, and
-`w(1) = 1` and the rest 0 at `t = 1`. So the filter reproduces a texel exactly
-at its centre and agrees with None there. It also reproduces constants, ramps
-and parabolas exactly (third order accurate).
-
-The result is rows first, then columns:
-
-    row_j  = sum_i w(i; fx) * T(i, j)             for j = -1..2
-    smooth = sum_j w(j; fy) * row_j
-
-### 4.2 Why this kernel
-
-Options considered: bilinear (already there), Mitchell-Netravali, Lanczos-2,
-Catmull-Rom.
-
-- Mitchell with its usual B = C = 1/3 is not interpolating: it blurs every
-  texel even at its centre. For hand-drawn 64x64 textures that is the wrong
-  default.
-- Lanczos-2 (a sinc windowed by a wider sinc, support 2) has nearly the same
-  4x4 footprint and nearly the same frequency response as Catmull-Rom, but
-  needs a sine per weight, or a lookup table, in a shader that runs for every
-  textured fragment at up to 6x internal resolution.
-- Catmull-Rom is polynomial, interpolating, C1, and has the same 4x4 support.
-  It sharpens slightly (a small negative lobe on each side) which is what a
-  magnified low-resolution texture wants, and the anti-ringing clamp below
-  removes the one thing it is criticised for.
-
-A wider kernel (6x6, a radially symmetric one) would resample better in theory but costs
-36 taps through CLUT lookups; PS1 textures are low-passed by the artists
-already and the extra taps do not buy a visible gain at 4x4.
-
-### 4.3 Anti-ringing clamp
-
-A kernel with negative lobes overshoots at a hard step: next to a black/white
-edge it produces a darker-than-black and brighter-than-white halo. Texture
-colours are bounded, so the correction is to bound the output as well. Let
-
-    lo_c = min(A_c, B_c, C_c, D_c)      per colour channel c
-    hi_c = max(A_c, B_c, C_c, D_c)
-
-then
-
-    smooth_c = clamp(smooth_c, lo_c, hi_c)
-
-The four texels of the sample's own cell are the ones the interpolated value
-lies between. Any monotone gradient already stays inside that range, so the
-clamp leaves smooth areas untouched. At a step edge the cubic's overshoot is
-cut off exactly at the two plateau values, which keeps the sharpness gain and
-loses the halo. The clamp is per channel, so it can never produce a colour
-outside the box spanned by the four neighbours.
+The Catmull-Rom resampler drafted here was dropped before release.
 
 ## 5. Edge: edge-directed interpolation
 
@@ -311,39 +248,37 @@ the pattern stays crisp.
 
 ## 6. What is deliberately not done
 
-- The filters do not know the on-screen size of a texel (the shader does not
+- The filter does not know the on-screen size of a texel (the shader does not
   receive screen-space derivatives of `uv`). The transition width constants in
   `sharpen` are fixed fractions of a texel. At low magnification the result
   approaches the nearest-texel look, at high magnification the transitions are
-  wider in screen pixels but still much narrower than Bilinear's.
-- Neither filter looks across texture pages: a tap just reads VRAM at the
-  wrapped, windowed coordinate. As with Bilinear, a texture packed against
+  wider in screen pixels but still much narrower than a plain linear ramp.
+- The filter does not look across texture pages: a tap just reads VRAM at the
+  wrapped, windowed coordinate. As with any sample-time filter, a texture packed against
   another one in VRAM shows seams at its boundary where a tap lands in the
   neighbour. Fixing that is not possible without knowing the texture's extent.
 - The semi-transparency, dither and tint stages after the filter are shared
-  with the other modes and are not changed.
+  with the None mode and are not changed.
 
 ## 7. Verification
 
 The tests live in `emu/crates/psx-gpu-render/src/lib.rs` and run the real
 shader headless on synthetic VRAM:
 
-- a flat texture is unchanged by both filters;
-- Smooth never leaves the range of a hard step and is monotone across it;
+- a flat texture is unchanged;
 - transparent texels leave no colour in the silhouette (the opaque pixels stay
   exactly the texel colour, and the silhouette area does not change);
 - Edge keeps an orthogonal step orthogonal (all rows identical) and narrow;
 - Edge turns a 45 degree staircase into a straight diagonal (the colour is
   constant along each `x + y = k` line) and leaves flat areas as they were;
 - Edge keeps an isolated texel's area;
-- a 4-bit CLUT texture drawn 1:1 comes out identical under all filters, since
+- a 4-bit CLUT texture drawn 1:1 comes out identical to None, since
   every fragment then samples a texel centre;
 - a texture window that repeats the first half of a texture never reads the
   second half through any tap.
 
-Two ignored tests produce the review material: `texture_filter_cost` times the
-four filters on stacked full-screen quads, and `texture_filter_sheet` writes
-the four renderings of a synthetic pixel-art texture. `--dump-hw` with
-`--texture-filter all` writes one frame per filter, and frames from the
-frontend with None and Bilinear selected are byte-identical to the frames from
-the build before this change.
+Two ignored tests produce the review material: `texture_filter_cost` times
+None and Edge on stacked full-screen quads, and `texture_filter_sheet` writes
+both renderings of a synthetic pixel-art texture. `--dump-hw` with
+`--texture-filter all` writes one frame per filter, and frames with None
+selected are byte-identical to the frames from the build before this change.

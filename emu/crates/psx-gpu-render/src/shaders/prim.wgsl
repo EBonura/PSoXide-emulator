@@ -32,9 +32,8 @@ const VRAM_W_F: f32 = 1024.0;
 const VRAM_H_F: f32 =  512.0;
 
 @group(0) @binding(0) var vram: texture_2d<u32>;
-// Texture filter in `.x`: 0 = nearest (PSX-native), 1 = bilinear, 2 = smooth
-// (Catmull-Rom), 3 = edge (edge-directed). Global per
-// frame; set by the toolbar toggle. `.y` holds the internal-resolution
+// Texture filter in `.x`: 0 = nearest (PSX-native), 1 = edge (edge-directed,
+// docs/texture-filters-spec.md). Global per frame; set by the toolbar toggle. `.y` holds the internal-resolution
 // multiplier S, used to map a fragment back to its PSX-native pixel.
 @group(0) @binding(1) var<uniform> u_texfilter: vec4<u32>;
 
@@ -259,20 +258,8 @@ fn modulate(texel_rgb: vec3<f32>, tint_rgba: vec4<f32>, raw: bool) -> vec3<f32> 
     return min(floor(tint * tex / 128.0), vec3<f32>(255.0)) / 255.0;
 }
 
-// One bilinear corner: premultiplied colour, coverage 0 on transparent texels
-// (DuckStation "no edge blending" / binary alpha -- transparent neighbours
-// never bleed colour into an opaque edge).
-fn tex_corner(flags: u32, tex_window: u32, uvf: vec2<f32>) -> vec4<f32> {
-    let uv8 = apply_tex_window(page_uv(uvf), tex_window);
-    let w = sample_texel(flags, uv8);
-    if w == 0u {
-        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    }
-    return vec4<f32>(bgr15_to_rgb(w), 1.0);
-}
-
 // ---------------------------------------------------------------------------
-// Smooth (u_texfilter.x == 2) and Edge (== 3) texture filters.
+// Edge (u_texfilter.x == 1) texture filter.
 // Specified in docs/texture-filters-spec.md; section numbers below refer to it.
 // ---------------------------------------------------------------------------
 
@@ -311,59 +298,6 @@ fn resolve_outer(own: vec4<f32>, clamped: vec3<f32>) -> vec3<f32> {
         return own.rgb;
     }
     return clamped;
-}
-
-// Catmull-Rom weights for the taps at -1, 0, 1, 2 (spec section 4.1).
-fn catmull_rom_weights(t: f32) -> vec4<f32> {
-    let t2 = t * t;
-    let t3 = t2 * t;
-    return vec4<f32>(
-        -0.5 * t3 + t2 - 0.5 * t,
-        1.5 * t3 - 2.5 * t2 + 1.0,
-        -1.5 * t3 + 2.0 * t2 + 0.5 * t,
-        0.5 * t3 - 0.5 * t2,
-    );
-}
-
-// Separable Catmull-Rom over the 4x4 taps, clamped per channel to the range of
-// the sample's own 2x2 cell (spec sections 4.1 and 4.3).
-fn filter_smooth(flags: u32, tex_window: u32, b: vec2<f32>, f: vec2<f32>, nearest: vec3<f32>) -> vec3<f32> {
-    // Raw inner taps, then their resolved colours.
-    let ra = filter_tap(flags, tex_window, b, 0.0, 0.0);
-    let rb = filter_tap(flags, tex_window, b, 1.0, 0.0);
-    let rc = filter_tap(flags, tex_window, b, 0.0, 1.0);
-    let rd = filter_tap(flags, tex_window, b, 1.0, 1.0);
-    var inner = array<vec3<f32>, 4>(
-        resolve_inner(ra, rb, rc, nearest),
-        resolve_inner(rb, ra, rd, nearest),
-        resolve_inner(rc, rd, ra, nearest),
-        resolve_inner(rd, rc, rb, nearest),
-    );
-    let lo = min(min(inner[0], inner[1]), min(inner[2], inner[3]));
-    let hi = max(max(inner[0], inner[1]), max(inner[2], inner[3]));
-    let wx = catmull_rom_weights(f.x);
-    let wy = catmull_rom_weights(f.y);
-    var acc = vec3<f32>(0.0);
-    for (var j = 0; j < 4; j++) {
-        var row = vec3<f32>(0.0);
-        for (var i = 0; i < 4; i++) {
-            var c: vec3<f32>;
-            if i == 1 || i == 2 {
-                if j == 1 || j == 2 {
-                    c = inner[(j - 1) * 2 + (i - 1)];
-                } else {
-                    let own = filter_tap(flags, tex_window, b, f32(i - 1), f32(j - 1));
-                    c = resolve_outer(own, inner[clamp(j - 1, 0, 1) * 2 + (i - 1)]);
-                }
-            } else {
-                let own = filter_tap(flags, tex_window, b, f32(i - 1), f32(j - 1));
-                c = resolve_outer(own, inner[clamp(j - 1, 0, 1) * 2 + clamp(i - 1, 0, 1)]);
-            }
-            row += wx[i] * c;
-        }
-        acc += wy[j] * row;
-    }
-    return clamp(acc, lo, hi);
 }
 
 // Colour distance, spec section 3.
@@ -470,36 +404,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if ((in.flags & FLAG_TEX_SEMI_PASS) != 0u) && !stp {
         discard;
     }
-    // Bilinear (u_texfilter.x == 1) with binary-alpha edge handling: blend the
-    // 2x2 texel colours premultiplied so transparent neighbours never bleed;
-    // the silhouette/STP stay on the nearest (center) texel above. Seam-free
-    // filtering isn't possible on PSX's packed VRAM (even DuckStation leaves
-    // texture-boundary seams), so this matches the established emulator result.
     var tex_rgb = bgr15_to_rgb(texel);
     if u_texfilter.x == 1u {
-        let uvf = in.uv - vec2<f32>(0.5, 0.5);
-        let base = floor(uvf);
-        let fr = uvf - base;
-        let c00 = tex_corner(in.flags, in.tex_window, base);
-        let c10 = tex_corner(in.flags, in.tex_window, base + vec2<f32>(1.0, 0.0));
-        let c01 = tex_corner(in.flags, in.tex_window, base + vec2<f32>(0.0, 1.0));
-        let c11 = tex_corner(in.flags, in.tex_window, base + vec2<f32>(1.0, 1.0));
-        let acc = mix(mix(c00, c10, fr.x), mix(c01, c11, fr.x), fr.y);
-        if acc.a > 0.0039 {
-            tex_rgb = acc.rgb / acc.a;
-        }
-    } else if u_texfilter.x == 2u || u_texfilter.x == 3u {
-        // Smooth / Edge: see docs/texture-filters-spec.md. The silhouette and
-        // STP tests above already ran on the nearest texel; a tap that lands on
-        // a transparent texel is replaced by an opaque neighbour (spec section 2).
+        // Edge filter: see docs/texture-filters-spec.md. The silhouette and STP
+        // tests above already ran on the nearest texel; a tap that lands on a
+        // transparent texel is replaced by an opaque neighbour (spec section 2).
         let p = in.uv - vec2<f32>(0.5, 0.5);
         let b = floor(p);
         let f = p - b;
-        if u_texfilter.x == 2u {
-            tex_rgb = filter_smooth(in.flags, in.tex_window, b, f, tex_rgb);
-        } else {
-            tex_rgb = filter_edge(in.flags, in.tex_window, b, f, tex_rgb);
-        }
+        tex_rgb = filter_edge(in.flags, in.tex_window, b, f, tex_rgb);
     }
     let raw = (in.flags & FLAG_RAW_TEXTURE) != 0u;
     var rgb = modulate(tex_rgb, in.color, raw);

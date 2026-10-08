@@ -2,11 +2,13 @@
 
 ## Unreleased
 
-- Two new texture filters beside None and Bilinear, written from scratch from
-  `docs/texture-filters-spec.md`: Smooth (Catmull-Rom with an anti-ringing
-  clamp) and Edge (edge-directed, smooths diagonal staircases and keeps flat
-  areas and orthogonal pixel-art edges crisp). CLI: `--texture-filter
-  none|bilinear|smooth|edge`.
+- One texture filter, Edge, replaces the earlier filter set: the Bilinear, JINC2
+  and xBR modes are gone, the toolbar and Settings toggle cycles None and
+  Edge, and `--texture-filter` takes `none`, `edge` or `all` (`xbr` is an
+  alias of `edge`; other values are an error). Edge is edge-directed
+  interpolation written from scratch from `docs/texture-filters-spec.md`: it
+  smooths diagonal staircases and keeps flat areas and orthogonal pixel-art
+  edges crisp.
 - Clean-room rewrites from PSX-SPX and console measurements: the event
   scheduler, the DMA register file and DICR logic, the MDEC colour path, and
   the SPU voice engine (ADSR and volume sweeps, noise generator, pitch

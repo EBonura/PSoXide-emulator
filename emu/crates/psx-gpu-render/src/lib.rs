@@ -200,8 +200,8 @@ impl HwRenderer {
             .ensure_scale(&self.device, &self.queue, egui_renderer, scale)
     }
 
-    /// Set the sample-time texture filter mode (0 nearest, 1 bilinear, 2 smooth,
-    /// 3 edge). Cheap uniform write; safe to call every frame.
+    /// Set the sample-time texture filter mode (0 nearest, 1 edge). Cheap
+    /// uniform write; safe to call every frame.
     pub fn set_texture_filter(&self, mode: u32) {
         self.pipeline.set_filter_mode(&self.queue, mode);
     }
@@ -2236,11 +2236,10 @@ mod tests {
         eprintln!("wrote /tmp/gp0-lines-cpu-vs-hw.ppm (left CPU, right HW)");
     }
 
-    // ---- Smooth and Edge texture filters (docs/texture-filters-spec.md) ----
+    // ---- Edge texture filter (docs/texture-filters-spec.md) ----
 
     const FILTER_NONE: u32 = 0;
-    const FILTER_SMOOTH: u32 = 2;
-    const FILTER_EDGE: u32 = 3;
+    const FILTER_EDGE: u32 = 1;
 
     /// Texture page x unit 8 (pixel x 512), y 0, 15bpp direct.
     const TPAGE_15BPP: u32 = 8 | (2 << 7);
@@ -2297,40 +2296,16 @@ mod tests {
     }
 
     #[test]
-    fn smooth_and_edge_leave_a_flat_texture_alone() {
+    fn edge_leaves_a_flat_texture_alone() {
         let Some(mut r) = filter_renderer() else {
             return;
         };
         let texel = 0x3DEF;
         let want = bgr15_to_rgba8(texel);
-        for mode in [FILTER_SMOOTH, FILTER_EDGE] {
+        for mode in [FILTER_EDGE] {
             let out = render_texture(&mut r, &[texel; 64], 8, 8, 4, mode, &[]);
             assert!(out.iter().all(|&p| p == want), "mode {mode}");
         }
-    }
-
-    #[test]
-    fn smooth_never_overshoots_a_hard_step() {
-        let Some(mut r) = filter_renderer() else {
-            return;
-        };
-        let (dark, light) = (0x0421, 0x7FFF);
-        let texels: Vec<u16> = (0..16 * 4)
-            .map(|i| if i % 16 < 8 { dark } else { light })
-            .collect();
-        let out = render_texture(&mut r, &texels, 16, 4, 4, FILTER_SMOOTH, &[]);
-        let (lo, hi) = (bgr15_to_rgba8(dark)[0], bgr15_to_rgba8(light)[0]);
-        let mut intermediate = 0;
-        for row in out.chunks_exact(64) {
-            // Monotone across the step: no undershoot before it, no overshoot
-            // after it, and every value inside the plateau range.
-            for w in row.windows(2) {
-                assert!(w[0][0] <= w[1][0], "ringing at a step: {:?}", row);
-            }
-            assert!(row.iter().all(|p| p[0] >= lo && p[0] <= hi));
-            intermediate += row.iter().filter(|p| p[0] > lo && p[0] < hi).count();
-        }
-        assert!(intermediate > 0, "the step should be smoothed, not copied");
     }
 
     #[test]
@@ -2340,7 +2315,7 @@ mod tests {
         };
         let red = 0x001F;
         let texels: Vec<u16> = (0..64).map(|i| if i % 8 < 4 { 0 } else { red }).collect();
-        for mode in [FILTER_SMOOTH, FILTER_EDGE] {
+        for mode in [FILTER_EDGE] {
             let out = render_texture(&mut r, &texels, 8, 8, 4, mode, &[]);
             let mut reds = 0;
             for p in &out {
@@ -2443,9 +2418,8 @@ mod tests {
             return;
         };
         // 16x16 4bpp texture, 1:1 on screen: every fragment samples a texel
-        // centre, where all four filters must return the nearest texel (the
-        // Catmull-Rom weights collapse to a delta, and the edge blend to the
-        // corner it is at).
+        // centre, where the Edge filter must return the nearest texel (its
+        // blend collapses to the corner it is at).
         let mut seed = Vec::new();
         for i in 0..16u16 {
             // Non-zero CLUT entries so no texel is transparent.
@@ -2483,7 +2457,7 @@ mod tests {
             16 | (16 << 8),
         ]);
         let mut shots = Vec::new();
-        for mode in [FILTER_NONE, FILTER_SMOOTH, FILTER_EDGE] {
+        for mode in [FILTER_NONE, FILTER_EDGE] {
             r.set_texture_filter(mode);
             run_both_backends(&words, &mut r, &seed);
             let (_, _, rgba) = r.read_subrect_rgba8(8, 8, 16, 16);
@@ -2491,7 +2465,7 @@ mod tests {
         }
         let distinct: std::collections::HashSet<_> = shots[0].chunks_exact(4).collect();
         assert!(distinct.len() >= 12, "texture did not reach the screen");
-        for (mode, shot) in [(FILTER_SMOOTH, &shots[1]), (FILTER_EDGE, &shots[2])] {
+        for (mode, shot) in [(FILTER_EDGE, &shots[1])] {
             let worst = shot
                 .iter()
                 .zip(&shots[0])
@@ -2520,7 +2494,7 @@ mod tests {
                 }
             })
             .collect();
-        for mode in [FILTER_SMOOTH, FILTER_EDGE] {
+        for mode in [FILTER_EDGE] {
             let out = render_texture(&mut r, &texels, 16, 8, 4, mode, &[0xE200_0001]);
             assert!(
                 out.iter().all(|p| p[2] == 0),
@@ -2530,7 +2504,7 @@ mod tests {
         }
     }
 
-    /// GPU cost of each filter: four stacked full-screen (320x240) 4bpp CLUT
+    /// GPU cost of Edge against nearest: four stacked full-screen (320x240) 4bpp CLUT
     /// quads at internal scale 4, i.e. 4.9 million filtered fragments per
     /// frame. Run with `cargo test --release -p psx-gpu-render --lib
     /// texture_filter_cost -- --ignored --nocapture`.
@@ -2571,7 +2545,7 @@ mod tests {
         for &w in &words {
             cpu.gp0_push(w);
         }
-        for (name, mode) in [("none", 0), ("bilinear", 1), ("smooth", 2), ("edge", 3)] {
+        for (name, mode) in [("none", 0), ("edge", 1)] {
             r.set_texture_filter(mode);
             for _ in 0..5 {
                 r.render_frame(&cpu, &cpu.cmd_log, &start_vram);
@@ -2590,7 +2564,7 @@ mod tests {
         }
     }
 
-    /// Writes the four filters' view of a synthetic pixel-art texture (a disc,
+    /// Writes the nearest and Edge views of a synthetic pixel-art texture (a disc,
     /// diagonal lines, a letter, a checker patch, a ramp and a cut-out hole)
     /// magnified 7x (the quad has to fit the 240 line draw area), as `<dir>/synthetic-<filter>.ppm`. Run with
     /// `PSOXIDE_FILTER_SHEET_DIR=<dir> cargo test --release -p psx-gpu-render
@@ -2659,7 +2633,7 @@ mod tests {
                 ),
             );
         }
-        for (name, mode) in [("none", 0), ("bilinear", 1), ("smooth", 2), ("edge", 3)] {
+        for (name, mode) in [("none", 0), ("edge", 1)] {
             let out = render_texture(&mut r, &t, n as u32, n as u32, 7, mode, &[]);
             let mut ppm = format!("P6\n{} {}\n255\n", n * 7, n * 7).into_bytes();
             for p in out {
