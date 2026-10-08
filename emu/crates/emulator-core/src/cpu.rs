@@ -2718,8 +2718,12 @@ impl Cpu {
         let rt = ((instr >> 16) & 0x1F) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
-        // SWC2 stores a GTE register, so it reads a result -- subject to the
-        // same MAC0/LZCR read latency as MFC2 (no stall on real hardware).
+        // SWC2 stores a GTE register, so it reads a result exactly as MFC2
+        // does: it waits for a running command (psx-spx lists MFC2, CFC2 and
+        // SWC2 as the reads that interlock; hwtest records 0x130-0x134 pin
+        // the MFC2 wait on silicon), and MAC0/LZCR can still come back stale
+        // by instruction count.
+        self.gte_sync(bus);
         let value = self.gte_read_data_latency(bus, rt);
         bus.cpu_write32(addr, value);
         Ok(())
@@ -4827,6 +4831,33 @@ mod tests {
         program.extend(std::iter::repeat_n(0, 20));
         assert_eq!(warm_cycles_with(limit_oracles(0, "", ""), &program), 37);
         assert_eq!(warm_cycles_with(limit_oracles(GTE, "", ""), &program), 22);
+    }
+
+    #[test]
+    fn swc2_waits_for_a_running_command_like_mfc2() {
+        // psx-spx lists SWC2 with MFC2 and CFC2 as the GTE reads that wait
+        // for the command in flight; hwtest records 0x130-0x134 measure the
+        // MFC2 wait (37 clocks a turn against 22 with the read after the
+        // command has finished, `gte_oracle_removes_the_command_interlock`).
+        // SWC2 of SXY2 (data register 14) to RAM must show the same wait.
+        const RTPS: u32 = 0x4A08_0001;
+        const MFC2_T2_SXY2: u32 = 0x480A_7000;
+        const SWC2_SXY2: u32 = (0x3A << 26) | (8 << 21) | (14 << 16);
+        let turn = |read: u32, gap: usize| {
+            let mut program = std::vec![RTPS, read];
+            program.extend(std::iter::repeat_n(0, gap));
+            warm_cycles_with(limit_oracles(0, "", ""), &program)
+        };
+        assert_eq!(turn(MFC2_T2_SXY2, 20), 37);
+        assert_eq!(turn(SWC2_SXY2, 20), turn(MFC2_T2_SXY2, 20));
+        // With the command long finished the read costs no wait.
+        let settled = |read: u32| {
+            let mut program = std::vec![RTPS];
+            program.extend(std::iter::repeat_n(0, 20));
+            program.push(read);
+            warm_cycles_with(limit_oracles(0, "", ""), &program)
+        };
+        assert_eq!(settled(SWC2_SXY2), settled(MFC2_T2_SXY2));
     }
 
     #[test]
