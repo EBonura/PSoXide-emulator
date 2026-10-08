@@ -33,7 +33,7 @@
 //! (43h, 44h, 4Dh and the query commands), the rumble mapping, and the
 //! "Memory Card Data Format" layout for a freshly formatted card. The
 //! ACK timing is the project's own measurement on an SCPH-1200 (see the
-//! `controller_test` record). See `LICENSE` and `docs/license-audit.md`.
+//! `controller_test` record). See `LICENSE` and `docs/PROVENANCE.md`.
 
 /// Logical button bit positions. `ButtonState::bits()` returns a
 /// `u16` where bit N = 1 means button N is currently held. The

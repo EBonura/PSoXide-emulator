@@ -63,12 +63,10 @@ counters every instruction.
 Timer 0 converts cycles through the current GPU dot-clock divisor when
 bits 9:8 select dot clock. Timer 1 converts cycles to HBlank ticks when
 bits 9:8 select HBlank. Timer 2 supports the system-clock and system/8
-sources, with Redux-compatible stop behavior for sync modes 1/2.
-
-Redux does not implement Timer 0/1 sync gate/reset semantics beyond the
-clock-source and IRQ effects. PSoXide mirrors that: Timer 1 mode
-`0x0103`, used by the SDK `vsync()` helper, continues counting across
-VBlank instead of resetting on the VBlank IRQ edge.
+sources. Timer 1's VBlank sync modes are modelled, with the sync-mode-1
+reset landing a measured number of lines after the VBlank (see
+`Timers::set_vblank_sync_offset_lines`); the Timer 0 HBlank sync modes are
+not modelled beyond their clock-source and IRQ effects.
 
 ## Rust shape
 
@@ -98,5 +96,4 @@ impl Timers {
 ## References
 
 - Nocash PSX-SPX -- "Timers"
-- PCSX-Redux `src/core/psxcounters.cc` -- the real ticking implementation
 - `emulator_core::timers` -- PSoXide's timed counter implementation

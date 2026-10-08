@@ -114,5 +114,4 @@ Currently `DICR` just stores what's written -- sufficient until a DMA channel ne
 ## References
 
 - Nocash PSX-SPX -- "DMA Channels"
-- PCSX-Redux `src/core/psxdma.cc` -- the dispatch that splits block / linked-list / OTC
 - `emulator_core::dma` -- our impl + the OTC unit tests
