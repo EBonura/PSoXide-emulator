@@ -3041,14 +3041,14 @@ mod tests {
                 "Quit PSoXide"
             ]
         );
-        s.sync_video_audio(false, "xBR", 0.5, true);
+        s.sync_video_audio(false, "Bilinear", 0.5, true);
         s.set_smooth_slow_host(true);
         let values: Vec<_> = s.categories[1]
             .items
             .iter()
             .map(|item| item.value.clone().unwrap_or_default())
             .collect();
-        assert_eq!(&values[1..5], ["Native", "xBR", "50%", "On"]);
+        assert_eq!(&values[1..5], ["Native", "Bilinear", "50%", "On"]);
         assert_eq!(values[7], "Keep it smooth");
     }
 

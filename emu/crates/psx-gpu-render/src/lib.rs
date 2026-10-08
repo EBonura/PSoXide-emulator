@@ -200,8 +200,8 @@ impl HwRenderer {
             .ensure_scale(&self.device, &self.queue, egui_renderer, scale)
     }
 
-    /// Set the sample-time texture filter mode (0 nearest, 1 bilinear, 2 JINC2,
-    /// 3 xBR). Cheap uniform write; safe to call every frame.
+    /// Set the sample-time texture filter mode (0 nearest, 1 bilinear). Cheap
+    /// uniform write; safe to call every frame.
     pub fn set_texture_filter(&self, mode: u32) {
         self.pipeline.set_filter_mode(&self.queue, mode);
     }
