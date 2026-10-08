@@ -558,7 +558,7 @@ fn read_command_uses_initial_delay_then_steady_stream_delay() {
         .expect("steady DataReady scheduled");
     assert_eq!(
         next_data_ready.deadline,
-        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2 + 1 + CD_READ_TIME / 2
+        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2 + CD_READ_TIME / 2
     );
 }
 
@@ -700,7 +700,7 @@ fn xa_audio_sector_suppresses_dataready_irq_but_keeps_streaming() {
         .expect("suppressed audio sector should still chain the read stream");
     assert_eq!(
         next_data_ready.deadline,
-        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2 + 1 + CD_READ_TIME / 2
+        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME * 3 / 2 + CD_READ_TIME / 2
     );
 }
 
@@ -831,6 +831,7 @@ fn seek_command_charges_the_measured_mech_curve() {
     let mut cd = CdRom::new();
     // Even with a prior seek done, silicon answers SeekL along the measured
     // distance curve (record 0x90: ~11 ms for a 1-sector hop, no free path).
+    cd.motor_on = true;
     cd.seek_done = true;
     cd.read_lba = 200;
     cd.setloc_msf = (0x00, 0x02, 0x16);
@@ -940,12 +941,66 @@ fn relocated_read_charges_travel_on_first_sector_then_streams_at_cadence() {
         .expect("read stream should continue after first sector");
     assert_eq!(
         next_sector.deadline,
-        first_sector_deadline + 1 + CD_READ_TIME / 2
+        first_sector_deadline + CD_READ_TIME / 2
     );
     assert!(
         !cd.location_changed,
         "the travel latch should clear once the stream is running"
     );
+}
+
+#[test]
+fn streaming_cadence_does_not_accumulate_the_lateness_of_each_tick() {
+    // Every sector is serviced a little after its deadline (the CPU only
+    // reaches the drive at branch boundaries). The next sector is chained
+    // from the deadline, so the stream stays on the disc's own 150 sectors
+    // a second however late each tick is.
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 64])));
+    cd.mode = 0x80; // double speed, plain data
+    cd.scheduling_cycle = 1_000;
+    cd.setloc_msf = (0x00, 0x02, 0x00);
+    cd.cmd_read();
+    let ack_deadline = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES;
+    assert!(cd.tick(ack_deadline + 1));
+    cd.irq_flag = 0;
+    let mut deadline = ack_deadline + 1 + CD_READ_TIME * 3 / 2;
+    for sector in 0..30u64 {
+        let lateness = 1 + (sector * 37) % 300;
+        cd.tick(deadline + lateness);
+        cd.irq_flag = 0;
+        deadline += CD_READ_TIME / 2;
+        let next = cd
+            .pending
+            .iter()
+            .find(|ev| ev.irq == IrqType::DataReady)
+            .expect("the stream continues")
+            .deadline;
+        assert_eq!(next, deadline, "after sector {sector}");
+    }
+}
+
+#[test]
+fn a_tick_more_than_a_period_late_restarts_the_cadence_from_now() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 64])));
+    cd.mode = 0x80;
+    cd.scheduling_cycle = 1_000;
+    cd.setloc_msf = (0x00, 0x02, 0x00);
+    cd.cmd_read();
+    let ack_deadline = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES;
+    assert!(cd.tick(ack_deadline + 1));
+    cd.irq_flag = 0;
+    let first = ack_deadline + 1 + CD_READ_TIME * 3 / 2;
+    let now = first + CD_READ_TIME * 5; // the CPU was away for five frames
+    cd.tick(now);
+    let next = cd
+        .pending
+        .iter()
+        .find(|ev| ev.irq == IrqType::DataReady)
+        .expect("the stream continues")
+        .deadline;
+    assert_eq!(next, now + CD_READ_TIME / 2);
 }
 
 #[test]
@@ -1704,6 +1759,169 @@ fn a_delivery_waits_for_a_sector_the_image_has_not_supplied() {
     assert_eq!(cd.data_fifo.front().copied(), Some(0x5A));
 }
 
+/// Cycle at which the first event of `irq` for `command` is due, once the
+/// acknowledge has been delivered (followups are anchored on it).
+fn completion_deadline(cd: &mut CdRom, ack_at: u64, irq: IrqType) -> Option<u64> {
+    assert!(cd.tick(ack_at + 1), "acknowledge delivered");
+    cd.irq_flag = 0;
+    cd.pending
+        .iter()
+        .find(|ev| ev.irq == irq)
+        .map(|ev| ev.deadline)
+}
+
+#[test]
+fn pause_from_cdda_completes_123_ms_after_the_command() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(cdda_disc()));
+    play_and_arrive(&mut cd, 2);
+    cd.pending.clear();
+    cd.irq_flag = 0;
+    cd.scheduling_cycle = 10_000_000;
+    cd.queue_command(0x09, 10_000_000);
+    let ack_at = 10_000_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + CDDA_BUSY_RESPONSE_CYCLES;
+    let done = completion_deadline(&mut cd, ack_at, IrqType::Complete).expect("completion");
+    // The completion is one tick after the acknowledge's own, plus the rest
+    // of the 123.1 ms.
+    assert_eq!(
+        done,
+        ack_at + 1 + PAUSE_FROM_CDDA_CYCLES - (ack_at - 10_000_000)
+    );
+    assert_eq!(
+        (done - 10_000_000) / MS,
+        123,
+        "complete at the console's median"
+    );
+}
+
+#[test]
+fn pause_of_a_data_read_keeps_the_short_followup() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(cdda_disc()));
+    cd.queue_command(0x09, 1_000);
+    let ack_at = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES;
+    let done = completion_deadline(&mut cd, ack_at, IrqType::Complete).expect("completion");
+    assert_eq!(done, ack_at + 1 + PAUSE_COMPLETE_CYCLES_STANDBY);
+}
+
+#[test]
+fn stop_keeps_reporting_the_motor_until_606_ms_then_completes_off() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(cdda_disc()));
+    cd.queue_command(0x08, 1_000);
+    assert_ne!(
+        cd.stat_byte() & drive_status_bit::MOTOR_ON,
+        0,
+        "still spinning"
+    );
+    let ack_at = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES;
+    assert!(cd.tick(ack_at + 1));
+    assert_eq!(
+        cd.read8(BASE + 1) & drive_status_bit::MOTOR_ON,
+        drive_status_bit::MOTOR_ON
+    );
+    cd.irq_flag = 0;
+    let done = cd
+        .pending
+        .iter()
+        .find(|ev| ev.irq == IrqType::Complete)
+        .expect("stop completion");
+    assert_eq!(
+        done.bytes[0] & drive_status_bit::MOTOR_ON,
+        0,
+        "completion says off"
+    );
+    assert_eq!(done.deadline - 1_000 - 1, STOP_FROM_SPINNING_CYCLES);
+    cd.tick(1_000 + STOP_FROM_SPINNING_CYCLES - 1);
+    assert_ne!(cd.stat_byte() & drive_status_bit::MOTOR_ON, 0);
+    cd.tick(1_000 + STOP_FROM_SPINNING_CYCLES);
+    assert_eq!(cd.stat_byte() & drive_status_bit::MOTOR_ON, 0);
+}
+
+/// First-sector delay of a ReadN issued at `now` on a one-track data disc.
+fn first_sector_delay(cd: &mut CdRom, now: u64) -> u64 {
+    cd.queue_command(0x06, now);
+    let ack_at = now + FIRST_RESPONSE_WITH_MEDIA_CYCLES;
+    completion_deadline(cd, ack_at, IrqType::DataReady).expect("first sector") - (ack_at + 1)
+}
+
+#[test]
+fn read_after_stop_pays_the_spin_up_and_read_during_spin_down_waits_it_out() {
+    let base = {
+        let mut cd = CdRom::new();
+        cd.insert_disc(Some(Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 64])));
+        first_sector_delay(&mut cd, 1_000)
+    };
+    // Settled: the motor is off by the time of the read.
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 64])));
+    cd.queue_command(0x08, 1_000);
+    let later = 1_000 + STOP_FROM_SPINNING_CYCLES + 10;
+    cd.tick(later);
+    cd.irq_flag = 0;
+    assert_eq!(first_sector_delay(&mut cd, later), base + SPIN_UP_CYCLES);
+    assert_ne!(
+        cd.stat_byte() & drive_status_bit::MOTOR_ON,
+        0,
+        "spinning again"
+    );
+    // At once: the Stop was acknowledged, the read follows.
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 64])));
+    cd.queue_command(0x08, 1_000);
+    let ack_at = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES;
+    cd.tick(ack_at + 1);
+    cd.irq_flag = 0;
+    let at = ack_at + 100;
+    let delay = first_sector_delay(&mut cd, at);
+    assert_eq!(
+        delay,
+        base + (1_000 + STOP_FROM_SPINNING_CYCLES - at)
+            + SPIN_UP_CYCLES
+            + STOP_ABORT_RESTART_CYCLES
+    );
+    assert!(
+        !cd.pending
+            .iter()
+            .any(|ev| ev.command == 0x08 && ev.irq == IrqType::Complete),
+        "the interrupted Stop never completes"
+    );
+}
+
+#[test]
+fn audio_and_data_pay_a_settle_when_the_head_changes_over() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(cdda_disc()));
+    // Data to audio: the settle is on top of the seek curve.
+    cd.read_lba = 2;
+    cd.queue_command(0x03, 1_000);
+    let first = cd.cdda_seek_done_at.expect("play armed");
+    assert_eq!(
+        first - 1_000,
+        seek_cycles(cd.read_lba.abs_diff(2)) + DATA_TO_AUDIO_SETTLE_CYCLES
+    );
+    // A second Play with the head already on audio pays no settle.
+    cd.tick(first + 1);
+    cd.queue_command(0x03, first + 10);
+    let second = cd.cdda_seek_done_at.expect("play armed");
+    assert!(second - (first + 10) < DATA_TO_AUDIO_SETTLE_CYCLES);
+    // Audio to data: the first data operation pays, the next does not.
+    let mut cd2 = CdRom::new();
+    cd2.insert_disc(Some(Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 64])));
+    let plain = first_sector_delay(&mut cd2, 1_000);
+    cd2.head_on_audio = true;
+    cd2.cmd_pause();
+    cd2.pending.clear();
+    cd2.irq_flag = 0;
+    assert_eq!(
+        first_sector_delay(&mut cd2, 5_000_000),
+        plain + AUDIO_TO_DATA_SETTLE_CYCLES
+    );
+    cd2.pending.clear();
+    cd2.irq_flag = 0;
+    assert_eq!(first_sector_delay(&mut cd2, 9_000_000), plain);
+}
+
 /// Reference decoder for a 4-bit stereo XA sector, written from the PSX-SPX
 /// "CDROM XA Audio ADPCM Compression" pseudocode (16-bit history, +32
 /// rounding, divide by 64) and independent of `decode_xa_native`.
@@ -1790,4 +2008,15 @@ fn xa_decode_matches_a_reference_written_from_the_spec() {
     // Measured 12 on this seed: the model truncates with four fractional
     // history bits where the textbook rounds a 16-bit history.
     assert!(worst <= 16, "deviation from the spec decoder: {worst}");
+}
+
+#[test]
+fn spindown_and_head_position_survive_a_save_state_round_trip() {
+    let mut cd = CdRom::new();
+    cd.spindown_until = Some(123_456_789);
+    cd.head_on_audio = true;
+    let bytes = postcard::to_allocvec(&cd).expect("serialise");
+    let back: CdRom = postcard::from_bytes(&bytes).expect("deserialise");
+    assert_eq!(back.spindown_until, Some(123_456_789));
+    assert!(back.head_on_audio);
 }
