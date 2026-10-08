@@ -1,0 +1,195 @@
+--- a/engine/examples/hardware-tests/src/main.rs
++++ b/engine/examples/hardware-tests/src/main.rs
+@@ -4707,9 +4707,67 @@
+         next,
+         sample_timing(0xC7, 256, || cd_seek_backward(256)),
+     );
++    // Second-response delays of GetID, Pause and Stop. The emulator holds
++    // values for these that no console measurement backs yet (see
++    // `cdrom/timing.rs` in PSoXide-emulator: GETID_SECOND_RESPONSE_CYCLES,
++    // PAUSE_COMPLETE_CYCLES_*, STOP_SECOND_RESPONSE_CYCLES). Short delays
++    // are timed on Timer 2 in system clocks (to the first INT3 or to the INT2
++    // that follows it); the multi-million-clock ones on Timer 1 HBlank ticks
++    // like the seek records. Every record runs through `sample_timing`, so
++    // the spread over repeats is kept, not just one answer.
+     push_timing_record(
+         records,
+         next,
++        sample_timing(0xF0, 1, || cd_irq_cycles(CD_CMD_GETID, &[], 3)),
++    );
++    push_timing_record(
++        records,
++        next,
++        sample_timing(0xF1, 1, || cd_irq_cycles(CD_CMD_GETID, &[], 2)),
++    );
++    push_timing_record(
++        records,
++        next,
++        sample_timing(0xF2, 1, || cd_pause_idle_cycles(3)),
++    );
++    push_timing_record(
++        records,
++        next,
++        sample_timing(0xF3, 1, || cd_pause_idle_cycles(2)),
++    );
++    push_timing_record(
++        records,
++        next,
++        sample_timing(0xF4, 1, || cd_stop_pause_while_reading(false, psx_hw::cd::CMD_PAUSE)),
++    );
++    push_timing_record(
++        records,
++        next,
++        sample_timing(0xF5, 1, || cd_stop_pause_while_reading(true, psx_hw::cd::CMD_PAUSE)),
++    );
++    push_timing_record(
++        records,
++        next,
++        sample_timing(0xF6, 1, || cd_stop_pause_while_reading(false, psx_hw::cd::CMD_STOP)),
++    );
++    push_timing_record(
++        records,
++        next,
++        sample_timing(0xF7, 1, || cd_stop_pause_while_reading(true, psx_hw::cd::CMD_STOP)),
++    );
++    push_timing_record(
++        records,
++        next,
++        sample_timing(0xF8, 1, cd_stop_from_idle),
++    );
++    push_timing_record(
++        records,
++        next,
++        sample_timing(0xF9, 1, cd_stop_when_stopped_cycles),
++    );
++    push_timing_record(
++        records,
++        next,
+         // Must establish playback itself: 0x9D pauses and mutes when it
+         // finishes, so measuring "during CD-DA" without restarting audio would
+         // silently measure the idle case instead.
+@@ -5812,8 +5870,124 @@
+         return CD_FAILED;
+     }
+     cd_timed(|| cd_command_until_complete_timed(psx_hw::cd::CMD_SEEKL, &[]))
++}
++
++/// CdlGetID, which `psx_hw::cd` does not name.
++const CD_CMD_GETID: u8 = 0x1A;
++
++/// Clock ticks (Timer 2, system clock) from writing `command` to the first
++/// interrupt of type `want` (3 = first response, 2 = second response). Each
++/// interrupt on the way is acknowledged. The count includes the few hundred
++/// clocks the command write itself takes, which record 0x40 (GetStat) also
++/// includes and which the analysis subtracts. Timer 2 wraps at 65,536, so a
++/// result at or above 0xF000 is reported as a failure rather than aliased.
++fn cd_irq_cycles(command: u8, params: &[u8], want: u8) -> u16 {
++    timers::set_mode(timers::Timer::Timer2, 0);
++    timers::set_counter(timers::Timer::Timer2, 0);
++    let Some(saved) = psx_io::cd::dispatch_command(command, params, CD_SPINS) else {
++        return CD_FAILED;
++    };
++    let mut result = CD_FAILED;
++    loop {
++        let now = timers::counter(timers::Timer::Timer2);
++        if now >= 0xF000 {
++            break;
++        }
++        match psx_io::cd::irq_flag_value() {
++            0 => {}
++            irq => {
++                psx_io::cd::discard_response();
++                psx_io::cd::acknowledge_irq(irq);
++                if irq == want {
++                    result = now;
++                    break;
++                }
++                if irq == 5 {
++                    break;
++                }
++            }
++        }
++    }
++    psx_io::cd::restore_irq_output(saved);
++    result
++}
++
++/// Pause with the motor on and the drive idle: park on the test LBA (a
++/// SeekL leaves the drive paused there), pause once so the state is known,
++/// then time the second Pause. `want` selects INT3 or INT2 as in
++/// [`cd_irq_cycles`].
++fn cd_pause_idle_cycles(want: u8) -> u16 {
++    if !cd_park(CD_TEST_LBA) {
++        return CD_FAILED;
++    }
++    cd_clock_reset();
++    if !cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]) {
++        return CD_FAILED;
++    }
++    cd_irq_cycles(psx_hw::cd::CMD_PAUSE, &[], want)
++}
++
++/// Total time (Timer 1 HBlank ticks) of `command` (Pause or Stop), issued
++/// after a read has streamed a few sectors at single or double speed. The
++/// total runs from the command write to the INT2 that ends it, so the first
++/// response (a few tens of thousands of clocks, under one HBlank tick per
++/// thousand) is included.
++fn cd_stop_pause_while_reading(double_speed: bool, command: u8) -> u16 {
++    let mode = if double_speed {
++        psx_hw::cd::MODE_DOUBLE_SPEED
++    } else {
++        0
++    };
++    if psx_io::cd::try_set_mode(mode, CD_SPINS).is_none()
++        || !cd_park(CD_TEST_LBA)
++        || psx_io::cd::try_set_target_lba(CD_TEST_LBA, CD_SPINS).is_none()
++        || psx_io::cd::try_start_reading(CD_SPINS).is_none()
++    {
++        cd_clock_reset();
++        let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
++        return CD_FAILED;
++    }
++    // Let the read settle: four sectors, so the drive is genuinely streaming.
++    cd_clock_reset();
++    let mut streaming = true;
++    let mut seen = 0;
++    while seen < 4 {
++        if !cd_sector_timed() {
++            streaming = false;
++            break;
++        }
++        seen += 1;
++    }
++    let elapsed = if streaming {
++        cd_timed(|| cd_command_until_complete_timed(command, &[]))
++    } else {
++        CD_FAILED
++    };
++    // Leave the drive paused and at single speed for whatever runs next.
++    cd_clock_reset();
++    let _ = cd_command_until_complete_timed(psx_hw::cd::CMD_PAUSE, &[]);
++    let _ = psx_io::cd::try_set_mode(0, CD_SPINS);
++    elapsed
++}
++
++/// Stop with the motor on and the drive idle (parked, paused). The motor
++/// stays off afterwards; the next record that needs it spins it up itself.
++fn cd_stop_from_idle() -> u16 {
++    if !cd_park(CD_TEST_LBA) {
++        return CD_FAILED;
++    }
++    cd_timed(|| cd_command_until_complete_timed(psx_hw::cd::CMD_STOP, &[]))
+ }
+ 
++/// Stop when the drive is already stopped, in system clocks to the INT2.
++fn cd_stop_when_stopped_cycles() -> u16 {
++    cd_clock_reset();
++    if !cd_command_until_complete_timed(psx_hw::cd::CMD_STOP, &[]) {
++        return CD_FAILED;
++    }
++    cd_irq_cycles(psx_hw::cd::CMD_STOP, &[], 2)
++}
++
+ /// Time `sectors` sequential sector arrivals once a read is already streaming,
+ /// which isolates sustained throughput from the initial seek and spin-up.
+ fn cd_read_throughput(double_speed: bool, sectors: u32) -> u16 {

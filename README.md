@@ -100,10 +100,14 @@ directing the architecture, debugging and hardware verification. A large part
 of the code was written by an AI assistant under human direction, review and
 integration.
 
-This is not a clean-room implementation, and disclosing AI assistance is not a
-warranty of clean-room provenance or of non-infringement. Parts of the emulator
-core are derived from PCSX-Redux (GPL-2.0-or-later), tracked file by file. The
-full picture is in PSoXide's
+This is not a clean-room implementation as a whole, and disclosing AI
+assistance is not a warranty of clean-room provenance or of non-infringement.
+PCSX-Redux (GPL-2.0-or-later) was the parity oracle early in the project. The
+scheduler, DMA register file, SIO model, MDEC, SPU and CD-ROM timing constants
+have since been rewritten from nocash PSX-SPX and console measurements; the
+CPU, bus, GPU and hardware renderer have not, and keep a short list of
+behaviours matched to Redux traces. [docs/PROVENANCE.md](docs/PROVENANCE.md)
+lists exactly what is and is not rewritten. The wider picture is in PSoXide's
 [downstream licensing](https://github.com/EBonura/PSoXide/blob/main/docs/downstream-licensing.md)
 document.
 

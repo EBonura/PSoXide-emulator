@@ -27,10 +27,14 @@
 //!
 //! ## Provenance
 //!
-//! Written from this project's own requirements: the event set, the slot
-//! names, the priority order and the strict-deadline rule are fixed by the
-//! gate suite (compat frame hashes, hardware-test records, ps1-tests), not
-//! by an outside design. See `LICENSE` and `docs/PROVENANCE.md`.
+//! The structure (a fixed array of per-slot deadlines, a pending bitmap and
+//! a cached earliest deadline) and the slot names are PSoXide's own. Two
+//! rules are behaviour inherited from the earlier engine, not derived from
+//! documentation, and are `gate-pinned`: a deadline is due only strictly in
+//! the past, and events that share a deadline fire in slot order. The slot
+//! order itself (which is also the save-state layout) was inherited too;
+//! no gate has been run that reverses it, so its influence is unmeasured.
+//! See `LICENSE` and `docs/PROVENANCE.md`.
 
 /// A scheduled-event slot. The discriminant is the slot's position in the
 /// pending bitmap and its tie-break priority (lower fires first when two
