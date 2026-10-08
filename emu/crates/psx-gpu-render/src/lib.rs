@@ -2302,7 +2302,8 @@ mod tests {
         };
         let texel = 0x3DEF;
         let want = bgr15_to_rgba8(texel);
-        for mode in [FILTER_EDGE] {
+        {
+            let mode = FILTER_EDGE;
             let out = render_texture(&mut r, &[texel; 64], 8, 8, 4, mode, &[]);
             assert!(out.iter().all(|&p| p == want), "mode {mode}");
         }
@@ -2315,7 +2316,8 @@ mod tests {
         };
         let red = 0x001F;
         let texels: Vec<u16> = (0..64).map(|i| if i % 8 < 4 { 0 } else { red }).collect();
-        for mode in [FILTER_EDGE] {
+        {
+            let mode = FILTER_EDGE;
             let out = render_texture(&mut r, &texels, 8, 8, 4, mode, &[]);
             let mut reds = 0;
             for p in &out {
@@ -2465,7 +2467,8 @@ mod tests {
         }
         let distinct: std::collections::HashSet<_> = shots[0].chunks_exact(4).collect();
         assert!(distinct.len() >= 12, "texture did not reach the screen");
-        for (mode, shot) in [(FILTER_EDGE, &shots[1])] {
+        {
+            let (mode, shot) = (FILTER_EDGE, &shots[1]);
             let worst = shot
                 .iter()
                 .zip(&shots[0])
@@ -2494,7 +2497,8 @@ mod tests {
                 }
             })
             .collect();
-        for mode in [FILTER_EDGE] {
+        {
+            let mode = FILTER_EDGE;
             let out = render_texture(&mut r, &texels, 16, 8, 4, mode, &[0xE200_0001]);
             assert!(
                 out.iter().all(|p| p[2] == 0),
