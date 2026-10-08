@@ -43,7 +43,7 @@ impl DrawArea {
 #[repr(u32)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BlendMode {
-    /// `(bg >> 1) + (fg >> 1)` per channel. Redux quirk: pre-shift
+    /// `(bg >> 1) + (fg >> 1)` per channel: pre-shift
     /// both operands before summing, NOT `(bg + fg) / 2`. The two
     /// disagree when both inputs are odd: `(3+3)/2 = 3` vs `1+1 = 2`.
     Average = 0,

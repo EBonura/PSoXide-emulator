@@ -12,16 +12,13 @@ pub(super) struct GpuStatus {
 
 impl GpuStatus {
     pub(super) fn new() -> Self {
-        // Reset defaults matching Redux's `SoftGPU::impl::open` /
-        // `softReset`, both of which initialise `m_statusRet` to
-        // `0x14802000`:
+        // Reset defaults (gate-pinned apart from bit 31):
         //   bit 23 (DISPLAY_DISABLE) = 1
-        //   bit 21 = 1 (reserved, Redux sets on reset)
+        //   bit 21 = 1 (reserved)
         //   bit 13 (INTERLACE_FIELD) = 1
         //   bit 31 (DRAWING_ODD) = 1 on the captured SCPH-9902 field;
-        //          VBlank XORs it for each following field. This intentionally
-        //          follows the physical console rather than Redux's zeroed
-        //          software-GPU default.
+        //          VBlank XORs it for each following field. This follows the
+        //          physical console.
         // Ready bits 26/28 are filled in by `read`; VRAM-ready (27) is
         // gated on an active VRAM→CPU transfer.
         Self { raw: 0x9480_2000 }
@@ -45,9 +42,8 @@ impl GpuStatus {
         // path, which is what makes CPU command submission settle at the
         // GPU's actual raster/VRAM bandwidth.
         // Bit 27 (VRAM→CPU ready) is only set while software is
-        // actually pulling pixels from GPUREAD; Redux's default is
-        // 0 and BIOS/game code polls this bit to detect transfer
-        // completion.
+        // actually pulling pixels from GPUREAD; BIOS/game code polls this
+        // bit to detect transfer completion.
         if command_ready {
             ret |= 0x0400_0000;
         } else {

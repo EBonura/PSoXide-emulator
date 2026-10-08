@@ -182,12 +182,12 @@ fn gp1_display_disable_toggles_bit_23() {
 }
 
 #[test]
-fn gp1_query_unknown_subops_preserve_read_latch_like_redux() {
+fn gp1_query_unknown_subops_preserve_read_latch() {
     let mut gpu = Gpu::new();
-    gpu.write32(GP1_ADDR, 0x0000_0000); // reset seeds Redux's dataRet latch
+    gpu.write32(GP1_ADDR, 0x0000_0000); // reset seeds the read latch
     assert_eq!(gpu.read32(GP0_ADDR).unwrap(), 0x0000_0400);
 
-    gpu.write32(GP1_ADDR, 0x1000_0007); // Redux CtrlQuery::Unknown
+    gpu.write32(GP1_ADDR, 0x1000_0007); // an unknown query index
     assert_eq!(gpu.read32(GP0_ADDR).unwrap(), 0x0000_0400);
 
     gpu.write32(GP0_ADDR, 0xE300_1234);
@@ -2182,8 +2182,8 @@ fn oversize_quad_drops_only_the_oversize_half() {
 // scratch (VRAM 512,256 size 96x96) through the exact GP0 + draw-offset
 // path and FNV-1a hashes the VRAM read-back. On real PS1 hardware (burn
 // 2026-06-09, ledger HWB-005) every TRIANGLE's hash diverged while every
-// QUAD matched -> the emulator's triangle edge-coverage rule (copied
-// from Redux's soft renderer) is not silicon. These tests replay the
+// QUAD matched -> the emulator's triangle edge-coverage rule at that time
+// (a corner-sampled scanline-delta walker) is not silicon. These tests replay the
 // disc's exact path in-process so the rasterizer can be tuned against
 // the recorded hardware hashes WITHOUT a burn per iteration.
 const SCR_X: u16 = 512;
@@ -2234,7 +2234,7 @@ fn flat_tri_replay_reproduces_disc_emulator_hash() {
     let tri = TriFlat::new([(8, 8), (88, 16), (40, 88)], 0xc0, 0x40, 0x80);
     let h = replay_scratch_hash(|g| replay_send_prim(g, &tri, TriFlat::WORDS));
     // Target: REAL SILICON's recorded hash (HWB-005 detail line). The old
-    // Redux rasterizer produced 0x495AFB4D here and FAILED on hardware.
+    // corner-sampled rasterizer produced 0x495AFB4D here and FAILED on hardware.
     assert_eq!(
         h, 0x0412_1005,
         "replay {h:#010x} must match silicon 0x04121005"
@@ -2246,7 +2246,7 @@ fn flat_triangle_edge_cases_match_silicon() {
     use psx_gpu::prim::TriFlat;
     // Every flat-triangle GPU CHECKS case and its real-silicon hash (HWB-005
     // photos, high 7 nibbles == hash>>4; the OBS column clips the low nibble).
-    // The Redux corner-sampled rasterizer failed ALL of these on hardware.
+    // The corner-sampled rasterizer failed ALL of these on hardware.
     type FlatTriCase = (&'static str, [(i16, i16); 3], (u8, u8, u8), u32);
     let cases: [FlatTriCase; 4] = [
         // case 105: vertex past the right edge.

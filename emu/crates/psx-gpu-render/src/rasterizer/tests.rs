@@ -211,7 +211,7 @@ fn diff_inside_bbox(a: &[u16], b: &[u16], bbox_min: (i32, i32), bbox_max: (i32, 
 
 #[test]
 fn semi_trans_average_matches_cpu_byte_for_byte() {
-    // The trickiest blend mode -- Redux's `(b>>1) + (f>>1)` quirk
+    // The trickiest blend mode -- the `(b>>1) + (f>>1)` form
     // produces different LSBs from the naive `(b+f)/2`. If the
     // shader gets this wrong, every output pixel of an axis-
     // aligned triangle (no edge-rule diffs) will be off-by-one
@@ -631,7 +631,7 @@ fn tex_tri_15bpp_axis_aligned_matches_cpu() {
 
     // Functional parity: the GPU samples the SAME texture cells
     // as the CPU at each integer pixel position with a barycentric
-    // affine interpolation. Pixel-EXACT parity vs the Redux-port
+    // affine interpolation. Pixel-EXACT parity vs the earlier
     // scanline-delta math (which uses specific Q16.16 setup +
     // shl10idiv) is a Phase-B.x follow-up -- that path produces
     // off-by-1/2 UV at some interior pixels due to the difference

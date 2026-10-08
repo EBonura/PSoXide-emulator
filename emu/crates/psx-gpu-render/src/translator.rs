@@ -1234,7 +1234,7 @@ mod tests {
     }
 
     #[test]
-    fn textured_quad_uses_cpu_redux_split_order() {
+    fn textured_quad_uses_cpu_split_order() {
         let log = [entry(
             0x2C,
             vec![

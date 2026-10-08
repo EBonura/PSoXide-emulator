@@ -6,7 +6,7 @@
 //
 // Everything here mirrors the silicon-verified CPU rasterizer
 // (`emulator-core::gpu` + `gpu/blend.rs`): the 15bpp blend modes,
-// the Redux-derived 4x4 dither rule, tint modulation, and the
+// the PSX-SPX 4x4 dither rule, tint modulation, and the
 // wrapping-u32 determinant-plane attribute evaluation.
 
 const VRAM_WIDTH: i32 = 1024;
