@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Three timing corrections found by auditing the CPU, GTE, bus and DMA models
+  against the console's hardware-test records. SWC2 now waits for a running
+  GTE command like MFC2 and CFC2 (it used to read the result for free), so
+  code that stores a result straight after a command costs what it does on
+  the console. Timer 1 on the HBlank source is no longer slowed by a loop that
+  polls it: the read latch took clocks out of the line phase, so tight polling
+  counted about 5% of its lines short (a 606 ms wait polled 8993 lines where
+  9506 are due), which also made hardware-test waits that poll Timer 1 read
+  short. A GPU linked-list walk now costs 10.25 clocks per empty node instead
+  of 12, and while it is moving, CPU reads of main RAM wait four clocks more
+  and stores drain four clocks later (console record 0xFE: 770 clocks for 64
+  loads against 513 idle). Frame times of games that store GTE results early,
+  poll Timer 1, or run RAM-heavy code during a draw-list DMA move accordingly.
 - One texture filter, Edge, replaces the earlier filter set: the Bilinear, JINC2
   and xBR modes are gone, the toolbar and Settings toggle cycles None and
   Edge, and `--texture-filter` takes `none`, `edge` or `all` (`xbr` is an
