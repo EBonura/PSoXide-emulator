@@ -30,7 +30,7 @@ fn main() {
         let mut ram = Vec::new();
         let mut state = 0x1234_5678u32;
         for block in 0..8 {
-            let header = 0x0000 | (block & 3) << 4 | 6; // filter 0..3, shift 6
+            let header = (block & 3) << 4 | 6; // filter 0..3, shift 6
             let flags = if block == 7 { 0x03 } else { 0x00 };
             ram.push((header as u16) | (flags << 8));
             for _ in 0..7 {

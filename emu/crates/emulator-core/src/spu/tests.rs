@@ -546,11 +546,13 @@ fn adsr_decay_is_independent_of_release_mode_bit() {
     // with exponential=true unconditionally; PSX-SPX hard-codes
     // EnvelopeMode::Exponential; PSX-SPX: "decay mode is always
     // Exponential decrease"). The release-mode bit must not change it.
-    let mut linear = Voice::default();
-    linear.adsr_lo = 0;
-    linear.adsr_hi = 0;
-    linear.phase = AdsrPhase::Decay;
-    linear.envelope = 0x7000;
+    let mut linear = Voice {
+        adsr_lo: 0,
+        adsr_hi: 0,
+        phase: AdsrPhase::Decay,
+        envelope: 0x7000,
+        ..Voice::default()
+    };
     linear.step_envelope();
 
     let mut exponential = linear.clone();
@@ -588,10 +590,12 @@ fn adsr_release_stops_when_envelope_reaches_zero() {
     // Reaching level 0 ends the release (voice Off) -- PSX-SPX and
     // PSX-SPX transition Release->Off when the level reaches the target
     // (0 for Release), i.e. at exactly 0, not only on strict underflow.
-    let mut voice = Voice::default();
-    voice.adsr_hi = 0;
-    voice.phase = AdsrPhase::Release;
-    voice.envelope = 8 << 11; // exactly one release step at shift 0
+    let mut voice = Voice {
+        adsr_hi: 0,
+        phase: AdsrPhase::Release,
+        envelope: 8 << 11, // exactly one release step at shift 0
+        ..Voice::default()
+    };
 
     voice.step_envelope();
     assert_eq!(voice.envelope, 0);
@@ -1517,11 +1521,13 @@ fn adsr_decay_is_always_exponential_regardless_of_release_mode() {
     // decay_rate=8, sustain_level=2: exponential decay reaches the sustain
     // level in ~840 steps; a (wrong) linear decay would reach it in ~416.
     let count_steps = |release_exp: bool| -> u32 {
-        let mut v = Voice::default();
-        v.adsr_lo = (8 << 4) | 2;
-        v.adsr_hi = if release_exp { 1 << 5 } else { 0 };
-        v.phase = AdsrPhase::Decay;
-        v.envelope = 0x7FFF;
+        let mut v = Voice {
+            adsr_lo: (8 << 4) | 2,
+            adsr_hi: if release_exp { 1 << 5 } else { 0 },
+            phase: AdsrPhase::Decay,
+            envelope: 0x7FFF,
+            ..Voice::default()
+        };
         v.pacer.reset();
         let mut steps = 0u32;
         while v.phase == AdsrPhase::Decay && steps < 100_000 {
@@ -1553,11 +1559,13 @@ fn adsr_decay_single_step_matches_exponential_with_linear_release_mode() {
     // exponential result (0x3800 = 14336), even when release mode is
     // Linear. Cross-checked against PSX-SPX exponential
     // decrease `(step * level) >> 15`.
-    let mut v = Voice::default();
-    v.adsr_lo = 0;
-    v.adsr_hi = 0; // linear release mode
-    v.phase = AdsrPhase::Decay;
-    v.envelope = 0x7000;
+    let mut v = Voice {
+        adsr_lo: 0,
+        adsr_hi: 0, // linear release mode
+        phase: AdsrPhase::Decay,
+        envelope: 0x7000,
+        ..Voice::default()
+    };
     v.pacer.reset();
     v.step_envelope();
     assert_eq!(
@@ -1576,10 +1584,12 @@ fn adsr_release_exponential_reaches_off_at_zero() {
     // the release (voice Off): PSX-SPX transition when the
     // level reaches the target (0 for Release). Previously the voice was
     // stuck in Release forever because the Off gate tested `< 0`.
-    let mut v = Voice::default();
-    v.adsr_hi = 1 << 5;
-    v.phase = AdsrPhase::Release;
-    v.envelope = 0x7FFF;
+    let mut v = Voice {
+        adsr_hi: 1 << 5,
+        phase: AdsrPhase::Release,
+        envelope: 0x7FFF,
+        ..Voice::default()
+    };
 
     let mut steps = 0u32;
     while v.phase == AdsrPhase::Release && steps < 200 {

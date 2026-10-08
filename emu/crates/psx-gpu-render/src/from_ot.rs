@@ -106,12 +106,14 @@ mod tests {
         ot.clear();
 
         // Hand-built packet imitating a flat triangle:
-        //   packet[0] = tag (set by `insert`)
+        //   packet[0] = tag (set by `add_raw`)
         //   packet[1] = 0x20RRGGBB (opcode 0x20, mono triangle)
         //   packet[2..4] = vertex words
         let mut packet: [u32; 5] = [0, 0x2080_4020, 0x0001_0002, 0x0003_0004, 0x0005_0006];
-        unsafe {
-            ot.insert(2, packet.as_mut_ptr(), 4);
+        {
+            // SAFETY: the table was cleared above and the packet outlives it.
+            let mut frame = unsafe { ot.resume_frame() };
+            unsafe { frame.add_raw(2, packet.as_mut_ptr(), 4) };
         }
 
         let log = unsafe { build_cmd_log(&ot) };
@@ -134,9 +136,13 @@ mod tests {
 
         let mut a: [u32; 2] = [0, 0xAA00_0000];
         let mut b: [u32; 2] = [0, 0xBB00_0000];
-        unsafe {
-            ot.insert(1, a.as_mut_ptr(), 1);
-            ot.insert(1, b.as_mut_ptr(), 1);
+        {
+            // SAFETY: the table was cleared above and both packets outlive it.
+            let mut frame = unsafe { ot.resume_frame() };
+            unsafe {
+                frame.add_raw(1, a.as_mut_ptr(), 1);
+                frame.add_raw(1, b.as_mut_ptr(), 1);
+            }
         }
 
         let log = unsafe { build_cmd_log(&ot) };
@@ -165,8 +171,10 @@ mod tests {
             0x0005_0006,
             0x0000_0000,
         ];
-        unsafe {
-            ot.insert(2, packet.as_mut_ptr(), 8);
+        {
+            // SAFETY: the table was cleared above and the packet outlives it.
+            let mut frame = unsafe { ot.resume_frame() };
+            unsafe { frame.add_raw(2, packet.as_mut_ptr(), 8) };
         }
 
         let log = unsafe { build_cmd_log(&ot) };
@@ -183,8 +191,10 @@ mod tests {
         let mut ot: OrderingTable<4> = OrderingTable::new();
         ot.clear();
         let mut packet: [u32; 2] = [0, 0xE100_0000];
-        unsafe {
-            ot.insert(1, packet.as_mut_ptr(), 1);
+        {
+            // SAFETY: the table was cleared above and the packet outlives it.
+            let mut frame = unsafe { ot.resume_frame() };
+            unsafe { frame.add_raw(1, packet.as_mut_ptr(), 1) };
         }
 
         let mut log = Vec::with_capacity(32);
