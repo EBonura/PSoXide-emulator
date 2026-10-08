@@ -135,20 +135,11 @@ The GetID response bytes return the ID string `PCSX` rather than the licensed
 response PSX-SPX documents, because a real-BIOS boot is the only thing that
 reads it and no gate covers that path.
 
-## Open item outside the rewrite scope
-
-The hardware renderer's optional texture filters in
-`psx-gpu-render/src/shaders/prim.wgsl` (JINC2 and xBR, and a "no edge
-blending" rule) are described in their comments as ports of Hyllian's
-shaders as shipped in beetle-psx and DuckStation. They have not been audited
-or rewritten; their provenance and licence need a separate decision.
-
 ## Other credits and non-derivations
 
 PCSX-Redux, DuckStation, Mednafen and the MiSTer PSX core were consulted as
 behavioural references at various points in the project's history. The
 modules rewritten above no longer contain their code as far as the history
 and the review can show; the modules listed under "Not rewritten" still
-carry behaviour matched to PCSX-Redux traces, and the filters named in the
-open item may carry DuckStation code. The ps1-tests captures (MIT) are used
+carry behaviour matched to PCSX-Redux traces. The ps1-tests captures (MIT) are used
 as external oracles and are not redistributed.
