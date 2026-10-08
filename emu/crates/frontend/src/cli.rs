@@ -456,7 +456,7 @@ pub struct LaunchArgs {
     /// toolbar toggle. Pair with `--dump-hw` for a single-frame edge render.
     #[arg(long)]
     pub wireframe: bool,
-    /// Sample-time texture filter for `--dump-hw`: none|bilinear.
+    /// Sample-time texture filter for `--dump-hw`: none|bilinear|smooth|edge|all (all writes one file per filter).
     #[arg(long, default_value = "none")]
     pub texture_filter: String,
 }
@@ -2165,7 +2165,21 @@ fn run_headless_launch(
     }
 
     if let Some(path) = args.dump_hw {
-        let fallback = dump_hw_ppm(&bus, &path, parse_texture_filter(&args.texture_filter))?;
+        // `--texture-filter all` renders the same frame once per filter and
+        // writes `<stem>-<filter>.ppm` next to `path`, so comparisons need
+        // only one emulation run.
+        let fallback = if args.texture_filter.eq_ignore_ascii_case("all") {
+            let mut fallback = None;
+            for name in TEXTURE_FILTER_NAMES {
+                let mut file = path.file_stem().unwrap_or_default().to_os_string();
+                file.push(format!("-{name}.ppm"));
+                fallback =
+                    dump_hw_ppm(&bus, &path.with_file_name(file), parse_texture_filter(name))?;
+            }
+            fallback
+        } else {
+            dump_hw_ppm(&bus, &path, parse_texture_filter(&args.texture_filter))?
+        };
         if emit_summary {
             if let Some(reason) = fallback {
                 eprintln!("[cli] HW renderer → {} ({reason})", path.display());
@@ -3083,9 +3097,14 @@ fn region_label(e: &LibraryEntry) -> &'static str {
     }
 }
 
+/// Names `--texture-filter` accepts, in shader-mode order.
+const TEXTURE_FILTER_NAMES: [&str; 4] = ["none", "bilinear", "smooth", "edge"];
+
 fn parse_texture_filter(s: &str) -> u32 {
     match s.to_ascii_lowercase().as_str() {
         "bilinear" => 1,
+        "smooth" => 2,
+        "edge" => 3,
         _ => 0,
     }
 }
@@ -3123,6 +3142,26 @@ fn dump_hw_ppm(
     let initial_vram =
         vec![0u16; (psx_gpu_render::VRAM_WIDTH * psx_gpu_render::VRAM_HEIGHT) as usize];
     hw.render_frame(&bus.gpu, &bus.gpu.cmd_log, &initial_vram);
+
+    // PSOXIDE_HW_DUMP_BENCH=N re-renders the frame N more times, each ended by
+    // a 1x1 readback that waits for the GPU, and prints the mean wall time. The
+    // difference between two filters on the same frame is their GPU cost.
+    if let Some(n) = std::env::var("PSOXIDE_HW_DUMP_BENCH")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|&n| n > 0)
+    {
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            hw.render_frame(&bus.gpu, &bus.gpu.cmd_log, &initial_vram);
+            let _ = hw.read_subrect_rgba8(0, 0, 1, 1);
+        }
+        eprintln!(
+            "[cli] HW bench filter={texture_filter} scale={} frames={n} mean_ms={:.3}",
+            hw.internal_scale(),
+            start.elapsed().as_secs_f64() * 1000.0 / f64::from(n)
+        );
+    }
 
     let s = hw.internal_scale();
     let (w, h, rgba) = hw.read_subrect_rgba8(
@@ -3992,5 +4031,22 @@ mod press_script_tests {
         let mut cpu = Cpu::new();
         let disc = Disc::from_bin(vec![0; 2352]);
         assert!(maybe_fast_boot_disc(&mut bus, &mut cpu, &disc, Path::new("bad.bin")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod texture_filter_cli_tests {
+    use super::parse_texture_filter;
+
+    #[test]
+    fn names_map_to_shader_modes_case_insensitively() {
+        assert_eq!(parse_texture_filter("none"), 0);
+        assert_eq!(parse_texture_filter("bilinear"), 1);
+        assert_eq!(parse_texture_filter("Smooth"), 2);
+        assert_eq!(parse_texture_filter("EDGE"), 3);
+        assert_eq!(parse_texture_filter("nonsense"), 0);
+        for (mode, name) in super::TEXTURE_FILTER_NAMES.iter().enumerate() {
+            assert_eq!(parse_texture_filter(name), mode as u32);
+        }
     }
 }

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Two new texture filters beside None and Bilinear, written from scratch from
+  `docs/texture-filters-spec.md`: Smooth (Catmull-Rom with an anti-ringing
+  clamp) and Edge (edge-directed, smooths diagonal staircases and keeps flat
+  areas and orthogonal pixel-art edges crisp). CLI: `--texture-filter
+  none|bilinear|smooth|edge`.
 - Clean-room rewrites from PSX-SPX and console measurements: the event
   scheduler, the DMA register file and DICR logic, the MDEC colour path, and
   the SPU voice engine (ADSR and volume sweeps, noise generator, pitch

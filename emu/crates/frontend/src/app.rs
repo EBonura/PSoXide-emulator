@@ -92,6 +92,11 @@ pub enum TextureFilter {
     None,
     /// Bilinear between the four nearest texels, with binary-alpha edges.
     Bilinear,
+    /// Catmull-Rom over 4x4 texels with an anti-ringing clamp.
+    Smooth,
+    /// Edge-directed interpolation: smooths diagonals, keeps orthogonal
+    /// pixel-art edges and flat areas crisp.
+    Edge,
 }
 
 impl TextureFilter {
@@ -99,7 +104,9 @@ impl TextureFilter {
     pub fn next(self) -> Self {
         match self {
             TextureFilter::None => TextureFilter::Bilinear,
-            TextureFilter::Bilinear => TextureFilter::None,
+            TextureFilter::Bilinear => TextureFilter::Smooth,
+            TextureFilter::Smooth => TextureFilter::Edge,
+            TextureFilter::Edge => TextureFilter::None,
         }
     }
 
@@ -107,6 +114,8 @@ impl TextureFilter {
         match self {
             TextureFilter::None => "None",
             TextureFilter::Bilinear => "Bilinear",
+            TextureFilter::Smooth => "Smooth",
+            TextureFilter::Edge => "Edge",
         }
     }
 
@@ -115,6 +124,8 @@ impl TextureFilter {
         match self {
             TextureFilter::None => 0,
             TextureFilter::Bilinear => 1,
+            TextureFilter::Smooth => 2,
+            TextureFilter::Edge => 3,
         }
     }
 }
@@ -4026,5 +4037,43 @@ mod claxon_parity {
         eprintln!("PROBE: first differing byte {diff:?}");
         assert_eq!(out.len(), reference.len());
         assert_eq!(diff, None);
+    }
+}
+
+#[cfg(test)]
+mod texture_filter_tests {
+    use super::TextureFilter;
+
+    #[test]
+    fn cycle_visits_every_filter_once_and_wraps() {
+        let mut seen = vec![TextureFilter::None];
+        let mut f = TextureFilter::None.next();
+        while f != TextureFilter::None {
+            seen.push(f);
+            f = f.next();
+        }
+        assert_eq!(
+            seen,
+            [
+                TextureFilter::None,
+                TextureFilter::Bilinear,
+                TextureFilter::Smooth,
+                TextureFilter::Edge
+            ]
+        );
+    }
+
+    #[test]
+    fn modes_and_labels_are_distinct_and_match_the_shader_values() {
+        let all = [
+            TextureFilter::None,
+            TextureFilter::Bilinear,
+            TextureFilter::Smooth,
+            TextureFilter::Edge,
+        ];
+        let modes: Vec<u32> = all.iter().map(|f| f.mode()).collect();
+        assert_eq!(modes, [0, 1, 2, 3]);
+        let labels: Vec<&str> = all.iter().map(|f| f.label()).collect();
+        assert_eq!(labels, ["None", "Bilinear", "Smooth", "Edge"]);
     }
 }

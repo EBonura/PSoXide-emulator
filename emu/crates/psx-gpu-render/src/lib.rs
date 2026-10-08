@@ -200,8 +200,8 @@ impl HwRenderer {
             .ensure_scale(&self.device, &self.queue, egui_renderer, scale)
     }
 
-    /// Set the sample-time texture filter mode (0 nearest, 1 bilinear). Cheap
-    /// uniform write; safe to call every frame.
+    /// Set the sample-time texture filter mode (0 nearest, 1 bilinear, 2 smooth,
+    /// 3 edge). Cheap uniform write; safe to call every frame.
     pub fn set_texture_filter(&self, mode: u32) {
         self.pipeline.set_filter_mode(&self.queue, mode);
     }
@@ -2234,5 +2234,442 @@ mod tests {
         }
         std::fs::write("/tmp/gp0-lines-cpu-vs-hw.ppm", ppm).unwrap();
         eprintln!("wrote /tmp/gp0-lines-cpu-vs-hw.ppm (left CPU, right HW)");
+    }
+
+    // ---- Smooth and Edge texture filters (docs/texture-filters-spec.md) ----
+
+    const FILTER_NONE: u32 = 0;
+    const FILTER_SMOOTH: u32 = 2;
+    const FILTER_EDGE: u32 = 3;
+
+    /// Texture page x unit 8 (pixel x 512), y 0, 15bpp direct.
+    const TPAGE_15BPP: u32 = 8 | (2 << 7);
+
+    /// Render a `tw x th` 15bpp texture magnified `mag` times with a raw
+    /// textured quad (GP0 0x2D) at `(8, 8)` under filter `mode`, and return
+    /// the `(tw * mag) x (th * mag)` RGBA block. `pre` words (for example a
+    /// texture window) go in front of the quad. Pixels outside the quad's
+    /// opaque texels stay black.
+    fn render_texture(
+        renderer: &mut HwRenderer,
+        texels: &[u16],
+        tw: u32,
+        th: u32,
+        mag: u32,
+        mode: u32,
+        pre: &[u32],
+    ) -> Vec<[u8; 4]> {
+        assert_eq!(texels.len() as u32, tw * th);
+        let seed: Vec<(u16, u16, u16)> = texels
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| (512 + (i as u32 % tw) as u16, (i as u32 / tw) as u16, t))
+            .collect();
+        let mut words = line_env();
+        words.extend_from_slice(pre);
+        let (x0, y0) = (8i32, 8i32);
+        let (x1, y1) = (x0 + (tw * mag) as i32, y0 + (th * mag) as i32);
+        words.extend_from_slice(&[
+            0x2D00_0000,
+            pack_xy((x0, y0)),
+            0,
+            pack_xy((x1, y0)),
+            tw | (TPAGE_15BPP << 16),
+            pack_xy((x0, y1)),
+            th << 8,
+            pack_xy((x1, y1)),
+            tw | (th << 8),
+        ]);
+        renderer.set_texture_filter(mode);
+        run_both_backends(&words, renderer, &seed);
+        let (_, _, rgba) = renderer.read_subrect_rgba8(8, 8, tw * mag, th * mag);
+        rgba.chunks_exact(4)
+            .map(|p| [p[0], p[1], p[2], p[3]])
+            .collect()
+    }
+
+    fn filter_renderer() -> Option<HwRenderer> {
+        let r = headless_renderer();
+        if r.is_none() {
+            eprintln!("skipping HW texture-filter test: no headless wgpu adapter");
+        }
+        r
+    }
+
+    #[test]
+    fn smooth_and_edge_leave_a_flat_texture_alone() {
+        let Some(mut r) = filter_renderer() else {
+            return;
+        };
+        let texel = 0x3DEF;
+        let want = bgr15_to_rgba8(texel);
+        for mode in [FILTER_SMOOTH, FILTER_EDGE] {
+            let out = render_texture(&mut r, &[texel; 64], 8, 8, 4, mode, &[]);
+            assert!(out.iter().all(|&p| p == want), "mode {mode}");
+        }
+    }
+
+    #[test]
+    fn smooth_never_overshoots_a_hard_step() {
+        let Some(mut r) = filter_renderer() else {
+            return;
+        };
+        let (dark, light) = (0x0421, 0x7FFF);
+        let texels: Vec<u16> = (0..16 * 4)
+            .map(|i| if i % 16 < 8 { dark } else { light })
+            .collect();
+        let out = render_texture(&mut r, &texels, 16, 4, 4, FILTER_SMOOTH, &[]);
+        let (lo, hi) = (bgr15_to_rgba8(dark)[0], bgr15_to_rgba8(light)[0]);
+        let mut intermediate = 0;
+        for row in out.chunks_exact(64) {
+            // Monotone across the step: no undershoot before it, no overshoot
+            // after it, and every value inside the plateau range.
+            for w in row.windows(2) {
+                assert!(w[0][0] <= w[1][0], "ringing at a step: {:?}", row);
+            }
+            assert!(row.iter().all(|p| p[0] >= lo && p[0] <= hi));
+            intermediate += row.iter().filter(|p| p[0] > lo && p[0] < hi).count();
+        }
+        assert!(intermediate > 0, "the step should be smoothed, not copied");
+    }
+
+    #[test]
+    fn transparent_texels_never_bleed_colour_into_the_silhouette() {
+        let Some(mut r) = filter_renderer() else {
+            return;
+        };
+        let red = 0x001F;
+        let texels: Vec<u16> = (0..64).map(|i| if i % 8 < 4 { 0 } else { red }).collect();
+        for mode in [FILTER_SMOOTH, FILTER_EDGE] {
+            let out = render_texture(&mut r, &texels, 8, 8, 4, mode, &[]);
+            let mut reds = 0;
+            for p in &out {
+                assert!(
+                    *p == [0, 0, 0, 255] || *p == [255, 0, 0, 255],
+                    "mode {mode}: {p:?}"
+                );
+                reds += usize::from(p[0] == 255);
+            }
+            assert_eq!(reds, 4 * 8 * 16, "silhouette area changed, mode {mode}");
+        }
+    }
+
+    #[test]
+    fn edge_keeps_an_orthogonal_step_orthogonal_and_narrow() {
+        let Some(mut r) = filter_renderer() else {
+            return;
+        };
+        let (a, b) = (0x0C63, 0x7E10);
+        let texels: Vec<u16> = (0..16 * 8)
+            .map(|i| if i % 16 < 8 { a } else { b })
+            .collect();
+        let out = render_texture(&mut r, &texels, 16, 8, 4, FILTER_EDGE, &[]);
+        let (wa, wb) = (bgr15_to_rgba8(a), bgr15_to_rgba8(b));
+        let rows: Vec<&[[u8; 4]]> = out.chunks_exact(64).collect();
+        for row in &rows {
+            assert_eq!(*row, rows[0], "rows differ: the edge leaked a slope");
+        }
+        let blended = rows[0].iter().filter(|&&p| p != wa && p != wb).count();
+        assert!(blended <= 2, "transition {blended} pixels wide");
+    }
+
+    /// Count the 45 degree staircase's per-diagonal colour spread. A straight
+    /// diagonal edge has a constant colour along each `x + y = k` line away
+    /// from the border; a staircase does not.
+    fn diagonal_spread(out: &[[u8; 4]], size: usize, margin: usize) -> u32 {
+        let mut total = 0;
+        for k in (2 * margin)..(2 * (size - margin)) {
+            let mut lo = 255u8;
+            let mut hi = 0u8;
+            for y in margin..size - margin {
+                let Some(x) = k.checked_sub(y) else { continue };
+                if x < margin || x >= size - margin {
+                    continue;
+                }
+                let v = out[y * size + x][0];
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+            total += u32::from(hi.saturating_sub(lo));
+        }
+        total
+    }
+
+    #[test]
+    fn edge_straightens_a_diagonal_staircase() {
+        let Some(mut r) = filter_renderer() else {
+            return;
+        };
+        let (light, dark) = (0x7FFF, 0x0421);
+        let n = 16u32;
+        let texels: Vec<u16> = (0..n * n)
+            .map(|i| if i % n + i / n < n { light } else { dark })
+            .collect();
+        let size = (n * 4) as usize;
+        let near = render_texture(&mut r, &texels, n, n, 4, FILTER_NONE, &[]);
+        let edge = render_texture(&mut r, &texels, n, n, 4, FILTER_EDGE, &[]);
+        let (sn, se) = (
+            diagonal_spread(&near, size, 8),
+            diagonal_spread(&edge, size, 8),
+        );
+        eprintln!("diagonal spread: nearest {sn}, edge {se}");
+        assert!(sn > 0 && se * 3 < sn, "nearest {sn}, edge {se}");
+        // Flat areas far from the edge stay exactly as they were.
+        assert_eq!(near[10 * size + 10], edge[10 * size + 10]);
+        assert_eq!(
+            near[(size - 10) * size + size - 10],
+            edge[(size - 10) * size + size - 10]
+        );
+    }
+
+    #[test]
+    fn edge_does_not_erode_an_isolated_texel() {
+        let Some(mut r) = filter_renderer() else {
+            return;
+        };
+        let mut texels = vec![0x0421u16; 64];
+        texels[3 * 8 + 3] = 0x7FFF;
+        let bright = |out: &[[u8; 4]]| out.iter().filter(|p| p[0] >= 128).count();
+        let near = bright(&render_texture(&mut r, &texels, 8, 8, 4, FILTER_NONE, &[]));
+        let edge = bright(&render_texture(&mut r, &texels, 8, 8, 4, FILTER_EDGE, &[]));
+        eprintln!("isolated texel area: nearest {near}, edge {edge}");
+        assert_eq!(near, 16);
+        assert!(edge * 10 >= near * 7, "texel shrank from {near} to {edge}");
+    }
+
+    #[test]
+    fn filters_reproduce_a_clut_texture_at_texel_centres() {
+        let Some(mut r) = filter_renderer() else {
+            return;
+        };
+        // 16x16 4bpp texture, 1:1 on screen: every fragment samples a texel
+        // centre, where all four filters must return the nearest texel (the
+        // Catmull-Rom weights collapse to a delta, and the edge blend to the
+        // corner it is at).
+        let mut seed = Vec::new();
+        for i in 0..16u16 {
+            // Non-zero CLUT entries so no texel is transparent.
+            seed.push((i, 480, 0x0421 + i * 0x0735));
+        }
+        let mut state = 0x1234_5678u32;
+        let mut nibbles = [[0u16; 16]; 16];
+        for row in nibbles.iter_mut() {
+            for n in row.iter_mut() {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *n = ((state >> 24) & 0xF) as u16;
+            }
+        }
+        for (y, row) in nibbles.iter().enumerate() {
+            for wx in 0..4usize {
+                let word = row[wx * 4]
+                    | (row[wx * 4 + 1] << 4)
+                    | (row[wx * 4 + 2] << 8)
+                    | (row[wx * 4 + 3] << 12);
+                seed.push((512 + wx as u16, y as u16, word));
+            }
+        }
+        let tpage = 8u32; // 4bpp
+        let clut = (480u32 << 6) << 16;
+        let mut words = line_env();
+        words.extend_from_slice(&[
+            0x2D00_0000,
+            pack_xy((8, 8)),
+            clut,
+            pack_xy((24, 8)),
+            16 | (tpage << 16),
+            pack_xy((8, 24)),
+            16 << 8,
+            pack_xy((24, 24)),
+            16 | (16 << 8),
+        ]);
+        let mut shots = Vec::new();
+        for mode in [FILTER_NONE, FILTER_SMOOTH, FILTER_EDGE] {
+            r.set_texture_filter(mode);
+            run_both_backends(&words, &mut r, &seed);
+            let (_, _, rgba) = r.read_subrect_rgba8(8, 8, 16, 16);
+            shots.push(rgba);
+        }
+        let distinct: std::collections::HashSet<_> = shots[0].chunks_exact(4).collect();
+        assert!(distinct.len() >= 12, "texture did not reach the screen");
+        for (mode, shot) in [(FILTER_SMOOTH, &shots[1]), (FILTER_EDGE, &shots[2])] {
+            let worst = shot
+                .iter()
+                .zip(&shots[0])
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert!(worst <= 1, "mode {mode} differs from nearest by {worst}");
+        }
+    }
+
+    #[test]
+    fn filters_respect_the_texture_window() {
+        let Some(mut r) = filter_renderer() else {
+            return;
+        };
+        // 16x8 texture: columns 0..8 shades of red, columns 8..16 magenta.
+        // A window that repeats the first 8 columns means no filter tap may
+        // ever read the magenta half.
+        let texels: Vec<u16> = (0..16 * 8)
+            .map(|i| {
+                let x = (i % 16) as u16;
+                if x < 8 {
+                    5 + x * 3
+                } else {
+                    0x7C1F
+                }
+            })
+            .collect();
+        for mode in [FILTER_SMOOTH, FILTER_EDGE] {
+            let out = render_texture(&mut r, &texels, 16, 8, 4, mode, &[0xE200_0001]);
+            assert!(
+                out.iter().all(|p| p[2] == 0),
+                "mode {mode} read outside the texture window"
+            );
+            assert!(out.iter().any(|p| p[0] > 0));
+        }
+    }
+
+    /// GPU cost of each filter: four stacked full-screen (320x240) 4bpp CLUT
+    /// quads at internal scale 4, i.e. 4.9 million filtered fragments per
+    /// frame. Run with `cargo test --release -p psx-gpu-render --lib
+    /// texture_filter_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "benchmark"]
+    fn texture_filter_cost() {
+        let Some(mut r) = filter_renderer() else {
+            return;
+        };
+        r.set_internal_scale(4, None);
+        let mut cpu = Gpu::new();
+        for i in 0..16u16 {
+            cpu.vram.set_pixel(i, 480, 0x0421 + i * 0x0735);
+        }
+        let mut state = 0x2468_ace1u32;
+        for y in 0..64u16 {
+            for wx in 0..16u16 {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                cpu.vram.set_pixel(512 + wx, y, (state >> 16) as u16);
+            }
+        }
+        let start_vram = cpu.vram.words().to_vec();
+        cpu.enable_cmd_log();
+        let mut words = line_env();
+        for _ in 0..4 {
+            words.extend_from_slice(&[
+                0x2D00_0000,
+                pack_xy((0, 0)),
+                (480 << 6) << 16,
+                pack_xy((320, 0)),
+                64 | (8 << 16),
+                pack_xy((0, 240)),
+                64 << 8,
+                pack_xy((320, 240)),
+                64 | (64 << 8),
+            ]);
+        }
+        for &w in &words {
+            cpu.gp0_push(w);
+        }
+        for (name, mode) in [("none", 0), ("bilinear", 1), ("smooth", 2), ("edge", 3)] {
+            r.set_texture_filter(mode);
+            for _ in 0..5 {
+                r.render_frame(&cpu, &cpu.cmd_log, &start_vram);
+                let _ = r.read_subrect_rgba8(0, 0, 1, 1);
+            }
+            let n = 40;
+            let t = std::time::Instant::now();
+            for _ in 0..n {
+                r.render_frame(&cpu, &cpu.cmd_log, &start_vram);
+                let _ = r.read_subrect_rgba8(0, 0, 1, 1);
+            }
+            eprintln!(
+                "texture_filter_cost {name}: {:.3} ms/frame",
+                t.elapsed().as_secs_f64() * 1000.0 / f64::from(n)
+            );
+        }
+    }
+
+    /// Writes the four filters' view of a synthetic pixel-art texture (a disc,
+    /// diagonal lines, a letter, a checker patch, a ramp and a cut-out hole)
+    /// magnified 7x (the quad has to fit the 240 line draw area), as `<dir>/synthetic-<filter>.ppm`. Run with
+    /// `PSOXIDE_FILTER_SHEET_DIR=<dir> cargo test --release -p psx-gpu-render
+    /// --lib texture_filter_sheet -- --ignored`.
+    #[test]
+    #[ignore = "writes images"]
+    fn texture_filter_sheet() {
+        let Some(dir) = std::env::var_os("PSOXIDE_FILTER_SHEET_DIR") else {
+            eprintln!("set PSOXIDE_FILTER_SHEET_DIR to write the sheets");
+            return;
+        };
+        let Some(mut r) = filter_renderer() else {
+            return;
+        };
+        let n = 32usize;
+        let rgb = |r: u16, g: u16, b: u16| r | (g << 5) | (b << 10);
+        let mut t = vec![rgb(4, 5, 10); n * n];
+        let mut put = |x: usize, y: usize, c: u16| t[y * n + x] = c;
+        for y in 0..n {
+            for x in 0..n {
+                let (dx, dy) = (x as i32 - 9, y as i32 - 9);
+                if dx * dx + dy * dy <= 36 {
+                    put(x, y, rgb(31, 28, 3));
+                }
+                // Cut-out hole (transparent) in the top right corner.
+                let (hx, hy) = (x as i32 - 28, y as i32 - 3);
+                if hx * hx + hy * hy <= 9 {
+                    put(x, y, 0);
+                }
+            }
+        }
+        for i in 0..13 {
+            put(17 + i, 2 + i, rgb(31, 31, 31)); // thin diagonal
+            for k in 0..3 {
+                put(12 + i + k, 17 + i / 2 + k, rgb(6, 26, 14)); // shallow band
+            }
+        }
+        // A "Z": bars and a diagonal.
+        for i in 0..11 {
+            put(2 + i, 19, rgb(31, 12, 12));
+            put(2 + i, 29, rgb(31, 12, 12));
+            put(12 - i, 19 + i, rgb(31, 12, 12));
+        }
+        // Checker patch and a ramp.
+        for y in 0..6 {
+            for x in 0..6 {
+                put(
+                    22 + x,
+                    22 + y,
+                    if (x + y) % 2 == 0 {
+                        rgb(31, 4, 4)
+                    } else {
+                        rgb(6, 6, 6)
+                    },
+                );
+            }
+        }
+        for x in 0..n {
+            put(
+                x,
+                31,
+                rgb(
+                    (x * 31 / (n - 1)) as u16,
+                    6,
+                    31 - (x * 31 / (n - 1)) as u16 + 1,
+                ),
+            );
+        }
+        for (name, mode) in [("none", 0), ("bilinear", 1), ("smooth", 2), ("edge", 3)] {
+            let out = render_texture(&mut r, &t, n as u32, n as u32, 7, mode, &[]);
+            let mut ppm = format!("P6\n{} {}\n255\n", n * 7, n * 7).into_bytes();
+            for p in out {
+                ppm.extend_from_slice(&p[..3]);
+            }
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("synthetic-{name}.ppm")),
+                ppm,
+            )
+            .unwrap();
+        }
     }
 }
