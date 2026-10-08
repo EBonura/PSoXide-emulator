@@ -2520,3 +2520,138 @@ fn sampled_one_shot_survives_delayed_waveform_attack_and_releases_quickly() {
         "END/key-off must not leave an infinite release"
     );
 }
+
+// -- XA sample-rate conversion --
+
+/// Least-squares fit of `a sin + b cos` at `freq` to `got`, sampled at
+/// `rate`; returns (amplitude, error-to-signal ratio in dB of the residual).
+fn fit_tone(got: &[f64], freq: f64, rate: f64) -> (f64, f64) {
+    let (mut ss, mut cc, mut sc, mut sy, mut cy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for (n, &y) in got.iter().enumerate() {
+        let (s, c) = (2.0 * std::f64::consts::PI * freq * n as f64 / rate).sin_cos();
+        ss += s * s;
+        cc += c * c;
+        sc += s * c;
+        sy += s * y;
+        cy += c * y;
+    }
+    let det = ss * cc - sc * sc;
+    let a = (sy * cc - cy * sc) / det;
+    let b = (cy * ss - sy * sc) / det;
+    let mut err = 0.0;
+    let mut sig = 0.0;
+    for (n, &y) in got.iter().enumerate() {
+        let (s, c) = (2.0 * std::f64::consts::PI * freq * n as f64 / rate).sin_cos();
+        let fit = a * s + b * c;
+        err += (y - fit) * (y - fit);
+        sig += fit * fit;
+    }
+    ((a * a + b * b).sqrt(), 10.0 * (err / sig).log10())
+}
+
+/// Gain of the PSX-SPX zigzag tables at low frequencies (about 0.906).
+const ZIGZAG_GAIN: f64 = 0x7400 as f64 / 32768.0;
+
+/// Convert a sine of `freq` Hz sampled at `src_rate` (through the 18.9 kHz
+/// path when `half_rate`) and return the left channel at 44.1 kHz with the filter's
+/// start-up transient removed.
+fn convert_tone(freq: f64, src_rate: f64, half_rate: bool) -> Vec<f64> {
+    let mut resampler = XaResampler::new();
+    let mut out = Vec::new();
+    for n in 0..6000 {
+        let v = (16_000.0 * (2.0 * std::f64::consts::PI * freq * n as f64 / src_rate).sin()).round()
+            as i16;
+        if half_rate {
+            resampler.push_half_rate((v, v), &mut out);
+        } else {
+            resampler.push((v, v), &mut out);
+        }
+    }
+    out.iter().skip(400).map(|&(l, _)| f64::from(l)).collect()
+}
+
+#[test]
+fn xa_resampler_zigzag_weights_have_the_documented_dc_gain() {
+    // PSX-SPX's table is not normalised to 8000h: each of the seven output
+    // tables sums to about 0.906 of unity (73E5h..741Dh). Pin that, so a
+    // change to the table or to the shift is a visible decision.
+    for phase in 0..7 {
+        let sum: i32 = xa_resample::ZIGZAG.iter().map(|row| row[phase]).sum();
+        assert!(
+            (0x73E0..=0x7420).contains(&sum),
+            "table {} sums to {sum:#x}",
+            phase + 1
+        );
+    }
+}
+
+#[test]
+fn xa_resampler_emits_seven_frames_per_six_and_is_chunk_independent() {
+    let frames: Vec<(i16, i16)> = (0..120).map(|n| (n as i16 * 37, -(n as i16) * 11)).collect();
+    let mut whole = XaResampler::new();
+    let mut a = Vec::new();
+    for &f in &frames {
+        whole.push(f, &mut a);
+    }
+    assert_eq!(a.len(), 120 / 6 * 7);
+    // Interleaving other state resets must not matter: a clone mid-stream
+    // continues identically.
+    let mut split = XaResampler::new();
+    let mut b = Vec::new();
+    for &f in &frames[..50] {
+        split.push(f, &mut b);
+    }
+    let mut cont = split.clone();
+    for &f in &frames[50..] {
+        cont.push(f, &mut b);
+    }
+    assert_eq!(a, b);
+}
+
+#[test]
+fn xa_resampler_reproduces_music_band_tones_at_the_44k_rate() {
+    // 37.8 kHz source: tones through the audible band come out at the
+    // table's DC gain (0.906) with the residual (images, rounding) at
+    // least 35 dB down.
+    for freq in [500.0, 1_000.0, 4_000.0, 8_000.0] {
+        let got = convert_tone(freq, 37_800.0, false);
+        let (amp, resid_db) = fit_tone(&got, freq, 44_100.0);
+        assert!(
+            (amp / 16_000.0 - ZIGZAG_GAIN).abs() < 0.02,
+            "{freq} Hz amplitude {amp}"
+        );
+        assert!(resid_db < -35.0, "{freq} Hz residual {resid_db:.1} dB");
+    }
+}
+
+#[test]
+fn xa_resampler_beats_nearest_sample_by_a_wide_margin() {
+    // The old nearest-sample conversion, for comparison: the same tone
+    // gives a residual within about 20 dB of the signal.
+    let freq = 5_000.0;
+    let src: Vec<f64> = (0..6000)
+        .map(|n| (16_000.0 * (2.0 * std::f64::consts::PI * freq * n as f64 / 37_800.0).sin()).round())
+        .collect();
+    let mut nearest = Vec::new();
+    for i in 0..(src.len() * 7 / 6) {
+        nearest.push(src[i * 6 / 7]);
+    }
+    let nearest: Vec<f64> = nearest.into_iter().skip(400).collect();
+    let (_, nearest_db) = fit_tone(&nearest, freq, 44_100.0);
+    let (_, zigzag_db) = fit_tone(&convert_tone(freq, 37_800.0, false), freq, 44_100.0);
+    assert!(nearest_db > -25.0, "nearest {nearest_db:.1} dB");
+    assert!(zigzag_db < nearest_db - 20.0, "zigzag {zigzag_db:.1} dB");
+}
+
+#[test]
+fn xa_resampler_handles_18900_streams_by_interpolating_to_37800() {
+    for freq in [400.0, 1_500.0] {
+        let got = convert_tone(freq, 18_900.0, true);
+        let (amp, resid_db) = fit_tone(&got, freq, 44_100.0);
+        assert!(
+            (amp / 16_000.0 - ZIGZAG_GAIN).abs() < 0.03,
+            "{freq} Hz amplitude {amp}"
+        );
+        assert!(resid_db < -30.0, "{freq} Hz residual {resid_db:.1} dB");
+    }
+}

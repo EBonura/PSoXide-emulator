@@ -547,6 +547,9 @@ pub struct CdRom {
     xa_left: crate::spu::XaDecoderState,
     /// XA right-channel history.
     xa_right: crate::spu::XaDecoderState,
+    /// 37.8/18.9 kHz to 44.1 kHz converter. Its history spans sectors, so it
+    /// is part of the stream state and of save states.
+    xa_resampler: crate::spu::XaResampler,
 }
 
 impl CdRom {
@@ -646,6 +649,7 @@ impl CdRom {
             cd_audio: VecDeque::new(),
             xa_left: crate::spu::XaDecoderState::new(),
             xa_right: crate::spu::XaDecoderState::new(),
+            xa_resampler: crate::spu::XaResampler::new(),
         }
     }
 
@@ -736,6 +740,7 @@ impl CdRom {
         self.xa_coding = None;
         self.xa_left.reset();
         self.xa_right.reset();
+        self.xa_resampler.reset();
         self.cd_audio.clear();
     }
 
@@ -1045,6 +1050,7 @@ impl CdRom {
         self.xa_first_sector = 0;
         self.xa_left.reset();
         self.xa_right.reset();
+        self.xa_resampler.reset();
     }
 
     /// Splice a disc handle into `self.disc` without touching any
@@ -1572,6 +1578,7 @@ impl CdRom {
             if self.mode & 0x40 == 0 && m & 0x40 != 0 {
                 self.xa_left.reset();
                 self.xa_right.reset();
+                self.xa_resampler.reset();
             }
             self.mode = m;
         }
@@ -2031,11 +2038,18 @@ impl CdRom {
             if self.xa_coding != Some(coding) {
                 self.xa_left.reset();
                 self.xa_right.reset();
+                self.xa_resampler.reset();
                 self.xa_coding = Some(coding);
             }
         }
         let coding = self.xa_coding.expect("XA coding seeded above");
-        match decode_xa_audio_sector(raw, coding, &mut self.xa_left, &mut self.xa_right) {
+        match decode_xa_audio_sector(
+            raw,
+            coding,
+            &mut self.xa_left,
+            &mut self.xa_right,
+            &mut self.xa_resampler,
+        ) {
             Some(mut samples) => {
                 self.attenuate_cd_samples(&mut samples);
                 self.append_cd_audio_samples(&samples);
@@ -2848,6 +2862,32 @@ fn parse_xa_coding(coding: u8) -> Option<XaCoding> {
 
 /// Decode one XA audio sector to 16-bit stereo frames at 44.1 kHz.
 ///
+/// The ADPCM is decoded at the stream's own rate by [`decode_xa_native`] and
+/// then converted by the stream's [`crate::spu::XaResampler`], whose history
+/// carries over from the previous sector.
+fn decode_xa_audio_sector(
+    raw: &[u8],
+    coding: XaCoding,
+    left: &mut crate::spu::XaDecoderState,
+    right: &mut crate::spu::XaDecoderState,
+    resampler: &mut crate::spu::XaResampler,
+) -> Option<Vec<(i16, i16)>> {
+    let native = decode_xa_native(raw, coding, left, right)?;
+    let half_rate = coding.freq == 18_900;
+    let mut out = Vec::with_capacity(native.len() * if half_rate { 14 } else { 7 } / 6 + 7);
+    for frame in native {
+        if half_rate {
+            resampler.push_half_rate(frame, &mut out);
+        } else {
+            resampler.push(frame, &mut out);
+        }
+    }
+    Some(out)
+}
+
+/// Decode one XA audio sector to stereo frames at the stream's own rate
+/// (37.8 or 18.9 kHz; a mono stream repeats each sample on both sides).
+///
 /// Layout from PSX-SPX "CDROM XA Audio ADPCM Compression": after the 12
 /// sync, 4 header and 8 subheader bytes come 18 portions of 128 bytes.
 /// A portion has a 16-byte header (the eight block header bytes sit at
@@ -2856,7 +2896,7 @@ fn parse_xa_coding(coding: u8) -> Option<XaCoding> {
 /// of byte `n` is block `2n`, high nibble block `2n + 1`); in 8-bit data
 /// byte `n` is the sample of block `n`, giving four blocks. Stereo streams
 /// alternate left and right blocks, mono streams play them in order.
-fn decode_xa_audio_sector(
+fn decode_xa_native(
     raw: &[u8],
     coding: XaCoding,
     left: &mut crate::spu::XaDecoderState,
@@ -2868,11 +2908,7 @@ fn decode_xa_audio_sector(
     if raw.len() < 2352 {
         return None;
     }
-    let XaCoding {
-        stereo,
-        freq,
-        nbits,
-    } = coding;
+    let XaCoding { stereo, nbits, .. } = coding;
     let blocks_per_portion = if nbits == 4 { 8 } else { 4 };
     let payload = &raw[24..24 + PORTIONS * PORTION_BYTES];
     let mut decoded: Vec<(i16, i16)> =
@@ -2908,18 +2944,7 @@ fn decode_xa_audio_sector(
             }
         }
     }
-
-    // Upsample to the SPU rate with a nearest-sample resampler (the
-    // console's 25-point zigzag filter is not modelled).
-    let mut resampled: Vec<(i16, i16)> =
-        Vec::with_capacity(decoded.len() * 44_100 / freq as usize + 1);
-    let src_n = decoded.len() as u32;
-    let dst_n = (src_n as u64 * 44_100 / freq as u64) as u32;
-    for i in 0..dst_n {
-        let src_idx = ((i as u64 * src_n as u64) / dst_n as u64) as usize;
-        resampled.push(decoded[src_idx.min(decoded.len() - 1)]);
-    }
-    Some(resampled)
+    Some(decoded)
 }
 
 #[cfg(test)]

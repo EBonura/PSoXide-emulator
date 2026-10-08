@@ -57,7 +57,9 @@ use crate::scheduler::{EventSlot, Scheduler};
 
 mod envelope;
 mod xa;
+mod xa_resample;
 pub use xa::{xa_decode_block, XaDecoderState};
+pub use xa_resample::XaResampler;
 
 use envelope::{
     attack_slope, decay_slope, release_slope, sustain_slope, sustain_threshold, Pacer,
