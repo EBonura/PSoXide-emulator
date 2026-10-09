@@ -2,7 +2,7 @@
 
 use wgpu::util::DeviceExt;
 
-use crate::target::{TARGET_FORMAT, VRAM_HEIGHT, VRAM_WIDTH};
+use crate::target::{RENDER_FORMAT, TARGET_FORMAT, VRAM_HEIGHT, VRAM_WIDTH};
 
 /// Per-vertex data. 20 bytes, `bytemuck::Pod` so we can blit a
 /// `Vec<HwVertex>` into the GPU vertex buffer with `cast_slice`.
@@ -50,6 +50,7 @@ pub struct HwVertex {
 /// bit      25   TEX_OPAQUE_PASS               discard STP texels
 /// bit      26   TEX_SEMI_PASS                 keep only STP texels
 /// bit      27   DITHER                        GP0(E1) bit 9 was set
+/// bit      28   CORNER_SAMPLED                triangle drawn from a GP0 polygon
 /// ```
 ///
 /// Texture-window state deliberately lives in
@@ -66,6 +67,14 @@ pub mod flags {
     /// the 4x4 ordered dither and truncates to 15bpp, matching
     /// `emulator-core`'s `dither_rgb` / `modulate_tint_dithered`.
     pub const DITHER: u32 = 1 << 27;
+    /// The vertex belongs to a GP0 polygon, whose pixels the CPU
+    /// rasterizer decides by testing each pixel's top-left CORNER against
+    /// the triangle (top-left tie rule) and whose attributes it evaluates
+    /// there. The vertex shader moves the polygon by half a PSX pixel so the
+    /// host's centre-sampled coverage and interpolation land on the same
+    /// points. Rectangles, fills and line bands are exact-pixel shapes and
+    /// stay unshifted.
+    pub const CORNER_SAMPLED: u32 = 1 << 28;
 
     /// Pack tpage origin (in pixels) into the flag bits.
     /// `tpage_x` must be a multiple of 64 (PSX alignment),
@@ -320,7 +329,7 @@ impl HwPipeline {
                     module: &shader,
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: TARGET_FORMAT,
+                        format: RENDER_FORMAT,
                         blend: Some(blend),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
