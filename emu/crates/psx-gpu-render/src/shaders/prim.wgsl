@@ -19,6 +19,7 @@
 //   bit      25   TEX_OPAQUE_PASS (discard STP texels)
 //   bit      26   TEX_SEMI_PASS   (keep only STP texels)
 //   bit      27   DITHER          (GP0(E1) bit 9 -- 4x4 ordered dither)
+//   bit      28   CORNER_SAMPLED  (GP0 polygon: shifted half a pixel, see vs_main)
 //
 // `HwVertex::tex_window` packs GP0(E2) as four bytes:
 //   bits  0..=7   mask_x in pixels
@@ -94,6 +95,7 @@ const FLAG_RAW_TEXTURE: u32 = 1u << 23u;
 const FLAG_TEX_OPAQUE_PASS: u32 = 1u << 25u;
 const FLAG_TEX_SEMI_PASS:   u32 = 1u << 26u;
 const FLAG_DITHER:      u32 = 1u << 27u;
+const FLAG_CORNER_SAMPLED: u32 = 1u << 28u;
 
 // PSX-SPX signed 4x4 ordered-dither offsets, indexed by
 // `(y & 3) * 4 + (x & 3)` -- byte-for-byte the CPU rasterizer's
@@ -128,7 +130,17 @@ fn dither_to_bgr15(rgb: vec3<f32>, frag: vec2<f32>) -> vec3<f32> {
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
     // PSX-VRAM-space (0..1024, 0..512) → NDC (-1..+1, Y-flipped).
-    let pos_psx = vec2<f32>(f32(in.pos.x), f32(in.pos.y));
+    var pos_psx = vec2<f32>(f32(in.pos.x), f32(in.pos.y));
+    // The CPU rasterizer covers a polygon pixel when the pixel's top-left
+    // corner lies in the triangle (top-left tie rule, verified edge for edge
+    // against `tri_raster_setup`), and evaluates colour and UV at that corner.
+    // The host rasterizer samples pixel centres. Moving the polygon by half a
+    // pixel in both axes makes the centre sample land on the CPU's corner
+    // sample: same coverage, same ties, same interpolants, at any internal
+    // scale S (the shift is half a PSX pixel, not half a host pixel).
+    if (in.flags & FLAG_CORNER_SAMPLED) != 0u {
+        pos_psx += vec2<f32>(0.5, 0.5);
+    }
     let ndc_xy = (pos_psx / vec2<f32>(VRAM_W_F, VRAM_H_F)) * 2.0 - 1.0;
     var out: VertexOut;
     out.position = vec4<f32>(ndc_xy.x, -ndc_xy.y, 0.0, 1.0);
@@ -139,12 +151,14 @@ fn vs_main(in: VertexIn) -> VertexOut {
     return out;
 }
 
-// PSX U/V are 8-bit per axis (so wrap on >255). Floor before the
-// wrap matches the PSX nearest-neighbour rasterizer the compute
-// backend already replicates pixel-for-pixel.
+// PSX U/V are 8-bit per axis and wrap, including below zero: the CPU
+// rasterizer keeps `plane >> 24` as a `u8`, so a coordinate that extrapolates
+// to -2 on a sliver's far side samples row 254. Floor, then wrap in two's
+// complement; clamping at zero (as this once did) sampled row 0 instead, which
+// is a different texel and, on the Quake shotgun, its blue border.
 fn page_uv(uv: vec2<f32>) -> vec2<u32> {
-    let ix = u32(max(uv.x, 0.0));
-    let iy = u32(max(uv.y, 0.0));
+    let ix = bitcast<u32>(i32(floor(uv.x)));
+    let iy = bitcast<u32>(i32(floor(uv.y)));
     return vec2<u32>(ix & 0xFFu, iy & 0xFFu);
 }
 
@@ -193,21 +207,6 @@ fn bgr15_to_rgb(word: u32) -> vec3<f32> {
     let g8 = (g5 << 3u) | (g5 >> 2u);
     let b8 = (b5 << 3u) | (b5 >> 2u);
     return vec3<f32>(f32(r8), f32(g8), f32(b8)) / 255.0;
-}
-
-fn srgb_channel_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        return c / 12.92;
-    }
-    return pow((c + 0.055) / 1.055, 2.4);
-}
-
-fn srgb_to_linear(rgb: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(
-        srgb_channel_to_linear(rgb.r),
-        srgb_channel_to_linear(rgb.g),
-        srgb_channel_to_linear(rgb.b),
-    );
 }
 
 // Sample the active texture page at PSX UV. Returns the raw 16-bit
@@ -381,6 +380,9 @@ fn filter_edge(flags: u32, tex_window: u32, b: vec2<f32>, f: vec2<f32>, nearest:
     return mix(axis, diag, o * sup);
 }
 
+// Output is the gamma-coded display value, written byte-for-byte: the draw
+// pass renders through the target's non-sRGB view (`target::RENDER_FORMAT`),
+// so the blender combines the same numbers the CPU rasterizer does.
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let textured = (in.flags & FLAG_TEXTURED) != 0u;
@@ -390,9 +392,18 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         if dither {
             rgb = dither_to_bgr15(rgb, in.position.xy);
         }
-        return vec4<f32>(srgb_to_linear(rgb), in.color.a);
+        return vec4<f32>(rgb, in.color.a);
     }
-    let uv8 = apply_tex_window(page_uv(in.uv), in.tex_window);
+    // A polygon is drawn half a pixel down-right (see `vs_main`), so the
+    // interpolant here is the plane at the pixel's top-left corner; the
+    // CPU rasterizer adds 0.5 and floors, i.e. rounds to the nearest texel.
+    // Rectangles are not shifted and their centre-sampled coordinate
+    // already carries that 0.5.
+    var suv = in.uv;
+    if (in.flags & FLAG_CORNER_SAMPLED) != 0u {
+        suv += vec2<f32>(0.5, 0.5);
+    }
+    let uv8 = apply_tex_window(page_uv(suv), in.tex_window);
     let texel = sample_texel(in.flags, uv8);
     if texel == 0u {
         discard;
@@ -409,7 +420,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         // Edge filter: see docs/texture-filters-spec.md. The silhouette and STP
         // tests above already ran on the nearest texel; a tap that lands on a
         // transparent texel is replaced by an opaque neighbour (spec section 2).
-        let p = in.uv - vec2<f32>(0.5, 0.5);
+        let p = suv - vec2<f32>(0.5, 0.5);
         let b = floor(p);
         let f = p - b;
         tex_rgb = filter_edge(in.flags, in.tex_window, b, f, tex_rgb);
@@ -422,5 +433,5 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if dither {
         rgb = dither_to_bgr15(rgb, in.position.xy);
     }
-    return vec4<f32>(srgb_to_linear(rgb), 1.0);
+    return vec4<f32>(rgb, 1.0);
 }
