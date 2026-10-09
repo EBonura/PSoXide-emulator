@@ -49,11 +49,12 @@ No 512 KiB blobs or suspicious firmware/SDK artifact paths were found. A separat
 scan of tracked binary contents found the bundled EXE header strings above;
 filename checks alone did not detect them.
 
-Run `python3 tools/sony-material-audit.py` for the current working files, and
-add `--history` for fetched remote refs and tags. Use `--repo PATH` to audit a
-sibling checkout. Fetch remote refs and tags before interpreting history results.
+Run `make material-audit` for the current working files (the SDK's
+`xtask material-audit`, built from the locked SDK revision). Pass
+`MATERIAL_AUDIT_ARGS=--history` to add fetched remote refs and tags; a later
+`--repo PATH` overrides the checkout to audit. Fetch remote refs and tags before interpreting history results.
 The check fails on suspicious artifact paths, 512 KiB blobs or vendor text in
-homebrew EXE headers. CI runs the working-file audit and its regression fixtures.
+homebrew EXE headers. CI runs the working-file audit; its regression tests live with the SDK xtask.
 A finding requires inspection; matching a size or filename does not establish
 ownership. This is not a semantic source-authorship proof.
 
