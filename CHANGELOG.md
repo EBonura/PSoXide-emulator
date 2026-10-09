@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Stopping a GPU linked-list DMA now delivers the node the walker had already
+  admitted. A DMA burst holds the bus, so a CPU write that clears CHCR cannot
+  land inside a node; the walker interleaves a word per cycle with the CPU and
+  could stop with half a packet in the GPU FIFO. The words the CPU sent next
+  (a clear-cache and an A0h upload header) were absorbed into that packet,
+  every pixel of the upload that followed was read as a command, and Legacy of
+  Kain: Soul Reaver showed corrupted textures after an area change.
 - Textured primitives pay for their texels (hardware tests v2.1, records 0x200
   to 0x223). An 8 or 15-bit texture costs more a pixel than a 4-bit one, a
   texture page change refills the texture cache in proportion to the pixels
