@@ -11,6 +11,20 @@
   folder. The texture filter is saved in `settings.ron` (`video.texture_filter`)
   and restored on the next launch. `ui-png` renders the menu or the window
   chrome to a PNG without opening a window.
+- The library list shows one row per game. It lists only what is under the
+  games folder (the editor's project bakes and example builds, which share
+  `library.ron`, no longer appear), skips `.bin` files that are RAM dumps rather
+  than discs, and shows a game's own folder as a plain row; folders remain as
+  groups of two or more games.
+- The desktop audio output waits for 50 ms of sound before it starts and again
+  after it runs dry, and an underrun fades the last sample out over about 2 ms
+  and back in over the refill instead of cutting to silence (a click). A
+  backlog past 160 ms drops its oldest samples with the seam crossfaded. The
+  web player keeps its shorter 20 ms and 64 ms limits.
+- The dev profile builds the workspace crates on the frame path (`psx-gpu-render`,
+  `psx-iso`, `psx-hw`, `psx-trace`, `psoxide-jit`) at opt-level 3 and the debug
+  UI and settings crates at 2, so `make run` is no longer limited by crates
+  that the `"*"` override does not reach.
 - `--press` takes analog stick entries, `tick:lstick=X/Y[:hold]` and
   `tick:rstick=X/Y[:hold]` (0..=255, 128 centred), held for a number of route
   ticks like a button. A stick token forces the pad to analog mode and
