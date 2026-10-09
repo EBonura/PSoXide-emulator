@@ -1166,7 +1166,11 @@ mod tests {
 
     #[test]
     fn a_polled_counter_counts_every_clock_of_a_long_poll() {
-        for (idx_base, mode, divisor) in [(0x1F80_1120u32, 0u32, 1u64), (0x1F80_1100, 0, 1), (0x1F80_1120, 0x200, 8)] {
+        for (idx_base, mode, divisor) in [
+            (0x1F80_1120u32, 0u32, 1u64),
+            (0x1F80_1100, 0, 1),
+            (0x1F80_1120, 0x200, 8),
+        ] {
             let mut t = Timers::new();
             t.write32(idx_base + 4, mode, 0);
             let mut now = 100u64;
@@ -1182,7 +1186,10 @@ mod tests {
                 last = value;
             }
             let due = 200_000 * 10 / divisor;
-            assert!(total.abs_diff(due) <= 8, "{idx_base:#x} {mode:#x}: {total} of {due}");
+            assert!(
+                total.abs_diff(due) <= 8,
+                "{idx_base:#x} {mode:#x}: {total} of {due}"
+            );
         }
     }
 

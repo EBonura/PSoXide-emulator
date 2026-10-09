@@ -4051,7 +4051,10 @@ mod tests {
             cpu.step(&mut bus).unwrap();
             let before = bus.cycles();
             cpu.step(&mut bus).unwrap();
-            assert!(bus.cycles() - before <= 2, "the read waited for the multiply");
+            assert!(
+                bus.cycles() - before <= 2,
+                "the read waited for the multiply"
+            );
             assert_eq!(cpu.gpr(10), 0x7FFF_FFFF);
         }
     }
