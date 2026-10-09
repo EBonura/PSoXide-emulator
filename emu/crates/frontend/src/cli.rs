@@ -3595,7 +3595,7 @@ fn headless_play_session(cue: &Path, polls: u64) -> Result<HeadlessPlaySession, 
     let disc = psoxide_settings::library::load_disc_from_cue(cue)?;
     fast_boot_embedded_playtest_disc(&mut bus, &mut cpu, &disc, cue)?;
     bus.cdrom.insert_disc(Some(disc));
-    attach_headless_playtest_pad(&mut bus, false);
+    attach_headless_playtest_pad(&mut bus, false, false);
     bus.set_port1_sticks(0x80, 0x80, 0x80, 0x00);
     let mut stats = psoxide_debug_ui::GuestStats::new();
     stats.set_cpu_attribution(&mut cpu, true);

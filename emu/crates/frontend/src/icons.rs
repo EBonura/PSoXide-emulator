@@ -9,7 +9,8 @@
 
 #![allow(dead_code)]
 
-use egui::{FontFamily, FontId, RichText};
+use egui::text::{LayoutJob, TextFormat};
+use egui::{Color32, FontFamily, FontId, RichText};
 
 pub const PLAY: char = '\u{e3d0}'; // ph-play
 pub const PAUSE: char = '\u{e39e}'; // ph-pause
@@ -64,6 +65,25 @@ pub fn font(size: f32) -> FontId {
 /// Phosphor fill (solid) FontId -- use for active toggle glyphs.
 pub fn font_fill(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("phosphor-fill".into()))
+}
+
+/// An icon followed by a label, the icon drawn from the Phosphor family
+/// explicitly. A plain `format!("{icon}  {label}")` would look the glyph up in
+/// the text families' fallback, which the editor build gives to lucide.
+pub fn labelled(ch: char, label: &str, size: f32) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    let format = |font_id| TextFormat {
+        font_id,
+        color: Color32::PLACEHOLDER,
+        ..Default::default()
+    };
+    job.append(&ch.to_string(), 0.0, format(font(size)));
+    job.append(
+        &format!("  {label}"),
+        0.0,
+        format(FontId::proportional(size)),
+    );
+    job
 }
 
 /// Icon as RichText at a given size (regular weight).

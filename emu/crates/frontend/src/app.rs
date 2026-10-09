@@ -1639,6 +1639,7 @@ impl AppState {
                                 continue;
                             }
                             projects.push(MenuLibraryItem {
+                                folder: std::path::PathBuf::new(),
                                 id: project_build_launch_id(&e.path),
                                 title: metadata.title,
                                 subtitle: metadata.subtitle,
@@ -5294,6 +5295,47 @@ mod tests {
             let _ = bus.read8(0x1F80_1040);
         }
         bus.write16(0x1F80_104A, 0x0000);
+    }
+
+    /// EM2: launch ids pick the file, never the save. A game reached by its
+    /// path id, its project-build id or its bare disc id keeps its card and
+    /// save states under `<config>/games/<disc id>/`, the layout every earlier
+    /// editor and emulator build wrote.
+    #[test]
+    fn every_launch_id_resolves_to_the_saves_under_the_disc_id() {
+        let root = frontend_test_temp_dir("launch-id-saves");
+        let bin = root.join("game.bin");
+        std::fs::write(&bin, bootable_test_bin()).unwrap();
+        let entry = disc_entry(&bin);
+        let entries = vec![entry.clone()];
+        let config = root.join("config");
+        let legacy_card = config.join("games").join(&entry.id).join("memcard-1.mcd");
+
+        for launch_id in [
+            entry.id.clone(),
+            path_launch_id(&bin),
+            project_build_launch_id(&bin),
+        ] {
+            let resolved = library_entry_for_launch_id(&entries, &launch_id)
+                .unwrap_or_else(|| panic!("{launch_id} resolves"));
+            let mut state = AppState::with_config_dir(Some(config.clone()));
+            state.launch_entry(resolved).unwrap();
+            assert_eq!(
+                state.memcard_port1_path.as_deref(),
+                Some(legacy_card.as_path()),
+                "{launch_id}"
+            );
+            assert_eq!(
+                state.paths.savestate_file(&resolved.id, 1),
+                config
+                    .join("games")
+                    .join(&entry.id)
+                    .join("savestates")
+                    .join("slot1.psx"),
+                "{launch_id}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A disc saves to its own `memcard-1.mcd`. A card that predates the
