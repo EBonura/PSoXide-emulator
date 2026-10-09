@@ -3183,7 +3183,8 @@ mod tests {
         s.set_library(&[dummy_item("a", "A", "")], &[], &[]);
         s.set_game_loaded(true);
         let n = s.categories.len();
-        assert_eq!(n, 3);
+        // Library, Game and Settings, plus the Editor column in the editor build.
+        assert_eq!(n, if cfg!(feature = "editor") { 4 } else { 3 });
         assert_eq!(s.current_category(), Some("Library"));
 
         let left = MenuInput {
