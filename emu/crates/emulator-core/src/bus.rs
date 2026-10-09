@@ -146,6 +146,61 @@ struct ExperimentalGpuList {
     headers: u32,
 }
 
+/// A sync-mode-1 transfer in flight on the GPU (channel 2) or the SPU
+/// (channel 4). The data moves when the channel is kicked; this lets MADR and
+/// the block count in BCR follow the clock the way the controller's do, so a
+/// read mid-transfer, or after software stops it, sees how far it got.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct DmaBlockRun {
+    start: u64,
+    end: u64,
+    /// Blocks the kick asked for: BCR's count, with 0 meaning 65,536.
+    blocks: u32,
+    block_words: u32,
+    madr: u32,
+    backward: bool,
+    /// BCR's block count field at the kick; the live one counts down from it.
+    count: u16,
+}
+
+/// Words a runaway block transfer (BCR block count 0, which the controller
+/// reads as 65,536 blocks) moves before the host stops it.
+const DMA_RUNAWAY_WORD_CAP: u32 = 1 << 22;
+/// Setup clocks of a linked-list node with no payload (see
+/// [`Bus::advance_experimental_gpu_list`]); every fourth node adds one.
+const EMPTY_NODE_SETUP_CYCLES: u32 = 8;
+
+/// Clocks between the starts of two CPU accesses to main RAM while the GPU
+/// linked-list DMA is walking nodes: the walk takes the RAM bus in between.
+/// hwtest on a console: 64 loads, each with a nop behind it or with three,
+/// took 770 and 774 clocks against 513 and 579 with the channel idle (records
+/// 0xFE, 0x1E5), and 64 stores back to back or with three nops each took 797
+/// (0x1E1, 0x1E3): about 12 clocks an access however the accesses are spaced.
+/// The same loads next to cached code or from the scratchpad cost nothing
+/// (0x36, 0x1E7), and a walk that is waiting on a full GPU FIFO leaves the
+/// CPU alone (list-busy cases 230 and 231, 76.83 against 76.77 clocks an
+/// iteration).
+const GPU_LIST_RAM_ACCESS_SPACING: u64 = 12;
+
+/// The most clocks an internal register read waits for a streaming code fill.
+/// Fitted to hwtest v2.1 record 0x1BA (32 GPUSTAT reads through evicted code,
+/// 284 clocks on a console against 239 with no wait): the first read in each
+/// refilled line gives way for three clocks.
+const CODE_FILL_MMIO_WAIT_CAP: u64 = 3;
+
+/// Clocks a main-RAM store behind a streaming code fill waits beyond the
+/// fill, on top of the RAM_SIZE contention clock. Fitted to hwtest v2.1
+/// record 0x1B8 (64 stores through evicted code, 329 clocks on a console
+/// against 142 from the scratchpad): the store cannot ride the write buffer
+/// while the fill holds the RAM bus.
+const CODE_FILL_STORE_EXTRA: u32 = 9;
+
+/// Extra clocks a CPU read of main RAM waits while a GPU block DMA streams
+/// from it. hwtest record 0x145: 64 RAM loads started right after a block
+/// transfer's kick took 1738 clocks against 510 with the channel idle, 19.2
+/// a load, because the transfer reads the bus in 16-word bursts.
+const GPU_BLOCK_RAM_READ_WAIT: u32 = 19;
+
 /// Cycles the MDEC output DMA (DMA1) takes per 32-bit word it moves.
 ///
 /// Source: this project's console profile of the v1.26 FMV player
@@ -408,6 +463,13 @@ pub struct Bus {
     #[serde(skip, default = "check_gpu_request_after_restore")]
     gpu_dma_waiting_for_request: bool,
     experimental_gpu_list: Option<ExperimentalGpuList>,
+    /// Earliest cycle the next CPU access to main RAM may start while a list
+    /// walk moves (see [`GPU_LIST_RAM_ACCESS_SPACING`]). A timing hint, so it
+    /// is not part of save states.
+    #[serde(skip)]
+    gpu_list_ram_next: u64,
+    /// In-flight sync-mode-1 transfers: channel 2, channel 4.
+    dma_block_runs: [Option<DmaBlockRun>; 2],
     /// While a linked-list walk is active: the bus cycle up to which every
     /// clock advance is a quiet batch of `advance_cycles_slow` (the walk
     /// only counts down its setup delay or waits, the GPU FIFO only decays
@@ -528,6 +590,8 @@ impl Bus {
             gpu_dma_overflow_drops: gpu_dma_overflow_drops_from_env(),
             gpu_dma_waiting_for_request: false,
             experimental_gpu_list: None,
+            gpu_list_ram_next: 0,
+            dma_block_runs: [None; 2],
             gpu_quiet_until: 0,
             gpu_linked_list_transfer: 0,
             gpu_linked_list_log: Vec::new(),
@@ -1523,7 +1587,108 @@ impl Bus {
     /// shared `IrqSource::Dma` line to transition high. Caller
     /// raises that IRQ once per tick if any channel was on the
     /// edge.
+    /// Clocks a CD DMA of `words` words keeps the CPU off the bus. hwtest
+    /// v2.1 on a console: 512 words (2048 bytes) and 585 words (2340) leave 64
+    /// loads or stores 34.9k and 39.9k clocks late, the same at single and
+    /// double speed: 68.3 clocks a word, the drive port's word-read cost.
+    fn cd_dma_clocks(words: u32) -> u64 {
+        u64::from(words) * 683 / 10
+    }
+
+    /// Slot of a channel in [`Bus::dma_block_runs`].
+    fn dma_block_run_slot(ch: usize) -> Option<usize> {
+        match ch {
+            2 => Some(0),
+            4 => Some(1),
+            _ => None,
+        }
+    }
+
+    /// Note a just-kicked GPU or SPU transfer that finishes `cycles` from
+    /// now. Only sync mode 1 counts blocks.
+    fn begin_dma_block_run(&mut self, ch: usize, cycles: u64) {
+        let Some(slot) = Self::dma_block_run_slot(ch) else {
+            return;
+        };
+        let channel = self.dma.channels[ch];
+        self.dma_block_runs[slot] = None;
+        if (channel.channel_control >> 9) & 3 != 1 {
+            return;
+        }
+        let count = (channel.block_control >> 16) as u16;
+        self.dma_block_runs[slot] = Some(DmaBlockRun {
+            start: self.cycles,
+            end: self.cycles + cycles,
+            blocks: if count == 0 {
+                0x1_0000
+            } else {
+                u32::from(count)
+            },
+            block_words: channel.block_control & 0xFFFF,
+            madr: channel.base,
+            backward: (channel.channel_control >> 1) & 1 != 0,
+            count,
+        });
+    }
+
+    /// Bring MADR and BCR's block count of the in-flight GPU and SPU block
+    /// transfers up to the current clock. Called before software touches the
+    /// DMA registers. A transfer whose CHCR start bit software has cleared is
+    /// over: the registers stay where the last settle left them.
+    fn settle_dma_block_runs(&mut self) {
+        for slot in 0..2 {
+            let Some(run) = self.dma_block_runs[slot] else {
+                continue;
+            };
+            let ch = if slot == 0 { 2 } else { 4 };
+            if self.dma.channels[ch].channel_control & (1 << 24) == 0 {
+                self.dma_block_runs[slot] = None;
+                continue;
+            }
+            let done = if self.cycles >= run.end {
+                run.blocks
+            } else {
+                let span = (run.end - run.start).max(1);
+                ((self.cycles - run.start) * u64::from(run.blocks) / span) as u32
+            };
+            Self::apply_dma_block_progress(&mut self.dma.channels[ch], &run, done);
+        }
+    }
+
+    /// [`Bus::settle_dma_block_runs`] ahead of a register write. Software that
+    /// reprograms a channel owns its registers from then on: the transfer it
+    /// was running no longer moves them.
+    fn settle_dma_block_runs_for_write(&mut self, phys: u32) {
+        self.settle_dma_block_runs();
+        let channel = ((phys - Dma::BASE) / Dma::STRIDE) as usize;
+        if let Some(slot) = Self::dma_block_run_slot(channel) {
+            self.dma_block_runs[slot] = None;
+        }
+    }
+
+    fn apply_dma_block_progress(
+        channel: &mut crate::dma::DmaChannel,
+        run: &DmaBlockRun,
+        done: u32,
+    ) {
+        let bytes = done.wrapping_mul(run.block_words).wrapping_mul(4);
+        channel.base = if run.backward {
+            run.madr.wrapping_sub(bytes)
+        } else {
+            run.madr.wrapping_add(bytes)
+        } & 0x00FF_FFFF;
+        let left = u32::from(run.count).wrapping_sub(done) & 0xFFFF;
+        channel.block_control = (channel.block_control & 0xFFFF) | (left << 16);
+    }
+
     fn complete_dma_channel(&mut self, ch: usize) -> bool {
+        if let Some(slot) = Self::dma_block_run_slot(ch) {
+            if let Some(run) = self.dma_block_runs[slot].take() {
+                if self.dma.channels[ch].channel_control & (1 << 24) != 0 {
+                    Self::apply_dma_block_progress(&mut self.dma.channels[ch], &run, run.blocks);
+                }
+            }
+        }
         if let Some(start) = self.dma_active_since.get_mut(ch).and_then(Option::take) {
             self.dma_busy_cycles[ch] =
                 self.dma_busy_cycles[ch].saturating_add(self.cycles.saturating_sub(start));
@@ -1532,6 +1697,10 @@ impl Bus {
             // OTC direction/decrement is hardwired to bit 1; both manual
             // trigger and busy clear when the transfer completes.
             self.dma.channels[ch].channel_control = 1 << 1;
+        } else if ch == 3 {
+            // The manual trigger clears with the start bit (hwtest v2.1:
+            // CHCR reads 0 once a CD transfer is over).
+            self.dma.channels[ch].channel_control &= !((1 << 24) | (1 << 28));
         } else {
             self.dma.channels[ch].channel_control &= !(1 << 24);
         }
@@ -1576,26 +1745,71 @@ impl Bus {
         }
         // Root-counter reads use the same three-cycle total (one issue + two
         // wait) measured for the other internal MMIO registers by the public
-        // access-time suite. Counter phase differences in compound loops must
-        // be modeled at their real CPU/bus dependency, not hidden in this
-        // independently observable access cost.
-        let stalls = self.memory_control.read_stalls(virt, width);
-        let external_counter_overlap = (memory::expansion1::BASE
-            ..memory::expansion1::BASE + memory::expansion1::SIZE as u32)
-            .contains(&phys)
-            || (memory::expansion2::BASE
-                ..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
-                .contains(&phys)
-            || (memory::expansion3::BASE
-                ..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
-                .contains(&phys)
-            || (0x1F80_1800..0x1F80_1804).contains(&phys)
-            || (0x1F80_1C00..0x1F80_2000).contains(&phys);
-        if external_counter_overlap {
-            self.timers
-                .overlap_counter_write_with_external_read(self.cycles, stalls);
+        // access-time suite. The external buses cost what their delay
+        // registers say: through warm code 64 reads of EXP1 take exactly what
+        // 64 BIOS ROM reads do, and EXP3 follows its own register (hwtest v2.1
+        // records 0x1C0 to 0x1CB).
+        let mut stalls = self.memory_control.read_stalls(virt, width);
+        if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
+            // Internal register reads next to a streaming code fill give way
+            // to it for a clock or two (hwtest v2.1 record 0x1BA: 32 GPUSTAT
+            // reads through freshly evicted code took 284 clocks, 239 modelled
+            // without this).
+            let fill_wait = self.code_fill_busy_until.saturating_sub(self.cycles);
+            stalls += fill_wait.min(CODE_FILL_MMIO_WAIT_CAP) as u32;
         }
         stalls
+    }
+
+    /// Clocks the CPU waits to start a main-RAM access while a list walk is
+    /// moving, and the bookkeeping for the access after it. See
+    /// [`GPU_LIST_RAM_ACCESS_SPACING`].
+    #[inline(always)]
+    fn gpu_list_ram_spacing_wait(&mut self) -> u32 {
+        let wait = self.gpu_list_ram_next.saturating_sub(self.cycles);
+        self.gpu_list_ram_next = self.cycles + wait + GPU_LIST_RAM_ACCESS_SPACING;
+        wait as u32
+    }
+
+    /// Whether a block DMA into the GPU is streaming main RAM right now.
+    #[inline(always)]
+    fn gpu_block_dma_is_moving(&self) -> bool {
+        match self.dma_block_runs[0] {
+            Some(run) => {
+                self.cycles < run.end
+                    && self.dma.channels[2].channel_control & ((1 << 24) | 1) == (1 << 24) | 1
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the GPU linked-list DMA is walking nodes right now, as
+    /// opposed to idle or parked on a GPU that cannot take the next word.
+    /// Only a walk that is making progress competes with the CPU for main
+    /// RAM.
+    #[inline(always)]
+    fn gpu_list_walk_is_moving(&self) -> bool {
+        let Some(list) = self.experimental_gpu_list.as_ref() else {
+            return false;
+        };
+        self.gpu_list_walk_is_moving_slow(list)
+    }
+
+    #[inline(never)]
+    fn gpu_list_walk_is_moving_slow(&self, list: &ExperimentalGpuList) -> bool {
+        if self.dma.channels[2].channel_control & (1 << 24) == 0 || !self.dma.is_channel_enabled(2)
+        {
+            return false;
+        }
+        if list.setup_cycles > 0 {
+            true
+        } else if list.need_header {
+            self.gpu.dma_fifo_requests_node()
+        } else if list.remaining > 0 {
+            self.gpu_dma_overflow_drops || self.gpu.dma_fifo_has_room()
+        } else {
+            true
+        }
     }
 
     /// [`Bus::cpu_read_stalls`] for a main-RAM address: the six-cycle
@@ -1605,7 +1819,12 @@ impl Bus {
     pub(crate) fn ram_read_stalls(&mut self, virt: u32) -> u32 {
         self.ram_load_from_cached_code =
             !self.code_fetch_on_ram_bus && self.cycles >= self.code_fill_busy_until;
-        let stalls = self.ram_load_stalls_with_code_contention(6);
+        let mut stalls = self.ram_load_stalls_with_code_contention(6);
+        if self.gpu_list_walk_is_moving() {
+            stalls += self.gpu_list_ram_spacing_wait();
+        } else if self.gpu_block_dma_is_moving() {
+            stalls += GPU_BLOCK_RAM_READ_WAIT;
+        }
         let access_gap = self.cycles.saturating_sub(self.last_cpu_ram_access_cycle);
         self.last_cpu_ram_access_cycle = self.cycles;
         let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
@@ -1656,12 +1875,29 @@ impl Bus {
         } else {
             memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES
         };
+        // A store behind a streaming code fill waits for the fill to let go
+        // of the RAM bus, as a load does (hwtest v2.1 record 0x1B8: 64 stores
+        // through freshly evicted code took 329 clocks, 142 from the
+        // scratchpad).
+        let fill_wait = self.code_fill_busy_until.saturating_sub(self.cycles) as u32;
+        let fill_stall = if fill_wait > 0 {
+            fill_wait + self.memory_control.code_data_contention_cycles() + CODE_FILL_STORE_EXTRA
+        } else {
+            0
+        };
+        let walk_wait = if self.gpu_list_walk_is_moving() {
+            self.gpu_list_ram_spacing_wait()
+        } else {
+            0
+        };
         self.queue_store()
+            .saturating_add(walk_wait)
             .saturating_add(memory_timing::dram_refresh_wait(
                 self.cycles,
                 &mut self.dram_refresh_deadline,
                 refresh_stall,
             ))
+            .saturating_add(fill_stall)
     }
 
     /// A RAM load that has to share the bus with a code fetch.
@@ -1838,6 +2074,7 @@ impl Bus {
         let issued = now + wait;
         let newest = if len == 0 { 0 } else { queue[len - 1] };
         let completion = (issued + Self::WRITE_QUEUE_FIRST).max(newest + Self::WRITE_QUEUE_PERIOD);
+        let queue = &mut self.write_queue;
         queue[len] = completion;
         self.ram_write_buffer_ready_cycle = completion;
         wait as u32
@@ -2413,6 +2650,7 @@ impl Bus {
                     self.log_dma_schedule("GpuDma", gpu_cycles as u64, target);
                     self.scheduler
                         .schedule(EventSlot::GpuDma, self.cycles, gpu_cycles as u64);
+                    self.begin_dma_block_run(2, gpu_cycles as u64);
                 }
             }
             3 => {
@@ -2435,15 +2673,23 @@ impl Bus {
                         if self.complete_dma_channel(3) {
                             self.irq.raise(IrqSource::Dma);
                         }
-                    } else {
-                        let delay = match self.dma.channels[3].channel_control {
-                            0x1140_0100 => (cdrom_words / 4).max(1) as u64,
-                            _ => cdrom_words as u64,
-                        };
+                    } else if self.dma.channels[3].channel_control == 0x1140_0100 {
+                        // Chopped bursts leave the CPU its windows.
+                        let delay = (cdrom_words / 4).max(1) as u64;
                         let target = self.cycles + delay;
                         self.log_dma_schedule(&label, delay, target);
                         self.scheduler
                             .schedule(EventSlot::CdDma, self.cycles, delay);
+                    } else {
+                        // The drive's data port is slow and the transfer owns
+                        // the bus: the CPU, loads and stores alike, waits for
+                        // the whole burst, and CHCR reads idle after it.
+                        let hold = Self::cd_dma_clocks(cdrom_words);
+                        self.log_dma_schedule(&label, hold, self.cycles + hold);
+                        self.add_cycles(hold as u32);
+                        if self.complete_dma_channel(3) {
+                            self.irq.raise(IrqSource::Dma);
+                        }
                     }
                 }
             }
@@ -2453,6 +2699,7 @@ impl Bus {
                     self.log_dma_schedule("SpuDma", spu_delay as u64, target);
                     self.scheduler
                         .schedule(EventSlot::SpuDma, self.cycles, spu_delay as u64);
+                    self.begin_dma_block_run(4, spu_delay as u64);
                 }
             }
             6 => {
@@ -2658,6 +2905,8 @@ impl Bus {
             addr = addr.wrapping_add(step);
         }
         self.mdec.dma_write_in(&words);
+        // MADR ends where the last word went (hwtest v2.1 record 0x798).
+        self.dma.channels[0].base = addr & 0x00FF_FFFF;
         Some(total_words)
     }
 
@@ -2692,6 +2941,8 @@ impl Bus {
             }
             addr = addr.wrapping_add(step);
         }
+        // MADR ends where the last word went (hwtest v2.1 record 0x798).
+        self.dma.channels[1].base = addr & 0x00FF_FFFF;
         Some(total_words)
     }
 
@@ -2740,8 +2991,17 @@ impl Bus {
             }
             1 => {
                 let block_size = bcr & 0xFFFF;
-                let block_count = (bcr >> 16) & 0xFFFF;
-                (block_size * block_count, block_size)
+                // A block count of 0 is 65,536 blocks, not none (hwtest v2.1).
+                let block_count = match (bcr >> 16) & 0xFFFF {
+                    0 => 0x1_0000,
+                    count => count,
+                };
+                (
+                    block_size
+                        .saturating_mul(block_count)
+                        .min(DMA_RUNAWAY_WORD_CAP),
+                    block_size,
+                )
             }
             _ => (0, 0), // Linked list + reserved -- not used for SPU.
         };
@@ -2972,8 +3232,14 @@ impl Bus {
         let mut addr = ch.base & 0x001F_FFFC;
         let bcr = ch.block_control;
         let block_size = bcr & 0xFFFF;
-        let block_count = ((bcr >> 16) & 0xFFFF).max(1);
-        let total_words = block_size.saturating_mul(block_count);
+        // A block count of 0 is 65,536 blocks, not none (hwtest v2.1).
+        let block_count = match (bcr >> 16) & 0xFFFF {
+            0 => 0x1_0000,
+            count => count,
+        };
+        let total_words = block_size
+            .saturating_mul(block_count)
+            .min(DMA_RUNAWAY_WORD_CAP);
         let upload_active = to_device && self.gpu.vram_upload_active();
         let step = if (ch.channel_control >> 1) & 1 != 0 {
             // Decrement mode -- rarely used for GPU but handle for safety.
@@ -3141,8 +3407,18 @@ impl Bus {
                 list.next = header & 0x00ff_ffff;
                 list.word = list.address.wrapping_add(4);
                 list.need_header = false;
-                // Reference-model assumptions, not new silicon timing claims.
-                list.setup_cycles = if list.remaining == 0 { 10 } else { 15 };
+                // A node with a payload keeps the reference-model setup
+                // (not a silicon timing claim). An empty one is measured:
+                // hwtest records 0x33/0x34 walk 256 and 1024 empty packets
+                // in 2654 and 10509 clocks on a launch PAL console, a slope
+                // of 10.23 a node. The header fetch and the hop to the next
+                // node take a clock each here, which leaves 8.25 of setup:
+                // eight, and a ninth on every fourth node (10.25 a node).
+                list.setup_cycles = if list.remaining == 0 {
+                    EMPTY_NODE_SETUP_CYCLES + u32::from(list.headers % 4 == 0)
+                } else {
+                    15
+                };
             }
         } else if list.remaining > 0 {
             if !self.gpu_dma_overflow_drops && !self.gpu.dma_fifo_has_room() {
@@ -3330,6 +3606,7 @@ impl Bus {
             return (self.timers.read32(aligned) >> ((phys & 3) * 8)) as u8;
         }
         if Dma::contains(phys) {
+            self.settle_dma_block_runs();
             return self.dma.read8(phys);
         }
         if let Some(value) = self.gpu.read32_at(phys & !3, self.cycles) {
@@ -3440,6 +3717,7 @@ impl Bus {
             return self.timers.read32(phys) as u16;
         }
         if Dma::contains(phys) {
+            self.settle_dma_block_runs();
             return self.dma.read16(phys);
         }
         if Spu::contains(phys) {
@@ -3596,6 +3874,7 @@ impl Bus {
             return (self.data_bus_latch & 0xFFFF_0000) | self.timers.read32(phys);
         }
         if Dma::contains(phys) {
+            self.settle_dma_block_runs();
             return self.dma.read32(phys);
         }
         if let Some(v) = self.gpu.read32_at(phys, self.cycles) {
@@ -3732,6 +4011,7 @@ impl Bus {
             return;
         }
         if Dma::contains(phys) {
+            self.settle_dma_block_runs_for_write(phys);
             if self.dma.write32(phys, value) {
                 self.irq.raise(IrqSource::Dma);
             }
@@ -4064,6 +4344,7 @@ impl Bus {
             return;
         }
         if Dma::contains(phys) {
+            self.settle_dma_block_runs_for_write(phys);
             if self.dma.write8(phys, value) {
                 self.irq.raise(IrqSource::Dma);
             }
@@ -4156,6 +4437,7 @@ impl Bus {
             return;
         }
         if Dma::contains(phys) {
+            self.settle_dma_block_runs_for_write(phys);
             if self.dma.write16(phys, value) {
                 self.irq.raise(IrqSource::Dma);
             }
@@ -4851,11 +5133,14 @@ mod tests {
         bus.sio0
             .attach_port1(crate::pad::PortDevice::empty().with_pad(crate::pad::DigitalPad::new()));
         bus.write16(Sio0::BASE + 0x0A, 0x1002); // JOYN_OUTPUT | ACK_IRQ_ENABLE
-        bus.write16(Sio0::BASE + 0x0E, 0x0001); // ACK after 8 cycles
+        bus.write16(Sio0::BASE + 0x0E, 0x0001); // a bit time is one cycle
         bus.write8(Sio0::BASE, 0x01);
 
-        assert_eq!(bus.scheduler.target(EventSlot::Sio0), Some(8));
-        bus.tick(9);
+        // The byte arrives after ten bit times; /ACK rises behind it.
+        assert_eq!(bus.scheduler.target(EventSlot::Sio0), Some(10));
+        bus.drain_scheduler_events_post_op();
+        let ack = 10 + 309;
+        bus.tick(ack as u32 - bus.cycles() as u32 + 1);
         assert_eq!(
             bus.irq.stat() & (1 << (IrqSource::Controller as u32)),
             0,
@@ -4894,16 +5179,30 @@ mod tests {
         bus.dma.channels[3].block_control = 1;
         bus.dma.channels[3].channel_control = 0x1100_0000;
 
+        let before = bus.cycles();
         bus.run_dma_channel(3);
 
         assert_eq!(read_ram_u32(&bus.ram[..], 0), 0x0403_0201);
-        assert_ne!(bus.dma.channels[3].channel_control & (1 << 24), 0);
-        assert_eq!(bus.scheduler.target(EventSlot::CdDma), Some(1));
+        // The CPU is held for the whole burst, and CHCR is idle after it.
+        assert_eq!(bus.cycles() - before, Bus::cd_dma_clocks(1));
+        assert_eq!(bus.dma.channels[3].channel_control, 0);
+        assert_eq!(bus.scheduler.target(EventSlot::CdDma), None);
+    }
 
-        bus.tick(1);
-        assert_ne!(bus.dma.channels[3].channel_control & (1 << 24), 0);
-        bus.drain_scheduler_events_post_op();
-        assert_eq!(bus.dma.channels[3].channel_control & (1 << 24), 0);
+    #[test]
+    fn a_cd_sector_dma_holds_the_cpu_for_68_clocks_a_word() {
+        // hwtest v2.1: 512 words keep the CPU waiting about 35,000 clocks.
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.cdrom.debug_seed_data_fifo(&vec![7u8; 2048], true, true);
+        bus.dma.dpcr = 1 << (3 * 4 + 3);
+        bus.dma.channels[3].base = 0;
+        bus.dma.channels[3].block_control = 512;
+        bus.dma.channels[3].channel_control = 0x1100_0000;
+        let before = bus.cycles();
+        bus.run_dma_channel(3);
+        let held = bus.cycles() - before;
+        assert!((34_900..35_100).contains(&held), "held {held}");
+        assert_eq!(bus.dma.channels[3].channel_control, 0);
     }
 
     #[test]
@@ -4989,6 +5288,108 @@ mod tests {
         bus.dma.channels[2].base = 0x300;
         bus.dma.channels[2].channel_control = 0x0100_0401;
         bus
+    }
+
+    /// A bus with the GPU DMA channel kicked on `nodes` empty packets (the
+    /// header word is only the link), as hwtest records 0x33/0x34 and 0xFE do.
+    fn empty_list_walk(nodes: u32) -> Bus {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.dma.dpcr = 1 << (2 * 4 + 3);
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        for index in 0..nodes {
+            let link = if index + 1 == nodes {
+                0x00ff_ffff
+            } else {
+                0x1000 + (index + 1) * 4
+            };
+            write_ram_u32(&mut bus.ram[..], 0x1000 + index * 4, link);
+        }
+        bus.dma.channels[2].base = 0x1000;
+        bus.dma.channels[2].channel_control = 0x0100_0401;
+        bus.run_dma_channel(2);
+        bus
+    }
+
+    /// Clocks until the channel's busy bit clears.
+    fn clocks_until_dma_done(bus: &mut Bus) -> u64 {
+        let start = bus.cycles();
+        while bus.dma.channels[2].channel_control & (1 << 24) != 0 {
+            assert!(bus.cycles() - start < 1_000_000, "walk did not finish");
+            bus.tick(1);
+        }
+        bus.cycles() - start
+    }
+
+    #[test]
+    fn an_empty_node_costs_about_ten_and_a_quarter_clocks() {
+        // Silicon, hwtest records 0x33/0x34 (launch PAL console): 256 and
+        // 1024 empty nodes in 2654 and 10509 clocks including the probe's own
+        // kick and poll, a slope of 10.23 a node.
+        let mut short = empty_list_walk(256);
+        let mut long = empty_list_walk(1024);
+        let short = clocks_until_dma_done(&mut short);
+        let long = clocks_until_dma_done(&mut long);
+        let slope = (long - short) as f64 / 768.0;
+        assert!((10.1..10.4).contains(&slope), "slope {slope}");
+    }
+
+    #[test]
+    fn main_ram_reads_wait_while_a_list_walk_is_moving() {
+        // Silicon, hwtest record 0xFE: 64 RAM loads during a 512-node empty
+        // walk cost 770 clocks against 513 idle; with three nops each, 774
+        // against 579. About 12 clocks a load either way. The loads are
+        // charged from the same entry point the CPU uses.
+        for (padding, expected) in [(1u32, 770u64), (4, 774)] {
+            let mut bus = empty_list_walk(512);
+            bus.tick(20);
+            assert!(bus.gpu_list_walk_is_moving());
+            let start = bus.cycles();
+            for _ in 0..64 {
+                let stalls = bus.ram_read_stalls(0x8000_0200);
+                bus.add_cycles(1 + stalls + padding);
+            }
+            let took = bus.cycles() - start;
+            assert!(took.abs_diff(expected) < 40, "padding {padding}: {took}");
+            clocks_until_dma_done(&mut bus);
+            assert!(!bus.gpu_list_walk_is_moving());
+        }
+    }
+
+    #[test]
+    fn ram_stores_queue_behind_a_moving_list_walk() {
+        // hwtest records 0x1E1 and 0x1E3: 64 stores take about 800 clocks
+        // while the walk runs, against 141 with the channel idle.
+        let mut bus = empty_list_walk(512);
+        bus.tick(20);
+        let start = bus.cycles();
+        for _ in 0..64 {
+            let wait = bus.ram_write_stalls(0x8000_0200);
+            bus.add_cycles(wait + 1);
+        }
+        let took = bus.cycles() - start;
+        assert!((740..860).contains(&took), "took {took}");
+        clocks_until_dma_done(&mut bus);
+        let start = bus.cycles();
+        for _ in 0..64 {
+            let wait = bus.ram_write_stalls(0x8000_0200);
+            bus.add_cycles(wait + 1);
+        }
+        assert!(bus.cycles() - start < 300);
+    }
+
+    #[test]
+    fn main_ram_reads_wait_while_a_gpu_block_dma_streams() {
+        // hwtest record 0x145: 19 clocks more a load behind a block transfer.
+        let mut bus = kick_gpu_block_dma((16 << 16) | 16);
+        let idle = Bus::new(synthetic_bios())
+            .unwrap()
+            .ram_read_stalls(0x8000_0200);
+        let busy = bus.ram_read_stalls(0x8000_0200);
+        assert!(busy >= idle + GPU_BLOCK_RAM_READ_WAIT, "{busy} vs {idle}");
+        // A zero count runs away: the loads keep waiting a long time.
+        let mut runaway = kick_gpu_block_dma(16);
+        runaway.add_cycles(100_000);
+        assert!(runaway.ram_read_stalls(0x8000_0200) >= idle + GPU_BLOCK_RAM_READ_WAIT);
     }
 
     #[test]
@@ -5757,6 +6158,7 @@ mod tests {
             assert_eq!(bus.gpu.vram.get_pixel(0x26, 0x10), 0x1F03);
             // Block DMA of a command stream: the 1Fh here is a command.
             write_ram_u32(&mut bus.ram[..], 0x2000, 0x1F00_0000);
+            bus.dma.channels[2].base = 0x2000;
             bus.dma.channels[2].block_control = (1 << 16) | 1;
             bus.dma.channels[2].channel_control = 0x0100_0201;
             bus.run_dma_channel(2);
@@ -5901,7 +6303,7 @@ mod tests {
         // as a fill command. Correct direction reads GPUREAD into RAM.
         write_ram_u32(&mut bus.ram[..], 0x300, 0x0200_FF00);
         bus.dma.channels[2].base = 0x300;
-        bus.dma.channels[2].block_control = 1;
+        bus.dma.channels[2].block_control = (1 << 16) | 1;
         bus.dma.channels[2].channel_control = 0x0100_0200;
 
         assert_eq!(bus.run_dma_gpu(), Some(3));
@@ -5924,6 +6326,73 @@ mod tests {
         // 2048 words + 10 cycles * 128 blocks + 250-cycle pipeline.
         assert_eq!(bus.run_dma_gpu(), Some(3578));
         assert!(!bus.gpu.vram_upload_active());
+    }
+
+    fn kick_gpu_block_dma(bcr: u32) -> Bus {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        bus.dma.dpcr = 1 << (2 * 4 + 3);
+        bus.dma.channels[2].base = 0x1000;
+        bus.dma.channels[2].block_control = bcr;
+        bus.dma.channels[2].channel_control = 0x0100_0201;
+        bus.run_dma_channel(2);
+        bus
+    }
+
+    const GPU_MADR: u32 = 0x1F80_10A0;
+    const GPU_BCR: u32 = 0x1F80_10A4;
+    const GPU_CHCR: u32 = 0x1F80_10A8;
+
+    #[test]
+    fn a_block_dma_counts_its_blocks_down_in_bcr_and_advances_madr() {
+        // hwtest v2.1: BCR's block count falls to zero as blocks finish.
+        let mut bus = kick_gpu_block_dma((16 << 16) | 16);
+        let whole = bus.scheduler.target(EventSlot::GpuDma).unwrap() - bus.cycles();
+        bus.add_cycles((whole / 2) as u32);
+        let count = bus.read32(GPU_BCR) >> 16;
+        assert!((1..16).contains(&count), "count {count} mid-transfer");
+        assert_eq!(bus.read32(GPU_BCR) & 0xFFFF, 16);
+        assert!(bus.read32(GPU_MADR) > 0x1000);
+        assert_ne!(bus.read32(GPU_CHCR) & (1 << 24), 0);
+
+        bus.add_cycles(whole as u32);
+        bus.drain_scheduler_events_post_op();
+        assert_eq!(bus.read32(GPU_CHCR) & (1 << 24), 0);
+        assert_eq!(bus.read32(GPU_BCR), 16);
+        assert_eq!(bus.read32(GPU_MADR), 0x1000 + 16 * 16 * 4);
+    }
+
+    #[test]
+    fn reprogramming_a_busy_block_channel_keeps_what_software_wrote() {
+        // ps1-tests gpu/texture-overflow kicks a second upload while the
+        // first still runs: its MADR and BCR writes must stick.
+        let mut bus = kick_gpu_block_dma((1024 << 16) | 8);
+        bus.add_cycles(500);
+        bus.write32(GPU_MADR, 0x4000);
+        bus.write32(GPU_BCR, (3 << 16) | 8);
+        assert_eq!(bus.read32(GPU_MADR), 0x4000);
+        assert_eq!(bus.read32(GPU_BCR), (3 << 16) | 8);
+        bus.add_cycles(500);
+        assert_eq!(bus.read32(GPU_MADR), 0x4000);
+        assert_eq!(bus.read32(GPU_BCR), (3 << 16) | 8);
+    }
+
+    #[test]
+    fn a_block_dma_kicked_with_a_zero_count_runs_65536_blocks() {
+        // hwtest v2.1: re-kicking a finished block transfer without rewriting
+        // BCR ran away on a console: the count wrapped below zero.
+        let mut bus = kick_gpu_block_dma(16);
+        assert_eq!(bus.read32(GPU_BCR) >> 16, 0);
+        bus.add_cycles(2_000);
+        bus.drain_scheduler_events_post_op();
+        assert_ne!(bus.read32(GPU_CHCR) & (1 << 24), 0, "still running");
+        let count = bus.read32(GPU_BCR) >> 16;
+        assert!(count > 0xF000, "count {count:#x} counts down through zero");
+        // Software stopping it freezes the registers where they are.
+        bus.write32(GPU_CHCR, 0);
+        let frozen = (bus.read32(GPU_MADR), bus.read32(GPU_BCR));
+        bus.add_cycles(2_000);
+        assert_eq!((bus.read32(GPU_MADR), bus.read32(GPU_BCR)), frozen);
     }
 
     #[test]

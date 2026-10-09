@@ -95,6 +95,9 @@ pub enum MenuAction {
     /// Re-walk the configured library root and refresh
     /// `library.ron`. The last row of the Library.
     RescanLibrary,
+    /// Pick a disc image or EXE anywhere on disk and launch it, without
+    /// adding it to the games folder's list. Remembered under "Recent discs".
+    OpenDisc,
     /// Build all public SDK/engine examples, then rescan the
     /// library once the background make job completes. What an
     /// unbuilt example row does when confirmed.
@@ -263,12 +266,22 @@ struct Category {
 /// paths relative to the games root, so an absolute one never collides with
 /// a real folder of the same name.
 pub(crate) const HOMEBREW_FOLDER: &str = "/homebrew";
+/// The keyboard shortcut for "Open disc...", as shown on its row.
+#[cfg(target_os = "macos")]
+pub(crate) const OPEN_DISC_SHORTCUT: &str = "Cmd+O";
+/// The keyboard shortcut for "Open disc...", as shown on its row.
+#[cfg(not(target_os = "macos"))]
+pub(crate) const OPEN_DISC_SHORTCUT: &str = "Ctrl+O";
+/// Pseudo-folder key for the discs opened with "Open disc...".
+pub(crate) const RECENT_FOLDER: &str = "/recent";
 
 pub struct MenuState {
     games: Vec<LibraryItem>,
     /// SDK examples, project builds and (web) the streamed demo disc,
     /// listed inside the Library's Homebrew folder.
     homebrew: Vec<LibraryItem>,
+    /// Discs opened from outside the games folder, newest first.
+    recent_discs: Vec<LibraryItem>,
     /// Right-hand value of the Library's games-folder row (native: the path).
     games_path: String,
     expanded_folders: HashSet<PathBuf>,
@@ -413,7 +426,7 @@ impl MenuState {
         // AppState loads the cached entries. The Game column appears with
         // the first loaded game (`set_game_loaded`).
         let categories = vec![
-            build_library_category(&[], &[], &HashSet::new(), ""),
+            build_library_category(&[], &[], &[], &HashSet::new(), ""),
             // The Editor column is the entry point into the host editor
             // workspace. Standalone emulator builds do not have it.
             #[cfg(feature = "editor")]
@@ -424,6 +437,7 @@ impl MenuState {
         Self {
             games: Vec::new(),
             homebrew: Vec::new(),
+            recent_discs: Vec::new(),
             games_path: String::new(),
             expanded_folders: HashSet::new(),
             game_loaded: false,
@@ -466,9 +480,21 @@ impl MenuState {
         self.homebrew = examples.iter().chain(projects).cloned().collect();
         self.expanded_folders.retain(|folder| {
             folder == Path::new(HOMEBREW_FOLDER)
+                || folder == Path::new(RECENT_FOLDER)
                 || games.iter().any(|game| game.folder.starts_with(folder))
         });
         self.rebuild_library();
+    }
+
+    /// Replace the "Recent discs" list (newest first) and rebuild the Library.
+    pub fn set_recent_discs(&mut self, recent: &[LibraryItem]) {
+        self.recent_discs = recent.to_vec();
+        self.rebuild_library();
+    }
+
+    /// Whether the Library column is what the menu is showing right now.
+    pub fn library_view_visible(&self) -> bool {
+        self.open && self.category_index == 0
     }
 
     /// Rebuild the Library column in place. A selected game or folder stays
@@ -482,6 +508,7 @@ impl MenuState {
         self.categories[0] = build_library_category(
             &self.games,
             &self.homebrew,
+            &self.recent_discs,
             &self.expanded_folders,
             &self.games_path,
         );
@@ -2569,6 +2596,7 @@ impl LibraryFolder<'_> {
 fn build_library_category(
     games: &[LibraryItem],
     homebrew: &[LibraryItem],
+    recent: &[LibraryItem],
     expanded: &HashSet<PathBuf>,
     games_path: &str,
 ) -> Category {
@@ -2615,6 +2643,31 @@ fn build_library_category(
         }
     }
 
+    if !recent.is_empty() {
+        let key = PathBuf::from(RECENT_FOLDER);
+        let open = expanded.contains(&key);
+        items.push(MenuItem {
+            depth: 0,
+            label: "Recent discs".into(),
+            action: MenuAction::ToggleLibraryFolder(key),
+            burn_action: None,
+            value: Some(format!(
+                "{} {}",
+                recent.len(),
+                if recent.len() == 1 { "disc" } else { "discs" }
+            )),
+        });
+        if open {
+            items.extend(recent.iter().map(|entry| MenuItem {
+                depth: 1,
+                label: entry.title.clone(),
+                action: MenuAction::LaunchGame(entry.id.clone()),
+                burn_action: None,
+                value: (!entry.subtitle.is_empty()).then(|| entry.subtitle.clone()),
+            }));
+        }
+    }
+
     if cfg!(target_arch = "wasm32") {
         items.push(row("Load games folder", MenuAction::ChooseGamesPath, None));
         // Reload the folder remembered from a previous visit (Chrome/Edge;
@@ -2622,6 +2675,11 @@ fn build_library_category(
         #[cfg(target_arch = "wasm32")]
         items.push(row("Reconnect saved games", MenuAction::Reconnect, None));
     } else {
+        items.push(row(
+            "Open disc...",
+            MenuAction::OpenDisc,
+            Some(OPEN_DISC_SHORTCUT),
+        ));
         items.push(row(
             "Choose games folder",
             MenuAction::ChooseGamesPath,
@@ -2814,6 +2872,7 @@ mod tests {
             [
                 "Bonnie Studios",
                 "Root game",
+                "Open disc...",
                 "Choose games folder",
                 "Refresh library"
             ]
@@ -2840,10 +2899,10 @@ mod tests {
         );
         menu.toggle_library_folder(Path::new("Bonnie Studios"));
         assert_eq!(menu.item_index, 0);
-        assert_eq!(menu.categories[0].items.len(), 4);
+        assert_eq!(menu.categories[0].items.len(), 5);
         let mut fresh = MenuState::new();
         fresh.set_library(&games, &[], &[]);
-        assert_eq!(fresh.categories[0].items.len(), 4);
+        assert_eq!(fresh.categories[0].items.len(), 5);
     }
 
     #[test]
@@ -2954,6 +3013,45 @@ mod tests {
     }
 
     #[test]
+    fn recent_discs_form_a_folder_that_launches_by_token() {
+        let mut s = MenuState::new();
+        assert!(!labels(&s, "Library").contains(&"Recent discs".to_string()));
+        s.set_recent_discs(&[
+            dummy_item("open:/x/A.cue", "A", "x"),
+            dummy_item("open:/y/B.bin", "B", "y"),
+        ]);
+        let rows = labels(&s, "Library");
+        assert_eq!(rows[0], "Recent discs");
+        assert_eq!(s.categories[0].items[0].value.as_deref(), Some("2 discs"));
+        // Collapsed until opened, like Homebrew.
+        assert!(!rows.contains(&"A".to_string()));
+        s.toggle_library_folder(Path::new(RECENT_FOLDER));
+        let opened = &s.categories[0].items;
+        assert_eq!(opened[1].label, "A");
+        assert_eq!(
+            opened[1].action,
+            MenuAction::LaunchGame("open:/x/A.cue".into())
+        );
+        assert_eq!(opened[1].depth, 1);
+        // They survive a library refresh, and clearing them removes the folder.
+        s.set_library(&[], &[], &[]);
+        assert!(labels(&s, "Library").contains(&"B".to_string()));
+        s.set_recent_discs(&[]);
+        assert!(!labels(&s, "Library").contains(&"Recent discs".to_string()));
+    }
+
+    #[test]
+    fn the_library_column_reports_when_it_is_on_screen() {
+        let mut s = MenuState::new();
+        assert!(s.library_view_visible());
+        s.select_category("Settings");
+        assert!(!s.library_view_visible());
+        s.select_category("Library");
+        s.open = false;
+        assert!(!s.library_view_visible());
+    }
+
+    #[test]
     fn folder_and_refresh_rows_appear_exactly_once_at_the_bottom() {
         let mut s = MenuState::new();
         s.set_library(
@@ -2963,23 +3061,28 @@ mod tests {
         );
         s.toggle_library_folder(Path::new(HOMEBREW_FOLDER));
         let actions: Vec<_> = s.categories.iter().flat_map(|c| &c.items).collect();
-        for wanted in [MenuAction::RescanLibrary, MenuAction::ChooseGamesPath] {
+        for wanted in [
+            MenuAction::RescanLibrary,
+            MenuAction::ChooseGamesPath,
+            MenuAction::OpenDisc,
+        ] {
             assert_eq!(actions.iter().filter(|i| i.action == wanted).count(), 1);
         }
         let library = &s.categories[0].items;
         let n = library.len();
+        assert_eq!(library[n - 3].action, MenuAction::OpenDisc);
         assert_eq!(library[n - 2].action, MenuAction::ChooseGamesPath);
         assert_eq!(library[n - 1].action, MenuAction::RescanLibrary);
         s.set_games_path_label("discs");
         assert_eq!(s.categories[0].items[n - 2].value.as_deref(), Some("discs"));
-        // An empty library has no placeholder rows, only the two actions.
+        // An empty library has no placeholder rows, only the three actions.
         let empty = MenuState::new();
         assert_eq!(
             labels(&empty, "Library"),
-            ["Choose games folder", "Refresh library"]
+            ["Open disc...", "Choose games folder", "Refresh library"]
         );
         assert_eq!(
-            empty.categories[0].items[0].value.as_deref(),
+            empty.categories[0].items[1].value.as_deref(),
             Some("Missing")
         );
         assert!(!labels(&s, "Settings")
@@ -3004,6 +3107,7 @@ mod tests {
                 "Ports",
                 "Crash",
                 "Homebrew",
+                "Open disc...",
                 "Choose games folder",
                 "Refresh library"
             ]

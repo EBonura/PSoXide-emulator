@@ -466,6 +466,9 @@ pub struct AppState {
     /// loads so a changed build gets flagged to the user. `None` when the
     /// image bytes were never in hand (e.g. a bundled example boot).
     current_game_hash: Option<u64>,
+    /// Whether the Library column was on screen last frame, so a return to
+    /// it (menu reopened, category switched back) rescans the games folder.
+    library_view_was_visible: bool,
 }
 
 /// A web disc waiting to boot (see `AppState::web_pending_boot`).
@@ -642,29 +645,21 @@ impl AppState {
             #[cfg(target_arch = "wasm32")]
             web_autoboot: false,
             current_game_hash: None,
+            // The menu starts open on the Library, which the startup scan
+            // below has just covered.
+            library_view_was_visible: true,
         };
-        // Startup auto-rescan: always run when a developer-facing build dir
-        // exists so stale `library.ron` entries (e.g. cargo
-        // `deps/<name>-<hash>.exe` intermediates picked up by an
-        // earlier version of the scanner before the deps/ filter
-        // landed) get purged. `scan_roots` is mtime-cached for
-        // already-seen files, so the cost is bounded by
-        // "number of files that changed since last scan" -- cheap
-        // on every boot.
-        //
-        // Scoped to "SDK/project dirs exist" so an end-user install
-        // without local builds doesn't pay the cost every startup.
-        let sdk_exists = out
-            .resolve_sdk_examples_dir()
-            .is_some_and(|sdk_dir| sdk_dir.exists());
-        let projects_exist = out
-            .resolve_editor_projects_dir()
-            .is_some_and(|projects_dir| projects_dir.exists());
-        if sdk_exists || projects_exist {
-            if let Err(e) = out.rescan_library() {
-                eprintln!("[frontend] startup auto-rescan skipped: {e}");
-            }
+        // Startup rescan, always: new discs dropped into the games folder
+        // since the last run show up without a manual refresh. `scan_roots`
+        // reuses the cached entry for every file whose mtime and size are
+        // unchanged, so the cost is a directory walk plus a parse of only
+        // what changed. It also purges stale entries (e.g. cargo `deps/`
+        // intermediates an older scanner picked up).
+        if let Err(e) = out.rescan_library_quiet() {
+            eprintln!("[frontend] startup rescan skipped: {e}");
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        out.adopt_legacy_game_data();
         // Seed the Menu's Library from the (now possibly-rescanned)
         // library so the user sees entries immediately.
         out.refresh_menu_library();
@@ -785,6 +780,8 @@ impl AppState {
         // recording before replacing Bus/current_game so a file can never
         // silently contain frames from two executables.
         self.stop_input_recording_if_active();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.adopt_legacy_game_data_for(entry);
 
         // Flush the outgoing game's memcard before we discard its
         // Bus state. Silently log on failure -- we'd rather launch
@@ -1127,7 +1124,13 @@ impl AppState {
                 return;
             }
         };
-        if loaded.header.game_id != game.id {
+        // A save copied over from an older id of this same game still counts.
+        if loaded.header.game_id != game.id
+            && !self
+                .paths
+                .migrated_from(&game.id)
+                .contains(&loaded.header.game_id)
+        {
             self.status_message_set("Load state failed: save is from a different game".to_string());
             return;
         }
@@ -1293,6 +1296,9 @@ impl AppState {
             self.status_message_set("Loading game...");
             return Ok(());
         }
+        if let Some(path) = id.strip_prefix(OPEN_LAUNCH_ID_PREFIX) {
+            return self.open_disc_path(Path::new(path));
+        }
         let Some(entry) = library_entry_for_launch_id(&self.library.entries, id).cloned() else {
             return Err(format!("no library entry with id={id}"));
         };
@@ -1381,6 +1387,30 @@ impl AppState {
     /// Also refreshes the Menu's Library so the
     /// newly-scanned entries appear immediately.
     pub fn rescan_library(&mut self) -> Result<usize, String> {
+        let changed = self.rescan_library_quiet()?;
+        // An explicit refresh also covers a changed games folder, which
+        // changes what the menu shows without changing the cache.
+        self.refresh_menu_library();
+        let sdk_root = self.resolve_sdk_examples_dir();
+        let sdk_hint = match &sdk_root {
+            Some(p) if p.exists() => format!(" (SDK: {})", p.display()),
+            _ => String::new(),
+        };
+        self.status_message = Some((
+            format!(
+                "Scan complete: {} entries{sdk_hint}",
+                self.library.entries.len()
+            ),
+            STATUS_MESSAGE_TTL_SECS,
+        ));
+        Ok(changed)
+    }
+
+    /// [`Self::rescan_library`] without the status toast, for the scans the
+    /// app runs by itself (startup, returning to the Library). Writes
+    /// `library.ron` and rebuilds the menu only when the scan changed
+    /// something. Returns the number of entries parsed anew.
+    pub fn rescan_library_quiet(&mut self) -> Result<usize, String> {
         let game_library = self.settings.paths.game_library.trim();
         let game_root = if game_library.is_empty() {
             None
@@ -1413,25 +1443,17 @@ impl AppState {
         }
 
         let root_refs: Vec<&std::path::Path> = roots.iter().map(|p| p.as_path()).collect();
+        let before = self.library.clone();
         let changed = self
             .library
             .scan_roots(&root_refs)
             .map_err(|e| format!("scan failed: {e}"))?;
-        self.library
-            .save(&self.paths.library_file())
-            .map_err(|e| format!("save library.ron: {e}"))?;
-        self.refresh_menu_library();
-        let sdk_hint = match &sdk_root {
-            Some(p) if p.exists() => format!(" (SDK: {})", p.display()),
-            _ => String::new(),
-        };
-        self.status_message = Some((
-            format!(
-                "Scan complete: {} entries{sdk_hint}",
-                self.library.entries.len()
-            ),
-            STATUS_MESSAGE_TTL_SECS,
-        ));
+        if self.library != before || !self.paths.library_file().exists() {
+            self.library
+                .save(&self.paths.library_file())
+                .map_err(|e| format!("save library.ron: {e}"))?;
+            self.refresh_menu_library();
+        }
         Ok(changed)
     }
 
@@ -1751,6 +1773,143 @@ impl AppState {
             });
         }
         self.menu.set_library(&games, &examples, &projects);
+        self.sync_menu_recent_discs();
+    }
+
+    /// Rescan the games folder when the Library column has just come back
+    /// on screen (the menu reopened, or another column switched back), so
+    /// discs added since the last look are listed without "Refresh library".
+    /// Cheap when nothing changed: a directory walk, no re-parsing.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn rescan_on_library_view(&mut self) {
+        let visible = self.menu.library_view_visible();
+        let entered = visible && !self.library_view_was_visible;
+        self.library_view_was_visible = visible;
+        if entered {
+            if let Err(e) = self.rescan_library_quiet() {
+                eprintln!("[frontend] library rescan skipped: {e}");
+            }
+        }
+    }
+
+    /// Copy per-game data saved under the older, collision-prone ids into
+    /// the directory of each game's current id (see
+    /// [`ConfigPaths::adopt_legacy_game_dir`]). Old directories are left in
+    /// place. Games without data under an old id cost two sector reads.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn adopt_legacy_game_data(&self) {
+        let game_root = PathBuf::from(self.settings.paths.game_library.trim());
+        for entry in &self.library.entries {
+            if entry_in_game_root(&entry.path, &game_root) {
+                self.adopt_legacy_game_data_for(entry);
+            }
+        }
+    }
+
+    /// [`Self::adopt_legacy_game_data`] for one entry.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn adopt_legacy_game_data_for(&self, entry: &LibraryEntry) {
+        let Some(legacy) = psoxide_settings::library::legacy_id(entry) else {
+            return;
+        };
+        match self.paths.adopt_legacy_game_dir(&legacy, &entry.id) {
+            Ok(0) => {}
+            Ok(n) => eprintln!(
+                "[frontend] copied {n} saved file(s) of \"{}\" from games/{legacy} to games/{}",
+                entry.title, entry.id
+            ),
+            Err(e) => eprintln!(
+                "[frontend] could not copy saved data of \"{}\" from games/{legacy}: {e}",
+                entry.title
+            ),
+        }
+    }
+
+    /// Show the discs opened with "Open disc..." (newest first) in the
+    /// Library's "Recent discs" folder. Files that are gone are skipped.
+    pub fn sync_menu_recent_discs(&mut self) {
+        let items: Vec<MenuLibraryItem> = self
+            .settings
+            .paths
+            .recent_discs
+            .iter()
+            .filter(|p| Path::new(p).exists())
+            .map(|p| {
+                let path = Path::new(p);
+                MenuLibraryItem {
+                    folder: PathBuf::new(),
+                    id: format!("{OPEN_LAUNCH_ID_PREFIX}{p}"),
+                    title: path
+                        .file_stem()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(p)
+                        .to_string(),
+                    subtitle: path
+                        .parent()
+                        .and_then(|d| d.file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    burnable: false,
+                    launchable: true,
+                }
+            })
+            .collect();
+        self.menu.set_recent_discs(&items);
+    }
+
+    /// Ask for a disc image or EXE anywhere on disk and launch it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_disc_dialog(&mut self) {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Open disc")
+            .add_filter(
+                "Discs and executables",
+                &["cue", "bin", "iso", "ccd", "ecm", "exe"],
+            )
+            .add_filter("All files", &["*"]);
+        let start = self
+            .settings
+            .paths
+            .recent_discs
+            .first()
+            .map(String::as_str)
+            .and_then(path_parent_or_self)
+            .or_else(|| path_parent_or_self(self.settings.paths.game_library.trim()));
+        if let Some(dir) = start {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        match self.open_disc_path(&path) {
+            Ok(()) => self.menu.open = false,
+            Err(e) => {
+                eprintln!("[frontend] open disc failed: {e}");
+                self.status_message_set(format!("Open failed: {e}"));
+            }
+        }
+    }
+
+    /// Launch the disc or EXE at `path` directly and remember it under
+    /// "Recent discs". It is not added to the games folder's list or to
+    /// `library.ron`. Per-game data (memory card, save states) lives under
+    /// the disc's own identity, the same as for a library game.
+    pub fn open_disc_path(&mut self, path: &Path) -> Result<(), String> {
+        let entry = psoxide_settings::library::entry_for_path(path)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.adopt_legacy_game_data_for(&entry);
+        self.launch_entry(&entry)?;
+        let key = entry.path.to_string_lossy().into_owned();
+        let recent = &mut self.settings.paths.recent_discs;
+        recent.retain(|p| *p != key);
+        recent.insert(0, key);
+        recent.truncate(MAX_RECENT_DISCS);
+        if let Err(e) = self.save_settings() {
+            eprintln!("[frontend] {e}");
+        }
+        self.sync_menu_recent_discs();
+        Ok(())
     }
 
     /// Persist the current `Settings` to `settings.ron`. Called
@@ -3841,6 +4000,10 @@ fn game_menu_item(
 }
 
 const PATH_LAUNCH_ID_PREFIX: &str = "path:";
+/// Launch token of a disc opened with "Open disc...": the file's path.
+const OPEN_LAUNCH_ID_PREFIX: &str = "open:";
+/// How many opened discs the Library remembers.
+const MAX_RECENT_DISCS: usize = 8;
 const PROJECT_LAUNCH_ID_PREFIX: &str = "project-path:";
 
 fn path_launch_id(path: &Path) -> String {
@@ -4711,7 +4874,7 @@ mod tests {
             .into_iter()
             .map(|(depth, label, _)| (depth, label))
             .filter(|(_, label)| {
-                !["Choose", "Refresh", "Homebrew"]
+                !["Choose", "Refresh", "Homebrew", "Open disc"]
                     .iter()
                     .any(|skip| label.starts_with(skip))
             })
@@ -5379,6 +5542,152 @@ mod tests {
         let path = state.port1_memcard_for_launch("g").unwrap();
         assert_eq!(path, state.paths.memcard_file("g", 1));
         assert!(!state.paths.pre_hle_memcard_file("g", 1).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Save settings with `games` as the games folder before a state is built.
+    fn write_games_folder_setting(config: &Path, games: &Path) {
+        let mut settings = Settings::default();
+        settings.paths.game_library = games.to_string_lossy().into_owned();
+        settings
+            .save(&ConfigPaths::rooted(config).settings_file())
+            .unwrap();
+    }
+
+    /// A zero-filled disc with a CUE, listed under `stem` in the Library.
+    fn write_blank_disc(dir: &Path, stem: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(format!("{stem}.bin")), vec![0u8; 2352 * 20]).unwrap();
+        std::fs::write(
+            dir.join(format!("{stem}.cue")),
+            format!("FILE \"{stem}.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n"),
+        )
+        .unwrap();
+    }
+
+    fn library_titles(state: &AppState) -> Vec<String> {
+        state
+            .menu
+            .library_rows()
+            .into_iter()
+            .map(|(_, label, _)| label)
+            .collect()
+    }
+
+    /// "Open disc..." launches a file from anywhere, remembers it under
+    /// Recent discs, and leaves both the games list and library.ron alone.
+    #[test]
+    fn open_disc_launches_and_remembers_without_joining_the_games_list() {
+        let root = frontend_test_temp_dir("open-disc");
+        let games = root.join("games");
+        std::fs::create_dir_all(&games).unwrap();
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let bin = elsewhere.join("Some Game.bin");
+        let other = elsewhere.join("Other.bin");
+        std::fs::write(&bin, bootable_test_bin()).unwrap();
+        std::fs::write(&other, bootable_test_bin()).unwrap();
+        let config = root.join("config");
+        write_games_folder_setting(&config, &games);
+        let mut state = AppState::with_config_dir(Some(config.clone()));
+
+        state.open_disc_path(&bin).unwrap();
+        assert!(state.running && state.bus.is_some());
+        let current = state.current_game.clone().unwrap();
+        assert_eq!(current.path, bin.canonicalize().unwrap());
+        assert!(state.library.entries.iter().all(|e| e.path != current.path));
+        assert!(!library_titles(&state).contains(&"Some Game".to_string()));
+        assert!(library_titles(&state).contains(&"Recent discs".to_string()));
+
+        // Newest first, no duplicates, persisted for the next run.
+        state.open_disc_path(&other).unwrap();
+        state.open_disc_path(&bin).unwrap();
+        let recent = state.settings.paths.recent_discs.clone();
+        assert_eq!(recent.len(), 2);
+        assert!(recent[0].ends_with("Some Game.bin") && recent[1].ends_with("Other.bin"));
+        let saved = Settings::load(&state.paths.settings_file()).unwrap();
+        assert_eq!(saved.paths.recent_discs, recent);
+
+        // The Recent discs row launches by its token, and a bad file fails
+        // without touching the list.
+        state
+            .launch_by_id(&format!("{OPEN_LAUNCH_ID_PREFIX}{}", recent[1]))
+            .unwrap();
+        assert!(state
+            .current_game
+            .as_ref()
+            .unwrap()
+            .path
+            .ends_with("Other.bin"));
+        let notes = elsewhere.join("notes.txt");
+        std::fs::write(&notes, b"x").unwrap();
+        assert!(state.open_disc_path(&notes).is_err());
+        assert_eq!(state.settings.paths.recent_discs[0], recent[1]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Discs dropped into the games folder show up at the next start and on
+    /// returning to the Library, with no manual "Refresh library".
+    #[test]
+    fn new_discs_appear_at_startup_and_on_returning_to_the_library() {
+        let root = frontend_test_temp_dir("auto-rescan");
+        let games = root.join("games");
+        write_blank_disc(&games.join("Alpha"), "Alpha");
+        let config = root.join("config");
+        write_games_folder_setting(&config, &games);
+        let first = AppState::with_config_dir(Some(config.clone()));
+        assert!(library_titles(&first).contains(&"Alpha".to_string()));
+
+        write_blank_disc(&games.join("Beta"), "Beta");
+        let mut state = AppState::with_config_dir(Some(config));
+        let titles = library_titles(&state);
+        assert!(titles.contains(&"Alpha".to_string()) && titles.contains(&"Beta".to_string()));
+
+        // Still on the Library: no rescan. Away and back: rescan.
+        write_blank_disc(&games.join("Gamma"), "Gamma");
+        state.rescan_on_library_view();
+        assert!(!library_titles(&state).contains(&"Gamma".to_string()));
+        state.menu.select_category("Settings");
+        state.rescan_on_library_view();
+        state.menu.select_category("Library");
+        state.rescan_on_library_view();
+        assert!(library_titles(&state).contains(&"Gamma".to_string()));
+
+        // An unchanged folder is not re-parsed or re-saved.
+        let ron = state.paths.library_file();
+        let stamp = std::fs::metadata(&ron).unwrap().modified().unwrap();
+        assert_eq!(state.rescan_library_quiet().unwrap(), 0);
+        assert_eq!(std::fs::metadata(&ron).unwrap().modified().unwrap(), stamp);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Data saved under an id that several discs shared is copied to each
+    /// disc's own id at startup; the old directory stays.
+    #[test]
+    fn startup_copies_data_saved_under_the_old_shared_id() {
+        let root = frontend_test_temp_dir("legacy-ids");
+        let games = root.join("games");
+        std::fs::create_dir_all(&games).unwrap();
+        let a = games.join("A.bin");
+        std::fs::write(&a, bootable_test_bin()).unwrap();
+        let entry = psoxide_settings::library::entry_for_path(&a).unwrap();
+        let old_id = psoxide_settings::library::legacy_id(&entry).expect("new scheme differs");
+        assert_ne!(old_id, entry.id);
+
+        let config = root.join("config");
+        write_games_folder_setting(&config, &games);
+        let paths = ConfigPaths::rooted(&config);
+        let old_card = paths.memcard_file(&old_id, 1);
+        std::fs::create_dir_all(old_card.parent().unwrap()).unwrap();
+        std::fs::write(&old_card, b"saved game").unwrap();
+
+        let state = AppState::with_config_dir(Some(config));
+        assert_eq!(
+            std::fs::read(state.paths.memcard_file(&entry.id, 1)).unwrap(),
+            b"saved game"
+        );
+        assert_eq!(std::fs::read(&old_card).unwrap(), b"saved game");
+        assert_eq!(state.paths.migrated_from(&entry.id), [old_id]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
