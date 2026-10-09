@@ -356,6 +356,15 @@ pub struct Gpu {
     /// Tracer bookkeeping -- excluded from save states.
     #[serde(skip)]
     current_cmd_index: u32,
+    /// Presentation memory for field-rendered 480i frames: the lines of
+    /// each field as it was last on display, kept while the GPU is barred
+    /// from the displayed field (see [`Gpu::skipped_row_parity`]). Output
+    /// only; excluded from save states.
+    #[serde(skip)]
+    field_hold: Vec<u16>,
+    /// Consecutive vblanks in that mode, saturating at 2 (both fields held).
+    #[serde(skip)]
+    field_hold_fields: u8,
 
     /// GPU execution backlog in CPU/bus cycles. Raster and VRAM
     /// commands add silicon-calibrated work; elapsed bus cycles drain
@@ -742,6 +751,8 @@ impl Gpu {
             cmd_log: Vec::new(),
             cmd_log_enabled: false,
             current_cmd_index: 0,
+            field_hold: Vec::new(),
+            field_hold_fields: 0,
             busy_credit: 0,
             cmd_ingest_credit: 0,
             dma_busy_credit: 0,
@@ -902,7 +913,8 @@ impl Gpu {
         // row at a time.
         let row_bytes = usize::from(effective_w) * if da.bpp24 { 3 } else { 2 };
         let mut bytes = [0u8; VRAM_WIDTH * 2];
-        let words = self.vram.words();
+        let presented = self.presented_words();
+        let words = &*presented;
         for dy in 0..effective_h {
             let start = usize::from(da.y + dy) * VRAM_WIDTH + usize::from(da.x);
             let halfwords = row_bytes.div_ceil(2);
@@ -1088,7 +1100,8 @@ impl Gpu {
         // row `dy - off_y` when that lies inside the display area.
         let (w, h) = (i32::from(eff_w), i32::from(eff_h));
         let mut out = [0u8, 0, 0, 0xFF].repeat(w as usize * h as usize);
-        let words = self.vram.words();
+        let presented = self.presented_words();
+        let words = &*presented;
         for dy in 0..h {
             let src_y = dy - off_y;
             if src_y < 0 || src_y >= h {
@@ -1197,11 +1210,54 @@ impl Gpu {
     /// often polls this bit to tell that a new frame has started,
     /// independent of the VBlank IRQ.
     pub fn toggle_vblank_field(&mut self) {
+        self.hold_displayed_field();
         self.status.toggle_field();
         // Piggy-back the wireframe journal rotation on the vblank pulse --
         // it's the GPU's only per-frame hook. No-op unless wireframe drew
         // something recently.
         self.wireframe_frame_boundary();
+    }
+
+    /// At a vblank, keep the lines of the field that was on display.
+    ///
+    /// A game that renders 480i frames field by field redraws the lines of
+    /// the other field while one is shown, so VRAM alone never holds a
+    /// whole picture at any one instant. The held lines let
+    /// [`Gpu::presented_words`] show both fields, as the eye does on a CRT.
+    fn hold_displayed_field(&mut self) {
+        let shown = self.skipped_row_parity();
+        if shown < 0 {
+            self.field_hold_fields = 0;
+            return;
+        }
+        if self.field_hold.is_empty() {
+            self.field_hold = vec![0; VRAM_WIDTH * VRAM_HEIGHT];
+        }
+        let words = self.vram.words();
+        let first = usize::from(self.display_start_y);
+        let last = (first + usize::from(self.effective_display_height())).min(VRAM_HEIGHT);
+        for y in (first..last).filter(|y| (y & 1) as i32 == shown) {
+            let row = y * VRAM_WIDTH..(y + 1) * VRAM_WIDTH;
+            self.field_hold[row.clone()].copy_from_slice(&words[row]);
+        }
+        self.field_hold_fields = (self.field_hold_fields + 1).min(2);
+    }
+
+    /// VRAM as presented: the live lines of the field on display and, while
+    /// field rendering is in effect, the held lines of the other field.
+    fn presented_words(&self) -> std::borrow::Cow<'_, [u16]> {
+        let shown = self.skipped_row_parity();
+        if shown < 0 || self.field_hold_fields < 2 {
+            return std::borrow::Cow::Borrowed(self.vram.words());
+        }
+        let mut words = self.vram.words().to_vec();
+        let first = usize::from(self.display_start_y);
+        let last = (first + usize::from(self.effective_display_height())).min(VRAM_HEIGHT);
+        for y in (first..last).filter(|y| (y & 1) as i32 != shown) {
+            let row = y * VRAM_WIDTH..(y + 1) * VRAM_WIDTH;
+            words[row.clone()].copy_from_slice(&self.field_hold[row]);
+        }
+        std::borrow::Cow::Owned(words)
     }
 
     /// Erase two-render-old wireframe edges and rotate the journal.
@@ -3123,13 +3179,26 @@ impl Gpu {
                 } else {
                     color
                 };
-                self.vram.fill_rect_unwrapped(
-                    left as u16,
-                    top as u16,
-                    right as u16,
-                    bottom as u16,
-                    color,
-                );
+                let skip = self.skipped_row_parity();
+                if skip < 0 {
+                    self.vram.fill_rect_unwrapped(
+                        left as u16,
+                        top as u16,
+                        right as u16,
+                        bottom as u16,
+                        color,
+                    );
+                } else {
+                    for row in (top..=bottom).filter(|row| (row & 1) != skip) {
+                        self.vram.fill_rect_unwrapped(
+                            left as u16,
+                            row as u16,
+                            right as u16,
+                            row as u16,
+                            color,
+                        );
+                    }
+                }
                 return;
             }
 
@@ -3137,9 +3206,11 @@ impl Gpu {
                 mask_check: self.mask_check_before_draw,
                 mask_or: if self.mask_set_on_draw { 0x8000 } else { 0 },
             };
+            let skip = self.skipped_row_parity();
             span::flat_rows(
                 self.vram.array_mut(),
                 (left, top, right, bottom),
+                skip,
                 color,
                 mode,
                 merge,
@@ -3712,15 +3783,20 @@ impl Gpu {
             mask_or: if self.mask_set_on_draw { 0x8000 } else { 0 },
         };
         let general = prim.semi || merge.mask_check;
+        let skip = self.skipped_row_parity();
         let clut = &self.clut_cache;
         let vram = self.vram.array_mut();
         let rows = (top, bottom);
         macro_rules! go {
             ($d:expr, $s:expr, $di:expr) => {
                 if general {
-                    span::tex_rows::<$d, $s, $di, true>(vram, clut, tex, rows, row, prim, merge)
+                    span::tex_rows::<$d, $s, $di, true>(
+                        vram, clut, tex, rows, skip, row, prim, merge,
+                    )
                 } else {
-                    span::tex_rows::<$d, $s, $di, false>(vram, clut, tex, rows, row, prim, merge)
+                    span::tex_rows::<$d, $s, $di, false>(
+                        vram, clut, tex, rows, skip, row, prim, merge,
+                    )
                 }
             };
         }
@@ -3748,6 +3824,26 @@ impl Gpu {
             bottom: self.draw_area_bottom as i32,
             left: self.draw_area_left as i32,
             right: self.draw_area_right as i32,
+            skip_parity: self.skipped_row_parity(),
+        }
+    }
+
+    /// Parity of the VRAM rows the GPU must not draw to, or `-1` for none.
+    ///
+    /// In 480-line interlaced mode (GP1(08h) bits 2 and 5) with GP0(E1h)
+    /// bit 10 clear ("drawing to display area: prohibited"), rendering and
+    /// fills leave the lines of the field being displayed alone and draw
+    /// only the other field's lines. GPUSTAT bit 31 names the field on
+    /// display (0 = even lines, 1 = odd).
+    #[inline]
+    fn skipped_row_parity(&self) -> i32 {
+        const INTERLACED_480: u32 = (1 << 19) | (1 << 22);
+        const DRAW_TO_DISPLAY: u32 = 1 << 10;
+        let raw = self.status.raw;
+        if raw & INTERLACED_480 == INTERLACED_480 && raw & DRAW_TO_DISPLAY == 0 {
+            (raw >> 31) as i32
+        } else {
+            -1
         }
     }
 
@@ -3824,6 +3920,9 @@ impl Gpu {
     /// [`Gpu::plot_pixel`] with its flags read once per primitive.
     #[inline(always)]
     fn plot_pixel_with(&mut self, state: PlotState, x: u16, y: u16, fg: u16, mode: BlendMode) {
+        if i32::from(y & 1) == self.skipped_row_parity() {
+            return;
+        }
         let existing = self.vram.get_pixel(x, y);
         if state.mask_check && existing & 0x8000 != 0 {
             return;
@@ -4359,9 +4458,14 @@ impl Gpu {
         // bottom.
         let (x, w) = (usize::from(x), usize::from(w));
         let first = w.min(VRAM_WIDTH - x);
+        let skip = self.skipped_row_parity();
         let vram = self.vram.array_mut();
         for row in 0..usize::from(h) {
-            let base = ((usize::from(y) + row) % VRAM_HEIGHT) * VRAM_WIDTH;
+            let line = (usize::from(y) + row) % VRAM_HEIGHT;
+            if (line & 1) as i32 == skip {
+                continue;
+            }
+            let base = line * VRAM_WIDTH;
             vram[base + x..base + x + first].fill(color15);
             vram[base..base + (w - first)].fill(color15);
         }

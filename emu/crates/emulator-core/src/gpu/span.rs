@@ -37,6 +37,9 @@ pub(super) struct Clip {
     pub bottom: i32,
     pub left: i32,
     pub right: i32,
+    /// Rows whose `y & 1` equals this are not drawn (`-1`: none). Set while
+    /// the GPU is barred from the interlaced field on display.
+    pub skip_parity: i32,
 }
 
 /// Visit the clipped, non-empty spans of a set-up triangle, top to bottom:
@@ -57,7 +60,7 @@ pub(super) fn tri_spans(setup: &TriRasterSetup, clip: Clip, mut span: impl FnMut
         while y < y1 {
             let xs = tri_span_x(lx).max(clip.left);
             let xe = tri_span_x(rx).min(clip.right + 1);
-            if xs < xe {
+            if xs < xe && (y & 1) != clip.skip_parity {
                 span(y, xs, xe);
             }
             lx += ls;
@@ -393,11 +396,15 @@ pub(super) fn tex_rows<const D: u8, const SHADE: u8, const DITHER: bool, const G
     clut: &[u16; 256],
     tex: TexFetch,
     (top, bottom): (i32, i32),
+    skip_parity: i32,
     mut row: impl FnMut(i32) -> (i32, i32, [u32; 4]),
     prim: &TexTri,
     merge: Merge,
 ) {
     for y in top..=bottom {
+        if (y & 1) == skip_parity {
+            continue;
+        }
         let (xs, xe, [u, v, du, dv]) = row(y);
         tex_span_chunked::<D, SHADE, DITHER, GENERAL>(
             vram,
@@ -635,6 +642,7 @@ pub(super) fn flat_tri(
 pub(super) fn flat_rows(
     vram: &mut [u16; VRAM_LEN],
     (left, top, right, bottom): (i32, i32, i32, i32),
+    skip_parity: i32,
     colour: u16,
     mode: BlendMode,
     merge: Merge,
@@ -642,6 +650,9 @@ pub(super) fn flat_rows(
     let plain = mode == BlendMode::Opaque && !merge.mask_check;
     let fg = [colour; LANES];
     for y in top..=bottom {
+        if (y & 1) == skip_parity {
+            continue;
+        }
         let row = y as usize * VRAM_WIDTH;
         let (mut x, end) = (left as usize, right as usize + 1);
         while x < end {
