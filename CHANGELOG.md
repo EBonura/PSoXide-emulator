@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- SIO0 follows the console's byte timing (hardware tests v2.1). A byte takes
+  ten bit times, not eight: it reaches DATA and sets RX not empty when it has
+  been through the wire (1360 clocks at the BIOS's BAUD, where the emulator
+  answered at once), and a DATA write behind it waits in the TX register.
+  `/ACK` rises 1677 clocks after a pad byte and 1511 (slot 1) or 1529 (slot 2)
+  after a card byte, for 92, 38 and 74 clocks. A full pad poll, which took
+  about 1100 clocks a byte, now takes about 1700, so games that poll the pad
+  see their input a few frames later in emulated time. Save states move to
+  format 15.
 - The GPU's DMA competes with the CPU for main RAM as it does on a console
   (hardware tests v2.1). While a linked-list walk is moving, RAM loads wait four
   clocks more and stores land 13 clocks apart (64 stores took 797 clocks
