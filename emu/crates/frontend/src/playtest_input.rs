@@ -131,11 +131,12 @@ impl PlaytestInputTape {
         }
     }
 
-    /// Stop recording and persist the tape.
+    /// Stop recording and persist the tape as `path` (the "latest" slot) plus
+    /// a timestamped copy beside it.
     pub(crate) fn stop_recording(&mut self, path: &Path) -> Result<usize, String> {
         let frames = self.finish_recording();
-        archive_existing_tape(path)?;
         write_tape_poll_bound(path, &self.samples, self.start_poll)?;
+        save_timestamped_copy(path)?;
         Ok(frames)
     }
 
@@ -267,42 +268,55 @@ impl PlaytestInputTape {
     }
 }
 
-/// Preserve the previous `latest.pxtape` before replacing it. Recordings can
-/// represent hours of navigation and must not silently disappear when a new
-/// capture starts.
-fn archive_existing_tape(path: &Path) -> Result<(), String> {
-    if !path.is_file() {
-        return Ok(());
-    }
+/// Keep a timestamped copy next to `latest.pxtape` so the next recording,
+/// which replaces `latest.pxtape`, cannot overwrite this one. Returns the
+/// copy's path. The name is the UTC time the recording stopped.
+fn save_timestamped_copy(path: &Path) -> Result<std::path::PathBuf, String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("input tape has no parent directory: {}", path.display()))?;
-    let archive_dir = parent.join("archive");
-    std::fs::create_dir_all(&archive_dir)
-        .map_err(|error| format!("create {}: {error}", archive_dir.display()))?;
-    let modified = std::fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .unwrap_or_else(|_| SystemTime::now());
-    let elapsed = modified.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let base = format!(
-        "recording-{}-{:09}",
-        elapsed.as_secs(),
-        elapsed.subsec_nanos()
-    );
-    let mut archive_path = archive_dir.join(format!("{base}.pxtape"));
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let base = format!("recording-{}", utc_stamp(secs));
+    let mut copy = parent.join(format!("{base}.pxtape"));
     let mut suffix = 1u32;
-    while archive_path.exists() {
-        archive_path = archive_dir.join(format!("{base}-{suffix}.pxtape"));
+    while copy.exists() {
+        copy = parent.join(format!("{base}-{suffix}.pxtape"));
         suffix = suffix.saturating_add(1);
     }
-    std::fs::copy(path, &archive_path).map_err(|error| {
-        format!(
-            "archive {} to {}: {error}",
-            path.display(),
-            archive_path.display()
-        )
-    })?;
-    Ok(())
+    std::fs::copy(path, &copy)
+        .map_err(|error| format!("copy {} to {}: {error}", path.display(), copy.display()))?;
+    Ok(copy)
+}
+
+/// `YYYYMMDDTHHMMSSZ` for a Unix time in seconds (proleptic Gregorian, UTC).
+fn utc_stamp(unix_secs: u64) -> String {
+    let days = (unix_secs / 86_400) as i64;
+    let rem = unix_secs % 86_400;
+    // Civil-from-days: shift the epoch to 0000-03-01 so leap days fall at the
+    // end of the year, then split into 400-year eras.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 #[cfg(test)]
@@ -368,9 +382,9 @@ mod tests {
     }
 
     #[test]
-    fn replacing_latest_tape_archives_the_previous_recording() {
+    fn every_recording_keeps_a_timestamped_copy_beside_latest() {
         let root = std::env::temp_dir().join(format!(
-            "psoxide-input-tape-archive-test-{}",
+            "psoxide-input-tape-copy-test-{}",
             std::process::id()
         ));
         let path = root.join("latest.pxtape");
@@ -393,14 +407,34 @@ mod tests {
         tape.note_polls(second, 1);
         tape.stop_recording(&path).unwrap();
 
+        // latest.pxtape is the newest; both recordings survive as copies,
+        // even when both stop within the same second.
         assert_eq!(read_input_tape(&path).unwrap().samples, [second]);
-        let archived = std::fs::read_dir(root.join("archive"))
+        let mut copies = std::fs::read_dir(&root)
             .unwrap()
             .map(|entry| entry.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("recording-"))
+            })
             .collect::<Vec<_>>();
-        assert_eq!(archived.len(), 1);
-        assert_eq!(read_input_tape(&archived[0]).unwrap().samples, [first]);
+        assert_eq!(copies.len(), 2);
+        copies.sort_by_key(|p| read_input_tape(p).unwrap().samples[0].buttons);
+        assert_eq!(read_input_tape(&copies[0]).unwrap().samples, [second]);
+        assert_eq!(read_input_tape(&copies[1]).unwrap().samples, [first]);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn utc_stamp_formats_known_instants() {
+        assert_eq!(utc_stamp(0), "19700101T000000Z");
+        // 2000-02-29 12:34:56 (leap day), 2026-10-09 10:44:00.
+        assert_eq!(utc_stamp(951_827_696), "20000229T123456Z");
+        assert_eq!(utc_stamp(1_791_542_640), "20261009T104400Z");
+        // Last second of a non-leap year, and the 400-year leap rule.
+        assert_eq!(utc_stamp(1_609_459_199), "20201231T235959Z");
+        assert_eq!(utc_stamp(4_107_542_400), "21000301T000000Z");
     }
 
     #[test]
