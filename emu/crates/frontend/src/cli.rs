@@ -1599,7 +1599,9 @@ fn run_headless_launch(
             if let Some(dir) = args.route_screenshot_dir.as_ref() {
                 if route_ticks.is_multiple_of(args.route_screenshot_interval) {
                     let path = dir.join(format!("tick-{route_ticks:06}.ppm"));
-                    let (rgba, width, height) = bus.gpu.display_rgba8();
+                    let (rgba, width, height) = bus
+                        .gpu
+                        .display_rgba8_with(emulator_core::Deinterlace::from_env());
                     write_rgb_ppm_from_rgba(&path, width, height, &rgba)?;
                 }
             }
@@ -2350,7 +2352,9 @@ fn run_headless_launch(
     }
 
     if let Some(path) = args.dump_display {
-        let (rgba, w, h) = bus.gpu.display_rgba8();
+        let (rgba, w, h) = bus
+            .gpu
+            .display_rgba8_with(emulator_core::Deinterlace::from_env());
         write_rgb_ppm_from_rgba(&path, w, h, &rgba)?;
         if emit_summary {
             eprintln!("[cli] CPU display → {} ({w}x{h})", path.display());
