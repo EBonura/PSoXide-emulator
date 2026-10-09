@@ -55,12 +55,16 @@ pub struct Timer {
     /// division: it must not suppress two whole HBlank ticks or two `/8` ticks.
     #[serde(default)]
     counter_hold_cycles: u8,
-    /// A current-value write can overlap the setup wait of the immediately
-    /// following external-bus read.
+    /// Clocks a CPU read of this counter samples early: the value it returns
+    /// leaves out the read's own MMIO wait. Unlike `counter_hold_cycles` the
+    /// clocks are not lost; they come back as `read_credit` at the next
+    /// advance (hwtest v2.1: a counter polled for a second loses no ticks).
     #[serde(default)]
-    counter_bus_overlap_pending: bool,
+    read_hold_cycles: u8,
+    /// Read-hold clocks consumed by the last advance, given back to the
+    /// counter by the next one.
     #[serde(default)]
-    counter_write_cycle: u64,
+    read_credit: u8,
     /// One-shot IRQs stop producing edges after their first event, but this is
     /// independent of observable mode bit 10. In pulse mode the bit returns
     /// high immediately after the short low pulse on real hardware.
@@ -221,6 +225,8 @@ impl Timers {
             0x0 => {
                 t.counter = v16;
                 t.target_reset_hold = false;
+                t.read_hold_cycles = 0;
+                t.read_credit = 0;
                 // Reset-at-target releases one clock earlier; all other
                 // current-value writes occupy the root counter for the full
                 // three-clock CPU transaction.
@@ -229,8 +235,6 @@ impl Timers {
                 } else {
                     3
                 };
-                t.counter_bus_overlap_pending = true;
-                t.counter_write_cycle = now;
             }
             0x4 => {
                 // Mode writes reset the counter and re-arm the IRQ request,
@@ -247,8 +251,9 @@ impl Timers {
                 t.mode_write_count = t.mode_write_count.saturating_add(1);
                 t.sync_seen = false;
                 t.target_reset_hold = false;
+                t.read_hold_cycles = 0;
+                t.read_credit = 0;
                 t.counter_hold_cycles = 2;
-                t.counter_bus_overlap_pending = false;
                 t.irq_fired_once = false;
             }
             0x8 => t.target = v16,
@@ -401,7 +406,7 @@ impl Timers {
                 }
                 continue;
             }
-            if t.counter_hold_cycles != 0 {
+            if t.counter_hold_cycles != 0 || t.read_hold_cycles != 0 || t.read_credit != 0 {
                 return 0;
             }
             if t.mode & MODE_SYNC_ENABLE != 0 {
@@ -472,11 +477,18 @@ impl Timers {
 
     /// Latch only the selected root counter for its CPU-side MMIO wait clocks.
     /// Other root counters continue running and can therefore measure the
-    /// complete access time of this register.
+    /// complete access time of this register. The latch only moves the point
+    /// the value is sampled at: the clocks it covers are given back to the
+    /// counter at its next advance, so polling never loses ticks.
     pub fn hold_counter_for_read(&mut self, phys: u32, cycles: u32) {
         self.quiet_until = 0;
         let (idx, off) = decode(phys);
         let mode = self.timers[idx].mode;
+        // A synchronised counter's gating is part of its walk, which a
+        // credit cannot replay.
+        if mode & MODE_SYNC_ENABLE != 0 {
+            return;
+        }
         // Timer 1 on the HBlank source counts line pulses from the video
         // timing, which keep coming whatever the CPU is reading. Holding it
         // would not just freeze the displayed value for the wait clocks: the
@@ -513,27 +525,9 @@ impl Timers {
             4 => cycles.min(2),
             _ => return,
         };
-        self.timers[idx].counter_hold_cycles = self.timers[idx]
-            .counter_hold_cycles
+        self.timers[idx].read_hold_cycles = self.timers[idx]
+            .read_hold_cycles
             .saturating_add(cycles.min(u32::from(u8::MAX)) as u8);
-    }
-
-    /// Overlap the first external memory-controller wait with a just-written
-    /// root counter. Silicon timing sweeps expose this as one missing setup
-    /// wait on the first of 64 otherwise-identical accesses.
-    pub(crate) fn overlap_counter_write_with_external_read(&mut self, now: u64, stalls: u32) {
-        self.quiet_until = 0;
-        for timer in &mut self.timers {
-            if !timer.counter_bus_overlap_pending {
-                continue;
-            }
-            timer.counter_bus_overlap_pending = false;
-            if now.saturating_sub(timer.counter_write_cycle) <= 16 {
-                timer.counter_hold_cycles = timer
-                    .counter_hold_cycles
-                    .saturating_add(stalls.saturating_sub(2).min(u32::from(u8::MAX)) as u8);
-            }
-        }
     }
 
     /// Is this timer currently paused per its sync-mode bits?
@@ -569,13 +563,17 @@ impl Timers {
         next_vblank: u64,
         vblank_period: u64,
     ) -> bool {
-        let held_cycles = {
+        let (held_cycles, credit) = {
             let timer = &mut self.timers[idx];
             let held = cycles.min(u64::from(timer.counter_hold_cycles));
             timer.counter_hold_cycles -= held as u8;
-            held
+            let read_held = (cycles - held).min(u64::from(timer.read_hold_cycles));
+            timer.read_hold_cycles -= read_held as u8;
+            let credit = u64::from(timer.read_credit);
+            timer.read_credit = read_held as u8;
+            (held + read_held, credit)
         };
-        let cycles = cycles - held_cycles;
+        let cycles = cycles - held_cycles + credit;
         if idx == 1 && self.timers[1].mode & MODE_SYNC_ENABLE != 0 {
             // A read holds the counter, not the VBlank sync: a reset that
             // falls inside the held cycles must still happen. Walk the whole
@@ -1121,8 +1119,10 @@ mod tests {
     }
 
     #[test]
-    fn polling_the_system_clock_counter_still_holds_it() {
-        // The latch on the system-clock path is console-measured and stays.
+    fn polling_the_system_clock_counter_samples_early_but_loses_nothing() {
+        // The value a read returns leaves out its own wait clocks
+        // (console-measured), but the clocks are only deferred: polled for a
+        // second, hwtest v2.1 lost no ticks.
         let mut t = Timers::new();
         t.write32(0x1F80_1124, 0, 0);
         t.advance_to(100, 2172, 8);
@@ -1131,6 +1131,39 @@ mod tests {
         t.advance_to(110, 2172, 8);
         let counted = (t.read32(0x1F80_1120) & 0xFFFF).wrapping_sub(start) & 0xFFFF;
         assert_eq!(counted, 8);
+        // The next advance gives the two clocks back.
+        t.advance_to(111, 2172, 8);
+        let counted = (t.read32(0x1F80_1120) & 0xFFFF).wrapping_sub(start) & 0xFFFF;
+        assert_eq!(counted, 11);
+    }
+
+    #[test]
+    fn a_polled_counter_counts_every_clock_of_a_long_poll() {
+        for (idx_base, mode, divisor) in [
+            (0x1F80_1120u32, 0u32, 1u64),
+            (0x1F80_1100, 0, 1),
+            (0x1F80_1120, 0x200, 8),
+        ] {
+            let mut t = Timers::new();
+            t.write32(idx_base + 4, mode, 0);
+            let mut now = 100u64;
+            t.advance_to(now, NTSC_HSYNC, 8);
+            let mut total = 0u64;
+            let mut last = t.read32(idx_base) & 0xFFFF;
+            for _ in 0..200_000 {
+                t.hold_counter_for_read(idx_base, 4);
+                now += 10;
+                t.advance_to(now, NTSC_HSYNC, 8);
+                let value = t.read32(idx_base) & 0xFFFF;
+                total += u64::from(value.wrapping_sub(last) & 0xFFFF);
+                last = value;
+            }
+            let due = 200_000 * 10 / divisor;
+            assert!(
+                total.abs_diff(due) <= 8,
+                "{idx_base:#x} {mode:#x}: {total} of {due}"
+            );
+        }
     }
 
     #[test]
@@ -1159,13 +1192,13 @@ mod tests {
     }
 
     #[test]
-    fn timer1_vblank_reset_inside_a_read_hold_still_happens() {
+    fn timer1_vblank_reset_inside_a_write_hold_still_happens() {
         let mut t = Timers::new();
         t.set_vblank_sync_offset_lines(0);
         t.write32(0x1F80_1114, MODE_SYNC_ENABLE | (1 << 1), 0);
         t.advance_to_video(996, NTSC_HSYNC, 8, 1000, NTSC_PERIOD);
-        // A read holds the counter across the VBlank at 1000.
-        t.hold_counter_for_read(0x1F80_1110, 8);
+        // A counter write holds it across the VBlank at 1000.
+        t.write32(0x1F80_1110, 0, 996);
         t.advance_to_video(1010, NTSC_HSYNC, 8, 1000 + NTSC_PERIOD, NTSC_PERIOD);
         assert!(t.read32(0x1F80_1110) & 0xFFFF < 16);
     }

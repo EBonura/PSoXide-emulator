@@ -106,6 +106,7 @@ fn draw_contents(ui: &mut egui::Ui, state: &mut AppState, vram_tex: egui::Textur
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            collapsible(ui, "Input tape", true, |ui| input_tape(ui, state));
             collapsible(ui, "Developer", true, |ui| developer(ui, state));
             let mut export = None;
             collapsible(ui, "Guest performance (PS1)", true, |ui| {
@@ -136,6 +137,51 @@ fn draw_contents(ui: &mut egui::Ui, state: &mut AppState, vram_tex: egui::Textur
                 vram::draw_contents(ui, vram_tex);
             });
         });
+}
+
+/// Record a controller tape (`.pxtape`) of the running game and replay it.
+/// The same actions are in the Game menu (F8 records, F4 replays the newest).
+fn input_tape(ui: &mut egui::Ui, state: &mut AppState) {
+    let (recording, frames) = state.input_recording_status();
+    let loaded = state.bus.is_some();
+    ui.horizontal_wrapped(|ui| {
+        let label = if recording {
+            "Stop recording (F8)"
+        } else {
+            "Record input tape (F8)"
+        };
+        if ui
+            .add_enabled(loaded, egui::Button::new(label))
+            .on_hover_text(
+                "Restarts the game, then records the controller from boot. \
+                 Stopping saves latest.pxtape plus a timestamped copy.",
+            )
+            .clicked()
+        {
+            state.toggle_input_recording();
+        }
+        if ui
+            .add_enabled(loaded && !recording, egui::Button::new("Replay last (F4)"))
+            .on_hover_text("Restart the game and replay the newest recording")
+            .clicked()
+        {
+            state.replay_last_input();
+        }
+        if ui
+            .add_enabled(loaded && !recording, egui::Button::new("Load replay..."))
+            .clicked()
+        {
+            state.pick_input_replay();
+        }
+    });
+    if recording {
+        ui.colored_label(
+            egui::Color32::from_rgb(245, 54, 68),
+            format!("REC  {frames} frames"),
+        );
+    } else if !loaded {
+        ui.label("Launch a game to record.");
+    }
 }
 
 /// Stepping, render debugging, freecam, and the SDK examples build.
