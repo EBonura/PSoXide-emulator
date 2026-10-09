@@ -58,6 +58,9 @@ pub struct UiPngArgs {
     /// (repeatable; `/homebrew` is the Homebrew folder).
     #[arg(long)]
     pub expand: Vec<PathBuf>,
+    /// Print the Library column's rows (indented by depth) to stdout.
+    #[arg(long)]
+    pub dump_library: bool,
     /// Texture filter to show: none or edge.
     #[arg(long, default_value = "none")]
     pub filter: String,
@@ -88,6 +91,15 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
     let mut state = AppState::with_config_dir(Some(root.to_path_buf()));
     for folder in &args.expand {
         state.menu.toggle_library_folder(folder);
+    }
+    if args.dump_library {
+        for (depth, label, value) in state.menu.library_rows() {
+            println!(
+                "{}{label}  [{}]",
+                "  ".repeat(depth),
+                value.unwrap_or_default()
+            );
+        }
     }
     state.texture_filter = TextureFilter::from_setting(&args.filter);
     if let Some(exe) = args.exe.as_ref() {

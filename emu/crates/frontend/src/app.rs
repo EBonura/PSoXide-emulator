@@ -1481,6 +1481,13 @@ impl AppState {
                 .as_ref()
                 .is_some_and(|root| path_is_under(&e.path, root));
 
+            // library.ron is shared with the editor build, which also scans
+            // its own projects and example builds into it. Those are the
+            // editor's: only show what lives under this emulator's roots.
+            if !is_sdk_example && !entry_in_game_root(&e.path, &game_root) {
+                continue;
+            }
+
             // Audio tracks: any "(Track N)" filename where N != 1.
             // Multi-track CUE rips leave each audio track as a
             // standalone BIN; none of those boot, so hide them.
@@ -1529,6 +1536,11 @@ impl AppState {
                         .as_ref()
                         .is_some_and(|root| path_is_under(&e.path, root))
                     {
+                        continue;
+                    }
+                    // A .bin that is not a whole number of CD sectors is a
+                    // RAM dump or capture, not a disc.
+                    if e.kind == GameKind::DiscBin && !is_raw_sector_image(e.size) {
                         continue;
                     }
                     // Launch by path so copies with the same disc ID in
@@ -1583,6 +1595,8 @@ impl AppState {
         examples.extend(public_example_source_items(&built_examples));
 
         merge_baked_examples(&mut examples, &built_examples);
+
+        hoist_single_game_folders(&mut games);
 
         // Pass 3: stable alphabetical order per column.
         games.sort_by_key(|a| a.title.to_lowercase());
@@ -2899,6 +2913,43 @@ fn is_internal_example_artifact(path: &Path) -> bool {
     )
 }
 
+/// True when `path` is inside the user's games folder. An unset folder owns
+/// nothing, so a fresh install shows no stale entries from another checkout.
+fn entry_in_game_root(path: &Path, game_root: &Path) -> bool {
+    !game_root.as_os_str().is_empty() && path_is_under(path, game_root)
+}
+
+/// A raw `.bin` CD image holds whole 2352-byte sectors. (A 2 MiB RAM dump
+/// is a multiple of 2048 but not of 2352.)
+fn is_raw_sector_image(size: u64) -> bool {
+    size != 0 && size % 2352 == 0
+}
+
+/// A game's own folder (the one holding its CUE and tracks) is not a group.
+/// Lift each game out of every folder that holds only that game, so one-game
+/// folders show as plain rows and folders stay for real collections.
+fn hoist_single_game_folders(games: &mut [MenuLibraryItem]) {
+    let mut subtree: std::collections::HashMap<PathBuf, usize> = std::collections::HashMap::new();
+    for game in games.iter() {
+        let mut prefix = PathBuf::new();
+        for part in game.folder.components() {
+            prefix.push(part);
+            *subtree.entry(prefix.clone()).or_default() += 1;
+        }
+    }
+    for game in games.iter_mut() {
+        let mut prefix = PathBuf::new();
+        for part in game.folder.clone().components() {
+            let parent = prefix.clone();
+            prefix.push(part);
+            if subtree.get(&prefix) == Some(&1) {
+                game.folder = parent;
+                break;
+            }
+        }
+    }
+}
+
 fn path_is_under(path: &Path, root: &Path) -> bool {
     match (path.canonicalize(), root.canonicalize()) {
         (Ok(path), Ok(root)) => path.starts_with(root),
@@ -3593,6 +3644,96 @@ mod tests {
         assert!(!stream_failure_is_quiet(false, true));
     }
 
+    /// One row per game: a game's own folder is not a group, flat homebrew
+    /// discs with sidecar files show up, editor builds and RAM dumps do not.
+    #[test]
+    fn library_lists_one_row_per_game() {
+        let root = frontend_test_temp_dir("library-rows");
+        let games = root.join("games");
+        let editor = root.join("editor/projects/graybox/baked");
+        let disc = vec![0u8; 2352 * 20];
+        let write_disc = |dir: &Path, stem: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(format!("{stem}.bin")), &disc).unwrap();
+            std::fs::write(
+                dir.join(format!("{stem}.cue")),
+                format!(
+                    "FILE \"{stem}.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n"
+                ),
+            )
+            .unwrap();
+        };
+        // Flat homebrew disc with the sidecars the SDK build leaves beside it.
+        write_disc(&games, "quake-psx");
+        std::fs::write(games.join("quake-psx.SLICNSE.TXT"), "license").unwrap();
+        std::fs::write(games.join("quake-psx.provenance.json"), "{}").unwrap();
+        // A retail rip in its own folder, and a two-disc game in one folder.
+        write_disc(&games.join("Crash (USA)"), "Crash (USA)");
+        write_disc(&games.join("Saga/Disc 1"), "Saga (Disc 1)");
+        write_disc(&games.join("Saga/Disc 2"), "Saga (Disc 2)");
+        write_disc(&games.join("Pack"), "Alpha");
+        write_disc(&games.join("Pack"), "Beta");
+        // A RAM dump in the games folder and the editor's baked disc.
+        std::fs::create_dir_all(games.join("review")).unwrap();
+        std::fs::write(games.join("review/final-ram.bin"), vec![0u8; 2_097_152]).unwrap();
+        write_disc(&editor, "graybox_reach");
+
+        let mut state = AppState::with_config_dir(Some(root.join("config")));
+        state.settings.paths.game_library = games.to_string_lossy().into_owned();
+        // The shared library.ron can carry the editor checkout's entries.
+        state
+            .library
+            .scan_roots(&[games.as_path(), root.join("editor").as_path()])
+            .unwrap();
+        state.refresh_menu_library();
+        let rows: Vec<(usize, String)> = state
+            .menu
+            .library_rows()
+            .into_iter()
+            .map(|(depth, label, _)| (depth, label))
+            .filter(|(_, label)| {
+                !["Choose", "Refresh", "Homebrew"]
+                    .iter()
+                    .any(|skip| label.starts_with(skip))
+            })
+            .collect();
+        let top: Vec<_> = rows
+            .iter()
+            .filter(|(depth, _)| *depth == 0)
+            .map(|(_, label)| label.as_str())
+            .collect();
+        // Folders (two or more games) come first; Crash has its own folder
+        // on disk but is a plain row, as is the flat quake-psx.
+        assert_eq!(top, ["Pack", "Saga", "Crash (USA)", "quake-psx"]);
+        assert!(!rows
+            .iter()
+            .any(|(_, l)| l.contains("graybox") || l == "final-ram"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn single_game_folders_are_hoisted_and_collections_stay() {
+        let item = |folder: &str, title: &str| MenuLibraryItem {
+            folder: PathBuf::from(folder),
+            id: title.to_string(),
+            title: title.to_string(),
+            subtitle: String::new(),
+            burnable: false,
+            launchable: true,
+        };
+        let mut games = vec![
+            item("", "flat"),
+            item("One", "one"),
+            item("Deep/Same/Inner", "deep"),
+            item("Set", "a"),
+            item("Set", "b"),
+            item("Set/Nested", "c"),
+        ];
+        hoist_single_game_folders(&mut games);
+        let folders: Vec<_> = games.iter().map(|g| g.folder.to_str().unwrap()).collect();
+        assert_eq!(folders, ["", "", "", "Set", "Set", "Set"]);
+    }
+
     #[test]
     fn library_keeps_same_id_discs_in_their_own_cue_folders() {
         let root = frontend_test_temp_dir("library-folders");
@@ -3619,23 +3760,29 @@ mod tests {
         assert_eq!(cues.len(), 2);
         assert_eq!(cues[0].id, cues[1].id);
         state.refresh_menu_library();
-        for folder in ["A", "B"] {
-            state.menu.toggle_library_folder(Path::new(folder));
+        // Each folder holds one game, so both are plain rows; stepping down
+        // the list reaches each disc by its own path-qualified launch id.
+        let mut launched = Vec::new();
+        for _ in 0..6 {
+            if let Some(ui::menu::MenuAction::LaunchGame(id)) = state.menu.selected_action() {
+                if !launched.contains(id) {
+                    launched.push(id.clone());
+                }
+            }
             state.menu.update(&ui::menu::MenuInput {
                 down: true,
                 ..Default::default()
             });
-            let expected = path_launch_id(&games.join(folder).join("game.cue"));
-            assert_eq!(
-                state.menu.selected_action(),
-                Some(&ui::menu::MenuAction::LaunchGame(expected.clone()))
-            );
-            assert_eq!(
-                library_entry_for_launch_id(&state.library.entries, &expected)
-                    .unwrap()
-                    .path,
-                games.join(folder).join("game.cue")
-            );
+        }
+        launched.sort();
+        let mut expected: Vec<_> = ["A", "B"]
+            .iter()
+            .map(|folder| path_launch_id(&games.join(folder).join("game.cue")))
+            .collect();
+        expected.sort();
+        assert_eq!(launched, expected);
+        for id in &expected {
+            assert!(library_entry_for_launch_id(&state.library.entries, id).is_some());
         }
         let _ = std::fs::remove_dir_all(root);
     }
