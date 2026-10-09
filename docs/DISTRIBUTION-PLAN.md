@@ -80,7 +80,7 @@ seen overnight; none reproduced in the emulator.
 ### 1.2 The proof of concept
 
 Branch `poc/one-liner-build-2026-10-09` in the work dir clone `emulator/`, five commits on main
-c743674, not pushed. Summary of the diff: 119 files, almost all vendored sources.
+c743674, not pushed. Summary of the diff: 121 files, almost all vendored sources.
 
 - Vendors `crates/{psx-hw,psx-iso,psx-trace,psxed-format}` and
   `sdk/crates/{psx-gpu,psx-gte,psx-gte-core,psx-io,psx-math,psx-spu,psx-telemetry,psx-vram}` plus a
