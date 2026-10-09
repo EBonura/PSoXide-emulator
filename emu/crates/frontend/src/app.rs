@@ -4896,32 +4896,59 @@ mod tests {
         let mut listed = std::collections::HashSet::new();
         let rows: Vec<_> = [0, 2, 4]
             .into_iter()
-            .map(|i| game_menu_item(&entries[i], &owners, &mut listed, Path::new("/")).unwrap())
+            .map(|i| {
+                game_menu_item(
+                    &entries[i],
+                    &owners,
+                    &mut listed,
+                    Path::new("/synthetic-games"),
+                )
+                .unwrap()
+            })
             .collect();
         assert_eq!(
             rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(),
             ["Normal", "Telemetry", "Standalone"]
         );
-        assert!(game_menu_item(&entries[0], &owners, &mut listed, Path::new("/")).is_none());
+        assert!(game_menu_item(
+            &entries[0],
+            &owners,
+            &mut listed,
+            Path::new("/synthetic-games")
+        )
+        .is_none());
         let mut menu = ui::menu::MenuState::new();
         menu.set_library(&rows, &[], &[]);
-        menu.select_category("Games");
+        menu.select_category("Library");
         menu.open = true;
-        for expected in [&entries[3], &entries[1], &entries[4]] {
+        // The Library lists rows in its own order; each must launch the file
+        // its title names.
+        let by_title = |title: &str| match title {
+            "Normal" => &entries[3],
+            "Telemetry" => &entries[1],
+            "Standalone" => &entries[4],
+            other => panic!("unexpected row {other}"),
+        };
+        let mut launched = Vec::new();
+        for _ in 0..rows.len() {
             let ui::menu::MenuAction::LaunchGame(token) = menu.selected_action().unwrap() else {
                 panic!("game row must launch its file");
             };
             let resolved = library_entry_for_launch_id(&entries, token).unwrap();
-            assert_eq!(resolved.path, expected.path);
+            let row = rows.iter().find(|row| &row.id == token).unwrap();
+            assert_eq!(resolved.path, by_title(&row.title).path);
             assert_eq!(
                 resolved.id, "shared-disc",
                 "content/save identity stays unchanged"
             );
+            launched.push(row.title.clone());
             menu.update(&ui::menu::MenuInput {
                 down: true,
                 ..Default::default()
             });
         }
+        launched.sort();
+        assert_eq!(launched, ["Normal", "Standalone", "Telemetry"]);
     }
 
     /// A tiny bootable disc: SYSTEM.CNF plus a 4-byte PSX-EXE.
