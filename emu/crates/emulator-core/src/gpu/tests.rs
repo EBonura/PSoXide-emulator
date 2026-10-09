@@ -3082,3 +3082,54 @@ fn an_8_bit_clut_change_reloads_270_clocks_and_a_15_bit_one_nothing() {
         assert_eq!(changed - kept, expected, "depth {depth}");
     }
 }
+
+/// Bob shows the field on display twice; Blend averages the two fields;
+/// Weave keeps both. Two fields drawn with different content tell them apart.
+#[test]
+fn interlaced_480_deinterlace_modes_combine_the_fields() {
+    let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0300_0000);
+    gpu.write32(GP1_ADDR, 0x0704_4C23);
+    gpu.write32(GP1_ADDR, 0x0800_0026);
+    gpu.write32(GP0_ADDR, 0xE100_0000);
+    // Field A (odd lines on display) is drawn red on the even lines; field B
+    // (even lines on display) is drawn black on the odd lines. Then the
+    // even lines are on display with red held for them... set up so the
+    // live field is red and the held field is black.
+    for y in 0..4u16 {
+        let colour = if y & 1 == 0 { 0x001F } else { 0 };
+        for x in 0..400 {
+            gpu.vram.set_pixel(x, y, colour);
+        }
+    }
+    gpu.toggle_vblank_field(); // holds the odd lines (black); even lines now on display
+    gpu.toggle_vblank_field(); // holds the even lines (red); odd lines on display
+                               // Redraw so the odd (displayed) lines are green and the held even lines
+                               // are the old red.
+    for y in (1..4u16).step_by(2) {
+        for x in 0..400 {
+            gpu.vram.set_pixel(x, y, 0x03E0);
+        }
+    }
+    let px = |mode: Deinterlace, y: usize| {
+        let (rgba, w, _) = gpu.display_rgba8_with(mode);
+        let at = (y * w as usize + 250) * 4;
+        (rgba[at], rgba[at + 1], rgba[at + 2])
+    };
+    // Weave: even lines red (held), odd lines green (live).
+    assert_eq!(px(Deinterlace::Weave, 0), (0xFF, 0, 0));
+    assert_eq!(px(Deinterlace::Weave, 1), (0, 0xFF, 0));
+    // Bob: both lines of a pair are the live (odd) line.
+    assert_eq!(px(Deinterlace::Bob, 0), (0, 0xFF, 0));
+    assert_eq!(px(Deinterlace::Bob, 1), (0, 0xFF, 0));
+    // Blend: both lines are the average of red and green.
+    let mixed = px(Deinterlace::Blend, 0);
+    assert_eq!(mixed, px(Deinterlace::Blend, 1));
+    assert!(mixed.0 > 0x60 && mixed.0 < 0x90, "{mixed:?}");
+    assert!(mixed.1 > 0x60 && mixed.1 < 0x90, "{mixed:?}");
+    // The hash and the default capture never depend on the mode.
+    assert_eq!(
+        gpu.display_rgba8().0,
+        gpu.display_rgba8_with(Deinterlace::Weave).0
+    );
+}
