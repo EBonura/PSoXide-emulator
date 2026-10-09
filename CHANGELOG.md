@@ -62,6 +62,15 @@
   console counted every clock of a second of Timer 2 and Timer 0 polling
   (2172.3 ticks a line), where the emulator lost 22 to 40 percent. Save states
   move to format 13; older save states no longer load.
+- The desktop audio output waits for 50 ms of sound before it starts and again
+  after it runs dry, and an underrun fades the last sample out over about 2 ms
+  and back in over the refill instead of cutting to silence (a click). A
+  backlog past 160 ms drops its oldest samples with the seam crossfaded. The
+  web player keeps its shorter 20 ms and 64 ms limits.
+- The dev profile builds the workspace crates on the frame path (`psx-gpu-render`,
+  `psx-iso`, `psx-hw`, `psx-trace`, `psoxide-jit`) at opt-level 3 and the debug
+  UI and settings crates at 2, so `make run` is no longer limited by crates
+  that the `"*"` override does not reach.
 - `--press` takes analog stick entries, `tick:lstick=X/Y[:hold]` and
   `tick:rstick=X/Y[:hold]` (0..=255, 128 centred), held for a number of route
   ticks like a button. A stick token forces the pad to analog mode and
