@@ -1139,6 +1139,8 @@ impl ApplicationHandler for Shell {
                 // around after. F9 is already the DualShock analog-mode
                 // toggle (see `key_is_analog_button`), so quick-save/-load
                 // land on F5/F7 instead of the more conventional F5/F9.
+                // F6 toggles the texture filter (saved in settings.ron); F4
+                // replays the newest recording from a cold boot.
                 // F8 toggles a deterministic port-1 recording saved below the
                 // current game's config directory (web: reboots the game and
                 // records from cold boot; stopping downloads a CSV tape).
@@ -1147,6 +1149,8 @@ impl ApplicationHandler for Shell {
                         Key::Named(NamedKey::F3) => self.state.toggle_performance_panel(),
                         Key::Named(NamedKey::F5) => self.state.save_state(),
                         Key::Named(NamedKey::F7) => self.state.load_latest_state(false),
+                        Key::Named(NamedKey::F6) => self.state.cycle_texture_filter(),
+                        Key::Named(NamedKey::F4) => self.state.replay_last_input(),
                         Key::Named(NamedKey::F8) => self.state.toggle_input_recording(),
                         _ => {}
                     }

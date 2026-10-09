@@ -52,6 +52,7 @@ mod debug_ui_png;
 mod headless_log;
 mod iso_inspect;
 mod profile_report;
+mod ui_png;
 
 use headless_log::{CounterLog, DisplayHashLog, GuestProfileLog};
 use iso_inspect::{contains_bytes, iso_root_entries, iso_volume_id};
@@ -115,6 +116,10 @@ pub enum Command {
 
     /// Run exact-hash validation checkpoints from a manifest.
     Validate(ValidateArgs),
+
+    /// Render the window chrome (menu, toolbar, debug sidebar) to a PNG
+    /// without opening a window.
+    UiPng(ui_png::UiPngArgs),
 }
 
 /// Arguments for `scan`.
@@ -539,6 +544,8 @@ pub fn run(cli: Cli) -> Result<(), String> {
         Command::PreburnCheck(args) => cmd_preburn_check(args),
 
         Command::Validate(args) => cmd_validate(&paths, args),
+
+        Command::UiPng(args) => ui_png::render(args),
     }
 }
 

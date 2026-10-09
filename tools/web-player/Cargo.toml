@@ -1,0 +1,15 @@
+[package]
+name = "web-player-bundle"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+publish = false
+description = "Builds the slim PSoXide web player bundle other sites embed with ?embed=1."
+
+# Standalone on purpose: the tool must start before `make bootstrap` has
+# hydrated the main workspace's members, so it is not one of them.
+[workspace]
+
+[dependencies]
+serde_json = { version = "1.0", features = ["preserve_order"] }
+sha2 = "0.10"

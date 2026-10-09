@@ -126,6 +126,10 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.pick_input_replay();
             MenuOutcome::None
         }
+        ReplayLastInput => {
+            state.replay_last_input();
+            MenuOutcome::None
+        }
         SaveState => {
             state.save_state();
             MenuOutcome::None
@@ -210,7 +214,7 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             MenuOutcome::None
         }
         CycleTextureFilter => {
-            state.texture_filter = state.texture_filter.next();
+            state.cycle_texture_filter();
             MenuOutcome::None
         }
         CycleVolume => {
@@ -318,7 +322,7 @@ pub enum MenuOutcome {
     Quit,
 }
 
-fn draw_status_toast(ctx: &egui::Context, state: &AppState) {
+pub(crate) fn draw_status_toast(ctx: &egui::Context, state: &AppState) {
     let Some((msg, ttl)) = state.status_message.as_ref() else {
         return;
     };
@@ -393,13 +397,19 @@ fn draw_freecam_indicator(ctx: &egui::Context, state: &AppState) {
         });
 }
 
-fn draw_recording_indicator(ctx: &egui::Context, state: &AppState) {
+pub(crate) fn draw_recording_indicator(ctx: &egui::Context, state: &AppState) {
     let (recording, frames) = state.input_recording_status();
     if !recording {
         return;
     }
+    // Sit left of the debug sidebar rather than over its buttons.
+    let x = if state.panels.debug_sidebar {
+        -(18.0 + state.sidebar_width)
+    } else {
+        -18.0
+    };
     egui::Area::new("input-recording-indicator".into())
-        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-18.0, 48.0))
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(x, 48.0))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::new()

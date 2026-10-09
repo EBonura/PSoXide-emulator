@@ -74,13 +74,13 @@ visible again (unless the host paused it). A frame scrolled offscreen is still
 ## Building the bundle
 
 ```sh
-python3 tools/build-web-player.py --out /path/to/player
+cargo run --release --manifest-path tools/web-player/Cargo.toml -- --out /path/to/player
 ```
 
 The output (index.html, the JS glue and wasm, `snippets/`, the favicon and
 `psoxide-player-build.json`) can be served from any path. The build record
 holds the emulator revision, the rustc, trunk, wasm-bindgen and wasm-opt
-versions, and a sha256 per file. The script's docstring lists the toolchain
+versions, and a sha256 per file. The tool's module docs list the toolchain
 it needs.
 
 Players start muted. Use the speaker button to enable sound. Cross-origin parent control is not supported.
