@@ -5691,6 +5691,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// EM2, editor side: a project build lives outside the games folder, so
+    /// the startup copy never sees it. Launching it still carries a card saved
+    /// under its old id over to the new one.
+    #[test]
+    fn launching_a_disc_outside_the_games_folder_adopts_its_old_card() {
+        let root = frontend_test_temp_dir("legacy-launch");
+        let build = root.join("projects").join("baked");
+        std::fs::create_dir_all(&build).unwrap();
+        let bin = build.join("game.bin");
+        std::fs::write(&bin, bootable_test_bin()).unwrap();
+        let entry = psoxide_settings::library::entry_for_path(&bin).unwrap();
+        let old_id = psoxide_settings::library::legacy_id(&entry).expect("new scheme differs");
+
+        let config = root.join("config");
+        let paths = ConfigPaths::rooted(&config);
+        let old_card = paths.memcard_file(&old_id, 1);
+        std::fs::create_dir_all(old_card.parent().unwrap()).unwrap();
+        std::fs::write(&old_card, b"editor save").unwrap();
+
+        let mut state = AppState::with_config_dir(Some(config));
+        state.launch_entry(&entry).unwrap();
+        assert_eq!(
+            std::fs::read(state.paths.memcard_file(&entry.id, 1)).unwrap(),
+            b"editor save"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn frontend_test_temp_dir(name: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
