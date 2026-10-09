@@ -108,6 +108,8 @@ pub enum MenuAction {
     CycleVideoScale,
     /// Cycle the sample-time texture filter.
     CycleTextureFilter,
+    /// Cycle how field-rendered 480i frames are deinterlaced.
+    CycleDeinterlace,
     /// Step the output volume through a few presets.
     CycleVolume,
     /// Mute or unmute the audio.
@@ -680,6 +682,11 @@ impl MenuState {
             &MenuAction::CycleMenuOpacity,
             format!("{}%", self.backdrop_pct),
         );
+    }
+
+    /// Reflect the deinterlace choice in its Settings row.
+    pub fn set_deinterlace(&mut self, label: &str) {
+        self.set_value(&MenuAction::CycleDeinterlace, label.into());
     }
 
     /// Reflect the persisted host UI scale in the Settings row.
@@ -2489,6 +2496,7 @@ fn build_settings_category() -> Category {
             MenuAction::CycleTextureFilter,
             Some("None"),
         ),
+        row("Deinterlace", MenuAction::CycleDeinterlace, Some("Blend")),
         row("Volume", MenuAction::CycleVolume, Some("100%")),
         row("Mute", MenuAction::ToggleMute, Some("Off")),
         row("Menu opacity", MenuAction::CycleMenuOpacity, Some("90%")),
@@ -3176,6 +3184,7 @@ mod tests {
                 "Controls",
                 "Video scale",
                 "Texture filter",
+                "Deinterlace",
                 "Volume",
                 "Mute",
                 "Menu opacity",
@@ -3192,8 +3201,17 @@ mod tests {
             .iter()
             .map(|item| item.value.clone().unwrap_or_default())
             .collect();
-        assert_eq!(&values[1..5], ["Native", "Edge", "50%", "On"]);
-        assert_eq!(values[7], "Keep it smooth");
+        assert_eq!(values[1], "Native");
+        assert_eq!(values[2], "Edge");
+        assert_eq!(&values[4..6], ["50%", "On"]);
+        assert_eq!(values[8], "Keep it smooth");
+        s.set_deinterlace("Bob");
+        let row = s.categories[1]
+            .items
+            .iter()
+            .find(|item| item.action == MenuAction::CycleDeinterlace)
+            .unwrap();
+        assert_eq!(row.value.as_deref(), Some("Bob"));
     }
 
     #[test]

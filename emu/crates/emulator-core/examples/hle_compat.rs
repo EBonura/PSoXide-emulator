@@ -840,7 +840,9 @@ fn print_table(results: &[GameResult]) {
 }
 
 fn write_ppm(bus: &Bus, path: &Path) {
-    let (rgba, w, h) = bus.gpu.display_rgba8();
+    let (rgba, w, h) = bus
+        .gpu
+        .display_rgba8_with(emulator_core::Deinterlace::from_env());
     if w == 0 || h == 0 {
         return;
     }
