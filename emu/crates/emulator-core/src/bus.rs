@@ -3249,7 +3249,13 @@ impl Bus {
             4
         };
         if to_device {
+            // Request mode: the GPU's DREQ holds the channel while its input
+            // FIFO is full, so no word is lost.
+            let paced = self.gpu.experimental_dma_fifo_enabled();
             for _ in 0..total_words {
+                if paced {
+                    self.gpu.make_dma_input_room();
+                }
                 let word = read_ram_u32(&self.ram[..], addr);
                 self.gpu.gp0_push_dma(word);
                 addr = addr.wrapping_add(step);
@@ -5959,6 +5965,66 @@ mod tests {
         assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0x5678);
         assert_eq!(bus.gpu.vram.get_pixel(19, 5), 0x1234);
         assert_eq!(bus.dma.channels[2].channel_control & (1 << 24), 0);
+    }
+
+    /// A block-mode DMA carrying an A0h upload behind busy drawing must
+    /// deliver every pixel: the channel waits on the GPU's request line, it
+    /// does not lose the words that arrive while the input FIFO is full.
+    #[test]
+    fn block_dma_upload_behind_busy_gpu_loses_no_words() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.gpu.enable_experimental_dma_fifo();
+        bus.dma.dpcr = 1 << (2 * 4 + 3);
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        bus.gpu.charge_busy(100_000);
+        // 64x1 upload at (4, 5): 3 header words and 32 packed pixel words.
+        let mut words = vec![0xa000_0000, 0x0005_0004, 0x0001_0040];
+        words.extend((0..32u32).map(|i| ((2 * i + 1) << 16) | (2 * i)));
+        for (i, word) in words.iter().enumerate() {
+            write_ram_u32(&mut bus.ram[..], 0x300 + 4 * i as u32, *word);
+        }
+        bus.dma.channels[2].base = 0x300;
+        bus.dma.channels[2].block_control = (5 << 16) | 7; // 5 blocks of 7 words
+        bus.dma.channels[2].channel_control = 0x0100_0201;
+        bus.run_dma_channel(2);
+        bus.tick(100_000);
+        assert_eq!(bus.gpu.experimental_dma_dropped_words(), 0);
+        for x in 0..64u16 {
+            assert_eq!(bus.gpu.vram.get_pixel(4 + x, 5), x, "pixel {x}");
+        }
+    }
+
+    /// The same for commands: twelve flat triangles, more than the input
+    /// FIFO holds, sent as one block behind a busy GPU. The last one is
+    /// somewhere the others are not, and has to be drawn.
+    #[test]
+    fn block_dma_commands_behind_busy_gpu_lose_no_words() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.gpu.enable_experimental_dma_fifo();
+        bus.dma.dpcr = 1 << (2 * 4 + 3);
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        let mut words = vec![0xe300_0000, 0xe400_0000 | (511 << 10) | 1023];
+        for k in 0..12u32 {
+            let (x, y) = if k == 11 { (200, 100) } else { (10, 10) };
+            words.extend([
+                0x2000_00ff,
+                (y << 16) | x,
+                (y << 16) | (x + 30),
+                ((y + 30) << 16) | x,
+            ]);
+        }
+        bus.gpu.charge_busy(100_000);
+        for (i, word) in words.iter().enumerate() {
+            write_ram_u32(&mut bus.ram[..], 0x300 + 4 * i as u32, *word);
+        }
+        bus.dma.channels[2].base = 0x300;
+        bus.dma.channels[2].block_control = (words.len() as u32) | (1 << 16); // one block
+        bus.dma.channels[2].channel_control = 0x0100_0201;
+        bus.run_dma_channel(2);
+        bus.tick(1_000_000);
+        assert_eq!(bus.gpu.experimental_dma_dropped_words(), 0);
+        assert_ne!(bus.gpu.vram.get_pixel(205, 105), 0, "the last triangle");
+        assert_ne!(bus.gpu.vram.get_pixel(12, 12), 0, "the first triangle");
     }
 
     /// hwtest v1.24's packed list: four 24-word nodes of Gouraud
