@@ -288,21 +288,16 @@ fn controller_ports(ui: &mut egui::Ui, input_router: &mut InputRouter) -> Option
                 message = Some(format!("{} assigned to {}", device.name, port.label()));
             }
 
-            let mode_label = if device.analog { "Analog" } else { "Digital" };
             if ui
-                .add_sized([62.0, 26.0], egui::Button::new(mode_label))
-                .on_hover_text(if device.analog {
-                    "Expose an Analog DualShock (ID 0x73)"
-                } else {
-                    "Expose an original digital pad (ID 0x41)"
-                })
+                .add_sized([78.0, 26.0], egui::Button::new(device.profile.label()))
+                .on_hover_text(device.profile.description())
                 .clicked()
-                && input_router.set_device_analog(&device.id, !device.analog)
+                && input_router.set_device_profile(&device.id, device.profile.next())
             {
                 message = Some(format!(
                     "{} will use {} mode",
                     device.name,
-                    if device.analog { "Digital" } else { "Analog" }
+                    device.profile.next().label()
                 ));
             }
         });
