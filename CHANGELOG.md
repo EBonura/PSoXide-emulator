@@ -11,6 +11,10 @@
   the transfer. MDEC DMA leaves MADR past the last word it moved. The CD and
   MDEC channels keep their block-count handling: only the GPU and SPU were
   measured. Save states move to format 14.
+- MTHI and MTLO cancel a running multiply or divide with its interlock: a
+  `multu; mtlo; mflo` triple costs three instructions, as on a console (hardware
+  tests v2.1, records 0x1D5 to 0x1D8), where the emulator waited out the
+  multiply.
 - A root counter polled in a tight loop no longer loses ticks. A read still
   returns the count from before its own bus wait, but the wait's clocks come
   back at the next advance instead of being dropped: hardware tests v2.1 on a

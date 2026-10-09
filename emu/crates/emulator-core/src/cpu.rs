@@ -2796,14 +2796,24 @@ impl Cpu {
                 }
                 self.op_mfhi(instr)
             }
-            0x11 => self.op_mthi(instr),
+            // MTHI/MTLO write the unit's registers outright: a multiply or
+            // divide still running is cancelled with its interlock (hwtest
+            // v2.1: `multu; mtlo; mflo` costs the same as three plain
+            // instructions on a console, however large the multiplier).
+            0x11 => {
+                self.hilo_busy_until = 0;
+                self.op_mthi(instr)
+            }
             0x12 => {
                 if !bus.limit(crate::limits::MULDIV) {
                     hilo_stall_to(bus, self.hilo_busy_until);
                 }
                 self.op_mflo(instr)
             }
-            0x13 => self.op_mtlo(instr),
+            0x13 => {
+                self.hilo_busy_until = 0;
+                self.op_mtlo(instr)
+            }
             // MULT/MULTU/DIV/DIVU run asynchronously: charge their latency so
             // a dependent MFHI/MFLO stalls and interleaved work hides it.
             0x18 => {
@@ -4019,6 +4029,30 @@ mod tests {
                 seen.abs_diff(due) <= 3 * 24,
                 "mode {mode:#x}: {seen} ticks seen of {due} clocks gone"
             );
+        }
+    }
+
+    #[test]
+    fn mtlo_and_mthi_cancel_a_running_multiply_interlock() {
+        // hwtest v2.1 records 0x1D5-0x1D8: 16 `multu; mtlo; mflo` (or the HI
+        // pair) take the same 94 clocks whether the multiplier is small or
+        // large, because the move cancels the wait.
+        for (mt, mf) in [(0x0100_0013u32, 0x0000_5012u32), (0x0100_0011, 0x0000_5010)] {
+            let mut cpu = Cpu::new();
+            let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+            cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+            cpu.gprs[8] = 0x7FFF_FFFF;
+            cpu.gprs[9] = 3;
+            bus.write32(0x8000_1000, 0x0109_0019); // multu $t0,$t1
+            bus.write32(0x8000_1004, mt); // mtlo/mthi $t0
+            bus.write32(0x8000_1008, mf); // mflo/mfhi $t2
+            cpu.pc = 0x8000_1000;
+            cpu.step(&mut bus).unwrap();
+            cpu.step(&mut bus).unwrap();
+            let before = bus.cycles();
+            cpu.step(&mut bus).unwrap();
+            assert!(bus.cycles() - before <= 2, "the read waited for the multiply");
+            assert_eq!(cpu.gpr(10), 0x7FFF_FFFF);
         }
     }
 
