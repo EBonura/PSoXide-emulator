@@ -91,6 +91,16 @@ pub struct VideoSettings {
     /// frame it runs and lets the game itself slow down instead.
     #[serde(default)]
     pub smooth_slow_host: bool,
+    /// Sample-time texture filter of the hardware renderer: `"none"`
+    /// (PS1-native point sampling, the default) or `"edge"`. A string so an
+    /// unknown value from a newer or older build falls back to `none`
+    /// instead of failing the whole settings file.
+    #[serde(default = "default_texture_filter")]
+    pub texture_filter: String,
+}
+
+fn default_texture_filter() -> String {
+    "none".to_string()
 }
 
 fn default_menu_opacity_pct() -> u8 {
@@ -109,6 +119,7 @@ impl Default for VideoSettings {
             menu_opacity_pct: default_menu_opacity_pct(),
             ui_scale_pct: default_ui_scale_pct(),
             smooth_slow_host: false,
+            texture_filter: default_texture_filter(),
         }
     }
 }
@@ -543,6 +554,24 @@ mod tests {
         original.save(&path).unwrap();
         let loaded = Settings::load(&path).unwrap();
         assert_eq!(original, loaded);
+    }
+
+    #[test]
+    fn texture_filter_is_saved_and_defaults_to_none() {
+        assert_eq!(Settings::default().video.texture_filter, "none");
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.ron");
+        let mut s = Settings::default();
+        s.video.texture_filter = "edge".to_string();
+        s.save(&path).unwrap();
+        assert_eq!(Settings::load(&path).unwrap().video.texture_filter, "edge");
+        // A settings file from before the field existed still loads.
+        std::fs::write(
+            &path,
+            "(\n    version: 4,\n    video: (integer_scale: true, scanline_filter: false),\n)",
+        )
+        .unwrap();
+        assert_eq!(Settings::load(&path).unwrap().video.texture_filter, "none");
     }
 
     #[test]
