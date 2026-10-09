@@ -103,6 +103,31 @@ cooks demo7, builds the playtest with a deterministic slow orbit camera, and
 prints the headless guest profile including room, model, GTE, and room-surface
 micro-profiler counters.
 
+## Headless input scripting
+
+`frontend launch --press SPEC` drives pad 1 on the headless route clock (one
+tick per vblank period, counted from the start of the run). `SPEC` is a comma
+separated list of entries, each `tick:input[:hold]`; `hold` is a number of
+ticks and defaults to 4, long enough for the guest to poll the pad.
+
+- Buttons: `300:cross`, `320:start:12`. Overlapping buttons OR together.
+- Sticks: `lstick=X/Y` and `rstick=X/Y`, both axes 0..=255 with 128 centred
+  (X: 0 left, 255 right; Y: 0 up, 255 down). `300:lstick=64/128:60` holds half
+  stick left for 60 ticks and then returns it to centre. Where stick entries
+  overlap, the later one in the spec wins. With `--hold-forward` the resting
+  left stick is forward rather than centre.
+
+Any stick token forces the pad to report analog mode (poll ID 0x73) and is an
+error together with `--digital-pad`. The headless pad is already a DualShock in
+analog mode by default, so this only matters for runs that opt out. A spec with
+no stick token never touches the sticks, so existing `--press` scripts and
+`.pxtape` replays behave exactly as before. A replaying `--input-tape` writes
+the sticks from its own samples and so overrides scripted sticks while it runs.
+
+Check a stick script by watching what the guest does with it: add
+`--route-log out.csv --route-watch-u32 ADDR` for a RAM word the guest derives
+from the stick and read the per-tick column.
+
 ## Menu mechanics
 
 Three categories (Game / Debug / System) plus infrastructure for expansion. Drawn entirely through `egui::Painter` on a middle layer -- no high-level widgets -- which keeps it snappy and position-locked.
