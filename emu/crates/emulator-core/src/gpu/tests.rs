@@ -2947,6 +2947,7 @@ fn triangles_past_the_extent_limit_cost_only_their_setup() {
 fn interlaced_480_draws_skip_the_displayed_field() {
     let xy = |x: u32, y: u32| (y << 16) | x;
     let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0300_0000); // display on
     gpu.write32(GP1_ADDR, 0x0800_0026); // 512 wide, 480 lines, interlaced
     gpu.write32(GP0_ADDR, 0xE100_0000); // drawing to the display area prohibited
     assert_eq!(gpu.read32(GP1_ADDR).unwrap() >> 31, 1, "odd lines shown");
