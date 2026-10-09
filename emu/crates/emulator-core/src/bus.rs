@@ -3366,6 +3366,28 @@ impl Bus {
         list_quiet.min(gpu_quiet)
     }
 
+    /// Deliver the rest of the node the list walker has already admitted.
+    ///
+    /// A DMA burst holds the bus until it ends, so the CPU's CHCR write that
+    /// stops the list lands between nodes, never inside one. The walker here
+    /// interleaves a word per cycle with the CPU, which would let the stop
+    /// fall mid-node and leave half a packet in the GPU FIFO; the words the
+    /// CPU then sends are absorbed into it and the command stream desyncs.
+    fn finish_admitted_gpu_node(&mut self) {
+        let Some(mut list) = self.experimental_gpu_list.take() else {
+            return;
+        };
+        if !list.need_header {
+            while list.remaining > 0 {
+                let word = read_ram_u32(&self.ram[..], list.word);
+                self.gpu.gp0_push_dma(word);
+                list.word = list.word.wrapping_add(4);
+                list.remaining -= 1;
+            }
+        }
+        self.experimental_gpu_list = Some(list);
+    }
+
     fn advance_experimental_gpu_list(&mut self) {
         let Some(mut list) = self.experimental_gpu_list.take() else {
             return;
@@ -4039,6 +4061,9 @@ impl Bus {
             } else if is_chcr_write {
                 // A stop write ends any busy span the debug counters track.
                 let channel = ((offset & 0x70) >> 4) as usize;
+                if channel == 2 {
+                    self.finish_admitted_gpu_node();
+                }
                 if let Some(start) = self
                     .dma_active_since
                     .get_mut(channel)
@@ -5870,6 +5895,36 @@ mod tests {
         uploads.tick(10000);
         assert_eq!(uploads.gpu.experimental_dma_dropped_words(), 0);
         assert_eq!(uploads.gpu.vram.get_pixel(4, 6), 0xef01);
+    }
+
+    /// A DMA burst holds the bus, so the CPU's CHCR write that stops a list
+    /// can only land between nodes. The walker must therefore finish a node it
+    /// has already admitted: stopping inside it leaves half a packet in the
+    /// GPU's FIFO, and the next words the CPU sends are absorbed into it.
+    #[test]
+    fn stopping_a_list_finishes_the_admitted_node() {
+        let mut bus = linked_list_upload_fixture(false, true, 0);
+        bus.gpu.enable_experimental_dma_fifo();
+        bus.run_dma_channel(2);
+        let mut ticks = 0;
+        // Walk until the first node is admitted and partly delivered.
+        while bus
+            .experimental_gpu_list
+            .as_ref()
+            .is_none_or(|l| l.need_header || l.remaining == 0 || l.remaining > 6)
+        {
+            bus.tick(1);
+            ticks += 1;
+            assert!(ticks < 200, "list never reached the middle of a node");
+        }
+        let stop = Dma::BASE + 2 * 0x10 + 8;
+        bus.write32(stop, 0x0000_0401);
+        bus.tick(10_000);
+        // The whole first upload arrived: its last pixel is the second half
+        // of the last payload word.
+        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0x5678);
+        assert_eq!(bus.gpu.vram.get_pixel(19, 5), 0x1234);
+        assert_eq!(bus.dma.channels[2].channel_control & (1 << 24), 0);
     }
 
     /// hwtest v1.24's packed list: four 24-word nodes of Gouraud
