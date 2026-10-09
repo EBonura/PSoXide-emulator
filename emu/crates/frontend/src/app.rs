@@ -2922,7 +2922,7 @@ fn entry_in_game_root(path: &Path, game_root: &Path) -> bool {
 /// A raw `.bin` CD image holds whole 2352-byte sectors. (A 2 MiB RAM dump
 /// is a multiple of 2048 but not of 2352.)
 fn is_raw_sector_image(size: u64) -> bool {
-    size != 0 && size % 2352 == 0
+    size != 0 && size.is_multiple_of(2352)
 }
 
 /// A game's own folder (the one holding its CUE and tracks) is not a group.
