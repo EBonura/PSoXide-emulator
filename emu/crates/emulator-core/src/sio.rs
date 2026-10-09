@@ -19,10 +19,11 @@
 //! ("Serial Interfaces (SIO)" and "Controllers and Memory Cards"). The
 //! exchange timing is a model, and each part says what pins it:
 //!
-//! - **Byte exchange is synchronous**: the received byte is visible in
-//!   DATA as soon as the transmit byte is written; only the interrupt
-//!   follows after the baud-clocked transfer time (gate-pinned, along with
-//!   the SCPH-1200 ACK measurement used for the ACK pulse).
+//! - **A byte takes ten bit times**: the received byte reaches DATA, and
+//!   `STAT.RX_NOT_EMPTY` rises, when the transfer ends; `/ACK` follows it by
+//!   the measured delay of the device and its pulse is as wide as measured
+//!   (hardware tests v2.1). Writing DATA while a byte is on the wire queues
+//!   the next one.
 //! - **A missing device** returns 0xFF and produces no ACK and no IRQ
 //!   (PSX-SPX: IRQ7 follows the /ACK edge). A timeout IRQ there gave a
 //!   commercial title that polls an empty port 2 extra IRQ7 passes inside
@@ -31,10 +32,7 @@
 //!   bit stays set until CTRL.ACK clears it (PSX-SPX "SIO0_STAT"), and the
 //!   compat hashes expect no new IRQ in between (gate-pinned).
 //!
-//! The older delayed-byte scaffolding (`queued_tx`, `transfer_busy`,
-//! `awaiting_ack`, the `ack_delay_ticks` path) is not exercised by the
-//! current exchange path and is kept only until it can be removed with a
-//! save-state layout change. See `LICENSE` and `docs/PROVENANCE.md`.
+//! See `LICENSE` and `docs/PROVENANCE.md`.
 
 mod stat_bit {
     // Layout facts come from the shared hardware-model crate, the same
@@ -85,17 +83,28 @@ mod offset {
 /// the R3000A still drives the complete source register on the peripheral bus.
 const MODE_WRITE_MASK: u16 = 0x013F;
 
-/// Serial-transfer time for one byte when BAUD is zero. Matches the
-/// BIOS's common `0x88 * 8 = 1088`-cycle setup.
-const DEFAULT_TRANSFER_TICKS: u64 = 1088;
-/// Extra delay between the end of a pad byte and its ACK. The data byte
-/// itself is made available synchronously; the delayed event represents
-/// the IRQ/ACK edge, not byte delivery.
-const PAD_ACK_DELAY_TICKS: u64 = 0;
-/// Memory cards use the same baud-clocked IRQ timing as pads.
-const MEMCARD_ACK_DELAY_TICKS: u64 = 0;
-/// `/ACK` is a pulse, not a sticky level.
-const ACK_PULSE_TICKS: u64 = 100;
+/// Bit times one byte takes on the wire (hwtest v2.1 on a console: the byte
+/// is in RX 1326 to 1438 clocks after the write with BAUD 0x88, a 136-clock
+/// bit, so ten bit times and not the eight of the data bits alone).
+const BYTE_BIT_TIMES: u64 = 10;
+/// Serial-transfer time for one byte when BAUD is zero: the BIOS's common
+/// BAUD of 0x88.
+const DEFAULT_TRANSFER_TICKS: u64 = 0x88 * BYTE_BIT_TIMES;
+// `/ACK` timing, from hwtest v2.1 on a console (one pad, id 0x73; two memory
+// cards). The rise is measured from the DATA write and the width between the
+// edges, both through a STAT polling loop. Medians over the bytes of a poll:
+// pad rise 1677 and width 92; slot 1 card 1511 and 38; slot 2 card 1529 and
+// 74. The rise below is that less the ten bit times (1360), less the few
+// clocks the probe's own read adds on the emulator, so the probe reads the
+// console's figure back.
+/// Clocks from the end of a pad byte to its `/ACK` rising.
+const PAD_ACK_DELAY_TICKS: u64 = 309;
+/// Clocks from the end of a memory card byte to `/ACK` rising, slot 1 and 2.
+const MEMCARD_ACK_DELAY_TICKS: [u64; 2] = [143, 161];
+/// `/ACK` is a pulse, not a sticky level: its width for a pad and a card in
+/// slot 1 and 2.
+const PAD_ACK_PULSE_TICKS: u64 = 92;
+const MEMCARD_ACK_PULSE_TICKS: [u64; 2] = [38, 74];
 
 /// SIO0 state. Register-level accuracy for the "nothing plugged in"
 /// path; no shift-clock simulation, but every byte-write pulses an
@@ -120,13 +129,15 @@ pub struct Sio0 {
     /// Sticky SIO IRQ bit exposed in `STAT` bit 9. Writing CTRL.ACK
     /// clears it; the bus-level interrupt controller is separate.
     irq_latched: bool,
-    /// Last byte produced by the selected device. The byte is visible in
-    /// DATA immediately; this copy is retained for the older
-    /// transfer-deadline scaffolding and diagnostics.
+    /// Byte the selected device answered with; it reaches DATA when the
+    /// transfer on the wire ends.
     pending_rx: u8,
-    /// Legacy one-byte TX holding register. DATA writes are accepted
-    /// synchronously, so this stays empty unless the older deadline path is
-    /// re-enabled.
+    /// Whether that byte is received at all (a port that is not selected
+    /// receives nothing).
+    #[serde(default)]
+    pending_rx_valid: bool,
+    /// One-byte TX holding register: a byte written while another is on the
+    /// wire waits here and starts when it ends.
     queued_tx: Option<u8>,
     /// Whether the current byte will be followed by a delayed SIO
     /// event.
@@ -135,9 +146,9 @@ pub struct Sio0 {
     /// ACK pulse. Kept for the legacy delayed-byte path; missing devices
     /// leave this false.
     pending_dsr_timeout: bool,
-    /// Legacy shifter state for the older delayed-byte path.
+    /// A byte is on the wire.
     transfer_busy: bool,
-    /// Legacy wait state for the older delayed-byte path.
+    /// The byte has gone and its `/ACK` is yet to come.
     awaiting_ack: bool,
     /// Absolute cycle at which the current byte transfer completes.
     transfer_deadline: Option<u64>,
@@ -147,6 +158,9 @@ pub struct Sio0 {
     ack_end_deadline: Option<u64>,
     /// Delay for the currently selected device kind.
     ack_delay_ticks: u64,
+    /// Width of the `/ACK` pulse of the byte on the wire.
+    #[serde(default)]
+    ack_pulse_ticks: u64,
     /// Device on port 1 (controller slot 1 + memory card 1).
     port1: crate::pad::PortDevice,
     /// Device on port 2 (controller slot 2 + memory card 2).
@@ -189,6 +203,7 @@ impl Sio0 {
             ack_input: false,
             irq_latched: false,
             pending_rx: 0xFF,
+            pending_rx_valid: false,
             queued_tx: None,
             pending_ack: false,
             pending_dsr_timeout: false,
@@ -198,6 +213,7 @@ impl Sio0 {
             ack_deadline: None,
             ack_end_deadline: None,
             ack_delay_ticks: PAD_ACK_DELAY_TICKS,
+            ack_pulse_ticks: PAD_ACK_PULSE_TICKS,
             port1: crate::pad::PortDevice::empty()
                 .with_pad(crate::pad::DigitalPad::new())
                 .with_memcard(crate::pad::MemoryCard::new()),
@@ -363,7 +379,7 @@ impl Sio0 {
         if self.queued_tx.is_none() {
             s |= stat_bit::TX_READY_1;
         }
-        if !self.transfer_busy && !self.awaiting_ack {
+        if !self.transfer_busy {
             s |= stat_bit::TX_READY_2;
         }
         if self.rx.is_some() {
@@ -384,13 +400,13 @@ impl Sio0 {
         self.rx.take().unwrap_or(0xFF)
     }
 
-    /// Transfer time for one byte. Hardware uses `BAUD * 8`; when the
-    /// BIOS hasn't set BAUD yet we still give software a realistic
-    /// default delay instead of "instant byte".
+    /// Transfer time for one byte: [`BYTE_BIT_TIMES`] bit times of `BAUD`
+    /// clocks; when the BIOS hasn't set BAUD yet we still give software a
+    /// realistic default delay instead of "instant byte".
     fn transfer_ticks(&self) -> u64 {
         let baud = self.baud as u64;
         if baud != 0 {
-            baud.saturating_mul(8)
+            baud.saturating_mul(BYTE_BIT_TIMES)
         } else {
             DEFAULT_TRANSFER_TICKS
         }
@@ -402,7 +418,9 @@ impl Sio0 {
             if let Some(deadline) = self.transfer_deadline {
                 if deadline <= now {
                     self.transfer_deadline = None;
-                    self.rx = Some(self.pending_rx);
+                    if self.pending_rx_valid {
+                        self.rx = Some(self.pending_rx);
+                    }
                     self.transfer_busy = false;
                     if self.pending_ack {
                         self.awaiting_ack = true;
@@ -432,7 +450,7 @@ impl Sio0 {
                         // time makes digital polls stop before the high
                         // button byte.
                         self.ack_input = true;
-                        self.ack_end_deadline = Some(deadline.saturating_add(ACK_PULSE_TICKS));
+                        self.ack_end_deadline = Some(deadline.saturating_add(self.ack_pulse_ticks));
                     }
                     if (ack_pulse || dsr_timeout)
                         && self.ctrl & ctrl_bit::ACK_IRQ_ENABLE != 0
@@ -500,6 +518,13 @@ impl Sio0 {
     /// selected device (if any) returns its RX byte and whether it
     /// wants another round (pulls `/DSR` low → IRQ7 armed).
     fn write_data_at(&mut self, value: u8, now: u64) {
+        if self.transfer_busy {
+            // The shifter is full: the byte waits in the TX register (a
+            // second one overwrites it, as the chip drops a byte written
+            // into a full holding register).
+            self.queued_tx = Some(value);
+            return;
+        }
         self.start_transfer_at(value, now, true);
     }
 
@@ -513,7 +538,7 @@ impl Sio0 {
         let selected = self.ctrl & ctrl_bit::JOYN_OUTPUT != 0;
         let force_rx_once = self.ctrl & ctrl_bit::FORCE_RX_ONCE != 0;
         let receive_enabled = selected || force_rx_once;
-        let (rx, ack, _device_present, ack_delay_ticks) = if selected {
+        let (rx, ack, _device_present, ack_delay_ticks, ack_pulse_ticks) = if selected {
             // Slow original-controller timing: a byte clocked before the
             // previous byte's `/ACK` deadline arrives while the device is still
             // busy, so it misses the clock and the rest of the packet desyncs.
@@ -526,24 +551,26 @@ impl Sio0 {
             if self.slow_pad && self.slow_desynced {
                 // The device missed the clock; it returns idle and does not
                 // advance its state machine.
-                (0xFF, false, true, PAD_ACK_DELAY_TICKS)
+                (0xFF, false, true, PAD_ACK_DELAY_TICKS, PAD_ACK_PULSE_TICKS)
             } else {
+                let slot = usize::from(self.ctrl & ctrl_bit::SLOT != 0);
                 let port = self.active_port();
                 let result = port.exchange_detailed_at(value, now);
-                let ack_delay_ticks = if port.selected_is_memcard() {
-                    MEMCARD_ACK_DELAY_TICKS
+                let (ack_delay_ticks, ack_pulse_ticks) = if port.selected_is_memcard() {
+                    (MEMCARD_ACK_DELAY_TICKS[slot], MEMCARD_ACK_PULSE_TICKS[slot])
                 } else {
-                    PAD_ACK_DELAY_TICKS
+                    (PAD_ACK_DELAY_TICKS, PAD_ACK_PULSE_TICKS)
                 };
                 (
                     result.rx,
                     result.ack,
                     result.device_present,
                     ack_delay_ticks,
+                    ack_pulse_ticks,
                 )
             }
         } else {
-            (0xFF, false, true, PAD_ACK_DELAY_TICKS)
+            (0xFF, false, true, PAD_ACK_DELAY_TICKS, PAD_ACK_PULSE_TICKS)
         };
         // A missing device returns 0xFF with no ACK/DSR IRQ for that byte.
         // One commercial title polls port 2 during the BIOS pad handler;
@@ -551,26 +578,22 @@ impl Sio0 {
         // same folded ISR.
         let dsr_timeout = false;
         self.pending_rx = rx;
+        self.pending_rx_valid = receive_enabled;
         self.pending_ack = ack;
         self.pending_dsr_timeout = dsr_timeout;
         self.ack_delay_ticks = ack_delay_ticks;
-        self.rx = receive_enabled.then_some(rx);
+        self.ack_pulse_ticks = ack_pulse_ticks;
         if receive_enabled {
             // SIO0 CTRL.2 is a force-receive strobe, not a persistent RX
             // enable. Retail hardware clears it after exactly one byte.
             self.ctrl &= !ctrl_bit::FORCE_RX_ONCE;
         }
-        self.transfer_busy = false;
+        // The byte is on the wire for ten bit times; DATA gets the answer,
+        // and `/ACK` follows, when they have passed (see `tick`).
+        self.transfer_busy = true;
         self.awaiting_ack = false;
-        self.transfer_deadline = None;
-        self.ack_deadline = if ack || dsr_timeout {
-            Some(
-                now.saturating_add(self.transfer_ticks())
-                    .saturating_add(if ack { ack_delay_ticks } else { 0 }),
-            )
-        } else {
-            None
-        };
+        self.ack_deadline = None;
+        self.transfer_deadline = Some(now.saturating_add(self.transfer_ticks()));
     }
 
     /// Device selected by the current `CTRL.SLOT` bit.
@@ -591,6 +614,7 @@ impl Sio0 {
             self.ack_input = false;
             self.irq_latched = false;
             self.pending_rx = 0xFF;
+            self.pending_rx_valid = false;
             self.queued_tx = None;
             self.pending_ack = false;
             self.pending_dsr_timeout = false;
@@ -741,9 +765,11 @@ mod tests {
     fn force_rx_is_one_shot_and_selected_receive_does_not_need_it() {
         let mut sio = Sio0::new();
         sio.attach_port1(crate::pad::PortDevice::empty());
+        let t = DEFAULT_TRANSFER_TICKS;
 
         sio.write16(Sio0::BASE + 0xA, ctrl_bit::FORCE_RX_ONCE);
-        sio.write8(Sio0::BASE, 0x00);
+        sio.write8_at(Sio0::BASE, 0x00, 0);
+        sio.tick(t);
         assert_eq!(sio.read8(Sio0::BASE).unwrap(), 0xFF);
         assert_eq!(
             sio.debug_ctrl() & ctrl_bit::FORCE_RX_ONCE,
@@ -751,7 +777,8 @@ mod tests {
             "hardware clears CTRL.2 after one received byte"
         );
 
-        sio.write8(Sio0::BASE, 0x00);
+        sio.write8_at(Sio0::BASE, 0x00, t + 1);
+        sio.tick(2 * t + 1);
         assert_eq!(
             sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::RX_NOT_EMPTY,
             0,
@@ -759,7 +786,8 @@ mod tests {
         );
 
         sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT);
-        sio.write8(Sio0::BASE, 0x00);
+        sio.write8_at(Sio0::BASE, 0x00, 2 * t + 2);
+        sio.tick(3 * t + 2);
         assert_ne!(
             sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::RX_NOT_EMPTY,
             0,
@@ -894,10 +922,10 @@ mod tests {
         sio.write8(Sio0::BASE, 0x01);
 
         let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
-        assert_ne!(
+        assert_eq!(
             stat & stat_bit::RX_NOT_EMPTY,
             0,
-            "the response byte is visible immediately"
+            "the response byte is still on the wire"
         );
         assert_eq!(
             stat & stat_bit::ACK_INPUT,
@@ -912,12 +940,24 @@ mod tests {
 
         sio.tick(DEFAULT_TRANSFER_TICKS - 1);
         assert_eq!(
-            sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::IRQ,
+            sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::RX_NOT_EMPTY,
             0,
-            "IRQ must not fire before the baud-clocked delay"
+            "ten bit times have not passed"
         );
 
         sio.tick(DEFAULT_TRANSFER_TICKS);
+        let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
+        assert_ne!(stat & stat_bit::RX_NOT_EMPTY, 0, "the byte has arrived");
+        assert_eq!(stat & stat_bit::IRQ, 0, "ACK follows the byte");
+
+        sio.tick(DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS - 1);
+        assert_eq!(
+            sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::IRQ,
+            0,
+            "IRQ must not fire before the pad's ACK delay"
+        );
+
+        sio.tick(DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS);
         let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
         assert_ne!(stat & stat_bit::ACK_INPUT, 0, "ACK input should be visible");
         assert_ne!(stat & stat_bit::IRQ, 0, "STAT IRQ bit should latch");
@@ -1002,14 +1042,14 @@ mod tests {
         let mut now = 10u64;
         for tx in [0x01, 0x42, 0x00, 0x00] {
             sio.write8_at(Sio0::BASE, tx, now);
-            sio.tick(now + 0x88 * 8);
+            sio.tick(now + 0x88 * BYTE_BIT_TIMES + PAD_ACK_DELAY_TICKS);
             assert!(sio.take_pending_irq(), "byte 0x{tx:02x} should ACK");
             sio.write16(
                 Sio0::BASE + 0xA,
                 ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE | ctrl_bit::ACK,
             );
             let _ = sio.read8(Sio0::BASE);
-            now += 0x88 * 8 + 1;
+            now += 0x88 * BYTE_BIT_TIMES + PAD_ACK_DELAY_TICKS + 1;
         }
 
         sio.write8_at(Sio0::BASE, 0x00, now);
@@ -1018,7 +1058,7 @@ mod tests {
             None,
             "the final byte of a real controller poll drops ACK without arming a DSR timeout"
         );
-        sio.tick(now + 0x88 * 8);
+        sio.tick(now + 0x88 * BYTE_BIT_TIMES + PAD_ACK_DELAY_TICKS);
         assert!(!sio.take_pending_irq());
         assert_eq!(sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::IRQ, 0);
     }
@@ -1103,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn transmit_keeps_tx_ready_high_while_irq_is_delayed() {
+    fn a_byte_holds_the_shifter_for_ten_bit_times_and_acks_later() {
         use crate::pad::{DigitalPad, PortDevice};
 
         let mut sio = Sio0::new();
@@ -1116,64 +1156,62 @@ mod tests {
 
         sio.write8_at(Sio0::BASE, 0x01, 10);
         let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
-        assert_ne!(
-            stat & stat_bit::TX_READY_2,
-            0,
-            "the byte completes synchronously and TX_READY_2 stays high"
-        );
-        assert_ne!(
-            stat & stat_bit::RX_NOT_EMPTY,
-            0,
-            "response byte should be readable immediately"
-        );
+        assert_eq!(stat & stat_bit::TX_READY_2, 0, "the byte is on the wire");
+        assert_ne!(stat & stat_bit::TX_READY_1, 0, "the TX register is free");
+        assert_eq!(stat & stat_bit::RX_NOT_EMPTY, 0, "nothing received yet");
 
-        sio.tick(10 + 0x88 * 8 - 1);
-        let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
-        assert_eq!(stat & stat_bit::IRQ, 0, "only the SIO IRQ edge is delayed");
-
-        sio.tick(10 + 0x88 * 8);
-        let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
-        assert_ne!(
-            stat & stat_bit::IRQ,
-            0,
-            "IRQ should latch at the baud-clocked deadline"
+        let end = 10 + 0x88 * BYTE_BIT_TIMES;
+        sio.tick(end - 1);
+        assert_eq!(
+            sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::RX_NOT_EMPTY,
+            0
         );
+        sio.tick(end);
+        let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
+        assert_ne!(stat & stat_bit::TX_READY_2, 0, "the shifter is idle again");
+        assert_ne!(stat & stat_bit::RX_NOT_EMPTY, 0, "the answer arrived");
+        assert_eq!(stat & stat_bit::IRQ, 0, "ACK has not come yet");
+
+        sio.tick(end + PAD_ACK_DELAY_TICKS);
+        let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
+        assert_ne!(stat & stat_bit::IRQ, 0, "IRQ latches with /ACK");
     }
 
     #[test]
-    fn tx_ready_1_stays_high_across_successive_synchronous_writes() {
+    fn a_byte_written_while_one_is_on_the_wire_waits_in_the_tx_register() {
         use crate::pad::{DigitalPad, PortDevice};
 
         let mut sio = Sio0::new();
         sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
         sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT);
+        let t = DEFAULT_TRANSFER_TICKS;
 
         sio.write8_at(Sio0::BASE, 0x01, 10);
-        let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
-        assert_ne!(
-            stat & stat_bit::TX_READY_1,
-            0,
-            "TX_READY_1 should stay set after synchronous select byte"
-        );
-        assert_eq!(sio.pop_rx(), 0xFF);
-
-        sio.write8_at(Sio0::BASE, 0x42, 11);
-        let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
-        assert_ne!(
-            stat & stat_bit::TX_READY_1,
-            0,
-            "second write should not fill a deferred TX queue"
-        );
-        assert_eq!(sio.pop_rx(), 0x41);
         assert_ne!(
             sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::TX_READY_1,
             0,
-            "TX_READY_1 remains high after DATA is consumed"
+            "TX_READY_1 stays set after the first write"
         );
+        sio.write8_at(Sio0::BASE, 0x42, 11);
+        assert_eq!(
+            sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::TX_READY_1,
+            0,
+            "the second write fills the TX register"
+        );
+
+        sio.tick(10 + t);
+        assert_eq!(sio.pop_rx(), 0xFF, "the select byte's answer");
+        assert_ne!(
+            sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::TX_READY_1,
+            0,
+            "the queued byte moved to the shifter"
+        );
+        sio.tick(10 + 2 * t);
+        assert_eq!(sio.pop_rx(), 0x41, "the queued byte went out right behind");
     }
 
     #[test]
-    fn successive_writes_advance_pad_state_synchronously() {
+    fn a_byte_schedules_its_arrival_then_its_ack() {
         use crate::pad::{DigitalPad, PortDevice};
 
         let mut sio = Sio0::new();
@@ -1184,28 +1222,23 @@ mod tests {
         );
 
         sio.write8_at(Sio0::BASE, 0x01, 10);
+        assert_eq!(sio.pop_rx(), 0xFF, "nothing has arrived: DATA reads idle");
         assert_eq!(
-            sio.pop_rx(),
-            0xFF,
-            "select byte response should be available before the IRQ event"
-        );
-        assert_eq!(
-            sio.debug_ack_deadline(),
+            sio.debug_transfer_deadline(),
             Some(10 + DEFAULT_TRANSFER_TICKS),
-            "first byte should still schedule a delayed SIO event"
+            "the byte arrives after ten bit times"
         );
-
-        sio.write8_at(Sio0::BASE, 0x42, 11);
-        assert_eq!(
-            sio.pop_rx(),
-            0x41,
-            "command byte response should also be immediate"
-        );
+        sio.tick(10 + DEFAULT_TRANSFER_TICKS);
         assert_eq!(
             sio.debug_ack_deadline(),
-            Some(11 + DEFAULT_TRANSFER_TICKS),
-            "new synchronous byte should replace the next delayed IRQ deadline"
+            Some(10 + DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS),
+            "and /ACK rises the pad's delay behind it"
         );
+        assert_eq!(sio.pop_rx(), 0xFF, "select byte answer");
+
+        sio.write8_at(Sio0::BASE, 0x42, 10 + DEFAULT_TRANSFER_TICKS + 1);
+        sio.tick(10 + 2 * DEFAULT_TRANSFER_TICKS + 1);
+        assert_eq!(sio.pop_rx(), 0x41, "the command byte's answer");
     }
 
     #[test]
@@ -1216,7 +1249,7 @@ mod tests {
         sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
         sio.set_port1_buttons(ButtonState::from_bits(button::START));
         sio.set_slow_pad(true);
-        sio.write16(Sio0::BASE + 0xE, 0x0088); // baud -> transfer_ticks = 1088
+        sio.write16(Sio0::BASE + 0xE, 0x0088); // baud -> transfer_ticks = 1360
         sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT); // select port 1
 
         let mut now = 100u64;
@@ -1225,7 +1258,7 @@ mod tests {
         assert_eq!(sio.pop_rx(), 0xFF);
 
         // The command byte is clocked only a few cycles later -- long before the
-        // slow pad's /ACK deadline (now + 1088) -- so the device misses it.
+        // slow pad's /ACK deadline (now + 1360) -- so the device misses it.
         now += 8;
         sio.write8_at(Sio0::BASE, 0x42, now);
         assert_eq!(
@@ -1256,12 +1289,12 @@ mod tests {
         sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT);
 
         // Mirror the ACK-paced driver: wait past each byte's /ACK deadline
-        // (transfer_ticks = 0x88 * 8 = 1088) before clocking the next byte.
-        let gap = 0x88u64 * 8 + 16;
+        // (ten bit times plus the pad's delay) before clocking the next byte.
+        let gap = DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS + 16;
         let mut now = 100u64;
         let ex = |sio: &mut Sio0, now: &mut u64, tx: u8| -> u8 {
             sio.write8_at(Sio0::BASE, tx, *now);
-            sio.tick(*now);
+            sio.tick(*now + DEFAULT_TRANSFER_TICKS);
             let rx = sio.read8(Sio0::BASE).unwrap();
             *now += gap; // host waited for /ACK before clocking the next byte
             rx
@@ -1293,7 +1326,7 @@ mod tests {
             "ACK pulse should become visible"
         );
 
-        sio.tick(100 + DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS + ACK_PULSE_TICKS);
+        sio.tick(100 + DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS + PAD_ACK_PULSE_TICKS);
         assert_eq!(
             sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::ACK_INPUT,
             0,
