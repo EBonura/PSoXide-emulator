@@ -1,8 +1,8 @@
 <!--
-DRAFT, not pushed. Describes the editor after plan phases P0 to P2 (self-contained clone, split
+DRAFT, not pushed. Describes the editor after plan phases P0 to P5 (self-contained clone, shared app library
 into its own product, installer that provisions the toolchain). Marked lines do not hold today:
-  [P0] the single clone-and-run command
-  [P2] the Download table and the first-run toolchain setup
+  [P3] the single clone-and-run command
+  [P3] the Download table and the first-run toolchain setup; [P4, P5] the Import line
 Today the editor needs Python 3 for `make bootstrap`, `make`, `sh`, `rsync` and a pinned nightly
 Rust, and a clone is about 1.1 GB.
 -->
@@ -16,7 +16,7 @@ image, and playtest on the built-in emulator. The editor, the cookers and the Pl
 
 ![The editor with a level open](docs/images/SCREENSHOT.png)
 
-## Download [P2]
+## Download [P3]
 
 | Platform | File |
 | --- | --- |
@@ -24,12 +24,12 @@ image, and playtest on the built-in emulator. The editor, the cookers and the Pl
 | Windows, 64-bit | `PSoXide-Editor-<version>-windows-x86_64.zip` |
 | Linux, 64-bit | `PSoXide-Editor-<version>-linux-x86_64.tar.gz` |
 
-Just want to play a disc? Use the [emulator](https://github.com/EBonura/PSoXide-emulator); the
+Just want to play a disc? Use the [PSoXide Emulator](https://github.com/EBonura/PSoXide-emulator); the
 editor is for making games. Playtesting compiles your project into a PlayStation program, so on
 first launch the editor checks for [rustup](https://rustup.rs) and installs the pinned nightly
 toolchain it needs.
 
-## Build from source [P0]
+## Build from source [P3]
 
 Needs [rustup](https://rustup.rs). The repository pins its nightly toolchain, so the first build
 downloads it, then:
@@ -49,7 +49,9 @@ On Linux, first install `pkg-config libasound2-dev libudev-dev libxkbcommon-dev`
 - Play button: cooks the project, builds the PlayStation program and boots it in the embedded
   emulator. Export builds a CUE/BIN disc image.
 - Command-line cookers and an MCP server for scripting the editor.
-- The runtime engine the games run on, and Cortex Ignition, a game made with it.
+- Everything the emulator does, plus Import: build a supported port, such as Half-Life, from your
+  own Steam copy, on your own machine [P4 and P5].
+- The runtime engine (`psoxide-engine`) the games run on, and Cortex Ignition, a game made with it.
 
 The engine and every game it produces link the GPL-licensed SDK; see
 [downstream licensing](https://github.com/EBonura/PSoXide/blob/main/docs/downstream-licensing.md)
@@ -63,8 +65,8 @@ before shipping.
 [Repository split](docs/sdk-separation.md) ·
 [Changelog](CHANGELOG.md)
 
-Related repositories: the [SDK](https://github.com/EBonura/PSoXide) and the
-[emulator](https://github.com/EBonura/PSoXide-emulator).
+Related repositories: the [SDK](https://github.com/EBonura/PSoXide) (psoxide-sdk) and the
+[emulator](https://github.com/EBonura/PSoXide-emulator) (psoxide-emulator).
 
 ## Licence and provenance
 
