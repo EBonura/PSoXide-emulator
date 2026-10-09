@@ -1,0 +1,25 @@
+[package]
+name         = "psx-gte-core"
+version      = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description  = "Pure-Rust GTE state machine and fixed-point math types. Shared by the PS1 SDK (`psx-gte`) and the emulator (`emulator-core`); both consume the same simulation so editor previews match what the hardware will draw."
+
+[dependencies]
+psx-math = { workspace = true }
+# Optional: lets the host emulator derive Serialize/Deserialize on `Gte`
+# for save states. Left off by default so the no_std, bare-metal SDK
+# build (mipsel-sony-psx) never pulls serde in. Declared directly
+# (not via `workspace = true`) because this crate lives in the
+# separate `sdk/` workspace, which has no `serde` entry of its own --
+# `default-features = false` keeps it `no_std`-compatible, matching
+# the host workspace's own serde policy.
+serde = { version = "1.0", default-features = false, features = ["derive"], optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[lints]
+workspace = true

@@ -1,0 +1,1730 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//! Typed VRAM primitives.
+//!
+//! PS1 VRAM is a 1024×512 halfword frame, and getting a sprite
+//! on screen is three interlocking decisions: *where* the texel
+//! bytes live, *where* the CLUT lives, and *what* format you're
+//! in. PsyQ leaves those as `short` variables you pass around by
+//! convention. This crate promotes them to types.
+//!
+//! ## What's here
+//!
+//! - [`Color555`] -- a 15bpp BGR pixel. Constructed via
+//!   [`Color555::rgb8`] (`u8` RGB → 5-bit truncation), or
+//!   [`Color555::rgb5`] (already 5-bit), or the `const` raw
+//!   constructor [`Color555::raw`].
+//! - [`VramRect`] -- an `(x, y, w, h)` in VRAM pixels with const
+//!   validation of the bounds. Can't construct one that would
+//!   overflow VRAM.
+//! - [`TexturePage`] -- a texture-page handle. Const constructor
+//!   enforces the PSX alignment rules (`x % 64 == 0`, `y ∈ {0, 256}`),
+//!   knows its bit-depth, and emits the GP0(E1h) draw-mode word
+//!   or the 16-bit tpage field embedded in textured-rect UV words.
+//! - [`Clut`] -- a CLUT handle. `x % 16 == 0`, `y ∈ 0..512`. Emits
+//!   the 16-bit clut field for UV words. 4bpp and 8bpp CLUTs are
+//!   the same underlying type -- the calling primitive's tpage
+//!   picks which entry count it uses.
+//! - [`upload_16bpp`] -- safe upload wrapper: checks `pixels.len()`
+//!   matches `rect.w * rect.h`, packs to GP0 0xA0 + word stream.
+//!
+//! ## What's NOT here (yet)
+//!
+//! - Compile-time tpage-overlap detection. A later pass can wrap
+//!   allocations in a const-generic `Layout<...>` that enforces
+//!   non-overlap across a fixed set of TexturePage/Clut declarations;
+//!   kept out for now because the rules around the 16-pixel CLUT
+//!   stride + tpage-row sharing get messy to express in bare
+//!   Rust const generics, and a build-time allocator tool is a
+//!   cleaner path when we're ready.
+//! - TIM parsing. Runtime / proc-macro loading lives in
+//!   `psx-asset` when it lands.
+//! - 4bpp / 8bpp upload helpers. PsyQ packs those as 16-bit
+//!   halfwords too (4 / 2 texels per halfword); the same
+//!   `upload_16bpp` works once the caller has pre-packed the
+//!   indices. A typed `upload_4bpp(rect, &[u8], clut)` would be
+//!   nicer; it's one of the first obvious follow-ups.
+//!
+//! ## Why these types over PsyQ's shorts
+//!
+//! Every field has rules PsyQ leaves to the programmer. TexturePage X
+//! must be a multiple of 64; Y must be 0 or 256. CLUT X must be
+//! a multiple of 16. Upload sizes are clamped on hardware but
+//! wrap (wrap, not truncate) on the real DMA controller if you
+//! oversize them. Getting any of these wrong in PsyQ silently
+//! corrupts VRAM. Const-validating them at construction means
+//! the bug can't compile -- which is the whole point of writing
+//! a Rust SDK instead of a C one.
+
+#![no_std]
+#![deny(unsafe_op_in_unsafe_fn)]
+#![warn(missing_docs)]
+
+use psx_hw::gpu::{gp0, gp1, pack_xy};
+use psx_io::dma::{self, Channel};
+use psx_io::gpu::{pause_recording, wait_command_ready, write_command, write_display_control};
+use psx_io::periph::GpuDma;
+
+/// VRAM framebuffer width in pixels.
+pub const VRAM_WIDTH: u16 = 1024;
+/// VRAM framebuffer height in pixels.
+pub const VRAM_HEIGHT: u16 = 512;
+
+// ======================================================================
+// Color
+// ======================================================================
+
+/// A 15-bit BGR pixel as stored in VRAM.
+///
+/// PSX VRAM stores every halfword in BGR-555-with-mask-bit layout:
+///
+/// ```text
+///   bit  15   14..10   9..5   4..0
+///        m    B       G      R
+/// ```
+///
+/// The mask bit is bit 15; [`Color555::rgb8`] constructs with the
+/// mask bit clear (most common). The "transparency" that games rely
+/// on for CLUT sprites is `Color555::raw(0)` -- PSX treats an
+/// all-zero texel as transparent in direct-color mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+#[repr(transparent)]
+pub struct Color555(u16);
+
+impl Color555 {
+    /// Fully-transparent texel (value 0). PSX treats this as "skip"
+    /// when sampling a textured primitive, regardless of mode.
+    pub const TRANSPARENT: Self = Self(0);
+    /// Opaque black with mask bit clear.
+    pub const BLACK: Self = Self(0);
+    /// Opaque white -- all five bits set in each channel.
+    pub const WHITE: Self = Self(0x7FFF);
+
+    /// Build a color from 8-bit channels, truncating the low 3 bits
+    /// of each. `rgb8(255, 255, 255) == WHITE`.
+    ///
+    /// Matches PsyQ's `getTPage(0, r, g, b)` and
+    /// `setRGB0(prim, r, g, b)` convention where the caller writes
+    /// 8-bit values; hardware sees 5 bits per channel.
+    pub const fn rgb8(r: u8, g: u8, b: u8) -> Self {
+        let r = (r as u16) >> 3;
+        let g = (g as u16) >> 3;
+        let b = (b as u16) >> 3;
+        Self(r | (g << 5) | (b << 10))
+    }
+
+    /// Build a color from already-5-bit channels. Asserts each
+    /// fits in 5 bits. `rgb5(31, 31, 31) == WHITE`.
+    pub const fn rgb5(r: u8, g: u8, b: u8) -> Self {
+        assert!(r < 32, "rgb5: red must be < 32");
+        assert!(g < 32, "rgb5: green must be < 32");
+        assert!(b < 32, "rgb5: blue must be < 32");
+        Self((r as u16) | ((g as u16) << 5) | ((b as u16) << 10))
+    }
+
+    /// Construct from the raw VRAM halfword. Useful when decoding
+    /// CLUT bytes or loading pre-packed asset data.
+    pub const fn raw(value: u16) -> Self {
+        Self(value)
+    }
+
+    /// Underlying VRAM halfword.
+    pub const fn as_u16(self) -> u16 {
+        self.0
+    }
+
+    /// Set the mask bit (bit 15). Matters when `GP0 0xE6` has
+    /// "check mask on draw" enabled -- writes are skipped where
+    /// existing mask is set. Games use this for UI overlays.
+    ///
+    /// In a **CLUT entry** bit 15 means something else entirely: see
+    /// [`Self::with_semi_transparency`].
+    pub const fn with_mask_bit(self) -> Self {
+        Self(self.0 | 0x8000)
+    }
+
+    /// Set the semi-transparency bit (STP, bit 15) for use in a **CLUT entry**.
+    ///
+    /// This is the same bit as [`Self::with_mask_bit`], but when the halfword
+    /// is a palette entry rather than a framebuffer pixel the GPU reads it as
+    /// "blend this texel". Selecting a blend mode on a textured primitive is
+    /// not enough on its own: the mode says *how* to blend, STP says *which
+    /// texels* blend. A palette without it draws fully opaque whatever blend
+    /// mode the primitive carries, and nothing reports it -- a silent failure
+    /// that reads like a brightness bug rather than a blending one.
+    ///
+    /// Set it on every entry of an additive or translucent palette, leaving
+    /// the fully transparent index (usually 0) at [`Self::TRANSPARENT`].
+    #[doc(alias = "STP")]
+    pub const fn with_semi_transparency(self) -> Self {
+        Self(self.0 | 0x8000)
+    }
+
+    /// Whether bit 15 is set (the mask bit, or STP in a CLUT entry).
+    #[doc(alias = "STP")]
+    pub const fn is_semi_transparent(self) -> bool {
+        self.0 & 0x8000 != 0
+    }
+}
+
+// ======================================================================
+// Rect
+// ======================================================================
+
+/// An `(x, y, w, h)` rectangle in VRAM coordinates.
+///
+/// Construction asserts the rect fits in VRAM. Subsequent code can
+/// pass `VramRect` around without re-checking -- it's by-construction
+/// safe.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct VramRect {
+    /// Top-left X in VRAM pixels (0..VRAM_WIDTH).
+    pub x: u16,
+    /// Top-left Y in VRAM pixels (0..VRAM_HEIGHT).
+    pub y: u16,
+    /// Width in pixels. `x + w <= VRAM_WIDTH`.
+    pub w: u16,
+    /// Height in pixels. `y + h <= VRAM_HEIGHT`.
+    pub h: u16,
+}
+
+impl VramRect {
+    /// Build a rect, asserting it fits in VRAM.
+    pub const fn new(x: u16, y: u16, w: u16, h: u16) -> Self {
+        assert!(w > 0, "VramRect: width must be > 0");
+        assert!(h > 0, "VramRect: height must be > 0");
+        assert!(x <= VRAM_WIDTH, "VramRect: x past VRAM right edge");
+        assert!(y <= VRAM_HEIGHT, "VramRect: y past VRAM bottom edge");
+        assert!(
+            (x as u32) + (w as u32) <= VRAM_WIDTH as u32,
+            "VramRect: (x + w) overflows VRAM width",
+        );
+        assert!(
+            (y as u32) + (h as u32) <= VRAM_HEIGHT as u32,
+            "VramRect: (y + h) overflows VRAM height",
+        );
+        Self { x, y, w, h }
+    }
+
+    /// Total pixel count. `w * h`.
+    pub const fn pixel_count(self) -> u32 {
+        (self.w as u32) * (self.h as u32)
+    }
+
+    /// Do these two rectangles share a pixel?
+    ///
+    /// Const so a game can prove its fixed VRAM layout at compile time. See
+    /// [`first_vram_overlap`].
+    pub const fn overlaps(self, other: Self) -> bool {
+        self.x < other.x + other.w
+            && other.x < self.x + self.w
+            && self.y < other.y + other.h
+            && other.y < self.y + self.h
+    }
+}
+
+/// Index of the first pair of rectangles in `rects` that share a pixel.
+///
+/// This exists because VRAM is the one PS1 resource with no allocator between
+/// the writer and the hardware: a picture uploaded to the wrong row silently
+/// reinterprets whatever was there, and the symptom is a wrong-looking texture
+/// somewhere else entirely, often only on the map that fills VRAM deepest.
+///
+/// A game that hardcodes its layout should list every fixed rectangle it owns
+/// (framebuffers, texture-page bands, CLUT rows, HUD and font strips) and pin
+/// the list at compile time, which costs no image bytes:
+///
+/// ```
+/// use psx_vram::{first_vram_overlap, VramRect};
+///
+/// const LAYOUT: [VramRect; 3] = [
+///     VramRect::new(0, 0, 320, 240),     // framebuffer A
+///     VramRect::new(0, 240, 320, 240),   // framebuffer B
+///     VramRect::new(0, 480, 320, 32),    // CLUT block
+/// ];
+/// const _: () = assert!(
+///     matches!(first_vram_overlap(&LAYOUT), None),
+///     "VRAM layout overlaps",
+/// );
+/// ```
+///
+/// A dynamic allocator's reachable output is a rectangle too. Bound it and
+/// list that bound, so a later change to the bound, the band or the row count
+/// fails the build rather than corrupting VRAM on one map.
+pub const fn first_vram_overlap(rects: &[VramRect]) -> Option<(usize, usize)> {
+    let mut i = 0;
+    while i < rects.len() {
+        let mut j = i + 1;
+        while j < rects.len() {
+            if rects[i].overlaps(rects[j]) {
+                return Some((i, j));
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// True when no two rectangles in `rects` share a pixel. See
+/// [`first_vram_overlap`] for the pattern and why it is worth pinning.
+pub const fn vram_layout_is_disjoint(rects: &[VramRect]) -> bool {
+    first_vram_overlap(rects).is_none()
+}
+
+// ======================================================================
+// Texture-window atlas allocation
+// ======================================================================
+
+/// Texture-window granularity in texels.
+///
+/// GP0(E2) stores texture-window masks and offsets in 8-texel units,
+/// so small atlas placements only need an 8-texel occupancy grid.
+pub const TEXTURE_WINDOW_UNIT_TEXELS: u16 = 8;
+
+/// Texture-page width and height in texels.
+pub const TEXTURE_PAGE_TEXELS: u16 = 256;
+
+const TEXTURE_PAGE_UNITS: usize = (TEXTURE_PAGE_TEXELS / TEXTURE_WINDOW_UNIT_TEXELS) as usize;
+
+/// Placement returned by [`TextureWindowAtlas::allocate`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TextureWindowPlacement {
+    page_index: u16,
+    origin_u: u8,
+    origin_v: u8,
+    width: u8,
+    height: u8,
+}
+
+impl TextureWindowPlacement {
+    /// Zero-based page index within the caller-owned atlas page band.
+    pub const fn page_index(self) -> u16 {
+        self.page_index
+    }
+
+    /// U origin in texels within the selected texture page.
+    pub const fn origin_u(self) -> u8 {
+        self.origin_u
+    }
+
+    /// V origin in texels within the selected texture page.
+    pub const fn origin_v(self) -> u8 {
+        self.origin_v
+    }
+
+    /// Allocated width in texels.
+    pub const fn width(self) -> u8 {
+        self.width
+    }
+
+    /// Allocated height in texels.
+    pub const fn height(self) -> u8 {
+        self.height
+    }
+}
+
+/// Tiny no-alloc atlas for PS1 texture-window-sized subtextures.
+///
+/// Each 256x256 texture page is tracked as a 32x32 bit grid where one
+/// bit represents an 8x8 texel block. Allocations are power-of-two
+/// rectangles that fit GP0(E2) texture-window constraints and are
+/// placed on their own width/height grid.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TextureWindowAtlas<const PAGE_COUNT: usize> {
+    rows: [[u32; TEXTURE_PAGE_UNITS]; PAGE_COUNT],
+}
+
+impl<const PAGE_COUNT: usize> TextureWindowAtlas<PAGE_COUNT> {
+    /// Build an empty atlas.
+    pub const fn new() -> Self {
+        Self {
+            rows: [[0; TEXTURE_PAGE_UNITS]; PAGE_COUNT],
+        }
+    }
+
+    /// Clear every occupied bit.
+    pub fn clear(&mut self) {
+        for page in &mut self.rows {
+            page.fill(0);
+        }
+    }
+
+    /// Allocate a power-of-two texture-window rectangle.
+    ///
+    /// Dimensions are texels. They must be 8-texel aligned,
+    /// power-of-two, and no larger than 128 texels, matching the
+    /// hardware texture-window range.
+    pub fn allocate(&mut self, width: u16, height: u16) -> Option<TextureWindowPlacement> {
+        let width_units = texture_window_units(width)?;
+        let height_units = texture_window_units(height)?;
+        let max_y = TEXTURE_PAGE_UNITS.checked_sub(height_units)?;
+        let max_x = TEXTURE_PAGE_UNITS.checked_sub(width_units)?;
+
+        for page_index in 0..PAGE_COUNT {
+            let mut y = 0usize;
+            while y <= max_y {
+                let mut x = 0usize;
+                while x <= max_x {
+                    if texture_region_free(&self.rows[page_index], x, y, width_units, height_units)
+                    {
+                        texture_region_mark(
+                            &mut self.rows[page_index],
+                            x,
+                            y,
+                            width_units,
+                            height_units,
+                        );
+                        return Some(TextureWindowPlacement {
+                            page_index: u16::try_from(page_index).ok()?,
+                            origin_u: u8::try_from(x * TEXTURE_WINDOW_UNIT_TEXELS as usize).ok()?,
+                            origin_v: u8::try_from(y * TEXTURE_WINDOW_UNIT_TEXELS as usize).ok()?,
+                            width: u8::try_from(width).ok()?,
+                            height: u8::try_from(height).ok()?,
+                        });
+                    }
+                    x += width_units;
+                }
+                y += height_units;
+            }
+        }
+        None
+    }
+
+    /// Reserve one completely empty texture page and return its page index.
+    ///
+    /// This is for assets that use a whole page without GP0(E2) texture
+    /// windows, such as large UI/background strips. It shares the atlas
+    /// bookkeeping so later windowed material allocations cannot overlap the
+    /// reserved page.
+    pub fn reserve_empty_page(&mut self) -> Option<usize> {
+        for page_index in 0..PAGE_COUNT {
+            if self.rows[page_index].iter().all(|row| *row == 0) {
+                self.rows[page_index].fill(u32::MAX);
+                return Some(page_index);
+            }
+        }
+        None
+    }
+
+    /// Release a placement previously returned by [`allocate`](Self::allocate),
+    /// clearing its occupancy bits so the space can be reused. The
+    /// `width`/`height` are the texel dimensions the placement was allocated
+    /// with (the placement records them).
+    pub fn release(&mut self, placement: TextureWindowPlacement) {
+        let page = placement.page_index() as usize;
+        let (Some(width_units), Some(height_units)) = (
+            texture_window_units(placement.width() as u16),
+            texture_window_units(placement.height() as u16),
+        ) else {
+            return;
+        };
+        let x = (placement.origin_u() / TEXTURE_WINDOW_UNIT_TEXELS as u8) as usize;
+        let y = (placement.origin_v() / TEXTURE_WINDOW_UNIT_TEXELS as u8) as usize;
+        if page >= PAGE_COUNT {
+            return;
+        }
+        let mask = texture_region_mask(x, width_units);
+        for row in &mut self.rows[page][y..y + height_units] {
+            *row &= !mask;
+        }
+    }
+
+    /// Release a whole page previously taken by
+    /// [`reserve_empty_page`](Self::reserve_empty_page).
+    pub fn release_page(&mut self, page_index: usize) {
+        if page_index < PAGE_COUNT {
+            self.rows[page_index].fill(0);
+        }
+    }
+
+    /// Whether a logical atlas page contains no live window or full-page
+    /// reservation. Used by the physical allocator to return lazy backing at
+    /// scene boundaries.
+    pub fn is_page_empty(&self, page_index: usize) -> bool {
+        self.rows
+            .get(page_index)
+            .is_some_and(|rows| rows.iter().all(|row| *row == 0))
+    }
+}
+
+impl<const PAGE_COUNT: usize> Default for TextureWindowAtlas<PAGE_COUNT> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn texture_window_units(size: u16) -> Option<usize> {
+    if !(TEXTURE_WINDOW_UNIT_TEXELS..=128).contains(&size)
+        || !size.is_power_of_two()
+        || !size.is_multiple_of(TEXTURE_WINDOW_UNIT_TEXELS)
+    {
+        return None;
+    }
+    Some((size / TEXTURE_WINDOW_UNIT_TEXELS) as usize)
+}
+
+fn texture_region_mask(x: usize, width: usize) -> u32 {
+    ((1u32 << width) - 1) << x
+}
+
+fn texture_region_free(
+    rows: &[u32; TEXTURE_PAGE_UNITS],
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> bool {
+    let mask = texture_region_mask(x, width);
+    for row in &rows[y..y + height] {
+        if row & mask != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn texture_region_mark(
+    rows: &mut [u32; TEXTURE_PAGE_UNITS],
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) {
+    let mask = texture_region_mask(x, width);
+    for row in &mut rows[y..y + height] {
+        *row |= mask;
+    }
+}
+
+// ======================================================================
+// TexturePage + Clut
+// ======================================================================
+
+/// Texture color depth -- the last field of GP0(E1h) and bits 7..8
+/// of a primitive's tpage word.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TextureDepth {
+    /// 4-bit CLUT-indexed. 4 texels per 16-bit halfword.
+    Bit4 = 0,
+    /// 8-bit CLUT-indexed. 2 texels per halfword.
+    Bit8 = 1,
+    /// 15-bit direct color. 1 texel per halfword.
+    Bit15 = 2,
+}
+
+impl TextureDepth {
+    const fn as_u16(self) -> u16 {
+        self as u16
+    }
+
+    /// Texels per 16-bit halfword at this depth. 4 for 4bpp,
+    /// 2 for 8bpp, 1 for 15bpp.
+    pub const fn texels_per_halfword(self) -> u16 {
+        match self {
+            TextureDepth::Bit4 => 4,
+            TextureDepth::Bit8 => 2,
+            TextureDepth::Bit15 => 1,
+        }
+    }
+}
+
+/// A texture page: a 256×256 region at a specific VRAM origin,
+/// plus a depth.
+///
+/// Hardware constraints (PSX-SPX "GP0 0xE1"):
+/// - `x` is multiples of 64 pixels → one of 0, 64, 128, …, 960.
+/// - `y` is either 0 or 256.
+/// - The effective page width shrinks with depth: 64 pixels for
+///   4bpp, 128 for 8bpp, 256 for 15bpp. (Because the texel-fetch
+///   address is `tpage_x + u / texels_per_halfword`, so smaller
+///   texels pack into fewer halfwords and hence a narrower span.)
+///
+/// The const constructor catches misaligned X/Y at compile time.
+/// A const check across multiple TexturePage consts (to enforce non-
+/// overlap) needs const generics that are noisy to express here;
+/// runtime collision tooling lives in a follow-up.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TexturePage {
+    x: u16,
+    y: u16,
+    depth: TextureDepth,
+}
+
+impl TexturePage {
+    /// Build a TexturePage. Compile-time assertion that `x` is a
+    /// multiple of 64 and `y` is 0 or 256.
+    #[allow(clippy::manual_is_multiple_of)]
+    pub const fn new(x: u16, y: u16, depth: TextureDepth) -> Self {
+        assert!(x % 64 == 0, "TexturePage: x must be a multiple of 64");
+        assert!(x < VRAM_WIDTH, "TexturePage: x past VRAM");
+        assert!(y == 0 || y == 256, "TexturePage: y must be 0 or 256");
+        Self { x, y, depth }
+    }
+
+    /// VRAM X origin (0, 64, …, 960).
+    pub const fn x(self) -> u16 {
+        self.x
+    }
+    /// VRAM Y origin (0 or 256).
+    pub const fn y(self) -> u16 {
+        self.y
+    }
+    /// Color depth.
+    pub const fn depth(self) -> TextureDepth {
+        self.depth
+    }
+
+    /// VRAM rect this tpage would actually cover at its depth.
+    /// Useful for sanity-checking that uploaded texture data fits.
+    pub const fn covering_rect(self) -> VramRect {
+        let w = match self.depth {
+            TextureDepth::Bit4 => 64,
+            TextureDepth::Bit8 => 128,
+            TextureDepth::Bit15 => 256,
+        };
+        // covering_rect is for upload sizing; height is always the
+        // 256-row page height. The assert in VramRect::new guards
+        // the actual bound at compile time.
+        VramRect::new(self.x, self.y, w, 256)
+    }
+
+    /// Encode as the low-16-bits of a textured-primitive UV word
+    /// (the "tpage" embedded field). Same byte layout as GP0(E1h)'s
+    /// low 10 bits minus display-disable / dither bits, which we
+    /// leave to the draw-mode setter. Bits:
+    ///
+    /// ```text
+    ///   bits 0..3   : tpage X / 64
+    ///   bit  4      : tpage Y / 256
+    ///   bits 5..6   : semi-transparency mode (0 = half + half)
+    ///   bits 7..8   : depth (0=4bpp, 1=8bpp, 2=15bpp)
+    /// ```
+    ///
+    /// `semi_trans` picks the GPU blend mode when a texel's mask
+    /// bit is set. 0 is "0.5·bg + 0.5·fg" -- the most common.
+    #[doc(alias = "getTPage")]
+    pub const fn uv_word(self, semi_trans: u8) -> u16 {
+        assert!(semi_trans < 4, "semi_trans must be 0..4");
+        let tpx = (self.x / 64) & 0xF;
+        let tpy = if self.y == 256 { 1 } else { 0 };
+        let depth = self.depth.as_u16();
+        tpx | (tpy << 4) | ((semi_trans as u16) << 5) | (depth << 7)
+    }
+
+    /// The full GP0(E1h) draw-mode word. Use this to set the
+    /// "current" tpage for sprite / rect primitives that don't
+    /// embed a tpage of their own.
+    pub fn apply_as_draw_mode(self) {
+        wait_command_ready();
+        write_command(gp0::draw_mode(
+            (self.x / 64) as u32,
+            if self.y == 256 { 1 } else { 0 },
+            0,
+            self.depth as u32,
+            false,
+            true,
+        ));
+        // Plain tpage application means "sample the page directly".
+        // Material-aware helpers re-apply their own texture window after
+        // setting draw mode.
+        wait_command_ready();
+        write_command(gp0::tex_window(0, 0, 0, 0));
+    }
+}
+
+/// A CLUT slot -- 16 consecutive halfwords at `(x, y)` for 4bpp, or
+/// 256 consecutive halfwords for 8bpp. Const constructor asserts
+/// the 16-pixel X alignment hardware requires.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Clut {
+    x: u16,
+    y: u16,
+}
+
+impl Clut {
+    /// Build a CLUT. `x` must be a multiple of 16; `y` is any row.
+    #[allow(clippy::manual_is_multiple_of)]
+    pub const fn new(x: u16, y: u16) -> Self {
+        assert!(x % 16 == 0, "Clut: x must be a multiple of 16");
+        assert!(x < VRAM_WIDTH, "Clut: x past VRAM");
+        assert!(y < VRAM_HEIGHT, "Clut: y past VRAM");
+        Self { x, y }
+    }
+
+    /// VRAM X origin (0, 16, 32, …).
+    pub const fn x(self) -> u16 {
+        self.x
+    }
+    /// VRAM Y origin (0..512).
+    pub const fn y(self) -> u16 {
+        self.y
+    }
+
+    /// Encode as the high-16-bits of a textured-primitive's first
+    /// UV word. Bits:
+    ///
+    /// ```text
+    ///   bits 0..5   : CLUT X / 16
+    ///   bits 6..14  : CLUT Y
+    /// ```
+    #[doc(alias = "getClut")]
+    pub const fn uv_word(self) -> u16 {
+        let cx = (self.x / 16) & 0x3F;
+        let cy = self.y & 0x1FF;
+        cx | (cy << 6)
+    }
+}
+
+// ======================================================================
+// Unified VRAM allocator
+// ======================================================================
+
+/// Coarse VRAM occupancy cell width in pixels (one texture-page column).
+const ALLOC_COL_W: u16 = 64;
+/// Coarse VRAM occupancy cell height in pixels.
+const ALLOC_ROW_H: u16 = 16;
+/// Number of 64-pixel columns across VRAM (16).
+pub const VRAM_ALLOC_COLS: usize = (VRAM_WIDTH / ALLOC_COL_W) as usize;
+/// Number of 16-pixel rows down VRAM (32).
+pub const VRAM_ALLOC_ROWS: usize = (VRAM_HEIGHT / ALLOC_ROW_H) as usize;
+/// Page height in coarse rows (a texture page is 256 px tall).
+const ALLOC_PAGE_ROWS: usize = (TEXTURE_PAGE_TEXELS / ALLOC_ROW_H) as usize;
+/// CLUT slots per VRAM row (1024 px / 16 px).
+const CLUT_SLOTS_PER_ROW: u16 = VRAM_WIDTH / 16;
+
+/// A freeable handle to a VRAM reservation handed out by [`VramAllocator`].
+///
+/// Returned alongside the hardware [`TexturePage`] / [`Clut`] so a caller can both
+/// use the reservation immediately and release it later via
+/// [`VramAllocator::free`]. `Copy` so it can sit in fixed slot tables.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum VramHandle {
+    /// No reservation (allocation failed, or a default slot).
+    Empty,
+    /// A coarse-grid rectangle: texture pages, model strips, the framebuffer.
+    Rect(VramRect),
+    /// A room-material window inside the composed [`TextureWindowAtlas`].
+    Window(TextureWindowPlacement),
+    /// A whole reserved room-material page (its page index).
+    RoomPage(u16),
+    /// A CLUT-row sub-allocation: `entries` palette slots at `(x, y)`.
+    Clut {
+        /// VRAM X (multiple of 16).
+        x: u16,
+        /// VRAM Y.
+        y: u16,
+        /// Palette entry count (16 or 256).
+        entries: u16,
+    },
+}
+
+/// Source of VRAM regions for crates that should not depend on the whole
+/// [`VramAllocator`] type (e.g. `psx-font`). [`VramAllocator`] implements it.
+pub trait VramRegionSource {
+    /// Reserve `count` contiguous texture pages at page row `page_y`
+    /// (0 or 256), returning the base [`TexturePage`] and a free handle.
+    fn alloc_page_run(
+        &mut self,
+        count: u16,
+        depth: TextureDepth,
+        page_y: u16,
+    ) -> Option<(TexturePage, VramHandle)>;
+
+    /// Reserve a CLUT of `entries` palette slots (16 for 4bpp, 256 for 8bpp).
+    fn alloc_clut(&mut self, entries: u16) -> Option<(Clut, VramHandle)>;
+}
+
+/// CLUT-row sub-allocator over a reserved band of `ROWS` VRAM rows.
+///
+/// Each row holds [`CLUT_SLOTS_PER_ROW`] 16-pixel slots tracked as a `u64`
+/// bitmap, so a 4bpp (16-entry) CLUT takes 1 slot and an 8bpp (256-entry)
+/// CLUT takes 16 contiguous slots.
+#[derive(Copy, Clone, Debug)]
+pub struct ClutRowAllocator<const ROWS: usize> {
+    base_y: u16,
+    // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
+    rows: [u64; ROWS],
+}
+
+impl<const ROWS: usize> ClutRowAllocator<ROWS> {
+    /// Build an allocator over rows `[base_y, base_y + ROWS)`.
+    pub const fn new(base_y: u16) -> Self {
+        Self {
+            base_y,
+            rows: [0; ROWS],
+        }
+    }
+
+    fn slot_count(entries: u16) -> usize {
+        (entries.max(1) as usize).div_ceil(16)
+    }
+
+    /// Allocate a CLUT of `entries` (16 or 256) palette slots.
+    pub fn alloc(&mut self, entries: u16) -> Option<Clut> {
+        let slots = Self::slot_count(entries);
+        let cap = CLUT_SLOTS_PER_ROW as usize;
+        if slots == 0 || slots > cap.min(64) {
+            return None;
+        }
+        // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
+        let want: u64 = if slots == 64 {
+            // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
+            u64::MAX
+        } else {
+            (1u64 << slots) - 1
+        };
+        for (r, row) in self.rows.iter_mut().enumerate() {
+            let mut s = 0usize;
+            while s + slots <= cap.min(64) {
+                let mask = want << s;
+                if *row & mask == 0 {
+                    *row |= mask;
+                    return Some(Clut::new((s as u16) * 16, self.base_y + r as u16));
+                }
+                s += 1;
+            }
+        }
+        None
+    }
+
+    /// Release a CLUT previously returned by [`alloc`](Self::alloc).
+    pub fn free(&mut self, clut: Clut, entries: u16) {
+        let slots = Self::slot_count(entries);
+        let r = clut.y().saturating_sub(self.base_y) as usize;
+        let s = (clut.x() / 16) as usize;
+        if r >= ROWS || s + slots > 64 {
+            return;
+        }
+        // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
+        let mask: u64 = if slots == 64 {
+            // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
+            u64::MAX
+        } else {
+            (1u64 << slots) - 1
+        } << s;
+        self.rows[r] &= !mask;
+    }
+}
+
+/// One owner for all of VRAM: texture pages, room-material windows, model
+/// strips and CLUT rows, with `free`. A coarse 64×16-pixel occupancy grid
+/// keeps page/strip/framebuffer reservations from overlapping; a composed
+/// [`TextureWindowAtlas`] sub-allocates room-material windows inside a
+/// reserved band; a [`ClutRowAllocator`] hands out CLUT rows.
+#[derive(Copy, Clone, Debug)]
+pub struct VramAllocator<const ROOM_PAGES: usize, const CLUT_ROWS: usize> {
+    grid: [u16; VRAM_ALLOC_ROWS],
+    clut: ClutRowAllocator<CLUT_ROWS>,
+    room: TextureWindowAtlas<ROOM_PAGES>,
+    /// Physical backing selected lazily for each logical room-atlas page.
+    /// Unused capacity therefore consumes no VRAM, and a page is returned when
+    /// its final window (or full-page image) is released at a scene boundary.
+    room_pages: [Option<TexturePage>; ROOM_PAGES],
+    room_page_handles: [VramHandle; ROOM_PAGES],
+    room_base_x: u16,
+    room_base_y: u16,
+}
+
+impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, CLUT_ROWS> {
+    /// Build an empty allocator. `clut_base_y` is the first CLUT-band row.
+    pub const fn new(clut_base_y: u16) -> Self {
+        Self {
+            grid: [0; VRAM_ALLOC_ROWS],
+            clut: ClutRowAllocator::new(clut_base_y),
+            room: TextureWindowAtlas::new(),
+            room_pages: [None; ROOM_PAGES],
+            room_page_handles: [VramHandle::Empty; ROOM_PAGES],
+            room_base_x: 0,
+            room_base_y: 0,
+        }
+    }
+
+    fn span(x: u16, y: u16, w: u16, h: u16) -> (usize, usize, usize, usize) {
+        let c0 = (x / ALLOC_COL_W) as usize;
+        let c1 = ((x as usize + w as usize).div_ceil(ALLOC_COL_W as usize)).min(VRAM_ALLOC_COLS);
+        let r0 = (y / ALLOC_ROW_H) as usize;
+        let r1 = ((y as usize + h as usize).div_ceil(ALLOC_ROW_H as usize)).min(VRAM_ALLOC_ROWS);
+        (c0, c1, r0, r1)
+    }
+
+    #[allow(dead_code)] // used by later stages for overlap assertions
+    fn rect_free(&self, x: u16, y: u16, w: u16, h: u16) -> bool {
+        let (c0, c1, r0, r1) = Self::span(x, y, w, h);
+        for r in r0..r1 {
+            for c in c0..c1 {
+                if self.grid[r] & (1 << c) != 0 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn set_rect(&mut self, x: u16, y: u16, w: u16, h: u16, occupied: bool) {
+        let (c0, c1, r0, r1) = Self::span(x, y, w, h);
+        for r in r0..r1 {
+            for c in c0..c1 {
+                if occupied {
+                    self.grid[r] |= 1 << c;
+                } else {
+                    self.grid[r] &= !(1 << c);
+                }
+            }
+        }
+    }
+
+    /// Reserve a fixed rectangle (e.g. the double-buffered framebuffer, or a
+    /// region still owned by legacy hardcoded uploads). Returns a handle that
+    /// can be `free`d but is normally permanent.
+    pub fn reserve_rect(&mut self, rect: VramRect) -> VramHandle {
+        self.set_rect(rect.x, rect.y, rect.w, rect.h, true);
+        VramHandle::Rect(rect)
+    }
+
+    /// Select the preferred room-material page band. Physical pages are
+    /// reserved lazily as the logical atlas first touches them, so a six-page
+    /// capacity no longer pins six pages for a scene that uses only one.
+    pub fn reserve_room_band(&mut self, base_x: u16, base_y: u16) {
+        self.room_base_x = base_x;
+        self.room_base_y = base_y;
+    }
+
+    fn ensure_room_page(&mut self, page_index: usize) -> Option<TexturePage> {
+        if let Some(tpage) = self.room_pages.get(page_index).copied().flatten() {
+            return Some(tpage);
+        }
+        if page_index >= ROOM_PAGES {
+            return None;
+        }
+        let preferred_x = self
+            .room_base_x
+            .checked_add((page_index as u16).checked_mul(ALLOC_COL_W)?)?;
+        let x = if preferred_x + ALLOC_COL_W <= VRAM_WIDTH
+            && self.rect_free(
+                preferred_x,
+                self.room_base_y,
+                ALLOC_COL_W,
+                TEXTURE_PAGE_TEXELS,
+            ) {
+            preferred_x
+        } else {
+            self.find_page_run(1, self.room_base_y)?
+        };
+        self.set_rect(x, self.room_base_y, ALLOC_COL_W, TEXTURE_PAGE_TEXELS, true);
+        let tpage = TexturePage::new(x, self.room_base_y, TextureDepth::Bit4);
+        self.room_pages[page_index] = Some(tpage);
+        self.room_page_handles[page_index] = VramHandle::Rect(VramRect::new(
+            x,
+            self.room_base_y,
+            ALLOC_COL_W,
+            TEXTURE_PAGE_TEXELS,
+        ));
+        Some(tpage)
+    }
+
+    fn release_room_page_if_empty(&mut self, page_index: usize) {
+        if page_index >= ROOM_PAGES || !self.room.is_page_empty(page_index) {
+            return;
+        }
+        let handle = core::mem::replace(&mut self.room_page_handles[page_index], VramHandle::Empty);
+        if let VramHandle::Rect(rect) = handle {
+            self.set_rect(rect.x, rect.y, rect.w, rect.h, false);
+        }
+        self.room_pages[page_index] = None;
+    }
+
+    fn find_page_run(&self, count: u16, page_y: u16) -> Option<u16> {
+        let r0 = (page_y / ALLOC_ROW_H) as usize;
+        let r1 = r0 + ALLOC_PAGE_ROWS;
+        if r1 > VRAM_ALLOC_ROWS || count == 0 {
+            return None;
+        }
+        let n = count as usize;
+        let mut c = 0usize;
+        while c + n <= VRAM_ALLOC_COLS {
+            let cols_free = (c..c + n).all(|col| (r0..r1).all(|r| self.grid[r] & (1 << col) == 0));
+            if cols_free {
+                return Some((c as u16) * ALLOC_COL_W);
+            }
+            c += 1;
+        }
+        None
+    }
+
+    /// Allocate a room-material window (delegates to the composed
+    /// [`TextureWindowAtlas`]; the band must be reserved first).
+    pub fn alloc_window(
+        &mut self,
+        width_texels: u16,
+        height_texels: u16,
+    ) -> Option<(TexturePage, TextureWindowPlacement, VramHandle)> {
+        let placement = self.room.allocate(width_texels, height_texels)?;
+        let page_index = placement.page_index() as usize;
+        let Some(tpage) = self.ensure_room_page(page_index) else {
+            self.room.release(placement);
+            return None;
+        };
+        Some((tpage, placement, VramHandle::Window(placement)))
+    }
+
+    /// Reserve a whole room-material page (large UI / background textures use a
+    /// full page without a GP0(E2) window). The room band must be reserved
+    /// first via [`reserve_room_band`](Self::reserve_room_band).
+    pub fn alloc_room_page(&mut self) -> Option<(TexturePage, VramHandle)> {
+        let page_index = self.room.reserve_empty_page()?;
+        let Some(tpage) = self.ensure_room_page(page_index) else {
+            self.room.release_page(page_index);
+            return None;
+        };
+        Some((tpage, VramHandle::RoomPage(page_index as u16)))
+    }
+
+    /// Allocate an indexed model-atlas strip `halfwords_per_row` wide (rounded
+    /// up to whole 64-halfword tpage bases) at page row 256.
+    ///
+    /// Placement is measured in physical VRAM halfwords, so the same allocator
+    /// works for 4bpp and 8bpp atlases. `depth` controls how the GPU interprets
+    /// those halfwords when the returned tpage word is emitted.
+    pub fn alloc_model_slot(
+        &mut self,
+        halfwords_per_row: u16,
+        depth: TextureDepth,
+    ) -> Option<(TexturePage, VramHandle)> {
+        if !matches!(depth, TextureDepth::Bit4 | TextureDepth::Bit8) {
+            return None;
+        }
+        let pages = halfwords_per_row.div_ceil(ALLOC_COL_W).max(1);
+        let x = self.find_page_run(pages, 256)?;
+        self.set_rect(x, 256, pages * ALLOC_COL_W, TEXTURE_PAGE_TEXELS, true);
+        Some((
+            TexturePage::new(x, 256, depth),
+            VramHandle::Rect(VramRect::new(
+                x,
+                256,
+                pages * ALLOC_COL_W,
+                TEXTURE_PAGE_TEXELS,
+            )),
+        ))
+    }
+
+    /// Release a reservation.
+    pub fn free(&mut self, handle: VramHandle) {
+        match handle {
+            VramHandle::Empty => {}
+            VramHandle::Rect(rect) => self.set_rect(rect.x, rect.y, rect.w, rect.h, false),
+            VramHandle::Window(placement) => {
+                let page = placement.page_index() as usize;
+                self.room.release(placement);
+                self.release_room_page_if_empty(page);
+            }
+            VramHandle::RoomPage(page) => {
+                let page = page as usize;
+                self.room.release_page(page);
+                self.release_room_page_if_empty(page);
+            }
+            VramHandle::Clut { x, y, entries } => self.clut.free(Clut::new(x, y), entries),
+        }
+    }
+}
+
+impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramRegionSource
+    for VramAllocator<ROOM_PAGES, CLUT_ROWS>
+{
+    fn alloc_page_run(
+        &mut self,
+        count: u16,
+        depth: TextureDepth,
+        page_y: u16,
+    ) -> Option<(TexturePage, VramHandle)> {
+        let x = self.find_page_run(count, page_y)?;
+        self.set_rect(x, page_y, count * ALLOC_COL_W, TEXTURE_PAGE_TEXELS, true);
+        Some((
+            TexturePage::new(x, page_y, depth),
+            VramHandle::Rect(VramRect::new(
+                x,
+                page_y,
+                count * ALLOC_COL_W,
+                TEXTURE_PAGE_TEXELS,
+            )),
+        ))
+    }
+
+    fn alloc_clut(&mut self, entries: u16) -> Option<(Clut, VramHandle)> {
+        let clut = self.clut.alloc(entries)?;
+        Some((
+            clut,
+            VramHandle::Clut {
+                x: clut.x(),
+                y: clut.y(),
+                entries,
+            },
+        ))
+    }
+}
+
+// ======================================================================
+// Uploads
+// ======================================================================
+
+/// Upload raw 16bpp halfwords into a VRAM rect via GP0 0xA0 + word
+/// stream. Checks that `pixels.len() * 2 == rect.w * rect.h` -- one
+/// halfword per pixel, and the FIFO ships 32-bit words containing
+/// two halfwords each. Odd pixel counts (which round up on
+/// hardware) panic because they're rarely what the caller wanted.
+///
+/// For a 15bpp direct-color upload, each halfword is a
+/// [`Color555`]. For pre-packed 4bpp / 8bpp index data, each
+/// halfword packs 4 or 2 indices respectively.
+pub fn upload_16bpp(rect: VramRect, pixels: &[u16]) {
+    let expected = rect.pixel_count();
+    // Literal messages: formatting the counts links core::fmt (about 4 KB)
+    // into any program where this function is not inlined.
+    assert!(
+        pixels.len() as u32 == expected,
+        "upload_16bpp: pixels.len() != rect.w * rect.h"
+    );
+    assert!(
+        expected.is_multiple_of(2),
+        "upload_16bpp: odd pixel count not supported; round the rect up"
+    );
+
+    // FIFO path by default: the CL2 silicon probes showed this console's
+    // DMA controller can latch a channel busy-forever while moving
+    // nothing, and an upload that wedges freezes boot with no diagnostic
+    // (the unbounded busy-wait in the DMA path). The FIFO loop is a
+    // boot-time cost nobody measures; callers that trust their DMA can
+    // opt in via `dma_copy_to_vram`.
+    // Two halfwords per 32-bit word, low half first.
+    // During GP0(0xA0) image transfer the GPU is waiting for data,
+    // not normal commands; DuckStation clears READY_CMD in this
+    // state, so stream payload words without polling command-ready.
+    // An image upload cannot be recorded, so it always reaches the port.
+    let _pause = pause_recording();
+    copy_to_vram_header(rect);
+    let mut i = 0;
+    while i + 1 < pixels.len() {
+        let lo = pixels[i] as u32;
+        let hi = pixels[i + 1] as u32;
+        psx_io::gpu::write_command_unguarded(lo | (hi << 16));
+        i += 2;
+    }
+}
+
+/// Upload raw byte-stream pixel data, interpreted as halfwords in
+/// little-endian order. Same semantics as [`upload_16bpp`] but
+/// accepts a `&[u8]` -- useful when the data comes from
+/// `include_bytes!` of a cooked asset blob, where the returned
+/// byte array has alignment 1 and a direct `&[u16]` reinterpret
+/// would be undefined behaviour.
+///
+/// `rect.w` still measures *halfwords* (the VRAM native unit).
+/// The byte length must be exactly `2 × rect.w × rect.h`.
+pub fn upload_bytes(rect: VramRect, bytes: &[u8]) {
+    let expected = (rect.pixel_count() as usize) * 2;
+    assert_eq!(
+        bytes.len(),
+        expected,
+        "upload_bytes: bytes.len() ({}) != 2 × rect.w × rect.h ({})",
+        bytes.len(),
+        expected,
+    );
+    assert!(
+        bytes.len() >= 2 && bytes.len().is_multiple_of(2),
+        "upload_bytes: byte count must be a positive multiple of 2"
+    );
+
+    // FIFO path by default; see upload_16bpp for the silicon rationale.
+    // Two halfwords per word, low half first -- matches upload_16bpp's
+    // packing convention. GP0 image copies with an odd halfword count still
+    // consume one complete final word; its unused high halfword is ignored by
+    // the GPU, so zero-pad it. See upload_16bpp: image payload writes must not
+    // wait on the normal command-ready bit.
+    let _pause = pause_recording();
+    copy_to_vram_header(rect);
+    let mut i = 0;
+    while i < bytes.len() {
+        psx_io::gpu::write_command_unguarded(packed_upload_word(bytes, i));
+        i += 4;
+    }
+}
+
+#[inline]
+fn packed_upload_word(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes.get(offset + 2).copied().unwrap_or(0),
+        bytes.get(offset + 3).copied().unwrap_or(0),
+    ])
+}
+
+/// Upload bytes using aligned word loads when possible. Unaligned and odd
+/// halfword counts retain [`upload_bytes`]'s zero-padded final-word behavior.
+pub fn upload_bytes_aligned(rect: VramRect, bytes: &[u8]) {
+    if cfg!(target_endian = "little")
+        && bytes.as_ptr().align_offset(4) == 0
+        && bytes.len().is_multiple_of(4)
+    {
+        let words =
+            // SAFETY: every u32 bit pattern is valid; alignment, extent and
+            // lifetime are checked above and the input stays immutably borrowed.
+            unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<u32>(), bytes.len() / 4) };
+        upload_words(rect, words);
+    } else {
+        upload_bytes(rect, bytes);
+    }
+}
+
+/// Upload an already packed little-endian stream of two 16-bit VRAM pixels
+/// per word.
+///
+/// This is the aligned counterpart to [`upload_bytes`]. Runtime-generated
+/// textures commonly live in a `u32` staging arena already, so accepting the
+/// packed words directly avoids reconstructing every word from four byte
+/// loads while retaining the silicon-safe FIFO transfer path.
+#[doc(alias = "LoadImage")]
+pub fn upload_words(rect: VramRect, words: &[u32]) {
+    let expected_words = rect.pixel_count() as usize / 2;
+    assert!(
+        rect.pixel_count().is_multiple_of(2),
+        "upload_words: odd pixel count is not supported"
+    );
+    assert_eq!(
+        words.len(),
+        expected_words,
+        "upload_words: words.len() ({}) != rect.w*rect.h/2 ({})",
+        words.len(),
+        expected_words,
+    );
+    assert!(!words.is_empty(), "upload_words: empty upload");
+
+    let _pause = pause_recording();
+    copy_to_vram_header(rect);
+    for &word in words {
+        psx_io::gpu::write_command_unguarded(word);
+    }
+}
+
+/// Emit the GP0(0xA0) "copy CPU→VRAM" header (destination, halfword extent). Its writes run
+/// any armed present-queue guard and callers hold a recording pause, so the FIFO payload that
+/// follows skips the flag test (`write_command_unguarded`); block DMA follows otherwise.
+#[inline]
+fn copy_to_vram_header(rect: VramRect) {
+    // An asynchronously kicked ordering-table walk may still be feeding
+    // GP0 over this same channel when streaming code uploads from a
+    // fixed update. Interleaving header words (or reprogramming the
+    // channel for the block-DMA path) mid-walk corrupts the command
+    // stream, so drain the channel first. Bounded: a wedged walk must
+    // not take the upload (or the boot that needs it) down with it.
+    if !dma::wait_done(Channel::Gpu, dma::DEFAULT_SPINS) {
+        dma::abort(Channel::Gpu);
+    }
+    wait_command_ready();
+    write_command(gp0::COPY_CPU_TO_VRAM);
+    write_command(pack_xy(rect.x, rect.y));
+    write_command(pack_xy(rect.w, rect.h));
+}
+
+/// Upload `words` to `rect` over block-mode DMA (channel 2) instead of
+/// word-at-a-time FIFO writes, and wait for it. This mirrors PsyQ's
+/// `LoadImage`: `BS = words-per-row`, `BA = rows`.
+///
+/// `words` holds the pixels as little-endian 32-bit words, two 16-bit
+/// halfwords each, row after row: `(rect.w / 2) * rect.h` words, and only
+/// that many are sent. Returns `false`, leaving the GPU untouched, when the
+/// transfer cannot be expressed this way: an odd or zero width, a zero
+/// height, a row wider than the GPU's 16-word FIFO, or a slice shorter than
+/// the rectangle. Use [`upload_16bpp`] (the FIFO path) for those.
+///
+/// Opt-in: on real hardware the DMA controller can latch a channel
+/// busy-forever (CL2 probe, 2026-07-31). The completion wait is bounded,
+/// so a wedge costs a `false` and a partial upload rather than a hang.
+#[doc(alias = "LoadImage")]
+pub fn dma_copy_to_vram(_dma: &mut GpuDma, rect: VramRect, words: &[u32]) -> bool {
+    if words.len() < copy_words(rect) {
+        return false;
+    }
+    // SAFETY: the check above proved `words` holds the whole rectangle, and
+    // it stays borrowed until this function returns; the wait below, or the
+    // abort on a wedge, ends the transfer before then.
+    if !unsafe { kick_copy_to_vram(rect, words.as_ptr()) } {
+        return false;
+    }
+    // On a wedge the GP0(A0) header is already out and the payload did not
+    // land, so VRAM holds a partial upload either way; report it.
+    dma::wait_or_abort(Channel::Gpu, dma::DEFAULT_SPINS)
+}
+
+/// [`dma_copy_to_vram`] without the completion wait: send the copy header,
+/// kick the block DMA and return, so the CPU keeps working while channel 2
+/// feeds the GPU. Poll [`dma_copy_to_vram_done`]; abort channel 2
+/// (`psx_io::dma::abort`) if it never finishes. Returns `false`, having
+/// touched nothing, for a transfer the DMA cannot express (see
+/// [`dma_copy_to_vram`]).
+///
+/// `words` points at the `(rect.w / 2) * rect.h` pixel words, as the slice
+/// of [`dma_copy_to_vram`] would.
+///
+/// # Safety
+/// `words` must point at that many readable words, alive and unmodified
+/// until [`dma_copy_to_vram_done`] returns `true` or channel 2 is aborted.
+/// Until then nothing else may write GP0 or program channel 2, so no
+/// drawing, other upload or frame submission; the `&mut GpuDma` borrow only
+/// covers the call itself.
+#[doc(alias = "LoadImage")]
+pub unsafe fn dma_copy_to_vram_start(_dma: &mut GpuDma, rect: VramRect, words: *const u32) -> bool {
+    // SAFETY: the caller upholds this function's contract.
+    unsafe { kick_copy_to_vram(rect, words) }
+}
+
+/// True once the transfer [`dma_copy_to_vram_start`] kicked has finished.
+#[inline]
+pub fn dma_copy_to_vram_done() -> bool {
+    !dma::is_busy(Channel::Gpu)
+}
+
+/// Words one block-DMA upload of `rect` sends.
+fn copy_words(rect: VramRect) -> usize {
+    (rect.w / 2) as usize * rect.h as usize
+}
+
+/// The GP0(A0) header, then a block DMA of the rectangle's words from
+/// `src`, with no wait. `false` (nothing touched) when the DMA cannot send
+/// the rectangle whole: an odd or zero width, a zero height, or a row wider
+/// than the GPU's 16-word FIFO.
+///
+/// # Safety
+/// `src` must point at [`copy_words`] readable words that stay unmodified
+/// until channel 2 finishes or is aborted.
+unsafe fn kick_copy_to_vram(rect: VramRect, src: *const u32) -> bool {
+    if !rect.w.is_multiple_of(2) || rect.w == 0 || rect.h == 0 {
+        return false;
+    }
+    let words_per_row = rect.w / 2;
+    // GPU block-mode DMA's BCR block size must fit the GPU's 16-word
+    // FIFO. Wider rows, such as the combined UI font atlas, can appear to
+    // work in emulators but wedge real hardware; use the GP0 FIFO path
+    // instead of starting an invalid DMA.
+    if words_per_row > 16 {
+        return false;
+    }
+    let _pause = pause_recording();
+    copy_to_vram_header(rect);
+    // GP1(04h) = 2: route DMA words CPU→GP0. `psx-gpu::init` sets this,
+    // but a VRAM readback could have flipped it to GPUREAD→CPU.
+    write_display_control(gp1::dma_direction(2));
+    dma::enable_channel(Channel::Gpu);
+    // SAFETY: the channel was drained by `copy_to_vram_header`. The transfer
+    // reads `words_per_row * rect.h` words from `src`, which the caller
+    // keeps readable and unmodified until it completes or is aborted.
+    unsafe {
+        dma::start(
+            Channel::Gpu,
+            dma::Transfer {
+                address: src as u32,
+                size: dma::size_blocks(words_per_row, rect.h),
+                control: psx_hw::dma::CHCR_TO_DEVICE
+                    | psx_hw::dma::CHCR_SYNC_BLOCK
+                    | psx_hw::dma::CHCR_START,
+            },
+        )
+    };
+    true
+}
+
+/// Upload typed [`Color555`] pixels -- sugar over [`upload_16bpp`]
+/// for direct-color textures.
+pub fn upload_15bpp(rect: VramRect, pixels: &[Color555]) {
+    let as_u16: &[u16] = unsafe {
+        // SAFETY: Color555 is `#[repr(transparent)] u16`, so the
+        // slice cast is layout-safe.
+        core::slice::from_raw_parts(pixels.as_ptr() as *const u16, pixels.len())
+    };
+    upload_16bpp(rect, as_u16);
+}
+
+/// Upload a CLUT -- a row of [`Color555`]s at `clut`. The caller
+/// picks the width: 16 entries for 4bpp, 256 for 8bpp. Asserts
+/// the CLUT fits in VRAM width and the slice length matches.
+pub fn upload_clut(clut: Clut, entries: &[Color555]) {
+    let rect = VramRect::new(clut.x(), clut.y(), entries.len() as u16, 1);
+    upload_15bpp(rect, entries);
+}
+
+// ======================================================================
+// Tests
+// ======================================================================
+
+/// Renamed to [`TexturePage`].
+#[deprecated(note = "renamed to `TexturePage`")]
+pub type Tpage = TexturePage;
+
+/// Renamed to [`TextureDepth`].
+#[deprecated(note = "renamed to `TextureDepth`")]
+pub type TexDepth = TextureDepth;
+
+impl TexturePage {
+    /// Renamed to [`TexturePage::uv_word`].
+    #[deprecated(note = "renamed to `uv_word`")]
+    #[inline(always)]
+    pub const fn uv_tpage_word(self, semi_trans: u8) -> u16 {
+        self.uv_word(semi_trans)
+    }
+}
+
+impl Clut {
+    /// Renamed to [`Clut::uv_word`].
+    #[deprecated(note = "renamed to `uv_word`")]
+    #[inline(always)]
+    pub const fn uv_clut_word(self) -> u16 {
+        self.uv_word()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dma_copy_to_vram_refuses_what_it_cannot_send_whole() {
+        // Every case returns before touching the GPU, so this runs on the host.
+        // SAFETY: the only token in this test.
+        let mut dma = unsafe { GpuDma::steal() };
+        let words = [0u32; 8];
+        // Four words per row, two rows: the slice is one word short.
+        assert!(!dma_copy_to_vram(
+            &mut dma,
+            VramRect::new(0, 0, 8, 2),
+            &words[..7]
+        ));
+        // Odd, zero or FIFO-overflowing widths, and a zero height.
+        assert!(!dma_copy_to_vram(
+            &mut dma,
+            VramRect::new(0, 0, 3, 1),
+            &words
+        ));
+        assert!(!dma_copy_to_vram(
+            &mut dma,
+            VramRect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 1
+            },
+            &words
+        ));
+        assert!(!dma_copy_to_vram(
+            &mut dma,
+            VramRect::new(0, 0, 34, 1),
+            &[0; 17]
+        ));
+        assert!(!dma_copy_to_vram(
+            &mut dma,
+            VramRect {
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 0
+            },
+            &words
+        ));
+    }
+
+    #[test]
+    fn byte_upload_word_zero_pads_an_odd_final_halfword() {
+        assert_eq!(
+            packed_upload_word(&[0x11, 0x22, 0x33, 0x44], 0),
+            0x4433_2211
+        );
+        assert_eq!(packed_upload_word(&[0x55, 0x66], 0), 0x0000_6655);
+    }
+
+    #[test]
+    fn stp_is_the_mask_bit_named_for_its_palette_meaning() {
+        let opaque = Color555::rgb8(255, 255, 255);
+        assert!(!opaque.is_semi_transparent());
+        assert_eq!(
+            opaque.with_semi_transparency().as_u16(),
+            opaque.with_mask_bit().as_u16()
+        );
+        assert!(opaque.with_semi_transparency().is_semi_transparent());
+        // The fully transparent slot must stay 0x0000: setting STP there would
+        // make the GPU blend the texel instead of skipping it.
+        assert_eq!(Color555::TRANSPARENT.as_u16(), 0);
+        assert!(!Color555::TRANSPARENT.is_semi_transparent());
+    }
+
+    #[test]
+    fn color_rgb8_truncates_low_bits() {
+        assert_eq!(Color555::rgb8(0, 0, 0).as_u16(), 0);
+        assert_eq!(Color555::rgb8(255, 255, 255).as_u16(), 0x7FFF);
+        // 0x18 = 24 → 24 >> 3 = 3.
+        assert_eq!(Color555::rgb8(24, 0, 0).as_u16(), 3);
+    }
+
+    #[test]
+    fn color_rgb5_rejects_out_of_range_via_panic() {
+        // Compile-time assert check happens in `const fn`; the panic
+        // path at runtime is the same.
+        assert_eq!(Color555::rgb5(31, 0, 0).as_u16(), 31);
+        assert_eq!(Color555::rgb5(0, 31, 0).as_u16(), 31 << 5);
+        assert_eq!(Color555::rgb5(0, 0, 31).as_u16(), 31 << 10);
+    }
+
+    #[test]
+    #[should_panic = "red must be < 32"]
+    fn color_rgb5_panics_on_32() {
+        let _ = Color555::rgb5(32, 0, 0);
+    }
+
+    #[test]
+    fn vram_rect_new_accepts_valid_positions() {
+        let _ = VramRect::new(0, 0, 64, 64);
+        let _ = VramRect::new(VRAM_WIDTH - 1, 0, 1, 1);
+        let _ = VramRect::new(0, VRAM_HEIGHT - 1, 1, 1);
+    }
+
+    #[test]
+    #[should_panic = "overflows VRAM width"]
+    fn vram_rect_new_rejects_horizontal_overflow() {
+        let _ = VramRect::new(1000, 0, 100, 10);
+    }
+
+    #[test]
+    fn texture_window_atlas_packs_32x32_textures_inside_one_page() {
+        let mut atlas = TextureWindowAtlas::<1>::new();
+
+        let first = atlas.allocate(32, 32).expect("first texture fits");
+        let second = atlas.allocate(32, 32).expect("second texture fits");
+        let eighth = {
+            let mut placement = second;
+            for _ in 2..8 {
+                placement = atlas.allocate(32, 32).expect("top row texture fits");
+            }
+            placement
+        };
+        let ninth = atlas.allocate(32, 32).expect("second row texture fits");
+
+        assert_eq!(first.page_index(), 0);
+        assert_eq!((first.origin_u(), first.origin_v()), (0, 0));
+        assert_eq!((second.origin_u(), second.origin_v()), (32, 0));
+        assert_eq!((eighth.origin_u(), eighth.origin_v()), (224, 0));
+        assert_eq!((ninth.origin_u(), ninth.origin_v()), (0, 32));
+    }
+
+    #[test]
+    fn texture_window_atlas_moves_to_next_page_when_current_page_is_full() {
+        let mut atlas = TextureWindowAtlas::<2>::new();
+
+        for _ in 0..16 {
+            atlas
+                .allocate(64, 64)
+                .expect("64x64 slot fits in first page");
+        }
+        let next = atlas.allocate(64, 64).expect("second page has space");
+
+        assert_eq!(next.page_index(), 1);
+        assert_eq!((next.origin_u(), next.origin_v()), (0, 0));
+    }
+
+    #[test]
+    fn texture_window_atlas_reserves_empty_page_for_unwindowed_texture() {
+        let mut atlas = TextureWindowAtlas::<2>::new();
+
+        let page = atlas.reserve_empty_page().expect("page reserved");
+        assert_eq!(page, 0);
+        let next = atlas.allocate(64, 64).expect("second page still free");
+
+        assert_eq!(next.page_index(), 1);
+        assert_eq!((next.origin_u(), next.origin_v()), (0, 0));
+    }
+
+    #[test]
+    fn texture_window_atlas_aligns_each_allocation_to_its_own_size() {
+        let mut atlas = TextureWindowAtlas::<1>::new();
+
+        atlas.allocate(32, 32).expect("small texture fits");
+        let large = atlas.allocate(64, 64).expect("large texture fits");
+
+        assert_eq!((large.origin_u(), large.origin_v()), (64, 0));
+    }
+
+    #[test]
+    fn texture_window_atlas_rejects_non_texture_window_dimensions() {
+        let mut atlas = TextureWindowAtlas::<1>::new();
+
+        assert!(atlas.allocate(48, 32).is_none());
+        assert!(atlas.allocate(4, 32).is_none());
+        assert!(atlas.allocate(256, 32).is_none());
+    }
+
+    #[test]
+    fn tpage_encodes_uv_word_correctly() {
+        let tp = TexturePage::new(640, 0, TextureDepth::Bit15);
+        // x=640 → tpx=10, y=0 → tpy=0, depth=15bpp → 2.
+        let word = tp.uv_word(0);
+        assert_eq!(word & 0xF, 10, "tpx");
+        assert_eq!((word >> 4) & 1, 0, "tpy");
+        assert_eq!((word >> 5) & 3, 0, "semi_trans");
+        assert_eq!((word >> 7) & 3, 2, "depth");
+    }
+
+    #[test]
+    #[should_panic = "x must be a multiple of 64"]
+    fn tpage_rejects_misaligned_x() {
+        let _ = TexturePage::new(32, 0, TextureDepth::Bit8);
+    }
+
+    #[test]
+    #[should_panic = "y must be 0 or 256"]
+    fn tpage_rejects_bad_y() {
+        let _ = TexturePage::new(0, 128, TextureDepth::Bit4);
+    }
+
+    #[test]
+    fn clut_encodes_uv_word_correctly() {
+        let cl = Clut::new(640, 240);
+        // x=640 → cx=40, y=240 → cy=240.
+        let word = cl.uv_word();
+        assert_eq!(word & 0x3F, 40, "cx");
+        assert_eq!((word >> 6) & 0x1FF, 240, "cy");
+    }
+
+    #[test]
+    #[should_panic = "x must be a multiple of 16"]
+    fn clut_rejects_misaligned_x() {
+        let _ = Clut::new(8, 0);
+    }
+
+    #[test]
+    fn tex_depth_texels_per_halfword() {
+        assert_eq!(TextureDepth::Bit4.texels_per_halfword(), 4);
+        assert_eq!(TextureDepth::Bit8.texels_per_halfword(), 2);
+        assert_eq!(TextureDepth::Bit15.texels_per_halfword(), 1);
+    }
+
+    #[test]
+    fn vram_alloc_reserves_framebuffer_then_packs_pages_past_it() {
+        let mut a = VramAllocator::<6, 16>::new(480);
+        a.reserve_rect(VramRect::new(0, 0, 320, 480));
+        let (tp, _h) = a
+            .alloc_page_run(3, TextureDepth::Bit4, 0)
+            .expect("3 contiguous pages");
+        assert_eq!(tp.x() % 64, 0, "page X is 64-aligned");
+        assert!(tp.x() >= 320, "page must not overlap the framebuffer");
+        assert_eq!(tp.y(), 0);
+    }
+
+    #[test]
+    fn vram_alloc_free_round_trips_a_page() {
+        let mut a = VramAllocator::<6, 16>::new(480);
+        let (tp1, h1) = a.alloc_page_run(1, TextureDepth::Bit4, 0).unwrap();
+        let (tp2, _h2) = a.alloc_page_run(1, TextureDepth::Bit4, 0).unwrap();
+        assert_ne!(tp1.x(), tp2.x());
+        a.free(h1);
+        let (tp3, _h3) = a.alloc_page_run(1, TextureDepth::Bit4, 0).unwrap();
+        assert_eq!(tp3.x(), tp1.x(), "freed page is reused");
+    }
+
+    #[test]
+    fn vram_alloc_window_lands_in_reserved_room_band() {
+        let mut a = VramAllocator::<2, 16>::new(480);
+        a.reserve_room_band(640, 0);
+        let (tp, pl, _h) = a.alloc_window(32, 32).expect("window fits");
+        assert_eq!(tp.x(), 640, "first window is at room band base");
+        assert_eq!((pl.origin_u(), pl.origin_v()), (0, 0));
+    }
+
+    #[test]
+    fn lazy_room_page_returns_physical_backing_after_last_window() {
+        let mut a = VramAllocator::<6, 16>::new(480);
+        a.reserve_rect(VramRect::new(0, 0, 320, 480));
+        a.reserve_room_band(640, 0);
+        let (_, _, window) = a.alloc_window(64, 64).expect("room window");
+        assert!(
+            a.alloc_page_run(6, TextureDepth::Bit4, 0).is_none(),
+            "live preferred room page interrupts the six-page top run"
+        );
+        a.free(window);
+        assert!(
+            a.alloc_page_run(6, TextureDepth::Bit4, 0).is_some(),
+            "last-window release must return the physical room page"
+        );
+    }
+
+    #[test]
+    fn model_slots_preserve_indexed_texture_depth() {
+        let mut a = VramAllocator::<2, 16>::new(480);
+        let (bit4, _h4) = a.alloc_model_slot(32, TextureDepth::Bit4).unwrap();
+        let (bit8, _h8) = a.alloc_model_slot(64, TextureDepth::Bit8).unwrap();
+
+        assert_eq!(bit4.depth(), TextureDepth::Bit4);
+        assert_eq!(bit8.depth(), TextureDepth::Bit8);
+        assert_ne!(bit4.x(), bit8.x());
+        assert!(a.alloc_model_slot(64, TextureDepth::Bit15).is_none());
+    }
+
+    #[test]
+    fn clut_row_allocator_packs_and_reuses_slots() {
+        let mut c = ClutRowAllocator::<4>::new(480);
+        let a = c.alloc(16).unwrap();
+        let b = c.alloc(16).unwrap();
+        assert_eq!((a.x(), a.y()), (0, 480));
+        assert_eq!((b.x(), b.y()), (16, 480));
+        let big = c.alloc(256).unwrap(); // 16 contiguous slots
+        assert_eq!((big.x(), big.y()), (32, 480));
+        c.free(a, 16);
+        let reused = c.alloc(16).unwrap();
+        assert_eq!((reused.x(), reused.y()), (0, 480), "freed slot reused");
+    }
+
+    #[test]
+    fn texture_window_atlas_release_frees_for_reuse() {
+        let mut atlas = TextureWindowAtlas::<1>::new();
+        let first = atlas.allocate(32, 32).unwrap();
+        let _second = atlas.allocate(32, 32).unwrap();
+        atlas.release(first);
+        let reused = atlas.allocate(32, 32).unwrap();
+        assert_eq!(
+            (reused.origin_u(), reused.origin_v()),
+            (first.origin_u(), first.origin_v()),
+            "released slot is reused"
+        );
+    }
+
+    #[test]
+    fn overlapping_layout_rectangles_are_found_in_listed_order() {
+        // Disjoint: the two framebuffers and the block under them.
+        let clean = [
+            VramRect::new(0, 0, 320, 240),
+            VramRect::new(0, 240, 320, 240),
+            VramRect::new(0, 480, 320, 32),
+        ];
+        assert_eq!(first_vram_overlap(&clean), None);
+        assert!(vram_layout_is_disjoint(&clean));
+
+        // The hl-psx bug in miniature: CLUT rows at Y=480..503 that run past
+        // X=320 sit inside a texture page banded at Y=256.
+        let clashing = [
+            VramRect::new(0, 0, 320, 240),
+            VramRect::new(320, 256, 64, 256),
+            VramRect::new(0, 480, 640, 24),
+        ];
+        assert_eq!(first_vram_overlap(&clashing), Some((1, 2)));
+        assert!(!vram_layout_is_disjoint(&clashing));
+
+        // Touching edges are not an overlap.
+        let touching = [
+            VramRect::new(0, 0, 320, 240),
+            VramRect::new(320, 0, 64, 240),
+        ];
+        assert_eq!(first_vram_overlap(&touching), None);
+        let stacked = [VramRect::new(0, 0, 320, 240), VramRect::new(0, 240, 320, 8)];
+        assert_eq!(first_vram_overlap(&stacked), None);
+
+        // A single rect, and none at all, are trivially disjoint.
+        assert!(vram_layout_is_disjoint(&[VramRect::new(0, 0, 1, 1)]));
+        assert!(vram_layout_is_disjoint(&[]));
+    }
+}

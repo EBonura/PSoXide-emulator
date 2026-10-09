@@ -1,24 +1,16 @@
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap verify-components check test fmt fmt-check build run
+.PHONY: help check test fmt fmt-check build run
 help:
-	@echo "make bootstrap | check | test | build | run"
-bootstrap:
-	python3 tools/bootstrap-components.py
-verify-components:
-	python3 tools/bootstrap-components.py --check
-check: bootstrap
+	@echo "make check | test | build | run   (or just: cargo run --release)"
+check:
 	cargo check --locked --workspace --all-features
-test: bootstrap
+test:
 	cargo test --locked --workspace
-fmt: bootstrap
+fmt:
 	cargo fmt --all
-fmt-check: bootstrap
+fmt-check:
 	cargo fmt --all -- --check
-build: bootstrap
-	cargo build --locked --release -p frontend
-run: bootstrap
-	cargo run --locked --release -p frontend
-
-.PHONY: examples
-examples: bootstrap
-	$(MAKE) -f tools/sdk-examples.mk examples
+build:
+	cargo build --locked --release -p psoxide
+run:
+	cargo run --locked --release -p psoxide

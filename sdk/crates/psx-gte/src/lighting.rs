@@ -1,0 +1,603 @@
+//! Up-to-3-directional-light rig, rendered via the GTE's
+//! hardware lighting pipeline (`NCCS` / `NCDS` / `NCS` ops).
+//!
+//! # Model
+//!
+//! Each [`Light`] is a *directional* light -- a direction vector
+//! + an RGB intensity. The PSX GTE evaluates lighting as:
+//!
+//! ```text
+//!   IR   = LLM * V0                         (N dot each light direction)
+//!   IR   = [BK] * 0x1000 + LCM * IR         (mix light colours + ambient)
+//!   MAC  = IR * RGBC                        (modulate by material/vertex colour)
+//!   RGB2 = MAC                              (push to RGB FIFO, readable as u32)
+//! ```
+//!
+//! - `LLM` (light direction matrix, 3×3): each **row** is one
+//!   light's direction vector.
+//! - `LCM` (light colour matrix, 3×3): each **column** is one
+//!   light's RGB contribution (so `LCM * IR` mixes light colours
+//!   weighted by the corresponding dot-product magnitudes).
+//! - `BK` (background colour, 3×i32): ambient term added
+//!   before the material multiply.
+//! - `RGBC` (data reg 6): per-vertex material / palette tint --
+//!   the GTE multiplies the lit colour by this before emitting.
+//!
+//! # Object-local vs world-space lights
+//!
+//! The GTE operates on normals in their native mesh space
+//! (typically object-local). Lights packed into LLM therefore
+//! also need to be in object-local space for the dot products to
+//! come out right. Use [`LightRig::for_object`] once per object
+//! per frame to pre-rotate world-space lights into its local
+//! frame.
+//!
+//! # Cost
+//!
+//! - Rig upload (`load`): ~20 CTC2 writes per frame (cheap).
+//! - Per-object rotate: 9 integer multiplies × 3 lights = 27 mul
+//!   + 9 adds on the CPU -- still cheap next to projection cost.
+//! - Per vertex: 2 MTC2 + 1 RTPS + 2 MTC2 + 1 MTC2 + 1 NCCS + 3
+//!   MFC2 ≈ 10 GTE ops, ~30-40 cycles total.
+//! - Batched projection: `project_lit_triangle` uses RTPT for three
+//!   positions, then NCCS per normal/material. This keeps per-vertex
+//!   lighting identical while replacing three RTPS ops with one RTPT.
+//!   If the three material tints match, it also uses NCCT to batch
+//!   the three NCCS lighting ops.
+
+#![allow(clippy::needless_range_loop)]
+
+use crate::math::{Mat3I16, Vec3I16, Vec3I32};
+use crate::scene;
+use crate::{ops, read_data, write_data};
+
+/// A single directional light in some reference frame (caller's
+/// choice of world / object / eye space).
+#[derive(Copy, Clone, Debug)]
+pub struct Light {
+    /// Direction FROM the surface TOWARD the light source. Q3.12
+    /// unit vector; if you computed a "light-to-surface" direction
+    /// instead, negate it before storing here.
+    pub direction: Vec3I16,
+    /// Per-channel intensity in Q3.12 (`0x1000` = full intensity,
+    /// `0x0800` = half, `0x2000` = double / over-bright). The GTE
+    /// clamps out-of-range values at the MAC stage.
+    pub colour: (i16, i16, i16),
+}
+
+impl Light {
+    /// Convenience constructor for a "warm-white at 75%" feel --
+    /// useful while prototyping light rigs.
+    pub const fn warm_white_at(direction: Vec3I16) -> Self {
+        Self {
+            direction,
+            colour: (0x0C00, 0x0A00, 0x0800),
+        }
+    }
+
+    /// "Cool fill" preset -- bluish, dimmer, useful as a
+    /// secondary / rim light.
+    pub const fn cool_fill_at(direction: Vec3I16) -> Self {
+        Self {
+            direction,
+            colour: (0x0400, 0x0600, 0x0A00),
+        }
+    }
+
+    /// Null light -- contributes nothing. Use as a filler for
+    /// unused slots in a rig.
+    pub const OFF: Self = Self {
+        direction: Vec3I16::ZERO,
+        colour: (0, 0, 0),
+    };
+}
+
+/// A rig of up to **3** directional lights -- the maximum the
+/// PSX GTE supports natively.
+#[derive(Copy, Clone, Debug)]
+pub struct LightRig {
+    /// Three light slots; unused slots should be [`Light::OFF`].
+    pub lights: [Light; 3],
+    /// Ambient term added before material multiply. Q3.12 per
+    /// channel in an `i32` (GTE's BK register is 20-bit signed).
+    pub ambient: (i32, i32, i32),
+}
+
+impl LightRig {
+    /// Empty rig: no lights, black ambient.
+    pub const OFF: Self = Self {
+        lights: [Light::OFF; 3],
+        ambient: (0, 0, 0),
+    };
+
+    /// Build a rig from 3 lights + an ambient term.
+    pub const fn new(lights: [Light; 3], ambient: (i32, i32, i32)) -> Self {
+        Self { lights, ambient }
+    }
+
+    /// Pack this rig into the GTE's control registers:
+    /// - LLM ← rows are light directions
+    /// - LCM ← columns are light RGB contributions
+    /// - BK ← ambient
+    ///
+    /// Call once per object (or once per frame if lights are
+    /// in a universal frame). Any subsequent [`NCCS`][ops::light_color_single]
+    /// / [`NCS`][ops::light_single] / [`NCDS`][ops::light_color_depth_single] reads these.
+    pub fn load(&self) {
+        let [l0, l1, l2] = self.lights;
+
+        // LLM: rows = light directions.
+        let llm = Mat3I16 {
+            m: [
+                [l0.direction.x, l0.direction.y, l0.direction.z],
+                [l1.direction.x, l1.direction.y, l1.direction.z],
+                [l2.direction.x, l2.direction.y, l2.direction.z],
+            ],
+        };
+        scene::load_light_matrix(&llm);
+
+        // LCM: `LCM * IR` mixes light colours weighted by the
+        // dot-product intensities. IR[i] = light-i's dot product,
+        // so LCM's COLUMN i must be light-i's RGB triple. In our
+        // row-major layout that means m[channel][light].
+        let lcm = Mat3I16 {
+            m: [
+                [l0.colour.0, l1.colour.0, l2.colour.0], // R row
+                [l0.colour.1, l1.colour.1, l2.colour.1], // G row
+                [l0.colour.2, l1.colour.2, l2.colour.2], // B row
+            ],
+        };
+        scene::load_light_color_matrix(&lcm);
+
+        // BK: ambient term.
+        scene::load_background_color(Vec3I32::new(self.ambient.0, self.ambient.1, self.ambient.2));
+    }
+
+    /// Return a new rig with every light's direction rotated into
+    /// the frame in which `rotation` is the object's local → world
+    /// transform. I.e., if you pass the same `Mat3I16` you pass to
+    /// [`scene::load_rotation`] for RTPS, the returned rig is in
+    /// object-local space -- correct for feeding LLM when lighting
+    /// mesh vertices that are themselves in local space.
+    ///
+    /// Math: world_vert = R × local_vert, so local = R⁻¹ × world,
+    /// and since R is a rotation, R⁻¹ = Rᵀ. We compute
+    /// `local_dir = Rᵀ × world_dir` component-wise.
+    pub fn for_object(&self, rotation: &Mat3I16) -> LightRig {
+        let rotate = |dir: Vec3I16| {
+            // R^T * dir: the dot of `dir` with each COLUMN of R.
+            let mut out = [0i32; 3];
+            for i in 0..3 {
+                out[i] = ((rotation.m[0][i] as i32) * (dir.x as i32)
+                    + (rotation.m[1][i] as i32) * (dir.y as i32)
+                    + (rotation.m[2][i] as i32) * (dir.z as i32))
+                    >> 12;
+            }
+            Vec3I16::new(
+                out[0].clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                out[1].clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                out[2].clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            )
+        };
+        let rot_light = |l: &Light| Light {
+            direction: rotate(l.direction),
+            colour: l.colour,
+        };
+        LightRig {
+            lights: [
+                rot_light(&self.lights[0]),
+                rot_light(&self.lights[1]),
+                rot_light(&self.lights[2]),
+            ],
+            ambient: self.ambient,
+        }
+    }
+
+    /// Return a new rig with every light's direction rotated by
+    /// `rotation` (direct `R × dir`, not the transpose).
+    ///
+    /// Used to animate world-space lights over time -- e.g. an
+    /// orbiting key light. Compose this BEFORE [`for_object`] so
+    /// the per-object transpose applies on top of the animation.
+    pub fn rotated(&self, rotation: &Mat3I16) -> LightRig {
+        let rotate = |dir: Vec3I16| {
+            // R × dir: standard row-major matrix-vector product.
+            let mut out = [0i32; 3];
+            for i in 0..3 {
+                out[i] = ((rotation.m[i][0] as i32) * (dir.x as i32)
+                    + (rotation.m[i][1] as i32) * (dir.y as i32)
+                    + (rotation.m[i][2] as i32) * (dir.z as i32))
+                    >> 12;
+            }
+            Vec3I16::new(
+                out[0].clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                out[1].clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                out[2].clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            )
+        };
+        let rot_light = |l: &Light| Light {
+            direction: rotate(l.direction),
+            colour: l.colour,
+        };
+        LightRig {
+            lights: [
+                rot_light(&self.lights[0]),
+                rot_light(&self.lights[1]),
+                rot_light(&self.lights[2]),
+            ],
+            ambient: self.ambient,
+        }
+    }
+}
+
+/// Result of [`project_lit`]: screen-space vertex + its computed
+/// lit colour.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+#[repr(C)]
+pub struct ProjectedLit {
+    /// Screen-space X, post-projection.
+    pub sx: i16,
+    /// Screen-space Y.
+    pub sy: i16,
+    /// Depth (MAC3 after divide), 0..=0xFFFF.
+    pub sz: u16,
+    /// GTE-computed RGB after lighting + material modulation.
+    pub r: u8,
+    /// Lit green.
+    pub g: u8,
+    /// Lit blue.
+    pub b: u8,
+}
+
+/// Result of [`project_triangle_fogged`]: three projected + lit +
+/// fogged vertices, plus the AVSZ3 OT-slot key and the hardware-
+/// NCLIP back-face flag.
+#[derive(Copy, Clone, Debug, Default)]
+#[repr(C)]
+pub struct FoggedTri {
+    /// The three vertices in draw-order, each carrying its own
+    /// projected position and lit+fogged colour.
+    pub verts: [ProjectedLit; 3],
+    /// AVSZ3 result -- ZSF3-weighted average of the three projected
+    /// Z values. Commercial games scale this into an OT slot so
+    /// nearer triangles sort in front.
+    pub otz: u16,
+    /// `true` if MAC0 from NCLIP came out positive -- the triangle
+    /// is front-facing and should be drawn. `false` = back-face,
+    /// skip.
+    pub front_facing: bool,
+}
+
+/// Run the full PS1-commercial triangle pipeline with **per-vertex
+/// fog**. Three interleaved RTPS + NCDS pairs give each vertex its
+/// own `IR0` (its own depth-cue weight), then `NCLIP` + `AVSZ3`
+/// finish the bookkeeping.
+///
+/// # Why per-vertex, not batched
+///
+/// `RTPT + NCDT` is faster (4 GTE ops vs 8) but produces **uniform**
+/// fog across each triangle -- `RTPT` only writes `IR0` for the last
+/// vertex, and `NCDT` then reuses that single `IR0` for each
+/// vertex's stage-3 blend. The visible result is stepped shading:
+/// every triangle has one flat fog tint, and seams between
+/// triangles are obvious.
+///
+/// `3× RTPS + 3× NCDS` sets `IR0` per vertex, so `NCDS` blends
+/// each vertex's material toward `FC` by that vertex's own depth
+/// weight. `GP0 0x34` Gouraud-interpolates the three vertex tints
+/// across the triangle, giving a smooth per-pixel gradient with
+/// no inter-triangle seam.
+///
+/// Cost is about 2× the GTE work per triangle vs the batched path.
+/// Still well under budget for PSX-scale scenes (~100 tris/frame).
+///
+/// # Pipeline
+///
+/// For each vertex `i = 0, 1, 2`:
+///   1. Load `verts[i]` into V0.
+///   2. `RTPS` -- projects V0, pushes SXY + SZ FIFOs, sets `IR0`
+///      from DQA/DQB × the perspective divisor.
+///   3. Load `normals[i]` into V0 (overwriting the position --
+///      `RTPS` already consumed it).
+///   4. `NCDS` -- computes lit + fogged colour using the current
+///      `IR0`, pushes RGB FIFO.
+///
+/// After the loop:
+///   5. `NCLIP` -- reads SXY0/1/2 from the FIFO, flags back-face.
+///   6. `AVSZ3` -- reads SZ1/2/3, computes the OT-slot key.
+///
+/// `NCDS` doesn't touch the SXY or SZ FIFOs, so they still hold
+/// the three per-vertex projection results when NCLIP and AVSZ3
+/// run at the end.
+///
+/// # Prerequisites
+/// All scene state must be loaded by the caller:
+/// - Rotation matrix ([`scene::load_rotation`])
+/// - Translation ([`scene::load_translation`])
+/// - Projection plane + screen offset
+///   ([`scene::set_projection_plane`], [`scene::set_screen_offset`])
+/// - Light rig ([`LightRig::load`], `for_object` applied)
+/// - Far colour ([`scene::load_far_color`])
+/// - Depth-cue coefficients ([`scene::set_depth_cue`])
+/// - AVSZ weights ([`scene::set_average_z_weights`])
+pub fn project_triangle_fogged(
+    verts: [Vec3I16; 3],
+    normals: [Vec3I16; 3],
+    material: (u8, u8, u8),
+) -> FoggedTri {
+    // Material goes into RGBC once -- NCDS reads RGBC on every call
+    // and it doesn't change per-vertex.
+    let rgbc = (material.0 as u32) | ((material.1 as u32) << 8) | ((material.2 as u32) << 16);
+    write_data!(6, rgbc);
+
+    // Per-vertex RTPS → NCDS, interleaved so each vertex's NCDS
+    // uses the IR0 just written by its RTPS. Collect results
+    // one at a time to keep the RGB-FIFO semantics straightforward
+    // (NCDS pushes newest → slot 2; we read slot 2 immediately).
+    let mut verts_out = [ProjectedLit::default(); 3];
+    let mut screen = [(0i16, 0i16); 3];
+    for i in 0..3 {
+        // --- RTPS: project verts[i] ---
+        write_data!(0, verts[i].xy_packed());
+        write_data!(1, verts[i].z_packed());
+        // SAFETY: V0 loaded; scene setup is caller-supplied.
+        unsafe { ops::project_single() };
+        let sxy = read_data!(14); // SXY2 (latest) -- SXY has no result-read latency
+        let sz = read_data!(19) as u16; // SZ3 (latest)
+        screen[i] = (sxy as i16, (sxy >> 16) as i16);
+
+        // --- NCDS: lit + fogged colour for normals[i], using the
+        // IR0 just written by the RTPS above. ---
+        write_data!(0, normals[i].xy_packed());
+        write_data!(1, normals[i].z_packed());
+        // SAFETY: V0 holds the normal; RGBC is loaded; scene
+        // matrices / DQA / DQB / FC / IR0 come from the caller.
+        unsafe { ops::light_color_depth_single() };
+        let rgb = read_data!(22); // RGB2 (latest)
+
+        verts_out[i] = unpack_projected(sxy, sz, rgb);
+    }
+
+    // --- Back-face cull in software from the projected SXY. GTE NCLIP's
+    // MAC0 read-back is STALE on real hardware (the result-read hazard, see
+    // scene::screen_area), which mis-culls and drops faces on silicon
+    // while looking fine on emulators. The i32 cross product is exact and
+    // hazard-free; SXY itself has no read latency, so `screen` is correct. ---
+    let front_facing = crate::scene::screen_area(screen) > 0;
+
+    // --- AVSZ3: OT key from SZ1/2/3, weighted by ZSF3. ---
+    // SAFETY: three RTPS calls populated the SZ FIFO.
+    unsafe { ops::average_z3() };
+    let otz = read_data!(7) as u16;
+
+    FoggedTri {
+        verts: verts_out,
+        otz,
+        front_facing,
+    }
+}
+
+/// Shared unpack -- turns raw SXY / SZ / RGB register reads into a
+/// [`ProjectedLit`]. Factored out so both the per-vertex and batch
+/// paths agree on byte/field layout.
+#[inline]
+fn unpack_projected(sxy: u32, sz: u16, rgb: u32) -> ProjectedLit {
+    ProjectedLit {
+        sx: sxy as i16,
+        sy: (sxy >> 16) as i16,
+        sz,
+        r: (rgb & 0xFF) as u8,
+        g: ((rgb >> 8) & 0xFF) as u8,
+        b: ((rgb >> 16) & 0xFF) as u8,
+    }
+}
+
+#[inline]
+fn rgbc_word(material: (u8, u8, u8)) -> u32 {
+    (material.0 as u32) | ((material.1 as u32) << 8) | ((material.2 as u32) << 16)
+}
+
+/// Project three vertices via RTPT, then compute each vertex's lit
+/// colour with NCCS.
+///
+/// This is the visual-preserving batched path for Gouraud meshes:
+/// projection work shares RTPT's setup cost, but lighting still runs
+/// once per vertex so different normals and material tints produce the
+/// same RGB values as three [`project_lit`] calls.
+///
+/// Prerequisites are the same as [`project_lit`]:
+/// rotation/translation/projection registers and the light rig must
+/// already be loaded.
+pub fn project_lit_triangle(
+    verts: [Vec3I16; 3],
+    normals: [Vec3I16; 3],
+    materials: [(u8, u8, u8); 3],
+) -> [ProjectedLit; 3] {
+    write_data!(0, verts[0].xy_packed());
+    write_data!(1, verts[0].z_packed());
+    write_data!(2, verts[1].xy_packed());
+    write_data!(3, verts[1].z_packed());
+    write_data!(4, verts[2].xy_packed());
+    write_data!(5, verts[2].z_packed());
+    // SAFETY: V0, V1, and V2 are loaded; scene setup is caller-supplied.
+    unsafe { ops::project_triple() };
+
+    let sxy = [read_data!(12), read_data!(13), read_data!(14)];
+    let sz = [
+        read_data!(17) as u16,
+        read_data!(18) as u16,
+        read_data!(19) as u16,
+    ];
+
+    if materials[0] == materials[1] && materials[1] == materials[2] {
+        write_data!(0, normals[0].xy_packed());
+        write_data!(1, normals[0].z_packed());
+        write_data!(2, normals[1].xy_packed());
+        write_data!(3, normals[1].z_packed());
+        write_data!(4, normals[2].xy_packed());
+        write_data!(5, normals[2].z_packed());
+        write_data!(6, rgbc_word(materials[0]));
+        // SAFETY: V0, V1, V2 hold normals and RGBC is common to all
+        // three vertices. NCCT is equivalent to NCCS for V0/V1/V2.
+        unsafe { ops::light_color_triple() };
+        let rgb = [read_data!(20), read_data!(21), read_data!(22)];
+        return [
+            unpack_projected(sxy[0], sz[0], rgb[0]),
+            unpack_projected(sxy[1], sz[1], rgb[1]),
+            unpack_projected(sxy[2], sz[2], rgb[2]),
+        ];
+    }
+
+    let mut out = [ProjectedLit::default(); 3];
+    let mut i = 0;
+    while i < 3 {
+        write_data!(0, normals[i].xy_packed());
+        write_data!(1, normals[i].z_packed());
+        write_data!(6, rgbc_word(materials[i]));
+        // SAFETY: V0 holds the normal, RGBC holds the material;
+        // LLM/LCM/BK were loaded by the caller's light rig.
+        unsafe { ops::light_color_single() };
+        out[i] = unpack_projected(sxy[i], sz[i], read_data!(22));
+        i += 1;
+    }
+
+    out
+}
+
+/// Project a vertex AND compute its lit colour in one call.
+///
+/// Does RTPS on `vert` + NCCS on `normal`, with a per-vertex
+/// `material` RGB loaded into RGBC (data reg 6) to modulate the
+/// GTE's lit output. Pass `(128, 128, 128)` as material for
+/// "unmodulated" behaviour -- the lit colour comes through as the
+/// light rig + ambient dictate.
+///
+/// Prerequisites (caller's responsibility, as with
+/// [`scene::project_vertex`]):
+///
+/// - Rotation matrix loaded ([`scene::load_rotation`])
+/// - Translation loaded ([`scene::load_translation`])
+/// - Projection plane / screen offset set
+///   ([`scene::set_projection_plane`], [`scene::set_screen_offset`])
+/// - Light rig loaded ([`LightRig::load`], with `for_object`
+///   applied so lights are in the same frame as the normal)
+pub fn project_lit(vert: Vec3I16, normal: Vec3I16, material: (u8, u8, u8)) -> ProjectedLit {
+    // --- Position: RTPS ---
+    write_data!(0, vert.xy_packed());
+    write_data!(1, vert.z_packed());
+    // SAFETY: V0 loaded; scene setup is caller's responsibility.
+    unsafe { ops::project_single() };
+    let sxy = read_data!(14); // SXY2 (packed xy)
+    let sz = read_data!(19) as u16; // SZ3
+
+    // --- Lighting: NCCS ---
+    write_data!(0, normal.xy_packed());
+    write_data!(1, normal.z_packed());
+    // RGBC layout (data reg 6): 0x00CC_BBGG_RR -- low 8 bits R,
+    // next 8 G, next 8 B, top 8 "CODE" (GPU command byte, used by
+    // some prim ops; 0 for our purposes).
+    write_data!(6, rgbc_word(material));
+    // SAFETY: V0 holds the normal, RGBC holds the material;
+    // LLM/LCM/BK were loaded via `LightRig::load`.
+    unsafe { ops::light_color_single() };
+    // Read lit colour from RGB2 (data reg 22). Same 0x00BB_GGRR
+    // layout as RGBC.
+    let lit = read_data!(22);
+
+    ProjectedLit {
+        sx: sxy as i16,
+        sy: (sxy >> 16) as i16,
+        sz,
+        r: (lit & 0xFF) as u8,
+        g: ((lit >> 8) & 0xFF) as u8,
+        b: ((lit >> 16) & 0xFF) as u8,
+    }
+}
+
+#[cfg(all(test, not(target_arch = "mips")))]
+mod host_smoke {
+    use super::*;
+    use crate::host;
+    use crate::math::{Mat3I16, Vec3I16, Vec3I32};
+    use crate::scene;
+
+    fn install_scene() {
+        scene::load_rotation(&Mat3I16::IDENTITY);
+        scene::load_translation(Vec3I32::new(0, 0, 0));
+        scene::set_screen_offset(160 << 16, 120 << 16);
+        scene::set_projection_plane(280);
+        LightRig::new(
+            [
+                Light {
+                    direction: Vec3I16::new(0, 0, 0x1000),
+                    colour: (0x0C00, 0x0800, 0x0400),
+                },
+                Light {
+                    direction: Vec3I16::new(0x0800, 0, 0x0800),
+                    colour: (0x0400, 0x0800, 0x0C00),
+                },
+                Light::OFF,
+            ],
+            (0x0100, 0x0100, 0x0100),
+        )
+        .load();
+    }
+
+    #[test]
+    fn batched_lit_triangle_matches_three_project_lit_calls() {
+        let verts = [
+            Vec3I16::new(-256, -128, 1024),
+            Vec3I16::new(256, -96, 1200),
+            Vec3I16::new(0, 256, 1400),
+        ];
+        let normals = [
+            Vec3I16::new(0, 0, 0x1000),
+            Vec3I16::new(0x0400, 0, 0x0F00),
+            Vec3I16::new(-0x0300, 0x0400, 0x0E00),
+        ];
+        let materials = [(128, 96, 64), (64, 128, 96), (96, 64, 128)];
+
+        host::reset();
+        install_scene();
+        let batch = project_lit_triangle(verts, normals, materials);
+
+        host::reset();
+        install_scene();
+        let separate = [
+            project_lit(verts[0], normals[0], materials[0]),
+            project_lit(verts[1], normals[1], materials[1]),
+            project_lit(verts[2], normals[2], materials[2]),
+        ];
+
+        assert_eq!(batch, separate);
+    }
+
+    #[test]
+    fn batched_lit_triangle_shared_material_uses_same_outputs() {
+        let verts = [
+            Vec3I16::new(-192, 64, 900),
+            Vec3I16::new(64, -160, 1150),
+            Vec3I16::new(224, 192, 1500),
+        ];
+        let normals = [
+            Vec3I16::new(0, 0, 0x1000),
+            Vec3I16::new(0x0200, 0x0200, 0x0F00),
+            Vec3I16::new(-0x0200, 0x0300, 0x0F00),
+        ];
+        let materials = [(112, 144, 96); 3];
+
+        host::reset();
+        install_scene();
+        let batch = project_lit_triangle(verts, normals, materials);
+
+        host::reset();
+        install_scene();
+        let separate = [
+            project_lit(verts[0], normals[0], materials[0]),
+            project_lit(verts[1], normals[1], materials[1]),
+            project_lit(verts[2], normals[2], materials[2]),
+        ];
+
+        assert_eq!(batch, separate);
+    }
+}
