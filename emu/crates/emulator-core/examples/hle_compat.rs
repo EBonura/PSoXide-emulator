@@ -34,6 +34,11 @@
 //! `--shot-every N` also every N frames as `<id>.<frame>.ppm`. That is game
 //! imagery: keep the directory local.
 //!
+//! `--no-card` starts with no memory card in either slot; `--card-out <dir>`
+//! writes the card a game wrote to `<dir>/<id>.mcd` and `--card-in <dir>`
+//! starts each game with that file in slot 1. Each game's run prints the
+//! card commands it sent (`[card] <id> R=.. W=.. S=..`).
+//!
 //! Every run uses the same fixed setup so results compare across builds:
 //! a digital pad on port 1 (buttons from `--input-tape`, one sample per
 //! VBlank, released after the tape ends), a formatted empty memory card on

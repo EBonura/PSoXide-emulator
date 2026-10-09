@@ -19,7 +19,8 @@
   fresh one. The routine now waits for RX not empty and leaves the byte to the
   next pass. `frontend launch --no-memcard` starts with no card in either
   slot, and `hle_compat --no-card` does the same for the compatibility runs,
-  which also print the card commands each game sent.
+  which also print the card commands each game sent and can start from
+  (`--card-in`) and save (`--card-out`) the card images.
 - 480-line interlaced frames drawn field by field show whole. With drawing to
   the display area prohibited (GP0 E1h bit 10 clear) in 480i and the display
   on, fills and primitives skip the lines of the field on display (GPUSTAT
