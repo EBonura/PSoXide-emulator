@@ -5104,11 +5104,14 @@ mod tests {
         bus.sio0
             .attach_port1(crate::pad::PortDevice::empty().with_pad(crate::pad::DigitalPad::new()));
         bus.write16(Sio0::BASE + 0x0A, 0x1002); // JOYN_OUTPUT | ACK_IRQ_ENABLE
-        bus.write16(Sio0::BASE + 0x0E, 0x0001); // ACK after 8 cycles
+        bus.write16(Sio0::BASE + 0x0E, 0x0001); // a bit time is one cycle
         bus.write8(Sio0::BASE, 0x01);
 
-        assert_eq!(bus.scheduler.target(EventSlot::Sio0), Some(8));
-        bus.tick(9);
+        // The byte arrives after ten bit times; /ACK rises behind it.
+        assert_eq!(bus.scheduler.target(EventSlot::Sio0), Some(10));
+        bus.drain_scheduler_events_post_op();
+        let ack = 10 + 309;
+        bus.tick(ack as u32 - bus.cycles() as u32 + 1);
         assert_eq!(
             bus.irq.stat() & (1 << (IrqSource::Controller as u32)),
             0,
