@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- GPU and SPU block DMA (sync mode 1) count their blocks down in BCR and walk
+  MADR as the transfer runs, and a kick with a block count of zero is 65,536
+  blocks, not none: hardware tests v2.1 re-kicked a finished transfer without
+  rewriting BCR and the channel ran away on a console (count wrapped below
+  zero, 250 blocks in for the SPU, which the emulator now reproduces to the
+  register). A software write to a busy channel's MADR, BCR or CHCR supersedes
+  the transfer. MDEC DMA leaves MADR past the last word it moved. The CD and
+  MDEC channels keep their block-count handling: only the GPU and SPU were
+  measured. Save states move to format 14.
 - A root counter polled in a tight loop no longer loses ticks. A read still
   returns the count from before its own bus wait, but the wait's clocks come
   back at the next advance instead of being dropped: hardware tests v2.1 on a

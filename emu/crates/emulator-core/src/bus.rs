@@ -146,6 +146,27 @@ struct ExperimentalGpuList {
     headers: u32,
 }
 
+/// A sync-mode-1 transfer in flight on the GPU (channel 2) or the SPU
+/// (channel 4). The data moves when the channel is kicked; this lets MADR and
+/// the block count in BCR follow the clock the way the controller's do, so a
+/// read mid-transfer, or after software stops it, sees how far it got.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct DmaBlockRun {
+    start: u64,
+    end: u64,
+    /// Blocks the kick asked for: BCR's count, with 0 meaning 65,536.
+    blocks: u32,
+    block_words: u32,
+    madr: u32,
+    backward: bool,
+    /// BCR's block count field at the kick; the live one counts down from it.
+    count: u16,
+}
+
+/// Words a runaway block transfer (BCR block count 0, which the controller
+/// reads as 65,536 blocks) moves before the host stops it.
+const DMA_RUNAWAY_WORD_CAP: u32 = 1 << 22;
+
 /// Cycles the MDEC output DMA (DMA1) takes per 32-bit word it moves.
 ///
 /// Source: this project's console profile of the v1.26 FMV player
@@ -408,6 +429,8 @@ pub struct Bus {
     #[serde(skip, default = "check_gpu_request_after_restore")]
     gpu_dma_waiting_for_request: bool,
     experimental_gpu_list: Option<ExperimentalGpuList>,
+    /// In-flight sync-mode-1 transfers: channel 2, channel 4.
+    dma_block_runs: [Option<DmaBlockRun>; 2],
     /// While a linked-list walk is active: the bus cycle up to which every
     /// clock advance is a quiet batch of `advance_cycles_slow` (the walk
     /// only counts down its setup delay or waits, the GPU FIFO only decays
@@ -528,6 +551,7 @@ impl Bus {
             gpu_dma_overflow_drops: gpu_dma_overflow_drops_from_env(),
             gpu_dma_waiting_for_request: false,
             experimental_gpu_list: None,
+            dma_block_runs: [None; 2],
             gpu_quiet_until: 0,
             gpu_linked_list_transfer: 0,
             gpu_linked_list_log: Vec::new(),
@@ -1523,7 +1547,92 @@ impl Bus {
     /// shared `IrqSource::Dma` line to transition high. Caller
     /// raises that IRQ once per tick if any channel was on the
     /// edge.
+    /// Slot of a channel in [`Bus::dma_block_runs`].
+    fn dma_block_run_slot(ch: usize) -> Option<usize> {
+        match ch {
+            2 => Some(0),
+            4 => Some(1),
+            _ => None,
+        }
+    }
+
+    /// Note a just-kicked GPU or SPU transfer that finishes `cycles` from
+    /// now. Only sync mode 1 counts blocks.
+    fn begin_dma_block_run(&mut self, ch: usize, cycles: u64) {
+        let Some(slot) = Self::dma_block_run_slot(ch) else {
+            return;
+        };
+        let channel = self.dma.channels[ch];
+        self.dma_block_runs[slot] = None;
+        if (channel.channel_control >> 9) & 3 != 1 {
+            return;
+        }
+        let count = (channel.block_control >> 16) as u16;
+        self.dma_block_runs[slot] = Some(DmaBlockRun {
+            start: self.cycles,
+            end: self.cycles + cycles,
+            blocks: if count == 0 { 0x1_0000 } else { u32::from(count) },
+            block_words: channel.block_control & 0xFFFF,
+            madr: channel.base,
+            backward: (channel.channel_control >> 1) & 1 != 0,
+            count,
+        });
+    }
+
+    /// Bring MADR and BCR's block count of the in-flight GPU and SPU block
+    /// transfers up to the current clock. Called before software touches the
+    /// DMA registers. A transfer whose CHCR start bit software has cleared is
+    /// over: the registers stay where the last settle left them.
+    fn settle_dma_block_runs(&mut self) {
+        for slot in 0..2 {
+            let Some(run) = self.dma_block_runs[slot] else {
+                continue;
+            };
+            let ch = if slot == 0 { 2 } else { 4 };
+            if self.dma.channels[ch].channel_control & (1 << 24) == 0 {
+                self.dma_block_runs[slot] = None;
+                continue;
+            }
+            let done = if self.cycles >= run.end {
+                run.blocks
+            } else {
+                let span = (run.end - run.start).max(1);
+                ((self.cycles - run.start) * u64::from(run.blocks) / span) as u32
+            };
+            Self::apply_dma_block_progress(&mut self.dma.channels[ch], &run, done);
+        }
+    }
+
+    /// [`Bus::settle_dma_block_runs`] ahead of a register write. Software that
+    /// reprograms a channel owns its registers from then on: the transfer it
+    /// was running no longer moves them.
+    fn settle_dma_block_runs_for_write(&mut self, phys: u32) {
+        self.settle_dma_block_runs();
+        let channel = ((phys - Dma::BASE) / Dma::STRIDE) as usize;
+        if let Some(slot) = Self::dma_block_run_slot(channel) {
+            self.dma_block_runs[slot] = None;
+        }
+    }
+
+    fn apply_dma_block_progress(channel: &mut crate::dma::DmaChannel, run: &DmaBlockRun, done: u32) {
+        let bytes = done.wrapping_mul(run.block_words).wrapping_mul(4);
+        channel.base = if run.backward {
+            run.madr.wrapping_sub(bytes)
+        } else {
+            run.madr.wrapping_add(bytes)
+        } & 0x00FF_FFFF;
+        let left = u32::from(run.count).wrapping_sub(done) & 0xFFFF;
+        channel.block_control = (channel.block_control & 0xFFFF) | (left << 16);
+    }
+
     fn complete_dma_channel(&mut self, ch: usize) -> bool {
+        if let Some(slot) = Self::dma_block_run_slot(ch) {
+            if let Some(run) = self.dma_block_runs[slot].take() {
+                if self.dma.channels[ch].channel_control & (1 << 24) != 0 {
+                    Self::apply_dma_block_progress(&mut self.dma.channels[ch], &run, run.blocks);
+                }
+            }
+        }
         if let Some(start) = self.dma_active_since.get_mut(ch).and_then(Option::take) {
             self.dma_busy_cycles[ch] =
                 self.dma_busy_cycles[ch].saturating_add(self.cycles.saturating_sub(start));
@@ -2413,6 +2522,7 @@ impl Bus {
                     self.log_dma_schedule("GpuDma", gpu_cycles as u64, target);
                     self.scheduler
                         .schedule(EventSlot::GpuDma, self.cycles, gpu_cycles as u64);
+                    self.begin_dma_block_run(2, gpu_cycles as u64);
                 }
             }
             3 => {
@@ -2453,6 +2563,7 @@ impl Bus {
                     self.log_dma_schedule("SpuDma", spu_delay as u64, target);
                     self.scheduler
                         .schedule(EventSlot::SpuDma, self.cycles, spu_delay as u64);
+                    self.begin_dma_block_run(4, spu_delay as u64);
                 }
             }
             6 => {
@@ -2658,6 +2769,8 @@ impl Bus {
             addr = addr.wrapping_add(step);
         }
         self.mdec.dma_write_in(&words);
+        // MADR ends where the last word went (hwtest v2.1 record 0x798).
+        self.dma.channels[0].base = addr & 0x00FF_FFFF;
         Some(total_words)
     }
 
@@ -2692,6 +2805,8 @@ impl Bus {
             }
             addr = addr.wrapping_add(step);
         }
+        // MADR ends where the last word went (hwtest v2.1 record 0x798).
+        self.dma.channels[1].base = addr & 0x00FF_FFFF;
         Some(total_words)
     }
 
@@ -2740,8 +2855,17 @@ impl Bus {
             }
             1 => {
                 let block_size = bcr & 0xFFFF;
-                let block_count = (bcr >> 16) & 0xFFFF;
-                (block_size * block_count, block_size)
+                // A block count of 0 is 65,536 blocks, not none (hwtest v2.1).
+                let block_count = match (bcr >> 16) & 0xFFFF {
+                    0 => 0x1_0000,
+                    count => count,
+                };
+                (
+                    block_size
+                        .saturating_mul(block_count)
+                        .min(DMA_RUNAWAY_WORD_CAP),
+                    block_size,
+                )
             }
             _ => (0, 0), // Linked list + reserved -- not used for SPU.
         };
@@ -2972,8 +3096,14 @@ impl Bus {
         let mut addr = ch.base & 0x001F_FFFC;
         let bcr = ch.block_control;
         let block_size = bcr & 0xFFFF;
-        let block_count = ((bcr >> 16) & 0xFFFF).max(1);
-        let total_words = block_size.saturating_mul(block_count);
+        // A block count of 0 is 65,536 blocks, not none (hwtest v2.1).
+        let block_count = match (bcr >> 16) & 0xFFFF {
+            0 => 0x1_0000,
+            count => count,
+        };
+        let total_words = block_size
+            .saturating_mul(block_count)
+            .min(DMA_RUNAWAY_WORD_CAP);
         let upload_active = to_device && self.gpu.vram_upload_active();
         let step = if (ch.channel_control >> 1) & 1 != 0 {
             // Decrement mode -- rarely used for GPU but handle for safety.
@@ -3330,6 +3460,7 @@ impl Bus {
             return (self.timers.read32(aligned) >> ((phys & 3) * 8)) as u8;
         }
         if Dma::contains(phys) {
+            self.settle_dma_block_runs();
             return self.dma.read8(phys);
         }
         if let Some(value) = self.gpu.read32_at(phys & !3, self.cycles) {
@@ -3440,6 +3571,7 @@ impl Bus {
             return self.timers.read32(phys) as u16;
         }
         if Dma::contains(phys) {
+            self.settle_dma_block_runs();
             return self.dma.read16(phys);
         }
         if Spu::contains(phys) {
@@ -3596,6 +3728,7 @@ impl Bus {
             return (self.data_bus_latch & 0xFFFF_0000) | self.timers.read32(phys);
         }
         if Dma::contains(phys) {
+            self.settle_dma_block_runs();
             return self.dma.read32(phys);
         }
         if let Some(v) = self.gpu.read32_at(phys, self.cycles) {
@@ -3732,6 +3865,7 @@ impl Bus {
             return;
         }
         if Dma::contains(phys) {
+            self.settle_dma_block_runs_for_write(phys);
             if self.dma.write32(phys, value) {
                 self.irq.raise(IrqSource::Dma);
             }
@@ -4064,6 +4198,7 @@ impl Bus {
             return;
         }
         if Dma::contains(phys) {
+            self.settle_dma_block_runs_for_write(phys);
             if self.dma.write8(phys, value) {
                 self.irq.raise(IrqSource::Dma);
             }
@@ -4156,6 +4291,7 @@ impl Bus {
             return;
         }
         if Dma::contains(phys) {
+            self.settle_dma_block_runs_for_write(phys);
             if self.dma.write16(phys, value) {
                 self.irq.raise(IrqSource::Dma);
             }
@@ -5757,6 +5893,7 @@ mod tests {
             assert_eq!(bus.gpu.vram.get_pixel(0x26, 0x10), 0x1F03);
             // Block DMA of a command stream: the 1Fh here is a command.
             write_ram_u32(&mut bus.ram[..], 0x2000, 0x1F00_0000);
+            bus.dma.channels[2].base = 0x2000;
             bus.dma.channels[2].block_control = (1 << 16) | 1;
             bus.dma.channels[2].channel_control = 0x0100_0201;
             bus.run_dma_channel(2);
@@ -5901,7 +6038,7 @@ mod tests {
         // as a fill command. Correct direction reads GPUREAD into RAM.
         write_ram_u32(&mut bus.ram[..], 0x300, 0x0200_FF00);
         bus.dma.channels[2].base = 0x300;
-        bus.dma.channels[2].block_control = 1;
+        bus.dma.channels[2].block_control = (1 << 16) | 1;
         bus.dma.channels[2].channel_control = 0x0100_0200;
 
         assert_eq!(bus.run_dma_gpu(), Some(3));
@@ -5924,6 +6061,73 @@ mod tests {
         // 2048 words + 10 cycles * 128 blocks + 250-cycle pipeline.
         assert_eq!(bus.run_dma_gpu(), Some(3578));
         assert!(!bus.gpu.vram_upload_active());
+    }
+
+    fn kick_gpu_block_dma(bcr: u32) -> Bus {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        bus.dma.dpcr = 1 << (2 * 4 + 3);
+        bus.dma.channels[2].base = 0x1000;
+        bus.dma.channels[2].block_control = bcr;
+        bus.dma.channels[2].channel_control = 0x0100_0201;
+        bus.run_dma_channel(2);
+        bus
+    }
+
+    const GPU_MADR: u32 = 0x1F80_10A0;
+    const GPU_BCR: u32 = 0x1F80_10A4;
+    const GPU_CHCR: u32 = 0x1F80_10A8;
+
+    #[test]
+    fn a_block_dma_counts_its_blocks_down_in_bcr_and_advances_madr() {
+        // hwtest v2.1: BCR's block count falls to zero as blocks finish.
+        let mut bus = kick_gpu_block_dma((16 << 16) | 16);
+        let whole = bus.scheduler.target(EventSlot::GpuDma).unwrap() - bus.cycles();
+        bus.add_cycles((whole / 2) as u32);
+        let count = bus.read32(GPU_BCR) >> 16;
+        assert!((1..16).contains(&count), "count {count} mid-transfer");
+        assert_eq!(bus.read32(GPU_BCR) & 0xFFFF, 16);
+        assert!(bus.read32(GPU_MADR) > 0x1000);
+        assert_ne!(bus.read32(GPU_CHCR) & (1 << 24), 0);
+
+        bus.add_cycles(whole as u32);
+        bus.drain_scheduler_events_post_op();
+        assert_eq!(bus.read32(GPU_CHCR) & (1 << 24), 0);
+        assert_eq!(bus.read32(GPU_BCR), 16);
+        assert_eq!(bus.read32(GPU_MADR), 0x1000 + 16 * 16 * 4);
+    }
+
+    #[test]
+    fn reprogramming_a_busy_block_channel_keeps_what_software_wrote() {
+        // ps1-tests gpu/texture-overflow kicks a second upload while the
+        // first still runs: its MADR and BCR writes must stick.
+        let mut bus = kick_gpu_block_dma((1024 << 16) | 8);
+        bus.add_cycles(500);
+        bus.write32(GPU_MADR, 0x4000);
+        bus.write32(GPU_BCR, (3 << 16) | 8);
+        assert_eq!(bus.read32(GPU_MADR), 0x4000);
+        assert_eq!(bus.read32(GPU_BCR), (3 << 16) | 8);
+        bus.add_cycles(500);
+        assert_eq!(bus.read32(GPU_MADR), 0x4000);
+        assert_eq!(bus.read32(GPU_BCR), (3 << 16) | 8);
+    }
+
+    #[test]
+    fn a_block_dma_kicked_with_a_zero_count_runs_65536_blocks() {
+        // hwtest v2.1: re-kicking a finished block transfer without rewriting
+        // BCR ran away on a console: the count wrapped below zero.
+        let mut bus = kick_gpu_block_dma(16);
+        assert_eq!(bus.read32(GPU_BCR) >> 16, 0);
+        bus.add_cycles(2_000);
+        bus.drain_scheduler_events_post_op();
+        assert_ne!(bus.read32(GPU_CHCR) & (1 << 24), 0, "still running");
+        let count = bus.read32(GPU_BCR) >> 16;
+        assert!(count > 0xF000, "count {count:#x} counts down through zero");
+        // Software stopping it freezes the registers where they are.
+        bus.write32(GPU_CHCR, 0);
+        let frozen = (bus.read32(GPU_MADR), bus.read32(GPU_BCR));
+        bus.add_cycles(2_000);
+        assert_eq!((bus.read32(GPU_MADR), bus.read32(GPU_BCR)), frozen);
     }
 
     #[test]
