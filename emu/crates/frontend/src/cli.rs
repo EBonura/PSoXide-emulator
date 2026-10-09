@@ -918,11 +918,21 @@ fn run_headless_launch(
         (Some(p), _) => p,
         (None, Some(id)) => {
             let lib = Library::load_or_empty(&paths.library_file());
-            lib.entries
-                .iter()
-                .find(|e| e.id == id)
-                .map(|e| e.path.clone())
-                .ok_or_else(|| format!("no game with id={id} in library.ron"))?
+            // An id from before disc identities still finds its disc when
+            // exactly one library entry used to have it.
+            let current = lib.entries.iter().find(|e| e.id == id);
+            let mut formerly = lib.entries.iter().filter(|e| {
+                psoxide_settings::library::legacy_id(e).as_deref() == Some(id.as_str())
+            });
+            match (current, formerly.next(), formerly.next()) {
+                (Some(entry), _, _) | (None, Some(entry), None) => entry.path.clone(),
+                (None, Some(_), Some(_)) => {
+                    return Err(format!(
+                        "id={id} was shared by several discs; pass --path or a current id"
+                    ))
+                }
+                (None, None, _) => return Err(format!("no game with id={id} in library.ron")),
+            }
         }
         (None, None) => {
             return Err("Provide --path or --game-id".to_string());

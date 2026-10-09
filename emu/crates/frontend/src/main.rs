@@ -72,7 +72,7 @@ use clap::Parser;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::app::AppState;
@@ -276,6 +276,17 @@ impl FreelookChord {
     }
 }
 
+/// Cmd+O on macOS, Ctrl+O elsewhere.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_open_disc_chord(key: &Key, modifiers: ModifiersState) -> bool {
+    let chord = if cfg!(target_os = "macos") {
+        modifiers.super_key()
+    } else {
+        modifiers.control_key()
+    };
+    chord && matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("o"))
+}
+
 struct Shell {
     graphics: Option<Graphics>,
     state: AppState,
@@ -284,6 +295,9 @@ struct Shell {
     /// a 1 MiB copy every redraw.
     hw_vram_scratch: Vec<u16>,
     pending_input: MenuInput,
+    /// Held modifier keys, for the Cmd/Ctrl shortcuts.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    modifiers: ModifiersState,
     last_frame: Instant,
     /// Every piece of pad state the shell derives from keyboard events
     /// (button mask, emulated sticks, SOCD recency). One struct so the
@@ -431,6 +445,7 @@ impl Shell {
             state,
             hw_vram_scratch: Vec::new(),
             pending_input: MenuInput::default(),
+            modifiers: ModifiersState::default(),
             last_frame: Instant::now(),
             host_input: HostKeyboardInput::default(),
             freelook_chord: FreelookChord::default(),
@@ -1042,6 +1057,9 @@ impl ApplicationHandler for Shell {
                 self.host_input.clear();
             }
             WindowEvent::Focused(true) => {}
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -1156,6 +1174,16 @@ impl ApplicationHandler for Shell {
                 // F8 toggles a deterministic port-1 recording saved below the
                 // current game's config directory (web: reboots the game and
                 // records from cold boot; stopping downloads a CSV tape).
+                // Cmd+O (Ctrl+O elsewhere) -- Open disc... from anywhere.
+                #[cfg(not(target_arch = "wasm32"))]
+                if state == ElementState::Pressed
+                    && !repeat
+                    && is_open_disc_chord(&logical_key, self.modifiers)
+                {
+                    self.state.open_disc_dialog();
+                    // The dialog swallowed the key releases.
+                    self.host_input.clear();
+                }
                 if state == ElementState::Pressed && !repeat {
                     match &logical_key {
                         Key::Named(NamedKey::F3) => self.state.toggle_performance_panel(),
@@ -1426,6 +1454,10 @@ impl ApplicationHandler for Shell {
                     }
                 }
 
+                // Back on the Library column: pick up discs added to the games
+                // folder since it was last on screen.
+                #[cfg(not(target_arch = "wasm32"))]
+                self.state.rescan_on_library_view();
                 if let Some(action) = self.state.menu.update(&input) {
                     match ui::apply_menu_action(&mut self.state, action) {
                         MenuOutcome::None => {}
