@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 # Host workspace. Ignored SDK/emulator members are materialized from
-# components.lock.json by tools/bootstrap-components.py before Cargo runs.
+# components.lock.json by `make bootstrap` (the SDK's psoxide-components) before Cargo runs.
 members = [
     "crates/psx-hw",
     "crates/psx-iso",
