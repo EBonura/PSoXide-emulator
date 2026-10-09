@@ -174,6 +174,10 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.pick_input_replay();
             MenuOutcome::None
         }
+        ReplayLastInput => {
+            state.replay_last_input();
+            MenuOutcome::None
+        }
         SaveState => {
             state.save_state();
             MenuOutcome::None
@@ -263,7 +267,7 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             MenuOutcome::None
         }
         CycleTextureFilter => {
-            state.texture_filter = state.texture_filter.next();
+            state.cycle_texture_filter();
             MenuOutcome::None
         }
         CycleVolume => {
@@ -337,21 +341,16 @@ fn controller_ports(ui: &mut egui::Ui, input_router: &mut InputRouter) -> Option
                 message = Some(format!("{} assigned to {}", device.name, port.label()));
             }
 
-            let mode_label = if device.analog { "Analog" } else { "Digital" };
             if ui
-                .add_sized([62.0, 26.0], egui::Button::new(mode_label))
-                .on_hover_text(if device.analog {
-                    "Expose an Analog DualShock (ID 0x73)"
-                } else {
-                    "Expose an original digital pad (ID 0x41)"
-                })
+                .add_sized([78.0, 26.0], egui::Button::new(device.profile.label()))
+                .on_hover_text(device.profile.description())
                 .clicked()
-                && input_router.set_device_analog(&device.id, !device.analog)
+                && input_router.set_device_profile(&device.id, device.profile.next())
             {
                 message = Some(format!(
                     "{} will use {} mode",
                     device.name,
-                    if device.analog { "Digital" } else { "Analog" }
+                    device.profile.next().label()
                 ));
             }
         });
@@ -371,7 +370,7 @@ pub enum MenuOutcome {
     Quit,
 }
 
-fn draw_status_toast(ctx: &egui::Context, state: &AppState) {
+pub(crate) fn draw_status_toast(ctx: &egui::Context, state: &AppState) {
     let Some((msg, ttl)) = state.status_message.as_ref() else {
         return;
     };
@@ -446,13 +445,19 @@ fn draw_freecam_indicator(ctx: &egui::Context, state: &AppState) {
         });
 }
 
-fn draw_recording_indicator(ctx: &egui::Context, state: &AppState) {
+pub(crate) fn draw_recording_indicator(ctx: &egui::Context, state: &AppState) {
     let (recording, frames) = state.input_recording_status();
     if !recording {
         return;
     }
+    // Sit left of the debug sidebar rather than over its buttons.
+    let x = if state.panels.debug_sidebar {
+        -(18.0 + state.sidebar_width)
+    } else {
+        -18.0
+    };
     egui::Area::new("input-recording-indicator".into())
-        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-18.0, 48.0))
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(x, 48.0))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::new()

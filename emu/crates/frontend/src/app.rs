@@ -123,6 +123,22 @@ impl TextureFilter {
         }
     }
 
+    /// The `settings.ron` spelling (`video.texture_filter`).
+    pub fn setting_name(self) -> &'static str {
+        match self {
+            TextureFilter::None => "none",
+            TextureFilter::Edge => "edge",
+        }
+    }
+
+    /// Parse a `settings.ron` value; anything unknown is the default.
+    pub fn from_setting(name: &str) -> Self {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "edge" => TextureFilter::Edge,
+            _ => TextureFilter::None,
+        }
+    }
+
     /// `u_texfilter.x` value the shader branches on.
     pub fn mode(self) -> u32 {
         match self {
@@ -659,6 +675,8 @@ impl AppState {
         out.menu.sync_editor_label(out.workspace.is_editor());
         out.menu
             .set_smooth_slow_host(out.settings.video.smooth_slow_host);
+        out.texture_filter = TextureFilter::from_setting(&out.settings.video.texture_filter);
+
         out.sync_menu_settings_paths();
         out.sync_menu_controls();
         // Dev/preview hook in the PSOXIDE_AUTORUN tradition: open the
@@ -1568,6 +1586,13 @@ impl AppState {
                 .as_ref()
                 .is_some_and(|root| path_is_under(&e.path, root));
 
+            // library.ron is shared with the editor build, which also scans
+            // its own projects and example builds into it. Those are the
+            // editor's: only show what lives under this emulator's roots.
+            if !is_sdk_example && !entry_in_game_root(&e.path, &game_root) {
+                continue;
+            }
+
             // Audio tracks: any "(Track N)" filename where N != 1.
             // Multi-track CUE rips leave each audio track as a
             // standalone BIN; none of those boot, so hide them.
@@ -1634,6 +1659,11 @@ impl AppState {
                     {
                         continue;
                     }
+                    // A .bin that is not a whole number of CD sectors is a
+                    // RAM dump or capture, not a disc.
+                    if e.kind == GameKind::DiscBin && !is_raw_sector_image(e.size) {
+                        continue;
+                    }
                     if let Some(item) =
                         game_menu_item(e, &cue_owns_bin, &mut cue_already_listed, &game_root)
                     {
@@ -1668,6 +1698,8 @@ impl AppState {
         examples.extend(public_example_source_items(&built_examples));
 
         merge_baked_examples(&mut examples, &built_examples);
+
+        hoist_single_game_folders(&mut games);
 
         // Pass 3: stable alphabetical order per column.
         games.sort_by_key(|a| a.title.to_lowercase());
@@ -2489,6 +2521,21 @@ impl AppState {
             Err(e) => {
                 eprintln!("[frontend] {e}");
                 self.status_message_set(format!("{msg} (settings save failed)"));
+            }
+        }
+    }
+
+    /// Switch the texture filter (None <-> Edge) and persist the choice in
+    /// `settings.ron`, so it is still set on the next launch.
+    pub fn cycle_texture_filter(&mut self) {
+        self.texture_filter = self.texture_filter.next();
+        self.settings.video.texture_filter = self.texture_filter.setting_name().to_string();
+        let message = format!("Texture filter: {}", self.texture_filter.label());
+        match self.save_settings() {
+            Ok(()) => self.status_message_set(message),
+            Err(error) => {
+                eprintln!("[frontend] {error}");
+                self.status_message_set(format!("{message} (settings save failed)"));
             }
         }
     }
@@ -3467,6 +3514,16 @@ impl AppState {
                 return;
             }
         }
+        // Like the web build, record from a cold boot: a tape started in the
+        // middle of a session cannot be replayed, because the replay boots
+        // fresh and nothing reproduces what the game did before recording.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(entry) = self.current_game.clone() {
+            if let Err(error) = self.launch_entry(&entry) {
+                self.status_message_set(format!("Input recording unavailable: {error}"));
+                return;
+            }
+        }
         let start_poll = self
             .bus
             .as_ref()
@@ -3483,9 +3540,34 @@ impl AppState {
         self.status_message_set("Game rebooted; recording input from boot (F8 to download CSV)");
         #[cfg(not(target_arch = "wasm32"))]
         self.status_message_set(format!(
-            "Input recording started (F8 to stop): {}",
+            "Game restarted; recording input from boot (F8 to stop): {}",
             path.display()
         ));
+    }
+
+    /// Replay the newest recording of the running game against a fresh boot
+    /// (native only; the web build has no stored tape, use "Load input
+    /// replay" there).
+    pub fn replay_last_input(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        self.status_message_set("Use Load input replay to pick a recording");
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(entry) = self.current_game.clone() else {
+                self.status_message_set("Launch a game before replaying a recording");
+                return;
+            };
+            if self.playtest_input_tape.is_recording() {
+                self.status_message_set("Stop input recording before replaying");
+                return;
+            }
+            let path = self.paths.latest_input_tape_file(&entry.id);
+            if !path.is_file() {
+                self.status_message_set("No recording for this game yet (F8 starts one)");
+                return;
+            }
+            self.load_native_replay(&entry, &path);
+        }
     }
 
     /// Persist an active recording (native: tape file; web: CSV download).
@@ -3828,6 +3910,43 @@ fn is_internal_example_artifact(path: &Path) -> bool {
             Some("build")
         )
     )
+}
+
+/// True when `path` is inside the user's games folder. An unset folder owns
+/// nothing, so a fresh install shows no stale entries from another checkout.
+fn entry_in_game_root(path: &Path, game_root: &Path) -> bool {
+    !game_root.as_os_str().is_empty() && path_is_under(path, game_root)
+}
+
+/// A raw `.bin` CD image holds whole 2352-byte sectors. (A 2 MiB RAM dump
+/// is a multiple of 2048 but not of 2352.)
+fn is_raw_sector_image(size: u64) -> bool {
+    size != 0 && size.is_multiple_of(2352)
+}
+
+/// A game's own folder (the one holding its CUE and tracks) is not a group.
+/// Lift each game out of every folder that holds only that game, so one-game
+/// folders show as plain rows and folders stay for real collections.
+fn hoist_single_game_folders(games: &mut [MenuLibraryItem]) {
+    let mut subtree: std::collections::HashMap<PathBuf, usize> = std::collections::HashMap::new();
+    for game in games.iter() {
+        let mut prefix = PathBuf::new();
+        for part in game.folder.components() {
+            prefix.push(part);
+            *subtree.entry(prefix.clone()).or_default() += 1;
+        }
+    }
+    for game in games.iter_mut() {
+        let mut prefix = PathBuf::new();
+        for part in game.folder.clone().components() {
+            let parent = prefix.clone();
+            prefix.push(part);
+            if subtree.get(&prefix) == Some(&1) {
+                game.folder = parent;
+                break;
+            }
+        }
+    }
 }
 
 fn path_is_under(path: &Path, root: &Path) -> bool {
@@ -4543,6 +4662,96 @@ mod tests {
         assert!(!stream_failure_is_quiet(false, true));
     }
 
+    /// One row per game: a game's own folder is not a group, flat homebrew
+    /// discs with sidecar files show up, editor builds and RAM dumps do not.
+    #[test]
+    fn library_lists_one_row_per_game() {
+        let root = frontend_test_temp_dir("library-rows");
+        let games = root.join("games");
+        let editor = root.join("editor/projects/graybox/baked");
+        let disc = vec![0u8; 2352 * 20];
+        let write_disc = |dir: &Path, stem: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(format!("{stem}.bin")), &disc).unwrap();
+            std::fs::write(
+                dir.join(format!("{stem}.cue")),
+                format!(
+                    "FILE \"{stem}.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n"
+                ),
+            )
+            .unwrap();
+        };
+        // Flat homebrew disc with the sidecars the SDK build leaves beside it.
+        write_disc(&games, "quake-psx");
+        std::fs::write(games.join("quake-psx.SLICNSE.TXT"), "license").unwrap();
+        std::fs::write(games.join("quake-psx.provenance.json"), "{}").unwrap();
+        // A retail rip in its own folder, and a two-disc game in one folder.
+        write_disc(&games.join("Crash (USA)"), "Crash (USA)");
+        write_disc(&games.join("Saga/Disc 1"), "Saga (Disc 1)");
+        write_disc(&games.join("Saga/Disc 2"), "Saga (Disc 2)");
+        write_disc(&games.join("Pack"), "Alpha");
+        write_disc(&games.join("Pack"), "Beta");
+        // A RAM dump in the games folder and the editor's baked disc.
+        std::fs::create_dir_all(games.join("review")).unwrap();
+        std::fs::write(games.join("review/final-ram.bin"), vec![0u8; 2_097_152]).unwrap();
+        write_disc(&editor, "graybox_reach");
+
+        let mut state = AppState::with_config_dir(Some(root.join("config")));
+        state.settings.paths.game_library = games.to_string_lossy().into_owned();
+        // The shared library.ron can carry the editor checkout's entries.
+        state
+            .library
+            .scan_roots(&[games.as_path(), root.join("editor").as_path()])
+            .unwrap();
+        state.refresh_menu_library();
+        let rows: Vec<(usize, String)> = state
+            .menu
+            .library_rows()
+            .into_iter()
+            .map(|(depth, label, _)| (depth, label))
+            .filter(|(_, label)| {
+                !["Choose", "Refresh", "Homebrew"]
+                    .iter()
+                    .any(|skip| label.starts_with(skip))
+            })
+            .collect();
+        let top: Vec<_> = rows
+            .iter()
+            .filter(|(depth, _)| *depth == 0)
+            .map(|(_, label)| label.as_str())
+            .collect();
+        // Folders (two or more games) come first; Crash has its own folder
+        // on disk but is a plain row, as is the flat quake-psx.
+        assert_eq!(top, ["Pack", "Saga", "Crash (USA)", "quake-psx"]);
+        assert!(!rows
+            .iter()
+            .any(|(_, l)| l.contains("graybox") || l == "final-ram"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn single_game_folders_are_hoisted_and_collections_stay() {
+        let item = |folder: &str, title: &str| MenuLibraryItem {
+            folder: PathBuf::from(folder),
+            id: title.to_string(),
+            title: title.to_string(),
+            subtitle: String::new(),
+            burnable: false,
+            launchable: true,
+        };
+        let mut games = vec![
+            item("", "flat"),
+            item("One", "one"),
+            item("Deep/Same/Inner", "deep"),
+            item("Set", "a"),
+            item("Set", "b"),
+            item("Set/Nested", "c"),
+        ];
+        hoist_single_game_folders(&mut games);
+        let folders: Vec<_> = games.iter().map(|g| g.folder.to_str().unwrap()).collect();
+        assert_eq!(folders, ["", "", "", "Set", "Set", "Set"]);
+    }
+
     #[test]
     fn library_keeps_same_id_discs_in_their_own_cue_folders() {
         let root = frontend_test_temp_dir("library-folders");
@@ -4569,24 +4778,118 @@ mod tests {
         assert_eq!(cues.len(), 2);
         assert_eq!(cues[0].id, cues[1].id);
         state.refresh_menu_library();
-        for folder in ["A", "B"] {
-            state.menu.toggle_library_folder(Path::new(folder));
+        // Each folder holds one game, so both are plain rows; stepping down
+        // the list reaches each disc by its own path-qualified launch id.
+        let mut launched = Vec::new();
+        for _ in 0..6 {
+            if let Some(ui::menu::MenuAction::LaunchGame(id)) = state.menu.selected_action() {
+                if !launched.contains(id) {
+                    launched.push(id.clone());
+                }
+            }
             state.menu.update(&ui::menu::MenuInput {
                 down: true,
                 ..Default::default()
             });
-            let expected = path_launch_id(&games.join(folder).join("game.cue"));
-            assert_eq!(
-                state.menu.selected_action(),
-                Some(&ui::menu::MenuAction::LaunchGame(expected.clone()))
-            );
-            assert_eq!(
-                library_entry_for_launch_id(&state.library.entries, &expected)
-                    .unwrap()
-                    .path,
-                games.join(folder).join("game.cue")
-            );
         }
+        launched.sort();
+        let mut expected: Vec<_> = ["A", "B"]
+            .iter()
+            .map(|folder| path_launch_id(&games.join(folder).join("game.cue")))
+            .collect();
+        expected.sort();
+        assert_eq!(launched, expected);
+        for id in &expected {
+            assert!(library_entry_for_launch_id(&state.library.entries, id).is_some());
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Run one emulated frame the way the GUI loop does: pick the pad sample
+    /// (live, or the tape's while replaying), apply it, step, then credit the
+    /// polls the guest completed to the tape. Returns an FNV-1a hash of the
+    /// frame's VRAM and the completed-poll count.
+    fn gui_frame(state: &mut AppState, live: Port1PadSample) -> (u64, u64) {
+        let sample = state.input_sample_for_frame(live);
+        let bus = state.bus.as_mut().unwrap();
+        sample.apply_to_bus(bus);
+        let before = bus.port1_completed_polls();
+        step_one_frame(state);
+        let bus = state.bus.as_ref().unwrap();
+        let after = bus.port1_completed_polls();
+        state.input_note_polls(sample, after - before);
+        let bus = state.bus.as_ref().unwrap();
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for byte in bus.gpu.vram.to_rgba8(0, 0, 640, 480) {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        (hash, after)
+    }
+
+    /// Record from the GUI's own entry points (`toggle_input_recording`),
+    /// replay with `replay_last_input`, and compare the frame hashes.
+    #[test]
+    fn gui_recorded_tape_replays_to_identical_frames() {
+        let exe = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/examples/hello-input.exe");
+        let root = frontend_test_temp_dir("tape-determinism");
+        let mut state = AppState::with_config_dir(Some(root.clone()));
+        let entry = LibraryEntry {
+            id: "0123456789abcdef".to_string(),
+            path: exe,
+            kind: GameKind::Exe,
+            title: "hello-input".to_string(),
+            region: Region::Unknown,
+            size: 0,
+            mtime: 0,
+            diagnostic: None,
+        };
+        state.launch_entry(&entry).unwrap();
+        // Input before recording must not matter: the recording reboots.
+        for _ in 0..20 {
+            gui_frame(&mut state, Port1PadSample::from_buttons(0xfffe));
+        }
+
+        const FRAMES: usize = 240;
+        let script = |frame: usize| match frame / 24 % 4 {
+            0 => 0xffff,
+            1 => 0xffef,
+            2 => 0xbfff,
+            _ => 0xffdf,
+        };
+        state.toggle_input_recording();
+        assert!(state.input_recording_status().0);
+        let recorded: Vec<_> = (0..FRAMES)
+            .map(|frame| gui_frame(&mut state, Port1PadSample::from_buttons(script(frame))))
+            .collect();
+        state.toggle_input_recording();
+        assert!(!state.input_recording_status().0);
+
+        let dir = state.paths.input_tapes_dir(&entry.id);
+        let latest = state.paths.latest_input_tape_file(&entry.id);
+        assert!(latest.is_file());
+        let copies = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("recording-"))
+            .count();
+        assert_eq!(copies, 1);
+        let tape = crate::playtest_input::read_input_tape(&latest).unwrap();
+        assert_eq!(tape.start_poll, 0, "recording starts at a cold boot");
+        assert!(!tape.samples.is_empty());
+
+        // The pad has to matter, or identical frames prove nothing.
+        let distinct = recorded
+            .iter()
+            .map(|(hash, _)| *hash)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(distinct.len() > 1, "scripted input never changed a frame");
+
+        // Replay with the live pad idle and compare frame by frame.
+        state.replay_last_input();
+        let replayed: Vec<_> = (0..FRAMES)
+            .map(|_| gui_frame(&mut state, Port1PadSample::from_buttons(0xffff)))
+            .collect();
+        assert_eq!(recorded, replayed);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -5203,5 +5506,15 @@ mod texture_filter_tests {
         assert_eq!(modes, [0, 1]);
         let labels: Vec<&str> = all.iter().map(|f| f.label()).collect();
         assert_eq!(labels, ["None", "Edge"]);
+    }
+
+    #[test]
+    fn settings_names_round_trip_and_unknown_values_fall_back_to_none() {
+        for f in [TextureFilter::None, TextureFilter::Edge] {
+            assert_eq!(TextureFilter::from_setting(f.setting_name()), f);
+        }
+        assert_eq!(TextureFilter::from_setting(" EDGE "), TextureFilter::Edge);
+        assert_eq!(TextureFilter::from_setting("xbr"), TextureFilter::None);
+        assert_eq!(TextureFilter::from_setting(""), TextureFilter::None);
     }
 }
