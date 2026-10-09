@@ -202,6 +202,15 @@ pub struct LaunchArgs {
     /// `--steps` still caps the run.
     #[arg(long)]
     pub stop_at_poll: Option<u64>,
+    /// Write a save state to `--save-state-out` once this many route ticks
+    /// have elapsed, then keep running. Lets a long scripted walk to a
+    /// checkpoint (a game's first area, say) be done once and resumed with
+    /// `--savestate`.
+    #[arg(long, requires = "save_state_out")]
+    pub save_state_at_tick: Option<u64>,
+    /// Destination file for `--save-state-at-tick`.
+    #[arg(long, requires = "save_state_at_tick")]
+    pub save_state_out: Option<PathBuf>,
     /// Press pad-1 button masks on the headless route clock. Format:
     /// `<mask>@<tick>+<frames>`, comma-separated, e.g.
     /// `0x4000@45+12,0x4000@80+16`.
@@ -1596,6 +1605,11 @@ fn run_headless_launch(
                     transcript_live = samples[tape_cursor];
                 }
             }
+            if args.save_state_at_tick == Some(route_ticks) {
+                if let Some(path) = args.save_state_out.as_ref() {
+                    write_headless_save_state(&cpu, &bus, path, route_ticks)?;
+                }
+            }
             if let Some(dir) = args.route_screenshot_dir.as_ref() {
                 if route_ticks.is_multiple_of(args.route_screenshot_interval) {
                     let path = dir.join(format!("tick-{route_ticks:06}.ppm"));
@@ -2874,6 +2888,8 @@ fn validation_launch_args(
         input_tape_delay_ticks: 0,
         input_tape_transcribe: None,
         stop_at_poll: None,
+        save_state_at_tick: None,
+        save_state_out: None,
         pad_pulses: checkpoint.pad_pulses.clone(),
         digital_pad: false,
         dualshock_pad: false,
@@ -3754,6 +3770,30 @@ fn parse_stick_position(entry: &str, name: &str, value: &str) -> Result<(u8, u8)
         x.trim().parse().map_err(|_| bad())?,
         y.trim().parse().map_err(|_| bad())?,
     ))
+}
+
+/// Write the running machine to `path` as a GUI-compatible save state.
+fn write_headless_save_state(
+    cpu: &Cpu,
+    bus: &Bus,
+    path: &Path,
+    route_ticks: u64,
+) -> Result<(), String> {
+    let tick = cpu.tick();
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn_scoped(scope, || {
+                let snapshot = emulator_core::EmulatorStateRef { cpu, bus };
+                SaveStateV1::new(snapshot, "headless", tick).write_to(path)
+            })
+            .map_err(|e| format!("spawn save-state writer: {e}"))?
+            .join()
+            .map_err(|_| "save-state writer panicked".to_string())?
+            .map_err(|e| e.to_string())
+    })?;
+    eprintln!("[cli] wrote save state {} at route tick {route_ticks}", path.display());
+    Ok(())
 }
 
 /// Parse a `--press` spec: `tick:button[:hold]` or

@@ -19,7 +19,7 @@ members = [
 ]
 # The device-side workspaces live inside this directory tree; cargo
 # requires nested workspace roots to be excluded explicitly.
-exclude = ["sdk", "engine", "build", "tools/web-player"]
+exclude = ["sdk", "engine", "build", "tools/web-player", "tools/compat-report"]
 
 [workspace.package]
 edition = "2021"

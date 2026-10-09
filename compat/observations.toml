@@ -1,5 +1,5 @@
 # Human judgement behind docs/COMPATIBILITY.md, one table per compat/games.toml
-# id. tools/compat_report.py merges this with compat/reference.toml and an
+# id. tools/compat-report merges this with compat/reference.toml and an
 # hle_compat run.
 #
 # hle          status tier on PSoXide: none, boots, intro, menu, in-game,
