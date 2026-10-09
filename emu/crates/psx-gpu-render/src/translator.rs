@@ -57,6 +57,10 @@ pub struct Translator {
     /// Filled polygons become edge strips; rectangles remain filled
     /// to match the CPU rasterizer's debug path.
     wireframe: bool,
+    /// The primitive being lowered is a GP0 polygon (triangle or quad), so
+    /// its vertices are tagged `fbits::CORNER_SAMPLED`. Set per event in
+    /// `process`; rectangles, fills and lines clear it.
+    polygon: bool,
     /// Ordered vertex stream for the current frame. This preserves
     /// GP0 command order, which matters for semi-transparency and
     /// overlapping UI primitives.
@@ -71,6 +75,7 @@ impl Translator {
         Self {
             interp: Interpreter::new(),
             wireframe: false,
+            polygon: false,
             flat: Vec::with_capacity(4 * 1024),
             runs: Vec::with_capacity(1024),
         }
@@ -157,7 +162,10 @@ impl Translator {
         ]
     }
 
-    fn push_vertex(&mut self, kind: BlendKind, clip: [u16; 4], vertex: HwVertex) {
+    fn push_vertex(&mut self, kind: BlendKind, clip: [u16; 4], mut vertex: HwVertex) {
+        if self.polygon && !self.wireframe {
+            vertex.flags |= fbits::CORNER_SAMPLED;
+        }
         let start = self.flat.len() as u32;
         if let Some(run) = self.runs.last_mut() {
             if run.kind == kind && run.clip == clip && run.start + run.count == start {
@@ -179,6 +187,17 @@ impl Translator {
         let Some(event) = self.interp.interpret(entry) else {
             return;
         };
+        self.polygon = matches!(
+            event,
+            GpuEvent::MonoTri { .. }
+                | GpuEvent::MonoQuad { .. }
+                | GpuEvent::TexTri { .. }
+                | GpuEvent::TexQuad { .. }
+                | GpuEvent::ShadedTri { .. }
+                | GpuEvent::ShadedQuad { .. }
+                | GpuEvent::ShadedTexTri { .. }
+                | GpuEvent::ShadedTexQuad { .. }
+        );
         match event {
             GpuEvent::Fill { cmd, x, y, w, h } => self.emit_fill_rect(cmd, x, y, w, h),
             GpuEvent::MonoTri { cmd, v } => self.emit_mono_tri(cmd, v),
@@ -1203,6 +1222,75 @@ mod tests {
         assert!(frame.total() > 0);
         for v in frame.vertices {
             assert_eq!(v.flags & fbits::DITHER, 0);
+        }
+    }
+
+    /// Polygons are tagged for the half-pixel shift that lines the host's
+    /// centre sampling up with the CPU's corner sampling; rectangles, fills
+    /// and lines are exact-pixel shapes and must stay untagged.
+    #[test]
+    fn only_polygon_vertices_are_corner_sampled() {
+        let polygons = [
+            entry(0x20, vec![0x2040_8040, xy(10, 10), xy(20, 10), xy(10, 20)]),
+            entry(
+                0x24,
+                vec![
+                    0x2480_8080,
+                    xy(10, 10),
+                    uv(0, 0, 0),
+                    xy(20, 10),
+                    uv(8, 0, 0),
+                    xy(10, 20),
+                    uv(0, 8, 0),
+                ],
+            ),
+            entry(
+                0x30,
+                vec![
+                    0x3000_00FF,
+                    xy(10, 10),
+                    0x0000_FF00,
+                    xy(20, 10),
+                    0x00FF_0000,
+                    xy(10, 20),
+                ],
+            ),
+        ];
+        for log in polygons {
+            let mut translator = Translator::new();
+            let frame = translator.translate(std::slice::from_ref(&log));
+            assert!(frame.total() >= 3);
+            for v in frame.vertices {
+                assert_ne!(
+                    v.flags & fbits::CORNER_SAMPLED,
+                    0,
+                    "opcode {:#x}",
+                    log.opcode
+                );
+            }
+        }
+        let exact = [
+            entry(0x60, vec![0x6000_00FF, xy(10, 10), 0x0004_0004]),
+            entry(0x65, vec![0x6580_8080, xy(10, 20), uv(0, 0, 0), xy(4, 4)]),
+            entry(0x02, vec![0x0200_00FF, xy(0, 0), 0x0004_0004]),
+            entry(0x40, vec![0x4000_00FF, xy(10, 10), xy(30, 40)]),
+        ];
+        for log in exact {
+            let mut translator = Translator::new();
+            let frame = translator.translate(std::slice::from_ref(&log));
+            assert!(
+                frame.total() > 0,
+                "opcode {:#x} emitted nothing",
+                log.opcode
+            );
+            for v in frame.vertices {
+                assert_eq!(
+                    v.flags & fbits::CORNER_SAMPLED,
+                    0,
+                    "opcode {:#x}",
+                    log.opcode
+                );
+            }
         }
     }
 
