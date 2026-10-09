@@ -162,6 +162,10 @@ pub struct LaunchArgs {
     /// `--memcard` for dual-card, slot-2 fallback, and card-copy tests.
     #[arg(long, value_name = "PATH")]
     pub memcard2: Option<PathBuf>,
+    /// Start with no memory card in either slot, for testing a game's
+    /// no-card path. Conflicts with `--memcard` and `--memcard2`.
+    #[arg(long, conflicts_with_all = ["memcard", "memcard2"])]
+    pub no_memcard: bool,
     /// Number of CPU instructions to retire before stopping.
     #[arg(long, default_value_t = 100_000_000)]
     pub steps: u64,
@@ -913,6 +917,14 @@ fn run_headless_launch(
         bus.attach_memcard_port1(bytes);
         if emit_summary {
             eprintln!("[cli] port-1 memory card → {}", path.display());
+        }
+    }
+
+    if args.no_memcard {
+        bus.detach_memcard_port1();
+        bus.detach_memcard_port2();
+        if emit_summary {
+            eprintln!("[cli] no memory card in either slot");
         }
     }
 
@@ -2881,6 +2893,7 @@ fn validation_launch_args(
         disc: None,
         memcard: None,
         memcard2: None,
+        no_memcard: false,
         steps: checkpoint.stop.steps,
         guest_frames: checkpoint.stop.guest_frames,
         guest_visual_frames: checkpoint.stop.guest_visual_frames,
