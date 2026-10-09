@@ -182,6 +182,19 @@ const EMPTY_NODE_SETUP_CYCLES: u32 = 8;
 /// iteration).
 const GPU_LIST_RAM_ACCESS_SPACING: u64 = 12;
 
+/// The most clocks an internal register read waits for a streaming code fill.
+/// Fitted to hwtest v2.1 record 0x1BA (32 GPUSTAT reads through evicted code,
+/// 284 clocks on a console against 239 with no wait): the first read in each
+/// refilled line gives way for three clocks.
+const CODE_FILL_MMIO_WAIT_CAP: u64 = 3;
+
+/// Clocks a main-RAM store behind a streaming code fill waits beyond the
+/// fill, on top of the RAM_SIZE contention clock. Fitted to hwtest v2.1
+/// record 0x1B8 (64 stores through evicted code, 329 clocks on a console
+/// against 142 from the scratchpad): the store cannot ride the write buffer
+/// while the fill holds the RAM bus.
+const CODE_FILL_STORE_EXTRA: u32 = 9;
+
 /// Extra clocks a CPU read of main RAM waits while a GPU block DMA streams
 /// from it. hwtest record 0x145: 64 RAM loads started right after a block
 /// transfer's kick took 1738 clocks against 510 with the channel idle, 19.2
@@ -1732,24 +1745,18 @@ impl Bus {
         }
         // Root-counter reads use the same three-cycle total (one issue + two
         // wait) measured for the other internal MMIO registers by the public
-        // access-time suite. Counter phase differences in compound loops must
-        // be modeled at their real CPU/bus dependency, not hidden in this
-        // independently observable access cost.
-        let stalls = self.memory_control.read_stalls(virt, width);
-        let external_counter_overlap = (memory::expansion1::BASE
-            ..memory::expansion1::BASE + memory::expansion1::SIZE as u32)
-            .contains(&phys)
-            || (memory::expansion2::BASE
-                ..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
-                .contains(&phys)
-            || (memory::expansion3::BASE
-                ..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
-                .contains(&phys)
-            || (0x1F80_1800..0x1F80_1804).contains(&phys)
-            || (0x1F80_1C00..0x1F80_2000).contains(&phys);
-        if external_counter_overlap {
-            self.timers
-                .overlap_counter_write_with_external_read(self.cycles, stalls);
+        // access-time suite. The external buses cost what their delay
+        // registers say: through warm code 64 reads of EXP1 take exactly what
+        // 64 BIOS ROM reads do, and EXP3 follows its own register (hwtest v2.1
+        // records 0x1C0 to 0x1CB).
+        let mut stalls = self.memory_control.read_stalls(virt, width);
+        if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
+            // Internal register reads next to a streaming code fill give way
+            // to it for a clock or two (hwtest v2.1 record 0x1BA: 32 GPUSTAT
+            // reads through freshly evicted code took 284 clocks, 239 modelled
+            // without this).
+            let fill_wait = self.code_fill_busy_until.saturating_sub(self.cycles);
+            stalls += fill_wait.min(CODE_FILL_MMIO_WAIT_CAP) as u32;
         }
         stalls
     }
@@ -1868,18 +1875,29 @@ impl Bus {
         } else {
             memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES
         };
+        // A store behind a streaming code fill waits for the fill to let go
+        // of the RAM bus, as a load does (hwtest v2.1 record 0x1B8: 64 stores
+        // through freshly evicted code took 329 clocks, 142 from the
+        // scratchpad).
+        let fill_wait = self.code_fill_busy_until.saturating_sub(self.cycles) as u32;
+        let fill_stall = if fill_wait > 0 {
+            fill_wait + self.memory_control.code_data_contention_cycles() + CODE_FILL_STORE_EXTRA
+        } else {
+            0
+        };
         let walk_wait = if self.gpu_list_walk_is_moving() {
             self.gpu_list_ram_spacing_wait()
         } else {
             0
         };
-        self.queue_store().saturating_add(walk_wait).saturating_add(
-            memory_timing::dram_refresh_wait(
+        self.queue_store()
+            .saturating_add(walk_wait)
+            .saturating_add(memory_timing::dram_refresh_wait(
                 self.cycles,
                 &mut self.dram_refresh_deadline,
                 refresh_stall,
-            ),
-        )
+            ))
+            .saturating_add(fill_stall)
     }
 
     /// A RAM load that has to share the bus with a code fetch.

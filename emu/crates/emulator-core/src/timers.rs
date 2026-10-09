@@ -65,12 +65,6 @@ pub struct Timer {
     /// counter by the next one.
     #[serde(default)]
     read_credit: u8,
-    /// A current-value write can overlap the setup wait of the immediately
-    /// following external-bus read.
-    #[serde(default)]
-    counter_bus_overlap_pending: bool,
-    #[serde(default)]
-    counter_write_cycle: u64,
     /// One-shot IRQs stop producing edges after their first event, but this is
     /// independent of observable mode bit 10. In pulse mode the bit returns
     /// high immediately after the short low pulse on real hardware.
@@ -241,8 +235,6 @@ impl Timers {
                 } else {
                     3
                 };
-                t.counter_bus_overlap_pending = true;
-                t.counter_write_cycle = now;
             }
             0x4 => {
                 // Mode writes reset the counter and re-arm the IRQ request,
@@ -262,7 +254,6 @@ impl Timers {
                 t.read_hold_cycles = 0;
                 t.read_credit = 0;
                 t.counter_hold_cycles = 2;
-                t.counter_bus_overlap_pending = false;
                 t.irq_fired_once = false;
             }
             0x8 => t.target = v16,
@@ -537,24 +528,6 @@ impl Timers {
         self.timers[idx].read_hold_cycles = self.timers[idx]
             .read_hold_cycles
             .saturating_add(cycles.min(u32::from(u8::MAX)) as u8);
-    }
-
-    /// Overlap the first external memory-controller wait with a just-written
-    /// root counter. Silicon timing sweeps expose this as one missing setup
-    /// wait on the first of 64 otherwise-identical accesses.
-    pub(crate) fn overlap_counter_write_with_external_read(&mut self, now: u64, stalls: u32) {
-        self.quiet_until = 0;
-        for timer in &mut self.timers {
-            if !timer.counter_bus_overlap_pending {
-                continue;
-            }
-            timer.counter_bus_overlap_pending = false;
-            if now.saturating_sub(timer.counter_write_cycle) <= 16 {
-                timer.counter_hold_cycles = timer
-                    .counter_hold_cycles
-                    .saturating_add(stalls.saturating_sub(2).min(u32::from(u8::MAX)) as u8);
-            }
-        }
     }
 
     /// Is this timer currently paused per its sync-mode bits?
