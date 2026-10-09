@@ -1,0 +1,75 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/psx-io",
+    "crates/psx-rt",
+    "crates/psx-gpu",
+    "crates/psx-gte",
+    "crates/psx-gte-core",
+    "crates/psx-pad",
+    "crates/psx-vram",
+    "crates/psx-cache",
+    "crates/psx-font",
+    "crates/psx-math",
+    "crates/psx-spu",
+    "crates/psx-sfx",
+    "crates/psx-telemetry",
+    "crates/psx-fx",
+    "crates/psx-asset",
+    "crates/psx-mc",
+    "crates/psx-settings",
+    "crates/psx-pack",
+    "crates/psx-osk",
+    "crates/psx-fmv",
+    "crates/psx-tick",
+    "crates/psx-cdstream",
+    "crates/psx-residency",
+    "crates/psx-residency-sim",
+]
+
+# The examples are built against the MIPS target via a separate
+# nightly toolchain -- keep them out of the main workspace so
+# `cargo check` in the default (host) target doesn't try to compile
+# bare-metal binaries on the wrong target.
+exclude = ["examples"]
+
+[workspace.package]
+edition    = "2021"
+license    = "GPL-2.0-or-later"
+repository = "https://github.com/EBonura/PSoXide"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+undocumented_unsafe_blocks = "warn"
+todo = "deny"
+too_many_arguments = "allow"
+
+[workspace.dependencies]
+psx-hw  = { path = "../crates/psx-hw" }
+psx-io  = { path = "crates/psx-io" }
+psx-rt  = { path = "crates/psx-rt" }
+psx-gpu = { path = "crates/psx-gpu" }
+psx-gte = { path = "crates/psx-gte" }
+psx-gte-core = { path = "crates/psx-gte-core" }
+psx-pad = { path = "crates/psx-pad" }
+psx-vram = { path = "crates/psx-vram" }
+psx-cache = { path = "crates/psx-cache" }
+psx-font = { path = "crates/psx-font" }
+psx-math = { path = "crates/psx-math" }
+psx-spu  = { path = "crates/psx-spu" }
+psx-fx   = { path = "crates/psx-fx" }
+psx-asset = { path = "crates/psx-asset" }
+psx-mc  = { path = "crates/psx-mc" }
+psx-settings = { path = "crates/psx-settings" }
+psx-pack = { path = "crates/psx-pack" }
+psx-fmv  = { path = "crates/psx-fmv" }
+psx-osk = { path = "crates/psx-osk" }
+psx-cdstream = { path = "crates/psx-cdstream" }
+psx-residency = { path = "crates/psx-residency" }
+psx-residency-sim = { path = "crates/psx-residency-sim" }
