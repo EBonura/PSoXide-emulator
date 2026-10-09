@@ -103,7 +103,7 @@ Verification, all from a fresh `git clone` of the branch into `fresh-emulator/` 
 | `lipo -create` of both | universal binary 27.6 MB (12.9 MB as tar.gz), ad-hoc linker-signed only |
 | `cargo check --locked --workspace --all-features` (includes the `mcp` feature) | pass |
 | `cargo fmt --all -- --check` | pass after trimming `sdk/Cargo.toml` (it failed before: missing members) |
-| `cargo test --locked -p psoxide` | 112 pass. Full workspace run: everything passed except B7, fixed afterwards and re-run for `-p psoxide` only. |
+| `cargo test --locked --workspace --no-fail-fast` on the final branch head | exit 0, 29 test binaries pass, 222 s. A first run before the example dirs were vendored failed B7 (plain `cargo test` stops at the first failing binary, so that run did not reach every crate). |
 
 Not done: I did not open the GUI window (agent rules forbid launching GUI apps), so "starts the
 app" rests on `--help` and the headless `launch` path through the same binary. Plain
