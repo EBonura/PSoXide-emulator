@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A CD sector DMA holds the CPU off the bus for the whole burst, 68.3 clocks a
+  word (34.9k clocks for 2048 bytes), and CHCR reads 0 once it ends. On a
+  console 64 loads or stores after the kick finished 35k clocks late at both
+  drive speeds (hardware tests v2.1); the emulator let the CPU run on and took
+  66k clocks to report the channel idle. Chopped bursts (CHCR 0x11400100) keep
+  their windows. Games that stream from the disc now spend that time in the
+  transfer, as on a console, so their frame timing shifts.
 - GPU and SPU block DMA (sync mode 1) count their blocks down in BCR and walk
   MADR as the transfer runs, and a kick with a block count of zero is 65,536
   blocks, not none: hardware tests v2.1 re-kicked a finished transfer without

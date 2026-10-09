@@ -1547,6 +1547,14 @@ impl Bus {
     /// shared `IrqSource::Dma` line to transition high. Caller
     /// raises that IRQ once per tick if any channel was on the
     /// edge.
+    /// Clocks a CD DMA of `words` words keeps the CPU off the bus. hwtest
+    /// v2.1 on a console: 512 words (2048 bytes) and 585 words (2340) leave 64
+    /// loads or stores 34.9k and 39.9k clocks late, the same at single and
+    /// double speed: 68.3 clocks a word, the drive port's word-read cost.
+    fn cd_dma_clocks(words: u32) -> u64 {
+        u64::from(words) * 683 / 10
+    }
+
     /// Slot of a channel in [`Bus::dma_block_runs`].
     fn dma_block_run_slot(ch: usize) -> Option<usize> {
         match ch {
@@ -1641,6 +1649,10 @@ impl Bus {
             // OTC direction/decrement is hardwired to bit 1; both manual
             // trigger and busy clear when the transfer completes.
             self.dma.channels[ch].channel_control = 1 << 1;
+        } else if ch == 3 {
+            // The manual trigger clears with the start bit (hwtest v2.1:
+            // CHCR reads 0 once a CD transfer is over).
+            self.dma.channels[ch].channel_control &= !((1 << 24) | (1 << 28));
         } else {
             self.dma.channels[ch].channel_control &= !(1 << 24);
         }
@@ -2545,15 +2557,23 @@ impl Bus {
                         if self.complete_dma_channel(3) {
                             self.irq.raise(IrqSource::Dma);
                         }
-                    } else {
-                        let delay = match self.dma.channels[3].channel_control {
-                            0x1140_0100 => (cdrom_words / 4).max(1) as u64,
-                            _ => cdrom_words as u64,
-                        };
+                    } else if self.dma.channels[3].channel_control == 0x1140_0100 {
+                        // Chopped bursts leave the CPU its windows.
+                        let delay = (cdrom_words / 4).max(1) as u64;
                         let target = self.cycles + delay;
                         self.log_dma_schedule(&label, delay, target);
                         self.scheduler
                             .schedule(EventSlot::CdDma, self.cycles, delay);
+                    } else {
+                        // The drive's data port is slow and the transfer owns
+                        // the bus: the CPU, loads and stores alike, waits for
+                        // the whole burst, and CHCR reads idle after it.
+                        let hold = Self::cd_dma_clocks(cdrom_words);
+                        self.log_dma_schedule(&label, hold, self.cycles + hold);
+                        self.add_cycles(hold as u32);
+                        if self.complete_dma_channel(3) {
+                            self.irq.raise(IrqSource::Dma);
+                        }
                     }
                 }
             }
@@ -5030,16 +5050,30 @@ mod tests {
         bus.dma.channels[3].block_control = 1;
         bus.dma.channels[3].channel_control = 0x1100_0000;
 
+        let before = bus.cycles();
         bus.run_dma_channel(3);
 
         assert_eq!(read_ram_u32(&bus.ram[..], 0), 0x0403_0201);
-        assert_ne!(bus.dma.channels[3].channel_control & (1 << 24), 0);
-        assert_eq!(bus.scheduler.target(EventSlot::CdDma), Some(1));
+        // The CPU is held for the whole burst, and CHCR is idle after it.
+        assert_eq!(bus.cycles() - before, Bus::cd_dma_clocks(1));
+        assert_eq!(bus.dma.channels[3].channel_control, 0);
+        assert_eq!(bus.scheduler.target(EventSlot::CdDma), None);
+    }
 
-        bus.tick(1);
-        assert_ne!(bus.dma.channels[3].channel_control & (1 << 24), 0);
-        bus.drain_scheduler_events_post_op();
-        assert_eq!(bus.dma.channels[3].channel_control & (1 << 24), 0);
+    #[test]
+    fn a_cd_sector_dma_holds_the_cpu_for_68_clocks_a_word() {
+        // hwtest v2.1: 512 words keep the CPU waiting about 35,000 clocks.
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.cdrom.debug_seed_data_fifo(&vec![7u8; 2048], true, true);
+        bus.dma.dpcr = 1 << (3 * 4 + 3);
+        bus.dma.channels[3].base = 0;
+        bus.dma.channels[3].block_control = 512;
+        bus.dma.channels[3].channel_control = 0x1100_0000;
+        let before = bus.cycles();
+        bus.run_dma_channel(3);
+        let held = bus.cycles() - before;
+        assert!((34_900..35_100).contains(&held), "held {held}");
+        assert_eq!(bus.dma.channels[3].channel_control, 0);
     }
 
     #[test]
