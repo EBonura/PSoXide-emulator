@@ -1,6 +1,6 @@
 <!--
-DRAFT, not pushed. Describes the editor after plan phases P0 to P5 (self-contained clone, shared app library
-into its own product, installer that provisions the toolchain). Marked lines do not hold today:
+DRAFT, not pushed. Describes the editor after plan phases P0 to P5 (self-contained clone, shared app library,
+installer that provisions the toolchain). Marked lines do not hold today:
   [P3] the single clone-and-run command
   [P3] the Download table and the first-run toolchain setup; [P4, P5] the Import line
 Today the editor needs Python 3 for `make bootstrap`, `make`, `sh`, `rsync` and a pinned nightly
