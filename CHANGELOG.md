@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- 480-line interlaced frames drawn field by field show whole. With drawing to
+  the display area prohibited (GP0 E1h bit 10 clear) in 480i and the display
+  on, fills and primitives skip the lines of the field on display (GPUSTAT
+  bit 31) and draw only the other field's. Valkyrie Profile redraws its title
+  and menus this way: the screen was white whenever the frame was sampled just
+  after the clear. The picture is put together from the live lines of the
+  shown field and the held lines of the other, by the new Settings >
+  Deinterlace choice: Blend (the default, averages the fields), Bob (shows the
+  field on display only) or Weave (interleaves them, which combs moving
+  objects). Headless captures and display hashes always weave. In the GUI,
+  these frames now come from the CPU display like 24bpp ones, since the HW
+  renderer does not apply the rule. Games that run in this mode (Valkyrie
+  Profile, Gran Turismo 2, Tekken 3, Chrono Cross, Formula One 2001, one
+  WipEout 3 frame) change display hashes. The rule is not measured on the
+  console yet, and whether it holds with the display blanked is a guess (it
+  does not, here: Chrono Cross builds its menu background that way).
 - The hardware renderer now matches the CPU rasterizer on polygons. It draws
   each triangle half a pixel down and right, so the host's centre sampling
   lands where the PS1 samples (a pixel's top-left corner): the same pixels are

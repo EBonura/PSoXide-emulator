@@ -1776,7 +1776,7 @@ impl ApplicationHandler for Shell {
                 // the stamp) so `prepare_display` clears its texture.
                 if vram_dirty {
                     let display_upload_start = Instant::now();
-                    gfx.prepare_display(state.bus.as_ref().map(|b| &b.gpu));
+                    gfx.prepare_display(state.bus.as_ref().map(|b| &b.gpu), state.deinterlace);
                     profile.display_upload_ms = elapsed_ms(display_upload_start);
                 }
 
@@ -1808,10 +1808,12 @@ impl ApplicationHandler for Shell {
                 profile.hw_scale_ms = elapsed_ms(hw_scale_start);
                 profile.hw_scale = gfx.hw_internal_scale() as f32;
                 let hw_target_needs_resync = {
-                    let display_bpp24 = state
-                        .bus
-                        .as_ref()
-                        .is_some_and(|bus| bus.gpu.display_area().bpp24);
+                    // Frames the HW target cannot show (true colour, and 480i
+                    // drawn field by field) come from the CPU display texture;
+                    // leaving them resyncs the HW target from VRAM.
+                    let display_bpp24 = state.bus.as_ref().is_some_and(|bus| {
+                        bus.gpu.display_area().bpp24 || bus.gpu.field_rendering_active()
+                    });
                     hw_target_needs_resync(
                         &mut self.hw_seen_gpu_resync_generation,
                         &mut self.hw_last_display_bpp24,
@@ -1918,7 +1920,9 @@ impl ApplicationHandler for Shell {
                 #[cfg(not(target_arch = "wasm32"))]
                 for path in state.take_pending_savestate_thumbnails() {
                     let result = match state.bus.as_ref() {
-                        Some(bus) => gfx.write_savestate_thumbnail(&bus.gpu, &path),
+                        Some(bus) => {
+                            gfx.write_savestate_thumbnail(&bus.gpu, state.deinterlace, &path)
+                        }
                         None => Err("emulator stopped after save".to_string()),
                     };
                     match result {
@@ -2156,7 +2160,7 @@ fn frontend_display(
     // ponytail: the fine display offset (a few px of CRT-window pan) is dropped in
     // the HW path -- imperceptible in a scale-to-fit window. Apply it at the paint
     // rect if an animated-offset (screen-shake) title ever needs it.
-    if area.bpp24 {
+    if area.bpp24 || bus.is_some_and(|b| b.gpu.field_rendering_active()) {
         return (gfx.display_texture_id(), cpu_display_uv(area));
     }
     (gfx.hw_texture_id(), hw_display_uv(area))

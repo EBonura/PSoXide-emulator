@@ -66,7 +66,7 @@ pub use cpu::{
 };
 pub use fastboot::fast_boot_disc;
 pub use freelook::FreelookState;
-pub use gpu::{DisplayArea, Gpu};
+pub use gpu::{Deinterlace, DisplayArea, Gpu};
 pub use input_tape::{
     game_image_hash, game_image_hash_parts, read_tape, tape_from_bytes, tape_from_csv, tape_to_csv,
     write_tape, GameImageHasher, PadSample,
