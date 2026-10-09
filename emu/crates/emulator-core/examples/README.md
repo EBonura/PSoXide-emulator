@@ -19,7 +19,7 @@ keeps the tools, so everything listed here is maintained.
 |---------|---------|
 | `verify_disc_reads` | Verifies disc sector delivery end to end. |
 | `probe_cdda_wav` | Captures CD-DA/SPU audio output to WAV; used by the preburn suite and the audio example targets. |
-| `hle_compat` | Runs the commercial discs listed in `compat/games.toml` (found by hash in `--games-dir`) on the HLE kernel, each with its schedule from `compat/inputs.toml`, and reports the first unimplemented kernel call, speed, display hash, FMV and CD statistics; feeds `tools/compat_report.py`. Save states (`--save-dir`, `--save-at`, `--load-state`) and stall diagnostics (`PSOXIDE_COMPAT_STATUS`, `PSOXIDE_COMPAT_CDLOG`) help find input schedules and bugs. |
+| `hle_compat` | Runs the commercial discs listed in `compat/games.toml` (found by hash in `--games-dir`) on the HLE kernel, each with its schedule from `compat/inputs.toml`, and reports the first unimplemented kernel call, speed, display hash, FMV and CD statistics; feeds `tools/compat-report`. Save states (`--save-dir`, `--save-at`, `--load-state`) and stall diagnostics (`PSOXIDE_COMPAT_STATUS`, `PSOXIDE_COMPAT_CDLOG`) help find input schedules and bugs. |
 | `kcall_scan` | Static scan of a disc (ISO9660 tree, every file) or an executable for A0h/B0h/C0h call sites, SYSCALLs and Psy-Q kernel patch routines, for the `compat/games.toml` census. `--toml` prints the lists as TOML. ECM images are not supported. |
 
 ## Performance and internals
