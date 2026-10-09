@@ -61,6 +61,14 @@ pub struct UiPngArgs {
     /// Print the Library column's rows (indented by depth) to stdout.
     #[arg(long)]
     pub dump_library: bool,
+    /// Print every games-folder entry as `id  old-id  path` (the old id is
+    /// `-` when it never changed) and report any id shared by entries with
+    /// different titles.
+    #[arg(long, requires = "games_root")]
+    pub dump_ids: bool,
+    /// Disc to list under "Recent discs" (repeatable, newest first).
+    #[arg(long, requires = "library_ron")]
+    pub recent: Vec<PathBuf>,
     /// Texture filter to show: none or edge.
     #[arg(long, default_value = "none")]
     pub filter: String,
@@ -80,9 +88,16 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
     if let Some(library) = args.library_ron.as_ref() {
         std::fs::copy(library, root.join("library.ron"))
             .map_err(|e| format!("copy {}: {e}", library.display()))?;
-        if let Some(games) = args.games_root.as_ref() {
+        if args.games_root.is_some() || !args.recent.is_empty() {
             let mut settings = psoxide_settings::Settings::default();
-            settings.paths.game_library = games.to_string_lossy().into_owned();
+            if let Some(games) = args.games_root.as_ref() {
+                settings.paths.game_library = games.to_string_lossy().into_owned();
+            }
+            settings.paths.recent_discs = args
+                .recent
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
             settings
                 .save(&root.join("settings.ron"))
                 .map_err(|e| format!("write settings: {e}"))?;
@@ -91,6 +106,9 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
     let mut state = AppState::with_config_dir(Some(root.to_path_buf()));
     for folder in &args.expand {
         state.menu.toggle_library_folder(folder);
+    }
+    if args.dump_ids {
+        dump_ids(&state, args.games_root.as_deref().unwrap_or(Path::new("")));
     }
     if args.dump_library {
         for (depth, label, value) in state.menu.library_rows() {
@@ -195,4 +213,40 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
         image::ExtendedColorType::Rgba8,
     )
     .map_err(|e| format!("write {}: {e}", args.out.display()))
+}
+
+/// Print the id of every entry under `games_root`, the id it had before disc
+/// identities, and which ids are shared by entries that are not the same
+/// disc: entries with the same id but different titles. Copies of one disc
+/// under one id are fine and are not reported.
+fn dump_ids(state: &AppState, games_root: &Path) {
+    use std::collections::BTreeMap;
+    let mut by_id: BTreeMap<&str, Vec<&LibraryEntry>> = BTreeMap::new();
+    for entry in state
+        .library
+        .entries
+        .iter()
+        .filter(|e| e.path.starts_with(games_root))
+    {
+        let old = psoxide_settings::library::legacy_id(entry).unwrap_or_else(|| "-".into());
+        println!("{}  {old}  {}", entry.id, entry.path.display());
+        by_id.entry(entry.id.as_str()).or_default().push(entry);
+    }
+    let mut shared = 0;
+    for (id, entries) in &by_id {
+        let titles: std::collections::BTreeSet<&str> =
+            entries.iter().map(|e| e.title.as_str()).collect();
+        if titles.len() > 1 {
+            shared += 1;
+            println!(
+                "SHARED {id}: {}",
+                titles.into_iter().collect::<Vec<_>>().join(" | ")
+            );
+        }
+    }
+    println!(
+        "{} entries, {} distinct ids, {shared} shared ids",
+        by_id.values().map(Vec::len).sum::<usize>(),
+        by_id.len()
+    );
 }

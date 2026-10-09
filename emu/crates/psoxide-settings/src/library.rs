@@ -14,9 +14,11 @@
 //!   LBA 4 (`Licensed by Sony Computer Entertainment America /
 //!   Europe / Japan`).
 //! - **Stable ID** -- a 16-hex-char FNV-1a-64 fingerprint. Disc IDs
-//!   use license text + PVD identifier bytes, so renaming a BIN
-//!   doesn't orphan its savestates. EXE IDs include the file path so
-//!   project builds with the same filename remain launch-distinct.
+//!   come from the disc's own contents (boot serial, volume, root
+//!   directory, the head of the boot executable), so renaming a BIN
+//!   doesn't orphan its savestates and two different retail discs never
+//!   share an ID. EXE IDs include the file path so project builds with
+//!   the same filename remain launch-distinct.
 //!
 //! Results are cached in `library.ron` alongside the source file's
 //! last-modified time. A subsequent scan skips re-parsing files
@@ -442,7 +444,9 @@ fn parse_entry(path: &Path, kind: GameKind, size: u64, mtime: u64) -> LibraryEnt
     match kind {
         GameKind::DiscBin => parse_bin(path, size, mtime, &fallback_title),
         GameKind::DiscIso => LibraryEntry {
-            id: fingerprint(&[fallback_title.as_bytes()]),
+            id: SectorReader::open(path)
+                .and_then(|reader| disc_identity_id(&reader))
+                .unwrap_or_else(|| raw_image_id(path, size, &fallback_title)),
             path: path.to_path_buf(),
             kind,
             title: fallback_title,
@@ -478,35 +482,236 @@ fn parse_entry(path: &Path, kind: GameKind, size: u64, mtime: u64) -> LibraryEnt
     }
 }
 
-/// Parse a raw 2352-byte-per-sector BIN. Reads:
+/// Sector-addressed reader over a disc image file, 2352-byte raw or
+/// 2048-byte cooked, plain or ECM-packed. Each read touches one sector, so
+/// the identity probes below cost a few KiB of IO however big the image is.
+struct SectorReader {
+    image: crate::disc_image::SharedImage,
+    stride: u64,
+    user_offset: u64,
+}
+
+impl SectorReader {
+    fn open(path: &Path) -> Option<Self> {
+        use psx_iso::{SECTOR_BYTES, SECTOR_USER_DATA_BYTES, SECTOR_USER_DATA_OFFSET};
+        let image = crate::disc_image::open_image(path).ok()?;
+        let len = image.len();
+        let (stride, user_offset) = if len != 0 && len % SECTOR_BYTES as u64 == 0 {
+            (SECTOR_BYTES as u64, SECTOR_USER_DATA_OFFSET as u64)
+        } else if len != 0 && len % SECTOR_USER_DATA_BYTES as u64 == 0 {
+            (SECTOR_USER_DATA_BYTES as u64, 0)
+        } else {
+            // Neither shape: read it as raw sectors, as before.
+            (SECTOR_BYTES as u64, SECTOR_USER_DATA_OFFSET as u64)
+        };
+        Some(Self {
+            image,
+            stride,
+            user_offset,
+        })
+    }
+
+    fn sector_count(&self) -> u64 {
+        self.image.len() / self.stride
+    }
+
+    /// The 2048-byte user-data payload of `lba`; `None` past the image.
+    fn user(&self, lba: u64) -> Option<Vec<u8>> {
+        let offset = lba
+            .checked_mul(self.stride)?
+            .checked_add(self.user_offset)?;
+        let mut buf = vec![0u8; psx_iso::SECTOR_USER_DATA_BYTES];
+        self.image.read_at(offset, &mut buf).then_some(buf)
+    }
+
+    /// `count` consecutive sectors from `lba`, cut to `len` bytes.
+    fn extent(&self, lba: u64, count: u64, len: usize) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(len.min(1 << 20));
+        for i in 0..count {
+            out.extend_from_slice(&self.user(lba.checked_add(i)?)?);
+        }
+        out.truncate(len);
+        Some(out)
+    }
+}
+
+/// One ISO9660 directory record's identity-relevant fields.
+struct IsoRecord {
+    name: String,
+    lba: u64,
+    size: u64,
+    is_dir: bool,
+}
+
+fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
+/// Parse the records of a directory extent. Stops at the first malformed
+/// record rather than guessing.
+fn iso_records(dir: &[u8]) -> Vec<IsoRecord> {
+    let sector = psx_iso::SECTOR_USER_DATA_BYTES;
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at < dir.len() {
+        let len = dir[at] as usize;
+        if len == 0 {
+            // Records never straddle sectors: padding runs to the next one.
+            at = (at / sector + 1) * sector;
+            continue;
+        }
+        let Some(rec) = dir.get(at..at + len) else {
+            break;
+        };
+        let name_len = rec.get(32).copied().unwrap_or(0) as usize;
+        let (Some(name), Some(lba), Some(size)) =
+            (rec.get(33..33 + name_len), le_u32(rec, 2), le_u32(rec, 10))
+        else {
+            break;
+        };
+        out.push(IsoRecord {
+            name: String::from_utf8_lossy(name).into_owned(),
+            lba: lba as u64,
+            size: size as u64,
+            is_dir: rec.get(25).is_some_and(|flags| flags & 0x02 != 0),
+        });
+        at += len;
+    }
+    out
+}
+
+/// The boot executable name from SYSTEM.CNF text (`BOOT = cdrom:\SLUS_006.78;1`).
+fn boot_exe_name(system_cnf: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(system_cnf);
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("BOOT") {
+            continue;
+        }
+        let value = value.trim();
+        let value = value
+            .get(..6)
+            .filter(|head| head.eq_ignore_ascii_case("cdrom:"))
+            .map_or(value, |_| &value[6..]);
+        let value = value.trim_start_matches(['\\', '/']);
+        let value = value.split(';').next().unwrap_or(value).trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// Sectors of the boot executable folded into a disc's identity.
+const IDENTITY_EXE_SECTORS: u64 = 256;
+
+/// A disc's own identity, independent of where its file lives or what it
+/// is called. Folds in the license sector, the ISO9660 volume (id, size),
+/// the root directory listing, SYSTEM.CNF (the boot serial) and the first
+/// [`IDENTITY_EXE_SECTORS`] sectors of the boot executable. That tells every
+/// retail disc and revision apart for a few dozen KiB of IO. It is not a
+/// hash of the whole track (a library of 650 MB images would take minutes to
+/// index); two images that differ only past the first part of the boot
+/// executable would share an identity.
+///
+/// `None` when the image has no ISO9660 volume descriptor (an audio track or
+/// a capture), where the caller falls back to [`raw_image_id`].
+fn disc_identity_id(reader: &SectorReader) -> Option<String> {
+    let pvd = reader.user(16)?;
+    if pvd[0] != 1 || &pvd[1..6] != b"CD001" {
+        return None;
+    }
+    let license = reader.user(4);
+
+    let mut hasher = psx_hw::hash::Fnv1a64::new();
+    hasher.update(b"psoxide-disc-v2");
+    if let Some(license) = &license {
+        hasher.update(&license[..256]);
+    }
+    hasher.update(&pvd[40..72]);
+    hasher.update(&pvd[80..88]);
+
+    let root_lba = le_u32(&pvd, 158).unwrap_or(0) as u64;
+    let root_size = le_u32(&pvd, 166).unwrap_or(0) as usize;
+    let sector = psx_iso::SECTOR_USER_DATA_BYTES as u64;
+    // A root directory is a handful of sectors; cap a corrupt size.
+    let root_sectors = (root_size as u64).div_ceil(sector).min(32);
+    let root = reader
+        .extent(root_lba, root_sectors, root_size)
+        .unwrap_or_default();
+    hasher.update(&root);
+
+    let records = iso_records(&root);
+    let system_cnf = records
+        .iter()
+        .find(|r| !r.is_dir && r.name.to_ascii_uppercase().starts_with("SYSTEM.CNF"))
+        .and_then(|r| reader.extent(r.lba, r.size.div_ceil(sector).min(2), r.size as usize))
+        .unwrap_or_default();
+    hasher.update(&system_cnf);
+
+    if let Some(exe) = boot_exe_name(&system_cnf).and_then(|boot| {
+        records.into_iter().find(|r| {
+            !r.is_dir
+                && r.name
+                    .split(';')
+                    .next()
+                    .unwrap_or(&r.name)
+                    .eq_ignore_ascii_case(&boot)
+        })
+    }) {
+        let sectors = exe
+            .size
+            .div_ceil(sector)
+            .min(IDENTITY_EXE_SECTORS)
+            .min(reader.sector_count().saturating_sub(exe.lba));
+        for i in 0..sectors {
+            if let Some(data) = reader.user(exe.lba + i) {
+                hasher.update(&data);
+            }
+        }
+        hasher.update(&exe.size.to_le_bytes());
+    }
+    Some(format!("{:016x}", hasher.finish()))
+}
+
+/// Identity for an image with no ISO9660 volume: the file stem, its length
+/// and its first 64 KiB. Audio tracks of a multi-BIN rip land here, and the
+/// "(Track N)" in the stem keeps them apart.
+fn raw_image_id(path: &Path, size: u64, fallback_title: &str) -> String {
+    let mut head = vec![0u8; 64 * 1024];
+    let filled = crate::disc_image::open_image(path)
+        .ok()
+        .map(|image| {
+            let n = (head.len() as u64).min(image.len()) as usize;
+            head.truncate(n);
+            image.read_at(0, &mut head)
+        })
+        .unwrap_or(false);
+    if !filled {
+        head.clear();
+    }
+    fingerprint(&[
+        fallback_title.as_bytes(),
+        &size.to_le_bytes(),
+        &head,
+        b"raw",
+    ])
+}
+
+/// Parse a BIN (or an ISO / ECM-packed image). Reads:
 ///
 /// - LBA 4 user-data → PSX license text → region
 /// - LBA 16 user-data → ISO9660 PVD → volume identifier → title
+/// - the identity probe in [`disc_identity_id`] → stable ID
 ///
-/// Each read is bounded by a sector (2352 B), so the total disk
-/// IO for one BIN is ~5 KiB regardless of image size.
+/// Total disk IO for one image is bounded (well under a megabyte)
+/// regardless of its size.
 fn parse_bin(path: &Path, size: u64, mtime: u64, fallback_title: &str) -> LibraryEntry {
-    use psx_iso::{SECTOR_BYTES, SECTOR_USER_DATA_BYTES, SECTOR_USER_DATA_OFFSET};
-
-    // Helper: read the 2048-byte user-data payload of a given LBA
-    // directly from the file, without loading it all. `None` on
-    // any I/O error or short read.
-    let read_user = |lba: u64| -> Option<Vec<u8>> {
-        use std::io::{Read, Seek, SeekFrom};
-        let mut f = fs::File::open(path).ok()?;
-        let byte_offset = lba
-            .checked_mul(SECTOR_BYTES as u64)?
-            .checked_add(SECTOR_USER_DATA_OFFSET as u64)?;
-        f.seek(SeekFrom::Start(byte_offset)).ok()?;
-        let mut buf = vec![0u8; SECTOR_USER_DATA_BYTES];
-        match f.read_exact(&mut buf) {
-            Ok(()) => Some(buf),
-            Err(_) => None,
-        }
-    };
-
-    let license_user = read_user(4);
-    let pvd_user = read_user(16);
+    let reader = SectorReader::open(path);
+    let license_user = reader.as_ref().and_then(|r| r.user(4));
+    let pvd_user = reader.as_ref().and_then(|r| r.user(16));
     let region = license_user
         .as_deref()
         .map(region_from_license_text)
@@ -517,20 +722,10 @@ fn parse_bin(path: &Path, size: u64, mtime: u64, fallback_title: &str) -> Librar
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| fallback_title.to_string());
 
-    // Stable ID: hash the license + PVD system/volume bytes so two
-    // BINs of the same disc get the same ID across renames.
-    let mut parts: Vec<&[u8]> = Vec::new();
-    if let Some(ref bytes) = license_user {
-        parts.push(&bytes[..bytes.len().min(256)]);
-    }
-    if let Some(ref bytes) = pvd_user {
-        // Volume identifier region -- stable across burns.
-        parts.push(&bytes[40..bytes.len().min(72)]);
-    }
-    if parts.is_empty() {
-        parts.push(fallback_title.as_bytes());
-    }
-    let id = fingerprint(&parts);
+    let id = reader
+        .as_ref()
+        .and_then(disc_identity_id)
+        .unwrap_or_else(|| raw_image_id(path, size, fallback_title));
 
     LibraryEntry {
         id,
@@ -542,6 +737,108 @@ fn parse_bin(path: &Path, size: u64, mtime: u64, fallback_title: &str) -> Librar
         mtime,
         diagnostic: None,
     }
+}
+
+/// The id [`parse_bin`] produced before disc identities: the license text
+/// plus the PVD volume identifier. Many retail discs share both, so those ids
+/// collide; they are kept only to find the per-game data saved under them.
+fn legacy_bin_id(path: &Path, fallback_title: &str) -> String {
+    use psx_iso::{SECTOR_BYTES, SECTOR_USER_DATA_BYTES, SECTOR_USER_DATA_OFFSET};
+    let read_user = |lba: u64| -> Option<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = fs::File::open(path).ok()?;
+        let byte_offset = lba
+            .checked_mul(SECTOR_BYTES as u64)?
+            .checked_add(SECTOR_USER_DATA_OFFSET as u64)?;
+        f.seek(SeekFrom::Start(byte_offset)).ok()?;
+        let mut buf = vec![0u8; SECTOR_USER_DATA_BYTES];
+        f.read_exact(&mut buf).ok()?;
+        Some(buf)
+    };
+    let license_user = read_user(4);
+    let pvd_user = read_user(16);
+    let mut parts: Vec<&[u8]> = Vec::new();
+    if let Some(ref bytes) = license_user {
+        parts.push(&bytes[..bytes.len().min(256)]);
+    }
+    if let Some(ref bytes) = pvd_user {
+        parts.push(&bytes[40..bytes.len().min(72)]);
+    }
+    if parts.is_empty() {
+        parts.push(fallback_title.as_bytes());
+    }
+    fingerprint(&parts)
+}
+
+/// The id this entry's per-game data was saved under before disc
+/// identities, when that differs from [`LibraryEntry::id`]. `None` when the
+/// id never changed (EXEs, ISOs, unreadable sheets) or nothing was ever
+/// saved under a different one.
+pub fn legacy_id(entry: &LibraryEntry) -> Option<String> {
+    let fallback_title = entry
+        .path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("<unknown>");
+    let old = match entry.kind {
+        GameKind::DiscBin => legacy_bin_id(&entry.path, fallback_title),
+        GameKind::DiscCue => {
+            let bin = primary_bin_from_cue(&entry.path)?;
+            fingerprint(&[legacy_bin_id(&bin, fallback_title).as_bytes(), b"cue"])
+        }
+        GameKind::DiscCcd => {
+            let img = ccd_decoded_img_path(&entry.path);
+            if !img.exists() {
+                return None;
+            }
+            fingerprint(&[legacy_bin_id(&img, fallback_title).as_bytes(), b"ccd"])
+        }
+        GameKind::DiscIso => fingerprint(&[fallback_title.as_bytes()]),
+        GameKind::Exe | GameKind::Unknown => return None,
+    };
+    (old != entry.id).then_some(old)
+}
+
+/// Build a library entry for one file picked outside any scanned folder
+/// ("Open disc..."). Never stored in the cache.
+pub fn entry_for_path(path: &Path) -> Result<LibraryEntry, String> {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let name = path.to_string_lossy().to_ascii_lowercase();
+    // A CloneCD `.img.ecm` is launched through the `.ccd` sheet beside it.
+    let path = if name.ends_with(".img.ecm") {
+        let ccd = path.with_extension("").with_extension("ccd");
+        if ccd.is_file() {
+            ccd
+        } else {
+            return Err(format!(
+                "{}: no .ccd sheet beside this image",
+                path.display()
+            ));
+        }
+    } else {
+        path
+    };
+    let kind = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("ecm") => GameKind::DiscBin,
+        _ => classify(&path).ok_or_else(|| {
+            format!(
+                "{}: not a disc image (.cue .bin .iso .ccd .ecm) or .exe",
+                path.display()
+            )
+        })?,
+    };
+    let meta = fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs());
+    Ok(parse_entry(&path, kind, meta.len(), mtime))
 }
 
 fn parse_cue(path: &Path, size: u64, mtime: u64, fallback_title: &str) -> LibraryEntry {
@@ -1540,6 +1837,201 @@ mod tests {
         std::fs::write(&not_a_dir, b"").unwrap();
         let mut lib = Library::default();
         assert!(lib.scan(&not_a_dir).is_err());
+    }
+
+    fn put_sector(image: &mut [u8], lba: usize, user: &[u8]) {
+        let off = lba * psx_iso::SECTOR_BYTES;
+        image[off..off + psx_iso::SECTOR_BYTES].copy_from_slice(&synth_sector(user));
+    }
+
+    fn dir_record(name: &str, lba: u32, size: u32) -> Vec<u8> {
+        let mut rec = vec![0u8; 33 + name.len() + usize::from(name.len().is_multiple_of(2))];
+        rec[0] = rec.len() as u8;
+        rec[2..6].copy_from_slice(&lba.to_le_bytes());
+        rec[10..14].copy_from_slice(&size.to_le_bytes());
+        rec[32] = name.len() as u8;
+        rec[33..33 + name.len()].copy_from_slice(name.as_bytes());
+        rec
+    }
+
+    /// A retail-shaped disc: license text, an ISO9660 volume with a root
+    /// directory holding SYSTEM.CNF and the boot executable. Every disc made
+    /// here has the same license text and the same volume identifier, which
+    /// is exactly what made the old ids collide.
+    fn write_retail_disc(path: &Path, serial: &str, exe_fill: u8) {
+        let mut image = vec![0u8; psx_iso::SECTOR_BYTES * 40];
+        let msg = b"          Licensed  by          Sony Computer Entertainment Amer  ica ";
+        put_sector(&mut image, 4, msg);
+
+        let mut pvd = [0u8; 2048];
+        pvd[0] = 1;
+        pvd[1..6].copy_from_slice(b"CD001");
+        pvd[40..43].copy_from_slice(b"PSX");
+        pvd[80..84].copy_from_slice(&40u32.to_le_bytes());
+        pvd[158..162].copy_from_slice(&22u32.to_le_bytes());
+        pvd[166..170].copy_from_slice(&2048u32.to_le_bytes());
+        put_sector(&mut image, 16, &pvd);
+
+        let cnf = format!("BOOT = cdrom:\\{serial};1\r\nTCB = 4\r\nEVENT = 10\r\n");
+        let mut root = Vec::new();
+        root.extend(dir_record("SYSTEM.CNF;1", 23, cnf.len() as u32));
+        root.extend(dir_record(&format!("{serial};1"), 24, 4096));
+        root.resize(2048, 0);
+        put_sector(&mut image, 22, &root);
+        put_sector(&mut image, 23, cnf.as_bytes());
+        put_sector(&mut image, 24, &[exe_fill; 2048]);
+        put_sector(&mut image, 25, &[exe_fill; 2048]);
+        std::fs::write(path, image).unwrap();
+    }
+
+    fn entry_of(path: &Path, kind: GameKind) -> LibraryEntry {
+        let size = std::fs::metadata(path).unwrap().len();
+        parse_entry(path, kind, size, 0)
+    }
+
+    #[test]
+    fn discs_sharing_license_and_volume_id_get_distinct_ids() {
+        let tmp = TempDir::new().unwrap();
+        let (a, b, c) = (
+            tmp.path().join("a.bin"),
+            tmp.path().join("b.bin"),
+            tmp.path().join("c.bin"),
+        );
+        write_retail_disc(&a, "SLUS_000.01", 0x11);
+        write_retail_disc(&b, "SLUS_000.02", 0x11);
+        // Same serial, different executable body: another revision.
+        write_retail_disc(&c, "SLUS_000.01", 0x22);
+        let (ea, eb, ec) = (
+            entry_of(&a, GameKind::DiscBin),
+            entry_of(&b, GameKind::DiscBin),
+            entry_of(&c, GameKind::DiscBin),
+        );
+        assert_ne!(ea.id, eb.id);
+        assert_ne!(ea.id, ec.id);
+        assert_ne!(eb.id, ec.id);
+        // The old scheme could not tell any of them apart.
+        let old = legacy_id(&ea).expect("id changed");
+        assert_eq!(legacy_id(&eb), Some(old.clone()));
+        assert_eq!(legacy_id(&ec), Some(old));
+    }
+
+    #[test]
+    fn disc_id_follows_the_content_not_the_file() {
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("a.bin");
+        write_retail_disc(&a, "SLUS_000.01", 0x11);
+        let renamed = tmp.path().join("Renamed (USA).bin");
+        std::fs::copy(&a, &renamed).unwrap();
+        let ea = entry_of(&a, GameKind::DiscBin);
+        let er = entry_of(&renamed, GameKind::DiscBin);
+        assert_eq!(ea.id, er.id);
+        assert_eq!(ea.id.len(), 16);
+    }
+
+    #[test]
+    fn cue_and_ccd_ids_stay_distinct_from_the_bin_and_map_back() {
+        let tmp = TempDir::new().unwrap();
+        let bin = tmp.path().join("g.bin");
+        write_retail_disc(&bin, "SLUS_000.01", 0x11);
+        let cue = tmp.path().join("g.cue");
+        std::fs::write(
+            &cue,
+            "FILE \"g.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        let bin_entry = entry_of(&bin, GameKind::DiscBin);
+        let cue_entry = entry_of(&cue, GameKind::DiscCue);
+        assert_ne!(bin_entry.id, cue_entry.id);
+        let old_cue = legacy_id(&cue_entry).expect("cue id changed");
+        assert_eq!(
+            old_cue,
+            fingerprint(&[legacy_bin_id(&bin, "g").as_bytes(), b"cue"])
+        );
+    }
+
+    #[test]
+    fn images_without_a_volume_get_ids_from_their_name_and_size() {
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("Game (Track 02).bin");
+        let b = tmp.path().join("Game (Track 03).bin");
+        std::fs::write(&a, vec![7u8; psx_iso::SECTOR_BYTES * 20]).unwrap();
+        std::fs::write(&b, vec![7u8; psx_iso::SECTOR_BYTES * 20]).unwrap();
+        let (ea, eb) = (
+            entry_of(&a, GameKind::DiscBin),
+            entry_of(&b, GameKind::DiscBin),
+        );
+        assert_ne!(ea.id, eb.id);
+        // Two audio tracks used to share one id.
+        assert_eq!(legacy_id(&ea), legacy_id(&eb));
+        assert!(legacy_id(&ea).is_some());
+    }
+
+    #[test]
+    fn boot_exe_name_reads_the_usual_system_cnf_spellings() {
+        for (text, want) in [
+            (
+                "BOOT = cdrom:\\SLUS_006.78;1\r\nTCB = 4",
+                Some("SLUS_006.78"),
+            ),
+            ("boot=cdrom:SCES_012.34;1", Some("SCES_012.34")),
+            ("BOOT = cdrom:/SLPS_000.01;1", Some("SLPS_000.01")),
+            ("TCB = 4\nEVENT = 10", None),
+            ("", None),
+        ] {
+            assert_eq!(boot_exe_name(text.as_bytes()).as_deref(), want, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn entry_for_path_builds_an_entry_outside_any_library() {
+        let tmp = TempDir::new().unwrap();
+        let bin = tmp.path().join("open.bin");
+        write_retail_disc(&bin, "SLUS_000.01", 0x11);
+        let entry = entry_for_path(&bin).unwrap();
+        assert_eq!(entry.kind, GameKind::DiscBin);
+        assert_eq!(entry.id, entry_of(&bin, GameKind::DiscBin).id);
+
+        let exe = tmp.path().join("hello.EXE");
+        std::fs::write(&exe, b"PS-X EXE").unwrap();
+        assert_eq!(entry_for_path(&exe).unwrap().kind, GameKind::Exe);
+
+        let text = tmp.path().join("notes.txt");
+        std::fs::write(&text, b"x").unwrap();
+        assert!(entry_for_path(&text).is_err());
+        assert!(entry_for_path(&tmp.path().join("missing.cue")).is_err());
+    }
+
+    #[test]
+    fn entry_for_path_launches_an_img_ecm_through_its_ccd_sheet() {
+        let tmp = TempDir::new().unwrap();
+        let ccd = tmp.path().join("Disc.ccd");
+        std::fs::write(&ccd, b"[CloneCD]\nVersion=3\n").unwrap();
+        let ecm = tmp.path().join("Disc.img.ecm");
+        std::fs::write(&ecm, b"ecm").unwrap();
+        let entry = entry_for_path(&ecm).unwrap();
+        assert_eq!(entry.kind, GameKind::DiscCcd);
+        assert_eq!(entry.path.file_name().unwrap(), "Disc.ccd");
+        std::fs::remove_file(&ccd).unwrap();
+        assert!(entry_for_path(&ecm).is_err());
+    }
+
+    #[test]
+    fn rescan_picks_up_new_files_and_leaves_cached_ones_alone() {
+        let tmp = TempDir::new().unwrap();
+        let first = tmp.path().join("first.bin");
+        write_retail_disc(&first, "SLUS_000.01", 0x11);
+        let mut lib = Library::default();
+        assert_eq!(lib.scan_roots(&[tmp.path()]).unwrap(), 1);
+        // Nothing changed: nothing is parsed again.
+        assert_eq!(lib.scan_roots(&[tmp.path()]).unwrap(), 0);
+        let before = lib.clone();
+        let second = tmp.path().join("second.bin");
+        write_retail_disc(&second, "SLUS_000.02", 0x11);
+        assert_eq!(lib.scan_roots(&[tmp.path()]).unwrap(), 1);
+        assert_eq!(lib.entries.len(), 2);
+        assert_ne!(lib, before);
+        let ids: std::collections::HashSet<_> = lib.entries.iter().map(|e| e.id.clone()).collect();
+        assert_eq!(ids.len(), 2);
     }
 
     #[test]
