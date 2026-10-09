@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Textured primitives pay for their texels (hardware tests v2.1, records 0x200
+  to 0x223). An 8 or 15-bit texture costs more a pixel than a 4-bit one, a
+  texture page change refills the texture cache in proportion to the pixels
+  drawn (a 32x32 15-bit triangle alternating between two pages costs about 1280
+  clocks more, where the emulator charged none), and a new 8-bit CLUT costs
+  about 270 clocks to load (25 at 4 bits, none at 15). A moving texture window
+  inside one page, which the console also charges for, is not modelled.
+  Games that switch pages and palettes a lot draw slower in emulated time.
 - The expansion buses cost what their delay registers say. A write to a root
   counter no longer shortens the first external read behind it (an overlap
   measured on a late PSone): through warm code 64 reads of EXP1 now take 2174
