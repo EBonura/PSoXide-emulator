@@ -3044,11 +3044,11 @@ fn textured_triangle_cost(gpu: &mut Gpu, size: i32, tpage: u32, clut: u32) -> u6
     gpu.gp0_fifo = vec![
         0x2400_0000,
         pos(0, 0),
-        (clut << 16) | 0,
+        clut << 16,
         pos(size, 0),
         (tpage << 16) | size as u32,
         pos(0, size),
-        ((size as u32) << 8) | 0,
+        (size as u32) << 8,
     ];
     let cost = gpu.gp0_packet_timing_cost(0x24);
     let pixels = std::mem::take(gpu.timing_pixels.get_mut());
