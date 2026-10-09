@@ -503,6 +503,12 @@ pub fn handler(bus: &mut Bus) -> Option<()> {
         );
         return Some(());
     }
+    if bus.read16(SIO_STAT) & STAT_RX_READY == 0 {
+        // The answer to the byte sent is still on the wire (a byte takes
+        // ten bit times); an exception that is not this byte's IRQ7 has
+        // nothing to take yet.
+        return Some(());
+    }
     let ctrl = bus.read16(SIO_CTRL);
     bus.write16(SIO_CTRL, ctrl | CTRL_ACKNOWLEDGE);
     bus.write32(I_STAT, !IRQ_SIO0);
@@ -530,11 +536,15 @@ pub fn fast(bus: &mut Bus) -> u32 {
     if let Some(slot) = active_slot(bus) {
         let step = peek32(bus, kvar::STEP);
         let operation = get(bus, kvar::OP, slot);
-        let ctrl = bus.read16(SIO_CTRL);
-        bus.write16(SIO_CTRL, ctrl | CTRL_ACKNOWLEDGE);
-        bus.write32(I_STAT, !IRQ_SIO0);
-        let rx = bus.read8(SIO_DATA);
-        advance(bus, slot, operation, step, rx);
+        // The early routine runs on every exception of a data phase, and a
+        // byte takes ten bit times to come back: take it once it is in.
+        if bus.read16(SIO_STAT) & STAT_RX_READY != 0 {
+            let ctrl = bus.read16(SIO_CTRL);
+            bus.write16(SIO_CTRL, ctrl | CTRL_ACKNOWLEDGE);
+            bus.write32(I_STAT, !IRQ_SIO0);
+            let rx = bus.read8(SIO_DATA);
+            advance(bus, slot, operation, step, rx);
+        }
     }
     ex::code().card_fast_rfe
 }
@@ -678,6 +688,33 @@ mod tests {
             b(0x08, [EVENT_CARD, spec, 0x2000, 0]),
             b(0x0C, [res(0), 0, 0, 0]),
         ]
+    }
+
+    #[test]
+    fn an_early_routine_pass_before_the_answer_arrives_takes_nothing() {
+        let mut bus = bus_with_card();
+        reset_sio0(&mut bus);
+        set(&mut bus, kvar::OP, 0, op::READ);
+        start_command(&mut bus, 0);
+        assert_eq!(peek32(&bus, kvar::STEP), 0, "the address byte went out");
+        assert_eq!(bus.read16(SIO_STAT) & STAT_RX_READY, 0, "still on the wire");
+
+        // The early routine runs on every exception of a data phase, so it
+        // can run while a byte is still being clocked: it takes nothing,
+        // sends nothing and leaves the card IRQ for the byte's own pass.
+        fast(&mut bus);
+        assert_eq!(peek32(&bus, kvar::STEP), 0, "no byte was taken");
+        assert_eq!(bus.sio0().debug_queued_tx(), None, "no byte was queued");
+
+        // Ten bit times later the answer is in and the next pass takes it.
+        bus.tick(10 * BAUD as u32);
+        assert_ne!(
+            bus.read16(SIO_STAT) & STAT_RX_READY,
+            0,
+            "the answer arrived"
+        );
+        fast(&mut bus);
+        assert_eq!(peek32(&bus, kvar::STEP), 1, "the command byte followed");
     }
 
     #[test]
