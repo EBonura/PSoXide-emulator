@@ -448,8 +448,19 @@ pub struct LaunchArgs {
     /// the guest to poll the pad at least once. Buttons: cross, circle, square,
     /// triangle, start, select, up, down, left, right, l1, r1, l2, r2, l3, r3.
     ///
+    /// Analog sticks use the same shape: `tick:lstick=X/Y[:hold]` and
+    /// `tick:rstick=X/Y[:hold]`, X and Y in 0..=255 with 128 centred (X: 0
+    /// left, 255 right; Y: 0 up, 255 down), held for `hold` ticks (default 4)
+    /// and then released to centre. For example `300:lstick=64/128:60` is half
+    /// stick left for 60 ticks. Any stick token forces the pad to report
+    /// analog mode (poll ID 0x73) and conflicts with `--digital-pad`. Where
+    /// stick entries overlap, the later one in the spec wins; buttons still OR
+    /// together. A replaying `--input-tape` overrides the sticks with its own
+    /// samples.
+    ///
     /// Combines with `--hold-forward`: held input stays applied, and a scheduled
-    /// press is added on top for its duration.
+    /// press is added on top for its duration (a scheduled left stick replaces
+    /// the held forward stick while it is active).
     #[arg(long)]
     pub press: Option<String>,
     /// Enable GPU wireframe render mode (edges only) for this run, mirroring the
@@ -948,6 +959,21 @@ fn run_headless_launch(
         Some(spec) => parse_press_script(spec)?,
         None => Vec::new(),
     };
+    // Stick tokens need a pad that reports analog (poll ID 0x73): a digital
+    // poll carries no stick bytes, so the script would silently do nothing.
+    let press_sticks = press_script_uses_sticks(&scripted_presses);
+    if press_sticks {
+        if args.digital_pad {
+            return Err("--press lstick/rstick conflicts with --digital-pad".to_string());
+        }
+        let _ = bus.force_port1_analog_mode();
+    }
+    let rest_left_stick = if args.hold_forward {
+        (STICK_CENTRE, 0x00)
+    } else {
+        (STICK_CENTRE, STICK_CENTRE)
+    };
+    let mut applied_press_sticks = None;
     let mut held_button_mask = 0u16;
     if args.hold_forward || args.hold_run {
         if args.hold_run {
@@ -1484,11 +1510,22 @@ fn run_headless_launch(
                 // down for the rest of the run.
                 let mut mask = held_button_mask;
                 for press in &scripted_presses {
-                    if route_ticks >= press.tick && route_ticks < press.tick + press.hold {
+                    if press.active_at(route_ticks) {
                         mask |= press.mask;
                     }
                 }
                 bus.set_port1_buttons(ButtonState::from_bits(mask));
+                if press_sticks {
+                    // Write the sticks only when the scripted position
+                    // changes, so a replaying input tape keeps control of the
+                    // sticks between its own samples.
+                    let (left, right) =
+                        scripted_sticks_at(&scripted_presses, route_ticks, rest_left_stick);
+                    if applied_press_sticks != Some((left, right)) {
+                        bus.set_port1_sticks(right.0, right.1, left.0, left.1);
+                        applied_press_sticks = Some((left, right));
+                    }
+                }
             }
             if args.input_tape_transcribe.is_some() {
                 // Attribute polls to the sample that was live while they ran,
@@ -3625,30 +3662,96 @@ fn write_vram_words_ppm(path: &std::path::Path, words: &[u16]) -> Result<(), Str
     Ok(())
 }
 
-/// One scheduled button press from `--press`.
+/// One scheduled button or stick press from `--press`.
 struct ScriptedPress {
     /// Route tick the press starts on.
     tick: u64,
     /// How many route ticks to hold it.
     hold: u64,
-    /// Pad button bits.
+    /// Pad button bits (zero for a stick entry).
     mask: u16,
+    /// Left stick `(x, y)` held for the duration, 0..=255 with 128 centred.
+    left_stick: Option<(u8, u8)>,
+    /// Right stick `(x, y)` held for the duration, 0..=255 with 128 centred.
+    right_stick: Option<(u8, u8)>,
 }
 
-/// Parse a `--press` spec: `tick:button[:hold]`, comma separated.
+/// Centre position of an analog stick axis.
+const STICK_CENTRE: u8 = 0x80;
+
+impl ScriptedPress {
+    fn is_stick(&self) -> bool {
+        self.left_stick.is_some() || self.right_stick.is_some()
+    }
+
+    fn active_at(&self, route_tick: u64) -> bool {
+        route_tick >= self.tick && route_tick < self.tick + self.hold
+    }
+}
+
+/// Whether a `--press` script drives either analog stick.
+fn press_script_uses_sticks(script: &[ScriptedPress]) -> bool {
+    script.iter().any(ScriptedPress::is_stick)
+}
+
+/// Both sticks at `route_tick` as `((left_x, left_y), (right_x, right_y))`.
+/// A stick with no active entry rests at `base_left` / centre; where entries
+/// overlap, the one listed last in the spec wins.
+fn scripted_sticks_at(
+    script: &[ScriptedPress],
+    route_tick: u64,
+    base_left: (u8, u8),
+) -> ((u8, u8), (u8, u8)) {
+    let mut left = base_left;
+    let mut right = (STICK_CENTRE, STICK_CENTRE);
+    for press in script.iter().filter(|p| p.active_at(route_tick)) {
+        if let Some(stick) = press.left_stick {
+            left = stick;
+        }
+        if let Some(stick) = press.right_stick {
+            right = stick;
+        }
+    }
+    (left, right)
+}
+
+/// Parse the `X/Y` of a `lstick=X/Y` or `rstick=X/Y` token.
+fn parse_stick_position(entry: &str, name: &str, value: &str) -> Result<(u8, u8), String> {
+    let bad = || format!("--press '{entry}': {name} wants X/Y with both in 0..=255, got '{value}'");
+    let (x, y) = value.split_once('/').ok_or_else(bad)?;
+    Ok((
+        x.trim().parse().map_err(|_| bad())?,
+        y.trim().parse().map_err(|_| bad())?,
+    ))
+}
+
+/// Parse a `--press` spec: `tick:button[:hold]` or
+/// `tick:lstick=X/Y[:hold]` / `tick:rstick=X/Y[:hold]`, comma separated.
 fn parse_press_script(spec: &str) -> Result<Vec<ScriptedPress>, String> {
     let mut out = Vec::new();
     for entry in spec.split(',').map(str::trim).filter(|e| !e.is_empty()) {
         let mut parts = entry.split(':');
         let (Some(tick), Some(name)) = (parts.next(), parts.next()) else {
-            return Err(format!("--press '{entry}': expected tick:button[:hold]"));
+            return Err(format!(
+                "--press '{entry}': expected tick:button[:hold] or tick:lstick=X/Y[:hold]"
+            ));
         };
         let tick: u64 = tick
             .trim()
             .parse()
             .map_err(|_| format!("--press '{entry}': '{tick}' is not a tick number"))?;
-        let mask = press_button_mask(name.trim())
-            .ok_or_else(|| format!("--press '{entry}': unknown button '{name}'"))?;
+        let name = name.trim();
+        let (mask, left_stick, right_stick) = if let Some((key, value)) = name.split_once('=') {
+            match key.trim().to_ascii_lowercase().as_str() {
+                "lstick" => (0, Some(parse_stick_position(entry, "lstick", value)?), None),
+                "rstick" => (0, None, Some(parse_stick_position(entry, "rstick", value)?)),
+                _ => return Err(format!("--press '{entry}': unknown stick '{key}'")),
+            }
+        } else {
+            let mask = press_button_mask(name)
+                .ok_or_else(|| format!("--press '{entry}': unknown button '{name}'"))?;
+            (mask, None, None)
+        };
         // A press shorter than a pad-poll interval can fall entirely between
         // two polls and never be seen, so the default is several ticks.
         let hold = match parts.next() {
@@ -3662,9 +3765,17 @@ fn parse_press_script(spec: &str) -> Result<Vec<ScriptedPress>, String> {
             return Err(format!("--press '{entry}': hold must be at least 1 tick"));
         }
         if parts.next().is_some() {
-            return Err(format!("--press '{entry}': expected tick:button[:hold]"));
+            return Err(format!(
+                "--press '{entry}': expected tick:button[:hold] or tick:lstick=X/Y[:hold]"
+            ));
         }
-        out.push(ScriptedPress { tick, hold, mask });
+        out.push(ScriptedPress {
+            tick,
+            hold,
+            mask,
+            left_stick,
+            right_stick,
+        });
     }
     if out.is_empty() {
         return Err("--press: no presses in spec".to_string());
@@ -3983,6 +4094,60 @@ mod press_script_tests {
         assert_eq!(script[1].tick, 60);
         assert_eq!(script[1].hold, 12);
         assert_eq!(script[1].mask, emulator_core::pad::button::START);
+    }
+
+    #[test]
+    fn parses_stick_tokens_with_optional_hold() {
+        let script = parse_press_script("100:lstick=64/128, 200:rstick=255/0:12, 300:cross")
+            .expect("valid spec");
+        assert_eq!(script.len(), 3);
+        assert_eq!(script[0].left_stick, Some((64, 128)));
+        assert_eq!(script[0].right_stick, None);
+        assert_eq!(script[0].mask, 0);
+        assert_eq!(script[0].hold, 4);
+        assert_eq!(script[1].right_stick, Some((255, 0)));
+        assert_eq!(script[1].hold, 12);
+        assert!(!script[2].is_stick());
+        assert!(press_script_uses_sticks(&script));
+        assert!(!press_script_uses_sticks(&script[2..]));
+    }
+
+    #[test]
+    fn rejects_malformed_stick_tokens() {
+        assert!(parse_press_script("10:lstick=64").is_err());
+        assert!(parse_press_script("10:lstick=256/0").is_err());
+        assert!(parse_press_script("10:lstick=-1/0").is_err());
+        assert!(parse_press_script("10:lstick=a/b").is_err());
+        assert!(parse_press_script("10:mstick=1/1").is_err());
+        assert!(parse_press_script("10:lstick=1/1:0").is_err());
+        assert!(parse_press_script("10:lstick=1/1:4:9").is_err());
+    }
+
+    #[test]
+    fn scripted_sticks_rest_centred_and_release_after_hold() {
+        let script = parse_press_script("10:lstick=64/200:5, 12:rstick=0/255:2").unwrap();
+        let centre = (STICK_CENTRE, STICK_CENTRE);
+        assert_eq!(scripted_sticks_at(&script, 9, centre), (centre, centre));
+        assert_eq!(scripted_sticks_at(&script, 10, centre), ((64, 200), centre));
+        assert_eq!(
+            scripted_sticks_at(&script, 12, centre),
+            ((64, 200), (0, 255))
+        );
+        assert_eq!(scripted_sticks_at(&script, 14, centre), ((64, 200), centre));
+        assert_eq!(scripted_sticks_at(&script, 15, centre), (centre, centre));
+        // The held-forward stick is the resting position, not centre.
+        let forward = (STICK_CENTRE, 0);
+        assert_eq!(scripted_sticks_at(&script, 9, forward), (forward, centre));
+        assert_eq!(scripted_sticks_at(&script, 15, forward), (forward, centre));
+    }
+
+    #[test]
+    fn overlapping_stick_entries_take_the_later_one() {
+        let script = parse_press_script("0:lstick=0/0:10, 5:lstick=255/255:2").unwrap();
+        let centre = (STICK_CENTRE, STICK_CENTRE);
+        assert_eq!(scripted_sticks_at(&script, 4, centre).0, (0, 0));
+        assert_eq!(scripted_sticks_at(&script, 5, centre).0, (255, 255));
+        assert_eq!(scripted_sticks_at(&script, 7, centre).0, (0, 0));
     }
 
     #[test]
