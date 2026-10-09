@@ -170,21 +170,17 @@ const DMA_RUNAWAY_WORD_CAP: u32 = 1 << 22;
 /// [`Bus::advance_experimental_gpu_list`]); every fourth node adds one.
 const EMPTY_NODE_SETUP_CYCLES: u32 = 8;
 
-/// Clocks a CPU read of main RAM waits while the GPU linked-list DMA is
-/// walking nodes. hwtest record 0xFE: 64 RAM loads started right after
-/// kicking a 512-node empty list cost 770 clocks on a launch PAL console
-/// against 513 with the channel idle, 4.0 a load. The same loads next to
-/// 128 cached nops cost nothing (record 0x36), and a walk that is waiting
-/// on a full GPU FIFO leaves the CPU alone (list-busy cases 230 and 231, 76.83
-/// against 76.77 clocks an iteration).
-const GPU_LIST_RAM_READ_WAIT: u32 = 4;
-
-/// Clocks between two main-RAM writes landing while the GPU linked-list DMA
-/// is walking nodes. hwtest records 0x1E1 and 0x1E3: 64 stores back to back,
-/// or each followed by three nops, took 797 clocks either way on a console
-/// (141 and 256 with the channel idle), so a store is write-queue limited at
-/// 13 clocks, not CPU limited.
-const GPU_LIST_STORE_PERIOD: u64 = 13;
+/// Clocks between the starts of two CPU accesses to main RAM while the GPU
+/// linked-list DMA is walking nodes: the walk takes the RAM bus in between.
+/// hwtest on a console: 64 loads, each with a nop behind it or with three,
+/// took 770 and 774 clocks against 513 and 579 with the channel idle (records
+/// 0xFE, 0x1E5), and 64 stores back to back or with three nops each took 797
+/// (0x1E1, 0x1E3): about 12 clocks an access however the accesses are spaced.
+/// The same loads next to cached code or from the scratchpad cost nothing
+/// (0x36, 0x1E7), and a walk that is waiting on a full GPU FIFO leaves the
+/// CPU alone (list-busy cases 230 and 231, 76.83 against 76.77 clocks an
+/// iteration).
+const GPU_LIST_RAM_ACCESS_SPACING: u64 = 12;
 
 /// Extra clocks a CPU read of main RAM waits while a GPU block DMA streams
 /// from it. hwtest record 0x145: 64 RAM loads started right after a block
@@ -454,6 +450,11 @@ pub struct Bus {
     #[serde(skip, default = "check_gpu_request_after_restore")]
     gpu_dma_waiting_for_request: bool,
     experimental_gpu_list: Option<ExperimentalGpuList>,
+    /// Earliest cycle the next CPU access to main RAM may start while a list
+    /// walk moves (see [`GPU_LIST_RAM_ACCESS_SPACING`]). A timing hint, so it
+    /// is not part of save states.
+    #[serde(skip)]
+    gpu_list_ram_next: u64,
     /// In-flight sync-mode-1 transfers: channel 2, channel 4.
     dma_block_runs: [Option<DmaBlockRun>; 2],
     /// While a linked-list walk is active: the bus cycle up to which every
@@ -576,6 +577,7 @@ impl Bus {
             gpu_dma_overflow_drops: gpu_dma_overflow_drops_from_env(),
             gpu_dma_waiting_for_request: false,
             experimental_gpu_list: None,
+            gpu_list_ram_next: 0,
             dma_block_runs: [None; 2],
             gpu_quiet_until: 0,
             gpu_linked_list_transfer: 0,
@@ -1752,6 +1754,16 @@ impl Bus {
         stalls
     }
 
+    /// Clocks the CPU waits to start a main-RAM access while a list walk is
+    /// moving, and the bookkeeping for the access after it. See
+    /// [`GPU_LIST_RAM_ACCESS_SPACING`].
+    #[inline(always)]
+    fn gpu_list_ram_spacing_wait(&mut self) -> u32 {
+        let wait = self.gpu_list_ram_next.saturating_sub(self.cycles);
+        self.gpu_list_ram_next = self.cycles + wait + GPU_LIST_RAM_ACCESS_SPACING;
+        wait as u32
+    }
+
     /// Whether a block DMA into the GPU is streaming main RAM right now.
     #[inline(always)]
     fn gpu_block_dma_is_moving(&self) -> bool {
@@ -1802,7 +1814,7 @@ impl Bus {
             !self.code_fetch_on_ram_bus && self.cycles >= self.code_fill_busy_until;
         let mut stalls = self.ram_load_stalls_with_code_contention(6);
         if self.gpu_list_walk_is_moving() {
-            stalls += GPU_LIST_RAM_READ_WAIT;
+            stalls += self.gpu_list_ram_spacing_wait();
         } else if self.gpu_block_dma_is_moving() {
             stalls += GPU_BLOCK_RAM_READ_WAIT;
         }
@@ -1856,12 +1868,18 @@ impl Bus {
         } else {
             memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES
         };
-        self.queue_store()
-            .saturating_add(memory_timing::dram_refresh_wait(
+        let walk_wait = if self.gpu_list_walk_is_moving() {
+            self.gpu_list_ram_spacing_wait()
+        } else {
+            0
+        };
+        self.queue_store().saturating_add(walk_wait).saturating_add(
+            memory_timing::dram_refresh_wait(
                 self.cycles,
                 &mut self.dram_refresh_deadline,
                 refresh_stall,
-            ))
+            ),
+        )
     }
 
     /// A RAM load that has to share the bus with a code fetch.
@@ -2037,14 +2055,7 @@ impl Bus {
         }
         let issued = now + wait;
         let newest = if len == 0 { 0 } else { queue[len - 1] };
-        let mut completion =
-            (issued + Self::WRITE_QUEUE_FIRST).max(newest + Self::WRITE_QUEUE_PERIOD);
-        if self.gpu_list_walk_is_moving() {
-            // The walk competes for the RAM bus: each write lands a whole
-            // arbitration round after the one before it.
-            completion = (issued + Self::WRITE_QUEUE_FIRST + u64::from(GPU_LIST_RAM_READ_WAIT))
-                .max(newest + GPU_LIST_STORE_PERIOD);
-        }
+        let completion = (issued + Self::WRITE_QUEUE_FIRST).max(newest + Self::WRITE_QUEUE_PERIOD);
         let queue = &mut self.write_queue;
         queue[len] = completion;
         self.ram_write_buffer_ready_cycle = completion;
@@ -5307,19 +5318,23 @@ mod tests {
     #[test]
     fn main_ram_reads_wait_while_a_list_walk_is_moving() {
         // Silicon, hwtest record 0xFE: 64 RAM loads during a 512-node empty
-        // walk cost 770 clocks against 513 idle, four more a load. The loads
-        // are charged from the same entry point the CPU uses.
-        let mut bus = empty_list_walk(512);
-        bus.tick(20);
-        assert!(bus.gpu_list_walk_is_moving());
-        let idle = Bus::new(synthetic_bios())
-            .unwrap()
-            .ram_read_stalls(0x8000_0200);
-        // Land the read away from the DRAM refresh slot of a fresh machine.
-        let busy = bus.ram_read_stalls(0x8000_0200);
-        assert!(busy >= idle + GPU_LIST_RAM_READ_WAIT, "{busy} vs {idle}");
-        clocks_until_dma_done(&mut bus);
-        assert!(!bus.gpu_list_walk_is_moving());
+        // walk cost 770 clocks against 513 idle; with three nops each, 774
+        // against 579. About 12 clocks a load either way. The loads are
+        // charged from the same entry point the CPU uses.
+        for (padding, expected) in [(1u32, 770u64), (4, 774)] {
+            let mut bus = empty_list_walk(512);
+            bus.tick(20);
+            assert!(bus.gpu_list_walk_is_moving());
+            let start = bus.cycles();
+            for _ in 0..64 {
+                let stalls = bus.ram_read_stalls(0x8000_0200);
+                bus.add_cycles(1 + stalls + padding);
+            }
+            let took = bus.cycles() - start;
+            assert!(took.abs_diff(expected) < 40, "padding {padding}: {took}");
+            clocks_until_dma_done(&mut bus);
+            assert!(!bus.gpu_list_walk_is_moving());
+        }
     }
 
     #[test]
