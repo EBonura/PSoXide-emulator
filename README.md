@@ -39,7 +39,7 @@ No Python, Make or other bootstrap step is needed. On Ubuntu, first install
 Headless verification uses the same core:
 
 ```sh
-./target/release/psoxide launch --path /path/to/game.cue --steps 8000000 --dump-hash
+./target/release/psoxide-emulator launch --path /path/to/game.cue --steps 8000000 --dump-hash
 ```
 
 For recorded runs, `--route-log route.csv` measures emulated cycles and display

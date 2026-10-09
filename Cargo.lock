@@ -3080,7 +3080,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
-name = "psoxide"
+name = "psoxide-debug-ui"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "emulator-core",
+]
+
+[[package]]
+name = "psoxide-emulator"
 version = "0.1.0"
 dependencies = [
  "axum",
@@ -3122,14 +3130,6 @@ dependencies = [
  "web-time",
  "wgpu",
  "winit",
-]
-
-[[package]]
-name = "psoxide-debug-ui"
-version = "0.1.0"
-dependencies = [
- "egui",
- "emulator-core",
 ]
 
 [[package]]

@@ -11,6 +11,6 @@ fmt:
 fmt-check:
 	cargo fmt --all -- --check
 build:
-	cargo build --locked --release -p psoxide
+	cargo build --locked --release -p psoxide-emulator
 run:
-	cargo run --locked --release -p psoxide
+	cargo run --locked --release -p psoxide-emulator
