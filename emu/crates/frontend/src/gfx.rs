@@ -254,18 +254,19 @@ impl Graphics {
     /// HW texture path cannot express directly: 24bpp scanout, and GP1(06h/
     /// 07h) screen-position preview. Normal 15-bit gameplay with the standard
     /// centred display range presents the HW renderer target.
-    pub fn prepare_display(&self, gpu: Option<&Gpu>) {
+    pub fn prepare_display(&self, gpu: Option<&Gpu>, deinterlace: emulator_core::Deinterlace) {
         let Some(gpu) = gpu else {
             self.clear_display_texture();
             return;
         };
         let needs_cpu_display = gpu.display_area().bpp24
+            || gpu.field_rendering_active()
             || gpu.horizontal_display_offset_px() != 0
             || gpu.vertical_display_offset_px() != 0;
         if !needs_cpu_display {
             return;
         }
-        let (rgba, width, height) = gpu.display_rgba8();
+        let (rgba, width, height) = gpu.display_rgba8_with(deinterlace);
         if width == 0 || height == 0 || rgba.is_empty() {
             self.clear_display_texture();
             return;
@@ -300,15 +301,17 @@ impl Graphics {
     pub fn write_savestate_thumbnail(
         &self,
         gpu: &Gpu,
+        deinterlace: emulator_core::Deinterlace,
         path: &std::path::Path,
     ) -> Result<(), String> {
         const THUMB_WIDTH: u32 = 160;
         let area = gpu.display_area();
         let cpu_fallback = area.bpp24
+            || gpu.field_rendering_active()
             || gpu.horizontal_display_offset_px() != 0
             || gpu.vertical_display_offset_px() != 0;
         let (width, height, rgba) = if cpu_fallback {
-            let (rgba, width, height) = gpu.display_rgba8();
+            let (rgba, width, height) = gpu.display_rgba8_with(deinterlace);
             (width, height, rgba)
         } else {
             let scale = self.hw_renderer.internal_scale();
