@@ -188,13 +188,6 @@ const GPU_LIST_RAM_ACCESS_SPACING: u64 = 12;
 /// refilled line gives way for three clocks.
 const CODE_FILL_MMIO_WAIT_CAP: u64 = 3;
 
-/// Clocks a main-RAM store behind a streaming code fill waits beyond the
-/// fill, on top of the RAM_SIZE contention clock. Fitted to hwtest v2.1
-/// record 0x1B8 (64 stores through evicted code, 329 clocks on a console
-/// against 142 from the scratchpad): the store cannot ride the write buffer
-/// while the fill holds the RAM bus.
-const CODE_FILL_STORE_EXTRA: u32 = 9;
-
 /// Extra clocks a CPU read of main RAM waits while a GPU block DMA streams
 /// from it. hwtest record 0x145: 64 RAM loads started right after a block
 /// transfer's kick took 1738 clocks against 510 with the channel idle, 19.2
@@ -1875,29 +1868,18 @@ impl Bus {
         } else {
             memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES
         };
-        // A store behind a streaming code fill waits for the fill to let go
-        // of the RAM bus, as a load does (hwtest v2.1 record 0x1B8: 64 stores
-        // through freshly evicted code took 329 clocks, 142 from the
-        // scratchpad).
-        let fill_wait = self.code_fill_busy_until.saturating_sub(self.cycles) as u32;
-        let fill_stall = if fill_wait > 0 {
-            fill_wait + self.memory_control.code_data_contention_cycles() + CODE_FILL_STORE_EXTRA
-        } else {
-            0
-        };
         let walk_wait = if self.gpu_list_walk_is_moving() {
             self.gpu_list_ram_spacing_wait()
         } else {
             0
         };
-        self.queue_store()
-            .saturating_add(walk_wait)
-            .saturating_add(memory_timing::dram_refresh_wait(
+        self.queue_store().saturating_add(walk_wait).saturating_add(
+            memory_timing::dram_refresh_wait(
                 self.cycles,
                 &mut self.dram_refresh_deadline,
                 refresh_stall,
-            ))
-            .saturating_add(fill_stall)
+            ),
+        )
     }
 
     /// A RAM load that has to share the bus with a code fetch.
@@ -2034,6 +2016,9 @@ impl Bus {
     /// First store into an empty write buffer reaches RAM this long after it
     /// was issued; each one behind it follows at `WRITE_QUEUE_PERIOD`.
     const WRITE_QUEUE_FIRST: u64 = 5;
+    /// A write held back by a code fill reaches RAM this long after the fill
+    /// lets go of the bus (fitted to hwtest v2.1 record 0x1B8).
+    const WRITE_AFTER_FILL: u64 = 6;
     const WRITE_QUEUE_PERIOD: u64 = 2;
 
     /// Queue a CPU store in the four-entry write buffer and return the clocks
@@ -2073,7 +2058,13 @@ impl Bus {
         }
         let issued = now + wait;
         let newest = if len == 0 { 0 } else { queue[len - 1] };
-        let completion = (issued + Self::WRITE_QUEUE_FIRST).max(newest + Self::WRITE_QUEUE_PERIOD);
+        let mut completion =
+            (issued + Self::WRITE_QUEUE_FIRST).max(newest + Self::WRITE_QUEUE_PERIOD);
+        if self.code_fill_busy_until > issued {
+            // The buffer cannot drain while a code fill owns the RAM bus: the
+            // write starts when the fill lets go.
+            completion = completion.max(self.code_fill_busy_until + Self::WRITE_AFTER_FILL);
+        }
         let queue = &mut self.write_queue;
         queue[len] = completion;
         self.ram_write_buffer_ready_cycle = completion;
@@ -2125,8 +2116,18 @@ impl Bus {
                 .memory_control
                 .icache_fill_stalls(phys, words, lead_words, streaming);
         }
-        // A fill cannot start until the previous one has let go.
-        let fill_wait = self.code_fill_busy_until.saturating_sub(self.cycles) as u32;
+        // A fill cannot start until the previous one has let go, nor until
+        // the stores already in the write buffer have landed: they and the
+        // fill share the RAM bus, and the buffer drains first.
+        let drain_wait = self.write_queue[3]
+            .max(self.write_queue[2])
+            .max(self.write_queue[1])
+            .max(self.write_queue[0])
+            .saturating_sub(self.cycles);
+        let fill_wait = self
+            .code_fill_busy_until
+            .max(self.cycles + drain_wait)
+            .saturating_sub(self.cycles) as u32;
         let refresh = memory_timing::dram_refresh_wait(
             self.cycles,
             &mut self.dram_refresh_deadline,
@@ -5406,6 +5407,39 @@ mod tests {
             bus.add_cycles(wait + 1);
         }
         assert!(bus.cycles() - start < 300);
+    }
+
+    #[test]
+    fn a_store_behind_a_code_fill_reaches_ram_after_the_fill() {
+        // hwtest v2.1 record 0x1B8: the write buffer cannot drain while a
+        // code fill owns the RAM bus, but the core is not held for it.
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.tick(100);
+        let now = bus.cycles();
+        bus.code_fill_busy_until = now + 8;
+        let wait = bus.ram_write_stalls(0x8000_0200);
+        assert!(wait < 8, "the store waited {wait} for the fill");
+        assert!(bus.write_queue[0] >= now + 8 + Bus::WRITE_AFTER_FILL);
+    }
+
+    #[test]
+    fn a_code_fill_waits_for_the_stores_already_buffered() {
+        // The fill and the buffered writes share the RAM bus, and the writes
+        // the buffer has accepted go first.
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.tick(100);
+        for _ in 0..3 {
+            let wait = bus.ram_write_stalls(0x8000_0200);
+            bus.add_cycles(wait + 1);
+        }
+        let landing = bus.write_queue.into_iter().max().unwrap();
+        assert!(landing > bus.cycles());
+        let stall = bus.icache_fill_stalls(0x0001_0000, 4, 0, true);
+        assert!(
+            u64::from(stall) >= landing - bus.cycles(),
+            "fill stall {stall}, last write lands in {}",
+            landing - bus.cycles()
+        );
     }
 
     #[test]
