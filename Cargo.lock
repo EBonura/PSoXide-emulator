@@ -1442,6 +1442,9 @@ dependencies = [
  "psoxide-jit",
  "psoxide-settings",
  "psoxide-validation",
+ "psx-asset",
+ "psx-bsp",
+ "psx-engine",
  "psx-gpu",
  "psx-gpu-render",
  "psx-gte",
@@ -1449,6 +1452,8 @@ dependencies = [
  "psx-iso",
  "psx-trace",
  "psx-vram",
+ "psxed-project",
+ "psxed-ui",
  "rfd",
  "rmcp",
  "schemars",
@@ -3188,6 +3193,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-asset"
+version = "0.1.0"
+dependencies = [
+ "psx-gte",
+ "psx-hw",
+ "psxed-format",
+]
+
+[[package]]
+name = "psx-bsp"
+version = "0.0.0"
+
+[[package]]
+name = "psx-engine"
+version = "0.0.0"
+
+[[package]]
 name = "psx-gpu"
 version = "0.1.0"
 dependencies = [
@@ -3286,6 +3308,14 @@ dependencies = [
 [[package]]
 name = "psxed-format"
 version = "0.1.0"
+
+[[package]]
+name = "psxed-project"
+version = "0.0.0"
+
+[[package]]
+name = "psxed-ui"
+version = "0.0.0"
 
 [[package]]
 name = "pxfm"

@@ -85,15 +85,42 @@ pub fn apply(ctx: &egui::Context) {
         .or_default()
         .push("phosphor-fill".to_owned());
     // Icons written inline in ordinary labels ("{SAVE}  Save state") come
-    // from the text families' fallback, so Phosphor holds that slot too.
-    // It used to be lucide, the editor's icon font, which drew its own
-    // unrelated glyphs at these codepoints.
+    // from the text families' fallback. The two icon sets' private-use
+    // codepoint ranges overlap, so only one font can hold that slot: Phosphor
+    // here, lucide in the editor build (below), whose UI embeds lucide glyphs
+    // inline in normal text runs.
+    #[cfg(not(feature = "editor"))]
     for family in [FontFamily::Proportional, FontFamily::Monospace] {
         fonts
             .families
             .entry(family)
             .or_default()
             .push("phosphor".to_owned());
+    }
+
+    // Lucide icon font: the EDITOR's icon set (psxed-ui/src/icons.rs binds
+    // FontFamily::Name("lucide")). The editor build panics at startup
+    // ("lucide is not bound to any fonts") unless it is registered. The
+    // font file belongs to the editor repository.
+    #[cfg(feature = "editor")]
+    {
+        const LUCIDE_TTF: &[u8] = include_bytes!("../assets/fonts/lucide.ttf");
+        fonts.font_data.insert(
+            "lucide".to_owned(),
+            egui::FontData::from_static(LUCIDE_TTF).into(),
+        );
+        fonts
+            .families
+            .entry(FontFamily::Name("lucide".into()))
+            .or_default()
+            .push("lucide".to_owned());
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push("lucide".to_owned());
+        }
     }
 
     const VT323_TTF: &[u8] = include_bytes!("../assets/fonts/VT323-Regular.ttf");
@@ -264,4 +291,37 @@ pub fn viz_frame<R>(
             inner_resp.inner
         });
     resp.inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lay out one label in `family`, as the first frame of the app does.
+    /// egui panics at layout when a named family has no font bound.
+    fn lay_out_in(family: FontFamily) {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new("\u{e0b3}").font(egui::FontId::new(14.0, family.clone())),
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn phosphor_families_are_bound_at_startup() {
+        lay_out_in(FontFamily::Name("phosphor".into()));
+        lay_out_in(FontFamily::Name("phosphor-fill".into()));
+    }
+
+    /// The editor's UI draws its icons from the `lucide` family; without the
+    /// font registered the editor build panics on its first frame.
+    #[cfg(feature = "editor")]
+    #[test]
+    fn editor_build_binds_the_lucide_family_at_startup() {
+        lay_out_in(FontFamily::Name("lucide".into()));
+    }
 }

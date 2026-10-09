@@ -10,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(any(target_arch = "wasm32", test))]
 use emulator_core::input_tape::tape_to_csv;
 use emulator_core::input_tape::{read_tape_full, write_tape_poll_bound, TapeClock};
+#[cfg(feature = "editor")]
+use psxed_ui::{EditorPlaytestTapeMode, EditorPlaytestTapeStatus};
 
 /// One emulated frame's port-1 pad state. Alias to the shared tape sample
 /// so existing frontend call sites stay stable while the type + binary
@@ -60,9 +62,30 @@ pub(crate) struct PlaytestInputTape {
 }
 
 impl PlaytestInputTape {
+    /// Editor-facing summary for controls and overlays.
+    #[cfg(feature = "editor")]
+    pub(crate) fn editor_status(&self) -> EditorPlaytestTapeStatus {
+        EditorPlaytestTapeStatus {
+            mode: match self.mode {
+                PlaytestInputMode::Idle => EditorPlaytestTapeMode::Idle,
+                PlaytestInputMode::Recording => EditorPlaytestTapeMode::Recording,
+                PlaytestInputMode::Replaying => EditorPlaytestTapeMode::Replaying,
+            },
+            frames: self.samples.len() as u32,
+            cursor: self.replay_cursor.min(self.samples.len()) as u32,
+        }
+    }
+
     /// True while live input is being appended to a tape.
     pub(crate) fn is_recording(&self) -> bool {
         self.mode == PlaytestInputMode::Recording
+    }
+
+    /// True while saved input is replacing live port-1 samples. Embedded
+    /// editor Play reads it.
+    #[cfg(feature = "editor")]
+    pub(crate) fn is_replaying(&self) -> bool {
+        self.mode == PlaytestInputMode::Replaying
     }
 
     /// Number of video-frame samples currently retained.
@@ -137,7 +160,6 @@ impl PlaytestInputTape {
     /// Start replaying a persisted tape, falling back to memory. In-place
     /// replay: the session is assumed to already be at the recording point,
     /// so no pre-`start_poll` idle window applies.
-    #[cfg(test)]
     pub(crate) fn start_replay(&mut self, path: &Path) -> Result<usize, String> {
         if path.is_file() {
             let tape = read_tape_full(path)?;
@@ -176,6 +198,15 @@ impl PlaytestInputTape {
         self.replay_cursor = 0;
         self.mode = PlaytestInputMode::Replaying;
         Ok(self.samples.len())
+    }
+
+    /// Stop replaying without discarding the loaded tape. Embedded editor
+    /// Play uses it.
+    #[cfg(feature = "editor")]
+    pub(crate) fn stop_replay(&mut self) {
+        if self.mode == PlaytestInputMode::Replaying {
+            self.mode = PlaytestInputMode::Idle;
+        }
     }
 
     /// Return the sample to apply for this emulated frame.

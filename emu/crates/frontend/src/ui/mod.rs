@@ -26,7 +26,7 @@ pub fn draw_layout(
     input_router: &mut InputRouter,
     vram_tex: egui::TextureId,
     display_tex: egui::TextureId,
-
+    #[cfg(feature = "editor")] editor_viewport: psxed_ui::EditorViewport3dPresentation,
     display_uv: egui::Rect,
     dt: f32,
 ) {
@@ -45,6 +45,41 @@ pub fn draw_layout(
     // An embedded player (web `?embed=1`) is just the game screen: the host
     // page supplies the chrome.
     let embed = crate::app::embed_mode();
+
+    // When the editor workspace owns the central UI it takes over the whole
+    // frame; the emulator panels below never run. Compiled out without the
+    // editor feature (the workspace can never be the editor then).
+    #[cfg(feature = "editor")]
+    if state.workspace.is_editor() {
+        let playtest_status = state.editor_playtest_status();
+        // During Play the guest performance panel can take the Inspector's
+        // column (F3 / the bars button toggles between the two).
+        let mut export = None;
+        let stats = &mut state.guest_stats;
+        let mut play_panel = |ui: &mut egui::Ui| {
+            export = play_panel_contents(ui, stats, vram_tex);
+        };
+        state.editor.draw_with_play_panel(
+            ctx,
+            editor_viewport,
+            playtest_status,
+            Some(&mut play_panel),
+        );
+        if let Some(psoxide_debug_ui::PanelAction::ExportCsv { csv, seconds }) = export {
+            state.export_guest_stats_csv(&csv, seconds);
+        }
+        if state.editor.take_emulator_menu_request() {
+            state.menu.open = true;
+        }
+        state.sync_embedded_playtest_with_editor_project();
+        let menu_warning = state.menu_setup_warning();
+        state.menu.draw(ctx, dt, menu_warning);
+        burn::draw(ctx, state);
+        draw_recording_indicator(ctx, state);
+        draw_freecam_indicator(ctx, state);
+        draw_status_toast(ctx, state);
+        return;
+    }
 
     // One-shot boot splash on a foreground layer.
     if !embed {
@@ -91,6 +126,19 @@ pub fn draw_layout(
     if !embed {
         draw_status_toast(ctx, state);
     }
+}
+
+/// The guest performance panel as it fills the Inspector's column during
+/// editor Play; shared with the headless `dump-editor-ui --play-disc`.
+#[cfg(feature = "editor")]
+pub fn play_panel_contents(
+    ui: &mut egui::Ui,
+    stats: &mut psoxide_debug_ui::GuestStats,
+    vram_tex: egui::TextureId,
+) -> Option<psoxide_debug_ui::PanelAction> {
+    crate::theme::viz_frame(ui, "", |ui| {
+        psoxide_debug_ui::draw(ui, stats, Some(vram_tex))
+    })
 }
 
 pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> MenuOutcome {
@@ -197,7 +245,12 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.start_examples_build();
             MenuOutcome::None
         }
-
+        #[cfg(feature = "editor")]
+        ToggleEditorWorkspace => {
+            state.toggle_editor_workspace();
+            state.menu.open = false;
+            MenuOutcome::None
+        }
         ChooseGamesPath => {
             state.choose_games_path();
             MenuOutcome::None

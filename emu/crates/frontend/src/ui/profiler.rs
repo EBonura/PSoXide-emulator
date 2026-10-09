@@ -20,6 +20,8 @@ use emulator_core::telemetry::{
 
 const HISTORY_CAP: usize = 500;
 const LOG_INTERVAL_MS: f32 = 1000.0;
+#[cfg(feature = "editor")]
+const LIVE_AVERAGE_WINDOW_MS: f32 = 100.0;
 const PSX_MASTER_CLOCK_HZ: f32 = 33_868_800.0;
 #[cfg(test)]
 const PSX_CYCLES_PER_MS: f32 = PSX_MASTER_CLOCK_HZ / 1000.0;
@@ -1042,6 +1044,12 @@ impl FrameProfiler {
         }
     }
 
+    /// Most recent sample. The editor's Play metrics read it.
+    #[cfg(feature = "editor")]
+    pub fn latest(&self) -> Option<FrameProfileSample> {
+        self.samples.back().copied()
+    }
+
     /// Most recent sample that contains one of the requested guest counters.
     #[cfg(test)]
     pub fn latest_with_guest_counters(&self, counter_ids: &[u16]) -> Option<FrameProfileSample> {
@@ -1074,6 +1082,35 @@ impl FrameProfiler {
         let mut avg = FrameProfileSample::default();
         for sample in &self.samples {
             avg.accumulate(*sample);
+        }
+        avg.divide(n as f32);
+        Some(avg)
+    }
+
+    /// Short moving average for live HUD numbers. The editor's Play metrics
+    /// read it.
+    #[cfg(feature = "editor")]
+    pub fn live_average(&self) -> Option<FrameProfileSample> {
+        self.average_recent_ms(LIVE_AVERAGE_WINDOW_MS)
+    }
+
+    /// Average across the newest samples that cover roughly `window_ms`.
+    #[cfg(feature = "editor")]
+    pub fn average_recent_ms(&self, window_ms: f32) -> Option<FrameProfileSample> {
+        let mut avg = FrameProfileSample::default();
+        let mut n = 0usize;
+        let mut elapsed_ms = 0.0f32;
+        let target_ms = window_ms.max(0.0);
+        for sample in self.samples.iter().rev() {
+            avg.accumulate(*sample);
+            n += 1;
+            elapsed_ms += sample.host_dt_ms.max(sample.total_ms).max(0.0);
+            if elapsed_ms >= target_ms {
+                break;
+            }
+        }
+        if n == 0 {
+            return None;
         }
         avg.divide(n as f32);
         Some(avg)
