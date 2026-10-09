@@ -59,6 +59,8 @@ pub enum MenuAction {
     /// fresh boot of the current game. Native opens a file dialog; the web
     /// build opens the browser upload picker.
     LoadInputReplay,
+    /// Replay the newest recording of the running game (native).
+    ReplayLastInput,
     /// Save the running game. Native builds create a new history slot (see
     /// [`SaveStateRow`]/[`MenuState::sync_save_states`]); the browser replaces
     /// its one persistent per-game quick-save. Either becomes the F7 target.
@@ -489,6 +491,16 @@ impl MenuState {
             }
             _ => self.item_index.min(items.len().saturating_sub(1)),
         };
+    }
+
+    /// The Library column as `(depth, label, value)` rows, for headless
+    /// previews and tests.
+    pub fn library_rows(&self) -> Vec<(usize, String, Option<String>)> {
+        self.categories[0]
+            .items
+            .iter()
+            .map(|item| (item.depth, item.label.clone(), item.value.clone()))
+            .collect()
     }
 
     /// Folder expansion lasts for this session; newly found folders start closed.
@@ -2618,7 +2630,17 @@ fn build_game_category(running: bool, recording: bool) -> Category {
                 MenuAction::ToggleInputRecording,
                 Some("F8"),
             ),
+            row(
+                "Replay last recording",
+                MenuAction::ReplayLastInput,
+                Some("F4"),
+            ),
             row("Load input replay", MenuAction::LoadInputReplay, None),
+            row(
+                "Texture filter (F6)",
+                MenuAction::CycleTextureFilter,
+                Some("None"),
+            ),
         ],
     }
 }
@@ -2628,9 +2650,9 @@ fn build_game_category(running: bool, recording: bool) -> Category {
 fn recording_label(recording: bool) -> &'static str {
     match (recording, cfg!(target_arch = "wasm32")) {
         (true, true) => "Stop recording (download CSV)",
-        (true, false) => "Stop input recording",
+        (true, false) => "Stop recording input tape",
         (false, true) => "Record input from boot",
-        (false, false) => "Record input",
+        (false, false) => "Record input tape",
     }
 }
 
@@ -2811,14 +2833,16 @@ mod tests {
                 "Save state",
                 "Load state",
                 "Reset",
-                "Record input",
-                "Load input replay"
+                "Record input tape",
+                "Replay last recording",
+                "Load input replay",
+                "Texture filter (F6)"
             ]
         );
         s.sync_run_label(true);
         s.sync_input_recording_label(true);
         assert_eq!(labels(&s, "Game")[0], "Pause");
-        assert_eq!(labels(&s, "Game")[4], "Stop input recording");
+        assert_eq!(labels(&s, "Game")[4], "Stop recording input tape");
         // Recording stays one row, one key.
         let game = s.categories.iter().find(|c| c.name == "Game").unwrap();
         let rec: Vec<_> = game
@@ -2828,6 +2852,22 @@ mod tests {
             .collect();
         assert_eq!(rec.len(), 1);
         assert_eq!(rec[0].value.as_deref(), Some("F8"));
+        // The texture filter is reachable from both the Game and Settings
+        // columns, and one value update reaches both rows.
+        s.sync_video_audio(true, "Edge", 1.0, false);
+        for column in ["Game", "Settings"] {
+            let filter: Vec<_> = s
+                .categories
+                .iter()
+                .find(|c| c.name == column)
+                .unwrap()
+                .items
+                .iter()
+                .filter(|item| item.action == MenuAction::CycleTextureFilter)
+                .collect();
+            assert_eq!(filter.len(), 1, "{column}");
+            assert_eq!(filter[0].value.as_deref(), Some("Edge"), "{column}");
+        }
 
         s.select_category("Game");
         s.set_game_loaded(false);
@@ -2836,7 +2876,7 @@ mod tests {
         // Labels survive the column being rebuilt.
         s.set_game_loaded(true);
         assert_eq!(labels(&s, "Game")[0], "Pause");
-        assert_eq!(labels(&s, "Game")[4], "Stop input recording");
+        assert_eq!(labels(&s, "Game")[4], "Stop recording input tape");
     }
 
     #[test]

@@ -52,6 +52,7 @@ mod debug_ui_png;
 mod headless_log;
 mod iso_inspect;
 mod profile_report;
+mod ui_png;
 
 use headless_log::{CounterLog, DisplayHashLog, GuestProfileLog};
 use iso_inspect::{contains_bytes, iso_root_entries, iso_volume_id};
@@ -115,6 +116,10 @@ pub enum Command {
 
     /// Run exact-hash validation checkpoints from a manifest.
     Validate(ValidateArgs),
+
+    /// Render the window chrome (menu, toolbar, debug sidebar) to a PNG
+    /// without opening a window.
+    UiPng(ui_png::UiPngArgs),
 }
 
 /// Arguments for `scan`.
@@ -216,6 +221,13 @@ pub struct LaunchArgs {
     /// an original digital controller, whose poll ID is 0x41.
     #[arg(long)]
     pub digital_pad: bool,
+    /// Attach a DualShock that powers up in digital mode (poll ID 0x41) and
+    /// switches to analog only when the guest sends the configuration
+    /// handshake, as a controller does on hardware and as the GUI's default
+    /// controller profile does. Without this flag the headless pad is forced
+    /// into analog mode (ID 0x73).
+    #[arg(long, conflicts_with = "digital_pad")]
+    pub dualshock_pad: bool,
     /// Treat an authored disc as an embedded editor Play disc and boot it
     /// through the same no-BIOS HLE path used by the editor viewport.
     #[arg(long)]
@@ -548,6 +560,8 @@ pub fn run(cli: Cli) -> Result<(), String> {
         Command::PreburnCheck(args) => cmd_preburn_check(args),
 
         Command::Validate(args) => cmd_validate(&paths, args),
+
+        Command::UiPng(args) => ui_png::render(args),
     }
 }
 
@@ -804,7 +818,7 @@ fn run_headless_launch(
             // starts in the homebrew payload and BIOS table calls are
             // intercepted by HLE dispatch.
             bus.enable_hle_bios();
-            attach_headless_playtest_pad(&mut bus, args.digital_pad);
+            attach_headless_playtest_pad(&mut bus, args.digital_pad, args.dualshock_pad);
             if emit_summary {
                 eprintln!(
                     "[cli] side-loaded {} - entry=0x{:08x} payload={}B",
@@ -827,7 +841,7 @@ fn run_headless_launch(
                 maybe_fast_boot_disc(&mut bus, &mut cpu, &disc, &game_path)?;
             }
             bus.cdrom.insert_disc(Some(disc));
-            attach_headless_playtest_pad(&mut bus, args.digital_pad);
+            attach_headless_playtest_pad(&mut bus, args.digital_pad, args.dualshock_pad);
             if emit_summary {
                 eprintln!("[cli] mounted disc {}", game_path.display());
             }
@@ -846,7 +860,7 @@ fn run_headless_launch(
             }
             bus.cdrom.insert_disc(Some(disc));
             crate::app::apply_libcrypt_sbi(&mut bus, &game_path);
-            attach_headless_playtest_pad(&mut bus, args.digital_pad);
+            attach_headless_playtest_pad(&mut bus, args.digital_pad, args.dualshock_pad);
             if emit_summary {
                 eprintln!("[cli] mounted cue-backed disc {}", game_path.display());
             }
@@ -864,7 +878,7 @@ fn run_headless_launch(
             maybe_fast_boot_disc(&mut bus, &mut cpu, &disc, &game_path)?;
             bus.cdrom.insert_disc(Some(disc));
             crate::app::apply_libcrypt_sbi(&mut bus, &game_path);
-            attach_headless_playtest_pad(&mut bus, args.digital_pad);
+            attach_headless_playtest_pad(&mut bus, args.digital_pad, args.dualshock_pad);
             if emit_summary {
                 eprintln!("[cli] mounted ccd-backed disc {}", game_path.display());
             }
@@ -935,7 +949,7 @@ fn run_headless_launch(
         // headless runner has no window event loop to release that key, so use
         // the same fresh neutral controller a normal headless launch starts
         // with before applying any explicit tape/pulse input below.
-        attach_headless_playtest_pad(&mut bus, args.digital_pad);
+        attach_headless_playtest_pad(&mut bus, args.digital_pad, args.dualshock_pad);
         bus.set_port1_buttons(ButtonState::default());
         bus.set_port1_sticks(0x80, 0x80, 0x80, 0x80);
         if capture_gpu_commands {
@@ -2864,6 +2878,7 @@ fn validation_launch_args(
         save_state_out: None,
         pad_pulses: checkpoint.pad_pulses.clone(),
         digital_pad: false,
+        dualshock_pad: false,
         embedded_playtest: artifact.embedded_playtest,
         scph_9902: false,
         dump_hash: false,
@@ -2953,9 +2968,11 @@ fn cli_repo_root() -> PathBuf {
         .join("..")
 }
 
-fn attach_headless_playtest_pad(bus: &mut Bus, digital_only: bool) {
+fn attach_headless_playtest_pad(bus: &mut Bus, digital_only: bool, dualshock: bool) {
     if digital_only {
         bus.attach_original_digital_pad_port1();
+    } else if dualshock {
+        bus.attach_digital_pad_port1();
     } else {
         bus.attach_digital_pad_port1();
         let _ = bus.force_port1_analog_mode();

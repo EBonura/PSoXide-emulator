@@ -47,6 +47,52 @@ impl PsxPort {
     }
 }
 
+/// What a routed host device presents to the guest on its port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PadProfile {
+    /// An original digital pad: always ID 0x41, ignores the DualShock
+    /// configuration commands.
+    Digital,
+    /// A DualShock as it powers up on hardware: ID 0x41 until the game sends
+    /// the analog-mode handshake (or the Mode button is pressed).
+    DualShock,
+    /// A DualShock already switched to analog mode: ID 0x73 from the first
+    /// poll, as if the Analog button had been pressed before the game began.
+    Analog,
+}
+
+impl PadProfile {
+    /// Short label of the controller panel's mode button.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Digital => "Digital",
+            Self::DualShock => "DualShock",
+            Self::Analog => "Analog",
+        }
+    }
+
+    /// Hover text describing what the guest sees.
+    pub(crate) const fn description(self) -> &'static str {
+        match self {
+            Self::Digital => "Expose an original digital pad (ID 0x41)",
+            Self::DualShock => {
+                "Expose a DualShock that starts in digital mode (ID 0x41) and goes analog \
+                 (ID 0x73) when the game asks for it"
+            }
+            Self::Analog => "Expose a DualShock already in analog mode (ID 0x73)",
+        }
+    }
+
+    /// The next profile in the panel's button cycle.
+    pub(crate) const fn next(self) -> Self {
+        match self {
+            Self::Digital => Self::DualShock,
+            Self::DualShock => Self::Analog,
+            Self::Analog => Self::Digital,
+        }
+    }
+}
+
 /// One row in the controller-routing panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct InputDeviceInfo {
@@ -56,15 +102,15 @@ pub(crate) struct InputDeviceInfo {
     pub(crate) name: String,
     /// Current guest port assignment.
     pub(crate) port: PsxPort,
-    /// Whether the guest sees an Analog DualShock instead of an original pad.
-    pub(crate) analog: bool,
+    /// Controller identity the guest sees on that port.
+    pub(crate) profile: PadProfile,
 }
 
 #[derive(Clone, Debug)]
 struct RoutingEntry {
     name: String,
     port: PsxPort,
-    analog: bool,
+    profile: PadProfile,
 }
 
 /// Host-device assignments shared by the native and browser backends.
@@ -82,7 +128,7 @@ impl Default for RoutingTable {
             RoutingEntry {
                 name: "Keyboard".to_string(),
                 port: PsxPort::One,
-                analog: false,
+                profile: PadProfile::Digital,
             },
         );
         Self {
@@ -119,11 +165,14 @@ impl RoutingTable {
             RoutingEntry {
                 name,
                 port,
-                // Modern host controllers should appear as a DualShock in
-                // analog mode. Guests such as Quake, VoXide, and HL-PSX use
-                // both sticks immediately; the routing panel still permits an
-                // explicit original-digital-pad profile for early games.
-                analog: true,
+                // A host controller appears as a DualShock the way one powers
+                // up on hardware: digital (ID 0x41) until the game sends the
+                // analog handshake, which every DualShock-aware guest does.
+                // Starting in analog mode instead made digital-only retail
+                // games such as Tomb Raider pause on "No Controller", because
+                // they accept nothing but ID 0x41. The routing panel still
+                // offers the always-analog profile for guests that never ask.
+                profile: PadProfile::DualShock,
             },
         );
         self.bump();
@@ -158,24 +207,31 @@ impl RoutingTable {
         true
     }
 
-    fn set_analog(&mut self, id: &str, analog: bool) -> bool {
+    fn set_profile(&mut self, id: &str, profile: PadProfile) -> bool {
         let Some(entry) = self.devices.get_mut(id) else {
             return false;
         };
-        if entry.analog == analog {
+        if entry.profile == profile {
             return false;
         }
-        entry.analog = analog;
+        entry.profile = profile;
         self.bump();
         true
     }
 
+    /// The Analog / Mode button: switch to analog, or back to the device's
+    /// own digital identity (a keyboard's original pad, a controller's
+    /// DualShock). Returns whether the device is analog afterwards.
     fn toggle_analog(&mut self, id: &str) -> bool {
         let Some(entry) = self.devices.get_mut(id) else {
             return false;
         };
-        entry.analog = !entry.analog;
-        let analog = entry.analog;
+        entry.profile = match entry.profile {
+            PadProfile::Analog if id == KEYBOARD_DEVICE_ID => PadProfile::Digital,
+            PadProfile::Analog => PadProfile::DualShock,
+            PadProfile::Digital | PadProfile::DualShock => PadProfile::Analog,
+        };
+        let analog = entry.profile == PadProfile::Analog;
         self.bump();
         analog
     }
@@ -191,11 +247,11 @@ impl RoutingTable {
         self.port_for(KEYBOARD_DEVICE_ID)
     }
 
-    fn profile_for(&self, port: PsxPort) -> Option<bool> {
+    fn profile_for(&self, port: PsxPort) -> Option<PadProfile> {
         self.devices
             .values()
             .find(|entry| entry.port == port)
-            .map(|entry| entry.analog)
+            .map(|entry| entry.profile)
     }
 
     fn port_occupied(&self, port: PsxPort) -> bool {
@@ -217,7 +273,7 @@ impl RoutingTable {
                 id: id.clone(),
                 name: entry.name.clone(),
                 port: entry.port,
-                analog: entry.analog,
+                profile: entry.profile,
             })
             .collect()
     }
@@ -342,17 +398,19 @@ fn finish_frame(
     *previous_chord = chord;
 }
 
-fn configure_port(bus: &mut Bus, port: PsxPort, analog: Option<bool>) {
-    match (port, analog) {
+fn configure_port(bus: &mut Bus, port: PsxPort, profile: Option<PadProfile>) {
+    match (port, profile) {
         (PsxPort::One, None) => bus.detach_pad_port1(),
-        (PsxPort::One, Some(false)) => bus.attach_original_digital_pad_port1(),
-        (PsxPort::One, Some(true)) => {
+        (PsxPort::One, Some(PadProfile::Digital)) => bus.attach_original_digital_pad_port1(),
+        (PsxPort::One, Some(PadProfile::DualShock)) => bus.attach_digital_pad_port1(),
+        (PsxPort::One, Some(PadProfile::Analog)) => {
             bus.attach_digital_pad_port1();
             let _ = bus.force_port1_analog_mode();
         }
         (PsxPort::Two, None) => bus.detach_pad_port2(),
-        (PsxPort::Two, Some(false)) => bus.attach_original_digital_pad_port2(),
-        (PsxPort::Two, Some(true)) => {
+        (PsxPort::Two, Some(PadProfile::Digital)) => bus.attach_original_digital_pad_port2(),
+        (PsxPort::Two, Some(PadProfile::DualShock)) => bus.attach_digital_pad_port2(),
+        (PsxPort::Two, Some(PadProfile::Analog)) => {
             bus.attach_digital_pad_port2();
             let _ = bus.force_port2_analog_mode();
         }
@@ -385,9 +443,9 @@ macro_rules! routing_api {
             self.routing.set_port(id, port)
         }
 
-        /// Select original Digital or Analog DualShock identity.
-        pub(crate) fn set_device_analog(&mut self, id: &str, analog: bool) -> bool {
-            self.routing.set_analog(id, analog)
+        /// Select the controller identity a device presents to the guest.
+        pub(crate) fn set_device_profile(&mut self, id: &str, profile: PadProfile) -> bool {
+            self.routing.set_profile(id, profile)
         }
 
         /// Toggle the keyboard's configured controller identity.
@@ -833,7 +891,10 @@ mod tests {
         routes.connect("pad-a".to_string(), "Pad A".to_string());
         assert_eq!(routes.port_for(KEYBOARD_DEVICE_ID), PsxPort::Off);
         assert_eq!(routes.port_for("pad-a"), PsxPort::One);
-        assert_eq!(routes.profile_for(PsxPort::One), Some(true));
+        assert_eq!(
+            routes.profile_for(PsxPort::One),
+            Some(PadProfile::DualShock)
+        );
 
         routes.connect("pad-b".to_string(), "Pad B".to_string());
         assert_eq!(routes.port_for("pad-b"), PsxPort::Two);
@@ -854,9 +915,43 @@ mod tests {
     #[test]
     fn analog_choice_is_part_of_the_port_profile() {
         let mut routes = RoutingTable::default();
-        assert_eq!(routes.profile_for(PsxPort::One), Some(false));
-        assert!(routes.set_analog(KEYBOARD_DEVICE_ID, true));
-        assert_eq!(routes.profile_for(PsxPort::One), Some(true));
+        assert_eq!(routes.profile_for(PsxPort::One), Some(PadProfile::Digital));
+        assert!(routes.set_profile(KEYBOARD_DEVICE_ID, PadProfile::Analog));
+        assert_eq!(routes.profile_for(PsxPort::One), Some(PadProfile::Analog));
+    }
+
+    #[test]
+    fn a_connected_controller_powers_up_as_a_digital_mode_dualshock() {
+        use emulator_core::pad::PadMode;
+
+        let mut routes = RoutingTable::default();
+        routes.connect("pad-a".to_string(), "Pad A".to_string());
+        assert_eq!(
+            routes.profile_for(PsxPort::One),
+            Some(PadProfile::DualShock)
+        );
+
+        // ID 0x41 at power-up: a digital-only retail game accepts it.
+        let mut bus = Bus::new_without_bios();
+        configure_port(&mut bus, PsxPort::One, routes.profile_for(PsxPort::One));
+        assert_eq!(bus.port1_pad_mode(), Some(PadMode::Digital));
+
+        // The Mode button goes analog and back to the controller's own
+        // identity, never to the keyboard's original pad.
+        assert!(routes.toggle_analog("pad-a"));
+        assert_eq!(routes.profile_for(PsxPort::One), Some(PadProfile::Analog));
+        assert!(!routes.toggle_analog("pad-a"));
+        assert_eq!(
+            routes.profile_for(PsxPort::One),
+            Some(PadProfile::DualShock)
+        );
+
+        assert!(routes.toggle_analog(KEYBOARD_DEVICE_ID));
+        assert!(!routes.toggle_analog(KEYBOARD_DEVICE_ID));
+        assert_eq!(
+            routes.devices.get(KEYBOARD_DEVICE_ID).map(|e| e.profile),
+            Some(PadProfile::Digital)
+        );
     }
 
     #[test]
@@ -864,8 +959,8 @@ mod tests {
         use emulator_core::pad::PadMode;
 
         let mut bus = Bus::new_without_bios();
-        configure_port(&mut bus, PsxPort::One, Some(false));
-        configure_port(&mut bus, PsxPort::Two, Some(true));
+        configure_port(&mut bus, PsxPort::One, Some(PadProfile::Digital));
+        configure_port(&mut bus, PsxPort::Two, Some(PadProfile::Analog));
         assert_eq!(bus.port1_pad_mode(), Some(PadMode::Digital));
         assert_eq!(bus.port2_pad_mode(), Some(PadMode::Analog));
 
