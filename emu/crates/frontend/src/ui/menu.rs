@@ -1511,9 +1511,11 @@ fn save_states_panel(
                 "Push a new save (F5) and pin it as the quick-load target"
             };
             if ui
-                .add(egui::Button::new(
-                    egui::RichText::new(format!("{}  {save_label}", icons::SAVE)).size(14.0),
-                ))
+                .add(egui::Button::new(icons::labelled(
+                    icons::SAVE,
+                    save_label,
+                    14.0,
+                )))
                 .on_hover_text(save_help)
                 .clicked()
             {
@@ -2279,7 +2281,11 @@ fn controls_panel(
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui
-                    .button(format!("{}  Reset to defaults", icons::ROTATE_CCW))
+                    .button(icons::labelled(
+                        icons::ROTATE_CCW,
+                        "Reset to defaults",
+                        theme::FONT_SIZE_UI,
+                    ))
                     .clicked()
                 {
                     *pending_pointer_action = Some(MenuAction::ResetControls);
@@ -2653,6 +2659,7 @@ fn build_create_category(editor_open: bool) -> Category {
             action: MenuAction::ToggleEditorWorkspace,
             burn_action: None,
             value: Some(if editor_open { "Active" } else { "Studio" }.into()),
+            depth: 0,
         }],
     }
 }
