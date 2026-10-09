@@ -493,6 +493,16 @@ impl MenuState {
         };
     }
 
+    /// The Library column as `(depth, label, value)` rows, for headless
+    /// previews and tests.
+    pub fn library_rows(&self) -> Vec<(usize, String, Option<String>)> {
+        self.categories[0]
+            .items
+            .iter()
+            .map(|item| (item.depth, item.label.clone(), item.value.clone()))
+            .collect()
+    }
+
     /// Folder expansion lasts for this session; newly found folders start closed.
     pub fn toggle_library_folder(&mut self, folder: &Path) {
         let action = MenuAction::ToggleLibraryFolder(folder.to_path_buf());
