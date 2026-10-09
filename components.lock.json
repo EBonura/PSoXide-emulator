@@ -18,7 +18,13 @@
         "crates/psx-hw",
         "crates/psx-iso",
         "crates/psx-trace",
-        "crates/psxed-format"
+        "crates/psxed-format",
+        "sdk/examples/hello-tri",
+        "sdk/examples/hello-input",
+        "sdk/examples/hello-ot",
+        "sdk/examples/hello-gte",
+        "sdk/examples/hello-tex",
+        "sdk/examples/hello-memcard"
       ]
     }
   }
