@@ -1,0 +1,186 @@
+# DRAFT release workflow for EBonura/PSoXide-emulator. NOT ENABLED: it lives at
+# docs/distribution/release.yml.draft and only runs once moved to .github/workflows/release.yml.
+#
+# What it does: on a tag like v0.2.0 (or a manual dispatch for a dry run) it builds the `psoxide`
+# desktop binary for macOS (universal), Windows x86_64 and Linux x86_64, packages each with the
+# licence and a SOURCE.txt naming the exact commit, and attaches them plus checksums to a GitHub
+# Release. Signing steps run only when the signing secrets exist; without them the artifacts are
+# unsigned and say so in the release notes.
+#
+# Untested: this file has never run. The build commands it relies on were verified on macOS arm64
+# only (see docs/DISTRIBUTION-PLAN.md section 1). Windows and Linux packaging is source-inspected,
+# not executed.
+#
+# Only first-party actions are used, so there are no third-party action SHAs to pin. Packaging is
+# inline shell for the draft; the plan moves it into a Rust `xtask package` so the repository stays
+# Rust-only.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Create the GitHub Release (otherwise artifacts are only uploaded to the run)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # create the release and upload assets
+  id-token: write   # build provenance attestation
+
+env:
+  CARGO_TERM_COLOR: never
+  # Version label used in file names: the tag, or "dev" for a dry run.
+  VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}
+
+jobs:
+  macos:
+    # Apple silicon runner. The Intel slice is cross-compiled here and joined with lipo, so the job
+    # does not depend on the Intel runner image (GitHub says Intel macOS runners end in fall 2027).
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - name: Build both architectures
+        run: |
+          cargo build --locked --release -p psoxide --target aarch64-apple-darwin
+          cargo build --locked --release -p psoxide --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/psoxide \
+            target/aarch64-apple-darwin/release/psoxide \
+            target/x86_64-apple-darwin/release/psoxide
+          lipo -info dist/psoxide
+      - name: Make the app bundle
+        run: |
+          app="dist/PSoXide.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp dist/psoxide "$app/Contents/MacOS/psoxide"
+          # icns from the 1024 px brand icon
+          set="$RUNNER_TEMP/AppIcon.iconset"; mkdir -p "$set"
+          for s in 16 32 64 128 256 512; do
+            sips -z $s $s assets/branding/psoxide-app-icon.png --out "$set/icon_${s}x${s}.png" >/dev/null
+            sips -z $((s*2)) $((s*2)) assets/branding/psoxide-app-icon.png --out "$set/icon_${s}x${s}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$set" -o "$app/Contents/Resources/AppIcon.icns"
+          version="${VERSION#v}"; [ "$version" = dev ] && version=0.0.0
+          cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>PSoXide</string>
+            <key>CFBundleIdentifier</key><string>io.itch.bonnie-studios.psoxide</string>
+            <key>CFBundleExecutable</key><string>psoxide</string>
+            <key>CFBundleIconFile</key><string>AppIcon</string>
+            <key>CFBundleShortVersionString</key><string>${version}</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+      - name: Sign and notarize (only when the Apple secrets exist)
+        env:
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}   # "Developer ID Application: Name (TEAMID)"
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}     # app-specific password for notarytool
+        run: |
+          if [ -z "$APPLE_CERT_P12_BASE64" ]; then echo "No Apple secrets: leaving the app unsigned"; exit 0; fi
+          kc="$RUNNER_TEMP/build.keychain-db"; pw="$(uuidgen)"
+          security create-keychain -p "$pw" "$kc"
+          security set-keychain-settings -lut 3600 "$kc"
+          security unlock-keychain -p "$pw" "$kc"
+          echo "$APPLE_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$kc"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pw" "$kc"
+          security list-keychains -d user -s "$kc" login.keychain
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGN_IDENTITY" dist/PSoXide.app
+          ditto -c -k --keepParent dist/PSoXide.app "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple dist/PSoXide.app
+      - name: Package
+        run: |
+          cp LICENSE dist/
+          printf 'PSoXide %s\nSource: https://github.com/%s/tree/%s\nBuilt from commit %s\n' \
+            "$VERSION" "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_SHA" > dist/SOURCE.txt
+          hdiutil create -volname PSoXide -srcfolder dist/PSoXide.app -ov -format UDZO "PSoXide-$VERSION-macos.dmg"
+          tar -C dist -czf "PSoXide-$VERSION-macos-cli.tar.gz" psoxide LICENSE SOURCE.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            PSoXide-*-macos.dmg
+            PSoXide-*-macos-cli.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Build
+        run: cargo build --locked --release -p psoxide
+      # Window icon and version resource need a build.rs resource step (not yet in the repository).
+      - name: Sign (only when a signing service or certificate is configured)
+        if: ${{ vars.WINDOWS_SIGNING == 'true' }}
+        run: echo "TODO sign target/release/psoxide.exe with the chosen service before packaging"
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/psoxide.exe LICENSE dist/
+          printf 'PSoXide %s\nSource: https://github.com/%s/tree/%s\nBuilt from commit %s\n' \
+            "$VERSION" "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_SHA" > dist/SOURCE.txt
+          7z a "PSoXide-$VERSION-windows-x86_64.zip" ./dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: PSoXide-*-windows-x86_64.zip
+
+  linux:
+    # Oldest hosted Ubuntu LTS image, so the binary's glibc floor stays low.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Build
+        run: cargo build --locked --release -p psoxide
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/psoxide LICENSE dist/
+          printf 'PSoXide %s\nSource: https://github.com/%s/tree/%s\nBuilt from commit %s\n' \
+            "$VERSION" "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_SHA" > dist/SOURCE.txt
+          tar -C dist -czf "PSoXide-$VERSION-linux-x86_64.tar.gz" psoxide LICENSE SOURCE.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: PSoXide-*-linux-x86_64.tar.gz
+
+  publish:
+    needs: [macos, windows, linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Checksums
+        run: cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Built from commit $GITHUB_SHA. Source: https://github.com/$GITHUB_REPOSITORY/tree/$GITHUB_REF_NAME"
+          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --notes "$notes" --draft
