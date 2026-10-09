@@ -202,6 +202,15 @@ pub struct LaunchArgs {
     /// `--steps` still caps the run.
     #[arg(long)]
     pub stop_at_poll: Option<u64>,
+    /// Write a save state to `--save-state-out` once this many route ticks
+    /// have elapsed, then keep running. Lets a long scripted walk to a
+    /// checkpoint (a game's first area, say) be done once and resumed with
+    /// `--savestate`.
+    #[arg(long, requires = "save_state_out")]
+    pub save_state_at_tick: Option<u64>,
+    /// Destination file for `--save-state-at-tick`.
+    #[arg(long, requires = "save_state_at_tick")]
+    pub save_state_out: Option<PathBuf>,
     /// Press pad-1 button masks on the headless route clock. Format:
     /// `<mask>@<tick>+<frames>`, comma-separated, e.g.
     /// `0x4000@45+12,0x4000@80+16`.
@@ -733,11 +742,21 @@ fn run_headless_launch(
         (Some(p), _) => p,
         (None, Some(id)) => {
             let lib = Library::load_or_empty(&paths.library_file());
-            lib.entries
-                .iter()
-                .find(|e| e.id == id)
-                .map(|e| e.path.clone())
-                .ok_or_else(|| format!("no game with id={id} in library.ron"))?
+            // An id from before disc identities still finds its disc when
+            // exactly one library entry used to have it.
+            let current = lib.entries.iter().find(|e| e.id == id);
+            let mut formerly = lib.entries.iter().filter(|e| {
+                psoxide_settings::library::legacy_id(e).as_deref() == Some(id.as_str())
+            });
+            match (current, formerly.next(), formerly.next()) {
+                (Some(entry), _, _) | (None, Some(entry), None) => entry.path.clone(),
+                (None, Some(_), Some(_)) => {
+                    return Err(format!(
+                        "id={id} was shared by several discs; pass --path or a current id"
+                    ))
+                }
+                (None, None, _) => return Err(format!("no game with id={id} in library.ron")),
+            }
         }
         (None, None) => {
             return Err("Provide --path or --game-id".to_string());
@@ -1584,6 +1603,11 @@ fn run_headless_launch(
                         samples[tape_cursor].apply_to_bus(&mut bus);
                     }
                     transcript_live = samples[tape_cursor];
+                }
+            }
+            if args.save_state_at_tick == Some(route_ticks) {
+                if let Some(path) = args.save_state_out.as_ref() {
+                    write_headless_save_state(&cpu, &bus, path, route_ticks)?;
                 }
             }
             if let Some(dir) = args.route_screenshot_dir.as_ref() {
@@ -2860,6 +2884,8 @@ fn validation_launch_args(
         input_tape_delay_ticks: 0,
         input_tape_transcribe: None,
         stop_at_poll: None,
+        save_state_at_tick: None,
+        save_state_out: None,
         pad_pulses: checkpoint.pad_pulses.clone(),
         digital_pad: false,
         dualshock_pad: false,
@@ -3740,6 +3766,30 @@ fn parse_stick_position(entry: &str, name: &str, value: &str) -> Result<(u8, u8)
         x.trim().parse().map_err(|_| bad())?,
         y.trim().parse().map_err(|_| bad())?,
     ))
+}
+
+/// Write the running machine to `path` as a GUI-compatible save state.
+fn write_headless_save_state(
+    cpu: &Cpu,
+    bus: &Bus,
+    path: &Path,
+    route_ticks: u64,
+) -> Result<(), String> {
+    let tick = cpu.tick();
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn_scoped(scope, || {
+                let snapshot = emulator_core::EmulatorStateRef { cpu, bus };
+                SaveStateV1::new(snapshot, "headless", tick).write_to(path)
+            })
+            .map_err(|e| format!("spawn save-state writer: {e}"))?
+            .join()
+            .map_err(|_| "save-state writer panicked".to_string())?
+            .map_err(|e| e.to_string())
+    })?;
+    eprintln!("[cli] wrote save state {} at route tick {route_ticks}", path.display());
+    Ok(())
 }
 
 /// Parse a `--press` spec: `tick:button[:hold]` or

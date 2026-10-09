@@ -1,0 +1,15 @@
+[package]
+name = "compat-report"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+publish = false
+description = "Regenerates docs/COMPATIBILITY.md from the compat tables and hle_compat reports."
+
+# Standalone on purpose: the tool must run before `make bootstrap` has
+# hydrated the main workspace's members, so it is not one of them.
+[workspace]
+
+[dependencies]
+serde_json = "1.0"
+toml = "1"

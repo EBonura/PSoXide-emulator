@@ -10,11 +10,15 @@
 //! axis-aligned cases. VRAM starts as random noise, so texture and CLUT
 //! fetches read random texels with random mask bits.
 //!
-//! The digest folds VRAM, the CLUT cache, the draw-timing histograms and the
-//! work counters at regular checkpoints, plus every word read back through
-//! GPUREAD. The expected digests were recorded from the rasteriser as of
-//! 8f6091c, so any change to a pixel, a timing charge or the CLUT cache
-//! behaviour fails the test.
+//! Two digests come out of each run. The pixel digest folds VRAM, the CLUT
+//! cache, the pixel-owner map (when the tracer is on) and every word read
+//! back through GPUREAD, so it moves only if a rasterised pixel does. The
+//! full digest adds the draw-timing histograms, the work counters, the busy
+//! credit and the status word, so it also moves with every timing charge.
+//! The pixel digests were recorded from the rasteriser as of 8f6091c and
+//! have not changed since. The full digests were last re-pinned when the
+//! texture page, CLUT reload and texel depth charges were added: the pixel
+//! digests stayed put, which is what showed that change to be timing only.
 //!
 //! On a mismatch, set `PSOXIDE_RASTER_STRESS_TRACE=<dir>` to write every
 //! checkpoint digest to `<dir>/<name>.txt`; comparing that file against one
@@ -74,6 +78,9 @@ struct Stress {
     gpu: Gpu,
     rng: Rng,
     digest: u64,
+    /// Same stream folded over rasterised output only: VRAM, the CLUT
+    /// cache, the pixel-owner map and GPUREAD data. No timing state.
+    pixel_digest: u64,
     trace: Vec<u64>,
 }
 
@@ -88,12 +95,17 @@ impl Stress {
             gpu,
             rng,
             digest: 0xCBF2_9CE4_8422_2325,
+            pixel_digest: 0xCBF2_9CE4_8422_2325,
             trace: Vec::new(),
         }
     }
 
     fn fold(&mut self, v: u64) {
         self.digest = fnv_fold(self.digest, v);
+    }
+
+    fn fold_pixels(&mut self, v: u64) {
+        self.pixel_digest = fnv_fold(self.pixel_digest, v);
     }
 
     fn gp0(&mut self, word: u32) {
@@ -107,6 +119,15 @@ impl Stress {
     fn checkpoint(&mut self) {
         let mut h = words_digest(self.gpu.vram.words());
         h = fnv_fold(h, words_digest(&self.gpu.clut_cache));
+        let mut px = h;
+        if let Some(owner) = &self.gpu.pixel_owner {
+            let mut o = 0xCBF2_9CE4_8422_2325u64;
+            for &v in owner {
+                o = fnv_fold(o, u64::from(v));
+            }
+            px = fnv_fold(px, o);
+        }
+        self.fold_pixels(px);
         h = fnv_fold(h, u64::from(self.gpu.clut_line_a_reg));
         h = fnv_fold(h, u64::from(self.gpu.clut_line_b_reg));
         for i in 0..256 {
@@ -452,6 +473,7 @@ impl Stress {
         for _ in 0..(w * h).div_ceil(2) {
             let d = self.gpu.read32(GP0_ADDR).unwrap_or(0);
             self.fold(u64::from(d));
+            self.fold_pixels(u64::from(d));
         }
     }
 
@@ -533,7 +555,7 @@ impl Stress {
         }
     }
 
-    fn run(&mut self, commands: usize, every: usize) -> u64 {
+    fn run(&mut self, commands: usize, every: usize) -> (u64, u64) {
         for i in 0..commands {
             self.command();
             if (i + 1) % every == 0 {
@@ -541,18 +563,18 @@ impl Stress {
             }
         }
         self.checkpoint();
-        self.digest
+        (self.digest, self.pixel_digest)
     }
 }
 
-fn run_case(name: &str, seed: u64, commands: usize, setup: impl FnOnce(&mut Gpu)) -> u64 {
+fn run_case(name: &str, seed: u64, commands: usize, setup: impl FnOnce(&mut Gpu)) -> (u64, u64) {
     let every = std::env::var("PSOXIDE_RASTER_STRESS_EVERY")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(256usize);
     let mut s = Stress::new(seed);
     setup(&mut s.gpu);
-    let digest = s.run(commands, every);
+    let (digest, pixels) = s.run(commands, every);
     if let Ok(dir) = std::env::var("PSOXIDE_RASTER_STRESS_TRACE") {
         let text: String = s.trace.iter().map(|d| format!("{d:016x}\n")).collect();
         std::fs::write(std::path::Path::new(&dir).join(format!("{name}.txt")), text)
@@ -564,42 +586,52 @@ fn run_case(name: &str, seed: u64, commands: usize, setup: impl FnOnce(&mut Gpu)
     let rects: u32 = hist[0x60..0x80].iter().sum();
     let lines: u32 = hist[0x40..0x60].iter().sum();
     println!(
-        "raster stress {name}: {digest:016x} (pixels {} textured {} polys {polys} rects {rects} lines {lines})",
+        "raster stress {name}: {digest:016x} pixel-only {pixels:016x} (pixels {} textured {} polys {polys} rects {rects} lines {lines})",
         w.pixels, w.texture_pixels
     );
-    digest
+    (digest, pixels)
 }
 
 #[test]
 fn raster_stress_random_primitives_a() {
-    let d = run_case("a", 0x5EED_0001, 150_000, |_| {});
-    assert_eq!(d, 0x8298_df67_24ad_ac19, "raster stress a digest changed");
+    let (d, px) = run_case("a", 0x5EED_0001, 150_000, |_| {});
+    assert_eq!(px, 0xaf04_9ca1_4f64_1b2f, "raster stress a pixels changed");
+    assert_eq!(d, 0x370c_2ead_dc27_e90f, "raster stress a digest changed");
 }
 
 #[test]
 fn raster_stress_random_primitives_b() {
-    let d = run_case("b", 0x5EED_0002, 150_000, |_| {});
-    assert_eq!(d, 0x4354_d706_6ea4_9b57, "raster stress b digest changed");
+    let (d, px) = run_case("b", 0x5EED_0002, 150_000, |_| {});
+    assert_eq!(px, 0x9e15_e646_d06c_cfaf, "raster stress b pixels changed");
+    assert_eq!(d, 0x189a_845f_7ed5_2769, "raster stress b digest changed");
 }
 
 #[test]
 fn raster_stress_pixel_tracer() {
-    let d = run_case("tracer", 0x5EED_0003, 6_000, |gpu| {
+    let (d, px) = run_case("tracer", 0x5EED_0003, 6_000, |gpu| {
         gpu.enable_pixel_tracer()
     });
     assert_eq!(
-        d, 0x3d5d_0680_ce40_0e52,
+        px, 0x6273_78f0_3793_5f55,
+        "raster stress tracer pixels changed"
+    );
+    assert_eq!(
+        d, 0xdbb6_0e4c_fb60_c4d2,
         "raster stress tracer digest changed"
     );
 }
 
 #[test]
 fn raster_stress_wireframe() {
-    let d = run_case("wire", 0x5EED_0004, 4_000, |gpu| {
+    let (d, px) = run_case("wire", 0x5EED_0004, 4_000, |gpu| {
         gpu.wireframe_enabled = true
     });
     assert_eq!(
-        d, 0x6a6a_c676_b348_14e2,
+        px, 0x2456_922f_803b_9fb9,
+        "raster stress wireframe pixels changed"
+    );
+    assert_eq!(
+        d, 0x69b2_55d7_8e0e_2ed4,
         "raster stress wireframe digest changed"
     );
 }

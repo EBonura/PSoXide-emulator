@@ -2940,3 +2940,56 @@ fn triangles_past_the_extent_limit_cost_only_their_setup() {
         packet_cost(&CENTRED_SCREEN, &first_half) + DRAW_FLAT_SETUP
     );
 }
+
+fn open_draw_area(gpu: &mut Gpu) {
+    gpu.write32(GP0_ADDR, 0xE300_0000);
+    gpu.write32(GP0_ADDR, 0xE400_0000 | 639 | (479 << 10));
+}
+
+/// A textured triangle of `size` x `size` texels (half a square of pixels)
+/// with the given texture page and CLUT, costed twice so the second sees the
+/// first's state.
+fn textured_triangle_cost(gpu: &mut Gpu, size: i32, tpage: u32, clut: u32) -> u64 {
+    let pos = |x: i32, y: i32| ((y as u32) << 16) | (x as u32 & 0xFFFF);
+    gpu.gp0_fifo = vec![
+        0x2400_0000,
+        pos(0, 0),
+        (clut << 16) | 0,
+        pos(size, 0),
+        (tpage << 16) | size as u32,
+        pos(0, size),
+        ((size as u32) << 8) | 0,
+    ];
+    let cost = gpu.gp0_packet_timing_cost(0x24);
+    let pixels = std::mem::take(gpu.timing_pixels.get_mut());
+    cost + gpu.texture_timing_surcharge(0x24, pixels)
+}
+
+#[test]
+fn a_texture_page_change_costs_in_proportion_to_the_pixels_drawn() {
+    // hwtest v2.1: 15-bit 32x32 triangles alternating between two pages cost
+    // 1281 clocks more than the same page, 16x32 ones 694.
+    for (size, low, high) in [(32, 1000, 1700), (16, 200, 600)] {
+        let mut gpu = Gpu::new();
+        open_draw_area(&mut gpu);
+        let same_1 = textured_triangle_cost(&mut gpu, size, 0x0108 | 0x100, 0x7800);
+        let same_2 = textured_triangle_cost(&mut gpu, size, 0x0108 | 0x100, 0x7800);
+        let changed = textured_triangle_cost(&mut gpu, size, 0x0109 | 0x100, 0x7800);
+        let _ = same_1;
+        let extra = changed - same_2;
+        assert!((low..high).contains(&extra), "size {size}: {extra} extra");
+    }
+}
+
+#[test]
+fn an_8_bit_clut_change_reloads_270_clocks_and_a_15_bit_one_nothing() {
+    for (depth, expected) in [(1u32, 270u64), (2, 0)] {
+        let mut gpu = Gpu::new();
+        open_draw_area(&mut gpu);
+        let tpage = 0x08 | depth << 7;
+        let _ = textured_triangle_cost(&mut gpu, 8, tpage, 0x7800);
+        let kept = textured_triangle_cost(&mut gpu, 8, tpage, 0x7800);
+        let changed = textured_triangle_cost(&mut gpu, 8, tpage, 0x7801);
+        assert_eq!(changed - kept, expected, "depth {depth}");
+    }
+}
