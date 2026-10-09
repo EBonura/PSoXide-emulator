@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A root counter polled in a tight loop no longer loses ticks. A read still
+  returns the count from before its own bus wait, but the wait's clocks come
+  back at the next advance instead of being dropped: hardware tests v2.1 on a
+  console counted every clock of a second of Timer 2 and Timer 0 polling
+  (2172.3 ticks a line), where the emulator lost 22 to 40 percent. Save states
+  move to format 13; older save states no longer load.
 - One texture filter, Edge, replaces the earlier filter set: the Bilinear, JINC2
   and xBR modes are gone, the toolbar and Settings toggle cycles None and
   Edge, and `--texture-filter` takes `none`, `edge` or `all` (`xbr` is an

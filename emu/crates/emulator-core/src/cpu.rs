@@ -3978,6 +3978,51 @@ mod tests {
     }
 
     #[test]
+    fn a_polled_system_clock_counter_loses_no_ticks_to_its_own_read_stalls() {
+        // hwtest v2.1 on a console: Timer 2 polled by a loop of 6 or 14
+        // instructions counted every clock of the wait. Summed over a loop the
+        // steps between reads must equal the bus clocks that went by.
+        for (mode, divisor) in [(0u32, 1u64), (0x0200, 8)] {
+            let mut cpu = Cpu::new();
+            let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+            cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+            bus.write32(0x1F80_1124, mode);
+            cpu.gprs[8] = 0x1F80_1120;
+            // lw $t1, 0($t0); nop; addu $t3,$t3,$t2; subu $t2,$t1,$t4;
+            // andi $t2,$t2,0xFFFF; bne $zero,$zero (never) ; move $t4,$t1; j back
+            let program = [
+                0x8d09_0000u32, // lw $t1,0($t0)
+                0x0000_0000,    // nop
+                0x016a_5821,    // addu $t3,$t3,$t2
+                0x0124_5023,    // subu $t2,$t1,$a0
+                0x314a_ffff,    // andi $t2,$t2,0xffff
+                0x0120_2021,    // move $a0,$t1
+                0x0800_0400,    // j 0x1000
+                0x0000_0000,    // nop (delay slot)
+            ];
+            for (i, word) in program.iter().enumerate() {
+                bus.write32(0x8000_1000 + 4 * i as u32, *word);
+            }
+            cpu.pc = 0x8000_1000;
+            for _ in 0..16 {
+                cpu.step(&mut bus).unwrap();
+            }
+            let first_cycles = bus.cycles();
+            cpu.gprs[11] = 0;
+            for _ in 0..8 * 5000 {
+                cpu.step(&mut bus).unwrap();
+            }
+            let elapsed = bus.cycles() - first_cycles;
+            let seen = u64::from(cpu.gpr(11));
+            let due = elapsed / divisor;
+            assert!(
+                seen.abs_diff(due) <= 3 * 24,
+                "mode {mode:#x}: {seen} ticks seen of {due} clocks gone"
+            );
+        }
+    }
+
+    #[test]
     fn fetch_returns_first_bios_word() {
         // Real stock BIOSes (SCPH1001 / 5500 / 5501 / 5502) all begin with
         // `lui $t0, 0x0013` = 0x3C08_0013 as part of cache-control init.
