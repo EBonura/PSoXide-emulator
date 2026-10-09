@@ -4678,7 +4678,10 @@ fn write_headless_save_state(
             .map_err(|_| "save-state writer panicked".to_string())?
             .map_err(|e| e.to_string())
     })?;
-    eprintln!("[cli] wrote save state {} at route tick {route_ticks}", path.display());
+    eprintln!(
+        "[cli] wrote save state {} at route tick {route_ticks}",
+        path.display()
+    );
     Ok(())
 }
 
