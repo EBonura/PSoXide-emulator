@@ -3027,6 +3027,8 @@ fn interlaced_480_presents_both_fields() {
     }
     for y in 0..4 {
         assert_ne!(shown(&gpu, y), 0, "row {y} presented");
+    }
+}
 
 fn open_draw_area(gpu: &mut Gpu) {
     gpu.write32(GP0_ADDR, 0xE300_0000);
