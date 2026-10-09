@@ -80,7 +80,7 @@ the lock and hashes without a network request.
 For local verification, export the exact locked commit from an existing clone:
 
 ```sh
-python3 tools/bootstrap-components.py --source sdk=/path/to/PSoXide
+make bootstrap COMPONENTS_ARGS="--source sdk=/path/to/PSoXide"
 ```
 
 This uses committed content at the lock's revision, not the checkout's working

@@ -54,6 +54,10 @@
   console counted every clock of a second of Timer 2 and Timer 0 polling
   (2172.3 ticks a line), where the emulator lost 22 to 40 percent. Save states
   move to format 13; older save states no longer load.
+- `--press` takes analog stick entries, `tick:lstick=X/Y[:hold]` and
+  `tick:rstick=X/Y[:hold]` (0..=255, 128 centred), held for a number of route
+  ticks like a button. A stick token forces the pad to analog mode and
+  conflicts with `--digital-pad`; scripts without one behave as before.
 - One texture filter, Edge, replaces the earlier filter set: the Bilinear, JINC2
   and xBR modes are gone, the toolbar and Settings toggle cycles None and
   Edge, and `--texture-filter` takes `none`, `edge` or `all` (`xbr` is an
