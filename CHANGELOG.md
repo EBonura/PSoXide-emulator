@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- 480-line interlaced frames drawn field by field show whole. With drawing to
+  the display area prohibited (GP0 E1h bit 10 clear) in 480i and the display
+  on, fills and primitives skip the lines of the field on display (GPUSTAT
+  bit 31) and draw only the other field's. Valkyrie Profile redraws its title
+  and menus this way: the screen was white whenever the frame was sampled just
+  after the clear. The picture is put together from the live lines of the
+  shown field and the held lines of the other, by the new Settings >
+  Deinterlace choice: Blend (the default, averages the fields), Bob (shows the
+  field on display only) or Weave (interleaves them, which combs moving
+  objects). Headless captures and display hashes always weave. In the GUI,
+  these frames now come from the CPU display like 24bpp ones, since the HW
+  renderer does not apply the rule. Games that run in this mode (Valkyrie
+  Profile, Gran Turismo 2, Tekken 3, Chrono Cross, Formula One 2001, one
+  WipEout 3 frame) change display hashes. The rule is not measured on the
+  console yet, and whether it holds with the display blanked is a guess (it
+  does not, here: Chrono Cross builds its menu background that way).
+- The hardware renderer now matches the CPU rasterizer on polygons. It draws
+  each triangle half a pixel down and right, so the host's centre sampling
+  lands where the PS1 samples (a pixel's top-left corner): the same pixels are
+  lit, with the same texels and colours, including on one-pixel slivers. That
+  removes the row of blue dots along the Quake shotgun, where the host lit
+  pixels the CPU skips and read the texture's border column; a Quake frame's
+  mean difference from the CPU image drops from about 8 to under 1.
+  Rectangles, fills and lines are unchanged. Texture coordinates wrap in
+  eight bits below zero as the CPU's do instead of clamping at zero.
+- Semi-transparency in the hardware renderer blends the stored colour values
+  instead of linear light. It added the source to the decoded destination and
+  re-encoded the sum, so VoXide's BRIGHTER 3 rectangle (+24 per channel) came
+  out near +3; all four blend modes now land within one 5-bit step of the CPU.
 - Stopping a GPU linked-list DMA now delivers the node the walker had already
   admitted. A DMA burst holds the bus, so a CPU write that clears CHCR cannot
   land inside a node; the walker interleaves a word per cycle with the CPU and
@@ -21,11 +50,13 @@
   counter no longer shortens the first external read behind it (an overlap
   measured on a late PSone): through warm code 64 reads of EXP1 now take 2174
   clocks, the BIOS ROM's figure and the console's 2176, and EXP3 830 against
-  832 (they were 2144 and 821). A store behind a cold I-cache line fill waits
-  for the fill and an internal register read gives way to it for up to three
-  clocks, which moves 64 stores through evicted code from 143 to 336 clocks
-  (329 on the console) and 32 GPUSTAT reads from 239 to 287 (284); both
-  constants are fits to those two records. Save states move to format 16.
+  832 (they were 2144 and 821). A cold I-cache line fill and the
+  write buffer share the RAM bus: a store behind a fill reaches RAM after it,
+  a fill waits for the stores the buffer already holds, and an internal
+  register read gives way to a fill for up to three clocks. That moves 64
+  stores through evicted code from 143 to 319 clocks (329 on the console) and
+  32 GPUSTAT reads from 239 to 287 (284), while a store with room in the
+  buffer is never held. Save states move to format 16.
 - SIO0 follows the console's byte timing (hardware tests v2.1). A byte takes
   ten bit times, not eight: it reaches DATA and sets RX not empty when it has
   been through the wire (1360 clocks at the BIOS's BAUD, where the emulator

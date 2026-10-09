@@ -97,6 +97,15 @@ pub struct VideoSettings {
     /// instead of failing the whole settings file.
     #[serde(default = "default_texture_filter")]
     pub texture_filter: String,
+    /// How frames a game renders field by field in 480i are put together:
+    /// `"weave"`, `"bob"` or `"blend"`. A string so an unknown value falls
+    /// back to the default instead of failing the whole settings file.
+    #[serde(default = "default_deinterlace")]
+    pub deinterlace: String,
+}
+
+fn default_deinterlace() -> String {
+    "blend".to_string()
 }
 
 fn default_texture_filter() -> String {
@@ -120,6 +129,7 @@ impl Default for VideoSettings {
             ui_scale_pct: default_ui_scale_pct(),
             smooth_slow_host: false,
             texture_filter: default_texture_filter(),
+            deinterlace: default_deinterlace(),
         }
     }
 }
@@ -576,6 +586,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(Settings::load(&path).unwrap().video.texture_filter, "none");
+    }
+
+    #[test]
+    fn deinterlace_is_saved_and_older_files_get_the_default() {
+        assert_eq!(Settings::default().video.deinterlace, "blend");
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.ron");
+        let mut s = Settings::default();
+        s.video.deinterlace = "bob".to_string();
+        s.save(&path).unwrap();
+        assert_eq!(Settings::load(&path).unwrap().video.deinterlace, "bob");
+        std::fs::write(
+            &path,
+            "(\n    version: 4,\n    video: (integer_scale: true, scanline_filter: false),\n)",
+        )
+        .unwrap();
+        assert_eq!(Settings::load(&path).unwrap().video.deinterlace, "blend");
     }
 
     #[test]
