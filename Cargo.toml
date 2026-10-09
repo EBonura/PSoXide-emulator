@@ -7,6 +7,7 @@ members = [
     "crates/psx-iso",
     "crates/psx-trace",
     "crates/psxed-format",
+    "emu/crates/editor-placeholders/*",
     "emu/crates/emulator-core",
     "emu/crates/frontend",
     "emu/crates/psoxide-debug-ui",
@@ -54,6 +55,15 @@ psoxide-debug-ui   = { path = "emu/crates/psoxide-debug-ui" }
 psoxide-settings   = { path = "emu/crates/psoxide-settings" }
 psoxide-validation = { path = "emu/crates/psoxide-validation" }
 psx-gpu-render     = { path = "emu/crates/psx-gpu-render" }
+
+# ---- Placeholders for the editor workspace's crates ----------------------
+# The frontend's optional `editor` feature names them. The real crates live in
+# PSoXide-editor, whose workspace supplies them; here they are empty packages
+# so the manifest resolves (see emu/crates/editor-placeholders).
+psxed-ui      = { path = "emu/crates/editor-placeholders/psxed-ui" }
+psxed-project = { path = "emu/crates/editor-placeholders/psxed-project" }
+psx-bsp       = { path = "emu/crates/editor-placeholders/psx-bsp" }
+psx-engine    = { path = "emu/crates/editor-placeholders/psx-engine" }
 
 # ---- Cross-workspace path deps into the DEVICE side --------------------
 psx-asset     = { path = "sdk/crates/psx-asset" }

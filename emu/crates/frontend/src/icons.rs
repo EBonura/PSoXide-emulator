@@ -102,11 +102,15 @@ mod tests {
                         "{icon:?} missing from {font:?}"
                     );
                 }
-                let text = egui::FontId::proportional(14.0);
-                assert!(
-                    fonts.has_glyph(&text, icon),
-                    "{icon:?} missing from text fallback"
-                );
+                // The editor build gives the inline-icon fallback to lucide.
+                #[cfg(not(feature = "editor"))]
+                {
+                    let text = egui::FontId::proportional(14.0);
+                    assert!(
+                        fonts.has_glyph(&text, icon),
+                        "{icon:?} missing from text fallback"
+                    );
+                }
             }
         });
     }

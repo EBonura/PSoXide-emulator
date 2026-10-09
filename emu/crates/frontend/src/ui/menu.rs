@@ -97,6 +97,9 @@ pub enum MenuAction {
     /// library once the background make job completes. What an
     /// unbuilt example row does when confirmed.
     BuildExamples,
+    /// Enter or leave the host-side editor workspace.
+    #[cfg(feature = "editor")]
+    ToggleEditorWorkspace,
     /// Pick and persist the games library root.
     ChooseGamesPath,
     /// Switch between high-res and native-resolution rendering.
@@ -409,6 +412,10 @@ impl MenuState {
         // the first loaded game (`set_game_loaded`).
         let categories = vec![
             build_library_category(&[], &[], &HashSet::new(), ""),
+            // The Editor column is the entry point into the host editor
+            // workspace. Standalone emulator builds do not have it.
+            #[cfg(feature = "editor")]
+            build_create_category(false),
             build_settings_category(),
         ];
 
@@ -538,6 +545,25 @@ impl MenuState {
             }
         }
         self.anim_x = self.category_index as f32;
+    }
+
+    /// Update the Editor category label for the current workspace.
+    #[cfg(feature = "editor")]
+    pub fn sync_editor_label(&mut self, editor_open: bool) {
+        if let Some(create) = self.categories.iter_mut().find(|c| c.name == "Editor") {
+            if let Some(item) = create
+                .items
+                .iter_mut()
+                .find(|item| item.action == MenuAction::ToggleEditorWorkspace)
+            {
+                item.label = if editor_open {
+                    "Close editor workspace".into()
+                } else {
+                    "Open editor workspace".into()
+                };
+                item.value = Some(if editor_open { "Active" } else { "Studio" }.into());
+            }
+        }
     }
 
     /// Flip the Game column's Pause/Resume label. Called when
@@ -2600,6 +2626,25 @@ fn build_library_category(
 
 /// The Game column, shown only while a game is loaded: run control,
 /// save states, reset and input tapes.
+/// Host-side creation tools.
+#[cfg(feature = "editor")]
+fn build_create_category(editor_open: bool) -> Category {
+    Category {
+        name: "Editor",
+        icon: icons::FOLDER,
+        items: vec![MenuItem {
+            label: if editor_open {
+                "Close editor workspace".into()
+            } else {
+                "Open editor workspace".into()
+            },
+            action: MenuAction::ToggleEditorWorkspace,
+            burn_action: None,
+            value: Some(if editor_open { "Active" } else { "Studio" }.into()),
+        }],
+    }
+}
+
 fn build_game_category(running: bool, recording: bool) -> Category {
     Category {
         name: "Game",
@@ -2683,19 +2728,41 @@ mod tests {
         let _ = context.run(input, |context| menu.draw(context, 1.0, None));
     }
 
+    /// Tests find columns by name: which columns exist depends on the
+    /// workspace features and on whether a game is loaded.
+    fn category<'a>(menu: &'a MenuState, name: &str) -> &'a Category {
+        menu.categories.iter().find(|c| c.name == name).unwrap()
+    }
+
     fn labels(menu: &MenuState, category: &str) -> Vec<String> {
-        menu.categories
-            .iter()
-            .find(|c| c.name == category)
-            .unwrap()
+        self::category(menu, category)
             .items
             .iter()
             .map(|item| item.label.clone())
             .collect()
     }
 
+    /// The columns every build has. The editor workspace adds its own
+    /// column, which `editor_column_sits_before_settings` covers.
     fn names(menu: &MenuState) -> Vec<&'static str> {
-        menu.categories.iter().map(|c| c.name).collect()
+        menu.categories
+            .iter()
+            .map(|c| c.name)
+            .filter(|name| *name != "Editor")
+            .collect()
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn editor_column_sits_before_settings() {
+        let mut s = MenuState::new();
+        let all: Vec<_> = s.categories.iter().map(|c| c.name).collect();
+        assert_eq!(all, ["Library", "Editor", "Settings"]);
+        s.set_game_loaded(true);
+        let all: Vec<_> = s.categories.iter().map(|c| c.name).collect();
+        assert_eq!(all, ["Library", "Game", "Editor", "Settings"]);
+        s.sync_editor_label(true);
+        assert_eq!(labels(&s, "Editor"), ["Close editor workspace"]);
     }
 
     fn confirm(menu: &mut MenuState) -> Option<MenuAction> {
@@ -3043,7 +3110,7 @@ mod tests {
         );
         s.sync_video_audio(false, "Edge", 0.5, true);
         s.set_smooth_slow_host(true);
-        let values: Vec<_> = s.categories[1]
+        let values: Vec<_> = category(&s, "Settings")
             .items
             .iter()
             .map(|item| item.value.clone().unwrap_or_default())
@@ -3089,7 +3156,7 @@ mod tests {
         let mut state = MenuState::new();
         state.set_ui_scale(75);
         state.set_menu_opacity(65);
-        let settings = &state.categories[1];
+        let settings = category(&state, "Settings");
         let value = |action: MenuAction| {
             settings
                 .items

@@ -35,13 +35,27 @@ mod web_embed;
 #[cfg(not(target_arch = "wasm32"))]
 mod cli;
 mod disasm;
-
+#[cfg(feature = "editor")]
+#[rustfmt::skip]
+mod editor_assets;
+#[cfg(feature = "editor")]
+#[rustfmt::skip]
+mod editor_preview;
+#[cfg(feature = "editor")]
+#[rustfmt::skip]
+mod editor_textures;
+#[cfg(feature = "editor")]
+#[rustfmt::skip]
+mod embedded_playtest;
 mod gfx;
 mod icons;
 mod input;
 #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
 mod mcp;
-
+mod pacing;
+#[cfg(feature = "editor")]
+#[rustfmt::skip]
+mod playtest_disc;
 mod playtest_input;
 mod theme;
 mod ui;
@@ -65,13 +79,15 @@ use crate::app::AppState;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cli::Cli;
 use crate::gfx::Graphics;
+use crate::pacing::{FramePacing, HostPace};
 use crate::playtest_input::Port1PadSample;
 use crate::ui::profiler::FrameProfileSample;
 use crate::ui::{menu::MenuInput, MenuOutcome};
 
 use emulator_core::button;
 // `counter` / `task` telemetry IDs feed the editor's Play metrics overlay only.
-
+#[cfg(feature = "editor")]
+use emulator_core::telemetry::{counter, task};
 use psoxide_settings::settings::{InputBinding, PortBindings, StickBindings};
 
 /// Default window size when not running fullscreen. Chosen big
@@ -91,47 +107,9 @@ const MIN_HEIGHT: u32 = 700;
 /// overproduces SPU samples until the host queue has to discard them.
 const PSX_MASTER_CLOCK_HZ: f32 = 33_868_800.0;
 const FALLBACK_FRAME_DT: f32 = 1.0 / 60.0;
-
-/// Don't try to catch up an arbitrarily long stall in one redraw;
-/// cap the burst so a debugger stop or window drag doesn't spend
-/// seconds chewing through delayed emu frames.
-const MAX_CATCHUP_FRAMES: u32 = 4;
-
-/// Measured redraw costs, for pacing a host too slow to keep up (see
-/// `video.smooth_slow_host`).
-#[derive(Clone, Copy, Default)]
-struct HostPace {
-    /// Emulation + audio per guest frame, ms.
-    frame_ms: f32,
-    /// Everything else in a redraw (rendering, UI), ms.
-    other_ms: f32,
-}
-
-impl HostPace {
-    fn note(&mut self, profile: &FrameProfileSample) {
-        fn ewma(avg: &mut f32, sample: f32) {
-            *avg += (sample - *avg) * 0.1;
-        }
-        let emulation = profile.emu_ms + profile.audio_ms;
-        if profile.frames_run > 0.0 {
-            ewma(&mut self.frame_ms, emulation / profile.frames_run);
-        }
-        ewma(&mut self.other_ms, (profile.total_ms - emulation).max(0.0));
-    }
-
-    /// Guest frames whose emulation fits in one guest frame period next to
-    /// the rest of a redraw, at least one. Measured against the guest
-    /// period rather than the redraw interval: on a slow host the interval
-    /// is the overrun itself.
-    fn frames_per_paint(&self, frame_dt: f32) -> u32 {
-        if self.frame_ms <= 0.0 {
-            return MAX_CATCHUP_FRAMES;
-        }
-        let room = (frame_dt * 1000.0 - self.other_ms).max(0.0);
-        ((room / self.frame_ms) as u32).clamp(1, MAX_CATCHUP_FRAMES)
-    }
-}
-
+/// Used only by the editor's Play metrics overlay (cycles -> milliseconds).
+#[cfg(feature = "editor")]
+const PSX_CYCLES_PER_MS: f32 = 33_868_800.0 / 1000.0;
 fn guest_frame_dt(vblank_period: Option<u64>) -> f32 {
     vblank_period
         .filter(|period| *period != 0)
@@ -200,11 +178,32 @@ fn main() {
     let fullscreen = !cli.windowed;
     let gpu_compute = cli.gpu_compute;
 
+    #[cfg(feature = "editor")]
+    let editor_startup = cli.editor.then_some((
+        cli.editor_project,
+        cli.editor_view.map(cli::EditorViewArg::project_view),
+        cli.editor_view
+            .is_some_and(cli::EditorViewArg::is_room_orthographic),
+        cli.editor_resource,
+    ));
+
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let mut app = Shell::new(config_dir, fullscreen, gpu_compute);
-
+    #[cfg(feature = "editor")]
+    if let Some((project_dir, view, room_orthographic, resource)) = editor_startup {
+        if let Err(error) = app
+            .state
+            .open_editor_startup(project_dir, view, resource.as_deref())
+        {
+            eprintln!("error: {error}");
+            std::process::exit(2);
+        }
+        if room_orthographic {
+            app.state.show_editor_room_orthographic();
+        }
+    }
     event_loop.run_app(&mut app).expect("event loop");
 }
 
@@ -379,7 +378,15 @@ impl Shell {
         // `--no-default-features` build -- the emulator-only configuration this
         // crate documents as supported, and what hl-psx's regression harness
         // uses -- failed to compile: psxed-project is an optional dependency.
-
+        #[cfg(all(not(target_arch = "wasm32"), feature = "editor"))]
+        match psxed_project::ensure_projects_seeded() {
+            Ok(true) => eprintln!(
+                "[projects] seeded sample project into {}",
+                psxed_project::projects_dir().display()
+            ),
+            Ok(false) => {}
+            Err(error) => eprintln!("[projects] could not seed sample project: {error}"),
+        }
         let audio = audio::AudioOut::open();
         let audio_status = if let Some(a) = audio.as_ref() {
             format!("[audio] opened host stream @ {} Hz", a.host_sample_rate())
@@ -411,7 +418,14 @@ impl Shell {
             None
         };
         let state = AppState::with_config_dir(config_dir);
-
+        #[cfg(feature = "editor")]
+        let state = {
+            let mut state = state;
+            state
+                .editor
+                .append_console_lines([audio_status, input_status]);
+            state
+        };
         Self {
             graphics: None,
             state,
@@ -999,25 +1013,11 @@ impl ApplicationHandler for Shell {
 
         match event {
             WindowEvent::CloseRequested => {
-                self.state.stop_input_recording_if_active();
-
-                self.state.flush_pending_input_profile_capture();
-                self.state.stop_examples_build();
-                // Flush any dirty memory card so save progress
-                // survives a window-close. A hard crash still
-                // loses whatever hasn't been flushed -- the run
-                // loop could call this periodically; for now
-                // graceful exit is enough.
-                if let Err(e) = self.state.flush_memcard_port1() {
-                    eprintln!("[frontend] memcard flush on exit: {e}");
+                if !self.state.close_allowed() {
+                    gfx.window.request_redraw();
+                    return;
                 }
-
-                // Persist current settings (library
-                // root, etc.) so the next launch picks up any
-                // user tweaks without needing a manual save step.
-                if let Err(e) = self.state.save_settings() {
-                    eprintln!("[frontend] settings save on exit: {e}");
-                }
+                self.state.shut_down_for_exit();
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
@@ -1086,7 +1086,10 @@ impl ApplicationHandler for Shell {
                 // BIOS polls every frame anyway.
                 // Without the editor feature the game always owns the
                 // keyboard (there is no editor workspace to take it over).
-
+                #[cfg(feature = "editor")]
+                let route_keyboard_to_game = !self.state.workspace.is_editor()
+                    || self.state.embedded_playtest_input_captured();
+                #[cfg(not(feature = "editor"))]
                 let route_keyboard_to_game = true;
                 if !repeat && route_keyboard_to_game {
                     let bindings = &self.state.settings.input.port1;
@@ -1107,7 +1110,16 @@ impl ApplicationHandler for Shell {
                 // row per repeat tick, matching GUI-standard behaviour.
                 // Only press events (including repeats) trigger menu
                 // navigation; releases don't.
-                if state == ElementState::Pressed {
+                #[cfg(feature = "editor")]
+                let escape_to_editor = matches!(logical_key, Key::Named(NamedKey::Escape))
+                    && editor_owns_escape(
+                        self.state.workspace.is_editor(),
+                        self.state.embedded_playtest_input_captured(),
+                        self.state.menu.open,
+                    );
+                #[cfg(not(feature = "editor"))]
+                let escape_to_editor = false;
+                if state == ElementState::Pressed && !escape_to_editor {
                     self.pending_input = merge_key(self.pending_input, &logical_key);
                 }
                 // F12 -- toggle the display source between the CPU
@@ -1370,7 +1382,16 @@ impl ApplicationHandler for Shell {
                     };
                     // In the editor, Escape first releases an active embedded-play
                     // input capture instead of toggling the menu.
-
+                    #[cfg(feature = "editor")]
+                    let editor_released_capture = !closed_controls_panel
+                        && self.state.workspace.is_editor()
+                        && self.state.embedded_playtest_running()
+                        && self.state.embedded_playtest_input_captured()
+                        && {
+                            self.state.release_embedded_playtest_input();
+                            true
+                        };
+                    #[cfg(not(feature = "editor"))]
                     let editor_released_capture = false;
                     if closed_controls_panel || editor_released_capture {
                         // Handled above: input capture released.
@@ -1384,7 +1405,9 @@ impl ApplicationHandler for Shell {
                         // live game to resume; otherwise just close
                         // the overlay.
                         self.state.menu.open = false;
-
+                        #[cfg(feature = "editor")]
+                        let resumable_embedded = self.state.embedded_playtest_input_captured();
+                        #[cfg(not(feature = "editor"))]
                         let resumable_embedded = false;
                         if self.state.bus.is_some()
                             && (self.state.current_game.is_some() || resumable_embedded)
@@ -1413,23 +1436,16 @@ impl ApplicationHandler for Shell {
                             self.host_input.clear();
                         }
                         MenuOutcome::Quit => {
-                            self.state.stop_input_recording_if_active();
-
-                            self.state.flush_pending_input_profile_capture();
-                            self.state.stop_examples_build();
-                            if let Err(e) = self.state.flush_memcard_port1() {
-                                eprintln!("[frontend] memcard flush on quit: {e}");
+                            if self.state.close_allowed() {
+                                self.state.shut_down_for_exit();
+                                event_loop.exit();
+                                return;
                             }
-
-                            if let Err(e) = self.state.save_settings() {
-                                eprintln!("[frontend] settings save on quit: {e}");
-                            }
-                            event_loop.exit();
-                            return;
                         }
                     }
                 }
-
+                #[cfg(feature = "editor")]
+                self.state.poll_embedded_playtest_build();
                 self.state.poll_examples_build();
                 profile.input_ms = elapsed_ms(input_start);
 
@@ -1470,21 +1486,21 @@ impl ApplicationHandler for Shell {
                 // is exactly what the replay path falls back to.
                 let active_frame_dt =
                     guest_frame_dt(self.state.bus.as_ref().map(|bus| bus.vblank_period()));
+                let pacing = FramePacing::for_workspace(
+                    self.state.workspace.is_editor(),
+                    self.state.settings.video.smooth_slow_host,
+                );
                 let frames_to_run = if self.state.running {
                     self.emu_frame_accum = (self.emu_frame_accum + dt).min(0.25);
-                    let owed =
-                        ((self.emu_frame_accum / active_frame_dt) as u32).min(MAX_CATCHUP_FRAMES);
-                    if self.state.settings.video.smooth_slow_host {
-                        // Run only what fits in one paint and forgive the
-                        // rest: the game slows down, the picture does not.
-                        let fit = self.pace.frames_per_paint(active_frame_dt);
-                        if owed > fit {
-                            self.emu_frame_accum = fit as f32 * active_frame_dt;
-                        }
-                        owed.min(fit)
-                    } else {
-                        owed
-                    }
+                    let plan =
+                        pacing.plan(self.emu_frame_accum, active_frame_dt, &self.pace, || {
+                            gfx.window
+                                .current_monitor()
+                                .and_then(|monitor| monitor.refresh_rate_millihertz())
+                                .is_some_and(|mhz| mhz as f32 / 1000.0 * active_frame_dt < 0.95)
+                        });
+                    self.emu_frame_accum = plan.accum;
+                    plan.frames
                 } else {
                     0
                 };
@@ -1651,7 +1667,8 @@ impl ApplicationHandler for Shell {
                         profile.add_guest_profile(guest_profile);
                         profile.audio_ms += elapsed_ms(audio_start);
                     }
-                    self.emu_frame_accum -= (frames_run as f32) * active_frame_dt;
+                    self.emu_frame_accum =
+                        pacing.settle(self.emu_frame_accum, active_frame_dt, frames_run);
                 } else {
                     self.emu_frame_accum = 0.0;
                 }
@@ -1825,7 +1842,7 @@ impl ApplicationHandler for Shell {
                 // frame so an open sidebar shows this frame, and only when
                 // the sidebar can actually be seen -- a hidden panel costs
                 // nothing at all.
-                if state.panels.debug_sidebar && state.bus.is_some() {
+                if state.guest_panel_visible() && state.bus.is_some() {
                     let vram_upload_start = Instant::now();
                     gfx.prepare_vram();
                     profile.vram_upload_ms = elapsed_ms(vram_upload_start);
@@ -1838,10 +1855,91 @@ impl ApplicationHandler for Shell {
                 // stats every material file on disk for hot-reload, which
                 // is pure per-frame syscall churn while playing a game in
                 // the emulator workspace.
+                #[cfg(feature = "editor")]
+                if state.workspace.is_editor()
+                    && !state.embedded_playtest_running()
+                    && state.editor.editor_3d_preview_visible()
+                {
+                    let editor_camera = state.editor.viewport_3d_camera();
+                    let editor_preview_bounds = state.editor.preview_bounds_enabled();
+                    let editor_show_grid = state.editor.show_grid_enabled();
+                    let editor_show_brush_surface_grid =
+                        state.editor.show_brush_surface_grid_enabled();
+                    let editor_grid_units = state.editor.grid_snap_units();
+                    let editor_bsp_leak_path = state.editor.visible_bsp_leak_path();
+                    let editor_bsp_leak_opening = state.editor.visible_bsp_leak_opening();
+                    let editor_show_lights = state.editor.show_lights_enabled();
+                    let editor_hidden_scene_nodes = state.editor.hidden_scene_nodes();
+                    let editor_selected = state.editor.selected_node_id();
+                    let editor_character_motion = state.editor.character_motion_preview();
+                    let editor_root = state.editor.project_root();
+                    let editor_selected_bounds = state.editor.selected_bounds_3d();
+                    let editor_entity_bounds = state.editor.collect_entity_bounds();
+                    let editor_hovered_entity = state.editor.hovered_entity_node();
+                    gfx.render_editor_preview(
+                        state.editor.project(),
+                        editor_root,
+                        editor_camera,
+                        editor_preview_bounds,
+                        editor_show_grid,
+                        editor_show_brush_surface_grid,
+                        editor_grid_units,
+                        editor_bsp_leak_path,
+                        editor_bsp_leak_opening,
+                        editor_show_lights,
+                        editor_hidden_scene_nodes,
+                        editor_selected,
+                        editor_character_motion,
+                        editor_selected_bounds,
+                        &editor_entity_bounds,
+                        editor_hovered_entity,
+                    );
+                }
+                #[cfg(feature = "editor")]
+                let editor_camera_preview = if !state.embedded_playtest_running() {
+                    state.editor.selected_camera_preview_request()
+                } else {
+                    None
+                };
+                #[cfg(feature = "editor")]
+                if let Some(request) = editor_camera_preview {
+                    let editor_hidden_scene_nodes = state.editor.hidden_scene_nodes();
+                    let editor_root = state.editor.project_root();
+                    gfx.render_editor_camera_preview(
+                        state.editor.project(),
+                        editor_root,
+                        request,
+                        editor_hidden_scene_nodes,
+                    );
+                }
 
                 let vram_tex = gfx.vram_texture_id();
                 let (display_tex, display_uv) = frontend_display(state.bus.as_ref(), gfx);
-
+                #[cfg(feature = "editor")]
+                let editor_viewport = {
+                    let mut editor_viewport = if state.embedded_playtest_running() {
+                        psxed_ui::EditorViewport3dPresentation::play(
+                            display_tex,
+                            display_uv,
+                            state.editor_playtest_input_tape_status(),
+                            editor_play_metrics(state),
+                            state
+                                .bus
+                                .as_ref()
+                                .is_some_and(|bus| bus.gpu.wireframe_enabled),
+                        )
+                    } else {
+                        psxed_ui::EditorViewport3dPresentation::edit(
+                            gfx.editor_hw_texture_id(),
+                            gfx.editor_overlay_lines().to_vec(),
+                        )
+                    };
+                    if editor_camera_preview.is_some() {
+                        editor_viewport =
+                            editor_viewport.with_camera_preview(gfx.camera_preview_texture_id());
+                    }
+                    editor_viewport
+                };
                 let mut pointer_menu_outcome = None;
                 profile.egui = gfx.render(|ctx| {
                     app::build_ui(
@@ -1850,6 +1948,8 @@ impl ApplicationHandler for Shell {
                         input_router,
                         vram_tex,
                         display_tex,
+                        #[cfg(feature = "editor")]
+                        editor_viewport.clone(),
                         display_uv,
                         dt,
                     );
@@ -1862,22 +1962,20 @@ impl ApplicationHandler for Shell {
                 });
                 match pointer_menu_outcome {
                     Some(MenuOutcome::ClearHostKeyboardInput) => self.host_input.clear(),
-                    Some(MenuOutcome::Quit) => {
-                        state.stop_input_recording_if_active();
-
-                        state.flush_pending_input_profile_capture();
-                        state.stop_examples_build();
-                        if let Err(error) = state.flush_memcard_port1() {
-                            eprintln!("[frontend] memcard flush on quit: {error}");
-                        }
-
-                        if let Err(error) = state.save_settings() {
-                            eprintln!("[frontend] settings save on quit: {error}");
-                        }
+                    Some(MenuOutcome::Quit) if state.close_allowed() => {
+                        state.shut_down_for_exit();
                         event_loop.exit();
                         return;
                     }
+                    Some(MenuOutcome::Quit) => {}
                     Some(MenuOutcome::None) | None => {}
+                }
+                // File > Quit in the editor asks egui to close the window.
+                // Take the same path as the window's close button.
+                if gfx.take_close_requested() && state.close_allowed() {
+                    state.shut_down_for_exit();
+                    event_loop.exit();
+                    return;
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 for path in state.take_pending_savestate_thumbnails() {
@@ -1892,7 +1990,10 @@ impl ApplicationHandler for Shell {
                         }
                     }
                 }
-
+                #[cfg(feature = "editor")]
+                if let Some(request) = state.editor.take_playtest_request() {
+                    state.handle_editor_playtest_request(request);
+                }
                 profile.total_ms = elapsed_ms(profile_start);
                 self.pace.note(&profile);
                 #[cfg(target_arch = "wasm32")]
@@ -2054,6 +2155,16 @@ fn web_window_logical_size() -> Option<winit::dpi::LogicalSize<f64>> {
     Some(winit::dpi::LogicalSize::new(w.max(1.0), h.max(1.0)))
 }
 
+/// Esc belongs to the editor while its workspace is showing: it cancels a
+/// paste, a clip, a rename or a popup there, and must not also open the
+/// emulator overlay. Embedded play that has captured the keyboard keeps the
+/// "PS button" meaning, and an overlay that is already open still closes on
+/// Esc. The editor reaches the overlay through its own menu entry instead.
+#[cfg(feature = "editor")]
+fn editor_owns_escape(editor_workspace: bool, play_captured: bool, menu_open: bool) -> bool {
+    editor_workspace && !play_captured && !menu_open
+}
+
 /// OR a keypress into the next-frame Menu input. `Escape` both toggles
 /// the overlay and acts as back when navigating; the combined semantics
 /// are handled inside `MenuState::update`.
@@ -2164,26 +2275,65 @@ fn hw_display_uv(area: emulator_core::DisplayArea) -> egui::Rect {
     )
 }
 
+#[cfg(feature = "editor")]
+fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytestMetrics> {
+    let latest = state.profiler.latest()?;
+    let sample = state
+        .profiler
+        .live_average()
+        .or_else(|| state.profiler.average())
+        .unwrap_or(latest);
+    let task_ms_per_hit = |task_id: u16| {
+        let task_id = task_id as usize;
+        let hits = sample.guest.task_hits[task_id];
+        if hits > 0.0 {
+            sample.guest.task_cycles[task_id] / hits / PSX_CYCLES_PER_MS
+        } else {
+            0.0
+        }
+    };
+    let task_max_ms =
+        |task_id: u16| sample.guest.task_max_cycles[task_id as usize] / PSX_CYCLES_PER_MS;
+    let recent_counter = |id: u16| profile_counter_u32(sample.guest.counter_max_value(id as usize));
+    Some(psxed_ui::EditorPlaytestMetrics {
+        fixed_update_task_ms: task_ms_per_hit(task::FIXED_UPDATE),
+        fixed_update_task_max_ms: task_max_ms(task::FIXED_UPDATE),
+        visual_render_task_ms: task_ms_per_hit(task::VISUAL_RENDER),
+        visual_render_task_max_ms: task_max_ms(task::VISUAL_RENDER),
+        vram_caps_full: [
+            recent_counter(counter::VRAM_SLOT_TABLE_FULL),
+            recent_counter(counter::VRAM_WINDOW_FULL),
+            recent_counter(counter::VRAM_CLUT_FULL),
+            recent_counter(counter::VRAM_UPLOAD_QUEUE_FULL),
+        ],
+    })
+}
+
+#[cfg(feature = "editor")]
+fn profile_counter_u32(value: f32) -> u32 {
+    if value.is_finite() && value > 0.0 {
+        value.round().min(u32::MAX as f32) as u32
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn slow_host_pacing_runs_what_fits_in_a_frame_period() {
-        let dt = 1.0 / 60.0;
-        let unmeasured = super::HostPace::default();
-        assert_eq!(unmeasured.frames_per_paint(dt), super::MAX_CATCHUP_FRAMES);
-        let fast = super::HostPace {
-            frame_ms: 5.0,
-            other_ms: 1.0,
-        };
-        assert_eq!(fast.frames_per_paint(dt), 3);
-        let slow = super::HostPace {
-            frame_ms: 25.0,
-            other_ms: 3.0,
-        };
-        assert_eq!(slow.frames_per_paint(dt), 1, "always at least one frame");
-    }
-
     use super::*;
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn escape_stays_with_the_editor_unless_play_or_the_overlay_has_it() {
+        // Editor showing, nothing captured, overlay closed: Esc is the editor's.
+        assert!(editor_owns_escape(true, false, false));
+        // Embedded play holding the keyboard keeps the "PS button" meaning.
+        assert!(!editor_owns_escape(true, true, false));
+        // An open overlay still closes on Esc.
+        assert!(!editor_owns_escape(true, false, true));
+        // The emulator workspace always toggles the overlay.
+        assert!(!editor_owns_escape(false, false, false));
+    }
 
     #[test]
     fn guest_frame_cadence_tracks_emulated_vblank_period() {

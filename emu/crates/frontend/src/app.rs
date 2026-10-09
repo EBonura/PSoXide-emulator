@@ -4,7 +4,8 @@
 //! join once the GPU subsystem lands) and drives the per-frame UI build.
 
 use std::collections::{BTreeSet, VecDeque};
-
+#[cfg(feature = "editor")]
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 
@@ -16,9 +17,20 @@ use psoxide_settings::savestate::SaveStateV1;
 use psoxide_settings::{ConfigPaths, Library, LibraryEntry, Settings};
 use psx_iso::{Disc, Exe, SECTOR_BYTES};
 use psx_trace::InstructionRecord;
+#[cfg(feature = "editor")]
+use psxed_project::EditorWorkspaceView;
+#[cfg(feature = "editor")]
+use psxed_ui::{EditorPlaytestStatus, EditorWorkspace};
 
 use crate::burn::{validate_burn_target_path, BurnState};
-
+#[cfg(feature = "editor")]
+use crate::embedded_playtest::EmbeddedPlaytestState;
+#[cfg(feature = "editor")]
+use crate::playtest_disc::{
+    build_embedded_playtest_disc, build_log_failure_detail, copy_project_disc,
+    editor_playtest_build_log_path, project_baked_disc_path, project_build_menu_metadata,
+    project_disc_volume_id, DEFAULT_EMBEDDED_PLAYTEST_VOLUME_ID,
+};
 use crate::playtest_input::{PlaytestInputEvent, PlaytestInputTape, Port1PadSample};
 use crate::ui;
 use crate::ui::memory::MemoryView;
@@ -125,16 +137,38 @@ impl TextureFilter {
 pub enum Workspace {
     /// Emulator/debugger workspace.
     Emulator,
+    /// Mouse/keyboard editor workspace.
+    #[cfg(feature = "editor")]
+    Editor,
 }
 
 impl Workspace {
     /// True when editor panels own the central UI. Always false without the
     /// editor feature (there is no editor workspace to switch into).
     pub const fn is_editor(self) -> bool {
+        #[cfg(feature = "editor")]
+        {
+            matches!(self, Self::Editor)
+        }
+        #[cfg(not(feature = "editor"))]
         {
             false
         }
     }
+}
+
+/// Work to perform after the shared editor-playtest MIPS build exits.
+#[cfg(feature = "editor")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EditorBuildCompletion {
+    /// Wrap the built runtime into a CUE/BIN disc and load it into the
+    /// embedded editor viewport.
+    RunEmbedded { volume_id: String },
+    /// Copy the built CUE/BIN disc into the active project's baked output folder.
+    ExportProject {
+        dest_path: PathBuf,
+        volume_id: String,
+    },
 }
 
 /// Top-level app state. Owns the emulator state directly -- no Arc/Mutex,
@@ -249,14 +283,36 @@ struct PendingInputProfileCapture {
 pub struct AppState {
     /// Active host workspace.
     pub workspace: Workspace,
-
+    /// Embedded editor workspace. Kept alive while hidden so editor
+    /// state survives a quick trip back to the Menu/emulator.
+    #[cfg(feature = "editor")]
+    pub editor: EditorWorkspace,
+    /// In-process playtest launched from the editor viewport.
+    #[cfg(feature = "editor")]
+    pub embedded_playtest: EmbeddedPlaytestState,
     /// Video-frame-exact port-1 recording/replay shared by ordinary emulator
     /// sessions, headless runs and embedded editor playtests.
     playtest_input_tape: PlaytestInputTape,
     /// Whole-run profiler capture waiting for the current host sample to be
     /// recorded before it is persisted beside its input tape.
     pending_input_profile_capture: Option<PendingInputProfileCapture>,
-
+    /// Editor project directory observed at the last
+    /// [`AppState::sync_embedded_playtest_with_editor_project`]
+    /// call. When the editor's current project_dir diverges, the
+    /// embedded playtest belongs to a different project and gets
+    /// stopped so the viewport doesn't keep showing stale output.
+    #[cfg(feature = "editor")]
+    editor_project_dir_seen: PathBuf,
+    /// Deferred action attached to the currently running editor build.
+    #[cfg(feature = "editor")]
+    editor_build_completion: Option<EditorBuildCompletion>,
+    /// Byte position already mirrored from the active compiler log into the
+    /// editor's bottom Console.
+    #[cfg(feature = "editor")]
+    editor_build_log_offset: u64,
+    /// Incomplete final compiler line retained until its newline arrives.
+    #[cfg(feature = "editor")]
+    editor_build_log_pending: Vec<u8>,
     /// Background `make examples` job launched from the debug sidebar or an
     /// unbuilt example row.
     examples_build_child: Option<Child>,
@@ -456,6 +512,16 @@ impl AppState {
         // The new model is project = directory under
         // editor/projects/. No automated migration; a stale
         // workspace.ron is just a starter snapshot.
+        #[cfg(feature = "editor")]
+        {
+            let legacy_workspace = paths.editor_dir().join("workspace.ron");
+            if legacy_workspace.is_file() {
+                eprintln!(
+                    "[frontend] legacy editor/workspace.ron at {} ignored - projects now live under editor/projects/",
+                    legacy_workspace.display()
+                );
+            }
+        }
 
         let settings = match Settings::load(&paths.settings_file()) {
             Ok(s) => s,
@@ -465,6 +531,25 @@ impl AppState {
             }
         };
 
+        #[cfg(feature = "editor")]
+        let editor = {
+            let preferred_dir = settings
+                .editor
+                .last_project_dir
+                .clone()
+                .unwrap_or_else(psxed_project::new_project_template_dir);
+            EditorWorkspace::open_directory(&preferred_dir)
+                .or_else(|first_err| {
+                    eprintln!(
+                        "[frontend] open editor project at {} failed: {first_err}; falling back to BSP starter",
+                        preferred_dir.display()
+                    );
+                    EditorWorkspace::open_directory(psxed_project::new_project_template_dir())
+                })
+                .unwrap_or_else(|err| {
+                    panic!("open BSP starter project: {err}");
+                })
+        };
         let library = Library::load_or_empty(&paths.library_file());
 
         // Legacy env-var side-load path: if PSOXIDE_EXE or
@@ -478,13 +563,24 @@ impl AppState {
         let autorun = bus.is_some() && env_flag("PSOXIDE_AUTORUN");
 
         let initial_gpu_resync_generation = if bus.is_some() { 1 } else { 0 };
-
+        #[cfg(feature = "editor")]
+        let editor_project_dir_seen = editor.project_dir().to_path_buf();
         let mut out = Self {
             workspace: Workspace::Emulator,
-
+            #[cfg(feature = "editor")]
+            editor,
+            #[cfg(feature = "editor")]
+            embedded_playtest: EmbeddedPlaytestState::default(),
             playtest_input_tape: PlaytestInputTape::default(),
             pending_input_profile_capture: None,
-
+            #[cfg(feature = "editor")]
+            editor_project_dir_seen,
+            #[cfg(feature = "editor")]
+            editor_build_completion: None,
+            #[cfg(feature = "editor")]
+            editor_build_log_offset: 0,
+            #[cfg(feature = "editor")]
+            editor_build_log_pending: Vec::new(),
             examples_build_child: None,
             burn: BurnState::default(),
             panels: PanelVisibility::startup(),
@@ -559,9 +655,10 @@ impl AppState {
         out.menu
             .set_menu_opacity(out.settings.video.menu_opacity_pct);
         out.menu.set_ui_scale(out.settings.video.ui_scale_pct);
+        #[cfg(feature = "editor")]
+        out.menu.sync_editor_label(out.workspace.is_editor());
         out.menu
             .set_smooth_slow_host(out.settings.video.smooth_slow_host);
-
         out.sync_menu_settings_paths();
         out.sync_menu_controls();
         // Dev/preview hook in the PSOXIDE_AUTORUN tradition: open the
@@ -615,6 +712,12 @@ impl AppState {
         &mut self,
         logs: Vec<emulator_core::telemetry::GuestDebugLogLine>,
     ) {
+        #[cfg(feature = "editor")]
+        self.editor.append_play_debug_terminal_lines(
+            logs.into_iter()
+                .map(|line| format!("[f{} c{}] {}", line.frame, line.cycles, line.text)),
+        );
+        #[cfg(not(feature = "editor"))]
         let _ = logs;
     }
 
@@ -770,11 +873,12 @@ impl AppState {
         self.exec_history.clear();
         self.gpr_snapshot = None;
         self.current_game = Some(entry.clone());
-        self.current_game_hash = game_hash;
         self.memcard_port1_path = memcard_port1_path;
+        self.current_game_hash = game_hash;
         self.refresh_save_state_menu_rows();
         self.menu.sync_run_label(true);
-
+        #[cfg(feature = "editor")]
+        self.menu.sync_editor_label(false);
         self.status_message = Some((
             format!("Launched: {} ({boot_mode})", entry.title),
             STATUS_MESSAGE_TTL_SECS,
@@ -1502,6 +1606,22 @@ impl AppState {
                     // metadata, which lives in the editor crates. Without the
                     // editor feature there is no project metadata to read, so
                     // project CUEs are skipped.
+                    #[cfg(feature = "editor")]
+                    {
+                        let root = project_root.as_ref().expect("checked above");
+                        if let Some(metadata) = project_build_menu_metadata(&e.path, root) {
+                            if !metadata.current {
+                                continue;
+                            }
+                            projects.push(MenuLibraryItem {
+                                id: project_build_launch_id(&e.path),
+                                title: metadata.title,
+                                subtitle: metadata.subtitle,
+                                burnable: true,
+                                launchable: true,
+                            });
+                        }
+                    }
                 }
                 // Retail CUEs are not shown directly -- their BIN is.
                 // CCDs are shown directly because their `.img`
@@ -1514,29 +1634,11 @@ impl AppState {
                     {
                         continue;
                     }
-                    // Launch by path so copies with the same disc ID in
-                    // different folders remain individually selectable.
-                    let (title, launch_path) =
-                        if let Some((cue_title, cue_path)) = cue_owns_bin.get(&e.path) {
-                            if !cue_already_listed.insert(cue_path.clone()) {
-                                continue;
-                            }
-                            (cue_title.clone(), cue_path.as_path())
-                        } else {
-                            (e.title.clone(), e.path.as_path())
-                        };
-                    games.push(MenuLibraryItem {
-                        folder: launch_path
-                            .parent()
-                            .and_then(|parent| parent.strip_prefix(&game_root).ok())
-                            .unwrap_or_else(|| std::path::Path::new(""))
-                            .to_path_buf(),
-                        id: path_launch_id(launch_path),
-                        title,
-                        subtitle: format_subtitle(e),
-                        burnable: false,
-                        launchable: true,
-                    });
+                    if let Some(item) =
+                        game_menu_item(e, &cue_owns_bin, &mut cue_already_listed, &game_root)
+                    {
+                        games.push(item);
+                    }
                 }
                 GameKind::Exe => {
                     if project_root
@@ -2292,6 +2394,82 @@ impl AppState {
         String::new()
     }
 
+    /// Whether the window may close now. With unsaved editor edits this
+    /// opens the editor's Save / Discard / Cancel prompt (showing the editor
+    /// workspace if needed) and returns false; answering the prompt asks to
+    /// close the window again.
+    pub fn close_allowed(&mut self) -> bool {
+        #[cfg(feature = "editor")]
+        {
+            if !self.editor.request_close() {
+                if !self.workspace.is_editor() {
+                    self.open_editor_workspace();
+                }
+                // The prompt is drawn by the editor; keep the overlay out of
+                // its way.
+                self.menu.open = false;
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Remember the open editor project so the next launch reopens it.
+    #[cfg(feature = "editor")]
+    fn remember_editor_project_dir(&mut self) {
+        let current = Some(self.editor.project_dir().to_path_buf());
+        if self.settings.editor.last_project_dir != current {
+            self.settings.editor.last_project_dir = current;
+        }
+    }
+
+    /// Everything that must happen before the process exits, shared by the
+    /// window close button, File > Quit in the editor (egui's
+    /// `ViewportCommand::Close`) and the overlay menu's Quit, so the three
+    /// cannot drift apart.
+    pub fn shut_down_for_exit(&mut self) {
+        self.stop_input_recording_if_active();
+        #[cfg(feature = "editor")]
+        self.stop_embedded_playtest();
+        self.flush_pending_input_profile_capture();
+        self.stop_examples_build();
+        // Flush any dirty memory card so save progress survives a
+        // window-close. A hard crash still loses whatever hasn't been
+        // flushed.
+        if let Err(e) = self.flush_memcard_port1() {
+            eprintln!("[frontend] memcard flush on exit: {e}");
+        }
+        // The project itself is not saved here: closing with unsaved edits
+        // went through the editor's Save / Discard / Cancel prompt
+        // (`close_allowed`), which saved or discarded them.
+        #[cfg(feature = "editor")]
+        self.remember_editor_project_dir();
+        // Persist current settings (library root, etc.) so the next launch
+        // picks up any user tweaks without needing a manual save step.
+        if let Err(e) = self.save_settings() {
+            eprintln!("[frontend] settings save on exit: {e}");
+        }
+    }
+
+    /// Persist the embedded editor project if it has unsaved edits,
+    /// and remember which project directory is active so the next
+    /// launch reopens it.
+    #[cfg(feature = "editor")]
+    pub fn save_editor_project(&mut self) -> Result<bool, String> {
+        let saved = self
+            .editor
+            .save_if_dirty()
+            .map_err(|e| format!("save editor project: {e}"))?;
+        let current = Some(self.editor.project_dir().to_path_buf());
+        if self.settings.editor.last_project_dir != current {
+            self.settings.editor.last_project_dir = current;
+            if let Err(e) = self.save_settings() {
+                eprintln!("[frontend] {e}");
+            }
+        }
+        Ok(saved)
+    }
+
     /// Cycle the menu backdrop opacity through a few presets, keep the Menu
     /// in sync, and persist immediately.
     pub fn cycle_menu_opacity(&mut self) {
@@ -2352,8 +2530,777 @@ impl AppState {
     }
 }
 
+/// Editor-workspace orchestration: entering/leaving the editor, the embedded
+/// Play state machine, project builds, and input-tape recording/replay. The
+/// whole surface drops out without the `editor` feature.
+#[cfg(feature = "editor")]
+const DEFAULT_EMBEDDED_PLAYTEST_FEATURES: &str = "cd-stream-bench";
+
+#[cfg(feature = "editor")]
+impl AppState {
+    /// Configure a deterministic native-editor launch before the event loop
+    /// starts. This is the implementation behind the frontend's `--editor`
+    /// development flags; it never depends on menu selection or synthetic
+    /// keyboard input.
+    pub fn open_editor_startup(
+        &mut self,
+        project_dir: Option<PathBuf>,
+        view: Option<EditorWorkspaceView>,
+        resource_selector: Option<&str>,
+    ) -> Result<(), String> {
+        if let Some(project_dir) = project_dir {
+            let project_dir = if project_dir.is_absolute() {
+                project_dir
+            } else {
+                repo_root_dir().join(project_dir)
+            };
+            self.editor = EditorWorkspace::open_directory(&project_dir).map_err(|error| {
+                format!("open editor project at {}: {error}", project_dir.display())
+            })?;
+            self.editor_project_dir_seen = self.editor.project_dir().to_path_buf();
+        }
+
+        if let Some(view) = view {
+            self.editor.show_workspace(view);
+            if self.editor.active_workspace_view() != view {
+                return Err(format!("editor failed to select startup view {view:?}"));
+            }
+        }
+
+        if let Some(selector) = resource_selector {
+            if view != Some(EditorWorkspaceView::Animation) {
+                return Err("--editor-resource requires --editor-view animation".to_string());
+            }
+            let numeric_id = selector.parse::<u64>().ok();
+            let resource_id = self
+                .editor
+                .project()
+                .resources
+                .iter()
+                .find(|resource| {
+                    numeric_id.is_some_and(|id| resource.id.raw() == id)
+                        || resource.name == selector
+                })
+                .or_else(|| {
+                    self.editor
+                        .project()
+                        .resources
+                        .iter()
+                        .find(|resource| resource.name.eq_ignore_ascii_case(selector))
+                })
+                .map(|resource| resource.id)
+                .ok_or_else(|| format!("editor resource {selector:?} was not found"))?;
+            if !self.editor.open_animation_viewer_for_resource(resource_id) {
+                return Err(format!(
+                    "editor resource {selector:?} cannot open in Animation Studio"
+                ));
+            }
+            if !self
+                .editor
+                .animation_viewer_resource_is_focused(resource_id)
+            {
+                return Err(format!(
+                    "Animation Studio failed to focus editor resource {selector:?}"
+                ));
+            }
+        }
+
+        self.open_editor_workspace();
+        self.menu.open = false;
+        self.status_message_set("Editor opened from deterministic startup flags");
+        Ok(())
+    }
+
+    /// Select the BSP workspace's orthographic viewport for the native
+    /// `--editor-view top` startup route.
+    pub fn show_editor_room_orthographic(&mut self) {
+        self.editor.show_room_orthographic();
+    }
+
+    /// Enter the embedded editor workspace.
+    pub fn open_editor_workspace(&mut self) {
+        self.running = false;
+        self.workspace = Workspace::Editor;
+        self.menu.sync_run_label(false);
+        self.menu.sync_editor_label(true);
+        self.status_message_set("Editor workspace open");
+    }
+
+    /// Return from the editor workspace to the emulator view.
+    pub fn close_editor_workspace(&mut self) {
+        self.stop_embedded_playtest();
+        let save_result = self.save_editor_project();
+        self.workspace = Workspace::Emulator;
+        self.menu.sync_editor_label(false);
+        match save_result {
+            Ok(true) => self.status_message_set("Returned to emulator workspace (editor saved)"),
+            Ok(false) => self.status_message_set("Returned to emulator workspace"),
+            Err(e) => {
+                eprintln!("[frontend] {e}");
+                self.status_message_set("Returned to emulator workspace (editor save failed)");
+            }
+        }
+    }
+
+    /// Toggle the embedded editor workspace.
+    pub fn toggle_editor_workspace(&mut self) {
+        if self.workspace.is_editor() {
+            self.close_editor_workspace();
+        } else {
+            self.open_editor_workspace();
+        }
+    }
+
+    /// Editor-facing status mirror for the embedded play controls.
+    pub fn editor_playtest_status(&self) -> EditorPlaytestStatus {
+        self.embedded_playtest.editor_status()
+    }
+
+    /// Editor-facing input-tape summary for the play viewport overlay.
+    pub fn editor_playtest_input_tape_status(&self) -> psxed_ui::EditorPlaytestTapeStatus {
+        self.playtest_input_tape.editor_status()
+    }
+
+    /// Resolve the persistent input tape for the current editor project.
+    fn editor_playtest_input_tape_path(&self) -> PathBuf {
+        let stem = self
+            .editor
+            .project_dir()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| psxed_project::project_file_stem(&self.editor.project().name));
+        self.paths
+            .editor_dir()
+            .join("playtest_tapes")
+            .join(format!("{stem}.pxtape"))
+    }
+
+    /// True when the editor viewport is currently the live game.
+    pub fn embedded_playtest_running(&self) -> bool {
+        self.embedded_playtest.is_running()
+    }
+
+    /// True when keyboard/gamepad input should be routed to the
+    /// embedded game even though the editor workspace is visible.
+    pub fn embedded_playtest_input_captured(&self) -> bool {
+        self.embedded_playtest.input_captured()
+    }
+
+    /// Cook the active project while preserving the cooker's stderr output
+    /// and mirroring the same progress lines into the editor Console.
+    fn cook_editor_playtest_to_disk(&mut self) -> Result<String, String> {
+        let (result, lines) =
+            psxed_project::playtest::capture_cook_output(|| self.editor.cook_playtest_to_disk());
+        self.editor.append_console_lines(lines);
+        result
+    }
+
+    /// Build and run the active editor project: cook assets, spawn
+    /// the existing MIPS build target, wrap the EXE into a bootable
+    /// disc image, then launch that disc. The build is asynchronous;
+    /// call [`Self::poll_embedded_playtest_build`] once per frame to
+    /// load the resulting disc when it exits successfully.
+    pub fn start_embedded_playtest(&mut self) {
+        self.stop_embedded_playtest();
+        self.editor.set_status("Play: cooking assets...");
+        self.editor
+            .append_console_lines(["[cook] Play: cooking assets..."]);
+        if let Err(error) = self.save_editor_project() {
+            let message = format!("Embedded Play failed: {error}");
+            self.editor.append_console_lines([message]);
+            self.editor
+                .set_status("Embedded Play failed while saving — see Console");
+            self.embedded_playtest.fail();
+            return;
+        }
+        let cook_status = match self.cook_editor_playtest_to_disk() {
+            Ok(status) => status,
+            Err(error) => {
+                let message = format!("Embedded Play failed while cooking assets: {error}");
+                self.editor.append_console_lines([message]);
+                self.editor
+                    .set_status("Embedded Play cook failed — see Console");
+                self.embedded_playtest.fail();
+                return;
+            }
+        };
+        self.editor
+            .append_console_lines([format!("[cook] {cook_status}")]);
+        self.editor.set_status("Play: compiling PS1 runtime...");
+
+        let volume_id = project_disc_volume_id(&self.editor.project().name);
+        if let Err(error) =
+            self.spawn_editor_playtest_build(EditorBuildCompletion::RunEmbedded { volume_id })
+        {
+            let message = format!("Embedded Play build failed: {error}");
+            self.editor.append_console_lines([message]);
+            self.editor
+                .set_status("Embedded Play build failed — see Console");
+            self.embedded_playtest.fail();
+        }
+    }
+
+    /// Build the active project by cooking assets, compiling the runtime,
+    /// and exporting a CUE/BIN disc into the project folder so Projects
+    /// can launch it without opening the editor.
+    pub fn build_current_project_for_launcher(&mut self) {
+        self.stop_embedded_playtest();
+        self.editor
+            .set_status("Building project: cooking assets...");
+        self.editor
+            .append_console_lines(["[cook] Project build: cooking assets..."]);
+        if let Err(error) = self.save_editor_project() {
+            let message = format!("Project build failed: {error}");
+            self.editor.append_console_lines([message]);
+            self.editor
+                .set_status("Project build failed while saving — see Console");
+            self.embedded_playtest.fail();
+            return;
+        }
+        let dest_path =
+            project_baked_disc_path(self.editor.project_dir(), &self.editor.project().name);
+        let volume_id = project_disc_volume_id(&self.editor.project().name);
+        let cook_status = match self.cook_editor_playtest_to_disk() {
+            Ok(status) => status,
+            Err(error) => {
+                let message = format!("Project build failed while cooking assets: {error}");
+                self.editor.append_console_lines([message]);
+                self.editor
+                    .set_status("Project build cook failed — see Console");
+                self.embedded_playtest.fail();
+                return;
+            }
+        };
+        self.editor
+            .append_console_lines([format!("[cook] {cook_status}")]);
+        self.editor.set_status("Building project PS1 runtime...");
+
+        if let Err(error) = self.spawn_editor_playtest_build(EditorBuildCompletion::ExportProject {
+            dest_path,
+            volume_id,
+        }) {
+            let message = format!("Project build failed: {error}");
+            self.editor.append_console_lines([message]);
+            self.editor.set_status("Project build failed — see Console");
+            self.embedded_playtest.fail();
+        }
+    }
+
+    fn begin_editor_build_log(&mut self, label: &str, log_path: &Path) {
+        self.editor_build_log_offset = 0;
+        self.editor_build_log_pending.clear();
+        self.editor
+            .append_console_lines([format!("[build] {label} started · {}", log_path.display())]);
+    }
+
+    fn poll_editor_build_log(&mut self, flush_partial: bool) {
+        if self.editor_build_completion.is_none() {
+            return;
+        }
+        let log_path = editor_playtest_build_log_path();
+        let Ok(mut file) = std::fs::File::open(&log_path) else {
+            return;
+        };
+        let Ok(length) = file.metadata().map(|metadata| metadata.len()) else {
+            return;
+        };
+        if length < self.editor_build_log_offset {
+            self.editor_build_log_offset = 0;
+            self.editor_build_log_pending.clear();
+        }
+        if file
+            .seek(SeekFrom::Start(self.editor_build_log_offset))
+            .is_err()
+        {
+            return;
+        }
+        let mut bytes = Vec::new();
+        if file.read_to_end(&mut bytes).is_err() {
+            return;
+        }
+        self.editor_build_log_offset = self
+            .editor_build_log_offset
+            .saturating_add(bytes.len() as u64);
+        self.editor_build_log_pending.extend_from_slice(&bytes);
+
+        let complete_len = if flush_partial {
+            self.editor_build_log_pending.len()
+        } else {
+            self.editor_build_log_pending
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |newline| newline + 1)
+        };
+        if complete_len == 0 {
+            return;
+        }
+        let complete: Vec<u8> = self
+            .editor_build_log_pending
+            .drain(..complete_len)
+            .collect();
+        let mut lines = Vec::new();
+        for bytes in complete.split(|byte| *byte == b'\n') {
+            let line = String::from_utf8_lossy(bytes);
+            let line = line.trim_end_matches('\r');
+            if !line.is_empty() {
+                lines.push(line.to_string());
+            }
+        }
+        if !lines.is_empty() {
+            self.editor.append_console_lines(lines);
+        }
+    }
+
+    fn spawn_editor_playtest_build(
+        &mut self,
+        completion: EditorBuildCompletion,
+    ) -> Result<(), String> {
+        let workspace_root = repo_root_dir();
+        // Capture the build's stdout+stderr to a log file rather than
+        // discarding it, so a compile failure surfaces the actual error
+        // (not just "exit status: 2"). Both streams go to the same file so
+        // the log reads in source order.
+        let log_path = editor_playtest_build_log_path();
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let log_file = std::fs::File::create(&log_path)
+            .map_err(|error| format!("create build log {}: {error}", log_path.display()))?;
+        let log_stderr = log_file
+            .try_clone()
+            .map_err(|error| format!("clone build log handle: {error}"))?;
+        let build_label = match &completion {
+            EditorBuildCompletion::ExportProject { .. } => "Project build",
+            EditorBuildCompletion::RunEmbedded { .. } => "Embedded Play build",
+        };
+        self.begin_editor_build_log(build_label, &log_path);
+        let mut command = Command::new("make");
+        command
+            .arg("build-editor-playtest")
+            .current_dir(&workspace_root)
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(log_stderr));
+        // Keep ordinary embedded Play on the hardware-equivalent guest. The
+        // current v0.4 content has only a few KiB of static-RAM headroom and
+        // emulator telemetry moves the BSS start by 16 KiB, so silently adding
+        // it makes Play fail at link time even though the export build fits.
+        // Profiling remains opt-in by launching the editor with an explicit
+        // EDITOR_PLAYTEST_FEATURES value that includes emulator-telemetry.
+        if matches!(completion, EditorBuildCompletion::RunEmbedded { .. })
+            && std::env::var_os("EDITOR_PLAYTEST_FEATURES").is_none()
+            && std::env::var_os("EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS").is_none()
+        {
+            command.env(
+                "EDITOR_PLAYTEST_FEATURES",
+                DEFAULT_EMBEDDED_PLAYTEST_FEATURES,
+            );
+        }
+        let child = command
+            .spawn()
+            .map_err(|error| format!("spawn make: {error}"))?;
+        self.editor_build_completion = Some(completion);
+        self.embedded_playtest.start_building(child);
+        Ok(())
+    }
+
+    /// Poll the background build child, then either launch the wrapped
+    /// CUE/BIN playtest disc or export that disc as a project build.
+    pub fn poll_embedded_playtest_build(&mut self) {
+        self.poll_editor_build_log(false);
+        let wait_result = {
+            let Some(child) = self.embedded_playtest.building_child_mut() else {
+                return;
+            };
+            child.try_wait()
+        };
+        let status = match wait_result {
+            Ok(Some(status)) => status,
+            Ok(None) => return,
+            Err(error) => {
+                let message = format!("{} poll failed: {error}", self.editor_build_label());
+                self.poll_editor_build_log(true);
+                self.editor.append_console_lines([message]);
+                self.editor.set_status("Build process failed — see Console");
+                self.editor_build_completion = None;
+                self.embedded_playtest.fail();
+                return;
+            }
+        };
+        self.poll_editor_build_log(true);
+
+        if !status.success() {
+            // Surface the real compiler error from the captured build log,
+            // not just the bare exit status, plus where to read the full log.
+            let label = self.editor_build_label();
+            let log_path = editor_playtest_build_log_path();
+            let detail = build_log_failure_detail(&log_path);
+            let message = format!("{label} failed ({status}). {detail}");
+            self.editor.append_console_lines([message]);
+            self.editor
+                .set_status(format!("{label} failed — see Console"));
+            self.editor_build_completion = None;
+            self.embedded_playtest.fail();
+            return;
+        }
+        self.editor
+            .append_console_lines(["[build] PS1 runtime compilation complete"]);
+
+        let completion = self.editor_build_completion.take().unwrap_or_else(|| {
+            EditorBuildCompletion::RunEmbedded {
+                volume_id: DEFAULT_EMBEDDED_PLAYTEST_VOLUME_ID.to_string(),
+            }
+        });
+        match completion {
+            EditorBuildCompletion::RunEmbedded { volume_id } => {
+                self.editor
+                    .set_status("Embedded Play build complete; creating disc image...");
+                match self.load_embedded_playtest_disc(&volume_id) {
+                    Ok(()) => {
+                        self.embedded_playtest.start_running(true);
+                        self.running = true;
+                        self.menu.open = false;
+                        self.menu.sync_run_label(true);
+                        self.editor
+                            .set_status("Embedded Play running in the 3D viewport");
+                        self.status_message_set("Embedded Play running");
+                    }
+                    Err(error) => {
+                        let message = format!("Embedded Play load failed: {error}");
+                        self.editor.append_console_lines([message]);
+                        self.editor
+                            .set_status("Embedded Play load failed — see Console");
+                        self.embedded_playtest.fail();
+                    }
+                }
+            }
+            EditorBuildCompletion::ExportProject {
+                dest_path,
+                volume_id,
+            } => match self.export_project_build(dest_path, &volume_id) {
+                Ok(message) => {
+                    self.embedded_playtest.stop();
+                    self.editor.append_console_lines([message.clone()]);
+                    self.editor.set_status("Project build complete");
+                    self.status_message_set(message);
+                }
+                Err(error) => {
+                    let message = format!("Project build export failed: {error}");
+                    self.editor.append_console_lines([message]);
+                    self.editor
+                        .set_status("Project build export failed — see Console");
+                    self.embedded_playtest.fail();
+                }
+            },
+        }
+    }
+
+    fn editor_build_label(&self) -> &'static str {
+        match self.editor_build_completion.as_ref() {
+            Some(EditorBuildCompletion::ExportProject { .. }) => "Project build",
+            _ => "Embedded Play build",
+        }
+    }
+
+    /// Stop embedded play mode and return the editor viewport to the
+    /// authored 3D preview.
+    pub fn stop_embedded_playtest(&mut self) {
+        let tape_path = self.editor_playtest_input_tape_path();
+        #[cfg(not(target_arch = "wasm32"))]
+        let capture_phase = if self.playtest_input_tape.is_recording() {
+            Some("record")
+        } else if self.playtest_input_tape.is_replaying() {
+            Some("replay")
+        } else {
+            None
+        };
+        let stop_result = if self.playtest_input_tape.is_recording() {
+            self.finish_input_recording(&tape_path).map(Some)
+        } else {
+            self.playtest_input_tape.stop_replay();
+            Ok(None)
+        };
+        if let Err(error) = stop_result {
+            eprintln!("[frontend] stop input tape: {error}");
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(phase) = capture_phase {
+                self.queue_input_profile_capture(&tape_path, phase);
+            }
+        }
+        if let Some(mut child) = self.embedded_playtest.take_build_child() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.editor_build_completion = None;
+        self.embedded_playtest.stop();
+        self.running = false;
+        self.menu.sync_run_label(false);
+    }
+
+    /// Reconcile the embedded playtest with the editor's current
+    /// project directory. Called once per frame after the editor UI
+    /// runs so that switching project from the editor menu
+    /// implicitly stops a play session that belongs to the previous
+    /// project, instead of letting the viewport keep rendering it
+    /// against the wrong assets.
+    pub fn sync_embedded_playtest_with_editor_project(&mut self) {
+        let current = self.editor.project_dir();
+        if current == self.editor_project_dir_seen {
+            return;
+        }
+        self.editor_project_dir_seen = current.to_path_buf();
+        let status = self.editor_playtest_status();
+        if status == EditorPlaytestStatus::Idle {
+            return;
+        }
+        let was_active = status.is_active();
+        self.stop_embedded_playtest();
+        if was_active {
+            self.status_message_set("Embedded play stopped: project changed");
+        }
+    }
+
+    /// Capture input for the embedded game and resume emulation.
+    pub fn capture_embedded_playtest_input(&mut self) {
+        if self.embedded_playtest.capture_input() {
+            self.running = true;
+            self.menu.open = false;
+            self.menu.sync_run_label(true);
+            self.editor.set_status("Embedded Play input captured");
+        }
+    }
+
+    /// Release input capture from the embedded game and pause it.
+    pub fn release_embedded_playtest_input(&mut self) {
+        if self.embedded_playtest.release_input() {
+            self.running = false;
+            self.menu.open = true;
+            self.menu.sync_run_label(false);
+            self.editor
+                .set_status("Embedded Play paused; click viewport to resume");
+        }
+    }
+
+    fn start_embedded_playtest_input_recording(&mut self) {
+        if !self.embedded_playtest_running() {
+            self.editor
+                .set_status("Start Embedded Play before recording input");
+            return;
+        }
+        let start_poll = self
+            .bus
+            .as_ref()
+            .map(|bus| bus.port1_completed_polls())
+            .unwrap_or(0);
+        self.playtest_input_tape.start_recording(start_poll);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.begin_input_profile_capture();
+        let _ = self.embedded_playtest.capture_input();
+        self.running = true;
+        self.menu.open = false;
+        self.menu.sync_run_label(true);
+        let message = "Input recording started";
+        self.editor.set_status(message);
+        self.status_message_set(message);
+    }
+
+    fn stop_embedded_playtest_input_recording(&mut self) {
+        let path = self.editor_playtest_input_tape_path();
+        let result = self.finish_input_recording(&path);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.queue_input_profile_capture(&path, "record");
+        match result {
+            Ok(frames) => {
+                #[cfg(target_arch = "wasm32")]
+                let message = format!("Input recording downloaded: {frames} frames (CSV)");
+                #[cfg(not(target_arch = "wasm32"))]
+                let message = format!("Input recording saved: {frames} frames");
+                self.editor.set_status(message.clone());
+                self.status_message_set(message);
+            }
+            Err(error) => {
+                let message = format!("Input recording save failed: {error}");
+                self.editor.set_status(message.clone());
+                self.status_message_set(message);
+            }
+        }
+    }
+
+    fn start_embedded_playtest_input_replay(&mut self) {
+        if !self.embedded_playtest_running() {
+            self.editor
+                .set_status("Start Embedded Play before replaying input");
+            return;
+        }
+        if self.playtest_input_tape.is_recording() {
+            self.editor
+                .set_status("Stop input recording before replaying it");
+            return;
+        }
+        let path = self.editor_playtest_input_tape_path();
+        match self.playtest_input_tape.start_replay(&path) {
+            Ok(frames) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                self.begin_input_profile_capture();
+                let _ = self.embedded_playtest.capture_input();
+                self.running = true;
+                self.menu.open = false;
+                self.menu.sync_run_label(true);
+                let message = format!("Input replay started: {frames} frames");
+                self.editor.set_status(message.clone());
+                self.status_message_set(message);
+            }
+            Err(error) => {
+                let message = format!("Input replay unavailable: {error}");
+                self.editor.set_status(message.clone());
+                self.status_message_set(message);
+            }
+        }
+    }
+
+    fn stop_embedded_playtest_input_replay(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let path = self.editor_playtest_input_tape_path();
+        self.playtest_input_tape.stop_replay();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.queue_input_profile_capture(&path, "replay");
+        let message = "Input replay stopped";
+        self.editor.set_status(message);
+        self.status_message_set(message);
+    }
+
+    fn embedded_playtest_profiler_history_path(&self) -> PathBuf {
+        self.editor
+            .project_dir()
+            .join("logs")
+            .join("play_guest_performance.csv")
+    }
+
+    /// The Play overlay's save button: the last 30 s of guest telemetry.
+    fn dump_embedded_playtest_profiler_history(&mut self) {
+        if self.guest_stats.is_empty() {
+            let message = "Guest performance history is empty";
+            self.editor.set_status(message);
+            self.status_message_set(message);
+            return;
+        }
+        let path = self.embedded_playtest_profiler_history_path();
+        let csv = self.guest_stats.csv(30);
+        let write_result = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&path, csv))
+            .map_err(|error| format!("{}: {error}", path.display()));
+        let message = match write_result {
+            Ok(()) => format!("Guest performance, last 30 s saved -> {}", path.display()),
+            Err(error) => format!("Guest performance save failed: {error}"),
+        };
+        self.editor.set_status(message.clone());
+        self.status_message_set(message);
+    }
+
+    /// Handle one request emitted by the editor UI.
+    pub fn handle_editor_playtest_request(&mut self, request: psxed_ui::EditorPlaytestRequest) {
+        match request {
+            psxed_ui::EditorPlaytestRequest::Play | psxed_ui::EditorPlaytestRequest::Rebuild => {
+                self.start_embedded_playtest();
+            }
+            psxed_ui::EditorPlaytestRequest::BuildProject => {
+                self.build_current_project_for_launcher();
+            }
+            psxed_ui::EditorPlaytestRequest::Stop => {
+                self.stop_embedded_playtest();
+                self.editor
+                    .set_status("Embedded Play stopped; returned to edit preview");
+            }
+            psxed_ui::EditorPlaytestRequest::CaptureInput => {
+                self.capture_embedded_playtest_input();
+            }
+            psxed_ui::EditorPlaytestRequest::StartInputRecording => {
+                self.start_embedded_playtest_input_recording();
+            }
+            psxed_ui::EditorPlaytestRequest::StopInputRecording => {
+                self.stop_embedded_playtest_input_recording();
+            }
+            psxed_ui::EditorPlaytestRequest::StartInputReplay => {
+                self.start_embedded_playtest_input_replay();
+            }
+            psxed_ui::EditorPlaytestRequest::StopInputReplay => {
+                self.stop_embedded_playtest_input_replay();
+            }
+            psxed_ui::EditorPlaytestRequest::DumpProfilerHistory => {
+                self.dump_embedded_playtest_profiler_history();
+            }
+            psxed_ui::EditorPlaytestRequest::SetWireframe { enabled } => {
+                if let Some(bus) = self.bus.as_mut() {
+                    bus.gpu.wireframe_enabled = enabled;
+                    let message = if enabled {
+                        "Embedded Play wireframe enabled"
+                    } else {
+                        "Embedded Play wireframe disabled"
+                    };
+                    self.editor.set_status(message);
+                    self.status_message_set(message);
+                }
+            }
+        }
+    }
+
+    fn load_embedded_playtest_disc(&mut self, volume_id: &str) -> Result<(), String> {
+        let mut bus = Bus::new_without_bios();
+        let mut cpu = Cpu::new();
+
+        let disc_path = build_embedded_playtest_disc(volume_id)?;
+        let disc = load_authored_disc(&disc_path)?;
+        // Embedded Play is PSoXide-authored homebrew: no user BIOS is
+        // required. The runtime fast-boots with HLE BIOS dispatch, while
+        // still mounting a real disc image so CD streaming exercises the
+        // same path as exported project builds.
+        fast_boot_embedded_playtest_disc(&mut bus, &mut cpu, &disc, &disc_path)?;
+        bus.cdrom.insert_disc(Some(disc));
+        bus.attach_digital_pad_port1();
+
+        self.bus = Some(bus);
+        self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
+        self.cpu = cpu;
+        self.exec_history.clear();
+        self.gpr_snapshot = None;
+        self.current_game = None;
+        Ok(())
+    }
+
+    fn export_project_build(
+        &mut self,
+        dest_path: PathBuf,
+        volume_id: &str,
+    ) -> Result<String, String> {
+        let source_path = build_embedded_playtest_disc(volume_id)?;
+        let build_bytes = copy_project_disc(&source_path, &dest_path)?;
+
+        let rescan_error = self.rescan_library().err();
+        let display_path = dest_path
+            .canonicalize()
+            .unwrap_or_else(|_| dest_path.clone());
+        let mut message = format!(
+            "Project disc exported -> {} ({} KiB)",
+            display_path.display(),
+            build_bytes / 1024
+        );
+        if let Some(error) = rescan_error {
+            message.push_str(&format!("; launcher rescan failed: {error}"));
+        }
+        Ok(message)
+    }
+}
+
 impl AppState {
     fn active_input_tape_path(&self) -> Result<PathBuf, String> {
+        #[cfg(feature = "editor")]
+        if self.workspace.is_editor() && self.embedded_playtest_running() {
+            return Ok(self.editor_playtest_input_tape_path());
+        }
         let game = self
             .current_game
             .as_ref()
@@ -2437,12 +3384,18 @@ impl AppState {
                     "Whole-run profile saved: {sample_count} samples -> {}",
                     path.display()
                 );
-
+                #[cfg(feature = "editor")]
+                if self.workspace.is_editor() {
+                    self.editor.set_status(message.clone());
+                }
                 self.status_message_set(message);
             }
             Err(error) => {
                 let message = format!("Whole-run profile save failed: {error}");
-
+                #[cfg(feature = "editor")]
+                if self.workspace.is_editor() {
+                    self.editor.set_status(message.clone());
+                }
                 self.status_message_set(message);
             }
         }
@@ -2459,7 +3412,10 @@ impl AppState {
                 self.queue_input_profile_capture(&tape_path, "replay");
             }
             let message = format!("Input replay finished: {frames} frames");
-
+            #[cfg(feature = "editor")]
+            if self.workspace.is_editor() {
+                self.editor.set_status(message.clone());
+            }
             self.status_message_set(message);
         }
         sample
@@ -2625,13 +3581,24 @@ impl AppState {
         self.status_message = Some((msg.into(), STATUS_MESSAGE_TTL_SECS));
     }
 
-    /// Whether the guest performance panel (the debug sidebar) is on screen.
+    /// Whether the guest performance panel is on screen: the debug sidebar,
+    /// or the panel docked beside the editor's Play viewport.
     pub fn guest_panel_visible(&self) -> bool {
+        #[cfg(feature = "editor")]
+        if self.workspace.is_editor() {
+            return self.embedded_playtest.is_running()
+                && self.editor.play_performance_panel_visible();
+        }
         self.panels.debug_sidebar
     }
 
     /// F3: show or hide the guest performance panel where the user is.
     pub fn toggle_performance_panel(&mut self) {
+        #[cfg(feature = "editor")]
+        if self.workspace.is_editor() {
+            self.editor.toggle_play_performance_panel();
+            return;
+        }
         self.panels.debug_sidebar = !self.panels.debug_sidebar;
     }
 
@@ -2759,6 +3726,37 @@ fn display_size_bytes(e: &LibraryEntry) -> u64 {
     e.size
 }
 
+/// Bind a Games row to its file, not a disc identity shared by distinct builds.
+/// Content IDs remain on LibraryEntry for saves and input-tape storage.
+fn game_menu_item(
+    entry: &LibraryEntry,
+    cue_owns_bin: &std::collections::HashMap<PathBuf, (String, PathBuf)>,
+    cue_already_listed: &mut std::collections::HashSet<PathBuf>,
+    game_root: &Path,
+) -> Option<MenuLibraryItem> {
+    let (title, launch_path) = if let Some((title, cue_path)) = cue_owns_bin.get(&entry.path) {
+        if !cue_already_listed.insert(cue_path.clone()) {
+            return None;
+        }
+        (title.clone(), cue_path)
+    } else {
+        (entry.title.clone(), &entry.path)
+    };
+    Some(MenuLibraryItem {
+        // Keep each disc under its CUE directory, even when its BIN is elsewhere.
+        folder: launch_path
+            .parent()
+            .and_then(|parent| parent.strip_prefix(game_root).ok())
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf(),
+        id: path_launch_id(launch_path),
+        title,
+        subtitle: format_subtitle(entry),
+        burnable: false,
+        launchable: true,
+    })
+}
+
 const PATH_LAUNCH_ID_PREFIX: &str = "path:";
 const PROJECT_LAUNCH_ID_PREFIX: &str = "project-path:";
 
@@ -2767,7 +3765,7 @@ fn path_launch_id(path: &Path) -> String {
     format!("{PATH_LAUNCH_ID_PREFIX}{}", canonical.to_string_lossy())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "editor"))]
 fn project_build_launch_id(path: &Path) -> String {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     format!("{PROJECT_LAUNCH_ID_PREFIX}{}", canonical.to_string_lossy())
@@ -2839,12 +3837,31 @@ fn path_is_under(path: &Path, root: &Path) -> bool {
     }
 }
 
+/// Where source examples are looked for. The editor lists engine examples too.
+#[cfg(not(feature = "editor"))]
+const EXAMPLE_SOURCE_DIRS: &[&str] = &["sdk/examples"];
+#[cfg(feature = "editor")]
+const EXAMPLE_SOURCE_DIRS: &[&str] = &["sdk/examples", "engine/examples"];
+
+/// Whether an example source directory gets a "not built" row. The player
+/// lists a fixed few; the editor lists everything but its own playtest runtime.
+fn example_source_is_listed(name: &str) -> bool {
+    if cfg!(feature = "editor") {
+        name != "editor-playtest"
+    } else {
+        matches!(
+            name,
+            "hello-tri" | "hello-input" | "hello-ot" | "hello-gte" | "hello-tex" | "hello-memcard"
+        )
+    }
+}
+
 fn public_example_source_items(
     built_examples: &std::collections::HashSet<String>,
 ) -> Vec<MenuLibraryItem> {
     let mut items = Vec::new();
     let root = repo_root_dir();
-    for examples_root in [root.join("sdk/examples")] {
+    for examples_root in EXAMPLE_SOURCE_DIRS.iter().map(|dir| root.join(dir)) {
         let Ok(entries) = std::fs::read_dir(&examples_root) else {
             continue;
         };
@@ -2856,16 +3873,7 @@ fn public_example_source_items(
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if !matches!(
-                name,
-                "hello-tri"
-                    | "hello-input"
-                    | "hello-ot"
-                    | "hello-gte"
-                    | "hello-tex"
-                    | "hello-memcard"
-            ) || built_examples.contains(&example_key(name))
-            {
+            if !example_source_is_listed(name) || built_examples.contains(&example_key(name)) {
                 continue;
             }
             items.push(MenuLibraryItem {
@@ -3478,7 +4486,7 @@ pub fn build_ui(
     input_router: &mut crate::input::InputRouter,
     vram_tex: egui::TextureId,
     display_tex: egui::TextureId,
-
+    #[cfg(feature = "editor")] editor_viewport: psxed_ui::EditorViewport3dPresentation,
     display_uv: egui::Rect,
     dt: f32,
 ) {
@@ -3489,6 +4497,8 @@ pub fn build_ui(
         input_router,
         vram_tex,
         display_tex,
+        #[cfg(feature = "editor")]
+        editor_viewport,
         display_uv,
         dt,
     );
@@ -3512,6 +4522,13 @@ fn next_ui_scale_pct(current: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn embedded_play_default_does_not_force_ram_heavy_telemetry() {
+        assert_eq!(DEFAULT_EMBEDDED_PLAYTEST_FEATURES, "cd-stream-bench");
+        assert!(!DEFAULT_EMBEDDED_PLAYTEST_FEATURES.contains("emulator-telemetry"));
+    }
 
     #[test]
     fn web_page_autoboots_the_demo_disc_unless_a_disc_is_named_or_embedded() {
@@ -3663,6 +4680,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[cfg(feature = "editor")]
+    #[test]
+    fn editor_wireframe_request_updates_the_live_gpu() {
+        let root = frontend_test_temp_dir("editor-wireframe");
+        let mut state = AppState::with_config_dir(Some(root.clone()));
+        state.bus = Some(Bus::new_without_bios());
+
+        state.handle_editor_playtest_request(psxed_ui::EditorPlaytestRequest::SetWireframe {
+            enabled: true,
+        });
+        assert!(state.bus.as_ref().unwrap().gpu.wireframe_enabled);
+
+        state.handle_editor_playtest_request(psxed_ui::EditorPlaytestRequest::SetWireframe {
+            enabled: false,
+        });
+        assert!(!state.bus.as_ref().unwrap().gpu.wireframe_enabled);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn internal_editor_playtest_artifacts_are_hidden_from_menu() {
         assert!(is_internal_example_artifact(Path::new(
@@ -3688,13 +4725,21 @@ mod tests {
         )));
     }
 
+    /// An example the checked-out sources have that the test build leaves
+    /// unbuilt, and that this build lists.
+    const LISTED_UNBUILT_EXAMPLE: &str = if cfg!(feature = "editor") {
+        "game-pong"
+    } else {
+        "hello-input"
+    };
+
     #[test]
     fn public_example_placeholders_are_discovered_from_source_dirs() {
         let built = std::collections::HashSet::from([example_key("hello-tri")]);
         let examples = public_example_source_items(&built);
         assert!(examples
             .iter()
-            .any(|entry| entry.title == "hello-input" && !entry.launchable));
+            .any(|entry| entry.title == LISTED_UNBUILT_EXAMPLE && !entry.launchable));
         assert!(examples
             .iter()
             .all(|entry| entry.title != "editor-playtest"));
@@ -3798,6 +4843,85 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn games_rows_with_shared_disc_ids_launch_the_selected_file() {
+        // In-memory fixtures: telemetry's CUE precedes the normal CUE in the
+        // library, while the normal BIN appears first in the Games projection.
+        let entry = |name: &str, kind, title: &str, id: &str| LibraryEntry {
+            path: PathBuf::from("/synthetic-games").join(name),
+            id: id.to_string(),
+            kind,
+            title: title.to_string(),
+            region: Region::Unknown,
+            size: 1,
+            mtime: 0,
+            diagnostic: None,
+        };
+        let entries = vec![
+            entry("normal.bin", GameKind::DiscBin, "HKPSX", "shared-bin"),
+            entry(
+                "telemetry.cue",
+                GameKind::DiscCue,
+                "Telemetry",
+                "shared-disc",
+            ),
+            entry("telemetry.bin", GameKind::DiscBin, "HKPSX", "shared-bin"),
+            entry("normal.cue", GameKind::DiscCue, "Normal", "shared-disc"),
+            entry(
+                "standalone.iso",
+                GameKind::DiscIso,
+                "Standalone",
+                "shared-disc",
+            ),
+        ];
+        assert_eq!(
+            library_entry_for_launch_id(&entries, "shared-disc")
+                .unwrap()
+                .path,
+            entries[1].path,
+            "the old bare-ID lookup selects the telemetry CUE first",
+        );
+        let owners = std::collections::HashMap::from([
+            (
+                entries[0].path.clone(),
+                (entries[3].title.clone(), entries[3].path.clone()),
+            ),
+            (
+                entries[2].path.clone(),
+                (entries[1].title.clone(), entries[1].path.clone()),
+            ),
+        ]);
+        let mut listed = std::collections::HashSet::new();
+        let rows: Vec<_> = [0, 2, 4]
+            .into_iter()
+            .map(|i| game_menu_item(&entries[i], &owners, &mut listed, Path::new("/")).unwrap())
+            .collect();
+        assert_eq!(
+            rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(),
+            ["Normal", "Telemetry", "Standalone"]
+        );
+        assert!(game_menu_item(&entries[0], &owners, &mut listed, Path::new("/")).is_none());
+        let mut menu = ui::menu::MenuState::new();
+        menu.set_library(&rows, &[], &[]);
+        menu.select_category("Games");
+        menu.open = true;
+        for expected in [&entries[3], &entries[1], &entries[4]] {
+            let ui::menu::MenuAction::LaunchGame(token) = menu.selected_action().unwrap() else {
+                panic!("game row must launch its file");
+            };
+            let resolved = library_entry_for_launch_id(&entries, token).unwrap();
+            assert_eq!(resolved.path, expected.path);
+            assert_eq!(
+                resolved.id, "shared-disc",
+                "content/save identity stays unchanged"
+            );
+            menu.update(&ui::menu::MenuInput {
+                down: true,
+                ..Default::default()
+            });
+        }
     }
 
     /// A tiny bootable disc: SYSTEM.CNF plus a 4-byte PSX-EXE.

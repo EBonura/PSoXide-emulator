@@ -7,8 +7,14 @@ repository.workspace = true
 publish = false
 
 [features]
-# The standalone frontend has no editor dependency.
+# The standalone emulator has no editor dependency.
 default = []
+# `editor` compiles the host editor workspace into the frontend: the embedded
+# 3D preview, the in-editor Play viewport and the project/disc authoring CLI.
+# The psxed-* crates and the editor-only modules live in PSoXide-editor, so
+# this feature builds only there. Here the four optional crates below resolve
+# to empty placeholders (emu/crates/editor-placeholders) so the manifest parses.
+editor = ["dep:psxed-ui", "dep:psxed-project", "dep:psx-asset", "dep:psx-bsp", "dep:psx-engine"]
 # AArch64 native tier, with PSOXIDE_JIT=0 as a runtime off switch.
 native-jit = ["dep:psoxide-jit"]
 # `mcp` (native-only) embeds a live MCP debug server (official `rmcp` SDK over
@@ -18,18 +24,28 @@ native-jit = ["dep:psoxide-jit"]
 # below and never enter the wasm dep graph; the module is additionally
 # `#[cfg(not(target_arch = "wasm32"))]`.
 mcp = ["dep:rmcp", "dep:tokio", "dep:axum", "dep:schemars", "dep:serde", "dep:base64"]
+# Opt-in allocation instrumentation for the ignored, full-project editor
+# preview benchmark. Keeping it off normal test binaries avoids an atomic
+# counter on every allocation in the frontend suite.
+editor-preview-benchmark = []
+
 [dependencies]
 emulator-core    = { workspace = true }
 psx-hw           = { workspace = true }
 psoxide-debug-ui = { workspace = true }
 psoxide-settings = { workspace = true }
 psoxide-validation = { workspace = true }
+psx-asset        = { workspace = true, optional = true }
+psx-bsp          = { workspace = true, optional = true }
+psx-engine       = { workspace = true, optional = true }
 psx-gpu          = { workspace = true }
 psx-gpu-render   = { workspace = true }
 psx-gte          = { workspace = true }
 psx-vram         = { workspace = true }
 psx-iso          = { workspace = true }
 psx-trace        = { workspace = true }
+psxed-project    = { workspace = true, optional = true }
+psxed-ui         = { workspace = true, optional = true }
 
 clap       = { workspace = true }
 winit      = { workspace = true }
