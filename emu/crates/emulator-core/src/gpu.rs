@@ -1606,6 +1606,29 @@ impl Gpu {
     }
 
     fn drain_dma_input_fifo(&mut self) {
+        self.drain_dma_input(false);
+    }
+
+    /// Make room in the input FIFO for one more DMA word. A block-mode
+    /// transfer is paced by the GPU's request line on silicon: it waits for
+    /// the GPU instead of losing the words that arrive while the FIFO is
+    /// full. The bus moves a whole block at once, so the commands at the
+    /// head are executed now, ahead of the GPU's busy window; their drawing
+    /// time stays charged as busy credit, so the GPU still reports busy for
+    /// as long as it would have been.
+    pub(crate) fn make_dma_input_room(&mut self) {
+        while !self.dma_fifo_has_room() {
+            let queued = self.dma_input_fifo.len();
+            self.drain_dma_input(true);
+            if self.dma_input_fifo.len() == queued {
+                break;
+            }
+        }
+    }
+
+    /// Run the commands at the head of the input FIFO. With `ignore_busy`
+    /// they run although the GPU is still busy with an earlier one.
+    fn drain_dma_input(&mut self, ignore_busy: bool) {
         while let Some(&(word, _)) = self.dma_input_fifo.front() {
             if self.vram_download.is_some() {
                 break;
@@ -1628,7 +1651,7 @@ impl Gpu {
                 self.deferred_irq_command = self.dma_input_fifo.pop_front();
                 continue;
             }
-            if !transfer && !superscalar_state && self.busy_credit > 0 {
+            if !ignore_busy && !transfer && !superscalar_state && self.busy_credit > 0 {
                 break;
             }
             let count = if transfer || self.polyline.is_some() {
