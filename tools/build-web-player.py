@@ -15,7 +15,8 @@ Toolchain, same on macOS and ubuntu-latest:
   - trunk, exactly TRUNK_VERSION below
     (cargo install trunk --version <TRUNK_VERSION> --locked, or a release binary).
   - python3 (3.9 or newer) and git.
-  - Network on a cold run: bootstrap-components.py fetches the locked SDK
+  - Network on a cold run: make bootstrap builds the SDK's psoxide-components,
+    which fetches the locked SDK
     sources from GitHub, and trunk downloads the wasm-bindgen CLI matching
     Cargo.lock and the wasm-opt pinned in Trunk.toml unless the ones on PATH
     already match.
@@ -87,7 +88,7 @@ def main():
 
     # Run from the repo root so rustup resolves the pinned toolchain.
     run("rustup", "target", "add", "wasm32-unknown-unknown")
-    run(sys.executable, ROOT / "tools/bootstrap-components.py")
+    run("make", "bootstrap")
     run("trunk", "build", "--release", "--locked", "--public-url", "./", "--dist", out, cwd=FRONTEND, env=env)
 
     for name in NOT_SHIPPED:
@@ -102,7 +103,7 @@ def main():
     notices = ["PSoXide web player\nGPL-2.0-or-later\n",
                f"Source: https://github.com/EBonura/PSoXide-emulator/tree/{revision}\n",
                "Build: python3 tools/build-web-player.py --out player\n",
-               "Locked SDK sources: see components.lock.json and tools/bootstrap-components.py in that source tree.\n",
+               "Locked SDK sources: see components.lock.json and `make bootstrap` in that source tree.\n",
                (ROOT / "LICENSE").read_text()]
     for pkg in sorted(metadata["packages"], key=lambda p: p["name"]):
         base = Path(pkg["manifest_path"]).parent
