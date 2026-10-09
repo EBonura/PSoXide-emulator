@@ -3281,7 +3281,7 @@ mod tests {
         assert_eq!(&values[4..6], ["50%", "On"]);
         assert_eq!(values[8], "Keep it smooth");
         s.set_deinterlace("Bob");
-        let row = s.categories[1]
+        let row = category(&s, "Settings")
             .items
             .iter()
             .find(|item| item.action == MenuAction::CycleDeinterlace)
