@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The GPU's DMA competes with the CPU for main RAM as it does on a console
+  (hardware tests v2.1). While a linked-list walk is moving, RAM loads wait four
+  clocks more and stores land 13 clocks apart (64 stores took 797 clocks
+  against 141 idle; a walk parked on a full FIFO leaves the CPU alone). While a
+  block transfer streams RAM into the GPU, loads wait 19 clocks more (1738
+  clocks for 64 against 510). An empty list node costs 10.25 clocks, where the
+  emulator charged 12 against a console's 10.23. Scratchpad accesses are
+  unaffected.
 - A CD sector DMA holds the CPU off the bus for the whole burst, 68.3 clocks a
   word (34.9k clocks for 2048 bytes), and CHCR reads 0 once it ends. On a
   console 64 loads or stores after the kick finished 35k clocks late at both
