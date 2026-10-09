@@ -1604,7 +1604,11 @@ impl Bus {
         self.dma_block_runs[slot] = Some(DmaBlockRun {
             start: self.cycles,
             end: self.cycles + cycles,
-            blocks: if count == 0 { 0x1_0000 } else { u32::from(count) },
+            blocks: if count == 0 {
+                0x1_0000
+            } else {
+                u32::from(count)
+            },
             block_words: channel.block_control & 0xFFFF,
             madr: channel.base,
             backward: (channel.channel_control >> 1) & 1 != 0,
@@ -1647,7 +1651,11 @@ impl Bus {
         }
     }
 
-    fn apply_dma_block_progress(channel: &mut crate::dma::DmaChannel, run: &DmaBlockRun, done: u32) {
+    fn apply_dma_block_progress(
+        channel: &mut crate::dma::DmaChannel,
+        run: &DmaBlockRun,
+        done: u32,
+    ) {
         let bytes = done.wrapping_mul(run.block_words).wrapping_mul(4);
         channel.base = if run.backward {
             run.madr.wrapping_sub(bytes)
@@ -5301,7 +5309,9 @@ mod tests {
         let mut bus = empty_list_walk(512);
         bus.tick(20);
         assert!(bus.gpu_list_walk_is_moving());
-        let idle = Bus::new(synthetic_bios()).unwrap().ram_read_stalls(0x8000_0200);
+        let idle = Bus::new(synthetic_bios())
+            .unwrap()
+            .ram_read_stalls(0x8000_0200);
         // Land the read away from the DRAM refresh slot of a fresh machine.
         let busy = bus.ram_read_stalls(0x8000_0200);
         assert!(busy >= idle + GPU_LIST_RAM_READ_WAIT, "{busy} vs {idle}");
@@ -5335,7 +5345,9 @@ mod tests {
     fn main_ram_reads_wait_while_a_gpu_block_dma_streams() {
         // hwtest record 0x145: 19 clocks more a load behind a block transfer.
         let mut bus = kick_gpu_block_dma((16 << 16) | 16);
-        let idle = Bus::new(synthetic_bios()).unwrap().ram_read_stalls(0x8000_0200);
+        let idle = Bus::new(synthetic_bios())
+            .unwrap()
+            .ram_read_stalls(0x8000_0200);
         let busy = bus.ram_read_stalls(0x8000_0200);
         assert!(busy >= idle + GPU_BLOCK_RAM_READ_WAIT, "{busy} vs {idle}");
         // A zero count runs away: the loads keep waiting a long time.
