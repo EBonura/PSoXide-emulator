@@ -146,10 +146,10 @@ opt-level = 3
 # Keep debug assertions and incremental compilation, but compile the three
 # host editor crates with enough optimisation for the development executable
 # to remain interactive on production-sized levels.
-[profile.dev.package.psoxide]
+[profile.dev.package.psoxide-emulator]
 opt-level = 2
 [profile.run-fast]
 inherits = "dev"
 
-[profile.run-fast.package.psoxide]
+[profile.run-fast.package.psoxide-emulator]
 opt-level = 0
