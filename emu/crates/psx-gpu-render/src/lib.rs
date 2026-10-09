@@ -32,8 +32,10 @@
 //!
 //! - **Enhanced** ([`HwRenderer`], `pipeline`/`target`/`translator`):
 //!   the user-facing render pipeline described above. Upscales, but
-//!   is not bit-exact (host coverage rule, f32 interpolation, no
-//!   dither).
+//!   is not bit-exact (f32 interpolation, 8-bit rather than 5-bit
+//!   blending, host line and rectangle coverage). Polygons are drawn
+//!   half a pixel down-right so their coverage and texels follow the
+//!   CPU's corner sampling.
 //! - **Accurate** ([`ComputeBackend`], `rasterizer`/`scanline`/
 //!   `vram`/`replay`): a compute-shader rasterizer that reproduces
 //!   the silicon-matched CPU rasterizer pixel-for-pixel at native
@@ -344,7 +346,7 @@ impl HwRenderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("psx-hw-renderer-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target.view(),
+                    view: target.render_view(),
                     resolve_target: None,
                     ops: wgpu::Operations {
                         // PSX VRAM is persistent -- never clear.
@@ -1104,6 +1106,11 @@ mod tests {
     /// at internal scale S every PSX pixel must still be one uniform
     /// SxS block matching the CPU. Fails if the scale never reaches the
     /// shader: the pattern would then vary inside each block.
+    ///
+    /// Polygons are drawn half a PSX pixel down-right (see the shader's
+    /// `vs_main`), which at scale 2 is one host pixel, so the quad's first
+    /// block row and column are half covered; the check starts at the
+    /// first fully covered block.
     #[test]
     fn dither_pattern_follows_psx_pixels_at_internal_scale_2() {
         let Some(mut renderer) = headless_renderer() else {
@@ -1114,8 +1121,8 @@ mod tests {
 
         let cpu_vram = run_both_backends(&gouraud_quad([0x00C0_8040; 4], true), &mut renderer, &[]);
         let (_, _, rgba) = renderer.read_subrect_rgba8(16, 16, 64, 64);
-        for y in 0..32usize {
-            for x in 0..32usize {
+        for y in 1..32usize {
+            for x in 1..32usize {
                 let want = bgr15_to_rgba8(cpu_vram[(y + 8) * VRAM_WIDTH as usize + x + 8]);
                 for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                     let o = ((y * 2 + dy) * 64 + x * 2 + dx) * 4;
@@ -2066,9 +2073,7 @@ mod tests {
     /// Semi-transparent line: coverage (which pixels changed against
     /// the prefilled background) matches the CPU exactly; every
     /// covered pixel is actually blended, not replaced. Blend VALUES
-    /// are not compared: the HW path blends in linear space on the
-    /// sRGB target while the CPU does PSX 5-bit integer math, the
-    /// same enhanced-backend divergence semi-trans triangles have.
+    /// are compared in `semi_trans_modes_match_cpu_blend_values`.
     #[test]
     fn gp0_semi_trans_line_blends_with_background_coverage_parity() {
         let prefill = 0x4210; // mid grey (r=g=b=16 in 5-bit)
@@ -2087,6 +2092,127 @@ mod tests {
             blended,
             [0xFF, 0xFF, 0xFF, 0xFF],
             "pixel replaced instead of blended"
+        );
+    }
+
+    /// All four semi-transparency modes combine the destination and the
+    /// source on the gamma-coded 5-bit values, so the HW result must land
+    /// within one 5-bit step of the CPU rasterizer. Blending through the
+    /// sRGB view instead (decode, add in linear light, re-encode) left an
+    /// additive +24/255 rectangle at about +3/255.
+    #[test]
+    fn semi_trans_modes_match_cpu_blend_values() {
+        let prefill = 0x4210; // r=g=b=16 in 5-bit, 132 in display codes
+                              // (E1 blend-mode bits, source grey, name)
+        let cases = [
+            (0x0000u32, 0xF8u32, "average (B+F)/2"),
+            (0x0020, 0x18, "add B+F"),
+            (0x0040, 0x40, "subtract B-F"),
+            (0x0060, 0x80, "add quarter B+F/4"),
+        ];
+        for (mode, grey, name) in cases {
+            let mut words = line_env();
+            words.push(0xE100_0000 | mode);
+            let src = grey * 0x0001_0101;
+            words.extend([0x6200_0000 | src, xyw(40, 40), (8 << 16) | 8]);
+            let Some((gpu, _, _, renderer)) = line_case(&words, prefill) else {
+                eprintln!("skipping: no headless wgpu adapter");
+                return;
+            };
+            let want = bgr15_to_rgba8(gpu.vram.words()[(44 * VRAM_WIDTH + 44) as usize]);
+            let got = pixel_block(&renderer, 44, 44)[0];
+            assert_ne!(
+                want,
+                bgr15_to_rgba8(prefill),
+                "{name}: CPU blend was a no-op"
+            );
+            for c in 0..3 {
+                assert!(
+                    want[c].abs_diff(got[c]) <= 8,
+                    "{name}: channel {c} cpu {want:?} hw {got:?}"
+                );
+            }
+        }
+    }
+
+    /// Textured polygons, slivers included, light the same pixels with the
+    /// same texels as the CPU rasterizer. The CPU decides coverage by testing
+    /// each pixel's top-left corner against the triangle and reads the texel
+    /// at that corner; the host samples pixel centres, so the polygon is
+    /// drawn half a pixel down-right to land on the same points. Without
+    /// that, a thin triangle on the Quake shotgun lit pixels the CPU skips and
+    /// sampled the texture's border column there, a row of blue dots.
+    ///
+    /// Raw-texture triangles (no tint, no dither) so the comparison is exact.
+    #[test]
+    fn textured_polygons_match_cpu_coverage_and_texels() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        assert_eq!(renderer.internal_scale(), 1, "compares PSX-native pixels");
+        let mut state = 0x2545_F491u32;
+        let mut next = move |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n
+        };
+        // 64x64 texture, every texel opaque and different from its neighbours.
+        let mut seed = Vec::new();
+        for y in 0..64u16 {
+            for x in 0..64u16 {
+                let c = 1 + ((x * 7 + y * 13 + (x ^ y) * 3) % 0x7FFE);
+                seed.push((512 + x, y, c));
+            }
+        }
+        let mut words = line_env();
+        words.push(0xE100_0000 | 8 | (2 << 7)); // tpage x 512, 15bpp
+        for _ in 0..300 {
+            let v: Vec<(i32, i32)> = (0..3)
+                .map(|_| (8 + next(48) as i32, 8 + next(48) as i32))
+                .collect();
+            let uv: Vec<(u32, u32)> = (0..3).map(|_| (next(64), next(64))).collect();
+            words.extend([
+                0x2500_0000,
+                pack_xy(v[0]),
+                uv[0].0 | (uv[0].1 << 8),
+                pack_xy(v[1]),
+                (uv[1].0 | (uv[1].1 << 8)) | (((8 | (2 << 7)) as u32) << 16),
+                pack_xy(v[2]),
+                uv[2].0 | (uv[2].1 << 8),
+            ]);
+        }
+        let cpu = run_both_backends(&words, &mut renderer, &seed);
+        let (_, _, rgba) = renderer.read_subrect_rgba8(0, 0, 64, 64);
+        let black = [0u8, 0, 0, 255];
+        let mut bad_coverage = Vec::new();
+        let mut bad_texel = Vec::new();
+        for y in 0..64usize {
+            for x in 0..64usize {
+                let want = bgr15_to_rgba8(cpu[y * VRAM_WIDTH as usize + x]);
+                let got = &rgba[(y * 64 + x) * 4..][..4];
+                let got = [got[0], got[1], got[2], got[3]];
+                if (want == black) != (got == black) {
+                    bad_coverage.push((x, y, want, got));
+                } else if want != got {
+                    bad_texel.push((x, y, want, got));
+                }
+            }
+        }
+        assert!(
+            bad_coverage.is_empty(),
+            "{} pixels covered by only one rasterizer, first: {:?}",
+            bad_coverage.len(),
+            &bad_coverage[..bad_coverage.len().min(4)]
+        );
+        // The CPU truncates each gradient to 1/4096 of a texel per pixel and
+        // the host interpolates in f32, so a pixel whose corner lands within
+        // that error of a texel boundary can pick the neighbour. A fraction of
+        // a percent of pixels, never more than one texel off.
+        assert!(
+            bad_texel.len() <= 41,
+            "{} of 4096 pixels sample another texel than the CPU, first: {:?}",
+            bad_texel.len(),
+            &bad_texel[..bad_texel.len().min(4)]
         );
     }
 
@@ -2249,6 +2375,13 @@ mod tests {
     /// the `(tw * mag) x (th * mag)` RGBA block. `pre` words (for example a
     /// texture window) go in front of the quad. Pixels outside the quad's
     /// opaque texels stay black.
+    ///
+    /// The quad's UVs run `0..tw` and `0..th`. A PS1 polygon samples a pixel's
+    /// top-left corner and rounds to the nearest texel, so its last pixels
+    /// read one texel past the UV extent; the texture gets an edge-replicated
+    /// extra row and column, the padding PS1 art carries for the same reason
+    /// (left transparent when `pre` is non-empty, so a texture-window test
+    /// sees only what it put there).
     fn render_texture(
         renderer: &mut HwRenderer,
         texels: &[u16],
@@ -2259,11 +2392,17 @@ mod tests {
         pre: &[u32],
     ) -> Vec<[u8; 4]> {
         assert_eq!(texels.len() as u32, tw * th);
-        let seed: Vec<(u16, u16, u16)> = texels
-            .iter()
-            .enumerate()
-            .map(|(i, &t)| (512 + (i as u32 % tw) as u16, (i as u32 / tw) as u16, t))
-            .collect();
+        let mut seed: Vec<(u16, u16, u16)> = Vec::new();
+        for y in 0..=th {
+            for x in 0..=tw {
+                let t = if pre.is_empty() || (x < tw && y < th) {
+                    texels[(y.min(th - 1) * tw + x.min(tw - 1)) as usize]
+                } else {
+                    0
+                };
+                seed.push((512 + x as u16, y as u16, t));
+            }
+        }
         let mut words = line_env();
         words.extend_from_slice(pre);
         let (x0, y0) = (8i32, 8i32);
@@ -2316,18 +2455,22 @@ mod tests {
         };
         let red = 0x001F;
         let texels: Vec<u16> = (0..64).map(|i| if i % 8 < 4 { 0 } else { red }).collect();
+        // The nearest-texel render decides the silhouette; the filter must not
+        // move it or tint the transparent side.
+        let reds_of = |out: &[[u8; 4]]| out.iter().filter(|p| p[0] == 255).count();
+        let nearest = render_texture(&mut r, &texels, 8, 8, 4, FILTER_NONE, &[]);
+        let want = reds_of(&nearest);
+        assert!(want > 0, "nearest render drew no opaque texels");
         {
             let mode = FILTER_EDGE;
             let out = render_texture(&mut r, &texels, 8, 8, 4, mode, &[]);
-            let mut reds = 0;
             for p in &out {
                 assert!(
                     *p == [0, 0, 0, 255] || *p == [255, 0, 0, 255],
                     "mode {mode}: {p:?}"
                 );
-                reds += usize::from(p[0] == 255);
             }
-            assert_eq!(reds, 4 * 8 * 16, "silhouette area changed, mode {mode}");
+            assert_eq!(reds_of(&out), want, "silhouette area changed, mode {mode}");
         }
     }
 

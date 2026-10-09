@@ -343,6 +343,9 @@ pub struct AppState {
     pub scale_mode: ScaleMode,
     /// Sample-time texture filter, cycled from the toolbar.
     pub texture_filter: TextureFilter,
+    /// How field-rendered 480i frames are put together on screen
+    /// (`video.deinterlace`).
+    pub deinterlace: emulator_core::Deinterlace,
     /// When true the top toolbar is slid up out of view, leaving only a
     /// small floating restore tab at the top-right.
     pub toolbar_hidden: bool,
@@ -606,6 +609,7 @@ impl AppState {
             sidebar_width: 430.0,
             scale_mode: ScaleMode::default(),
             texture_filter: TextureFilter::default(),
+            deinterlace: emulator_core::Deinterlace::default(),
             toolbar_hidden: false,
             framebuffer_present_size_px: (320, 240),
             cpu,
@@ -671,6 +675,7 @@ impl AppState {
         out.menu
             .set_smooth_slow_host(out.settings.video.smooth_slow_host);
         out.texture_filter = TextureFilter::from_setting(&out.settings.video.texture_filter);
+        out.deinterlace = emulator_core::Deinterlace::from_setting(&out.settings.video.deinterlace);
 
         out.sync_menu_settings_paths();
         out.sync_menu_controls();
@@ -2691,6 +2696,21 @@ impl AppState {
         self.texture_filter = self.texture_filter.next();
         self.settings.video.texture_filter = self.texture_filter.setting_name().to_string();
         let message = format!("Texture filter: {}", self.texture_filter.label());
+        match self.save_settings() {
+            Ok(()) => self.status_message_set(message),
+            Err(error) => {
+                eprintln!("[frontend] {error}");
+                self.status_message_set(format!("{message} (settings save failed)"));
+            }
+        }
+    }
+
+    /// Step the deinterlace mode (Weave, Bob, Blend) and persist the choice in
+    /// `settings.ron`.
+    pub fn cycle_deinterlace(&mut self) {
+        self.deinterlace = self.deinterlace.next();
+        self.settings.video.deinterlace = self.deinterlace.setting_name().to_string();
+        let message = format!("Deinterlace: {}", self.deinterlace.label());
         match self.save_settings() {
             Ok(()) => self.status_message_set(message),
             Err(error) => {

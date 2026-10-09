@@ -21,6 +21,15 @@ use wgpu::TextureFormat;
 /// requires no extra colorspace conversion.
 pub const TARGET_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
 
+/// Format the draw passes render through: the same texture storage as
+/// [`TARGET_FORMAT`], viewed without the sRGB transfer function. PSX
+/// colour arithmetic (semi-transparency, modulation) runs on the
+/// gamma-coded 5-bit values, so the fixed-function blender has to add,
+/// average and subtract the stored bytes directly. Blending through the
+/// sRGB view decodes the destination to linear light first and made an
+/// additive +24/255 rectangle come out near +3/255.
+pub const RENDER_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
+
 /// PSX VRAM dimensions in 16-bit cells. The HW target is a multiple
 /// of these by the internal scale.
 pub const VRAM_WIDTH: u32 = 1024;
@@ -34,7 +43,11 @@ pub const MAX_SCALE: u32 = 4;
 
 pub struct RenderTarget {
     texture: wgpu::Texture,
+    /// sRGB-aware view: what egui samples and what blits write into.
     view: wgpu::TextureView,
+    /// Raw-byte view of the same texture ([`RENDER_FORMAT`]) the draw
+    /// pass renders and blends through.
+    render_view: wgpu::TextureView,
     /// `None` in headless mode (parity harness, dump CLI). The live
     /// frontend always supplies a registered id.
     egui_id: Option<egui::TextureId>,
@@ -53,13 +66,14 @@ impl RenderTarget {
         egui_renderer: &mut egui_wgpu::Renderer,
     ) -> Self {
         let scale = 1;
-        let (texture, view) = create_target(device, scale);
+        let (texture, view, render_view) = create_target(device, scale);
         clear_to_black(device, queue, &view);
         let egui_id =
             egui_renderer.register_native_texture(device, &view, wgpu::FilterMode::Nearest);
         Self {
             texture,
             view,
+            render_view,
             egui_id: Some(egui_id),
             scale,
         }
@@ -68,11 +82,12 @@ impl RenderTarget {
     /// Headless constructor -- used by the parity harness / dump CLI.
     pub fn new_headless(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let scale = 1;
-        let (texture, view) = create_target(device, scale);
+        let (texture, view, render_view) = create_target(device, scale);
         clear_to_black(device, queue, &view);
         Self {
             texture,
             view,
+            render_view,
             egui_id: None,
             scale,
         }
@@ -94,19 +109,25 @@ impl RenderTarget {
         if s == self.scale {
             return false;
         }
-        let (texture, view) = create_target(device, s);
+        let (texture, view, render_view) = create_target(device, s);
         clear_to_black(device, queue, &view);
         if let (Some(id), Some(r)) = (self.egui_id, egui_renderer) {
             r.update_egui_texture_from_wgpu_texture(device, &view, wgpu::FilterMode::Nearest, id);
         }
         self.texture = texture;
         self.view = view;
+        self.render_view = render_view;
         self.scale = s;
         true
     }
 
     pub fn view(&self) -> &wgpu::TextureView {
         &self.view
+    }
+
+    /// View the draw passes render through (see [`RENDER_FORMAT`]).
+    pub fn render_view(&self) -> &wgpu::TextureView {
+        &self.render_view
     }
 
     pub fn texture(&self) -> &wgpu::Texture {
@@ -126,7 +147,10 @@ impl RenderTarget {
     }
 }
 
-fn create_target(device: &wgpu::Device, scale: u32) -> (wgpu::Texture, wgpu::TextureView) {
+fn create_target(
+    device: &wgpu::Device,
+    scale: u32,
+) -> (wgpu::Texture, wgpu::TextureView, wgpu::TextureView) {
     let s = scale.clamp(1, MAX_SCALE);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("psx-hw-vram-target"),
@@ -143,10 +167,15 @@ fn create_target(device: &wgpu::Device, scale: u32) -> (wgpu::Texture, wgpu::Tex
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_SRC
             | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
+        view_formats: &[RENDER_FORMAT],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (texture, view)
+    let render_view = texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("psx-hw-vram-target-render-view"),
+        format: Some(RENDER_FORMAT),
+        ..Default::default()
+    });
+    (texture, view, render_view)
 }
 
 /// One-shot clear to opaque black. Called when the target is
