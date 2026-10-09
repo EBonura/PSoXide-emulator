@@ -92,18 +92,19 @@ const BYTE_BIT_TIMES: u64 = 10;
 const DEFAULT_TRANSFER_TICKS: u64 = 0x88 * BYTE_BIT_TIMES;
 // `/ACK` timing, from hwtest v2.1 on a console (one pad, id 0x73; two memory
 // cards). The rise is measured from the DATA write and the width between the
-// edges, both through a STAT polling loop that reads the rise 8 clocks late
-// and the width 12 short, which the figures below allow for: the probe, run
-// on the emulator, reads back what the console showed (pad 1677 and 92 over
-// the nine bytes' median; slot 1 card 1511 and 38; slot 2 card 1529 and 74).
+// edges, both through a STAT polling loop. Medians over the bytes of a poll:
+// pad rise 1677 and width 92; slot 1 card 1511 and 38; slot 2 card 1529 and
+// 74. The rise below is that less the ten bit times (1360), less the few
+// clocks the probe's own read adds on the emulator, so the probe reads the
+// console's figure back.
 /// Clocks from the end of a pad byte to its `/ACK` rising.
 const PAD_ACK_DELAY_TICKS: u64 = 309;
 /// Clocks from the end of a memory card byte to `/ACK` rising, slot 1 and 2.
 const MEMCARD_ACK_DELAY_TICKS: [u64; 2] = [143, 161];
 /// `/ACK` is a pulse, not a sticky level: its width for a pad and a card in
 /// slot 1 and 2.
-const PAD_ACK_PULSE_TICKS: u64 = 104;
-const MEMCARD_ACK_PULSE_TICKS: [u64; 2] = [50, 86];
+const PAD_ACK_PULSE_TICKS: u64 = 92;
+const MEMCARD_ACK_PULSE_TICKS: [u64; 2] = [38, 74];
 
 /// SIO0 state. Register-level accuracy for the "nothing plugged in"
 /// path; no shift-clock simulation, but every byte-write pulses an
