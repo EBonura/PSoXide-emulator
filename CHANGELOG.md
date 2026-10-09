@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- The HLE kernel's memory card driver no longer takes a byte before it has
+  arrived. Its early data-phase routine, which games patch to wait for the
+  card's `/ACK` line, runs on every exception of a sector's data phase, not
+  only on the byte's IRQ7. With a byte on the wire for ten bit times it then
+  read an empty DATA register and sent the next byte behind it, so a card
+  read or write lost its sync: Legacy of Kain: Soul Reaver reported "Invalid
+  memory card" with a good card and never left "Reading memory card" with a
+  fresh one. The routine now waits for RX not empty and leaves the byte to the
+  next pass. `frontend launch --no-memcard` starts with no card in either
+  slot, and `hle_compat --no-card` does the same for the compatibility runs,
+  which also print the card commands each game sent.
 - Stopping a GPU linked-list DMA now delivers the node the walker had already
   admitted. A DMA burst holds the bus, so a CPU write that clears CHCR cannot
   land inside a node; the walker interleaves a word per cycle with the CPU and

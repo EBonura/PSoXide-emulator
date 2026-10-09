@@ -69,6 +69,10 @@ const HASH_EVERY: u64 = 60;
 /// Instruction budget per requested frame before a run is declared stuck.
 const STEPS_PER_FRAME_CAP: u64 = 1_000_000;
 
+/// `--no-card`: no memory card in either slot (the default is a formatted
+/// empty card on port 1).
+static NO_CARD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 struct Game {
     id: String,
     title: String,
@@ -163,6 +167,7 @@ fn main() {
             "--json" => json = Some(args_support::take_path(&mut args, "--json")),
             "--strict" => strict = true,
             "--no-sbi" => no_sbi = true,
+            "--no-card" => NO_CARD.store(true, std::sync::atomic::Ordering::Relaxed),
             "--shots" => shots = Some(args_support::take_path(&mut args, "--shots")),
             "--shot-every" => shot_every = args_support::take_u64(&mut args, "--shot-every"),
             "--hash-log" => hash_log = Some(args_support::take_path(&mut args, "--hash-log")),
@@ -441,6 +446,10 @@ fn run_hle(
     bus.cdrom.set_bad_subq_sectors(sbi.to_vec());
     bus.attach_digital_pad_port1();
     bus.attach_memcard_port1(Vec::new());
+    if NO_CARD.load(std::sync::atomic::Ordering::Relaxed) {
+        bus.detach_memcard_port1();
+        bus.detach_memcard_port2();
+    }
     let mut start_frame = 0;
     if let Some(path) = &states.load {
         let loaded = SaveStateV1::<EmulatorState>::read_from(path)
@@ -516,6 +525,17 @@ fn run_hle(
     result.distinct_display_hashes = hashes.len();
     result.cd_sectors_dropped = bus.cdrom.dropped_sectors();
     result.mdec_macroblocks = bus.mdec.macroblocks_decoded();
+    // What the game did with the card: the command bytes it sent (R 52h,
+    // W 57h, S 53h) and whether the card was written.
+    if let Some(hist) = bus.port1_memcard_command_histogram().copied() {
+        let dirty = bus.memcard_port1_snapshot().is_some();
+        eprintln!(
+            "[card] {} R={} W={} S={} written={dirty}",
+            result.id, hist[0x52], hist[0x57], hist[0x53]
+        );
+    } else {
+        eprintln!("[card] {} no card", result.id);
+    }
     if !sbi_listed.is_empty() {
         let hits = bus
             .cdrom
