@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- 480-line interlaced frames drawn field by field show whole. With drawing to
+  the display area prohibited (GP0 E1h bit 10 clear) in 480i, fills and
+  primitives skip the lines of the field on display (GPUSTAT bit 31) and draw
+  only the other field's, and the frame is presented from the live lines of the
+  shown field plus the held lines of the other. Valkyrie Profile redraws its
+  title and menus this way: the screen was white whenever the frame was
+  sampled just after the clear. Games that run in this mode (Valkyrie Profile,
+  Gran Turismo 2, Tekken 3, Chrono Cross, Formula One 2001, one WipEout 3
+  frame) change display hashes; the other 14 of 20 compat titles do not. Not
+  yet checked against the console.
 - Textured primitives pay for their texels (hardware tests v2.1, records 0x200
   to 0x223). An 8 or 15-bit texture costs more a pixel than a 4-bit one, a
   texture page change refills the texture cache in proportion to the pixels
