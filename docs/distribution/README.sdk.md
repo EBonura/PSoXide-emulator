@@ -9,7 +9,7 @@ Today the working command is `make hello-tri-disc`.
 
 > **Largely written with agentic coding.** I direct the agents and test their work in two places: PSoXide's emulator, which profiles every cycle, and a real PlayStation, which shows me where the emulator is wrong. Working between them is where the accuracy and the speed come from. [How PSoXide is built](https://ebonura.github.io/PSoXide/how-its-built/)
 
-Bare-metal Rust for the original PlayStation: runtime, GPU and GTE, audio, input, disc and
+psoxide-sdk: bare-metal Rust for the original PlayStation: runtime, GPU and GTE, audio, input, disc and
 memory-card APIs, fixed-point math, a disc packer and small homebrew examples. No Sony SDK and no
 BIOS needed.
 
@@ -44,8 +44,8 @@ or burn it for a console that can boot it. No editor is needed.
 [Website](https://ebonura.github.io/PSoXide/) · [SDK crate docs](sdk/README.md) ·
 [Downstream licensing](docs/downstream-licensing.md) · [Asset provenance](docs/asset-provenance.md)
 
-The [emulator](https://github.com/EBonura/PSoXide-emulator) runs what you build, and the
-[editor](https://github.com/EBonura/PSoXide-editor) makes whole games on top of the SDK. Games pin
+The [emulator](https://github.com/EBonura/PSoXide-emulator) (psoxide-emulator) runs what you build, and the
+[editor](https://github.com/EBonura/PSoXide-editor) (psoxide-editor, with psoxide-engine) makes whole games on top of the SDK. Games pin
 a full Git revision of this repository and commit their lockfiles.
 
 ## Licence and provenance

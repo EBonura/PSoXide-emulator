@@ -1,11 +1,11 @@
 # PSoXide distribution plan
 
-Date: 2026-10-09. Status: design plus one proof of concept. Nothing here is pushed.
+Date: 2026-10-09. Status: design plus one proof of concept. Round 2 (names, parity audit, import library) folded in.
 
 This plan covers four things: a build-from-source path as short as the one on getartcraft.com/apps,
-prebuilt downloads for every platform, a launchpad that builds the Half-Life and Hollow Knight
-ports from the user's own game files, and a clean split of the emulator and editor into two
-products. It is not legal advice, and neither is the fact sheet in section 5. It records facts with
+prebuilt downloads for every platform, an Import feature that builds the Half-Life and Hollow Knight
+ports from the user's own game files inside both apps, a clean split of the emulator and editor into
+two products, and the product names. It is not legal advice, and neither is the fact sheet in section 5. It records facts with
 sources and lists the questions a lawyer should answer.
 
 Evidence tags used throughout:
@@ -20,7 +20,7 @@ Evidence tags used throughout:
 
 1. **The emulator one-liner works on macOS from a fresh clone** [host-tested], on branch
    `poc/one-liner-build-2026-10-09`. `git clone`, then `cargo run --release` builds and starts the
-   `psoxide` binary with no Python, no Make and no hydration step. Fresh clone to finished release
+   `psoxide-emulator` binary with no Python, no Make and no hydration step. Fresh clone to finished release
    binary took 3 min 47 s with the machine at load average ~40. The binary is 13.3 MB. It booted
    Celeste headless, and a separately cross-built x86_64 binary run under Rosetta printed the same
    frame hashes. Windows and Linux were **not run**; see 1.4 for what is and is not evidenced.
@@ -35,14 +35,24 @@ Evidence tags used throughout:
    frontend: the two source trees differ by 6,806 added or removed lines in the files they share, and the editor's tree has another 10.9k lines the emulator lacks (37.0k lines against 25.4k in total) [host-tested, diff]. It is a developer
    tool whose download must provision a toolchain, and the product split should remove the fork
    (section 4).
-4. **Half-Life is launchpad-ready in design, Hollow Knight is not.** `cargo hl-build build` is a
+4. **Half-Life is import-ready in design, Hollow Knight is not.** `cargo hl-build build` is a
    Rust-only, cross-OS-aware builder that finds Steam installs itself. `cargo hk-build` shells out
    to 281 Python files, needs a venv, finds only Windows installs inside CrossOver bottles, and
    writes discs to a hard-coded `~/Downloads/ps1 games` [source-inspected].
-5. **Provenance has gaps that block a public launchpad regardless of engineering**: the HL
+5. **Provenance has gaps that block a public Import feature regardless of engineering**: the HL
    clean-room branch is unmerged and diverged (53 ahead, 43 behind main), the website legal page
    still describes Redux derivation that the emulator's own PROVENANCE.md says is rewritten, and
    nobody has asked a lawyer the questions in 5.9.
+
+6. **Names (decided):** products are `psoxide-emulator`, `psoxide-editor`, `psoxide-sdk`,
+   `psoxide-engine`; helper crates `psoxide-app` and `psoxide-import`. Only the emulator package is
+   renamed now. The repo `EBonura/PSoXide` and the `psx-*` crates should not be renamed yet (4.4).
+7. **Parity audit:** 13 things the emulator frontend has that the editor's fork lacks, 6 the other
+   way, 7 already at parity. The editor's fork can be deleted once the six editor-side rows move
+   into `psoxide-app`; the riskiest merges are frame pacing, the menu layout, fonts, the texture
+   filter pin and launch/save identity (4.5).
+8. **Import (decided):** a `psoxide-import` library shown through the shared app library in both
+   apps, HL first. No standalone launchpad (section 3).
 
 Decisions that need Manny are collected in section 8.
 
@@ -79,8 +89,8 @@ seen overnight; none reproduced in the emulator.
 
 ### 1.2 The proof of concept
 
-Branch `poc/one-liner-build-2026-10-09` in the work dir clone `emulator/`, five commits on main
-c743674, not pushed. Summary of the diff: 121 files, almost all vendored sources.
+Branch `poc/one-liner-build-2026-10-09` in the work dir clone `emulator/`, six commits on main
+c743674, pushed. Summary of the diff: 121 files, almost all vendored sources.
 
 - Vendors `crates/{psx-hw,psx-iso,psx-trace,psxed-format}` and
   `sdk/crates/{psx-gpu,psx-gte,psx-gte-core,psx-io,psx-math,psx-spu,psx-telemetry,psx-vram}` plus a
@@ -89,7 +99,7 @@ c743674, not pushed. Summary of the diff: 121 files, almost all vendored sources
   exactly these paths and says `"vendored": true`.
 - Drops `tools/mkisopsx` and `tools/psoxide-link` from the workspace (the frontend does not use
   them), `rust-toolchain.toml`, and the bootstrap steps in `Makefile` and `ci.yml`.
-- Renames the package to `psoxide`, adds `default-members`, fixes profile names, rewrites the README
+- Renames the package and binary to `psoxide-emulator` (the first product name in the scheme of section 4.4), adds `default-members`, fixes profile names, rewrites the README
   build block.
 
 Verification, all from a fresh `git clone` of the branch into `fresh-emulator/` [host-tested]:
@@ -97,8 +107,8 @@ Verification, all from a fresh `git clone` of the branch into `fresh-emulator/` 
 | Check | Result |
 |---|---|
 | `cargo run --release -- --help` (cold, includes crate downloads) | exit 0, 227 s wall, load ~40 |
-| Binary | `target/release/psoxide`, 13,305,424 bytes, arm64 |
-| `psoxide launch --path <Celeste cue> --steps 8000000 --dump-hash` | `vram_fnv1a_64=0xff5327f5b858460d`, `display_fnv1a_64=0xc2779d4f09200444` |
+| Binary | `target/release/psoxide-emulator`, 13,305,424 bytes, arm64 (measured before the final rename; same code) |
+| `psoxide-emulator launch --path <Celeste cue> --steps 8000000 --dump-hash` | `vram_fnv1a_64=0xff5327f5b858460d`, `display_fnv1a_64=0xc2779d4f09200444` |
 | x86_64 cross build on the arm64 Mac, then `arch -x86_64` run | built in 3 min 35 s, identical hashes under Rosetta |
 | `lipo -create` of both | universal binary 27.6 MB (12.9 MB as tar.gz), ad-hoc linker-signed only |
 | `cargo check --locked --workspace --all-features` (includes the `mcp` feature) | pass |
@@ -167,7 +177,7 @@ realistic editor target is in section 7, phase P3. I did not run a release build
 | Artifact | Built on | Contents | Size evidence |
 |---|---|---|---|
 | macOS universal `.dmg` with `PSoXide.app` | `macos-14` (arm64), x86_64 slice cross-built and joined with `lipo` | the app, licence, source note | 27.6 MB universal binary, 12.9 MB compressed [host-tested] |
-| Windows x86_64 `.zip` | `windows-latest` | `psoxide.exe`, licence, source note | not measured |
+| Windows x86_64 `.zip` | `windows-latest` | `psoxide-emulator.exe`, licence, source note | not measured |
 | Linux x86_64 `.tar.gz` | `ubuntu-22.04` (lowest glibc of the hosted LTS images) | binary, licence, source note | not measured |
 | Browser player | already exists | itch.io page and GitHub Pages | n/a |
 | Later: Linux aarch64 | `ubuntu-24.04-arm` | for the Pi roadmap | not planned yet |
@@ -222,22 +232,29 @@ will not run it). It triggers on `v*` tags or manual dispatch, builds three jobs
 secrets are present, and creates a **draft** release with `SHA256SUMS.txt`. It uses first-party
 actions only. It is YAML-valid [host-tested, parsed with PyYAML] and has never run. Known gaps: the
 macOS bundle and icns steps are inline shell (should become a Rust `xtask package`), Windows has no
-icon or version resource yet, and `Cargo.toml` still says version `0.1.0` (`psoxide --version`
+icon or version resource yet, and `Cargo.toml` still says version `0.1.0` (`psoxide-emulator --version`
 prints it). The repo's only release today is `source-2026.09.05` with no assets, and the web demo
 disc sits in the SDK repo's `web-disc` release.
 
-## 3. The launchpad
+## 3. Import: building ports from the user's own files
 
 ### 3.1 Concept
 
-A small tool, not part of the emulator core, that does this for a port such as HL or HK:
+One interface, two apps. A library crate, recommended name `psoxide-import`, does the work. Its
+screens live in the shared app library (4.3, recommended name `psoxide-app`), so each app shows the
+same "Import a game" entry in its Library menu:
 
-1. Find the user's own install of the game (section 3.2).
+- **psoxide-emulator** shows the emulator plus Import.
+- **psoxide-editor** shows the editor plus the emulator plus the same Import.
+
+There is no standalone launchpad program. For a port such as HL or HK, Import does this:
+
+1. Find the user's own install of the game (3.2).
 2. Verify it is a version the cookers were tested on (3.3).
 3. Fetch the port's source at a pinned tag (public GPL source, no game data) and make sure the
    needed Rust toolchain is present, asking before installing anything.
 4. Run the port's builder locally with progress output (3.4, 3.5).
-5. Put the resulting `.cue`/`.bin` in the user's game library and offer to launch it in PSoXide.
+5. Put the resulting `.cue`/`.bin` in the user's game library and offer to boot it.
 
 Nothing copyrighted is downloaded, uploaded or redistributed: the game files are read from where
 Steam put them, converted data and the disc image stay on the user's disk. That matches the
@@ -256,7 +273,7 @@ hk-psx THIRD_PARTY_NOTICES).
 | All | every library listed in `steamapps/libraryfolders.vdf`, and `steamapps/appmanifest_<appid>.acf` for the app | Only the CrossOver code reads `libraryfolders.vdf`; neither builder reads the registry or other-drive libraries |
 
 App ids: Half-Life is 70 (Steam store link in the Xash3D FWGS README [web]); Hollow Knight is 367520
-(`APP_ID` in hk-psx `tools/doctor.py`). The launchpad should be one Rust crate that implements
+(`APP_ID` in hk-psx `tools/doctor.py`). `psoxide-import` should implement
 `libraryfolders.vdf` parsing once, with the HL candidate list, the CrossOver scan and the OS-specific
 roots as its sources, and a manual "choose folder" fallback (both builders already accept
 `--half-life` / `--hollow-knight`).
@@ -312,37 +329,55 @@ From the hl-psx README and `host/hl-build/main.rs`:
   once; validation is part of `build` unless `--no-validate`.
 - `pgo` needs a checkout path without spaces.
 
-So HK cannot be a launchpad target until the pipeline is Rust-only (Manny's stated goal, memory
+So HK cannot be an Import target until the pipeline is Rust-only (Manny's stated goal, memory
 note `rust-only-codebase`), Windows-install discovery works without CrossOver, and the output
 directory is a parameter. I will not put a number on the Python port; 281 files is the scale.
 
 ### 3.6 Architecture
 
-- A `psoxide-launchpad` crate: library plus CLI, then a window. Port manifests are data files
-  (id, display name, source repo and pinned commit, game app id, expected build ids, expected file
-  hashes, builder command, output name). Adding a port is a manifest change.
-- Progress: the builders already print step banners (`==> bootstrap PSoXide components`, ...).
-  Wrap them with line-oriented capture first; ask builders for a `--json-progress` flag later.
-- The build runs `cargo` on pinned remote source, which is executing downloaded code. The tool must
-  show the repo and commit before running, pin by commit, and get explicit consent. It must not run
-  anything from a manifest that was not shipped with the launchpad release.
-- Toolchain provisioning: check `rustup`; if absent, say so and link rustup.rs rather than silently
-  installing it. If present, the repo's `rust-toolchain.toml` downloads the nightly on first use;
-  tell the user the size beforehand (I have not measured it).
-- No telemetry, no network calls except Git fetches of the pinned port source, crates.io, and the
-  rustup toolchain download.
+- **`psoxide-import`** (library, no UI): `discover()` returns installs (3.2); `verify()` checks them
+  against a port manifest (3.3); `plan()` lists the steps and what each will download or write;
+  `run()` executes a plan and emits progress events (step started, line of output, step finished,
+  failed with the log path). The UI only renders events and answers consent prompts. A small
+  `psoxide-import` CLI wraps the same calls for scripts and tests.
+- **Port manifests** are data files shipped with the import crate: id, display name, source repo and
+  pinned commit, game app id, tested build ids, tested file hashes, builder command, output name.
+  Adding a port is a manifest change, and an app build with an empty manifest list shows no
+  Import entry at all (relevant to 5.9 and to phase P6).
+- **Where it runs**: the builders already print step banners (`==> bootstrap PSoXide components`);
+  wrap them with line-oriented capture first and ask builders for a `--json-progress` flag later.
+  HL's builder is `cargo hl-build`; the import crate calls it as a subprocess against the fetched
+  source. Linking a builder into the app instead would still need `cargo` for the guest build
+  (3.4), so a subprocess is simpler and keeps the app small.
+- **Trust**: the build runs `cargo` on pinned remote source, which is executing downloaded code. The
+  UI must show the repo and commit before running, pin by commit, and get explicit consent. It must
+  not run anything from a manifest that was not shipped with the app release.
+- **Toolchain provisioning**: check `rustup` and `git`; if absent, say so and link rustup.rs rather
+  than silently installing it. If present, the repo's `rust-toolchain.toml` downloads the nightly
+  on first use; tell the user the size beforehand (I have not measured it).
+- **Network**: Git fetches of the pinned port source, crates.io, and the rustup toolchain download.
+  No telemetry. If no `git` is installed, a tarball download needs an HTTP client dependency; that
+  is an implementation decision for the first milestone.
+- **Output location**: a parameter, not `~/Downloads/ps1 games` (HK hard-codes it today). Default to
+  the user's configured games folder.
 
-### 3.7 Where the launchpad lives
+### 3.7 Consequences of embedding Import in both apps
 
-| Option | For | Against |
-|---|---|---|
-| Inside the emulator | Players are the audience; one app to open | The emulator becomes a build orchestrator needing a Rust toolchain at runtime, and carries port-specific, legally sensitive code into the core product |
-| Inside the editor | The editor already shells out to Cargo | Wrong audience: makers, not players; the editor has no Windows story yet |
-| **Separate crate and binary** | Optional, removable, independently released and reviewed; legal text sits next to the code that needs it; works without either app | Third download unless bundled |
+Manny's decision (round 2) replaces my earlier recommendation of a separate launchpad. What follows
+from it:
 
-Recommendation: a separate `psoxide-launchpad` that the **emulator's Library menu opens** (a "Get
-games" entry that starts the launchpad if installed, otherwise links to its page). The emulator
-stays a player that never builds anything; the editor does not need to know about it.
+- The emulator stays a player at run time: Import is optional, only needs a toolchain when a user
+  chooses to import, and can be compiled out with a cargo feature (`import`, default on) for
+  packagers. It is never compiled for wasm; the web player cannot read local installs or run Cargo.
+- The editor gets Import for free once both apps share the app library, so there is one
+  implementation and one set of legal text.
+- Legal isolation moves from "separate repo" to "separate crate with data-only manifests": the
+  import crate is the only place that names Half-Life or Hollow Knight. Question 8 in 5.9 covers
+  whether that is enough exposure separation.
+- Because Import lives inside the shared shell, it depends on the parity merge in 4.5: it can only
+  reach the editor after the editor's frontend fork is gone.
+- The first release can ship the Import screens with an empty manifest list (so no port is named in
+  any binary) until the legal gate in P6 clears.
 
 ## 4. Emulator and editor as separate products
 
@@ -367,26 +402,154 @@ other, and the editor sits ten emulator commits behind.
 
 | Option | Description | Verdict |
 |---|---|---|
-| A. Shared app library | Move the window/UI shell (`app`, `gfx`, library, debugger UI, toolbar, input, audio, cli core) into a library crate in the emulator repo with a small hooks trait. `psoxide` is a thin bin. The editor repo depends on that library (vendored or pinned like the core crates) and adds `editor_*`, `embedded_playtest`, `playtest_disc` behind the hooks. | **Recommended.** One frontend, no fork, both products share fixes. Cost: untangling 124 feature gates into a trait, in the 4k-line `AppState`. The old web-build note called this "moderate surgery". |
-| B. Editor spawns the emulator | Play launches the standalone `psoxide` process with the disc; the editor drops its embedded emulator. | Simplest split and smallest editor, but loses the in-editor Play viewport and quick iteration. Reasonable as a stopgap or a `--play-external` mode, not as the end state. |
+| A. Shared app library | Move the window/UI shell (`app`, `gfx`, library, debugger UI, toolbar, input, audio, cli core) into a library crate in the emulator repo with a small hooks trait. `psoxide-emulator` is a thin bin. The editor repo depends on that library (vendored or pinned like the core crates) and adds `editor_*`, `embedded_playtest`, `playtest_disc` behind the hooks. | **Recommended.** One frontend, no fork, both products share fixes. Cost: untangling 124 feature gates into a trait, in the 4k-line `AppState`. The old web-build note called this "moderate surgery". |
+| B. Editor spawns the emulator | Play launches the standalone `psoxide-emulator` process with the disc; the editor drops its embedded emulator. | Simplest split and smallest editor, but loses the in-editor Play viewport and quick iteration. Reasonable as a stopgap or a `--play-external` mode, not as the end state. |
 | C. Keep the fork, add a drift check | CI diffs shared files. | Cheapest, keeps the problem. Not recommended. |
 
 ### 4.3 Recommended product shape
 
-- **PSoXide (emulator)**: play discs, debugger, profiler, library, web build. Download: one app per
-  OS (section 2). Contains no editor code, no `make`, no SDK examples scan, no repo-relative paths.
-  This is what the one-liner and the release workflow in this plan produce.
-- **PSoXide Editor**: makes games. Download: the editor app plus a source bundle of `engine/`, `sdk/`
-  and the pinned tool sources, and a first-run check for rustup and the pinned nightly (E2, E5 show
-  Play compiles a program per project). It embeds the same app library as the emulator through
-  option A. Its Play and Export steps move from `make` + `sh` + `rsync` to a Rust `xtask`, so they
-  run on Windows, and its root-path logic reads a data directory instead of `CARGO_MANIFEST_DIR`.
-- **Launchpad**: separate, opened from the emulator (3.7).
+- **psoxide-emulator**: play discs, debugger, profiler, library, web build, plus Import. Download:
+  one app per OS (section 2). Contains no editor code, no `make`, no SDK examples scan, no
+  repo-relative paths. This is what the one-liner and the release workflow in this plan produce.
+- **psoxide-editor**: makes games; shows the editor, the emulator and the same Import. Download: the
+  editor app plus a source bundle of `engine/`, `sdk/` and the pinned tool sources, and a first-run
+  check for rustup and the pinned nightly (E2, E5 show Play compiles a program per project). It is
+  built on the same app library as the emulator through option A. Its Play and Export steps move
+  from `make` + `sh` + `rsync` to a Rust `xtask`, so they run on Windows, and its root-path logic
+  reads a data directory instead of `CARGO_MANIFEST_DIR`.
+- **psoxide-app** (new library, recommended name): the window, menus, library, debugger, input,
+  audio and CLI shell now duplicated across the two frontends, with hooks for the editor. It also
+  hosts the Import screens. It lives in the emulator repo and the editor repo consumes it the way it
+  consumes the core crates today (vendored at a pinned revision).
+- **psoxide-import** (new library): discovery, verification, plan and run (section 3). No UI of its
+  own.
 - **What moves**: from the emulator repo, the SDK-examples scan, `make examples` action and
   `editor/projects` lookup in `app.rs` (these belong to the editor or are deleted); into the
   emulator repo, a library target for the shell. In the editor repo, delete its copy of the shared
-  frontend files and depend on the emulator's app library. Sample projects (694 MB) move to release
-  assets or a sparse-checkout path so the editor clone shrinks.
+  frontend files and depend on the app library, after the parity items in 4.5 are merged. Sample
+  projects (694 MB) move to release assets or a sparse-checkout path so the editor clone shrinks.
+
+### 4.4 Names
+
+Decision (Manny, round 2): "PSoXide" is the project. The products are **psoxide-emulator**,
+**psoxide-editor**, **psoxide-sdk** and **psoxide-engine**. No package is called just `psoxide`.
+Two helper crates in this plan follow the same scheme: **psoxide-app** (the shared window and UI
+shell, 4.2 option A) and **psoxide-import** (section 3).
+
+Map from today's names. "Cost" is what a rename breaks; "Recommend" is my advice. This round renames
+only the emulator package and binary (done on the PoC branch, verified: `cargo run --release -p
+psoxide-emulator -- --version` prints `psoxide-emulator 0.1.0`; fmt and check pass; the headless
+Celeste hashes are unchanged).
+
+| Today | Scheme name | Cost | Recommend |
+|---|---|---|---|
+| Package and binary `frontend` in PSoXide-emulator | `psoxide-emulator` | Done on the PoC. Downstream path and flag references listed below. | Do it (P0). |
+| Binary `frontend` in PSoXide-editor (the fork) | `psoxide-editor` | None until the fork is replaced (4.5). | Name it when the editor binary is built on `psoxide-app`. |
+| Repo `EBonura/PSoXide-emulator`, `EBonura/PSoXide-editor` | already `psoxide-emulator`, `psoxide-editor` apart from case | GitHub URLs are case-insensitive. | No action. |
+| Repo `EBonura/PSoXide` (SDK, website, docs, shared tools) | `psoxide-sdk` | Old URLs, clones and API calls redirect, but the Pages site does not: it is served at `ebonura.github.io/PSoXide/` ([web] GitHub docs: "Project site URLs are the exception"; use a custom domain before renaming). Every game's `components.lock.json` names `EBonura/PSoXide`; tarball and `cargo install --git` URLs rely on the redirect. Redirects die if anyone creates a new repo under the old name. | Do not rename now. Get a custom domain for the site first, then rename, and never reuse the old name. The SDK is also the project hub today (website, docs), so a clean split of the hub from the SDK may come first. |
+| `engine/` inside PSoXide-editor (`psx-bsp`, `psx-engine`, `psx-game-runtime`, `psx-render-contract`, `psx-chainloader`, `psx-goldsrc`, `psx-level`, `psx-carousel`, `psx-disc-toc`) | `psoxide-engine` | Games consume it through the editor repo's lock paths (`engine`, `editor/crates`), e.g. hl-psx's lock. A separate repo changes those paths in every game. | Use the name now in docs and READMEs. Split the repo later, only when something consumes the engine without the editor. |
+| `emulator-core` (package) | `psoxide-emulator-core` | 47 files in the emulator repo import `emulator_core`; the editor and every game's lock list `emu/crates/emulator-core` (directory names can stay; only the package name changes). A generic name like `emulator-core` would also be a poor crates.io claim. | Rename the package when the first crates.io publish is planned, not before. |
+| `psx-gpu-render` | `psoxide-gpu-render` (it is emulator-side, not device code) | 5 files in the emulator repo, plus pins. | Rename with the next pin bump. |
+| `psoxide-debug-ui`, `-jit`, `-settings`, `-validation`, `-link`, `-pgo`, `-hazard`, `-dev`, `-vmcook` | already in scheme | none | Keep. |
+| `psx-*` SDK and shared crates (`psx-hw`, `psx-rt`, `psx-gpu`, `psx-gte`, `psx-io`, `psx-math`, `psx-spu`, `psx-pad`, `psx-mc`, `psx-iso`, `psx-trace`, ...) | keep | Every game's source says `use psx_gpu::...`; every manifest and lock names them. | **Do not rename.** `psx-` is the platform vocabulary, like `psx-spx`. If they are ever published, Cargo's `package = "..."` key lets a crate be published as `psoxide-sdk-gpu` while games keep writing `psx-gpu` (Cargo feature, not tested here). |
+| `psxed-*` editor crates, binary `psxed` | keep for now | Editor lock paths in every game. | Keep; revisit with the engine split. |
+
+crates.io facts [web, crates.io API, 2026-10-09; "free" is not a reservation]: `psoxide`,
+`psoxide-emulator`, `psoxide-editor`, `psoxide-sdk`, `psoxide-engine`, `psoxide-import` and most of
+the `psx-*` names I probed (`psx-hw`, `psx-gpu`, `psx-rt`, `psx-gte`, `psx-iso`, `psx-io`, `psx-math`,
+`psx-asset`, `psx-font`, `psx-engine`, `psx-trace`, `psxed`) returned 404, so are unpublished. **`psx-spu`
+is taken** (another project, version 0.1.1, updated 2026-04-12) and so is `psx` (0.1.8). Publishing the
+SDK crates under their current names would therefore collide at least once.
+
+Downstream breakage from the emulator rename (references to update in P0):
+
+- hl-psx: `--frontend`/`PSOXIDE` build paths that name `target/release/frontend`, and the README
+  regress command (`cargo hl-build regress --psoxide ...`) docs.
+- hk-psx: `cargo hk-build validate --frontend ../PSoXide-emulator/target/release/frontend`, the
+  `python3 tools/validate.py --emulator .../frontend` line, and the emulator build it does itself from
+  `emulator.lock.json` (it looks for the built binary by name).
+- SDK: `make run-tri FRONTEND=/absolute/path/to/frontend` in the README and Makefile.
+- demo-disc and the other games' validation scripts, plus the `psoxide-debug` skill, which name `-p frontend` or
+  `target/release/frontend`.
+- The editor repo is unaffected until its fork goes: it builds its own `frontend`, and its Makefile
+  keeps `-p frontend`.
+- `psoxide-validation` already accepts the runner names `psoxide` and `frontend`; I did not touch it
+  (it names a validation runner, not the package).
+
+I searched the emulator repo only. The other repos need a grep before P0 lands; I have not done that.
+
+### 4.5 Parity audit: what the two frontends have that the other lacks
+
+Method [source-inspected unless noted]: the two frontend trees were byte-identical on 2026-09-05
+(tree hash 7c95974 in both repos: emulator commit e1f10617, editor commit d4f77eb3). I diffed each
+side against that base, then diffed the two current trees (emulator main c743674, editor main
+6613c59d), ignoring everything behind `feature = "editor"` and the editor-only files
+(`editor_*`, `embedded_playtest`, `playtest_disc`), which stay with the editor. Commit SHAs differ
+between the repos, so I matched commits by date and subject. 30 frontend commits exist only in the
+editor and 45 only in the emulator, all after the base. Of 6,806 changed lines in shared files, most
+sit in `app.rs` (1,950), `ui/menu.rs` (1,484), `cli.rs` (1,347), `main.rs` (505) and `ui/toolbar.rs`
+(494). Dates are commit dates. I read the diffs and grepped both trees for each item; I did not run
+the editor build, so no behaviour below is run-tested. A first row-by-row read could have missed a
+small item; the "Parity" list is where I would look for mistakes.
+
+**Emulator has it, editor lacks it (13 rows).** Home: `psoxide-app` unless noted.
+
+| # | Feature, fix or difference | Dated | Newer/better | Where it should live | Risk |
+|---|---|---|---|---|---|
+| EM1 | Menu redesign: Library, Game, Settings; developer tools in the sidebar; toolbar slimmed. Editor still has Games, Examples, Projects, Editor, System, Settings. | 2026-09-26 | Emulator | Menu as data; editor adds its categories | High (tests index categories by position) |
+| EM2 | Collapsible library folder tree; launch ids from paths; folder field on library rows. Editor has a flat list and its own shared-disc-id fix (2026-09-15). | 09-06, 09-25 | Emulator | Shared | High (save identity) |
+| EM3 | Disc images read on demand (`load_disc_from_bin`, `Disc::from_source`), a frame waits for pending sectors (`disc_ready_for_frame`), `disc_waits` profile column. Editor reads the whole BIN into memory. | 09-25 | Emulator | Shared | Medium |
+| EM4 | Opt-in "smooth slow host" setting and `HostPace` adaptive frames-per-paint. | 09-25 | Emulator | Shared setting | High (conflicts with ED1) |
+| EM5 | Native AArch64 tier hook (`install_native_tier`, feature `native-jit`). The editor lock already carries `psoxide-jit`. | 09-27 | Emulator | Shared, feature-gated | Low |
+| EM6 | Audio underrun counter in the output callback, shown on the performance panel's host line. | 09-25 | Emulator | Shared | Low |
+| EM7 | Smooth and Edge texture filters; xBR and JINC2 removed (clean-room provenance work). Editor still has the xBR path. | 10-08 | Emulator | Shared; shader is in `psx-gpu-render` | High (pin plus provenance) |
+| EM8 | Phosphor-only icon subset (fonts 176 KB). Editor ships lucide 742 KB plus full Phosphor (1.8 MB). | 09-25 | Emulator, but editor needs lucide | Shared; lucide under the editor feature | High (startup panic) |
+| EM9 | Headless CLI: `--route-watch-u32` (09-06), `--route-log-host-ns` (09-24), `--debug-ui-png` with width, window, pointer and csv options (09-25). | 09-06 to 09-25 | Emulator | `psoxide-app` cli | Low |
+| EM10 | CLI hardening: malformed disc returns a boot error; unknown or removed filter names are rejected. | 09-25, 10-08 | Emulator | Shared | Low |
+| EM11 | Web player stack: `web_disc`, `web_embed`, `web_bench`, slice reads and streaming, WebAssembly SIMD, demo disc at page open, iframe embed. | 09-25 to 09-30 | Emulator (editor never builds wasm) | Shared, `cfg(wasm)` | Medium (must stay wasm-clean) |
+| EM12 | Reuse of the frame-start VRAM snapshot buffer for the hardware renderer. | 09-25 | Emulator | Shared | Low |
+| EM13 | Core-crate drift that arrives with a pin bump, not frontend code. The editor pins emulator ca42a30 (2026-10-08 15:47 UTC); the 10 commits after it are the Smooth/Edge filters (3), XA 44.1 kHz conversion, a CD underrun repeat, console-measured CD timing, SWC2 timing, an HBlank counter fix and a README edit [`gh api compare`]. | 10-08 | Emulator | Pin bump | Medium |
+
+**Editor has it, emulator lacks it, outside `feature = "editor"` (6 rows).**
+
+| # | Feature, fix or difference | Dated | Newer/better | Where it should live | Risk |
+|---|---|---|---|---|---|
+| ED1 | Hard frame cap: one guest frame per redraw (two if the monitor refresh is too slow), backlog dropped. Emulator catches up to 4 frames unless EM4 is on. | 2026-09-24 | Editor, tuned for Play beside a heavy editor UI | Shared, as a per-workspace pacing policy | High |
+| ED2 | One `shut_down_for_exit` path with an `editor_close_allowed` veto. The emulator repeats the quit sequence three times in `main.rs`. | 09-25 | Editor | Shared, with a hook for the veto | Medium (data loss if a path is missed) |
+| ED3 | `Gfx::take_close_requested`: an egui close command goes through the window-close path. | 09-25 | Editor | Shared | Low |
+| ED4 | Lucide font registered in `theme.rs`; the code says the editor panics at startup without it. | before the split | Editor requirement | Under the editor feature | High (see EM8) |
+| ED5 | Input tape `stop_replay` and `is_replaying`. Used only by embedded Play. | before the split; emulator removed them as unused 09-05 [inferred] | Editor | Editor feature | Low |
+| ED6 | Profiler `live_average`, `average_recent_ms`, `latest`. Used only by `editor_play_metrics`. | before the split; emulator removed 09-05 [inferred] | Editor | Editor feature | Low |
+
+**Parity (no action beyond keeping one copy), 7 items:** BIOS removal and HLE boot (emulator
+2026-09-15 to 09-25, editor 09-15 and 09-25); clock-driven audio drain (both 09-22); the guest
+performance panel and its F3 toggle (both 09-25); LibCrypt `.sbi` loading; per-launch memory card path
+(`port1_memcard_for_launch`); shared-disc-id launch fix, done differently on each side (EM2); and four
+features the emulator moved out of the toolbar without loss (save-state buttons, controller routing,
+debug toggles, single-step), which now sit in the Game menu, `ui::controller_ports` and the debug
+sidebar.
+
+**Counts:** 13 emulator-ahead rows, 6 editor-ahead rows, 7 parity items. Nothing in the editor's
+fork is lost by deleting it if rows ED1 to ED6 land in `psoxide-app` or the editor feature first, and EM1,
+EM2, EM4, EM7 and EM8 are resolved by test, not by default.
+
+**Riskiest to merge, in order:**
+
+1. **Frame pacing (ED1 against EM4).** Two policies with different goals. Pick one mechanism with a
+   per-workspace setting, and re-measure editor Play and plain emulator speed. Neither was measured here.
+2. **Menu architecture (EM1).** Editor tests assert menu positions (`categories[5]` is System) and the
+   editor workspace toggle, Projects and Editor categories depend on the old layout.
+3. **Fonts (EM8, ED4).** Drop lucide from the shared lib and the editor panics at startup.
+4. **Filters and the `psx-gpu-render` pin (EM7, EM13).** The frontend and the crate must move together.
+   The filter is not persisted in settings (it is a runtime cycle), so there is no saved-setting
+   migration, but the shader uniform values differ (xBR was 3, Edge is 1) and the editor's preview and
+   Play use the same renderer. The pin bump also needs the editor's red CI fixed first (E8).
+5. **Launch ids and save identity (EM2, EM3).** The two sides fix the same shared-disc-id bug
+   differently. Check that existing memory cards and save states still resolve for both, and test
+   huge BINs with the on-demand reader inside the editor's Play.
+6. **Quit path (ED2).** Merge the three emulator copies into the single path before adding the editor
+   veto, or a quit can skip the project save.
+
 
 ## 5. Legal and provenance fact sheet
 
@@ -516,14 +679,14 @@ a prediction about PSoXide.
   noncommercial status, source availability and a rights holder's silence do not establish
   permission.
 
-### 5.9 Questions for a lawyer before a public HL/HK launchpad
+### 5.9 Questions for a lawyer before a public HL/HK Import feature
 
 1. Does a tool that reads a user's lawfully installed game, converts it locally, and never
    transmits it, raise a different question from publishing a cooker? Does the answer differ when
    the vendor of the tool pins and fetches the cooker source for the user?
 2. SSA 2.G (no reverse engineering or derivative works without consent, "unless applicable law
    permits") against a cooker that converts Valve maps and models into a new format on the user's
-   machine. Does the user's local conversion count, and who is the actor, the user or the launchpad
+   machine. Does the user's local conversion count, and who is the actor, the user or the app
    publisher? Same question for Hollow Knight's own licence, which still has to be located.
 3. hl-psx's Valve-SDK-informed code: is the Half-Life 1 SDK licence relevant to a port that runs on
    a different runtime, given the licence text covers "modified Valve games running on the
@@ -534,14 +697,14 @@ a prediction about PSoXide.
    jurisdictions matter (UK, US, EU)?
 5. Are hash lists of copyrighted game files, build ids, and Half-Life or Hollow Knight file names in a
    public manifest a problem?
-6. GPL: a launchpad that runs GPL port code to produce a disc image that contains GPL-derived code
+6. GPL: an app that runs GPL port code to produce a disc image that contains GPL-derived code
    plus converted proprietary data. Does the local output ever need to be treated as a combined
    work, and does it matter that the user never redistributes it?
 7. Trademark and affiliation wording for a tool that names "Half-Life" and "Hollow Knight" in its UI
    and manifests. Is nominative use enough, and is more disclaimer text needed?
 8. Platform exposure: the re3 precedent suggests rights holders act through GitHub takedowns. What
-   is the exposure of the PSoXide repos, the releases and the itch pages, and does it differ if the
-   launchpad lives in its own repository?
+   is the exposure of the PSoXide repos, the releases and the itch pages, and does it differ now that Import ships inside the emulator and editor apps
+   rather than in a separate program?
 9. Whether the binary release process (SOURCE.txt, tag, vendored crates) meets GPL-2.0 section 3 for
    each artifact type, including the macOS app bundle and any future AppImage.
 10. Sony: anything further needed beyond omitting BIOS and system-area material for generated discs
@@ -551,17 +714,19 @@ a prediction about PSoXide.
 
 ## 6. READMEs
 
-Drafts, not pushed, in `drafts/`: `README.emulator.md`, `README.editor.md`, `README.sdk.md`. Each
-follows one structure: the agentic-coding callout copied unchanged from the current READMEs, one
-line saying what it is, a screenshot, a Download table, a short "Build from source" block, a
-feature list, links, then licence, provenance and trademark lines. They are written for the state
-after the phases they depend on, and each draft has a header comment marking lines that are not true
-yet:
+Drafts in `drafts/` and on the docs branch under `docs/distribution/`: `README.emulator.md`,
+`README.editor.md`, `README.sdk.md`. Each follows one structure: the agentic-coding callout copied
+unchanged from the current READMEs, one line saying what it is, a screenshot, a Download table, a
+short "Build from source" block, a feature list, links, then licence, provenance and trademark
+lines. They use the product names from 4.4 (titles "PSoXide Emulator", "PSoXide Editor", "PSoXide
+SDK"; binary `psoxide-emulator`). They are written for the state after the phases they depend on,
+and each draft has a header comment marking lines that are not true yet:
 
 - Emulator: the clone-and-run block is true on the PoC branch only; the Download table needs the
-  first release.
-- Editor: both the one-liner [P0 for the editor] and the Download table [P2] are not true yet, and it
-  says plainly that Play compiles a program and needs rustup.
+  first release; the Import line needs P5.
+- Editor: both the one-liner [P3] and the Download table [P3] are not true yet, it says plainly that
+  Play compiles a program and needs rustup, and the Import line needs P4 and P5 (the editor only
+  gets Import after the fork is replaced).
 - SDK: no Download table, because the SDK is distributed as a pinned revision; the quick start
   assumes a Make-free `cargo xtask disc hello-tri` that does not exist yet.
 
@@ -573,52 +738,58 @@ of the app with the debugger open is a better lead image. The itch and website l
 
 Efforts are my estimates in engineer-days of focused work, as ranges, assuming the repo owner
 reviews. They exclude waiting on accounts and legal. Hardware smoke tests need someone with the
-machines.
+machines. Round 2 changed: P0 now includes the `psoxide-emulator` rename and its downstream edits;
+P4 absorbs the parity audit's merge work and the shared `psoxide-app` library; the standalone
+launchpad is gone, so P5 builds `psoxide-import` and its screens inside `psoxide-app`.
 
 | Phase | Scope | Effort | Needs Manny |
 |---|---|---|---|
-| P0 One-line build, emulator | Review and merge the PoC; add CI jobs on `windows-latest` and `ubuntu-22.04` and an MSRV job; use the Rust `psoxide-components` for the vendor refresh and delete the Python bootstrap; update every downstream reference to `target/release/frontend` and `-p frontend` (hl-psx, hk-psx `--frontend`, demo-disc, `psoxide-debug` skill, SDK `FRONTEND=` examples); decide the version number. | 2 to 4 | OK to rename the package; one real Windows run and one Linux desktop run |
+| P0 One-line build and names, emulator | Review and merge the PoC (package already renamed `psoxide-emulator`); add CI jobs on `windows-latest` and `ubuntu-22.04` and an MSRV job; use the Rust `psoxide-components` for the vendor refresh and delete the Python bootstrap; grep every repo and update references to `target/release/frontend`, `-p frontend` and `--frontend` (hl-psx, hk-psx, SDK `FRONTEND=`, demo-disc, `psoxide-debug` skill; list in 4.4); decide the version number. No SDK crate or repo renames. | 2 to 4 | One real Windows run and one Linux desktop run |
 | P0b One-line build, SDK | `cargo xtask disc <example>` so the SDK needs no Make; hello-tri quick start. | 2 to 4 | none |
 | P1 Release binaries, unsigned | Move the draft workflow in, dry-run on a test tag, fix what breaks; `xtask package` for the app bundle and icon; Windows icon resource; checksums; SOURCE.txt; website download page; smoke test checklist run on all three OSes. | 4 to 8 | Test machines or testers for Windows and Linux |
 | P2 Signing | Apple enrolment, certificate, notarisation in CI; Windows signing service decision and setup. | 1 to 3 of work, plus enrolment lead time | Apple Developer account ($99/yr), certificate and app password; entity decision and spend for Windows |
-| P3 Editor as a buildable product | Vendor the SDK subset into the editor, shrink the clone (sample projects out of the default checkout), port `build_guest_staged.sh`/`make` Play path to a Rust `xtask`, replace compile-time root paths with a data-dir resolver, first-run toolchain check, fix editor CI, bring pins current. Editor release workflow. | 15 to 30 | Which sample projects stay in the default clone; a Windows tester |
-| P4 Product split | Option A in section 4.2: library target for the shared shell, hooks trait, delete the editor's frontend fork, remove SDK-example and `editor/projects` code from the player. | 15 to 30 | Approval of option A over B |
-| P5 Launchpad MVP, HL only | `psoxide-launchpad` crate: install discovery on all OSes, `libraryfolders.vdf`, version check against tested build ids, pinned fetch, run `cargo hl-build`, progress, library install, launch; emulator Library entry. Not released publicly until P6 clears. | 10 to 20 | Tested HL build ids and file hashes from his installs; consent text |
-| P5b Launchpad, HK | Blocked by the Python-to-Rust port of the HK pipeline, Windows-install discovery without CrossOver, and a parameterised output directory. | not estimated; 281 Python files is the measure | The Rust-only port is already his stated goal |
-| P6 Legal gate | Merge `cleanroom/hl-2026-10-03` (rebase, regate), reconcile `legal.md` with `PROVENANCE.md`, answer 5.9 with a lawyer, then publish the launchpad. | engineering 5 to 15 for the HL clean-room finish; lawyer time unknown | A lawyer, the decision to ship, and for HK the Team Cherry terms |
+| P3 Editor as a buildable product | Vendor the SDK subset into the editor, shrink the clone (sample projects out of the default checkout), port the `build_guest_staged.sh`/`make` Play path to a Rust `xtask`, replace compile-time root paths with a data-dir resolver, first-run toolchain check, fix editor CI, bring pins current (the pin bump carries the filter change, so do it with P4's EM7 work). Editor release workflow. | 15 to 30 | Which sample projects stay in the default clone; a Windows tester |
+| P4 Shared app library and parity merge | Create `psoxide-app` in the emulator repo from the emulator frontend (option A, 4.2); land the six editor-side rows ED1 to ED6 (4.5) as hooks and features; resolve the five riskiest items by test (frame pacing, menu data, fonts, filter pin, launch and save identity); rebuild the editor binary `psoxide-editor` on it; delete the editor's fork; remove SDK-example and `editor/projects` code from the player. | 20 to 40 | Approval of option A over B; a call on the pacing policy |
+| P5 Import, HL first | `psoxide-import` crate (discovery on all OSes, `libraryfolders.vdf`, version check against tested build ids, pinned fetch, run `cargo hl-build`, progress events, library install) plus the Import screens in `psoxide-app`, shown by both apps. Ships with an empty port manifest list until P6 clears. Needs P4 for the editor; the emulator can ship it earlier. | 10 to 20 | Tested HL build ids and file hashes from his installs; consent text |
+| P5b Import, HK | Blocked by the Python-to-Rust port of the HK pipeline, Windows-install discovery without CrossOver, and a parameterised output directory. | not estimated; 281 Python files is the measure | The Rust-only port is already his stated goal |
+| P6 Legal gate | Merge `cleanroom/hl-2026-10-03` (rebase, regate), reconcile `legal.md` with `PROVENANCE.md`, answer 5.9 with a lawyer, then enable the HL (and later HK) manifests. | engineering 5 to 15 for the HL clean-room finish; lawyer time unknown | A lawyer, the decision to ship, and for HK the Team Cherry terms |
 
-Order I would take: P0, P1 unsigned, P2 in parallel with P3 and P4, P5 in parallel, P6 gating the
-public launchpad only. P0 and P1 give a visible win (downloads for the emulator) without touching
-the editor or anything legally sensitive.
+Order I would take: P0, then P1 unsigned; P2 alongside; P4 (with P3's editor-build work) in
+parallel; P5 as soon as the emulator side exists; P6 gating only the manifests, not the screens. P0
+and P1 give a visible win (downloads for the emulator) without touching the editor or anything legally
+sensitive.
 
 ## 8. Needs from Manny
 
-1. Yes or no to renaming the emulator package to `psoxide` and to vendoring the SDK crates (P0).
+1. Merge approval for the PoC and the `psoxide-emulator` rename (P0), and a go-ahead to update the
+   other repos' references to the old binary name.
 2. Apple Developer enrolment and the signing secrets; the Windows signing route and entity (P2).
 3. A Windows and a Linux machine or a tester for the smoke checklist (P0, P1).
-4. Product split choice: option A, B or C (P4), and which editor sample projects ship in the default clone.
+4. The pacing policy call (4.5, ED1 against EM4) and which editor sample projects ship in the default clone (P3, P4).
 5. The Half-Life and Hollow Knight build ids and file hashes from his installs, and which game
    versions the cookers were validated on (P5).
 6. A lawyer and the questions in 5.9; the Team Cherry terms for Hollow Knight (P6).
-7. Whether the launchpad is a separate repository (recommended) and under which account.
-8. Permission to push: the PoC branch and the docs branch are local only.
+7. A custom domain for the website before any rename of `EBonura/PSoXide` (4.4); until then the repo keeps its name.
+8. Whether to claim crates.io names early (4.4); not needed for any phase here.
 
 ## Appendix A. Repositories and artefacts
 
 - Work dir: `~/Library/Application Support/PSoXide-perf/work/dist-plan-2026-10-09`
-- PoC clone and branch: `emulator/` on `poc/one-liner-build-2026-10-09` (base main c743674).
+- PoC clone and branch: `emulator/` on `poc/one-liner-build-2026-10-09` (base main c743674), pushed.
 - Docs branch: `docs/distribution-plan-2026-10-09` in the same clone, off main: this file,
-  `docs/distribution/release.yml.draft`, and the three README drafts.
-- Fresh-clone proof: `fresh-emulator/` and logs `fresh-run.log`, `fresh-check.log`, `fresh-test.log`,
-  `fresh-test2.log`, `fresh-x86.log`, `fresh-win.log`.
+  `docs/distribution/release.yml.draft`, and the three README drafts; pushed.
+- Fresh-clone proof: logs `fresh-run.log`, `fresh-check.log`, `fresh-test*.log`, `fresh-x86.log`,
+  `fresh-win.log` and `rename-check.log` in the work dir (the fresh clone itself was cleaned up).
 - Fetched sources: `src/` (READMEs, PROVENANCE, LICENSING, THIRD_PARTY_NOTICES, legal.md, hk
   doctor, hl-build main.rs).
-- Editor clone `editor/` on `poc/editor-fresh-build-probe` (bootstrapped, nothing committed).
+- Parity audit working material: `editor/` is a partial clone with the editor's full history and a
+  sparse checkout of `emu/crates/frontend`; `e.log` and `m.log` list each side's frontend commits.
 
 ## Appendix B. Things I noticed outside the brief
 
 - The editor's `README.md` still lists MIPS binutils as a prerequisite (E7).
 - Editor main CI is red (E8).
 - The standalone emulator frontend scans repo-relative SDK and editor paths (B7).
-- `psoxide --version` reports 0.1.0 for all builds.
+- `psoxide-emulator --version` reports 0.1.0 for all builds.
 - `tools/build-web-player.py` (Python) builds the web player bundle, so the web path is not Rust-only yet.
+- The website `legal.md` still describes Redux derivation the emulator's PROVENANCE.md says is rewritten (5.2).

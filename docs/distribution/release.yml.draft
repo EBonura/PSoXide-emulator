@@ -1,7 +1,7 @@
 # DRAFT release workflow for EBonura/PSoXide-emulator. NOT ENABLED: it lives at
 # docs/distribution/release.yml.draft and only runs once moved to .github/workflows/release.yml.
 #
-# What it does: on a tag like v0.2.0 (or a manual dispatch for a dry run) it builds the `psoxide`
+# What it does: on a tag like v0.2.0 (or a manual dispatch for a dry run) it builds the `psoxide-emulator`
 # desktop binary for macOS (universal), Windows x86_64 and Linux x86_64, packages each with the
 # licence and a SOURCE.txt naming the exact commit, and attaches them plus checksums to a GitHub
 # Release. Signing steps run only when the signing secrets exist; without them the artifacts are
@@ -49,18 +49,18 @@ jobs:
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
       - name: Build both architectures
         run: |
-          cargo build --locked --release -p psoxide --target aarch64-apple-darwin
-          cargo build --locked --release -p psoxide --target x86_64-apple-darwin
+          cargo build --locked --release -p psoxide-emulator --target aarch64-apple-darwin
+          cargo build --locked --release -p psoxide-emulator --target x86_64-apple-darwin
           mkdir -p dist
-          lipo -create -output dist/psoxide \
-            target/aarch64-apple-darwin/release/psoxide \
-            target/x86_64-apple-darwin/release/psoxide
-          lipo -info dist/psoxide
+          lipo -create -output dist/psoxide-emulator \
+            target/aarch64-apple-darwin/release/psoxide-emulator \
+            target/x86_64-apple-darwin/release/psoxide-emulator
+          lipo -info dist/psoxide-emulator
       - name: Make the app bundle
         run: |
-          app="dist/PSoXide.app"
+          app="dist/PSoXide-Emulator.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          cp dist/psoxide "$app/Contents/MacOS/psoxide"
+          cp dist/psoxide-emulator "$app/Contents/MacOS/psoxide-emulator"
           # icns from the 1024 px brand icon
           set="$RUNNER_TEMP/AppIcon.iconset"; mkdir -p "$set"
           for s in 16 32 64 128 256 512; do
@@ -73,9 +73,9 @@ jobs:
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
-            <key>CFBundleName</key><string>PSoXide</string>
+            <key>CFBundleName</key><string>PSoXide Emulator</string>
             <key>CFBundleIdentifier</key><string>io.itch.bonnie-studios.psoxide</string>
-            <key>CFBundleExecutable</key><string>psoxide</string>
+            <key>CFBundleExecutable</key><string>psoxide-emulator</string>
             <key>CFBundleIconFile</key><string>AppIcon</string>
             <key>CFBundleShortVersionString</key><string>${version}</string>
             <key>CFBundlePackageType</key><string>APPL</string>
@@ -100,24 +100,24 @@ jobs:
           security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$kc"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$pw" "$kc"
           security list-keychains -d user -s "$kc" login.keychain
-          codesign --force --options runtime --timestamp --sign "$APPLE_SIGN_IDENTITY" dist/PSoXide.app
-          ditto -c -k --keepParent dist/PSoXide.app "$RUNNER_TEMP/notarize.zip"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGN_IDENTITY" dist/PSoXide-Emulator.app
+          ditto -c -k --keepParent dist/PSoXide-Emulator.app "$RUNNER_TEMP/notarize.zip"
           xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
             --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
-          xcrun stapler staple dist/PSoXide.app
+          xcrun stapler staple dist/PSoXide-Emulator.app
       - name: Package
         run: |
           cp LICENSE dist/
           printf 'PSoXide %s\nSource: https://github.com/%s/tree/%s\nBuilt from commit %s\n' \
             "$VERSION" "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_SHA" > dist/SOURCE.txt
-          hdiutil create -volname PSoXide -srcfolder dist/PSoXide.app -ov -format UDZO "PSoXide-$VERSION-macos.dmg"
-          tar -C dist -czf "PSoXide-$VERSION-macos-cli.tar.gz" psoxide LICENSE SOURCE.txt
+          hdiutil create -volname "PSoXide Emulator" -srcfolder dist/PSoXide-Emulator.app -ov -format UDZO "PSoXide-Emulator-$VERSION-macos.dmg"
+          tar -C dist -czf "PSoXide-Emulator-$VERSION-macos-cli.tar.gz" psoxide-emulator LICENSE SOURCE.txt
       - uses: actions/upload-artifact@v4
         with:
           name: macos
           path: |
-            PSoXide-*-macos.dmg
-            PSoXide-*-macos-cli.tar.gz
+            PSoXide-Emulator-*-macos.dmg
+            PSoXide-Emulator-*-macos-cli.tar.gz
 
   windows:
     runs-on: windows-latest
@@ -126,23 +126,23 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal
       - name: Build
-        run: cargo build --locked --release -p psoxide
+        run: cargo build --locked --release -p psoxide-emulator
       # Window icon and version resource need a build.rs resource step (not yet in the repository).
       - name: Sign (only when a signing service or certificate is configured)
         if: ${{ vars.WINDOWS_SIGNING == 'true' }}
-        run: echo "TODO sign target/release/psoxide.exe with the chosen service before packaging"
+        run: echo "TODO sign target/release/psoxide-emulator.exe with the chosen service before packaging"
       - name: Package
         shell: bash
         run: |
           mkdir -p dist
-          cp target/release/psoxide.exe LICENSE dist/
+          cp target/release/psoxide-emulator.exe LICENSE dist/
           printf 'PSoXide %s\nSource: https://github.com/%s/tree/%s\nBuilt from commit %s\n' \
             "$VERSION" "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_SHA" > dist/SOURCE.txt
-          7z a "PSoXide-$VERSION-windows-x86_64.zip" ./dist/*
+          7z a "PSoXide-Emulator-$VERSION-windows-x86_64.zip" ./dist/*
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: PSoXide-*-windows-x86_64.zip
+          path: PSoXide-Emulator-*-windows-x86_64.zip
 
   linux:
     # Oldest hosted Ubuntu LTS image, so the binary's glibc floor stays low.
@@ -153,18 +153,18 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal
       - name: Build
-        run: cargo build --locked --release -p psoxide
+        run: cargo build --locked --release -p psoxide-emulator
       - name: Package
         run: |
           mkdir -p dist
-          cp target/release/psoxide LICENSE dist/
+          cp target/release/psoxide-emulator LICENSE dist/
           printf 'PSoXide %s\nSource: https://github.com/%s/tree/%s\nBuilt from commit %s\n' \
             "$VERSION" "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_SHA" > dist/SOURCE.txt
-          tar -C dist -czf "PSoXide-$VERSION-linux-x86_64.tar.gz" psoxide LICENSE SOURCE.txt
+          tar -C dist -czf "PSoXide-Emulator-$VERSION-linux-x86_64.tar.gz" psoxide-emulator LICENSE SOURCE.txt
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: PSoXide-*-linux-x86_64.tar.gz
+          path: PSoXide-Emulator-*-linux-x86_64.tar.gz
 
   publish:
     needs: [macos, windows, linux]
