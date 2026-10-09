@@ -460,6 +460,15 @@ pub struct Gpu {
     /// Cumulative drawing workload for the debug UI. Diagnostic only.
     #[serde(skip)]
     work: GpuWorkCounters,
+    /// Texture state of the last textured primitive costed, for the timing
+    /// model's cache charges (see [`Gpu::texture_timing_surcharge`]): the
+    /// texture page with its colour depth, and the CLUT word.
+    #[serde(skip)]
+    timing_tex_key: u16,
+    #[serde(skip)]
+    timing_tex_clut: u16,
+    #[serde(skip)]
+    timing_tex_valid: bool,
     /// Pixel area of the packet being costed, handed from the timing model
     /// (which only borrows `self`) to `execute_gp0_packet`. An atomic only
     /// so `Gpu` stays `Sync`; it is written with plain relaxed loads/stores.
@@ -786,6 +795,9 @@ impl Gpu {
             gp0_timing_hist: [0; 256],
             gp0_dma_timing_hist: [0; 256],
             work: GpuWorkCounters::default(),
+            timing_tex_key: 0,
+            timing_tex_clut: 0,
+            timing_tex_valid: false,
             timing_pixels: std::sync::atomic::AtomicU64::new(0),
             gp1_opcode_hist: [0; 256],
             display_start_history: std::collections::BTreeSet::new(),
@@ -1878,6 +1890,60 @@ impl Gpu {
         }
     }
 
+    /// What a textured primitive costs for its texels beyond the rate and
+    /// setup of [`Gpu::gp0_packet_timing_cost`] (hwtest v2.1, records
+    /// 0x200-0x223; clocks a triangle over the same-page, same-CLUT run):
+    ///
+    /// * an 8 or 15-bit texture reads more per pixel than the rate models:
+    ///   8x8, 16x32 and 32x32 triangles cost 7/42/47 more at 8 bits and
+    ///   6/60/85 at 15, charged as a rate on the pixels (4 bits matches the
+    ///   rate, give or take 15 on the middle size);
+    /// * a texture page change refills the texture cache, in proportion to
+    ///   the pixels drawn past a small start: 12/283/431 (4 bits), 9/402/682
+    ///   (8) and 40/694/1281 (15) for the same three sizes, fitted as 1.0, 1.55
+    ///   and 2.8 clocks a pixel past the first 24;
+    /// * a new CLUT reloads it: about 270 clocks at 8 bits, 25 at 4 and none
+    ///   at 15.
+    ///
+    /// A moving UV window within one page, which the console also charges for
+    /// (15-bit 16x32: 227), is not modelled. Returns 0 for anything that does
+    /// not sample a texture.
+    fn texture_timing_surcharge(&mut self, op: u8, pixels: u64) -> u64 {
+        let (clut, key) = match op {
+            0x24..=0x27 | 0x2C..=0x2F => (self.gp0_fifo[2] >> 16, self.gp0_fifo[4] >> 16),
+            0x34..=0x37 | 0x3C..=0x3F => (self.gp0_fifo[2] >> 16, self.gp0_fifo[5] >> 16),
+            0x64..=0x67 | 0x6C..=0x6F | 0x74..=0x77 | 0x7C..=0x7F => (
+                self.gp0_fifo[2] >> 16,
+                u32::from(self.tex_page_x / 64) & 0xF
+                    | u32::from(self.tex_page_y >= 256) << 4
+                    | u32::from(self.tex_depth) << 7,
+            ),
+            _ => return 0,
+        };
+        let key = (key & 0x019F) as u16;
+        let depth = usize::from((key >> 7) & 3).min(2);
+        let clut = clut as u16;
+        // Q8 clocks a pixel for the per-pixel read, and a pixel past the
+        // start for a page change.
+        const READ_Q8: [u64; 3] = [0, 31, 38];
+        const REFILL_Q8: [u64; 3] = [256, 397, 717];
+        const REFILL_START: u64 = 24;
+        const CLUT_RELOAD: [u64; 3] = [25, 270, 0];
+        let mut cost = pixels * READ_Q8[depth] / 256;
+        if self.timing_tex_valid {
+            if key != self.timing_tex_key {
+                cost += pixels.saturating_sub(REFILL_START) * REFILL_Q8[depth] / 256;
+            }
+            if clut != self.timing_tex_clut {
+                cost += CLUT_RELOAD[depth];
+            }
+        }
+        self.timing_tex_valid = true;
+        self.timing_tex_key = key;
+        self.timing_tex_clut = clut;
+        cost
+    }
+
     /// `max(setup, fill)`: the setup of a primitive overlaps its own fill.
     ///
     /// A triangle past the hardware extent limit draws nothing (see
@@ -2610,6 +2676,7 @@ impl Gpu {
         // Setup is part of the fitted per-primitive cost.
         let timing_cost = self.gp0_packet_timing_cost(op as u8);
         let pixels = std::mem::take(self.timing_pixels.get_mut());
+        let timing_cost = timing_cost + self.texture_timing_surcharge(op as u8, pixels);
         self.work.pixels = self.work.pixels.saturating_add(pixels);
         self.gp0_opcode_hist[op as usize] = self.gp0_opcode_hist[op as usize].saturating_add(1);
         self.gp0_timing_hist[op as usize] =
