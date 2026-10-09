@@ -18,6 +18,19 @@
   WipEout 3 frame) change display hashes. The rule is not measured on the
   console yet, and whether it holds with the display blanked is a guess (it
   does not, here: Chrono Cross builds its menu background that way).
+- The hardware renderer now matches the CPU rasterizer on polygons. It draws
+  each triangle half a pixel down and right, so the host's centre sampling
+  lands where the PS1 samples (a pixel's top-left corner): the same pixels are
+  lit, with the same texels and colours, including on one-pixel slivers. That
+  removes the row of blue dots along the Quake shotgun, where the host lit
+  pixels the CPU skips and read the texture's border column; a Quake frame's
+  mean difference from the CPU image drops from about 8 to under 1.
+  Rectangles, fills and lines are unchanged. Texture coordinates wrap in
+  eight bits below zero as the CPU's do instead of clamping at zero.
+- Semi-transparency in the hardware renderer blends the stored colour values
+  instead of linear light. It added the source to the decoded destination and
+  re-encoded the sum, so VoXide's BRIGHTER 3 rectangle (+24 per channel) came
+  out near +3; all four blend modes now land within one 5-bit step of the CPU.
 - Stopping a GPU linked-list DMA now delivers the node the walker had already
   admitted. A DMA burst holds the bus, so a CPU write that clears CHCR cannot
   land inside a node; the walker interleaves a word per cycle with the CPU and
