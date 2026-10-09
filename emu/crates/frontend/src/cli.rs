@@ -27,7 +27,9 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+#[cfg(feature = "editor")]
+use clap::ValueEnum;
+use clap::{Args, Parser, Subcommand};
 use emulator_core::{
     button, fast_boot_disc, telemetry, Bus, ButtonState, Cpu, EmulatorState,
     InstructionCacheMissKind,
@@ -663,6 +665,7 @@ pub struct DumpEditorUiArgs {
     pub pointer: Option<(f32, f32)>,
 }
 
+#[cfg(feature = "editor")]
 fn parse_editor_ui_point(text: &str) -> Result<(f32, f32), String> {
     let (x, y) = text
         .split_once(',')

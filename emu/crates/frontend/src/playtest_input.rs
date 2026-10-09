@@ -160,6 +160,7 @@ impl PlaytestInputTape {
     /// Start replaying a persisted tape, falling back to memory. In-place
     /// replay: the session is assumed to already be at the recording point,
     /// so no pre-`start_poll` idle window applies.
+    #[cfg(any(test, feature = "editor"))]
     pub(crate) fn start_replay(&mut self, path: &Path) -> Result<usize, String> {
         if path.is_file() {
             let tape = read_tape_full(path)?;
