@@ -50,11 +50,13 @@
   counter no longer shortens the first external read behind it (an overlap
   measured on a late PSone): through warm code 64 reads of EXP1 now take 2174
   clocks, the BIOS ROM's figure and the console's 2176, and EXP3 830 against
-  832 (they were 2144 and 821). A store behind a cold I-cache line fill waits
-  for the fill and an internal register read gives way to it for up to three
-  clocks, which moves 64 stores through evicted code from 143 to 336 clocks
-  (329 on the console) and 32 GPUSTAT reads from 239 to 287 (284); both
-  constants are fits to those two records. Save states move to format 16.
+  832 (they were 2144 and 821). A cold I-cache line fill and the
+  write buffer share the RAM bus: a store behind a fill reaches RAM after it,
+  a fill waits for the stores the buffer already holds, and an internal
+  register read gives way to a fill for up to three clocks. That moves 64
+  stores through evicted code from 143 to 319 clocks (329 on the console) and
+  32 GPUSTAT reads from 239 to 287 (284), while a store with room in the
+  buffer is never held. Save states move to format 16.
 - SIO0 follows the console's byte timing (hardware tests v2.1). A byte takes
   ten bit times, not eight: it reaches DATA and sets RX not empty when it has
   been through the wire (1360 clocks at the BIOS's BAUD, where the emulator
