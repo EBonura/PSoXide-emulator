@@ -23,9 +23,11 @@
 //!     └── last-crash.log
 //! ```
 //!
-//! `<game-id>` is a stable 16-hex-char hash derived from the
-//! disc's license text + PVD title, so renaming a BIN doesn't
-//! orphan its savestates.
+//! `<game-id>` is a stable 16-hex-char hash derived from the disc's
+//! own contents (see `library`), so renaming a BIN doesn't orphan its
+//! savestates. Data saved under an older id scheme is copied into the
+//! new id's directory by [`ConfigPaths::adopt_legacy_game_dir`]; the old
+//! directory is left untouched.
 //!
 //! `ConfigPaths` is constructed once at startup and threaded
 //! through the app -- no code outside this module should build
@@ -233,6 +235,57 @@ impl ConfigPaths {
             .join(format!("memcard-{clamped}.pre-hle.mcd"))
     }
 
+    /// Marker inside a game directory naming the older ids whose data was
+    /// copied in, one per line.
+    fn migrated_marker(&self, game_id: &str) -> PathBuf {
+        self.game_dir(game_id).join(".migrated-from")
+    }
+
+    /// The older ids whose per-game data was copied into `game_id`'s
+    /// directory. A save state written under one of them is still this
+    /// game's save state.
+    pub fn migrated_from(&self, game_id: &str) -> Vec<String> {
+        std::fs::read_to_string(self.migrated_marker(game_id))
+            .map(|text| {
+                text.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Copy the data saved under `legacy_id` (memory cards, save states,
+    /// input tapes, thumbnails) into `game_id`'s directory, so a game keeps
+    /// its saves after its id changed. Nothing is deleted or overwritten:
+    /// the old directory stays as it was, and a file already present in the
+    /// new one wins. Runs once per `(legacy_id, game_id)` pair (recorded in a
+    /// marker) so a file removed from the new directory later does not come
+    /// back. Returns how many files were copied.
+    ///
+    /// Several games can share one legacy id; each of them gets its own
+    /// copy, which is what they were all effectively using before.
+    pub fn adopt_legacy_game_dir(&self, legacy_id: &str, game_id: &str) -> std::io::Result<usize> {
+        use std::io::Write;
+        let from = self.game_dir(legacy_id);
+        if legacy_id == game_id || !from.is_dir() {
+            return Ok(0);
+        }
+        if self.migrated_from(game_id).iter().any(|id| id == legacy_id) {
+            return Ok(0);
+        }
+        let to = self.game_dir(game_id);
+        let copied = copy_tree_no_overwrite(&from, &to)?;
+        std::fs::create_dir_all(&to)?;
+        let mut marker = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.migrated_marker(game_id))?;
+        writeln!(marker, "{legacy_id}")?;
+        Ok(copied)
+    }
+
     /// Ensure `dir` exists as a directory, creating parents as
     /// needed. Idempotent. Errors are wrapped with the path so
     /// callers can include it in user messages.
@@ -252,6 +305,32 @@ impl ConfigPaths {
         self.ensure_dir(&self.input_tapes_dir(game_id))?;
         Ok(())
     }
+}
+
+/// Copy `from` into `to` recursively, skipping every file that already
+/// exists in `to` and keeping modification times (the newest input tape is
+/// picked by them). The marker file is not copied.
+fn copy_tree_no_overwrite(from: &Path, to: &Path) -> std::io::Result<usize> {
+    std::fs::create_dir_all(to)?;
+    let mut copied = 0;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copied += copy_tree_no_overwrite(&src, &dst)?;
+        } else if kind.is_file() && entry.file_name() != ".migrated-from" && !dst.exists() {
+            std::fs::copy(&src, &dst)?;
+            if let Ok(modified) = std::fs::metadata(&src).and_then(|m| m.modified()) {
+                if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&dst) {
+                    let _ = file.set_modified(modified);
+                }
+            }
+            copied += 1;
+        }
+    }
+    Ok(copied)
 }
 
 #[cfg(test)]
@@ -415,5 +494,76 @@ mod tests {
             None,
             "a pin pointing at a deleted/nonexistent slot must not be trusted"
         );
+    }
+
+    fn write(path: &Path, bytes: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn adopting_a_legacy_dir_copies_and_never_touches_the_old_one() {
+        let tmp = TempDir::new().unwrap();
+        let p = ConfigPaths::rooted(tmp.path());
+        write(&p.memcard_file("old", 1), b"card");
+        write(&p.savestate_file("old", 0), b"state");
+        write(&p.latest_input_tape_file("old"), b"tape");
+
+        assert_eq!(p.adopt_legacy_game_dir("old", "new").unwrap(), 3);
+        assert_eq!(std::fs::read(p.memcard_file("new", 1)).unwrap(), b"card");
+        assert_eq!(std::fs::read(p.savestate_file("new", 0)).unwrap(), b"state");
+        assert_eq!(
+            std::fs::read(p.latest_input_tape_file("new")).unwrap(),
+            b"tape"
+        );
+        // The old directory is intact.
+        assert_eq!(std::fs::read(p.memcard_file("old", 1)).unwrap(), b"card");
+        assert_eq!(p.migrated_from("new"), ["old"]);
+        assert!(p.migrated_from("old").is_empty());
+    }
+
+    #[test]
+    fn adopting_never_overwrites_and_runs_once_per_pair() {
+        let tmp = TempDir::new().unwrap();
+        let p = ConfigPaths::rooted(tmp.path());
+        write(&p.memcard_file("old", 1), b"old card");
+        write(&p.memcard_file("new", 1), b"new card");
+        write(&p.savestate_file("old", 3), b"slot3");
+
+        assert_eq!(p.adopt_legacy_game_dir("old", "new").unwrap(), 1);
+        assert_eq!(
+            std::fs::read(p.memcard_file("new", 1)).unwrap(),
+            b"new card"
+        );
+
+        // A file removed afterwards is not copied back by a later run.
+        std::fs::remove_file(p.savestate_file("new", 3)).unwrap();
+        assert_eq!(p.adopt_legacy_game_dir("old", "new").unwrap(), 0);
+        assert!(!p.savestate_file("new", 3).exists());
+        assert_eq!(p.migrated_from("new"), ["old"]);
+    }
+
+    #[test]
+    fn games_that_shared_a_legacy_id_each_get_their_own_copy() {
+        let tmp = TempDir::new().unwrap();
+        let p = ConfigPaths::rooted(tmp.path());
+        write(&p.memcard_file("shared", 1), b"card");
+        for game in ["mgs", "ff9", "spider"] {
+            assert_eq!(p.adopt_legacy_game_dir("shared", game).unwrap(), 1);
+        }
+        // Saving in one no longer touches the others.
+        write(&p.memcard_file("mgs", 1), b"mgs progress");
+        assert_eq!(std::fs::read(p.memcard_file("ff9", 1)).unwrap(), b"card");
+        assert_eq!(std::fs::read(p.memcard_file("shared", 1)).unwrap(), b"card");
+    }
+
+    #[test]
+    fn adopting_a_missing_or_identical_id_is_a_no_op() {
+        let tmp = TempDir::new().unwrap();
+        let p = ConfigPaths::rooted(tmp.path());
+        assert_eq!(p.adopt_legacy_game_dir("gone", "new").unwrap(), 0);
+        assert!(!p.game_dir("new").exists());
+        write(&p.memcard_file("same", 1), b"card");
+        assert_eq!(p.adopt_legacy_game_dir("same", "same").unwrap(), 0);
     }
 }

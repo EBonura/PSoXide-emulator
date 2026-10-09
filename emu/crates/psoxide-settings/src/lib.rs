@@ -47,4 +47,7 @@ pub const SETTINGS_VERSION: u32 = 4;
 
 /// Current version for `library.ron`. Cache files from older
 /// versions are discarded silently -- the scanner regenerates them.
-pub const LIBRARY_VERSION: u32 = 3;
+/// 4: entry ids come from the disc's own identity (see `library`), so
+/// every old id is re-derived; the old ids stay reachable through
+/// [`library::legacy_id`] for migrating per-game data.
+pub const LIBRARY_VERSION: u32 = 4;
