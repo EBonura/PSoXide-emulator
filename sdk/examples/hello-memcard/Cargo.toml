@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name    = "hello-memcard"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[lib]
+name = "hello_memcard_recovery"
+path = "src/main.rs"
+
+[[bin]]
+name = "hello-memcard"
+path = "src/bin.rs"
+test = false
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-gpu  = { path = "../../crates/psx-gpu" }
+psx-rt   = { path = "../../crates/psx-rt" }
+psx-font = { path = "../../crates/psx-font" }
+psx-vram = { path = "../../crates/psx-vram" }
+psx-mc   = { path = "../../crates/psx-mc", features = ["compress"] }
+psx-pad  = { path = "../../crates/psx-pad" }
