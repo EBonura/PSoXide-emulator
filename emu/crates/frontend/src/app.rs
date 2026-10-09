@@ -4293,7 +4293,9 @@ mod tests {
     }
 
     /// Clock one memory-card frame write through SIO0 port 1, the way a
-    /// game's card driver does, so the attached card turns dirty.
+    /// game's card driver does, so the attached card turns dirty. A byte
+    /// takes ten bit times on the wire, so each one is let through (RX not
+    /// empty in SIO0_STAT) before the next goes out, as a driver waits.
     fn write_card_frame0(bus: &mut Bus, fill: u8) {
         bus.write16(0x1F80_104A, 0x0003); // TX enable + /CS on port 1
         let mut bytes = vec![0x81, 0x57, 0x00, 0x00, 0x00, 0x00];
@@ -4302,6 +4304,12 @@ mod tests {
         bytes.extend([checksum, 0x00, 0x00, 0x00]);
         for byte in bytes {
             bus.write8(0x1F80_1040, byte);
+            let mut waited = 0;
+            while bus.read32(0x1F80_1044) & 0x2 == 0 {
+                assert!(waited < 100_000, "SIO0 byte never arrived");
+                bus.tick(64);
+                waited += 64;
+            }
             let _ = bus.read8(0x1F80_1040);
         }
         bus.write16(0x1F80_104A, 0x0000);
