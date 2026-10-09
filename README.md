@@ -23,24 +23,23 @@ their screenshots belong to their respective owners.
 
 ## Build and run
 
-Install Rust through rustup, Python 3, and your host's C/C++ build tools.
-On Ubuntu, install `pkg-config libasound2-dev libudev-dev libxkbcommon-dev`.
-The checked-in toolchain file selects the Rust version.
+Needs Rust 1.87 or newer (built and tested here with 1.92). Install it with
+[rustup](https://rustup.rs), then:
 
 ```sh
 git clone https://github.com/EBonura/PSoXide-emulator.git
 cd PSoXide-emulator
-make bootstrap
-make check
-make test
-make build
-./target/release/frontend
+cargo run --release
 ```
+
+No Python, Make or other bootstrap step is needed. On Ubuntu, first install
+`pkg-config libasound2-dev libudev-dev libxkbcommon-dev`. `make check`,
+`make test` and `make build` are shortcuts for the matching cargo commands.
 
 Headless verification uses the same core:
 
 ```sh
-./target/release/frontend launch --path /path/to/game.cue --steps 8000000 --dump-hash
+./target/release/psoxide launch --path /path/to/game.cue --steps 8000000 --dump-hash
 ```
 
 For recorded runs, `--route-log route.csv` measures emulated cycles and display
@@ -70,21 +69,11 @@ running) and Settings.
 
 ## Source dependencies
 
-`components.lock.json` pins the SDK by full Git commit. `make bootstrap`
-materializes its source at Cargo's expected paths and records file hashes in
-`.components-receipt.json`. These generated directories are ignored by Git.
-Do SDK development in the SDK repository and update the lock; the bootstrap
-refuses to overwrite modified imported files. `make verify-components` checks
-the lock and hashes without a network request.
-
-For local verification, export the exact locked commit from an existing clone:
-
-```sh
-python3 tools/bootstrap-components.py --source sdk=/path/to/PSoXide
-```
-
-This uses committed content at the lock's revision, not the checkout's working
-files. The original source history is retained. Emulator verification cannot
+The twelve SDK crates the emulator links are vendored (committed) under `crates/`
+and `sdk/crates/`, at the SDK revision recorded in `components.lock.json`, so a
+plain clone builds without a download step. Do SDK development in the SDK
+repository, then refresh the copies from the locked revision with the SDK's
+`psoxide-components` tool (`tools/psoxide-link`). Emulator verification cannot
 substitute for original-console validation of SDK or game behavior.
 
 ## License
