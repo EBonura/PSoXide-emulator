@@ -197,6 +197,11 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             }
             MenuOutcome::None
         }
+        OpenDisc => {
+            #[cfg(not(target_arch = "wasm32"))]
+            state.open_disc_dialog();
+            MenuOutcome::None
+        }
         BuildExamples => {
             state.start_examples_build();
             MenuOutcome::None
