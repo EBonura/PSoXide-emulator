@@ -111,6 +111,22 @@ impl TextureFilter {
         }
     }
 
+    /// The `settings.ron` spelling (`video.texture_filter`).
+    pub fn setting_name(self) -> &'static str {
+        match self {
+            TextureFilter::None => "none",
+            TextureFilter::Edge => "edge",
+        }
+    }
+
+    /// Parse a `settings.ron` value; anything unknown is the default.
+    pub fn from_setting(name: &str) -> Self {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "edge" => TextureFilter::Edge,
+            _ => TextureFilter::None,
+        }
+    }
+
     /// `u_texfilter.x` value the shader branches on.
     pub fn mode(self) -> u32 {
         match self {
@@ -561,6 +577,7 @@ impl AppState {
         out.menu.set_ui_scale(out.settings.video.ui_scale_pct);
         out.menu
             .set_smooth_slow_host(out.settings.video.smooth_slow_host);
+        out.texture_filter = TextureFilter::from_setting(&out.settings.video.texture_filter);
 
         out.sync_menu_settings_paths();
         out.sync_menu_controls();
@@ -2315,6 +2332,21 @@ impl AppState {
         }
     }
 
+    /// Switch the texture filter (None <-> Edge) and persist the choice in
+    /// `settings.ron`, so it is still set on the next launch.
+    pub fn cycle_texture_filter(&mut self) {
+        self.texture_filter = self.texture_filter.next();
+        self.settings.video.texture_filter = self.texture_filter.setting_name().to_string();
+        let message = format!("Texture filter: {}", self.texture_filter.label());
+        match self.save_settings() {
+            Ok(()) => self.status_message_set(message),
+            Err(error) => {
+                eprintln!("[frontend] {error}");
+                self.status_message_set(format!("{message} (settings save failed)"));
+            }
+        }
+    }
+
     /// Flip `video.smooth_slow_host`, update its Settings row, and persist it.
     pub fn toggle_smooth_slow_host(&mut self) {
         let smooth = !self.settings.video.smooth_slow_host;
@@ -2511,6 +2543,16 @@ impl AppState {
                 return;
             }
         }
+        // Like the web build, record from a cold boot: a tape started in the
+        // middle of a session cannot be replayed, because the replay boots
+        // fresh and nothing reproduces what the game did before recording.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(entry) = self.current_game.clone() {
+            if let Err(error) = self.launch_entry(&entry) {
+                self.status_message_set(format!("Input recording unavailable: {error}"));
+                return;
+            }
+        }
         let start_poll = self
             .bus
             .as_ref()
@@ -2527,9 +2569,34 @@ impl AppState {
         self.status_message_set("Game rebooted; recording input from boot (F8 to download CSV)");
         #[cfg(not(target_arch = "wasm32"))]
         self.status_message_set(format!(
-            "Input recording started (F8 to stop): {}",
+            "Game restarted; recording input from boot (F8 to stop): {}",
             path.display()
         ));
+    }
+
+    /// Replay the newest recording of the running game against a fresh boot
+    /// (native only; the web build has no stored tape, use "Load input
+    /// replay" there).
+    pub fn replay_last_input(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        self.status_message_set("Use Load input replay to pick a recording");
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(entry) = self.current_game.clone() else {
+                self.status_message_set("Launch a game before replaying a recording");
+                return;
+            };
+            if self.playtest_input_tape.is_recording() {
+                self.status_message_set("Stop input recording before replaying");
+                return;
+            }
+            let path = self.paths.latest_input_tape_file(&entry.id);
+            if !path.is_file() {
+                self.status_message_set("No recording for this game yet (F8 starts one)");
+                return;
+            }
+            self.load_native_replay(&entry, &path);
+        }
     }
 
     /// Persist an active recording (native: tape file; web: CSV download).
@@ -3573,6 +3640,94 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Run one emulated frame the way the GUI loop does: pick the pad sample
+    /// (live, or the tape's while replaying), apply it, step, then credit the
+    /// polls the guest completed to the tape. Returns an FNV-1a hash of the
+    /// frame's VRAM and the completed-poll count.
+    fn gui_frame(state: &mut AppState, live: Port1PadSample) -> (u64, u64) {
+        let sample = state.input_sample_for_frame(live);
+        let bus = state.bus.as_mut().unwrap();
+        sample.apply_to_bus(bus);
+        let before = bus.port1_completed_polls();
+        step_one_frame(state);
+        let bus = state.bus.as_ref().unwrap();
+        let after = bus.port1_completed_polls();
+        state.input_note_polls(sample, after - before);
+        let bus = state.bus.as_ref().unwrap();
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for byte in bus.gpu.vram.to_rgba8(0, 0, 640, 480) {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        (hash, after)
+    }
+
+    /// Record from the GUI's own entry points (`toggle_input_recording`),
+    /// replay with `replay_last_input`, and compare the frame hashes.
+    #[test]
+    fn gui_recorded_tape_replays_to_identical_frames() {
+        let exe = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/examples/hello-input.exe");
+        let root = frontend_test_temp_dir("tape-determinism");
+        let mut state = AppState::with_config_dir(Some(root.clone()));
+        let entry = LibraryEntry {
+            id: "0123456789abcdef".to_string(),
+            path: exe,
+            kind: GameKind::Exe,
+            title: "hello-input".to_string(),
+            region: Region::Unknown,
+            size: 0,
+            mtime: 0,
+            diagnostic: None,
+        };
+        state.launch_entry(&entry).unwrap();
+        // Input before recording must not matter: the recording reboots.
+        for _ in 0..20 {
+            gui_frame(&mut state, Port1PadSample::from_buttons(0xfffe));
+        }
+
+        const FRAMES: usize = 240;
+        let script = |frame: usize| match frame / 24 % 4 {
+            0 => 0xffff,
+            1 => 0xffef,
+            2 => 0xbfff,
+            _ => 0xffdf,
+        };
+        state.toggle_input_recording();
+        assert!(state.input_recording_status().0);
+        let recorded: Vec<_> = (0..FRAMES)
+            .map(|frame| gui_frame(&mut state, Port1PadSample::from_buttons(script(frame))))
+            .collect();
+        state.toggle_input_recording();
+        assert!(!state.input_recording_status().0);
+
+        let dir = state.paths.input_tapes_dir(&entry.id);
+        let latest = state.paths.latest_input_tape_file(&entry.id);
+        assert!(latest.is_file());
+        let copies = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("recording-"))
+            .count();
+        assert_eq!(copies, 1);
+        let tape = crate::playtest_input::read_input_tape(&latest).unwrap();
+        assert_eq!(tape.start_poll, 0, "recording starts at a cold boot");
+        assert!(!tape.samples.is_empty());
+
+        // The pad has to matter, or identical frames prove nothing.
+        let distinct = recorded
+            .iter()
+            .map(|(hash, _)| *hash)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(distinct.len() > 1, "scripted input never changed a frame");
+
+        // Replay with the live pad idle and compare frame by frame.
+        state.replay_last_input();
+        let replayed: Vec<_> = (0..FRAMES)
+            .map(|_| gui_frame(&mut state, Port1PadSample::from_buttons(0xffff)))
+            .collect();
+        assert_eq!(recorded, replayed);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn ui_zoom_factor_clamps_to_supported_range() {
         assert_eq!(ui_zoom_factor(0), 0.5);
@@ -4052,5 +4207,15 @@ mod texture_filter_tests {
         assert_eq!(modes, [0, 1]);
         let labels: Vec<&str> = all.iter().map(|f| f.label()).collect();
         assert_eq!(labels, ["None", "Edge"]);
+    }
+
+    #[test]
+    fn settings_names_round_trip_and_unknown_values_fall_back_to_none() {
+        for f in [TextureFilter::None, TextureFilter::Edge] {
+            assert_eq!(TextureFilter::from_setting(f.setting_name()), f);
+        }
+        assert_eq!(TextureFilter::from_setting(" EDGE "), TextureFilter::Edge);
+        assert_eq!(TextureFilter::from_setting("xbr"), TextureFilter::None);
+        assert_eq!(TextureFilter::from_setting(""), TextureFilter::None);
     }
 }

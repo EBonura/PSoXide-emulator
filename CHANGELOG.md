@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Input tapes are easier to find and keep. The Game menu has "Record input
+  tape" (F8), "Replay last recording" (F4) and the texture filter (F6), and the
+  debug sidebar has an Input tape section with the same buttons. Recording now
+  restarts the game first, so every tape starts at a cold boot and replays to
+  the same frames. Stopping saves `latest.pxtape` plus a timestamped
+  `recording-<UTC time>.pxtape` beside it, in place of the old `archive/`
+  folder. The texture filter is saved in `settings.ron` (`video.texture_filter`)
+  and restored on the next launch. `ui-png` renders the menu or the window
+  chrome to a PNG without opening a window.
 - `--press` takes analog stick entries, `tick:lstick=X/Y[:hold]` and
   `tick:rstick=X/Y[:hold]` (0..=255, 128 centred), held for a number of route
   ticks like a button. A stick token forces the pad to analog mode and

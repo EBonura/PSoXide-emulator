@@ -115,7 +115,12 @@ fn panel(ctx: &egui::Context, stats: &mut GuestStats, vram: egui::TextureId) -> 
     used
 }
 
-fn input(width: u32, height: u32, time: f64, events: Vec<egui::Event>) -> egui::RawInput {
+pub(super) fn input(
+    width: u32,
+    height: u32,
+    time: f64,
+    events: Vec<egui::Event>,
+) -> egui::RawInput {
     let rect = egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(width as f32, height as f32));
     let mut input = egui::RawInput {
         screen_rect: Some(rect),
@@ -131,7 +136,7 @@ fn input(width: u32, height: u32, time: f64, events: Vec<egui::Event>) -> egui::
     input
 }
 
-fn paint(
+pub(super) fn paint(
     width: u32,
     height: u32,
     pixels_per_point: f32,
