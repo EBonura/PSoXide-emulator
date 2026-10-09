@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A block-mode DMA to the GPU waits for the GPU instead of losing words. The
+  channel is paced by the GPU's request line, and the emulator pushed a whole
+  block at once, dropping every word that arrived while the input FIFO was
+  full: an A0h upload or a command stream sent behind busy drawing lost its
+  tail, and the pixels or commands that followed were read out of step. The
+  commands at the head of the FIFO now run to make room, with their drawing
+  time still charged as busy credit.
 - The HLE kernel's memory card driver no longer takes a byte before it has
   arrived. Its early data-phase routine, which games patch to wait for the
   card's `/ACK` line, runs on every exception of a sector's data phase, not
