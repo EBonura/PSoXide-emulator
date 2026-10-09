@@ -35,6 +35,7 @@ pub fn draw_layout(
     let recording_input = state.input_recording_status().0;
     state.menu.sync_input_recording_label(recording_input);
     state.menu.set_game_loaded(state.bus.is_some());
+    state.menu.set_deinterlace(state.deinterlace.label());
     state.menu.sync_video_audio(
         state.scale_mode == ScaleMode::Window,
         state.texture_filter.label(),
@@ -220,6 +221,10 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
         }
         CycleTextureFilter => {
             state.cycle_texture_filter();
+            MenuOutcome::None
+        }
+        CycleDeinterlace => {
+            state.cycle_deinterlace();
             MenuOutcome::None
         }
         CycleVolume => {

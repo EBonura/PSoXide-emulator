@@ -2941,6 +2941,96 @@ fn triangles_past_the_extent_limit_cost_only_their_setup() {
     );
 }
 
+/// 480i with GP0(E1h) bit 10 clear: fills and draws leave the lines of the
+/// displayed field alone (GPUSTAT bit 31 names it).
+#[test]
+fn interlaced_480_draws_skip_the_displayed_field() {
+    let xy = |x: u32, y: u32| (y << 16) | x;
+    let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0300_0000); // display on
+    gpu.write32(GP1_ADDR, 0x0800_0026); // 512 wide, 480 lines, interlaced
+    gpu.write32(GP0_ADDR, 0xE100_0000); // drawing to the display area prohibited
+    assert_eq!(gpu.read32(GP1_ADDR).unwrap() >> 31, 1, "odd lines shown");
+
+    // Fill: even lines only.
+    gpu.write32(GP0_ADDR, 0x0200_00FF);
+    gpu.write32(GP0_ADDR, 0x0000_0000);
+    gpu.write32(GP0_ADDR, 0x0004_0010);
+    // Flat rectangle: even lines only.
+    gpu.write32(GP0_ADDR, 0x6000_FF00);
+    gpu.write32(GP0_ADDR, xy(32, 0));
+    gpu.write32(GP0_ADDR, 0x0004_0010);
+    // Flat triangle: even lines only.
+    gpu.write32(GP0_ADDR, 0x2000_FF00);
+    gpu.write32(GP0_ADDR, xy(64, 0));
+    gpu.write32(GP0_ADDR, xy(80, 0));
+    gpu.write32(GP0_ADDR, xy(64, 8));
+    for y in 0..4u16 {
+        let odd = y & 1 == 1;
+        assert_eq!(gpu.vram.get_pixel(4, y) != 0, !odd, "fill row {y}");
+        assert_eq!(gpu.vram.get_pixel(36, y) != 0, !odd, "rect row {y}");
+    }
+    assert_ne!(gpu.vram.get_pixel(65, 0), 0, "triangle even row");
+    assert_eq!(gpu.vram.get_pixel(65, 1), 0, "triangle odd row");
+
+    // The next field shows the even lines: only odd lines are drawn now.
+    gpu.toggle_vblank_field();
+    gpu.write32(GP0_ADDR, 0x6000_00FF);
+    gpu.write32(GP0_ADDR, xy(100, 0));
+    gpu.write32(GP0_ADDR, 0x0004_0010);
+    for y in 0..4u16 {
+        assert_eq!(gpu.vram.get_pixel(104, y) != 0, y & 1 == 1, "rect row {y}");
+    }
+
+    // With bit 10 set every line is drawn.
+    gpu.write32(GP0_ADDR, 0xE100_0400);
+    gpu.write32(GP0_ADDR, 0x6000_0FF0);
+    gpu.write32(GP0_ADDR, xy(120, 0));
+    gpu.write32(GP0_ADDR, 0x0004_0010);
+    for y in 0..4u16 {
+        assert_ne!(gpu.vram.get_pixel(124, y), 0, "unrestricted row {y}");
+    }
+}
+
+/// Field-rendered 480i frames are presented whole: the lines of the other
+/// field come from when it was last on display.
+#[test]
+fn interlaced_480_presents_both_fields() {
+    let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0300_0000);
+    gpu.write32(GP1_ADDR, 0x0704_4C23); // 240 lines from the centred top, doubled by the 480 mode
+    gpu.write32(GP1_ADDR, 0x0800_0026);
+    gpu.write32(GP0_ADDR, 0xE100_0000);
+    let shown = |gpu: &Gpu, y: usize| {
+        let (rgba, w, _) = gpu.display_rgba8();
+        rgba[(y * w as usize + 250) * 4]
+    };
+    // Two fields, each drawing its own lines, as a game redrawing the same
+    // picture every field does.
+    for _ in 0..2 {
+        for y in 0..4u16 {
+            if i32::from(y & 1) != gpu.skipped_row_parity() {
+                for x in 0..400 {
+                    gpu.vram.set_pixel(x, y, 0x001F);
+                }
+            }
+        }
+        gpu.toggle_vblank_field();
+    }
+    // Now the other field is being redrawn (cleared first), but both fields
+    // still present as the finished picture.
+    for y in 0..4u16 {
+        if i32::from(y & 1) != gpu.skipped_row_parity() {
+            for x in 0..400 {
+                gpu.vram.set_pixel(x, y, 0);
+            }
+        }
+    }
+    for y in 0..4 {
+        assert_ne!(shown(&gpu, y), 0, "row {y} presented");
+    }
+}
+
 fn open_draw_area(gpu: &mut Gpu) {
     gpu.write32(GP0_ADDR, 0xE300_0000);
     gpu.write32(GP0_ADDR, 0xE400_0000 | 639 | (479 << 10));
@@ -2992,4 +3082,55 @@ fn an_8_bit_clut_change_reloads_270_clocks_and_a_15_bit_one_nothing() {
         let changed = textured_triangle_cost(&mut gpu, 8, tpage, 0x7801);
         assert_eq!(changed - kept, expected, "depth {depth}");
     }
+}
+
+/// Bob shows the field on display twice; Blend averages the two fields;
+/// Weave keeps both. Two fields drawn with different content tell them apart.
+#[test]
+fn interlaced_480_deinterlace_modes_combine_the_fields() {
+    let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0300_0000);
+    gpu.write32(GP1_ADDR, 0x0704_4C23);
+    gpu.write32(GP1_ADDR, 0x0800_0026);
+    gpu.write32(GP0_ADDR, 0xE100_0000);
+    // Field A (odd lines on display) is drawn red on the even lines; field B
+    // (even lines on display) is drawn black on the odd lines. Then the
+    // even lines are on display with red held for them... set up so the
+    // live field is red and the held field is black.
+    for y in 0..4u16 {
+        let colour = if y & 1 == 0 { 0x001F } else { 0 };
+        for x in 0..400 {
+            gpu.vram.set_pixel(x, y, colour);
+        }
+    }
+    gpu.toggle_vblank_field(); // holds the odd lines (black); even lines now on display
+    gpu.toggle_vblank_field(); // holds the even lines (red); odd lines on display
+                               // Redraw so the odd (displayed) lines are green and the held even lines
+                               // are the old red.
+    for y in (1..4u16).step_by(2) {
+        for x in 0..400 {
+            gpu.vram.set_pixel(x, y, 0x03E0);
+        }
+    }
+    let px = |mode: Deinterlace, y: usize| {
+        let (rgba, w, _) = gpu.display_rgba8_with(mode);
+        let at = (y * w as usize + 250) * 4;
+        (rgba[at], rgba[at + 1], rgba[at + 2])
+    };
+    // Weave: even lines red (held), odd lines green (live).
+    assert_eq!(px(Deinterlace::Weave, 0), (0xFF, 0, 0));
+    assert_eq!(px(Deinterlace::Weave, 1), (0, 0xFF, 0));
+    // Bob: both lines of a pair are the live (odd) line.
+    assert_eq!(px(Deinterlace::Bob, 0), (0, 0xFF, 0));
+    assert_eq!(px(Deinterlace::Bob, 1), (0, 0xFF, 0));
+    // Blend: both lines are the average of red and green.
+    let mixed = px(Deinterlace::Blend, 0);
+    assert_eq!(mixed, px(Deinterlace::Blend, 1));
+    assert!(mixed.0 > 0x60 && mixed.0 < 0x90, "{mixed:?}");
+    assert!(mixed.1 > 0x60 && mixed.1 < 0x90, "{mixed:?}");
+    // The hash and the default capture never depend on the mode.
+    assert_eq!(
+        gpu.display_rgba8().0,
+        gpu.display_rgba8_with(Deinterlace::Weave).0
+    );
 }
