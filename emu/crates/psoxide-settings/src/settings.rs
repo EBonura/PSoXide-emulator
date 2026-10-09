@@ -149,6 +149,10 @@ pub struct Paths {
     /// Optional directory for the parity-trace cache. Empty =
     /// use the default under `target/parity-cache`.
     pub parity_cache_dir: String,
+    /// Discs opened with "Open disc..." from outside the games folder,
+    /// newest first. Absolute paths.
+    #[serde(default)]
+    pub recent_discs: Vec<String>,
 }
 
 /// A single key → button mapping. `InputBinding` is a tagged enum
