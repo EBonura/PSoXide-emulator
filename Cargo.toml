@@ -147,6 +147,26 @@ opt-level = 3
 # to remain interactive on production-sized levels.
 [profile.dev.package.frontend]
 opt-level = 2
+
+# Workspace crates the frame loop runs through on every emulated frame. The
+# wildcard above skips workspace members, so without these they build at
+# opt-level 0: psx-gpu-render replays each frame's GP0 packets and uploads
+# (FMV frames are a full-frame image upload), psx-iso reads the disc and
+# psoxide-jit is the native execution tier.
+[profile.dev.package.psx-gpu-render]
+opt-level = 3
+[profile.dev.package.psoxide-jit]
+opt-level = 3
+[profile.dev.package.psx-iso]
+opt-level = 3
+[profile.dev.package.psx-hw]
+opt-level = 3
+[profile.dev.package.psx-trace]
+opt-level = 3
+[profile.dev.package.psoxide-debug-ui]
+opt-level = 2
+[profile.dev.package.psoxide-settings]
+opt-level = 2
 [profile.run-fast]
 inherits = "dev"
 
