@@ -6055,6 +6055,27 @@ mod tests {
         }
     }
 
+    /// A block of NOPs behind busy drawing is not held up: they draw nothing
+    /// and the GPU takes them at once (hwtest v2.1 and v2.2 rows 0x67 to
+    /// 0x6A read 126 to 440 clocks on the console).
+    #[test]
+    fn block_dma_of_nops_behind_busy_gpu_does_not_wait() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.gpu.enable_experimental_dma_fifo();
+        bus.dma.dpcr = 1 << (2 * 4 + 3);
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        bus.gpu.charge_busy(100_000);
+        for i in 0..64u32 {
+            write_ram_u32(&mut bus.ram[..], 0x300 + 4 * i, 0);
+        }
+        bus.dma.channels[2].base = 0x300;
+        bus.dma.channels[2].block_control = (4 << 16) | 16;
+        bus.dma.channels[2].channel_control = 0x0100_0201;
+        bus.run_dma_channel(2);
+        bus.tick(2_000);
+        assert_eq!(bus.dma.channels[2].channel_control & (1 << 24), 0, "done");
+    }
+
     /// The same for commands: twelve flat triangles, more than the input
     /// FIFO holds, sent as one block behind a busy GPU. The last one is
     /// somewhere the others are not, and has to be drawn.

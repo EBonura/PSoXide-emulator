@@ -1798,6 +1798,21 @@ impl Gpu {
         let mut waited = 0;
         while !self.dma_fifo_has_room() {
             let queued = self.dma_input_fifo.len();
+            // A NOP draws nothing: the command parser takes it at once
+            // whatever the drawing is doing (hwtest v2.1 and v2.2 rows 0x67
+            // to 0x6A, 64 to 256 NOPs in a block, read 126 to 440 clocks, no
+            // wait).
+            if self.dma_input_fifo.front().is_some_and(|&(word, _)| {
+                word >> 24 == 0
+                    && self.vram_upload.is_none()
+                    && self.vram_download.is_none()
+                    && self.polyline.is_none()
+            }) {
+                if let Some((word, from_dma)) = self.dma_input_fifo.pop_front() {
+                    self.gp0_write(word, from_dma);
+                }
+                continue;
+            }
             if self.busy_credit > 0 {
                 let step = self.busy_credit;
                 self.decay_busy(step);
