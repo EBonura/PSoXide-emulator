@@ -16,6 +16,7 @@ members = [
     "emu/crates/psoxide-validation",
     "emu/crates/psx-gpu-render",
     "tools/mkisopsx",
+    "tools/psoxide-gate",
     "tools/psoxide-link"
 ]
 # The device-side workspaces live inside this directory tree; cargo

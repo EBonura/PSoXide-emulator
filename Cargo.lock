@@ -3152,6 +3152,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "psoxide-gate"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "emulator-core",
+ "image",
+ "pollster 0.3.0",
+ "psoxide-jit",
+ "psoxide-settings",
+ "psx-gpu-render",
+ "psx-iso",
+ "serde",
+ "sha2",
+ "tempfile",
+ "toml",
+ "wgpu",
+]
+
+[[package]]
 name = "psoxide-jit"
 version = "0.1.0"
 dependencies = [
