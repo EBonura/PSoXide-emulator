@@ -100,24 +100,25 @@ const DEFAULT_TRANSFER_TICKS: u64 = 0x88 * BYTE_BIT_TIMES;
 //
 // Pad, bytes 0 to 7 (the ninth byte of a poll draws no `/ACK`); the console's
 // rise was 1665, 1678, 1627, 1629, 1468, 1695, 1695, 1692 clocks, width 92.
-const PAD_ACK_DELAYS: [u64; 8] = [290, 311, 260, 262, 101, 320, 320, 325];
+const PAD_ACK_DELAYS: [u64; 8] = [290, 311, 260, 254, 101, 320, 320, 325];
 /// Clocks from the end of a pad byte to its `/ACK` rising, for a byte past
 /// the table.
 const PAD_ACK_DELAY_TICKS: u64 = 328;
 // Memory card, slot 1 and 2, bytes 0 to 3 (select, command, ID bytes) as
 // measured: rise 1717, 1682, 1523, 1516 and 1691, 1552, 1465, 1497, width 44
 // and 68, 68, 80, 80. The bytes after those were not timed one by one; the
-// delay for them is fitted so a whole frame read, 140 bytes, takes what the
+// delay for them is fitted (with the SDK's spin loop at the cost the CPU
+// model gives it) so a whole frame read, 140 bytes, takes what the
 // console's did, 124 HBlanks in slot 1 and 138 to 139 in slot 2 (records
 // 0x641 and 0x649, 0x693).
-const MEMCARD_ACK_DELAYS: [[u64; 4]; 2] = [[352, 309, 146, 146], [316, 177, 90, 122]];
+const MEMCARD_ACK_DELAYS: [[u64; 4]; 2] = [[341, 309, 146, 146], [316, 177, 100, 122]];
 /// Fitted delay for the card bytes after the fourth, slot 1 and 2.
-const MEMCARD_DATA_ACK_DELAY_TICKS: [u64; 2] = [308, 512];
+const MEMCARD_DATA_ACK_DELAY_TICKS: [u64; 2] = [325, 528];
 /// `/ACK` is a pulse, not a sticky level: its width for a pad and for a card
 /// in slot 1 and 2 (bytes 0 to 3, then the rest).
 const PAD_ACK_PULSE_TICKS: u64 = 92;
 const PAD_ACK_PULSES: [u64; 8] = [100, 92, 92, 92, 92, 92, 92, 92];
-const MEMCARD_ACK_PULSES: [[u64; 4]; 2] = [[38, 44, 48, 50], [74, 74, 86, 86]];
+const MEMCARD_ACK_PULSES: [[u64; 4]; 2] = [[44, 44, 48, 50], [74, 74, 80, 86]];
 const MEMCARD_DATA_ACK_PULSE_TICKS: [u64; 2] = [44, 86];
 
 /// `/ACK` delay and pulse width of byte `index` of a transaction.
