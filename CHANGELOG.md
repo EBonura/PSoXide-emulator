@@ -9,10 +9,12 @@
   rows are nearly free. The cost model counted every row. Fills, rectangles
   and triangles now take the skipped rows' pixels off their cost (not their
   per-line term or their setup): 364 and 2,145 clocks for the same pair, 6%
-  under and 0.7% over. Everything the console timed in that mode (the
-  texture-state rows 0x8E0 to 0x92B, a block DMA waiting for a rectangle)
-  read about half what the emulator gave, and now reads within a few
-  percent.
+  under and 0.7% over. The other rows the console timed in that mode read
+  about half what the emulator gave: the in-cache 4-bit triangle rows 0x8E0
+  to 0x8E6 fall from 9,959 to 5,578 against the console's 5.4k, and a block
+  DMA waiting for a 512 x 256 rectangle (record 0x86B) reads 35,458 against
+  35,630. 8 and 15-bit triangles read 12 to 14% over (see the texture cache
+  entry).
 - A block-mode GPU DMA that backs up behind the drawing waits for it, as the
   request line holds the channel on the console. The words already landed
   (since the FIFO pacing change); the transfer still finished in a few
