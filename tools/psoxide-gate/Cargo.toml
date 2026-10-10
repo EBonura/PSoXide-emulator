@@ -1,0 +1,36 @@
+[package]
+name = "psoxide-gate"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Fleet test gate: drives each game's player journey headlessly on the CPU and hardware renderers and checks frames, RAM state, presentation and audio."
+
+[features]
+default = ["native-jit"]
+# AArch64 native tier. Identical results to the interpreter; PSOXIDE_JIT=0 turns it off at run time.
+native-jit = ["dep:psoxide-jit"]
+
+[dependencies]
+emulator-core    = { workspace = true }
+psoxide-settings = { workspace = true }
+psx-gpu-render   = { workspace = true }
+psx-iso          = { workspace = true }
+clap             = { workspace = true }
+image            = { workspace = true }
+pollster         = { workspace = true }
+serde            = { workspace = true, features = ["std"] }
+sha2             = { workspace = true }
+wgpu             = { workspace = true }
+toml             = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+psoxide-jit = { path = "../../emu/crates/psoxide-jit", optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

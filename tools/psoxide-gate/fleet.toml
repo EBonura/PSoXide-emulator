@@ -1,0 +1,93 @@
+# The fleet: every first-party game in the PS1 library, the repo that builds it
+# and the journey that proves it works. `psoxide-gate all` walks this list.
+#
+# Paths starting with `~/` are expanded. `library` is relative to `games_dir`
+# and names the disc the player actually launches, so `all` tests what ships.
+# Third-party titles are not listed: the emulator's own `validate` manifests
+# cover them.
+#
+# A game without a journey file shows as MISSING in the report. A journey is
+# required before a library swap or a main landing (see TESTING.md).
+
+games_dir = "~/Downloads/ps1 games"
+repos_dir = "~/Desktop/repos"
+
+[[game]]
+name = "oot"
+library = "Ocarina of Time (oot-psx)/Ocarina of Time (oot-psx).cue"
+repo = "oot-psx"
+
+[[game]]
+name = "nitroxide"
+library = "NitroXide/NitroXide.cue"
+repo = "nitroxide"
+
+[[game]]
+name = "voxide"
+library = "VoXide/VoXide.cue"
+repo = "voxide"
+
+[[game]]
+name = "hl"
+library = "Half-Life (hl-psx).cue"
+repo = "hl-psx"
+
+[[game]]
+name = "hk"
+library = "hk-psx.cue"
+repo = "hk-psx"
+
+[[game]]
+name = "cs"
+library = "cs-psx.cue"
+repo = "cs-psx"
+
+[[game]]
+name = "quake"
+library = "quake-psx.cue"
+repo = "quake-psx"
+
+[[game]]
+name = "wipeout"
+library = "WipEout PSoXide.cue"
+repo = "wipeout-psx-game"
+
+[[game]]
+name = "celeste"
+library = "Celeste Classic Collection/Celeste Classic Collection.cue"
+repo = "pico8-psx"
+
+[[game]]
+name = "zelda3"
+library = "A Link to the Past (zelda3-psx)/A Link to the Past (zelda3-psx).cue"
+repo = "alttp-psx"
+
+[[game]]
+name = "psxcel"
+library = "PSXcel/PSXcel.cue"
+repo = "psxcel"
+
+[[game]]
+name = "ds"
+library = "ds-psx-courtyard.cue"
+repo = "ds-psx"
+
+[[game]]
+name = "arcade"
+library = "psoxide-arcade.cue"
+repo = "psoxide-arcade"
+
+[[game]]
+name = "demo-disc"
+library = "PSoXide Demo Disc v0.44-test Private.cue"
+repo = "psx-demo-disc"
+
+[[game]]
+name = "cortex-graybox"
+library = "Cortex Graybox Reach/Cortex Graybox Reach.cue"
+repo = "PSoXide-editor"
+
+[[game]]
+name = "cortex-combat"
+library = "Cortex Combat Test (temporary)/Cortex Combat Test.cue"
+repo = "PSoXide-editor"
