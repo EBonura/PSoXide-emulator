@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Textured triangles pay when their texels outgrow the texture cache. The
+  console's cost for sixteen 32 x 32 triangles was flat at 5.4k clocks until
+  the texture coordinates spanned more than the cache holds, then climbed to
+  14.7k and 24.8k (4-bit, spans 128 and 255), 12.1k, 26.5k and 44.0k (8-bit,
+  64, 128 and 255) and 22.4k then 45.2k twice (15-bit, 64, 128 and 255); the
+  emulator read 9,959 for all of them (hwtest v2.4, records 0x8E0 to 0x8F7).
+  The extra clocks per drawn pixel follow the bytes the texture step
+  advances per pixel (about 1.2 clocks a byte up to 9.7, one miss in two or
+  so), ramping in over footprints of 1 to 2.5 KB; a triangle that fits is
+  charged nothing. With the 480i rule on, the per-pixel read charge for 8 and
+  15-bit texels is dropped as well: the console took 5.4k for triangles of
+  every depth that fit. With the 480i rows change below, 32 of the 38
+  texture-window rows read within 5% of the console and the cliffs land
+  (4-bit span 128 and 255: 15,393 and 25,143 against 14,661 and 24,796; 8-bit
+  64, 128 and 255: 12,091, 25,221 and 44,708 against 12,051, 26,549 and
+  44,044; 15-bit 128 and 255: 44,864 and 45,306 against 45,185 and 45,167);
+  the 15-bit span 64 row reads 25,221 against 22,410. A texture window (GP0
+  E2h) is not modelled; only the 15-bit 64-texel one cost anything on the
+  console (record 0x92B, 16.3k).
 - Draws that the 480i rule skips rows of cost only the rows they reach. With
   drawing to the display area prohibited in 480i, a 256 x 240 fill took 5,872
   clocks and a rectangle 33,592 on the console with the rule off, and 3,096
@@ -15,6 +34,27 @@
   DMA waiting for a 512 x 256 rectangle (record 0x86B) reads 35,458 against
   35,630. 8 and 15-bit triangles read 12 to 14% over (see the texture cache
   entry).
+- The hardware renderer draws axis-aligned quads (sprites, glyphs, UI boxes)
+  as exact blocks at internal scales above 1. They were shifted half a pixel
+  like slanted polygons, which at 3x moved a gradient-shaded font half a pixel
+  and left a ghost column on one side and a missing sub-row on the other, most
+  visible on text such as the WipEout title and VoXide's splash. A scaled
+  sprite now covers the same pixels as the CPU image enlarged, with the CPU's
+  texel in every sub-pixel; 1x output is unchanged byte for byte.
+- A memory card answers its data bytes faster and its read's seek byte late.
+  hwtest v2.4 timed every byte of a sector read on the console: the 128 data
+  bytes drew `/ACK` 1,468 (slot 1) and 1,730 (slot 2) clocks after their
+  write, where the emulator gave 1,689 and 1,897, and the byte after the
+  sector address (the `5C` reply) drew none within the probe's 1,200-poll
+  window, its `/ACK` arriving 11,530 clocks after the next byte's write on
+  slot 2. The data delays now read 1,468 and 1,728 in the same probe, the
+  seek byte is acknowledged about 30,000 (slot 1) and 23,000 (slot 2) clocks
+  late, the values that keep a whole frame read at the console's 124 and 138
+  to 139 HBlanks (records 0x641, 0x649, 0x693), and slot 2's data `/ACK`
+  pulse is 68 clocks where the console showed 68 to 80. The late `/ACK` is an
+  estimate fitted to the frame totals (the probe lost sync after it, so the
+  console gave no clean figure); the emulator's card still takes the bytes
+  clocked before it, where the console's seems to have dropped them.
 - A block-mode GPU DMA that backs up behind the drawing waits for it, as the
   request line holds the channel on the console. The words already landed
   (since the FIFO pacing change); the transfer still finished in a few
