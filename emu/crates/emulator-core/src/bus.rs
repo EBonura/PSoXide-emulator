@@ -6042,7 +6042,11 @@ mod tests {
         bus.dma.channels[2].channel_control = 0x0100_0201;
         bus.run_dma_channel(2);
         bus.tick(99_000);
-        assert_ne!(bus.dma.channels[2].channel_control & (1 << 24), 0, "still busy");
+        assert_ne!(
+            bus.dma.channels[2].channel_control & (1 << 24),
+            0,
+            "still busy"
+        );
         bus.tick(2_000);
         assert_eq!(bus.dma.channels[2].channel_control & (1 << 24), 0, "done");
         assert_eq!(bus.gpu.experimental_dma_dropped_words(), 0);

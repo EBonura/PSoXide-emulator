@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- A memory card answers its data bytes faster and its read's seek byte late.
+  hwtest v2.4 timed every byte of a sector read on the console: the 128 data
+  bytes drew `/ACK` 1,468 (slot 1) and 1,730 (slot 2) clocks after their
+  write, where the emulator gave 1,689 and 1,897, and the byte after the
+  sector address (the `5C` reply) drew none within the probe's 1,200-poll
+  window, its `/ACK` arriving 11,530 clocks after the next byte's write on
+  slot 2. The data delays now read 1,468 and 1,728 in the same probe, the
+  seek byte is acknowledged about 30,000 (slot 1) and 23,000 (slot 2) clocks
+  late, the values that keep a whole frame read at the console's 124 and 138
+  to 139 HBlanks (records 0x641, 0x649, 0x693), and slot 2's data `/ACK`
+  pulse is 68 clocks where the console showed 68 to 80. The late `/ACK` is an
+  estimate fitted to the frame totals (the probe lost sync after it, so the
+  console gave no clean figure); the emulator's card still takes the bytes
+  clocked before it, where the console's seems to have dropped them.
 - A block-mode GPU DMA that backs up behind the drawing waits for it, as the
   request line holds the channel on the console. The words already landed
   (since the FIFO pacing change); the transfer still finished in a few
