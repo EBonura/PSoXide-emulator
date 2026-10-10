@@ -13,8 +13,27 @@
   so), ramping in over footprints of 1 to 2.5 KB; a triangle that fits is
   charged nothing. With the 480i rule on, the per-pixel read charge for 8 and
   15-bit texels is dropped as well: the console took 5.4k for triangles of
-  every depth that fit. A texture window (GP0 E2h) is not modelled; only the
-  15-bit 64-texel one cost anything on the console (record 0x92B).
+  every depth that fit. With the 480i rows change below, 32 of the 38
+  texture-window rows read within 5% of the console and the cliffs land
+  (4-bit span 128 and 255: 15,393 and 25,143 against 14,661 and 24,796; 8-bit
+  64, 128 and 255: 12,091, 25,221 and 44,708 against 12,051, 26,549 and
+  44,044; 15-bit 128 and 255: 44,864 and 45,306 against 45,185 and 45,167);
+  the 15-bit span 64 row reads 25,221 against 22,410. A texture window (GP0
+  E2h) is not modelled; only the 15-bit 64-texel one cost anything on the
+  console (record 0x92B, 16.3k).
+- Draws that the 480i rule skips rows of cost only the rows they reach. With
+  drawing to the display area prohibited in 480i, a 256 x 240 fill took 5,872
+  clocks and a rectangle 33,592 on the console with the rule off, and 3,096
+  and 17,040 with it on (hwtest v2.4, records 0x843 to 0x84A): the skipped
+  rows are nearly free. The cost model counted every row. Fills, rectangles
+  and triangles now take the skipped rows' pixels off their cost (not their
+  per-line term or their setup): 364 and 2,145 clocks for the same pair, 6%
+  under and 0.7% over. The other rows the console timed in that mode read
+  about half what the emulator gave: the in-cache 4-bit triangle rows 0x8E0
+  to 0x8E6 fall from 9,959 to 5,578 against the console's 5.4k, and a block
+  DMA waiting for a 512 x 256 rectangle (record 0x86B) reads 35,458 against
+  35,630. 8 and 15-bit triangles read 12 to 14% over (see the texture cache
+  entry).
 - A block-mode GPU DMA that backs up behind the drawing waits for it, as the
   request line holds the channel on the console. The words already landed
   (since the FIFO pacing change); the transfer still finished in a few
