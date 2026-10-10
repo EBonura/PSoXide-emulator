@@ -291,6 +291,14 @@ pub struct CdRom {
     /// already says the drive is stopping. `None` when no Stop is in flight.
     /// Saved with the state, so a restore mid spin-down finishes it on time.
     spindown_until: Option<u64>,
+    /// Cycle at which the Pause in flight completes. A Pause stops the drive
+    /// at the end of the sector it is on, so until its second response the
+    /// status byte still reads "reading" (hwtest v2.4, records 0x500 to
+    /// 0x507: a GetStat just after a Pause's first response says 0x22, and
+    /// no second response has come yet). Not saved: a restore mid-pause
+    /// reports the stopped state.
+    #[serde(skip)]
+    pause_completes_at: u64,
     /// The head last went to a CD-DA track and has not gone back to data
     /// since. The next data operation then pays
     /// [`AUDIO_TO_DATA_SETTLE_CYCLES`], and a Play with this clear pays
@@ -592,6 +600,7 @@ impl CdRom {
             drive_state: DriveState::Stopped,
             motor_on: false,
             spindown_until: None,
+            pause_completes_at: 0,
             head_on_audio: false,
             disc_present: false,
             setloc_msf: (0, 0, 0),
@@ -1604,7 +1613,10 @@ impl CdRom {
     }
 
     fn cmd_getstat(&mut self) {
-        let stat = self.stat_byte();
+        let mut stat = self.stat_byte();
+        if self.scheduling_cycle < self.pause_completes_at {
+            stat |= drive_status_bit::READING;
+        }
         self.getstat_commands = self.getstat_commands.wrapping_add(1);
         let maintenance_delay = if self.disc_present && self.getstat_commands.is_multiple_of(5) {
             GETSTAT_MAINTENANCE_CYCLES
@@ -1766,6 +1778,7 @@ impl CdRom {
         // after the BIOS asked us to pause, producing a runaway
         // pending queue that burned the entire CPU budget on
         // peripheral-scheduling overhead.
+        let was_reading = self.reading;
         self.reading = false;
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
@@ -1786,13 +1799,26 @@ impl CdRom {
             // rather than from the acknowledge.
             PAUSE_FROM_CDDA_CYCLES.saturating_sub(self.first_response_delay())
         } else if was_motor_on {
-            PAUSE_COMPLETE_CYCLES_STANDBY
+            // Out of a read the drive finishes the sector it is on first.
+            if was_reading {
+                PAUSE_FROM_READ_CYCLES
+            } else {
+                PAUSE_COMPLETE_CYCLES_STANDBY
+            }
         } else if self.mode & 0x80 != 0 {
             PAUSE_COMPLETE_CYCLES_ACTIVE * 2
         } else {
             PAUSE_COMPLETE_CYCLES_ACTIVE
         };
         self.schedule_second_response(vec![stat], delay);
+        self.pause_completes_at = self
+            .pending
+            .iter()
+            .filter(|ev| ev.irq == IrqType::Acknowledge)
+            .map(|ev| ev.deadline)
+            .max()
+            .unwrap_or_else(|| self.first_response_deadline())
+            .saturating_add(delay);
     }
 
     fn cmd_motor_on(&mut self) {

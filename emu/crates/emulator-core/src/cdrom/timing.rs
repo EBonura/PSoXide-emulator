@@ -73,6 +73,15 @@ pub(super) const STOP_SECOND_RESPONSE_CYCLES: u64 = CD_READ_TIME * 4; // 1,806,3
 /// a read: 0x21181C single speed, 0x10BD93 double speed).
 pub(super) const PAUSE_COMPLETE_CYCLES_STANDBY: u64 = 7_000;
 
+/// Pause second response out of a running read, counted from the first. The
+/// console had sent no second response by the time a probe had spent about
+/// 90,000 cycles on other work after the first, and in half the runs had
+/// one by the end of a GetStat 30,000 cycles later (hwtest v2.4, records
+/// 0x500 to 0x507, double speed), so it lies about there: this is an
+/// estimate from those two bounds, not a measurement. PSX-SPX gives
+/// 1,096,083 at double speed; nothing on the console contradicts it either.
+pub(super) const PAUSE_FROM_READ_CYCLES: u64 = 120_000;
+
 /// Pause second response from a stopped drive (doubled at double speed).
 /// **Unsourced**; not distinguished by the gates.
 pub(super) const PAUSE_COMPLETE_CYCLES_ACTIVE: u64 = 1_000_000;
