@@ -1,7 +1,7 @@
 //! Runs one journey: boots the disc, plays the steps, and judges every
 //! checkpoint across the CPU/hardware render matrix.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -107,6 +107,7 @@ pub struct JourneyResult {
     pub wall: Duration,
     pub hw_adapter: Option<String>,
     pub notes: Vec<String>,
+    pub cards: Vec<crate::card::CardImage>,
 }
 
 impl JourneyResult {
@@ -165,6 +166,7 @@ pub struct RunOptions {
     pub scales: Option<Vec<u32>>,
     pub verbose: bool,
     pub strict: bool,
+    pub artifact_dir: PathBuf,
 }
 
 fn release_requirements(journey: &Journey, scales: &[u32], use_hw: bool) -> Result<(), String> {
@@ -234,6 +236,9 @@ struct Run<'a> {
     groups: Vec<Group>,
     /// CPU frame of every checkpoint so far, for `frame_diff`.
     shots: std::collections::BTreeMap<String, Img>,
+    initial_card: Vec<u8>,
+    cards: Vec<crate::card::CardImage>,
+    notes: Vec<String>,
 }
 
 pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
@@ -253,6 +258,7 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         wall: Duration::ZERO,
         hw_adapter: None,
         notes: Vec::new(),
+        cards: Vec::new(),
     };
     let scales = opts
         .scales
@@ -270,7 +276,7 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         }
     }
     let want_hw = opts.use_hw && journey.needs_hw() && !scales.is_empty();
-    let m = match Machine::boot(&Boot {
+    let mut m = match Machine::boot(&Boot {
         disc: &opts.disc,
         pad: journey.pad,
         pad2: journey.pad2,
@@ -284,6 +290,26 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
             return result;
         }
     };
+    if let Some(f) = &journey.card_fixture {
+        let path = opts.repo_root.join(&f.path);
+        let bytes = match crate::card::load_fixture(&opts.repo_root, f) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                result.abort = Some(e);
+                return result;
+            }
+        };
+        m.bus.attach_memcard_port1(bytes);
+        result.notes.push(format!(
+            "card fixture {} SHA256 {}",
+            path.display(),
+            f.sha256
+        ));
+    }
+    let initial_card = crate::card::bytes(&m.bus).unwrap_or_default();
+    if journey.card_observe {
+        m.card_observer = Some(Default::default());
+    }
     let hw = if want_hw {
         match HwSet::new(&scales) {
             Ok(h) => {
@@ -327,9 +353,17 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         syms,
         groups: Vec::new(),
         shots: std::collections::BTreeMap::new(),
+        initial_card,
+        cards: Vec::new(),
+        notes: Vec::new(),
     };
     run.m.release_pads();
     result.abort = run.play().err();
+    if let Some(observer) = &run.m.card_observer {
+        result.notes.extend(observer.evidence());
+    }
+    result.notes.extend(run.notes);
+    result.cards = run.cards;
     result.ticks = run.m.ticks;
     result.emu_secs = run.m.ticks as f64 / 60.0;
     result.groups = run.groups;
@@ -338,6 +372,203 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
 }
 
 impl Run<'_> {
+    fn card_step(&mut self, index: usize, step: &Step) -> Result<(), String> {
+        if let Some(path) = &step.tape {
+            let tape = emulator_core::input_tape::read_tape_full(&self.opts.repo_root.join(path))?;
+            if tape.clock != emulator_core::input_tape::TapeClock::PadPoll
+                || tape.samples.is_empty()
+            {
+                return Err("gate tape must contain poll-bound samples".into());
+            }
+            let raw = std::fs::read(self.opts.repo_root.join(path)).map_err(|e| e.to_string())?;
+            self.notes.push(format!(
+                "poll-bound tape {path} SHA256 {}",
+                crate::card::hash(&raw)
+            ));
+            self.m.tape = Some(tape);
+        }
+        let action = step.card.as_ref();
+        if let Some(c) = action {
+            if ["power_cut", "irq_during_ack"].contains(&c.action.as_str()) {
+                let command = c.command.expect("validated command");
+                let count = self
+                    .m
+                    .bus
+                    .port1_memcard_command_histogram()
+                    .ok_or("power_cut needs a card")?[usize::from(command)];
+                let target = (
+                    command,
+                    c.byte_index.expect("validated index"),
+                    count
+                        .checked_add(c.occurrence.unwrap_or(1))
+                        .ok_or("command occurrence overflow")?,
+                );
+                if c.action == "power_cut" {
+                    self.m.cut = Some(target);
+                } else {
+                    self.m.irq_injection = Some((
+                        target.0,
+                        target.1,
+                        target.2,
+                        c.ack_lead.expect("validated ACK lead"),
+                    ));
+                    self.m.injected = None;
+                    self.m.irq_ack_seen = None;
+                    self.m.irq_missed = None;
+                    if let Some(observer) = &mut self.m.card_observer {
+                        observer.target_ack = None;
+                        observer.target_observed = false;
+                        observer.target_overlap = None;
+                    }
+                }
+                self.m.cut_hit = None;
+                if step.has_input() {
+                    self.m.set_pad(
+                        step.port.unwrap_or(1),
+                        step.press.iter().fold(0, |m, b| m | button_mask(b)),
+                        step.lstick.unwrap_or(Machine::centre()),
+                        step.rstick.unwrap_or(Machine::centre()),
+                    );
+                }
+            }
+        }
+        if self.m.tape.is_some() || self.m.cut.is_some() || self.m.irq_injection.is_some() {
+            let timeout = action.and_then(|c| c.timeout).unwrap_or(3600);
+            let mut finished = false;
+            for _ in 0..timeout {
+                let exhausted = self.m.tape.as_ref().is_some_and(|t| {
+                    self.m.bus.port1_completed_polls() >= t.start_poll + t.samples.len() as u64
+                });
+                let injected_complete = self.m.tape.is_none()
+                    && self.m.injected.is_some()
+                    && self
+                        .m
+                        .card_observer
+                        .as_ref()
+                        .is_some_and(|o| o.target_observed);
+                if self.m.cut_hit.is_some()
+                    || (self.m.cut.is_none() && exhausted)
+                    || injected_complete
+                {
+                    finished = true;
+                    break;
+                }
+                self.tick()?;
+            }
+            if self.m.cut_hit.is_some() {
+                finished = true;
+            }
+            self.m.tape = None;
+            self.m.release_pads();
+            if action.is_some_and(|c| c.action == "irq_during_ack") {
+                let ok = self.m.injected.is_some()
+                    && self
+                        .m
+                        .card_observer
+                        .as_ref()
+                        .is_some_and(|o| o.target_observed);
+                let detail = match self.m.injected {
+                    Some((now, ack)) => format!("diagnostic VBlank injected at cycle {now}; selected ACK scheduled at {ack}; full pulse covered by actual guest IRQ handler: {ok}; {}", self.m.card_observer.as_ref().and_then(|o| o.target_overlap.as_deref()).unwrap_or("selected full pulse not observed")),
+                    None => self.m.irq_missed.clone().unwrap_or_else(|| "diagnostic VBlank did not trigger".into()),
+                };
+                self.notes.push(detail.clone());
+                self.groups.push(Group {
+                    name: format!("step {} IRQ fault", index + 1),
+                    label: step.label.clone(),
+                    tick: self.m.ticks,
+                    capture: None,
+                    checks: vec![Check {
+                        name: "selected IRQ/ACK fault".into(),
+                        status: if ok { Status::Pass } else { Status::Fail },
+                        detail: detail.clone(),
+                    }],
+                    wants_golden: false,
+                });
+                if !ok {
+                    return Err(detail);
+                }
+            }
+            if !finished {
+                return Err(format!(
+                    "step {}: tape or power_cut did not complete within {timeout} ticks",
+                    index + 1
+                ));
+            }
+        }
+        if let Some(c) = action {
+            if c.action == "irq_during_ack" {
+                return Ok(());
+            }
+            let bytes = crate::card::bytes(&self.m.bus)?;
+            let name = format!("card-step-{:03}.mcd", index + 1);
+            std::fs::create_dir_all(&self.opts.artifact_dir).map_err(|e| e.to_string())?;
+            let path = self.opts.artifact_dir.join(&name);
+            // A fixture can never be used as the output destination.
+            if let Some(f) = &self.journey.card_fixture {
+                if path == self.opts.repo_root.join(&f.path) {
+                    return Err("card output overlaps fixture".into());
+                }
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|e| format!("create card receipt {}: {e}", path.display()))?;
+            file.write_all(&bytes)
+                .and_then(|_| file.sync_all())
+                .map_err(|e| format!("persist {}: {e}", path.display()))?;
+            let detail = format!(
+                "{} at bus cycle {}, retired instructions {}; SHA256 {}; {}",
+                c.action,
+                self.m.bus.cycles(),
+                self.m.cpu.tick(),
+                crate::card::hash(&bytes),
+                self.m
+                    .cut_hit
+                    .as_deref()
+                    .unwrap_or("explicit snapshot boundary")
+            );
+            self.notes.push(detail.clone());
+            self.cards.push(crate::card::CardImage {
+                name,
+                bytes: bytes.clone(),
+                detail,
+            });
+            if c.action != "snapshot" {
+                let persisted = std::fs::read(&path).map_err(|e| e.to_string())?;
+                if persisted != bytes {
+                    return Err("persisted card readback differs".into());
+                }
+                if let Some(observer) = &self.m.card_observer {
+                    self.notes.extend(observer.evidence());
+                }
+                let ticks = self.m.ticks;
+                self.m = Machine::boot(&Boot {
+                    disc: &self.opts.disc,
+                    pad: self.journey.pad,
+                    pad2: self.journey.pad2,
+                    memcard: self.journey.memcard,
+                    cmd_log: self.hw.is_some(),
+                })?;
+                self.m.bus.attach_memcard_port1(persisted);
+                self.m.ticks = ticks;
+                self.m.release_pads();
+                if self.journey.card_observe {
+                    self.m.card_observer = Some(Default::default());
+                }
+                if self.hw.is_some() {
+                    let scales = self
+                        .opts
+                        .scales
+                        .clone()
+                        .unwrap_or_else(|| self.journey.render.scales.clone());
+                    self.hw = Some(HwSet::new(&scales)?);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn tick(&mut self) -> Result<(), String> {
         if self.m.ticks >= self.journey.max_ticks {
             return Err(format!(
@@ -376,6 +607,9 @@ impl Run<'_> {
                         .unwrap_or("")
                 );
             }
+            if step.card.is_some() || step.tape.is_some() {
+                self.card_step(i, step)?;
+            }
             self.input_and_wait(step)?;
             if let Some(cond) = &step.wait_until {
                 self.wait_until(i, cond, step.timeout.unwrap_or(3600))?;
@@ -388,6 +622,9 @@ impl Run<'_> {
     }
 
     fn input_and_wait(&mut self, step: &Step) -> Result<(), String> {
+        if step.card.is_some() || step.tape.is_some() {
+            return Ok(());
+        }
         let repeat = step.repeat.unwrap_or(1).max(1);
         for _ in 0..repeat {
             if step.has_input() {
@@ -703,6 +940,45 @@ impl Run<'_> {
             return checked_assert(ram_name(a), self.eval_ram(a), a);
         }
         let (name, ok, detail) = match a.kind.as_str() {
+            "card_writes" => {
+                let count = self
+                    .m
+                    .bus
+                    .port1_memcard_recent_events()
+                    .iter()
+                    .filter(|e| {
+                        e.command == 0x57
+                            && e.kind == emulator_core::pad::MemcardEventKind::End
+                            && e.status == 0x47
+                    })
+                    .count() as u64;
+                ("completed card sectors".into(), count >= a.min_count.unwrap_or(1), format!("{count} successful sector commits in recent protocol events; guest save success requires RAM assertions"))
+            }
+            "card_unchanged" => {
+                let now = crate::card::bytes(&self.m.bus).unwrap_or_default();
+                (
+                    "card unchanged since boot".into(),
+                    !now.is_empty() && now == self.initial_card,
+                    format!(
+                        "SHA256 {} (initial {})",
+                        crate::card::hash(&now),
+                        crate::card::hash(&self.initial_card)
+                    ),
+                )
+            }
+            "card_irq_ack" => {
+                let count = self
+                    .m
+                    .card_observer
+                    .as_ref()
+                    .map(|o| o.overlap_count)
+                    .unwrap_or(0);
+                (
+                    "IRQ spans entire card ACK pulse".into(),
+                    count >= a.min_count.unwrap_or(1),
+                    format!("{count} observed complete overlaps; cycle spans in report notes"),
+                )
+            }
             "presenting" => {
                 let window = a.window.unwrap_or(120);
                 let need = a.min_changes.unwrap_or(10);

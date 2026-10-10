@@ -266,6 +266,22 @@ pub fn write_report(
             let _ = write!(html, "<p class=\"note\">{}</p>", esc(n));
         }
         let dir = out.join(&r.name);
+        for card in &r.cards {
+            let card_dir = dir.join("cards");
+            std::fs::create_dir_all(&card_dir).map_err(|e| e.to_string())?;
+            let persisted = std::fs::read(card_dir.join(&card.name)).map_err(|e| e.to_string())?;
+            if persisted != card.bytes {
+                return Err("card receipt changed since capture".into());
+            }
+            let _ = write!(
+                html,
+                "<p class=\"note\"><a href=\"{}/cards/{}\">{}</a>: {}</p>",
+                esc(&r.name),
+                esc(&card.name),
+                esc(&card.name),
+                esc(&card.detail)
+            );
+        }
         for g in &r.groups {
             let shots = write_images(&dir, g)?;
             group_html(&mut html, &r.name, g, &shots);
@@ -313,6 +329,7 @@ mod tests {
             wall: Duration::ZERO,
             hw_adapter: None,
             notes: Vec::new(),
+            cards: Vec::new(),
         };
         let index = write_report(
             dir.path(),
