@@ -1913,8 +1913,12 @@ impl Gpu {
                 let size = self.gp0_fifo[2];
                 let w = ((size & 0x3FF) + 0x0F) & !0x0F;
                 let h = (size >> 16) & 0x1FF;
-                self.note_timing_pixels(u64::from(w) * u64::from(h));
-                DRAW_FILL_SETUP + scale_gpu_pixels(u64::from(w) * u64::from(h), 41, 512)
+                // A fill honours the 480i rule too, over rows that wrap in
+                // VRAM; the rows it skips cost nothing.
+                let rows = self.field_rule_drawn_rows((self.gp0_fifo[1] >> 16) & 0x1FF, h);
+                let pixels = u64::from(w) * u64::from(rows);
+                self.note_timing_pixels(pixels);
+                DRAW_FILL_SETUP + scale_gpu_pixels(pixels, 41, 512)
             }
             // VRAM-to-VRAM uses the slower internal read/modify/write path.
             0x80..=0x9F => {
@@ -2118,12 +2122,14 @@ impl Gpu {
             return setup;
         }
         let pixels = self.timing_polygon_pixels(vertices);
-        self.note_timing_pixels(pixels);
         let top = vertices.iter().map(|v| v.1).min().unwrap_or(0);
         let bottom = vertices.iter().map(|v| v.1).max().unwrap_or(0);
         let clip_top = (self.draw_area_top as i32).max(0);
         let clip_bottom = (self.draw_area_bottom as i32 + 1).min(VRAM_HEIGHT as i32);
-        let lines = (bottom.min(clip_bottom) - top.max(clip_top)).max(0) as u64;
+        let first = top.max(clip_top);
+        let lines = (bottom.min(clip_bottom) - first).max(0) as u64;
+        let pixels = self.field_rule_pixels(pixels, first, lines);
+        self.note_timing_pixels(pixels);
         setup.max((pixels * pixel_q8 + lines * line_q8).div_ceil(256))
     }
 
@@ -2135,14 +2141,15 @@ impl Gpu {
         setup: u64,
         (pixel_q8, line_q8): (u64, u64),
     ) -> u64 {
-        let (pixels, lines) = self.timing_rect_extent(pos, w, h);
+        let (pixels, lines, first) = self.timing_rect_extent(pos, w, h);
+        let pixels = self.field_rule_pixels(pixels, first, lines);
         self.note_timing_pixels(pixels);
         setup.max((pixels * pixel_q8 + lines * line_q8).div_ceil(256))
     }
 
-    fn timing_rect_extent(&self, pos: u32, w: i32, h: i32) -> (u64, u64) {
+    fn timing_rect_extent(&self, pos: u32, w: i32, h: i32) -> (u64, u64, i32) {
         if w <= 0 || h <= 0 {
-            return (0, 0);
+            return (0, 0, 0);
         }
         let x = sign_extend_11((pos & 0x7FF) as i32) + self.draw_offset_x;
         let y = sign_extend_11(((pos >> 16) & 0x7FF) as i32) + self.draw_offset_y;
@@ -2155,13 +2162,37 @@ impl Gpu {
             .min(self.draw_area_bottom as i32 + 1)
             .min(VRAM_HEIGHT as i32);
         if left >= right || top >= bottom {
-            (0, 0)
+            (0, 0, 0)
         } else {
             (
                 (right - left) as u64 * (bottom - top) as u64,
                 (bottom - top) as u64,
+                top,
             )
         }
+    }
+
+    /// Rows, of the `count` starting at VRAM row `first` (wrapping at 512),
+    /// that the 480i rule lets a draw reach; all of them when it is off.
+    fn field_rule_drawn_rows(&self, first: u32, count: u32) -> u32 {
+        let skip = self.skipped_row_parity();
+        if skip < 0 {
+            return count;
+        }
+        count / 2 + u32::from(count & 1 == 1 && (first & 1) as i32 != skip)
+    }
+
+    /// `pixels` of a primitive covering `lines` rows from `first`, less the
+    /// rows the 480i rule skips. The rows are free apart from the per-line
+    /// term the callers still charge for all of them (hwtest v2.4, records
+    /// 0x843 to 0x84A: a 256 x 240 fill or rectangle costs 3,096 and 17,040
+    /// clocks with half its rows skipped, 5,872 and 33,592 with none).
+    fn field_rule_pixels(&self, pixels: u64, first: i32, lines: u64) -> u64 {
+        if lines == 0 || self.skipped_row_parity() < 0 {
+            return pixels;
+        }
+        let rows = u64::from(self.field_rule_drawn_rows(first as u32, lines as u32));
+        pixels * rows / lines
     }
 
     fn note_timing_pixels(&self, pixels: u64) {
