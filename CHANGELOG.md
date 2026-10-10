@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- A controller port answers each byte of a transaction in its own time
+  (hardware tests v2.2). `/ACK` rises 1665, 1678, 1627, 1629, 1468, 1695,
+  1695 and 1692 clocks after the bytes of a pad poll, not 1677 after every
+  one, and a memory card's first four bytes take 1717, 1682, 1523 and 1516
+  clocks in slot 1 and 1691, 1552, 1465 and 1497 in slot 2, with the pulse
+  widths the console showed. The bytes after those were never timed one by
+  one; their delay is fitted so a whole 140-byte frame read takes the 124
+  HBlanks (slot 1) and 139 (slot 2) the console took, where the emulator took
+  113 and 117. A card read or write in a game is that much slower, and the
+  card frame reads that failed under GPU load in the hardware tests (records
+  0x6D3 to 0x6D5, all clean on the console) now pass. The pad poll record
+  0x642 reads 1765 against the console's 1757 (it was 1807). Save states move
+  to format 17.
 - A block-mode DMA to the GPU waits for the GPU instead of losing words. The
   channel is paced by the GPU's request line, and the emulator pushed a whole
   block at once, dropping every word that arrived while the input FIFO was
