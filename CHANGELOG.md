@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Textured triangles pay when their texels outgrow the texture cache. The
+  console's cost for sixteen 32 x 32 triangles was flat at 5.4k clocks until
+  the texture coordinates spanned more than the cache holds, then climbed to
+  14.7k and 24.8k (4-bit, spans 128 and 255), 12.1k, 26.5k and 44.0k (8-bit,
+  64, 128 and 255) and 22.4k then 45.2k twice (15-bit, 64, 128 and 255); the
+  emulator read 9,959 for all of them (hwtest v2.4, records 0x8E0 to 0x8F7).
+  The extra clocks per drawn pixel follow the bytes the texture step
+  advances per pixel (about 1.2 clocks a byte up to 9.7, one miss in two or
+  so), ramping in over footprints of 1 to 2.5 KB; a triangle that fits is
+  charged nothing. With the 480i rule on, the per-pixel read charge for 8 and
+  15-bit texels is dropped as well: the console took 5.4k for triangles of
+  every depth that fit. A texture window (GP0 E2h) is not modelled; only the
+  15-bit 64-texel one cost anything on the console (record 0x92B).
 - A block-mode GPU DMA that backs up behind the drawing waits for it, as the
   request line holds the channel on the console. The words already landed
   (since the FIFO pacing change); the transfer still finished in a few
