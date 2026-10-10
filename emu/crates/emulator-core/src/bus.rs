@@ -1750,6 +1750,14 @@ impl Bus {
             // without this).
             let fill_wait = self.code_fill_busy_until.saturating_sub(self.cycles);
             stalls += fill_wait.min(CODE_FILL_MMIO_WAIT_CAP) as u32;
+            // The core's own registers' wait overlaps the instructions behind
+            // the load just as a RAM load's does (see `Cpu::hides_in_load_shadow`).
+            let on_die = !(0x1F80_1800..0x1F80_1804).contains(&phys)
+                && !(0x1F80_1C00..0x1F80_2000).contains(&phys);
+            if on_die {
+                self.ram_load_from_cached_code =
+                    !self.code_fetch_on_ram_bus && self.cycles >= self.code_fill_busy_until;
+            }
         }
         stalls
     }
