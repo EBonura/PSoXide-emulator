@@ -2992,6 +2992,25 @@ fn interlaced_480_draws_skip_the_displayed_field() {
     }
 }
 
+/// The rule holds with the display blanked: hwtest v2.4 drew a fill, a
+/// rectangle, triangles and a line with GP1(03h) off and read 0xAAAA and
+/// 0x5555 back for the two fields, as with the display on.
+#[test]
+fn interlaced_480_rule_holds_with_the_display_blanked() {
+    let xy = |x: u32, y: u32| (y << 16) | x;
+    let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0300_0001); // display off
+    gpu.write32(GP1_ADDR, 0x0800_0026);
+    gpu.write32(GP0_ADDR, 0xE100_0000);
+    assert_eq!(gpu.read32(GP1_ADDR).unwrap() >> 31, 1, "odd lines shown");
+    gpu.write32(GP0_ADDR, 0x6000_FF00);
+    gpu.write32(GP0_ADDR, xy(32, 0));
+    gpu.write32(GP0_ADDR, 0x0004_0010);
+    for y in 0..4u16 {
+        assert_eq!(gpu.vram.get_pixel(36, y) != 0, y & 1 == 0, "rect row {y}");
+    }
+}
+
 /// Field-rendered 480i frames are presented whole: the lines of the other
 /// field come from when it was last on display.
 #[test]

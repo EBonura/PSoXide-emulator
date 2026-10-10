@@ -4041,19 +4041,16 @@ impl Gpu {
     /// bit 10 clear ("drawing to display area: prohibited"), rendering and
     /// fills leave the lines of the field being displayed alone and draw
     /// only the other field's lines. GPUSTAT bit 31 names the field on
-    /// display (0 = even lines, 1 = odd). Not while the display is blanked.
+    /// display (0 = even lines, 1 = odd). It holds with the display blanked
+    /// too (hwtest v2.4, records 0x84B to 0x852: fill, rectangle, triangles
+    /// and line drawn with GP1(03h) still leave the rows of the field on
+    /// show alone).
     #[inline]
     fn skipped_row_parity(&self) -> i32 {
         const INTERLACED_480: u32 = (1 << 19) | (1 << 22);
         const DRAW_TO_DISPLAY: u32 = 1 << 10;
-        const DISPLAY_DISABLED: u32 = 1 << 23;
         let raw = self.status.raw;
-        // With the display blanked nothing is on show to protect. (Chrono
-        // Cross builds its 640x432 menu background with the display off and
-        // in one field's draws; the rule would leave the other field's lines
-        // as they were. Not measured on the console.)
-        if raw & INTERLACED_480 == INTERLACED_480 && raw & (DRAW_TO_DISPLAY | DISPLAY_DISABLED) == 0
-        {
+        if raw & INTERLACED_480 == INTERLACED_480 && raw & DRAW_TO_DISPLAY == 0 {
             (raw >> 31) as i32
         } else {
             -1
