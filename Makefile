@@ -45,7 +45,7 @@ run: bootstrap
 
 # The fleet gate (TESTING.md): every game's journey on the CPU and hardware
 # renderers. GATE_ARGS e.g. "run nitroxide" or "run all --jobs 2".
-GATE_ARGS ?= run all
+GATE_ARGS ?= run all --strict
 gate: bootstrap
 	cargo run --locked --release -p psoxide-gate -- $(GATE_ARGS)
 

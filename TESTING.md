@@ -28,8 +28,8 @@ The rules below close those holes.
 4. **Goldens change deliberately.** A frame changes only through
    `psoxide-gate bless`, after reading the diff report.
 5. **Known failures are marked, not hidden.** `expect_fail = true` reports XFAIL
-   and passes. When the feature lands the assert reports XPASS and the marker is
-   removed in the same change.
+   and passes for an evaluated assertion. XPASS fails until its marker is removed.
+   A broken symbol or unreadable RAM fails even with the marker.
 
 ## Running it
 
@@ -38,19 +38,24 @@ cargo build --release -p psoxide-gate        # or: make gate
 psoxide-gate list                            # each game, journey and whether it exists
 psoxide-gate run nitroxide                   # one game, library disc
 psoxide-gate run tests/journey.toml --disc dist/game.cue   # a journey file, a specific disc
-psoxide-gate run all --jobs 2                # the fleet (at most 2 emulator runs at once)
+psoxide-gate run all --jobs 2 --strict       # release gate (at most 2 emulator runs at once)
 psoxide-gate bless oot                       # rewrite goldens, with a review report
 ```
 
-Exit code 0 means every journey passed. 1 means a check failed or a journey
-aborted. 2 means bad usage or an unreadable file. `--strict` also fails games
-with no journey. The report goes to `gate-report/index.html` (or `--out`).
+Exit code 0 means every selected journey passed. 1 means a check failed or a
+journey aborted. 2 means bad usage or an unreadable file. `--strict` is the
+release gate: it requires a journey, checkpoints and CPU/HW 1x and 3x at every
+checkpoint. A missing named journey always fails. `make gate` uses `--strict`.
+`--no-hw` and reduced `--scales` are diagnostic options and cannot pass the
+release gate. The report goes to `gate-report/index.html` (or `--out`).
 
 Which disc runs: a fleet name or `all` boots the library disc, the one a player
 launches. A journey path boots the journey's own `disc` list, the game's normal
 build output. `--library` and `--build` force either, `--disc` names one. The
 `--repo name=/path` flag points a game at a different checkout (for example a
 worktree) while its fleet entry stays the same.
+An explicit `--library` or `--build` fails if that disc is absent; it never
+substitutes the other one.
 
 The fleet manifest is `tools/psoxide-gate/fleet.toml`: library entry, repo, and
 journey path per first-party game. A game without a journey shows as MISSING.
@@ -59,21 +64,26 @@ Third-party titles are covered by the emulator's `validate` manifests instead.
 ## The report
 
 `index.html` is a contact sheet. For each journey: the disc and its hash, the
-timings, and per checkpoint a row of frames: old golden, new frame, a golden
-vs new heat map, then the hardware frame at each scale with a heat map against
-the CPU frame. Below the frames, every check with PASS, FAIL, XFAIL, XPASS or
-SKIP and the numbers behind it. One line per journey also goes to stdout.
+timings, and per checkpoint a row of frames: old golden, CPU 1x, CPU 3x,
+golden vs new heat map, then the hardware frame at each scale with a heat map
+against the corresponding CPU frame. Each checkpoint also writes a full-size
+`<checkpoint>.matrix.png` page: CPU 1x and HW 1x across the top, CPU 3x and
+HW 3x below. The individual frames remain available for close review. Below
+the frames, every check has PASS, FAIL, XFAIL, XPASS or SKIP and its measured
+values. One line per journey also goes to stdout.
 
 Heat maps: black is identical, dim blue-grey is a difference inside the
 tolerance, red through white is a pixel outside it.
 
 ## The render matrix
 
-Every checkpoint with `no_matrix` unset is rendered three ways from the same
-emulated state: the CPU rasterizer (the silicon-verified reference), the
-hardware renderer at 1x, and the hardware renderer at 3x (`render.scales`
-changes the list). The hardware renderers run alongside the CPU one all
-through the journey, fed each tick's GP0 log the way the window feeds them, so
+Every checkpoint with `no_matrix` unset has four reviewable images from the same
+emulated state: CPU 1x, CPU 3x presentation by nearest-neighbour enlargement,
+hardware 1x, and hardware 3x (`render.scales` changes the hardware list in
+diagnostic runs). The CPU rasterizer runs at native resolution, so CPU 3x is an
+enlarged reference, not a second rasterization. The hardware renderers run
+alongside the CPU one throughout the journey, fed each tick's GP0 log as in the
+window, so
 the persistent target holds what a player would see.
 
 - **CPU vs golden.** Exact by default. This catches any change to what the
@@ -96,7 +106,8 @@ the persistent target holds what a player would see.
   Do not mark regions with 3D showing through, or scenery edges fail them.
 
 Frames the hardware renderer defers to the CPU (24bpp, screen offset, 480i
-field rendering) are reported SKIP with the reason.
+field rendering) are reported SKIP with the reason in diagnostic runs. A
+required renderer SKIP fails the release gate.
 
 Per-checkpoint overrides: `tolerance` (golden), `hw1`, `hwn`, `mask`
 (rectangles ignored by every comparison, for clocks and random particles).

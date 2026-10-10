@@ -4,11 +4,14 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::exec::{Group, JourneyResult, Status};
+use crate::exec::{Capture, Group, JourneyResult, Status};
 use crate::img::Img;
 
 fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn badge(s: Status) -> String {
@@ -22,11 +25,46 @@ fn badge(s: Status) -> String {
     format!("<span class=\"badge {class}\">{}</span>", s.label())
 }
 
+/// A full-size page per checkpoint: CPU 1x | HW 1x above CPU 3x | HW 3x.
+/// The 1x cells are enlarged with nearest-neighbour sampling for legibility.
+fn matrix_page(cap: &Capture) -> Img {
+    let cpu3 = cap.cpu.enlarge(3);
+    let (w, h) = (cpu3.w, cpu3.h);
+    let gap = 8;
+    let mut page = Img::from_rgba(
+        2 * w + gap,
+        2 * h + gap,
+        vec![24; ((2 * w + gap) * (2 * h + gap) * 4) as usize],
+    );
+    let mut copy = |img: &Img, x: u32, y: u32| {
+        if (img.w, img.h) != (w, h) {
+            return;
+        }
+        for row in 0..h {
+            let src = (row * w * 4) as usize;
+            let dst = (((y + row) * page.w + x) * 4) as usize;
+            page.rgba[dst..dst + (w * 4) as usize]
+                .copy_from_slice(&img.rgba[src..src + (w * 4) as usize]);
+        }
+    };
+    copy(&cpu3, 0, 0);
+    if let Some((_, hw1)) = cap.hw.iter().find(|(scale, _)| *scale == 1) {
+        copy(&hw1.enlarge(3), w + gap, 0);
+    }
+    copy(&cpu3, 0, h + gap);
+    if let Some((_, hw3)) = cap.hw.iter().find(|(scale, _)| *scale == 3) {
+        copy(hw3, w + gap, h + gap);
+    }
+    page
+}
+
 /// Write PNGs for every capture into `dir` and return the file stem prefix
 /// used in the page.
 fn write_images(dir: &Path, group: &Group) -> Result<Vec<(String, String, String)>, String> {
     // (caption, relative file, css class)
-    let Some(cap) = &group.capture else { return Ok(Vec::new()) };
+    let Some(cap) = &group.capture else {
+        return Ok(Vec::new());
+    };
     let mut shots = Vec::new();
     let stem = &group.name;
     let mut put = |caption: String, file: String, img: &Img, class: &str| -> Result<(), String> {
@@ -37,24 +75,63 @@ fn write_images(dir: &Path, group: &Group) -> Result<Vec<(String, String, String
     if let Some(g) = &cap.golden {
         put("golden".into(), format!("{stem}.golden.png"), g, "")?;
     }
-    put("new (cpu 1x)".into(), format!("{stem}.new.png"), &cap.cpu, "")?;
+    put(
+        "new (cpu 1x)".into(),
+        format!("{stem}.new.png"),
+        &cap.cpu,
+        "",
+    )?;
+    put(
+        "cpu 3x (nearest neighbour)".into(),
+        format!("{stem}.cpu3.png"),
+        &cap.cpu.enlarge(3),
+        "",
+    )?;
     if let Some(g) = &cap.golden {
         if (g.w, g.h) == (cap.cpu.w, cap.cpu.h) {
-            put("golden vs new".into(), format!("{stem}.diff.png"), &cap.cpu.heatmap(g, 0, 0), "heat")?;
-        }
-    }
-    for (scale, frame) in &cap.hw {
-        put(format!("hw {scale}x"), format!("{stem}.hw{scale}.png"), frame, "")?;
-        let base = if *scale == 1 { cap.cpu.clone() } else { cap.cpu.enlarge(*scale) };
-        if (base.w, base.h) == (frame.w, frame.h) {
             put(
-                format!("hw {scale}x vs cpu"),
-                format!("{stem}.hw{scale}.diff.png"),
-                &frame.heatmap(&base, if *scale == 1 { cap.hw1_channel } else { cap.hwn_channel }, if *scale == 1 { 0 } else { *scale }),
+                "golden vs new".into(),
+                format!("{stem}.diff.png"),
+                &cap.cpu.heatmap(g, 0, 0),
                 "heat",
             )?;
         }
     }
+    for (scale, frame) in &cap.hw {
+        put(
+            format!("hw {scale}x"),
+            format!("{stem}.hw{scale}.png"),
+            frame,
+            "",
+        )?;
+        let base = if *scale == 1 {
+            cap.cpu.clone()
+        } else {
+            cap.cpu.enlarge(*scale)
+        };
+        if (base.w, base.h) == (frame.w, frame.h) {
+            put(
+                format!("hw {scale}x vs cpu"),
+                format!("{stem}.hw{scale}.diff.png"),
+                &frame.heatmap(
+                    &base,
+                    if *scale == 1 {
+                        cap.hw1_channel
+                    } else {
+                        cap.hwn_channel
+                    },
+                    if *scale == 1 { 0 } else { *scale },
+                ),
+                "heat",
+            )?;
+        }
+    }
+    put(
+        "matrix page: CPU 1x | HW 1x / CPU 3x | HW 3x".into(),
+        format!("{stem}.matrix.png"),
+        &matrix_page(cap),
+        "",
+    )?;
     Ok(shots)
 }
 
@@ -75,7 +152,11 @@ fn group_html(out: &mut String, dir_rel: &str, group: &Group, shots: &[(String, 
         esc(&group.name),
         badge(worst),
         group.tick,
-        group.label.as_deref().map(|l| format!(" &middot; {}", esc(l))).unwrap_or_default()
+        group
+            .label
+            .as_deref()
+            .map(|l| format!(" &middot; {}", esc(l)))
+            .unwrap_or_default()
     );
     if !shots.is_empty() {
         out.push_str("<div class=\"shots\">");
@@ -121,7 +202,12 @@ a{color:inherit}
 "#;
 
 /// Write the report under `out`. Returns the index page path.
-pub fn write_report(out: &Path, results: &[JourneyResult], title: &str) -> Result<PathBuf, String> {
+pub fn write_report(
+    out: &Path,
+    results: &[JourneyResult],
+    missing: &[(String, String)],
+    title: &str,
+) -> Result<PathBuf, String> {
     std::fs::create_dir_all(out).map_err(|e| format!("mkdir {}: {e}", out.display()))?;
     let mut html = String::new();
     let _ = write!(
@@ -133,9 +219,10 @@ pub fn write_report(out: &Path, results: &[JourneyResult], title: &str) -> Resul
     let failed = results.iter().filter(|r| !r.passed()).count();
     let _ = write!(
         html,
-        "<p class=\"note\">{} journeys, {} failed. Goldens are the CPU rasterizer at 1x; hardware frames are checked against it.</p>",
+        "<p class=\"note\">{} journeys, {} failed, {} missing. Goldens are the CPU rasterizer at 1x; hardware frames are checked against it.</p>",
         results.len(),
-        failed
+        failed,
+        missing.len()
     );
     html.push_str("<table class=\"summary\"><tr><th>journey</th><th></th><th>checks</th><th>fail</th><th>ticks</th><th>wall</th><th>disc</th></tr>");
     for r in results {
@@ -151,6 +238,9 @@ pub fn write_report(out: &Path, results: &[JourneyResult], title: &str) -> Resul
             n = esc(&r.name)
         );
     }
+    for (name, why) in missing {
+        let _ = write!(html, "<tr><td>{}</td><td><span class=\"badge fail\">MISSING</span></td><td colspan=\"5\">{}</td></tr>", esc(name), esc(why));
+    }
     html.push_str("</table>");
     for r in results {
         let _ = write!(
@@ -163,10 +253,14 @@ pub fn write_report(out: &Path, results: &[JourneyResult], title: &str) -> Resul
             r.hw_adapter.as_deref().map(|a| format!(", hardware renderer on {}", esc(a))).unwrap_or_default(),
             n = esc(&r.name),
             t = esc(&r.title),
-            d = esc(&format!("{} (sha256 {})", r.disc.display(), r.disc_id)),
+            d = esc(&format!("{} (sha256 prefix {})", r.disc.display(), r.disc_id)),
         );
         if let Some(a) = &r.abort {
-            let _ = write!(html, "<p><span class=\"badge fail\">ABORTED</span> {}</p>", esc(a));
+            let _ = write!(
+                html,
+                "<p><span class=\"badge fail\">ABORTED</span> {}</p>",
+                esc(a)
+            );
         }
         for n in &r.notes {
             let _ = write!(html, "<p class=\"note\">{}</p>", esc(n));
@@ -181,4 +275,56 @@ pub fn write_report(out: &Path, results: &[JourneyResult], title: &str) -> Resul
     let index = out.join("index.html");
     std::fs::write(&index, html).map_err(|e| format!("write {}: {e}", index.display()))?;
     Ok(index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exec::{Capture, Group};
+    use std::time::Duration;
+
+    #[test]
+    fn contact_sheet_contains_cpu_at_both_scales_and_missing_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = JourneyResult {
+            name: "sample".into(),
+            title: "Sample".into(),
+            disc: PathBuf::from("sample.cue"),
+            disc_id: "ba7816bf8f01".into(),
+            groups: vec![Group {
+                name: "menu".into(),
+                label: None,
+                tick: 1,
+                capture: Some(Capture {
+                    cpu: Img::from_rgba(1, 1, vec![10, 20, 30, 255]),
+                    golden: None,
+                    golden_error: None,
+                    hw: Vec::new(),
+                    hw_skip: None,
+                    hw1_channel: 24,
+                    hwn_channel: 48,
+                }),
+                checks: Vec::new(),
+                wants_golden: false,
+            }],
+            abort: None,
+            ticks: 1,
+            emu_secs: 1.0 / 60.0,
+            wall: Duration::ZERO,
+            hw_adapter: None,
+            notes: Vec::new(),
+        };
+        let index = write_report(
+            dir.path(),
+            &[result],
+            &[("absent".into(), "no journey".into())],
+            "Gate",
+        )
+        .unwrap();
+        let html = std::fs::read_to_string(index).unwrap();
+        assert!(html.contains("cpu 3x (nearest neighbour)"));
+        assert!(html.contains("MISSING"));
+        assert!(dir.path().join("sample/menu.cpu3.png").exists());
+        assert!(dir.path().join("sample/menu.matrix.png").exists());
+    }
 }

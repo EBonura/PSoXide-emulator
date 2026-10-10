@@ -27,7 +27,10 @@ use fleet::{Entry, Fleet};
 use journey::Journey;
 
 #[derive(Parser)]
-#[command(version, about = "Fleet test gate: play each game's journey on the CPU and hardware renderers")]
+#[command(
+    version,
+    about = "Fleet test gate: play each game's journey on the CPU and hardware renderers"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
@@ -84,7 +87,7 @@ struct RunArgs {
     /// Journeys running at once for `all` (each is one emulator run).
     #[arg(long, default_value_t = 1)]
     jobs: usize,
-    /// A game with no journey counts as a failure.
+    /// Release gate: require a journey and CPU/HW 1x and 3x at every checkpoint.
     #[arg(long)]
     strict: bool,
     /// Print each step as it starts.
@@ -180,14 +183,27 @@ fn plan(target: &str, common: &CommonArgs) -> Result<(Vec<Planned>, Fleet), Stri
         let jp = PathBuf::from(target);
         let jp = std::fs::canonicalize(&jp).map_err(|e| format!("{}: {e}", jp.display()))?;
         let repo_root = Journey::repo_root(&jp);
-        let name = jp.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        planned.push(Planned::Run(Job { name, journey_path: jp, repo_root, library_disc: None }));
+        let name = jp
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        planned.push(Planned::Run(Job {
+            name,
+            journey_path: jp,
+            repo_root,
+            library_disc: None,
+        }));
     } else if let Some(e) = fleet.find(target) {
         planned.push(from_entry(e));
     } else {
         return Err(format!(
             "unknown target `{target}`: use `all`, a path to a journey.toml, or one of: {}",
-            fleet.games.iter().map(|g| g.name.as_str()).collect::<Vec<_>>().join(", ")
+            fleet
+                .games
+                .iter()
+                .map(|g| g.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     Ok((planned, fleet))
@@ -200,6 +216,7 @@ fn pick_disc(
     explicit: Option<&Path>,
     build: bool,
     library: bool,
+    strict: bool,
 ) -> Result<PathBuf, String> {
     if let Some(d) = explicit {
         return Ok(d.to_path_buf());
@@ -220,7 +237,11 @@ fn pick_disc(
     };
     // A fleet name defaults to the library disc, a journey path to the build.
     let prefer_library = library || (!build && job.library_disc.is_some());
-    let picked = if prefer_library {
+    let picked = if library || (strict && job.library_disc.is_some() && !build) {
+        from_library()
+    } else if build {
+        from_build()
+    } else if prefer_library {
         from_library().or_else(from_build)
     } else {
         from_build().or_else(from_library)
@@ -243,6 +264,7 @@ struct Opts {
     scales: Option<Vec<u32>>,
     verbose: bool,
     golden_dir: Option<PathBuf>,
+    strict: bool,
 }
 
 impl Opts {
@@ -255,6 +277,7 @@ impl Opts {
             scales: a.scales.clone(),
             verbose: a.verbose,
             golden_dir: a.golden_dir.clone(),
+            strict: a.strict,
         }
     }
 }
@@ -274,7 +297,15 @@ fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
         Ok(j) => j,
         Err(e) => return aborted(&job.name, e),
     };
-    let disc = match pick_disc(&journey, job, fleet, o.disc.as_deref(), o.build, o.library) {
+    let disc = match pick_disc(
+        &journey,
+        job,
+        fleet,
+        o.disc.as_deref(),
+        o.build,
+        o.library,
+        o.strict,
+    ) {
         Ok(d) => d,
         Err(e) => return aborted(&journey.name, e),
     };
@@ -287,6 +318,7 @@ fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
             use_hw: o.use_hw,
             scales: o.scales.clone(),
             verbose: o.verbose,
+            strict: o.strict,
         },
     )
 }
@@ -314,20 +346,43 @@ fn print_failures(r: &JourneyResult, all: bool) {
     for g in &r.groups {
         for c in &g.checks {
             if all || matches!(c.status, Status::Fail | Status::XPass) {
-                println!("  {}  {}/{}: {}: {}", c.status.label(), r.name, g.name, c.name, c.detail);
+                println!(
+                    "  {}  {}/{}: {}: {}",
+                    c.status.label(),
+                    r.name,
+                    g.name,
+                    c.name,
+                    c.detail
+                );
             }
         }
     }
 }
 
 fn cmd_run(a: &RunArgs) -> Result<ExitCode, String> {
+    if a.strict && a.no_hw {
+        return Err("--strict requires hardware rendering; remove --no-hw".into());
+    }
+    if a.strict
+        && a.scales
+            .as_ref()
+            .is_some_and(|s| !s.contains(&1) || !s.contains(&3))
+    {
+        return Err("--strict requires both hardware scales 1 and 3".into());
+    }
     let (planned, fleet) = plan(&a.target, &a.common)?;
     if a.disc.is_some() && planned.len() != 1 {
         return Err("--disc needs a single target".into());
     }
     let jobs: Vec<&Job> = planned
         .iter()
-        .filter_map(|p| if let Planned::Run(j) = p { Some(j) } else { None })
+        .filter_map(|p| {
+            if let Planned::Run(j) = p {
+                Some(j)
+            } else {
+                None
+            }
+        })
         .collect();
     let opts = Opts::from_run(a);
     let slots: Vec<Mutex<Option<JourneyResult>>> = jobs.iter().map(|_| Mutex::new(None)).collect();
@@ -348,33 +403,41 @@ fn cmd_run(a: &RunArgs) -> Result<ExitCode, String> {
         .into_iter()
         .filter_map(|m| m.into_inner().expect("slot"))
         .collect();
-    let mut missing = 0;
+    let mut missing_jobs = Vec::new();
     for p in &planned {
         if let Planned::Missing { name, why } = p {
             println!("MISSING {name:<14} {why}");
-            missing += 1;
+            missing_jobs.push((name.clone(), why.clone()));
         }
     }
-    let index = report::write_report(&a.out, &results, "PSoXide fleet gate")?;
+    let index = report::write_report(&a.out, &results, &missing_jobs, "PSoXide fleet gate")?;
     println!("report: {}", index.display());
     let failed = results.iter().filter(|r| !r.passed()).count();
     println!(
         "gate: {} journeys, {} failed, {} without a journey",
         results.len(),
         failed,
-        missing
+        missing_jobs.len()
     );
-    let bad = failed > 0 || (a.strict && missing > 0);
-    Ok(if bad { ExitCode::from(1) } else { ExitCode::SUCCESS })
+    let bad = failed > 0 || (!missing_jobs.is_empty() && (a.strict || a.target != "all"));
+    Ok(if bad {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
     let (planned, fleet) = plan(&a.target, &a.common)?;
     if a.target == "all" || planned.len() != 1 {
-        return Err("bless takes one game at a time: goldens are reviewed, not bulk-regenerated".into());
+        return Err(
+            "bless takes one game at a time: goldens are reviewed, not bulk-regenerated".into(),
+        );
     }
     let Planned::Run(job) = &planned[0] else {
-        let Planned::Missing { why, .. } = &planned[0] else { unreachable!() };
+        let Planned::Missing { why, .. } = &planned[0] else {
+            unreachable!()
+        };
         return Err(why.clone());
     };
     let opts = Opts {
@@ -385,6 +448,7 @@ fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
         scales: a.scales.clone(),
         verbose: a.verbose,
         golden_dir: a.golden_dir.clone(),
+        strict: false,
     };
     let r = run_planned(job, &fleet, &opts);
     println!("{}", r.summary());
@@ -392,10 +456,23 @@ fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
         .groups
         .iter()
         .flat_map(|g| g.checks.iter().map(move |c| (g, c)))
-        .filter(|(_, c)| c.status.is_failure() && c.name != "golden" && !c.name.starts_with("hw ") && !c.name.starts_with("strict"))
+        .filter(|(_, c)| {
+            c.status.is_failure()
+                && c.name != "golden"
+                && !c.name.starts_with("hw ")
+                && !c.name.starts_with("strict")
+        })
         .collect();
-    let index = report::write_report(&a.out, std::slice::from_ref(&r), "PSoXide gate: golden review")?;
-    println!("review report (old golden | new | diff): {}", index.display());
+    let index = report::write_report(
+        &a.out,
+        std::slice::from_ref(&r),
+        &[],
+        "PSoXide gate: golden review",
+    )?;
+    println!(
+        "review report (old golden | new | diff): {}",
+        index.display()
+    );
     if (r.abort.is_some() || !blocking.is_empty()) && !a.force {
         if let Some(e) = &r.abort {
             println!("  ABORT  {e}");
@@ -413,10 +490,9 @@ fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
         if !g.wants_golden {
             continue;
         }
-        let unchanged = cap
-            .golden
-            .as_ref()
-            .is_some_and(|old| (old.w, old.h) == (cap.cpu.w, cap.cpu.h) && old.rgba == cap.cpu.rgba);
+        let unchanged = cap.golden.as_ref().is_some_and(|old| {
+            (old.w, old.h) == (cap.cpu.w, cap.cpu.h) && old.rgba == cap.cpu.rgba
+        });
         if unchanged {
             same += 1;
             continue;
@@ -429,11 +505,14 @@ fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
             "new"
         };
         let detail = match &cap.golden {
-            Some(old) if (old.w, old.h) == (cap.cpu.w, cap.cpu.h) => cap.cpu.diff(old, 0, 1, &[], None).describe(),
+            Some(old) if (old.w, old.h) == (cap.cpu.w, cap.cpu.h) => {
+                cap.cpu.diff(old, 0, 1, &[], None).describe()
+            }
             Some(old) => format!("size {}x{} -> {}x{}", old.w, old.h, cap.cpu.w, cap.cpu.h),
             None => "first golden".into(),
         };
-        cap.cpu.save_png(&golden_dir.join(format!("{}.png", g.name)))?;
+        cap.cpu
+            .save_png(&golden_dir.join(format!("{}.png", g.name)))?;
         println!("  {verb:<7} {}: {detail}", g.name);
     }
     println!(
@@ -451,14 +530,59 @@ fn cmd_list(a: &CommonArgs) -> Result<ExitCode, String> {
         let jp = repo.join(&e.journey);
         let state = if jp.exists() {
             match Journey::load(&jp) {
-                Ok(j) => format!("journey {} ({} steps, {} checkpoints)", jp.display(), j.steps.len(), j.checkpoints().count()),
+                Ok(j) => format!(
+                    "journey {} ({} steps, {} checkpoints)",
+                    jp.display(),
+                    j.steps.len(),
+                    j.checkpoints().count()
+                ),
                 Err(err) => format!("INVALID journey: {err}"),
             }
         } else {
             "no journey".to_string()
         };
-        let disc = if fleet.library_disc(e).exists() { "" } else { " [library disc missing]" };
+        let disc = if fleet.library_disc(e).exists() {
+            ""
+        } else {
+            " [library disc missing]"
+        };
         println!("{:<15} {state}{disc}", e.name);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_gate_never_substitutes_a_build_for_the_library_disc() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("game");
+        std::fs::create_dir_all(repo.join("dist")).unwrap();
+        let build_disc = repo.join("dist/build.cue");
+        std::fs::write(&build_disc, "").unwrap();
+        let library_disc = dir.path().join("library.cue");
+        let journey: Journey = toml::from_str(
+            "name = 'gate'\ndisc = 'dist/build.cue'\n[[step]]\ncheckpoint = 'menu'\n",
+        )
+        .unwrap();
+        let job = Job {
+            name: "gate".into(),
+            journey_path: repo.join("tests/journey.toml"),
+            repo_root: repo,
+            library_disc: Some(library_disc.clone()),
+        };
+        let fleet = Fleet {
+            games_dir: String::new(),
+            repos_dir: String::new(),
+            games: Vec::new(),
+        };
+        assert!(pick_disc(&journey, &job, &fleet, None, false, false, true).is_err());
+        assert!(pick_disc(&journey, &job, &fleet, None, false, true, false).is_err());
+        assert_eq!(
+            pick_disc(&journey, &job, &fleet, None, true, false, true).unwrap(),
+            build_disc
+        );
+    }
 }

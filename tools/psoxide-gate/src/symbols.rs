@@ -172,7 +172,10 @@ pub fn demangle_legacy(raw: &str) -> Option<String> {
     }
     // Drop the trailing `h<16 hex>` hash component.
     if let Some(last) = parts.last() {
-        if last.len() == 17 && last.starts_with('h') && last[1..].chars().all(|c| c.is_ascii_hexdigit()) {
+        if last.len() == 17
+            && last.starts_with('h')
+            && last[1..].chars().all(|c| c.is_ascii_hexdigit())
+        {
             parts.pop();
         }
     }
