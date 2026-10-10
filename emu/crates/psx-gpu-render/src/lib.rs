@@ -1171,14 +1171,12 @@ mod tests {
         }
     }
 
-    /// Same path with a real gradient. The HW backend interpolates in
-    /// f32 where the CPU walks a fixed-point plane, and dither makes
-    /// that tolerance visible: a sub-LSB interpolation difference near a
-    /// 5-bit boundary flips the truncated channel. So this pins the
-    /// bound (one 5-bit step) rather than byte equality -- exactness on
-    /// a gradient needs the compute backend, not this rasterizer.
+    /// Same path with a real gradient. The fragment shader evaluates the
+    /// CPU rasterizer's own attribute plane (`HwVertex::planes`), so at 1x the
+    /// gradient, and the dither that makes a one-LSB difference visible, are
+    /// the CPU's byte for byte.
     #[test]
-    fn gouraud_gradient_dither_stays_within_one_step_of_cpu() {
+    fn gouraud_gradient_dither_matches_the_cpu_exactly() {
         let Some(mut renderer) = headless_renderer() else {
             eprintln!("skipping HW dither test: no headless wgpu adapter");
             return;
@@ -1190,24 +1188,7 @@ mod tests {
 
         for (i, (want, got)) in pixels.iter().enumerate() {
             let (x, y) = at(i);
-            for ch in 0..3 {
-                let steps = (want[ch] as i32 - got[ch] as i32).abs() / 8;
-                assert!(
-                    steps <= 1,
-                    "({x}, {y}) channel {ch} off by {steps} 5-bit steps: cpu {want:?} hw {got:?}"
-                );
-                // The one-step bound alone would also hold for an
-                // undithered image, so pin what only this path
-                // produces: a 15bpp display code. Skipping dither
-                // leaves the HW backend's full 8-bit gradient, which
-                // is not one.
-                let c5 = got[ch] >> 3;
-                assert_eq!(
-                    got[ch],
-                    (c5 << 3) | (c5 >> 2),
-                    "({x}, {y}) channel {ch} was not truncated to 15bpp: {got:?}"
-                );
-            }
+            assert_eq!(want, got, "({x}, {y}): cpu {want:?} hw {got:?}");
         }
     }
 
@@ -2236,15 +2217,166 @@ mod tests {
             bad_coverage.len(),
             &bad_coverage[..bad_coverage.len().min(4)]
         );
-        // The CPU truncates each gradient to 1/4096 of a texel per pixel and
-        // the host interpolates in f32, so a pixel whose corner lands within
-        // that error of a texel boundary can pick the neighbour. A fraction of
-        // a percent of pixels, never more than one texel off.
+        // The CPU truncates each gradient to 1/4096 of a texel per pixel; the
+        // fragment shader evaluates that same plane (`HwVertex::planes`), so
+        // no pixel samples another texel.
         assert!(
-            bad_texel.len() <= 41,
+            bad_texel.is_empty(),
             "{} of 4096 pixels sample another texel than the CPU, first: {:?}",
             bad_texel.len(),
             &bad_texel[..bad_texel.len().min(4)]
+        );
+    }
+
+    /// Random Gouraud triangles, plain and textured, with and without the
+    /// dither, land on the CPU rasterizer's pixels (byte for byte with the
+    /// dither, which truncates to 15bpp; on the same 5-bit level without it,
+    /// where the host keeps 8 bits): the colour and texture planes the shader
+    /// evaluates are the CPU's own.
+    #[test]
+    fn random_gouraud_polygons_match_the_cpu_exactly() {
+        for (textured, dither) in [(false, false), (false, true), (true, false), (true, true)] {
+            let Some(mut renderer) = headless_renderer() else {
+                eprintln!("skipping: no headless wgpu adapter");
+                return;
+            };
+            let mut state = 0x9E37_79B9u32 ^ (u32::from(textured) << 3) ^ u32::from(dither);
+            let mut next = move |n: u32| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 8) % n
+            };
+            let mut seed = Vec::new();
+            for y in 0..64u16 {
+                for x in 0..64u16 {
+                    let c = 1 + ((x * 7 + y * 13 + (x ^ y) * 3) % 0x7FFE);
+                    seed.push((512 + x, y, c));
+                }
+            }
+            let mut words = line_env();
+            let tpage = 8 | (2 << 7);
+            words.push(0xE100_0000 | tpage | if dither { 0x200 } else { 0 });
+            for _ in 0..200 {
+                let v: Vec<(i32, i32)> = (0..3)
+                    .map(|_| (8 + next(48) as i32, 8 + next(48) as i32))
+                    .collect();
+                let c: Vec<u32> = (0..3).map(|_| next(0x100_0000)).collect();
+                if textured {
+                    let uv: Vec<u32> = (0..3).map(|_| next(64) | (next(64) << 8)).collect();
+                    words.extend([
+                        0x3400_0000 | c[0],
+                        pack_xy(v[0]),
+                        uv[0],
+                        c[1],
+                        pack_xy(v[1]),
+                        uv[1] | (tpage << 16),
+                        c[2],
+                        pack_xy(v[2]),
+                        uv[2],
+                    ]);
+                } else {
+                    words.extend([
+                        0x3000_0000 | c[0],
+                        pack_xy(v[0]),
+                        c[1],
+                        pack_xy(v[1]),
+                        c[2],
+                        pack_xy(v[2]),
+                    ]);
+                }
+            }
+            let cpu = run_both_backends(&words, &mut renderer, &seed);
+            let (_, _, rgba) = renderer.read_subrect_rgba8(0, 0, 64, 64);
+            let mut bad = Vec::new();
+            for y in 0..64usize {
+                for x in 0..64usize {
+                    let want = bgr15_to_rgba8(cpu[y * VRAM_WIDTH as usize + x]);
+                    let got = &rgba[(y * 64 + x) * 4..][..4];
+                    let got = [got[0], got[1], got[2], got[3]];
+                    // Without the dither the host keeps the full 8-bit value
+                    // where the CPU stores 5 bits: compare the 5-bit level.
+                    let same = if dither {
+                        want == got
+                    } else {
+                        (0..3).all(|c| want[c] >> 3 == got[c] >> 3)
+                    };
+                    if !same {
+                        bad.push((x, y, want, got));
+                    }
+                }
+            }
+            assert!(
+                bad.is_empty(),
+                "textured {textured} dither {dither}: {} of 4096 pixels differ, first: {:?}",
+                bad.len(),
+                &bad[..bad.len().min(4)]
+            );
+        }
+    }
+
+    /// Sprite-shaped textured quads (top-left, top-right, bottom-left,
+    /// bottom-right, flat tint) are drawn by the CPU with its own four-edge
+    /// Q12 walk, not two planes; stretched, shrunk and flipped, they land on
+    /// the CPU's texels pixel for pixel.
+    #[test]
+    fn axis_aligned_textured_quads_match_the_cpu_walker() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        let mut state = 0x1234_5678u32;
+        let mut next = move |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n
+        };
+        let mut seed = Vec::new();
+        for y in 0..64u16 {
+            for x in 0..64u16 {
+                let c = 1 + ((x * 7 + y * 13 + (x ^ y) * 3) % 0x7FFE);
+                seed.push((512 + x, y, c));
+            }
+        }
+        let tpage = 8 | (2 << 7);
+        let mut words = line_env();
+        words.push(0xE100_0000 | tpage);
+        for _ in 0..150 {
+            let (x, y) = (8 + next(24) as i32, 8 + next(24) as i32);
+            let (w, h) = (1 + next(30) as i32, 1 + next(30) as i32);
+            let (flip_x, flip_y) = (next(2) == 1, next(2) == 1);
+            let (xl, xr) = if flip_x { (x + w, x) } else { (x, x + w) };
+            let (yt, yb) = if flip_y { (y + h, y) } else { (y, y + h) };
+            let (u0, u1) = (next(64), next(64));
+            let (v0, v1) = (next(64), next(64));
+            let uv = |u: u32, v: u32| u | (v << 8);
+            words.extend([
+                0x2D00_0000,
+                pack_xy((xl, yt)),
+                uv(u0, v0),
+                pack_xy((xr, yt)),
+                uv(u1, v0) | (tpage << 16),
+                pack_xy((xl, yb)),
+                uv(u0, v1),
+                pack_xy((xr, yb)),
+                uv(u1, v1),
+            ]);
+        }
+        let cpu = run_both_backends(&words, &mut renderer, &seed);
+        let (_, _, rgba) = renderer.read_subrect_rgba8(0, 0, 64, 64);
+        let mut bad = Vec::new();
+        for y in 0..64usize {
+            for x in 0..64usize {
+                let want = bgr15_to_rgba8(cpu[y * VRAM_WIDTH as usize + x]);
+                let got = &rgba[(y * 64 + x) * 4..][..4];
+                let got = [got[0], got[1], got[2], got[3]];
+                if want != got {
+                    bad.push((x, y, want, got));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{} of 4096 pixels differ from the CPU walker, first: {:?}",
+            bad.len(),
+            &bad[..bad.len().min(4)]
         );
     }
 
