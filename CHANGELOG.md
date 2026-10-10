@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- The full-screen VRAM blit shows the VRAM's display codes unchanged. It
+  rendered through an sRGB view of its target, so every code was encoded a
+  second time: a grey ramp of 5-bit levels 1 to 31 read back as 49 to 255
+  where the VRAM says 8 to 255, and the wireframe view (which rebuilds the
+  target with it) and the VRAM debug view came out too bright. They now
+  render through the raw-byte view, as the draw passes do, so the blit, the
+  hardware renderer's own draws and the CPU display all agree byte for byte.
 - Reading one of the chip's own registers (SIO0, GPUSTAT, the interrupt, DMA
   and timer registers, memory control) no longer holds back the instructions
   behind it. Its wait overlaps them the way a RAM load's does: the first two
