@@ -277,6 +277,7 @@ impl HwRenderer {
             return;
         }
 
+        self.translator.set_internal_scale(self.target.scale());
         let frame = self.translator.translate_with_wireframe(cmd_log, wireframe);
         if frame.total() > 0 {
             self.pipeline.upload_vertices(
@@ -2375,6 +2376,113 @@ mod tests {
         assert!(
             bad.is_empty(),
             "{} of 4096 pixels differ from the CPU walker, first: {:?}",
+            bad.len(),
+            &bad[..bad.len().min(4)]
+        );
+    }
+
+    /// Axis-aligned quads (sprites, glyphs, UI boxes) are exact pixel
+    /// rectangles on the CPU, so at an internal scale of `S` every PSX pixel
+    /// must become an `S` by `S` block of the 1x result: no half-pixel
+    /// shift of the quad, no neighbouring texel read at its edges. Flat
+    /// textured quads (the four-edge walker), Gouraud textured quads with a
+    /// neutral tint and flat mono quads, all with 1:1 texels, some flipped.
+    #[test]
+    fn axis_aligned_quads_enlarge_exactly_at_scale() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        let mut state = 0x9E37_79B9u32;
+        let mut next = move |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n
+        };
+        let mut seed = Vec::new();
+        for y in 0..64u16 {
+            for x in 0..64u16 {
+                let c = 1 + ((x * 7 + y * 13 + (x ^ y) * 3) % 0x7FFE);
+                seed.push((512 + x, y, c));
+            }
+        }
+        let tpage = 8 | (2 << 7);
+        let mut words = line_env();
+        words.push(0xE100_0000 | tpage);
+        for i in 0..90 {
+            let (x, y) = (4 + next(36) as i32, 4 + next(36) as i32);
+            let (w, h) = (1 + next(20) as i32, 1 + next(20) as i32);
+            let (flip_x, flip_y) = (next(2) == 1, next(2) == 1);
+            let (xl, xr) = if flip_x { (x + w, x) } else { (x, x + w) };
+            let (yt, yb) = if flip_y { (y + h, y) } else { (y, y + h) };
+            // Texels map 1:1 to pixels (a flipped quad steps the other way);
+            // a stretched quad is meant to interpolate inside a pixel.
+            let (u0, v0) = (20 + next(20), 20 + next(20));
+            let u1 = (u0 as i32 + xr - xl) as u32;
+            let v1 = (v0 as i32 + yb - yt) as u32;
+            let uv = |u: u32, v: u32| u | (v << 8);
+            match i % 3 {
+                0 => words.extend([
+                    0x3C80_8080,
+                    pack_xy((xl, yt)),
+                    uv(u0, v0),
+                    0x0080_8080,
+                    pack_xy((xr, yt)),
+                    uv(u1, v0) | (tpage << 16),
+                    0x0080_8080,
+                    pack_xy((xl, yb)),
+                    uv(u0, v1),
+                    0x0080_8080,
+                    pack_xy((xr, yb)),
+                    uv(u1, v1),
+                ]),
+                1 => words.extend([
+                    0x2C80_8080,
+                    pack_xy((xl, yt)),
+                    uv(u0, v0),
+                    pack_xy((xr, yt)),
+                    uv(u1, v0) | (tpage << 16),
+                    pack_xy((xl, yb)),
+                    uv(u0, v1),
+                    pack_xy((xr, yb)),
+                    uv(u1, v1),
+                ]),
+                _ => words.extend([
+                    0x2800_0000 | (next(0x00FF_FFFF) | 0x0001_0101),
+                    pack_xy((xl, yt)),
+                    pack_xy((xr, yt)),
+                    pack_xy((xl, yb)),
+                    pack_xy((xr, yb)),
+                ]),
+            }
+        }
+        let read = |renderer: &HwRenderer| {
+            let s = renderer.internal_scale() as usize;
+            renderer
+                .read_subrect_rgba8(0, 0, 64 * s as u32, 64 * s as u32)
+                .2
+        };
+        run_both_backends(&words, &mut renderer, &seed);
+        let one = read(&renderer);
+        assert!(renderer.set_internal_scale(3, None));
+        run_both_backends(&words, &mut renderer, &seed);
+        let three = read(&renderer);
+        let mut bad = Vec::new();
+        for y in 0..64usize {
+            for x in 0..64usize {
+                let want = &one[(y * 64 + x) * 4..][..4];
+                for sy in 0..3usize {
+                    for sx in 0..3usize {
+                        let got = &three[((y * 3 + sy) * 192 + x * 3 + sx) * 4..][..4];
+                        if want != got {
+                            bad.push((x, y, sx, sy, want.to_vec(), got.to_vec()));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{} host pixels differ from the 1x pixel they enlarge, first: {:?}",
             bad.len(),
             &bad[..bad.len().min(4)]
         );

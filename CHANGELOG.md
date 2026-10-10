@@ -15,6 +15,13 @@
   DMA waiting for a 512 x 256 rectangle (record 0x86B) reads 35,458 against
   35,630. 8 and 15-bit triangles read 12 to 14% over (see the texture cache
   entry).
+- The hardware renderer draws axis-aligned quads (sprites, glyphs, UI boxes)
+  as exact blocks at internal scales above 1. They were shifted half a pixel
+  like slanted polygons, which at 3x moved a gradient-shaded font half a pixel
+  and left a ghost column on one side and a missing sub-row on the other, most
+  visible on text such as the WipEout title and VoXide's splash. A scaled
+  sprite now covers the same pixels as the CPU image enlarged, with the CPU's
+  texel in every sub-pixel; 1x output is unchanged byte for byte.
 - A block-mode GPU DMA that backs up behind the drawing waits for it, as the
   request line holds the channel on the console. The words already landed
   (since the FIFO pacing change); the transfer still finished in a few
