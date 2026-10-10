@@ -5202,6 +5202,52 @@ mod tests {
         }
     }
 
+    /// Clocks a turn of `lw $8, imm($3); <second>; bne $9, $0, top; nop` takes
+    /// once the loop is warm, with `$3` = 0x1F800000.
+    fn warm_turn_of_a_register_poll(imm: u32, second: u32) -> u64 {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+        cpu.gprs[3] = 0x1F80_0000;
+        let lw = (0x23 << 26) | (3 << 21) | (8 << 16) | imm;
+        let bne = (0x05 << 26) | (9 << 21) | 0xFFFD;
+        for (index, word) in [lw, second, bne, 0].into_iter().enumerate() {
+            bus.write32(0x8000_1000 + index as u32 * 4, word);
+        }
+        bus.add_cycles(100);
+        cpu.pc = 0x8000_1000;
+        cpu.gprs[9] = 1;
+        for _ in 0..8 {
+            cpu.step(&mut bus).unwrap();
+        }
+        let start = bus.cycles();
+        for _ in 0..4 {
+            cpu.step(&mut bus).unwrap();
+        }
+        bus.cycles() - start
+    }
+
+    #[test]
+    fn the_wait_of_an_on_die_register_read_overlaps_the_instructions_behind_it() {
+        // hwtest v2.2, the SDK's spin loop (`lw` of SIO0 STAT, `addiu`, `bne`,
+        // `nop`): records 0xD1 to 0xDB grow 6.85 clocks a spin, where the `lw`
+        // alone costs 5 (record 0x4F) and the three others 3 more. The wait
+        // of the read hides the last of them, as a RAM load's does.
+        let addiu = (0x09 << 26) | (9 << 21) | (10 << 16) | 0;
+        assert_eq!(warm_turn_of_a_register_poll(0x1044, addiu), 7);
+        // An instruction that needs the loaded value ends the shadow.
+        let uses = (0x25 << 0) | (8 << 21) | (10 << 11);
+        assert_eq!(warm_turn_of_a_register_poll(0x1044, uses), 8);
+        // The CD-ROM and SPU buses are not on die: their reads hide nothing.
+        for imm in [0x1800, 0x1C00] {
+            assert_eq!(
+                warm_turn_of_a_register_poll(imm, addiu),
+                warm_turn_of_a_register_poll(imm, uses),
+                "{imm:#x}"
+            );
+        }
+    }
+
     #[test]
     fn cache_control_nostr_makes_a_line_fill_blocking() {
         // hwtest v1.22 records 0xE1/0xE9: a cold sweep of nops costs 9 clocks
