@@ -64,6 +64,18 @@ pub struct Translator {
     /// its vertices are tagged `fbits::CORNER_SAMPLED`. Set per event in
     /// `process`; rectangles, fills and lines clear it.
     polygon: bool,
+    /// The polygon being lowered is an axis-aligned rectangle with integer
+    /// corners, which the CPU rasterizer lights as exactly the pixels from
+    /// `x0..x1` by `y0..y1`. It is drawn unshifted so that, at any internal
+    /// scale, those pixels become exact `S` by `S` blocks; shifting it by half
+    /// a pixel (right for a slanted edge) would move a sprite or glyph by half
+    /// a pixel and shave its top and left sub-rows. Set per event in `process`.
+    sprite_rect: bool,
+    /// Internal resolution multiplier of the target this frame is for. Only a
+    /// scaled target (above 1) unshifts a sprite rectangle: at 1x the shifted
+    /// and unshifted rectangles light the same pixels, and the shifted one
+    /// takes the CPU's tie-break on the shared diagonal exactly.
+    scale: u32,
     /// Ordered vertex stream for the current frame. This preserves
     /// GP0 command order, which matters for semi-transparency and
     /// overlapping UI primitives.
@@ -80,6 +92,8 @@ impl Translator {
             wireframe: false,
             axis_quad: None,
             polygon: false,
+            sprite_rect: false,
+            scale: 1,
             flat: Vec::with_capacity(4 * 1024),
             runs: Vec::with_capacity(1024),
         }
@@ -97,6 +111,11 @@ impl Translator {
             self.interp.state.draw_offset_x,
             self.interp.state.draw_offset_y,
         )
+    }
+
+    /// Set the internal resolution multiplier the next frames are drawn at.
+    pub fn set_internal_scale(&mut self, scale: u32) {
+        self.scale = scale.max(1);
     }
 
     /// Walk `cmd_log`, return the vertex stream for this frame
@@ -167,7 +186,7 @@ impl Translator {
     }
 
     fn push_vertex(&mut self, kind: BlendKind, clip: [u16; 4], mut vertex: HwVertex) {
-        if self.polygon && !self.wireframe {
+        if self.polygon && !self.sprite_rect && !self.wireframe {
             vertex.flags |= fbits::CORNER_SAMPLED;
         }
         let start = self.flat.len() as u32;
@@ -202,6 +221,13 @@ impl Translator {
                 | GpuEvent::ShadedTexTri { .. }
                 | GpuEvent::ShadedTexQuad { .. }
         );
+        self.sprite_rect = match &event {
+            GpuEvent::MonoQuad { v, .. }
+            | GpuEvent::TexQuad { v, .. }
+            | GpuEvent::ShadedQuad { v, .. }
+            | GpuEvent::ShadedTexQuad { v, .. } => self.scale > 1 && is_axis_rect(*v),
+            _ => false,
+        };
         match event {
             GpuEvent::Fill { cmd, x, y, w, h } => self.emit_fill_rect(cmd, x, y, w, h),
             GpuEvent::MonoTri { cmd, v } => self.emit_mono_tri(cmd, v),
@@ -1114,6 +1140,21 @@ fn axis_quad_words(v: [(i32, i32); 4], uv: [(i32, i32); 4]) -> Option<[[u32; 4];
         planes[i / 4][i % 4] = w as u32;
     }
     Some(planes)
+}
+
+/// Whether four quad vertices are the corners of an axis-aligned rectangle of
+/// non-zero area, in any order.
+fn is_axis_rect(v: [(i32, i32); 4]) -> bool {
+    let x0 = v.iter().map(|p| p.0).min().unwrap_or(0);
+    let x1 = v.iter().map(|p| p.0).max().unwrap_or(0);
+    let y0 = v.iter().map(|p| p.1).min().unwrap_or(0);
+    let y1 = v.iter().map(|p| p.1).max().unwrap_or(0);
+    if x0 == x1 || y0 == y1 {
+        return false;
+    }
+    [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
+        .iter()
+        .all(|corner| v.contains(corner))
 }
 
 // Same limits as emulator-core::gpu::raster. Apply after signed vertex
