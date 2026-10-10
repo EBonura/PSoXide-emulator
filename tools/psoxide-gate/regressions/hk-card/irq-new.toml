@@ -1,0 +1,49 @@
+name = "card-injected-new"
+title = "Diagnostic IRQ during a selected card ACK"
+disc = "fixtures/new/hk-psx.cue"
+symbols = "fixtures/new/hk-psx.map"
+card_observe = true
+max_ticks = 3600
+[card_fixture]
+path = "fixtures/town.mcd"
+sha256 = "1aa6c20210c2ef1134f20d30e82bf5a78cefea8f84ff349dd0e95f9f62391dd8"
+[[step]]
+tape = "fixtures/load.pxtape"
+[[step]]
+tape = "fixtures/bench.pxtape"
+card = { action = "irq_during_ack", command = 82, byte_index = 82, occurrence = 1, ack_lead = 64, timeout = 1800 }
+[[step]]
+[[step.assert]]
+kind = "card_irq_ack"
+[[step.assert]]
+kind = "card_writes"
+[[step.assert]]
+kind = "ram"
+sym = "HK_SAVE_WRITES"
+value = 1
+[[step.assert]]
+kind = "ram"
+sym = "HK_SAVE_ERRORS"
+value = 0
+[[step.assert]]
+kind = "ram"
+sym = "HK_SAVE_FAULT"
+value = 0
+[[step]]
+card = { action = "snapshot" }
+[[step]]
+card = { action = "reboot" }
+[[step]]
+tape = "fixtures/load.pxtape"
+[[step.assert]]
+kind = "ram"
+sym = "HK_SAVE_LOADED"
+value = 1
+[[step.assert]]
+kind = "ram"
+sym = "HK_SAVE_ERRORS"
+value = 0
+[[step.assert]]
+kind = "ram"
+sym = "HK_SAVE_FAULT"
+value = 0
