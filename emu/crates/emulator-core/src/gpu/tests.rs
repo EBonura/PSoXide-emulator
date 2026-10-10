@@ -2787,6 +2787,60 @@ fn packet_cost(setup: &[u32], packet: &[u32]) -> u64 {
     gpu.gp0_timing_histogram()[op] - before
 }
 
+/// hwtest v2.4 records 0x843 to 0x84A: under the 480i rule half the rows of a
+/// 256 x 240 fill or rectangle are skipped and the cost falls to about half
+/// (fill 3,096 against 5,872 clocks, rectangle 17,040 against 33,592).
+#[test]
+fn rows_skipped_by_the_480i_rule_cost_nothing() {
+    let xy = |x: u32, y: u32| (y << 16) | x;
+    let area = [0xE300_0000, 0xE400_0000 | 1023 | (511 << 10), 0xE500_0000];
+    let setup = |e1: u32| {
+        let mut words = vec![0x0800_0026]; // 480i, interlaced
+        words.extend_from_slice(&area);
+        words.push(0xE100_0000 | e1);
+        words
+    };
+    let cost = |e1: u32, packet: &[u32]| {
+        let mut gpu = Gpu::new();
+        gpu.write32(GP1_ADDR, 0x0300_0000);
+        gpu.write32(GP1_ADDR, 0x0800_0026);
+        for &word in &setup(e1)[1..] {
+            gpu.write32(GP0_ADDR, word);
+        }
+        let op = (packet[0] >> 24) as usize;
+        let before = gpu.gp0_timing_histogram()[op];
+        for &word in packet {
+            gpu.write32(GP0_ADDR, word);
+        }
+        gpu.gp0_timing_histogram()[op] - before
+    };
+    let fill = [0x02FF_FFFF, xy(640, 256), xy(256, 240)];
+    let rect = [0x60FF_FFFF, xy(640, 256), xy(256, 240)];
+    let (fill_on, fill_off) = (cost(0, &fill), cost(1 << 10, &fill));
+    let (rect_on, rect_off) = (cost(0, &rect), cost(1 << 10, &rect));
+    let ratio = |on: u64, off: u64| on as f64 / off as f64;
+    assert!(
+        (0.50..0.56).contains(&ratio(fill_on, fill_off)),
+        "{fill_on} {fill_off}"
+    );
+    assert!(
+        (0.50..0.53).contains(&ratio(rect_on, rect_off)),
+        "{rect_on} {rect_off}"
+    );
+    // The rule does not touch a 240-line display.
+    let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0800_0001);
+    for &word in &area {
+        gpu.write32(GP0_ADDR, word);
+    }
+    gpu.write32(GP0_ADDR, 0xE100_0000);
+    let before = gpu.gp0_timing_histogram()[0x60];
+    for &word in &rect {
+        gpu.write32(GP0_ADDR, word);
+    }
+    assert_eq!(gpu.gp0_timing_histogram()[0x60] - before, rect_off);
+}
+
 #[test]
 fn draw_cost_follows_the_silicon_setup_and_fill_fit() {
     let area = [0xE300_0000, 0xE400_0000 | 1023 | (511 << 10), 0xE500_0000];

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Draws that the 480i rule skips rows of cost only the rows they reach. With
+  drawing to the display area prohibited in 480i, a 256 x 240 fill took 5,872
+  clocks and a rectangle 33,592 on the console with the rule off, and 3,096
+  and 17,040 with it on (hwtest v2.4, records 0x843 to 0x84A): the skipped
+  rows are nearly free. The cost model counted every row. Fills, rectangles
+  and triangles now take the skipped rows' pixels off their cost (not their
+  per-line term or their setup): 364 and 2,145 clocks for the same pair, 6%
+  under and 0.7% over. Everything the console timed in that mode (the
+  texture-state rows 0x8E0 to 0x92B, a block DMA waiting for a rectangle)
+  read about half what the emulator gave, and now reads within a few
+  percent.
 - A block-mode GPU DMA that backs up behind the drawing waits for it, as the
   request line holds the channel on the console. The words already landed
   (since the FIFO pacing change); the transfer still finished in a few
