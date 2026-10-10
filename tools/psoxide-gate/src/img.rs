@@ -81,7 +81,7 @@ impl DiffStats {
     }
 
     pub fn within(&self, tol: Tolerance) -> bool {
-        self.fraction() <= tol.fraction
+        self.compared > 0 && self.fraction() <= tol.fraction
     }
 
     /// Fraction of compared pixels whose largest channel difference exceeds `t`.
@@ -209,7 +209,11 @@ impl Img {
         mask: &[Rect],
         only: Option<&[Rect]>,
     ) -> DiffStats {
-        assert_eq!((self.w, self.h), (other.w, other.h), "diff of unequal sizes");
+        assert_eq!(
+            (self.w, self.h),
+            (other.w, other.h),
+            "diff of unequal sizes"
+        );
         let mask: Vec<Rect> = mask.iter().map(|r| r.scaled(scale)).collect();
         let only: Option<Vec<Rect>> = only.map(|rs| rs.iter().map(|r| r.scaled(scale)).collect());
         let mut stats = DiffStats {
@@ -300,9 +304,11 @@ impl Img {
         use image::codecs::png::{CompressionType, FilterType, PngEncoder};
         use image::ImageEncoder;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
-        let file = std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+        let file =
+            std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
         let mut rgb = Vec::with_capacity((self.w * self.h * 3) as usize);
         for px in self.rgba.chunks_exact(4) {
             rgb.extend_from_slice(&px[..3]);
@@ -359,7 +365,12 @@ mod tests {
             &b,
             0,
             1,
-            &[Rect { x: 0, y: 0, w: 1, h: 1 }],
+            &[Rect {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+            }],
             None,
         );
         assert_eq!((masked.compared, masked.differing), (15, 0));
@@ -372,5 +383,24 @@ mod tests {
         let mut a = solid(8, 8, [0, 0, 0]);
         a.rgba[0..3].copy_from_slice(&[255, 0, 0]);
         assert!(a.dominant_fraction() < 1.0);
+    }
+
+    #[test]
+    fn a_fully_masked_frame_cannot_pass() {
+        let a = solid(2, 2, [0, 0, 0]);
+        let d = a.diff(
+            &a,
+            0,
+            1,
+            &[Rect {
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 2,
+            }],
+            None,
+        );
+        assert_eq!(d.compared, 0);
+        assert!(!d.within(Tolerance::EXACT));
     }
 }

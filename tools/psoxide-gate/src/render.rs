@@ -31,8 +31,12 @@ impl HwSkip {
     pub fn describe(&self) -> &'static str {
         match self {
             HwSkip::Bpp24 => "24bpp display (hardware renderer defers to the CPU frame)",
-            HwSkip::ScreenOffset => "screen-offset display (hardware renderer defers to the CPU frame)",
-            HwSkip::FieldRendering => "480i field rendering (hardware renderer defers to the CPU frame)",
+            HwSkip::ScreenOffset => {
+                "screen-offset display (hardware renderer defers to the CPU frame)"
+            }
+            HwSkip::FieldRendering => {
+                "480i field rendering (hardware renderer defers to the CPU frame)"
+            }
         }
     }
 }
@@ -108,7 +112,8 @@ impl HwSet {
         if bus.gpu.field_rendering_active() {
             return Err(HwSkip::FieldRendering);
         }
-        if bus.gpu.horizontal_display_offset_px() != 0 || bus.gpu.vertical_display_offset_px() != 0 {
+        if bus.gpu.horizontal_display_offset_px() != 0 || bus.gpu.vertical_display_offset_px() != 0
+        {
             return Err(HwSkip::ScreenOffset);
         }
         self.device.poll(wgpu::Maintain::Wait);

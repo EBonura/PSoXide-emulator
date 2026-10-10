@@ -1,6 +1,7 @@
 //! Runs one journey: boots the disc, plays the steps, and judges every
 //! checkpoint across the CPU/hardware render matrix.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -35,7 +36,30 @@ impl Status {
         }
     }
     pub fn is_failure(self) -> bool {
-        self == Status::Fail
+        matches!(self, Status::Fail | Status::XPass)
+    }
+}
+
+fn checked_assert(name: String, outcome: Result<(bool, String), String>, a: &Assert) -> Check {
+    let (status, mut detail) = match outcome {
+        Err(error) => (Status::Fail, error),
+        Ok((ok, detail)) => (
+            match (ok, a.expect_fail) {
+                (true, false) => Status::Pass,
+                (false, false) => Status::Fail,
+                (false, true) => Status::XFail,
+                (true, true) => Status::XPass,
+            },
+            detail,
+        ),
+    };
+    if let Some(note) = &a.note {
+        detail.push_str(&format!(" [{note}]"));
+    }
+    Check {
+        name,
+        status,
+        detail,
     }
 }
 
@@ -50,6 +74,7 @@ pub struct Check {
 pub struct Capture {
     pub cpu: Img,
     pub golden: Option<Img>,
+    pub golden_error: Option<String>,
     /// `(scale, frame)` per hardware scale.
     pub hw: Vec<(u32, Img)>,
     pub hw_skip: Option<String>,
@@ -107,7 +132,11 @@ impl JourneyResult {
             self.count(Status::Pass),
             self.count(Status::Fail),
         );
-        for (st, word) in [(Status::XFail, "xfail"), (Status::XPass, "xpass"), (Status::Skip, "skip")] {
+        for (st, word) in [
+            (Status::XFail, "xfail"),
+            (Status::XPass, "xpass"),
+            (Status::Skip, "skip"),
+        ] {
             let n = self.count(st);
             if n > 0 {
                 s.push_str(&format!(", {n} {word}"));
@@ -135,10 +164,30 @@ pub struct RunOptions {
     /// Override the journey's scales (e.g. `--scales 1`).
     pub scales: Option<Vec<u32>>,
     pub verbose: bool,
+    pub strict: bool,
+}
+
+fn release_requirements(journey: &Journey, scales: &[u32], use_hw: bool) -> Result<(), String> {
+    if !use_hw {
+        return Err("release gate requires hardware rendering".into());
+    }
+    if !scales.contains(&1) || !scales.contains(&3) {
+        return Err("release gate requires hardware scales 1 and 3".into());
+    }
+    if journey.checkpoints().next().is_none() {
+        return Err("release gate requires at least one checkpoint".into());
+    }
+    if journey.checkpoints().any(|s| s.no_matrix) {
+        return Err("release gate requires the render matrix at every checkpoint".into());
+    }
+    Ok(())
 }
 
 pub fn disc_id(cue_or_bin: &Path) -> String {
-    let target = if cue_or_bin.extension().is_some_and(|e| e.eq_ignore_ascii_case("cue")) {
+    let target = if cue_or_bin
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("cue"))
+    {
         std::fs::read_to_string(cue_or_bin)
             .ok()
             .and_then(|t| {
@@ -157,17 +206,23 @@ pub fn disc_id(cue_or_bin: &Path) -> String {
     } else {
         cue_or_bin.to_path_buf()
     };
-    match std::fs::metadata(&target) {
-        Ok(m) if m.len() <= 256 << 20 => match std::fs::read(&target) {
-            Ok(bytes) => {
-                let h = Sha256::digest(&bytes);
-                h.iter().take(4).map(|b| format!("{b:02x}")).collect()
-            }
-            Err(_) => "unreadable".into(),
-        },
-        Ok(m) => format!("{}MB", m.len() >> 20),
-        Err(_) => "missing".into(),
+    let Ok(mut file) = std::fs::File::open(&target) else {
+        return "missing or unreadable".into();
+    };
+    let mut hash = Sha256::new();
+    let mut block = [0u8; 1024 * 1024];
+    loop {
+        match file.read(&mut block) {
+            Ok(0) => break,
+            Ok(n) => hash.update(&block[..n]),
+            Err(_) => return "unreadable".into(),
+        }
     }
+    hash.finalize()
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 struct Run<'a> {
@@ -185,7 +240,10 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     let start = Instant::now();
     let mut result = JourneyResult {
         name: journey.name.clone(),
-        title: journey.title.clone().unwrap_or_else(|| journey.name.clone()),
+        title: journey
+            .title
+            .clone()
+            .unwrap_or_else(|| journey.name.clone()),
         disc: opts.disc.clone(),
         disc_id: disc_id(&opts.disc),
         groups: Vec::new(),
@@ -196,7 +254,21 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         hw_adapter: None,
         notes: Vec::new(),
     };
-    let scales = opts.scales.clone().unwrap_or_else(|| journey.render.scales.clone());
+    let scales = opts
+        .scales
+        .clone()
+        .unwrap_or_else(|| journey.render.scales.clone());
+    let unique: std::collections::BTreeSet<u32> = scales.iter().copied().collect();
+    if scales.iter().any(|s| *s == 0 || *s > 8) || unique.len() != scales.len() {
+        result.abort = Some("hardware scales must be unique and within 1..=8".into());
+        return result;
+    }
+    if opts.strict {
+        if let Err(e) = release_requirements(journey, &scales, opts.use_hw) {
+            result.abort = Some(e);
+            return result;
+        }
+    }
     let want_hw = opts.use_hw && journey.needs_hw() && !scales.is_empty();
     let m = match Machine::boot(&Boot {
         disc: &opts.disc,
@@ -226,7 +298,9 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         }
     } else {
         if journey.needs_hw() && !opts.use_hw {
-            result.notes.push("hardware renderer matrix skipped (--no-hw)".into());
+            result
+                .notes
+                .push("hardware renderer matrix skipped (--no-hw)".into());
         }
         None
     };
@@ -238,7 +312,9 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     for rel in journey.symbols.list() {
         let path = opts.repo_root.join(rel);
         match syms.load(&path) {
-            Ok(n) => result.notes.push(format!("symbols: {n} from {}", path.display())),
+            Ok(n) => result
+                .notes
+                .push(format!("symbols: {n} from {}", path.display())),
             Err(e) => result.notes.push(format!("symbols unavailable: {e}")),
         }
     }
@@ -264,7 +340,10 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
 impl Run<'_> {
     fn tick(&mut self) -> Result<(), String> {
         if self.m.ticks >= self.journey.max_ticks {
-            return Err(format!("journey exceeded max_ticks ({})", self.journey.max_ticks));
+            return Err(format!(
+                "journey exceeded max_ticks ({})",
+                self.journey.max_ticks
+            ));
         }
         if let Some(hw) = self.hw.as_mut() {
             hw.before_tick(&self.m.bus);
@@ -291,7 +370,10 @@ impl Run<'_> {
                     "[gate] tick {:>6} step {:>2} {}",
                     self.m.ticks,
                     i + 1,
-                    step.label.as_deref().or(step.checkpoint.as_deref()).unwrap_or("")
+                    step.label
+                        .as_deref()
+                        .or(step.checkpoint.as_deref())
+                        .unwrap_or("")
                 );
             }
             self.input_and_wait(step)?;
@@ -336,19 +418,41 @@ impl Run<'_> {
     }
 
     fn wait_until(&mut self, index: usize, cond: &Assert, timeout: u64) -> Result<(), String> {
-        for _ in 0..=timeout {
+        for _ in 0..timeout {
             if self.eval_wait(cond).0 {
                 return Ok(());
             }
             self.tick()?;
         }
+        if self.eval_wait(cond).0 {
+            return Ok(());
+        }
         let (_, detail) = self.eval_wait(cond);
-        let msg = format!("step {}: wait_until timed out after {timeout} ticks ({detail})", index + 1);
+        let msg = format!(
+            "step {}: wait_until timed out after {timeout} ticks ({detail})",
+            index + 1
+        );
+        let cpu = self.m.display_image();
+        let (hw, hw_skip) = match &self.hw {
+            Some(renderer) => match renderer.capture(&self.m.bus, cpu.w, cpu.h) {
+                Ok(frames) => (frames, None),
+                Err(reason) => (Vec::new(), Some(reason.describe().to_string())),
+            },
+            None => (Vec::new(), None),
+        };
         self.groups.push(Group {
             name: format!("step {}", index + 1),
             label: Some("wait_until".into()),
             tick: self.m.ticks,
-            capture: None,
+            capture: Some(Capture {
+                cpu,
+                golden: None,
+                golden_error: None,
+                hw,
+                hw_skip,
+                hw1_channel: self.journey.render.hw1.channel,
+                hwn_channel: self.journey.render.hwn.channel,
+            }),
             checks: vec![Check {
                 name: "wait_until".into(),
                 status: Status::Fail,
@@ -363,7 +467,7 @@ impl Run<'_> {
         match cond.kind.as_str() {
             "pixels" => self.eval_pixels(cond, &self.m.display_image()),
             "flat" | "not_flat" | "dark" | "not_dark" => self.eval_flat(cond, None),
-            _ => self.eval_ram(cond),
+            _ => self.eval_ram(cond).unwrap_or_else(|e| (false, e)),
         }
     }
 
@@ -392,13 +496,23 @@ impl Run<'_> {
         } else {
             f <= a.max_dominant.unwrap_or(0.98)
         };
-        (ok, format!("most common colour covers {:.1}% of the frame", f * 100.0))
+        (
+            ok,
+            format!("most common colour covers {:.1}% of the frame", f * 100.0),
+        )
     }
 
     fn eval_pixels(&self, a: &Assert, img: &Img) -> (bool, String) {
-        let Some(col) = a.color else { return (false, "no colour".into()) };
+        let Some(col) = a.color else {
+            return (false, "no colour".into());
+        };
         let tol = a.color_tol.unwrap_or(24);
-        let r = a.region.unwrap_or(Rect { x: 0, y: 0, w: img.w, h: img.h });
+        let r = a.region.unwrap_or(Rect {
+            x: 0,
+            y: 0,
+            w: img.w,
+            h: img.h,
+        });
         let mut n = 0u64;
         for y in r.y..(r.y + r.h).min(img.h) {
             for x in r.x..(r.x + r.w).min(img.w) {
@@ -409,7 +523,13 @@ impl Run<'_> {
             }
         }
         let ok = a.min_count.is_none_or(|m| n >= m) && a.max_count.is_none_or(|m| n <= m);
-        (ok, format!("{n} pixels of rgb({},{},{}) +-{tol} in {}x{} region at ({},{})", col[0], col[1], col[2], r.w, r.h, r.x, r.y))
+        (
+            ok,
+            format!(
+                "{n} pixels of rgb({},{},{}) +-{tol} in {}x{} region at ({},{})",
+                col[0], col[1], col[2], r.w, r.h, r.x, r.y
+            ),
+        )
     }
 
     fn checkpoint(&mut self, index: usize, step: &Step) {
@@ -422,7 +542,17 @@ impl Run<'_> {
         if step.checkpoint.is_some() {
             let cpu = self.m.display_image();
             let golden_path = self.opts.golden_dir.join(format!("{name}.png"));
-            let golden = if golden_path.exists() { Img::load_png(&golden_path).ok() } else { None };
+            let (golden, golden_error) = if golden_path.exists() {
+                match Img::load_png(&golden_path) {
+                    Ok(img) => (Some(img), None),
+                    Err(e) => (None, Some(e)),
+                }
+            } else {
+                (
+                    None,
+                    Some(format!("no golden frame at {}", golden_path.display())),
+                )
+            };
             let (hw, hw_skip) = match (&self.hw, step.no_matrix) {
                 (Some(hw), false) => match hw.capture(&self.m.bus, cpu.w, cpu.h) {
                     Ok(frames) => (frames, None),
@@ -434,6 +564,7 @@ impl Run<'_> {
             let cap = Capture {
                 cpu,
                 golden,
+                golden_error,
                 hw,
                 hw_skip,
                 hw1_channel: step.hw1.unwrap_or(cfg.hw1).channel,
@@ -468,18 +599,28 @@ impl Run<'_> {
                 None => Check {
                     name: "golden".into(),
                     status: Status::Fail,
-                    detail: "no golden frame committed (run `psoxide-gate bless` after reviewing the frame)".into(),
+                    detail: cap
+                        .golden_error
+                        .clone()
+                        .unwrap_or_else(|| "no golden frame committed".into()),
                 },
                 Some(g) if (g.w, g.h) != (cap.cpu.w, cap.cpu.h) => Check {
                     name: "golden".into(),
                     status: Status::Fail,
-                    detail: format!("size {}x{} but golden is {}x{}", cap.cpu.w, cap.cpu.h, g.w, g.h),
+                    detail: format!(
+                        "size {}x{} but golden is {}x{}",
+                        cap.cpu.w, cap.cpu.h, g.w, g.h
+                    ),
                 },
                 Some(g) => {
                     let d = cap.cpu.diff(g, tol.channel, 1, &step.mask, None);
                     Check {
                         name: "golden".into(),
-                        status: if d.within(tol) { Status::Pass } else { Status::Fail },
+                        status: if d.within(tol) {
+                            Status::Pass
+                        } else {
+                            Status::Fail
+                        },
                         detail: d.describe(),
                     }
                 }
@@ -489,20 +630,34 @@ impl Run<'_> {
         if let Some(why) = &cap.hw_skip {
             checks.push(Check {
                 name: "render matrix".into(),
-                status: Status::Skip,
+                status: if self.opts.strict {
+                    Status::Fail
+                } else {
+                    Status::Skip
+                },
                 detail: why.clone(),
             });
         }
         let hw1_tol = step.hw1.unwrap_or(cfg.hw1);
         let hwn_tol = step.hwn.unwrap_or(cfg.hwn);
         for (scale, frame) in &cap.hw {
-            let base = if *scale == 1 { cap.cpu.clone() } else { cap.cpu.enlarge(*scale) };
-            let label = format!("hw {scale}x vs cpu{}", if *scale == 1 { "" } else { " enlarged" });
+            let base = if *scale == 1 {
+                cap.cpu.clone()
+            } else {
+                cap.cpu.enlarge(*scale)
+            };
+            let label = format!(
+                "hw {scale}x vs cpu{}",
+                if *scale == 1 { "" } else { " enlarged" }
+            );
             if (frame.w, frame.h) != (base.w, base.h) {
                 checks.push(Check {
                     name: label,
                     status: Status::Fail,
-                    detail: format!("hardware frame is {}x{}, expected {}x{}", frame.w, frame.h, base.w, base.h),
+                    detail: format!(
+                        "hardware frame is {}x{}, expected {}x{}",
+                        frame.w, frame.h, base.w, base.h
+                    ),
                 });
                 continue;
             }
@@ -512,16 +667,31 @@ impl Run<'_> {
             let d = frame.diff_near(&base, tol.channel, radius, *scale, &step.mask, None);
             checks.push(Check {
                 name: label,
-                status: if d.within(tol) { Status::Pass } else { Status::Fail },
+                status: if d.within(tol) {
+                    Status::Pass
+                } else {
+                    Status::Fail
+                },
                 detail: d.describe(),
             });
             // Each strict rectangle is judged on its own, so a bleed along one line
             // of text cannot hide in the pixel count of a large region.
             for r in &step.strict {
-                let d = frame.diff_near(&base, cfg.strict.channel, 1, *scale, &step.mask, Some(std::slice::from_ref(r)));
+                let d = frame.diff_near(
+                    &base,
+                    cfg.strict.channel,
+                    1,
+                    *scale,
+                    &step.mask,
+                    Some(std::slice::from_ref(r)),
+                );
                 checks.push(Check {
                     name: format!("strict ({},{} {}x{}) @{scale}x", r.x, r.y, r.w, r.h),
-                    status: if d.within(cfg.strict) { Status::Pass } else { Status::Fail },
+                    status: if d.within(cfg.strict) {
+                        Status::Pass
+                    } else {
+                        Status::Fail
+                    },
                     detail: d.describe(),
                 });
             }
@@ -529,11 +699,10 @@ impl Run<'_> {
     }
 
     fn eval_assert(&self, a: &Assert, frame: Option<&Img>, mask: &[Rect]) -> Check {
+        if a.kind == "ram" {
+            return checked_assert(ram_name(a), self.eval_ram(a), a);
+        }
         let (name, ok, detail) = match a.kind.as_str() {
-            "ram" => {
-                let (ok, detail) = self.eval_ram(a);
-                (ram_name(a), ok, detail)
-            }
             "presenting" => {
                 let window = a.window.unwrap_or(120);
                 let need = a.min_changes.unwrap_or(10);
@@ -543,7 +712,10 @@ impl Run<'_> {
                 (
                     format!("presenting (>= {need} of last {window} ticks)"),
                     n >= need,
-                    format!("{n} ticks showed a new frame ({flips} buffer flips) in the last {} ticks", recent.len()),
+                    format!(
+                        "{n} ticks showed a new frame ({flips} buffer flips) in the last {} ticks",
+                        recent.len()
+                    ),
                 )
             }
             "pixels" => {
@@ -563,7 +735,11 @@ impl Run<'_> {
                     (None, Some(hi)) => format!("<= {hi}"),
                     (None, None) => String::new(),
                 };
-                (format!("pixels rgb({},{},{}) {want}", col[0], col[1], col[2]), ok, detail)
+                (
+                    format!("pixels rgb({},{},{}) {want}", col[0], col[1], col[2]),
+                    ok,
+                    detail,
+                )
             }
             "frame_diff" => {
                 let owned;
@@ -582,10 +758,20 @@ impl Run<'_> {
                     }
                     Some(then) => {
                         let region = a.region.map(|r| vec![r]);
-                        let d = now.diff(then, a.color_tol.unwrap_or(16), 1, mask, region.as_deref());
+                        let d =
+                            now.diff(then, a.color_tol.unwrap_or(16), 1, mask, region.as_deref());
                         let f = d.fraction();
-                        let ok = a.min_changed.is_none_or(|m| f >= m) && a.max_changed.is_none_or(|m| f <= m);
-                        (ok, format!("{:.2}% of pixels differ from `{from}` ({} of {})", f * 100.0, d.differing, d.compared))
+                        let ok = a.min_changed.is_none_or(|m| f >= m)
+                            && a.max_changed.is_none_or(|m| f <= m);
+                        (
+                            ok,
+                            format!(
+                                "{:.2}% of pixels differ from `{from}` ({} of {})",
+                                f * 100.0,
+                                d.differing,
+                                d.compared
+                            ),
+                        )
                     }
                 };
                 let want = match (a.min_changed, a.max_changed) {
@@ -599,7 +785,11 @@ impl Run<'_> {
             "not_flat" => {
                 let (ok, detail) = self.eval_flat(a, frame);
                 let max = a.max_dominant.unwrap_or(0.98);
-                (format!("screen not one colour (<= {:.0}%)", max * 100.0), ok, detail)
+                (
+                    format!("screen not one colour (<= {:.0}%)", max * 100.0),
+                    ok,
+                    detail,
+                )
             }
             "dark" | "not_dark" => {
                 let (ok, detail) = self.eval_flat(a, frame);
@@ -617,7 +807,11 @@ impl Run<'_> {
             "flat" => {
                 let (ok, detail) = self.eval_flat(a, frame);
                 let min = a.min_dominant.unwrap_or(0.98);
-                (format!("screen one colour (>= {:.0}%)", min * 100.0), ok, detail)
+                (
+                    format!("screen one colour (>= {:.0}%)", min * 100.0),
+                    ok,
+                    detail,
+                )
             }
             "pc_not_stuck" => {
                 let window = a.window.unwrap_or(120);
@@ -632,7 +826,13 @@ impl Run<'_> {
             "audio" => {
                 let window = a.window.unwrap_or(120);
                 let need = a.min_peak.unwrap_or(64);
-                let peak = self.m.recent(window).iter().map(|t| t.audio_peak).max().unwrap_or(0);
+                let peak = self
+                    .m
+                    .recent(window)
+                    .iter()
+                    .map(|t| t.audio_peak)
+                    .max()
+                    .unwrap_or(0);
                 (
                     format!("audio not silent (peak >= {need} over {window} ticks)"),
                     peak >= need,
@@ -641,53 +841,57 @@ impl Run<'_> {
             }
             other => (other.to_string(), false, "unknown assert kind".into()),
         };
-        let status = match (ok, a.expect_fail) {
-            (true, false) => Status::Pass,
-            (false, false) => Status::Fail,
-            (false, true) => Status::XFail,
-            (true, true) => Status::XPass,
-        };
-        let mut detail = detail;
-        if let Some(note) = &a.note {
-            detail.push_str(&format!(" [{note}]"));
-        }
-        Check { name, status, detail }
+        checked_assert(name, Ok((ok, detail)), a)
     }
 
     /// Evaluate a `ram` assert. The detail names the actual values.
-    fn eval_ram(&self, a: &Assert) -> (bool, String) {
+    fn eval_ram(&self, a: &Assert) -> Result<(bool, String), String> {
         let base = match (&a.sym, a.addr) {
             (Some(sym), _) => match self.syms.resolve(sym) {
                 Ok(addr) => addr,
                 Err(e) => {
                     let mut msg = e;
                     if self.syms.is_empty() {
-                        msg.push_str(" (no symbol file loaded; give the journey `symbols` or `addr`)");
+                        msg.push_str(
+                            " (no symbol file loaded; give the journey `symbols` or `addr`)",
+                        );
                     }
-                    return (false, msg);
+                    return Err(msg);
                 }
             },
             (None, Some(addr)) => addr,
-            (None, None) => return (false, "ram assert has neither sym nor addr".into()),
+            (None, None) => return Err("ram assert has neither sym nor addr".into()),
         };
         let size = usize::from(a.size.unwrap_or(4));
         let op = a.op.as_deref().unwrap_or("eq");
         let each = a.each.map(|e| (e.count.max(1), e.stride)).unwrap_or((1, 0));
         let mut values = Vec::new();
         for i in 0..each.0 {
-            let addr = (i64::from(base) + a.offset.unwrap_or(0) + i64::from(i) * i64::from(each.1)) as u32;
+            let addr =
+                (i64::from(base) + a.offset.unwrap_or(0) + i64::from(i) * i64::from(each.1)) as u32;
             let Some(bytes) = self.m.ram_bytes(addr, size) else {
-                return (false, format!("{addr:#010x} is not main RAM"));
+                return Err(format!("{addr:#010x} is not main RAM"));
             };
             let raw = match size {
-                1 => i64::from(bytes[0]) - if a.signed && bytes[0] >= 0x80 { 0x100 } else { 0 },
+                1 => {
+                    i64::from(bytes[0])
+                        - if a.signed && bytes[0] >= 0x80 {
+                            0x100
+                        } else {
+                            0
+                        }
+                }
                 2 => {
                     let v = u16::from_le_bytes([bytes[0], bytes[1]]);
                     i64::from(v) - if a.signed && v >= 0x8000 { 0x1_0000 } else { 0 }
                 }
                 _ => {
                     let v = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                    if a.signed { i64::from(v as i32) } else { i64::from(v) }
+                    if a.signed {
+                        i64::from(v as i32)
+                    } else {
+                        i64::from(v)
+                    }
                 }
             };
             values.push((addr, raw));
@@ -710,10 +914,23 @@ impl Run<'_> {
         let shown: Vec<String> = values
             .iter()
             .take(12)
-            .map(|(addr, v)| if values.len() == 1 { format!("{v} (@{addr:#010x})") } else { format!("{v}") })
+            .map(|(addr, v)| {
+                if values.len() == 1 {
+                    format!("{v} (@{addr:#010x})")
+                } else {
+                    format!("{v}")
+                }
+            })
             .collect();
         let more = if values.len() > 12 { ", ..." } else { "" };
-        (ok, format!("value{} = [{}{more}]", if values.len() > 1 { "s" } else { "" }, shown.join(", ")))
+        Ok((
+            ok,
+            format!(
+                "value{} = [{}{more}]",
+                if values.len() > 1 { "s" } else { "" },
+                shown.join(", ")
+            ),
+        ))
     }
 }
 
@@ -735,4 +952,71 @@ fn ram_name(a: &Assert) -> String {
         .map(|e| format!(" for each of {} (stride {:#x})", e.count, e.stride))
         .unwrap_or_default();
     format!("ram {target}{off} {op}{rhs}{each}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn journey(toml_text: &str) -> Journey {
+        let journey: Journey = toml::from_str(toml_text).unwrap();
+        journey.validate().unwrap();
+        journey
+    }
+
+    #[test]
+    fn release_requires_a_complete_render_matrix() {
+        let j = journey("name = 'gate'\n[[step]]\ncheckpoint = 'menu'\n");
+        assert!(release_requirements(&j, &[1, 3], true).is_ok());
+        assert!(release_requirements(&j, &[1], true)
+            .unwrap_err()
+            .contains("scales 1 and 3"));
+        assert!(release_requirements(&j, &[1, 3], false).is_err());
+
+        let no_checkpoint = journey("name = 'gate'\n[[step]]\nwait = 1\n");
+        assert!(release_requirements(&no_checkpoint, &[1, 3], true)
+            .unwrap_err()
+            .contains("checkpoint"));
+        let skipped = journey("name = 'gate'\n[[step]]\ncheckpoint = 'menu'\nno_matrix = true\n");
+        assert!(release_requirements(&skipped, &[1, 3], true)
+            .unwrap_err()
+            .contains("every checkpoint"));
+    }
+
+    #[test]
+    fn expected_failure_cannot_hide_setup_errors_or_stale_markers() {
+        let a = Assert {
+            kind: "ram".into(),
+            expect_fail: true,
+            ..Default::default()
+        };
+        let unresolved_symbol = Symbols::default()
+            .resolve("missing")
+            .map(|_| (true, String::new()));
+        assert_eq!(
+            checked_assert("ram".into(), unresolved_symbol, &a).status,
+            Status::Fail
+        );
+        assert_eq!(
+            checked_assert("ram".into(), Err("invalid RAM address".into()), &a).status,
+            Status::Fail
+        );
+        assert_eq!(
+            checked_assert("ram".into(), Ok((false, "wrong value".into())), &a).status,
+            Status::XFail
+        );
+        assert_eq!(
+            checked_assert("ram".into(), Ok((true, "right value".into())), &a).status,
+            Status::XPass
+        );
+        assert!(Status::XPass.is_failure());
+    }
+
+    #[test]
+    fn disc_id_is_a_content_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let disc = dir.path().join("tiny.bin");
+        std::fs::write(&disc, "abc").unwrap();
+        assert_eq!(disc_id(&disc), "ba7816bf8f01");
+    }
 }

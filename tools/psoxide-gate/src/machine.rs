@@ -65,7 +65,12 @@ impl Machine {
             "cue" => psoxide_settings::library::load_disc_from_cue(opts.disc)?,
             "bin" | "iso" => psoxide_settings::library::load_disc_from_bin(opts.disc)?,
             "ccd" => psoxide_settings::library::load_disc_from_ccd(opts.disc)?,
-            other => return Err(format!("unsupported disc extension .{other}: {}", opts.disc.display())),
+            other => {
+                return Err(format!(
+                    "unsupported disc extension .{other}: {}",
+                    opts.disc.display()
+                ))
+            }
         };
         let mut cpu = Cpu::new();
         let mut bus = Bus::new_without_bios();
@@ -175,7 +180,11 @@ impl Machine {
                 break;
             }
             if ran == 0 {
-                return Err(format!("cpu made no progress at tick {} pc={:#010x}", self.ticks, self.cpu.pc()));
+                return Err(format!(
+                    "cpu made no progress at tick {} pc={:#010x}",
+                    self.ticks,
+                    self.cpu.pc()
+                ));
             }
         }
         self.deadline = self.bus.cycles().saturating_add(self.period);
@@ -207,9 +216,12 @@ impl Machine {
     /// Distinct code lines executed over the last `window` ticks.
     pub fn distinct_pc_lines(&self, window: u64) -> usize {
         let recent = self.recent(window);
-        let Some(first) = recent.first() else { return 0 };
+        let Some(first) = recent.first() else {
+            return 0;
+        };
         let last = recent.last().expect("non-empty");
-        let mut seen: Vec<u32> = self.pc_samples[first.pc_start as usize..last.pc_end as usize].to_vec();
+        let mut seen: Vec<u32> =
+            self.pc_samples[first.pc_start as usize..last.pc_end as usize].to_vec();
         seen.sort_unstable();
         seen.dedup();
         seen.len()

@@ -42,7 +42,9 @@ pub fn expand(path: &str) -> PathBuf {
 impl Fleet {
     pub fn load(path: Option<&Path>) -> Result<Fleet, String> {
         let text = match path {
-            Some(p) => std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?,
+            Some(p) => {
+                std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?
+            }
             None => DEFAULT_MANIFEST.to_string(),
         };
         toml::from_str(&text).map_err(|e| format!("fleet manifest: {e}"))

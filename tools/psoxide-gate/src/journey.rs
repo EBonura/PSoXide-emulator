@@ -141,13 +141,22 @@ fn default_scales() -> Vec<u32> {
 // at 1x under 0.5% of pixels differ by more than 16; at 3x the polygon edges
 // (finer geometry than the 1x oracle) put up to 1.5% over 32.
 fn default_hw1() -> Tolerance {
-    Tolerance { channel: 24, fraction: 0.005 }
+    Tolerance {
+        channel: 24,
+        fraction: 0.005,
+    }
 }
 fn default_hwn() -> Tolerance {
-    Tolerance { channel: 48, fraction: 0.04 }
+    Tolerance {
+        channel: 48,
+        fraction: 0.04,
+    }
 }
 fn default_strict() -> Tolerance {
-    Tolerance { channel: 16, fraction: 0.002 }
+    Tolerance {
+        channel: 16,
+        fraction: 0.002,
+    }
 }
 
 impl Default for RenderCfg {
@@ -341,17 +350,24 @@ pub struct Each {
 
 impl Journey {
     pub fn load(path: &Path) -> Result<Journey, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
         let journey: Journey =
             toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-        journey.validate().map_err(|e| format!("{}: {e}", path.display()))?;
+        journey
+            .validate()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(journey)
     }
 
     /// Directory the journey file lives in (`<repo>/tests`).
     pub fn repo_root(journey_path: &Path) -> PathBuf {
         let dir = journey_path.parent().unwrap_or(Path::new("."));
-        let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+        let dir = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
         // tests/journey.toml -> repo root is the parent of tests/.
         if dir.file_name().is_some_and(|n| n == "tests") {
             dir.parent().unwrap_or(dir).to_path_buf()
@@ -361,30 +377,47 @@ impl Journey {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.name.is_empty() || self.name.contains(['/', '\\', ' ']) {
-            return Err(format!("journey name `{}` must be a short id without spaces or slashes", self.name));
+        if !safe_id(&self.name) {
+            return Err(format!(
+                "journey name `{}` must be a short id without spaces or slashes",
+                self.name
+            ));
         }
         if self.render.scales.iter().any(|s| *s == 0 || *s > 8) {
             return Err("render.scales must be within 1..=8".into());
         }
-        let uses_port2 = self.steps.iter().any(|s| s.port == Some(2) || s.other.is_some());
+        let uses_port2 = self
+            .steps
+            .iter()
+            .any(|s| s.port == Some(2) || s.other.is_some());
         if uses_port2 && self.pad2 == Pad2Mode::None {
             return Err("a step drives port 2 but the journey has no `pad2`".into());
         }
         let mut seen = std::collections::BTreeSet::new();
         for (i, step) in self.steps.iter().enumerate() {
-            let at = format!("step {} ({})", i + 1, step.label.as_deref().or(step.checkpoint.as_deref()).unwrap_or("-"));
+            let at = format!(
+                "step {} ({})",
+                i + 1,
+                step.label
+                    .as_deref()
+                    .or(step.checkpoint.as_deref())
+                    .unwrap_or("-")
+            );
             step.validate().map_err(|e| format!("{at}: {e}"))?;
             for a in &step.asserts {
                 if let Some(from) = &a.from {
                     if !seen.contains(from) {
-                        return Err(format!("{at}: frame_diff `from = \"{from}\"` is not an earlier checkpoint"));
+                        return Err(format!(
+                            "{at}: frame_diff `from = \"{from}\"` is not an earlier checkpoint"
+                        ));
                     }
                 }
             }
             if let Some(cp) = &step.checkpoint {
-                if cp.is_empty() || cp.contains(['/', '\\', ' ']) {
-                    return Err(format!("{at}: checkpoint name must be a short id without spaces or slashes"));
+                if !safe_id(cp) {
+                    return Err(format!(
+                        "{at}: checkpoint name must be a short id without spaces or slashes"
+                    ));
                 }
                 if !seen.insert(cp.clone()) {
                     return Err(format!("{at}: duplicate checkpoint `{cp}`"));
@@ -403,6 +436,12 @@ impl Journey {
     }
 }
 
+fn safe_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 pub const BUTTONS: &[&str] = &[
     "cross", "circle", "square", "triangle", "start", "select", "up", "down", "left", "right",
     "l1", "r1", "l2", "r2", "l3", "r3",
@@ -410,7 +449,10 @@ pub const BUTTONS: &[&str] = &[
 
 impl Step {
     pub fn has_input(&self) -> bool {
-        !self.press.is_empty() || self.lstick.is_some() || self.rstick.is_some() || self.other.is_some()
+        !self.press.is_empty()
+            || self.lstick.is_some()
+            || self.rstick.is_some()
+            || self.other.is_some()
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -423,7 +465,11 @@ impl Step {
         if !matches!(self.port.unwrap_or(1), 1 | 2) {
             return Err("`port` must be 1 or 2".into());
         }
-        if self.port.is_some() && self.press.is_empty() && self.lstick.is_none() && self.rstick.is_none() {
+        if self.port.is_some()
+            && self.press.is_empty()
+            && self.lstick.is_none()
+            && self.rstick.is_none()
+        {
             return Err("`port` needs press, lstick or rstick".into());
         }
         let kinds = [
@@ -434,8 +480,19 @@ impl Step {
         if kinds.iter().filter(|k| **k).count() == 0 {
             return Err("step does nothing (needs press/lstick/rstick, wait, wait_until, checkpoint or assert)".into());
         }
-        if self.checkpoint.is_none() && (self.golden.is_some() || self.tolerance.is_some() || !self.mask.is_empty() || !self.strict.is_empty() || self.no_matrix || self.hw1.is_some() || self.hwn.is_some()) {
-            return Err("golden/tolerance/mask/strict/no_matrix/hw1/hwn only apply to a checkpoint step".into());
+        if self.checkpoint.is_none()
+            && (self.golden.is_some()
+                || self.tolerance.is_some()
+                || !self.mask.is_empty()
+                || !self.strict.is_empty()
+                || self.no_matrix
+                || self.hw1.is_some()
+                || self.hwn.is_some())
+        {
+            return Err(
+                "golden/tolerance/mask/strict/no_matrix/hw1/hwn only apply to a checkpoint step"
+                    .into(),
+            );
         }
         if self.hold.is_some() && !self.has_input() {
             return Err("`hold` needs press, lstick or rstick".into());
@@ -447,8 +504,12 @@ impl Step {
             return Err("wait_until cannot be combined with input or wait in one step".into());
         }
         if let Some(c) = &self.wait_until {
-            if !["ram", "pixels", "flat", "not_flat", "dark", "not_dark"].contains(&c.kind.as_str()) {
-                return Err("wait_until supports kind = ram, pixels, flat, not_flat, dark or not_dark".into());
+            if !["ram", "pixels", "flat", "not_flat", "dark", "not_dark"].contains(&c.kind.as_str())
+            {
+                return Err(
+                    "wait_until supports kind = ram, pixels, flat, not_flat, dark or not_dark"
+                        .into(),
+                );
             }
             c.validate()?;
         }
@@ -459,19 +520,38 @@ impl Step {
     }
 }
 
-pub const ASSERT_KINDS: &[&str] = &["ram", "presenting", "not_flat", "flat", "dark", "not_dark", "frame_diff", "pc_not_stuck", "audio", "pixels"];
+pub const ASSERT_KINDS: &[&str] = &[
+    "ram",
+    "presenting",
+    "not_flat",
+    "flat",
+    "dark",
+    "not_dark",
+    "frame_diff",
+    "pc_not_stuck",
+    "audio",
+    "pixels",
+];
 
 impl Assert {
     pub fn validate(&self) -> Result<(), String> {
         if !ASSERT_KINDS.contains(&self.kind.as_str()) {
-            return Err(format!("unknown assert kind `{}` (expected one of {})", self.kind, ASSERT_KINDS.join(", ")));
+            return Err(format!(
+                "unknown assert kind `{}` (expected one of {})",
+                self.kind,
+                ASSERT_KINDS.join(", ")
+            ));
         }
         if self.kind == "ram" {
             if self.sym.is_some() == self.addr.is_some() {
                 return Err("ram assert needs exactly one of `sym` or `addr`".into());
             }
             let op = self.op.as_deref().unwrap_or("eq");
-            if !["eq", "ne", "lt", "le", "gt", "ge", "between", "zero", "nonzero"].contains(&op) {
+            if ![
+                "eq", "ne", "lt", "le", "gt", "ge", "between", "zero", "nonzero",
+            ]
+            .contains(&op)
+            {
                 return Err(format!("unknown op `{op}`"));
             }
             if !["zero", "nonzero"].contains(&op) && self.value.is_none() {
@@ -572,7 +652,14 @@ expect_fail = true
         .unwrap();
         assert_eq!(ok.steps[0].port, Some(2));
         assert!(ok.steps[1].other.is_some());
-        assert!(parse("name = \"a\"\n[[step]]\nport = 2\npress = [\"start\"]\n").unwrap_err().contains("pad2"));
-        assert!(parse("name = \"a\"\npad2 = \"analog\"\n[[step]]\nport = 3\npress = [\"start\"]\n").is_err());
+        assert!(
+            parse("name = \"a\"\n[[step]]\nport = 2\npress = [\"start\"]\n")
+                .unwrap_err()
+                .contains("pad2")
+        );
+        assert!(parse(
+            "name = \"a\"\npad2 = \"analog\"\n[[step]]\nport = 3\npress = [\"start\"]\n"
+        )
+        .is_err());
     }
 }
