@@ -4,7 +4,7 @@ use wgpu::util::DeviceExt;
 
 use crate::target::{RENDER_FORMAT, TARGET_FORMAT, VRAM_HEIGHT, VRAM_WIDTH};
 
-/// Per-vertex data. 20 bytes, `bytemuck::Pod` so we can blit a
+/// Per-vertex data. 84 bytes, `bytemuck::Pod` so we can blit a
 /// `Vec<HwVertex>` into the GPU vertex buffer with `cast_slice`.
 ///
 /// `flags` and `tex_window` pack the per-primitive state the fragment
@@ -31,6 +31,13 @@ pub struct HwVertex {
     /// offset_y in the same pre-shifted pixel units used by the
     /// CPU GPU path.
     pub tex_window: u32,
+    /// The CPU rasterizer's attribute planes for the triangle this vertex
+    /// belongs to, identical on its three vertices, when
+    /// `flags::PLANE_RGB` / `flags::PLANE_UV` say the fragment shader should
+    /// evaluate them: channels `r, g, b, u, v`, each `(dadx, dady, base)`,
+    /// then one unused word. `attr(x, y) = (base + x * dadx + y * dady) >> 24`
+    /// in wrapping u32 arithmetic, from `emulator_core::gpu::tri_raster_setup`.
+    pub planes: [[u32; 4]; 4],
 }
 
 /// `HwVertex::flags` bit layout. Host + shader must agree --
@@ -51,6 +58,9 @@ pub struct HwVertex {
 /// bit      26   TEX_SEMI_PASS                 keep only STP texels
 /// bit      27   DITHER                        GP0(E1) bit 9 was set
 /// bit      28   CORNER_SAMPLED                triangle drawn from a GP0 polygon
+/// bit      29   PLANE_RGB                     colour from `HwVertex::planes`
+/// bit      30   PLANE_UV                      texture UV from `HwVertex::planes`
+/// bit      31   AXIS_UV                       UV from the axis-aligned quad walker
 /// ```
 ///
 /// Texture-window state deliberately lives in
@@ -75,6 +85,16 @@ pub mod flags {
     /// points. Rectangles, fills and line bands are exact-pixel shapes and
     /// stay unshifted.
     pub const CORNER_SAMPLED: u32 = 1 << 28;
+    /// The fragment shader takes the colour from the triangle's attribute
+    /// planes (`HwVertex::planes`), the CPU rasterizer's integer-truncated
+    /// gradient, instead of the host's f32 interpolation of vertex colours.
+    pub const PLANE_RGB: u32 = 1 << 29;
+    /// The same for the texture coordinates.
+    pub const PLANE_UV: u32 = 1 << 30;
+    /// The triangle is half of a flat textured quad the CPU draws with its
+    /// four-edge walker (a row-wide Q12 UV walk, not a plane); `planes`
+    /// holds that walk's constants, see `translator::axis_quad_words`.
+    pub const AXIS_UV: u32 = 1 << 31;
 
     /// Pack tpage origin (in pixels) into the flag bits.
     /// `tpage_x` must be a multiple of 64 (PSX alignment),
@@ -293,6 +313,27 @@ impl HwPipeline {
                     format: wgpu::VertexFormat::Uint32,
                     offset: 16,
                     shader_location: 4,
+                },
+                // planes: four u32x4, offsets 20, 36, 52, 68
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Uint32x4,
+                    offset: 20,
+                    shader_location: 5,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Uint32x4,
+                    offset: 36,
+                    shader_location: 6,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Uint32x4,
+                    offset: 52,
+                    shader_location: 7,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Uint32x4,
+                    offset: 68,
+                    shader_location: 8,
                 },
             ],
         };

@@ -44,6 +44,11 @@ struct VertexIn {
     @location(2) uv:    vec2<u32>,
     @location(3) flags: u32,
     @location(4) tex_window: u32,
+    // The CPU rasterizer's attribute planes (see `HwVertex::planes`).
+    @location(5) planes0: vec4<u32>,
+    @location(6) planes1: vec4<u32>,
+    @location(7) planes2: vec4<u32>,
+    @location(8) planes3: vec4<u32>,
 }
 
 struct VertexOut {
@@ -56,6 +61,10 @@ struct VertexOut {
     @location(1)       uv:       vec2<f32>,
     @location(2) @interpolate(flat) flags: u32,
     @location(3) @interpolate(flat) tex_window: u32,
+    @location(4) @interpolate(flat) planes0: vec4<u32>,
+    @location(5) @interpolate(flat) planes1: vec4<u32>,
+    @location(6) @interpolate(flat) planes2: vec4<u32>,
+    @location(7) @interpolate(flat) planes3: vec4<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +105,9 @@ const FLAG_TEX_OPAQUE_PASS: u32 = 1u << 25u;
 const FLAG_TEX_SEMI_PASS:   u32 = 1u << 26u;
 const FLAG_DITHER:      u32 = 1u << 27u;
 const FLAG_CORNER_SAMPLED: u32 = 1u << 28u;
+const FLAG_PLANE_RGB:   u32 = 1u << 29u;
+const FLAG_PLANE_UV:    u32 = 1u << 30u;
+const FLAG_AXIS_UV:     u32 = 1u << 31u;
 
 // PSX-SPX signed 4x4 ordered-dither offsets, indexed by
 // `(y & 3) * 4 + (x & 3)` -- byte-for-byte the CPU rasterizer's
@@ -148,6 +160,10 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.uv       = vec2<f32>(f32(in.uv.x), f32(in.uv.y));
     out.flags    = in.flags;
     out.tex_window = in.tex_window;
+    out.planes0 = in.planes0;
+    out.planes1 = in.planes1;
+    out.planes2 = in.planes2;
+    out.planes3 = in.planes3;
     return out;
 }
 
@@ -380,6 +396,51 @@ fn filter_edge(flags: u32, tex_window: u32, b: vec2<f32>, f: vec2<f32>, nearest:
     return mix(axis, diag, o * sup);
 }
 
+// The CPU rasterizer's attribute planes for the triangle (see
+// `HwVertex::planes`): channel `ch` (0..5 = r, g, b, u, v) is the word
+// triple (dadx, dady, base) at 3 * ch, and
+// `attr(x, y) = (base + x * dadx + y * dady) >> 24` in wrapping u32
+// arithmetic, evaluated at a PSX pixel `(x, y)` -- the CPU's own per-pixel
+// rule, so the value is bit-exact at 1x. (u32 products wrap in WGSL; a
+// negative coordinate goes through bitcast, as the CPU's `x as u32` does.)
+fn plane_word(in: VertexOut, i: u32) -> u32 {
+    let q = i >> 2u;
+    var v = in.planes0;
+    if q == 1u { v = in.planes1; }
+    if q == 2u { v = in.planes2; }
+    if q == 3u { v = in.planes3; }
+    return v[i & 3u];
+}
+
+fn plane_attr(in: VertexOut, ch: u32, px: vec2<i32>) -> u32 {
+    let dadx = plane_word(in, ch * 3u);
+    let dady = plane_word(in, ch * 3u + 1u);
+    let base = plane_word(in, ch * 3u + 2u);
+    return (base + bitcast<u32>(px.x) * dadx + bitcast<u32>(px.y) * dady) >> 24u;
+}
+
+// Where inside its PSX pixel this fragment lies, from the pixel's centre
+// (0 at 1x, where the fragment is the CPU's sample point; a sub-pixel step
+// at higher internal scales). The planes are evaluated exactly at the PSX
+// pixel and this adds the gradient over the sub-pixel, so a scaled target
+// stays smooth while 1x stays bit-exact.
+fn plane_subpixel(frag: vec2<f32>) -> vec2<f32> {
+    let s = f32(u_texfilter.y);
+    let p = frag / s;
+    return (p - floor(p)) - vec2<f32>(0.5, 0.5);
+}
+
+fn plane_delta(in: VertexOut, ch: u32, sub: vec2<f32>) -> f32 {
+    let gx = f32(bitcast<i32>(plane_word(in, ch * 3u)));
+    let gy = f32(bitcast<i32>(plane_word(in, ch * 3u + 1u)));
+    return clamp((sub.x * gx + sub.y * gy) / 16777216.0, -128.0, 128.0);
+}
+
+fn plane_pixel(frag: vec2<f32>) -> vec2<i32> {
+    let s = f32(u_texfilter.y);
+    return vec2<i32>(floor(frag / s));
+}
+
 // Output is the gamma-coded display value, written byte-for-byte: the draw
 // pass renders through the target's non-sRGB view (`target::RENDER_FORMAT`),
 // so the blender combines the same numbers the CPU rasterizer does.
@@ -387,8 +448,17 @@ fn filter_edge(flags: u32, tex_window: u32, b: vec2<f32>, f: vec2<f32>, nearest:
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let textured = (in.flags & FLAG_TEXTURED) != 0u;
     let dither = (in.flags & FLAG_DITHER) != 0u;
+    var color = in.color;
+    if (in.flags & FLAG_PLANE_RGB) != 0u {
+        let px = plane_pixel(in.position.xy);
+        let sub = plane_subpixel(in.position.xy);
+        let r = f32(plane_attr(in, 0u, px)) + plane_delta(in, 0u, sub);
+        let g = f32(plane_attr(in, 1u, px)) + plane_delta(in, 1u, sub);
+        let b = f32(plane_attr(in, 2u, px)) + plane_delta(in, 2u, sub);
+        color = vec4<f32>(clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(255.0)) / 255.0, in.color.a);
+    }
     if !textured {
-        var rgb = in.color.rgb;
+        var rgb = color.rgb;
         if dither {
             rgb = dither_to_bgr15(rgb, in.position.xy);
         }
@@ -400,7 +470,45 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Rectangles are not shifted and their centre-sampled coordinate
     // already carries that 0.5.
     var suv = in.uv;
-    if (in.flags & FLAG_CORNER_SAMPLED) != 0u {
+    if (in.flags & FLAG_AXIS_UV) != 0u && u_texfilter.x == 0u {
+        // Half of a sprite-shaped quad: the CPU's four-edge walk, Q12 per row
+        // (see `translator::axis_quad_words` for the word layout).
+        let px = plane_pixel(in.position.xy);
+        let sub = plane_subpixel(in.position.xy);
+        let left = bitcast<i32>(plane_word(in, 0u));
+        let top = bitcast<i32>(plane_word(in, 1u));
+        let width = max(bitcast<i32>(plane_word(in, 2u)), 1);
+        let row = px.y - top;
+        let xoff = px.x - left;
+        var uv_fixed = vec2<i32>(0, 0);
+        var uv_step = vec2<f32>(0.0, 0.0);
+        for (var c = 0u; c < 2u; c = c + 1u) {
+            let l0 = bitcast<i32>(plane_word(in, 3u + c));
+            let r0 = bitcast<i32>(plane_word(in, 5u + c));
+            let dl = bitcast<i32>(plane_word(in, 7u + c));
+            let dr = bitcast<i32>(plane_word(in, 9u + c));
+            let lpos = l0 + row * dl;
+            let rpos = r0 + row * dr;
+            let dx = (rpos - lpos) / width;
+            uv_fixed[c] = (lpos + xoff * dx) >> 12u;
+            uv_step[c] = (sub.x * f32(dx) + sub.y * f32(dl)) / 4096.0;
+        }
+        suv = vec2<f32>(
+            f32(uv_fixed.x & 0xFF) + 0.5 + clamp(uv_step.x, -128.0, 128.0),
+            f32(uv_fixed.y & 0xFF) + 0.5 + clamp(uv_step.y, -128.0, 128.0),
+        );
+    } else if (in.flags & FLAG_PLANE_UV) != 0u && u_texfilter.x == 0u {
+        // The plane already carries the CPU's +0.5 rounding, so its integer
+        // value is the texel; `suv` is that texel's centre, plus the
+        // sub-pixel gradient on a scaled target. The edge filter keeps the
+        // host's smooth interpolation: it needs fractional coordinates.
+        let px = plane_pixel(in.position.xy);
+        let sub = plane_subpixel(in.position.xy);
+        suv = vec2<f32>(
+            f32(plane_attr(in, 3u, px)) + 0.5 + plane_delta(in, 3u, sub),
+            f32(plane_attr(in, 4u, px)) + 0.5 + plane_delta(in, 4u, sub),
+        );
+    } else if (in.flags & FLAG_CORNER_SAMPLED) != 0u {
         suv += vec2<f32>(0.5, 0.5);
     }
     let uv8 = apply_tex_window(page_uv(suv), in.tex_window);
@@ -426,7 +534,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         tex_rgb = filter_edge(in.flags, in.tex_window, b, f, tex_rgb);
     }
     let raw = (in.flags & FLAG_RAW_TEXTURE) != 0u;
-    var rgb = modulate(tex_rgb, in.color, raw);
+    var rgb = modulate(tex_rgb, color, raw);
     // Raw-texture primitives bypass the modulator on silicon and are
     // never dithered; the translator already withholds FLAG_DITHER
     // for them, so `raw` needs no second check here.
