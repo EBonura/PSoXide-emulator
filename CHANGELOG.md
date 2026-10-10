@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Reading one of the chip's own registers (SIO0, GPUSTAT, the interrupt, DMA
+  and timer registers, memory control) no longer holds back the instructions
+  behind it. Its wait overlaps them the way a RAM load's does: the first two
+  pay in full, the next ones that need neither the bus nor the loaded value
+  run free. The SDK's spin loop (`lw` of SIO0 STAT, `addiu`, `bne`, `nop`)
+  cost 8.0 clocks a turn where the console's costs 6.85 (hardware tests v2.2,
+  records 0xD1 to 0xDB), and costs 7.0 now. The pad setup and poll rows
+  (0xB7 to 0xB9, 0xD1 to 0xDB) come 100 to 1,500 clocks nearer the console's,
+  and a missing pad's timeout (records 0x64A, 0x64E, 0x767, 0x768) is exact.
+  The fitted memory card data-byte delays were refitted for the faster loop
+  (325 clocks in slot 1, 528 in slot 2), so a frame read still takes 124
+  and 139 HBlanks.
 - A controller port answers each byte of a transaction in its own time
   (hardware tests v2.2). `/ACK` rises 1665, 1678, 1627, 1629, 1468, 1695,
   1695 and 1692 clocks after the bytes of a pad poll, not 1677 after every
