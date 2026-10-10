@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A block-mode GPU DMA of NOPs is not held up behind busy drawing. The pacing
+  change made every block past the 16 words the FIFO holds wait for the
+  drawing in progress, NOPs included: hwtest v2.1 and v2.2 rows 0x67 to 0x6A
+  (64 to 256 NOP words) went from 133 to 237 clocks and from 458 to 562 for
+  the 16 x 16 block, where the console reads 124 to 126 and 436 to 466. A NOP
+  draws nothing and leaves the FIFO as it reaches the head.
 - Textured triangles pay when their texels outgrow the texture cache. The
   console's cost for sixteen 32 x 32 triangles was flat at 5.4k clocks until
   the texture coordinates spanned more than the cache holds, then climbed to
