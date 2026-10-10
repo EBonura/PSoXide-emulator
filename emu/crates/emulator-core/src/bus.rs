@@ -455,6 +455,10 @@ pub struct Bus {
     /// inspect CHCR and the completion event once to recover an armed wait.
     #[serde(skip, default = "check_gpu_request_after_restore")]
     gpu_dma_waiting_for_request: bool,
+    /// Cycles the block transfer just started waited on the GPU's FIFO; read
+    /// once by `run_dma_channel` to place the streaming window.
+    #[serde(skip)]
+    gpu_dma_wait: u32,
     experimental_gpu_list: Option<ExperimentalGpuList>,
     /// Earliest cycle the next CPU access to main RAM may start while a list
     /// walk moves (see [`GPU_LIST_RAM_ACCESS_SPACING`]). A timing hint, so it
@@ -582,6 +586,7 @@ impl Bus {
             gpu_linked_list_fifo_guard: gpu_linked_list_fifo_guard_from_env(),
             gpu_dma_overflow_drops: gpu_dma_overflow_drops_from_env(),
             gpu_dma_waiting_for_request: false,
+            gpu_dma_wait: 0,
             experimental_gpu_list: None,
             gpu_list_ram_next: 0,
             dma_block_runs: [None; 2],
@@ -1642,7 +1647,7 @@ impl Bus {
                 run.blocks
             } else {
                 let span = (run.end - run.start).max(1);
-                ((self.cycles - run.start) * u64::from(run.blocks) / span) as u32
+                (self.cycles.saturating_sub(run.start) * u64::from(run.blocks) / span) as u32
             };
             Self::apply_dma_block_progress(&mut self.dma.channels[ch], &run, done);
         }
@@ -1777,7 +1782,7 @@ impl Bus {
     fn gpu_block_dma_is_moving(&self) -> bool {
         match self.dma_block_runs[0] {
             Some(run) => {
-                self.cycles < run.end
+                (run.start..run.end).contains(&self.cycles)
                     && self.dma.channels[2].channel_control & ((1 << 24) | 1) == (1 << 24) | 1
             }
             None => false,
@@ -2659,7 +2664,16 @@ impl Bus {
                     self.log_dma_schedule("GpuDma", gpu_cycles as u64, target);
                     self.scheduler
                         .schedule(EventSlot::GpuDma, self.cycles, gpu_cycles as u64);
+                    // Only the words that move compete for main RAM: the part
+                    // of a paced block spent waiting on the GPU is not.
+                    let waited =
+                        u64::from(std::mem::take(&mut self.gpu_dma_wait)).min(gpu_cycles as u64);
                     self.begin_dma_block_run(2, gpu_cycles as u64);
+                    if waited > 0 {
+                        if let Some(run) = self.dma_block_runs[0].as_mut() {
+                            run.start += waited;
+                        }
+                    }
                 }
             }
             3 => {
@@ -3237,6 +3251,7 @@ impl Bus {
     }
 
     fn dma_gpu_block(&mut self, to_device: bool) -> u32 {
+        self.gpu_dma_wait = 0;
         let ch = self.dma.channels[2];
         let mut addr = ch.base & 0x001F_FFFC;
         let bcr = ch.block_control;
@@ -3260,14 +3275,17 @@ impl Bus {
             // Request mode: the GPU's DREQ holds the channel while its input
             // FIFO is full, so no word is lost.
             let paced = self.gpu.experimental_dma_fifo_enabled();
+            let mut waited = 0u64;
             for _ in 0..total_words {
                 if paced {
-                    self.gpu.make_dma_input_room();
+                    waited += self.gpu.make_dma_input_room();
                 }
                 let word = read_ram_u32(&self.ram[..], addr);
                 self.gpu.gp0_push_dma(word);
                 addr = addr.wrapping_add(step);
             }
+            self.gpu.carry_dma_wait(waited);
+            self.gpu_dma_wait = waited.min(u64::from(u32::MAX / 2)) as u32;
         } else {
             for _ in 0..total_words {
                 let word = self
@@ -3286,11 +3304,12 @@ impl Bus {
         // the whole sweep within a few percent. Command traffic keeps the
         // hardware-calibrated NOP command-traffic model.
         if to_device {
-            if upload_active {
+            let moving = if upload_active {
                 gpu_upload_block_cycles(total_words, block_count)
             } else {
                 gpu_command_block_cycles(total_words, block_count)
-            }
+            };
+            moving.saturating_add(self.gpu_dma_wait)
         } else {
             gpu_download_cycles(total_words)
         }
@@ -5996,6 +6015,36 @@ mod tests {
         bus.dma.channels[2].channel_control = 0x0100_0201;
         bus.run_dma_channel(2);
         bus.tick(100_000);
+        assert_eq!(bus.gpu.experimental_dma_dropped_words(), 0);
+        for x in 0..64u16 {
+            assert_eq!(bus.gpu.vram.get_pixel(4 + x, 5), x, "pixel {x}");
+        }
+    }
+
+    /// The channel waits for the drawing it queued behind: a block of more
+    /// words than the FIFO holds ends when the GPU has taken the head
+    /// command, not after the time the words take to move (hwtest v2.4,
+    /// records 0x868 to 0x873). Software polling CHCR sees it busy until then.
+    #[test]
+    fn block_dma_behind_busy_gpu_ends_with_the_drawing() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.gpu.enable_experimental_dma_fifo();
+        bus.dma.dpcr = 1 << (2 * 4 + 3);
+        bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+        bus.gpu.charge_busy(100_000);
+        let mut words = vec![0xa000_0000, 0x0005_0004, 0x0001_0040];
+        words.extend((0..32u32).map(|i| ((2 * i + 1) << 16) | (2 * i)));
+        for (i, word) in words.iter().enumerate() {
+            write_ram_u32(&mut bus.ram[..], 0x300 + 4 * i as u32, *word);
+        }
+        bus.dma.channels[2].base = 0x300;
+        bus.dma.channels[2].block_control = (5 << 16) | 7;
+        bus.dma.channels[2].channel_control = 0x0100_0201;
+        bus.run_dma_channel(2);
+        bus.tick(99_000);
+        assert_ne!(bus.dma.channels[2].channel_control & (1 << 24), 0, "still busy");
+        bus.tick(2_000);
+        assert_eq!(bus.dma.channels[2].channel_control & (1 << 24), 0, "done");
         assert_eq!(bus.gpu.experimental_dma_dropped_words(), 0);
         for x in 0..64u16 {
             assert_eq!(bus.gpu.vram.get_pixel(4 + x, 5), x, "pixel {x}");

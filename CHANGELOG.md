@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- A block-mode GPU DMA that backs up behind the drawing waits for it, as the
+  request line holds the channel on the console. The words already landed
+  (since the FIFO pacing change); the transfer still finished in a few
+  hundred clocks. It now ends when the GPU has taken the command at the head
+  of the FIFO: a 64-word upload behind a 512x256 flat rectangle ran 160
+  clocks and now runs 70,272, the rectangle's own cost. hwtest v2.4 records
+  0x868 to 0x873 read 35,630 to 35,974 on the console, the same rectangle
+  drawn with half its rows skipped (the 480i rule was on for that step).
+  Main RAM loads wait only through the clocks the words move, not through
+  the wait.
 - The hardware renderer takes colour and texture gradients from the CPU
   rasterizer's own attribute planes instead of interpolating in f32. Each
   Gouraud and textured polygon now carries the plane constants
