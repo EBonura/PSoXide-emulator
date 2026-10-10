@@ -112,18 +112,39 @@ const PAD_ACK_DELAY_TICKS: u64 = 328;
 // console's did, 124 HBlanks in slot 1 and 138 to 139 in slot 2 (records
 // 0x641 and 0x649, 0x693).
 const MEMCARD_ACK_DELAYS: [[u64; 4]; 2] = [[341, 309, 146, 146], [316, 177, 100, 122]];
-/// Fitted delay for the card bytes after the fourth, slot 1 and 2.
-const MEMCARD_DATA_ACK_DELAY_TICKS: [u64; 2] = [325, 528];
+/// Delay for the card bytes after the fourth, slot 1 and 2, from the
+/// per-byte `/ACK` rises of hwtest v2.4 (records 0x88A and 0x8AA, 128 data
+/// bytes times four reads): the console's median was 1468 and 1730 clocks,
+/// 221 and 167 below what the earlier fit (325 and 528) read back.
+const MEMCARD_DATA_ACK_DELAY_TICKS: [u64; 2] = [104, 361];
+/// The byte after the sector address of a read (the `0x5C` reply) draws its
+/// `/ACK` late: the card is looking the sector up. v2.4's probe saw none
+/// within its 1,200-poll window on either slot, and on slot 2 the next
+/// byte's rise at 11,530 clocks after its write. The delay is the one that
+/// keeps a whole frame read where the console had it (124 HBlanks in slot 1,
+/// 138 to 139 in slot 2, records 0x641, 0x649 and 0x693) now that the
+/// bytes after it are quicker.
+const MEMCARD_SEEK_ACK_DELAY_TICKS: [u64; 2] = [29_500, 22_600];
 /// `/ACK` is a pulse, not a sticky level: its width for a pad and for a card
 /// in slot 1 and 2 (bytes 0 to 3, then the rest).
 const PAD_ACK_PULSE_TICKS: u64 = 92;
 const PAD_ACK_PULSES: [u64; 8] = [100, 92, 92, 92, 92, 92, 92, 92];
 const MEMCARD_ACK_PULSES: [[u64; 4]; 2] = [[44, 44, 48, 50], [74, 74, 80, 86]];
-const MEMCARD_DATA_ACK_PULSE_TICKS: [u64; 2] = [44, 86];
+/// Slot 2's data bytes pulsed 68 to 80 clocks in hwtest v2.4 (records 0x8AB).
+const MEMCARD_DATA_ACK_PULSE_TICKS: [u64; 2] = [44, 68];
+
+/// The memory-card read command, the second byte of a transaction.
+const CARD_READ_COMMAND: u8 = 0x52;
 
 /// `/ACK` delay and pulse width of byte `index` of a transaction.
-fn ack_timing(is_card: bool, slot: usize, index: u32) -> (u64, u64) {
+fn ack_timing(is_card: bool, slot: usize, index: u32, command: u8) -> (u64, u64) {
     let index = index as usize;
+    if is_card && index == 6 && command == CARD_READ_COMMAND {
+        return (
+            MEMCARD_SEEK_ACK_DELAY_TICKS[slot],
+            MEMCARD_DATA_ACK_PULSE_TICKS[slot],
+        );
+    }
     if is_card {
         match MEMCARD_ACK_DELAYS[slot].get(index) {
             Some(&delay) => (delay, MEMCARD_ACK_PULSES[slot][index]),
@@ -218,6 +239,9 @@ pub struct Sio0 {
     /// While `slow_pad`: set once a byte was clocked before the device was
     /// ready; the rest of the packet then returns `0xFF` until deselect.
     slow_desynced: bool,
+    /// The second byte of the card transaction under way (its command).
+    #[serde(skip)]
+    card_command: u8,
 }
 
 impl Sio0 {
@@ -261,6 +285,7 @@ impl Sio0 {
             slow_pad: false,
             slow_ready_cycle: None,
             slow_desynced: false,
+            card_command: 0,
         }
     }
 
@@ -597,8 +622,15 @@ impl Sio0 {
                 let slot = usize::from(self.ctrl & ctrl_bit::SLOT != 0);
                 let port = self.active_port();
                 let result = port.exchange_detailed_at(value, now);
+                let is_card = port.selected_is_memcard();
+                let command = if is_card && byte_index == 1 {
+                    value
+                } else {
+                    self.card_command
+                };
                 let (ack_delay_ticks, ack_pulse_ticks) =
-                    ack_timing(port.selected_is_memcard(), slot, byte_index);
+                    ack_timing(is_card, slot, byte_index, command);
+                self.card_command = command;
                 (
                     result.rx,
                     result.ack,
@@ -1409,9 +1441,10 @@ mod tests {
         );
     }
 
-    /// Past the four header bytes a card answers in the fitted data delay.
+    /// Past the four header bytes a card answers in the data delay, except
+    /// for the byte after a read's sector address, which it answers late.
     #[test]
-    fn a_card_answers_its_data_bytes_in_the_fitted_delay() {
+    fn a_card_answers_its_data_bytes_in_the_data_delay_and_the_seek_byte_late() {
         use crate::pad::{MemoryCard, PortDevice};
 
         for slot in 0..2usize {
@@ -1436,6 +1469,7 @@ mod tests {
                 sio.tick(now + t);
                 let want = match MEMCARD_ACK_DELAYS[slot].get(index) {
                     Some(&delay) => delay,
+                    None if index == 6 => MEMCARD_SEEK_ACK_DELAY_TICKS[slot],
                     None => MEMCARD_DATA_ACK_DELAY_TICKS[slot],
                 };
                 assert_eq!(
