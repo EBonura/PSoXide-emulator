@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap verify-components material-audit check test fmt fmt-check build run
+.PHONY: help bootstrap verify-components material-audit check test fmt fmt-check build run gate
 # Locked components (components.lock.json) are hydrated by the SDK's Rust
 # psoxide-components, built once per locked SDK revision into .tools/. It has to
 # exist before Cargo can load this workspace, whose members are the hydrated
@@ -20,7 +20,7 @@ SDK_GIT    := https://github.com/EBonura/PSoXide
 SDK_INSTALL = cargo install --locked --git $(SDK_GIT) --rev $(SDK_REV) --root "$(SDK_TOOLS)"
 
 help:
-	@echo "make bootstrap | check | test | build | run | material-audit"
+	@echo "make bootstrap | check | test | build | run | gate | material-audit"
 bootstrap:
 	@[ -x "$(COMPONENTS)" ] || $(SDK_INSTALL) psoxide-link
 	"$(COMPONENTS)" --root "$(CURDIR)" $(COMPONENTS_ARGS)
@@ -42,6 +42,12 @@ build: bootstrap
 	cargo build --locked --release -p frontend
 run: bootstrap
 	cargo run --locked --release -p frontend
+
+# The fleet gate (TESTING.md): every game's journey on the CPU and hardware
+# renderers. GATE_ARGS e.g. "run nitroxide" or "run all --jobs 2".
+GATE_ARGS ?= run all
+gate: bootstrap
+	cargo run --locked --release -p psoxide-gate -- $(GATE_ARGS)
 
 .PHONY: examples
 examples: bootstrap
