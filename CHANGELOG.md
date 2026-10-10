@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- The hardware renderer takes colour and texture gradients from the CPU
+  rasterizer's own attribute planes instead of interpolating in f32. Each
+  Gouraud and textured polygon now carries the plane constants
+  (`tri_raster_setup`: `(base + x*dadx + y*dady) >> 24`, truncated to 1/4096)
+  and the fragment shader evaluates them at the pixel, so at 1x its colours
+  and texels are the CPU's byte for byte (a scaled target adds the gradient
+  over the sub-pixel, so it stays smooth). A flat textured quad laid out as a
+  sprite takes the CPU's four-edge Q12 walk instead, as the CPU does, and a
+  quad whose half is too large is dropped whole. Random Gouraud, textured and
+  sprite-quad tests now compare equal where they allowed a texel or a step.
+  In 35 boots (800M instructions each) the hardware frame moves nearer the
+  CPU's in 10 and away in none that could be compared (the CPU display of
+  two others, oot and the WipEout PSoXide disc, differs between the builds
+  compared); Crash, Quake, VoXide, the arcade, the demo disc and the
+  courtyard now match to the 5-bit level, and Counter-Strike and Half-Life
+  fell from 582 and 472 pixels apart to 39.
 - The full-screen VRAM blit shows the VRAM's display codes unchanged. It
   rendered through an sRGB view of its target, so every code was encoded a
   second time: a grey ramp of 5-bit levels 1 to 31 read back as 49 to 255
