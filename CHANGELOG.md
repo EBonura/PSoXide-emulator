@@ -55,6 +55,19 @@
   estimate fitted to the frame totals (the probe lost sync after it, so the
   console gave no clean figure); the emulator's card still takes the bytes
   clocked before it, where the console's seems to have dropped them.
+- A Pause out of a running read completes later, and until it does the drive
+  still reports reading. Out of the console's CD chain probe (hwtest v2.4,
+  records 0x500 to 0x507) a read ended with a Pause, then, after the probe
+  hashed the sector (some 90,000 cycles), the controller read idle (index
+  and status register 0x18, no interrupt pending) and a GetStat answered 0x22,
+  reading, in four of the eight variants; the emulator had delivered the
+  Pause's second response in 7,000 cycles, so it read 0x38 with INT2 pending
+  and a stopped drive (0x02). The second response now follows the first by
+  120,000 cycles when the Pause stops a read (an estimate between those two
+  bounds, not a measurement; PSX-SPX gives 1,096,083 at double speed), and a
+  GetStat meanwhile reports reading. Six of the eight records now read as the
+  console's (8,719 or 527, 0x1800); the other two read 0x22 where the console
+  happened to read 0x02. Pause from a standing drive keeps its 7,000.
 - A block-mode GPU DMA that backs up behind the drawing waits for it, as the
   request line holds the channel on the console. The words already landed
   (since the FIFO pacing change); the transfer still finished in a few
