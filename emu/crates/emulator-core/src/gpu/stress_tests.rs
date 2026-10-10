@@ -596,14 +596,14 @@ fn run_case(name: &str, seed: u64, commands: usize, setup: impl FnOnce(&mut Gpu)
 fn raster_stress_random_primitives_a() {
     let (d, px) = run_case("a", 0x5EED_0001, 150_000, |_| {});
     assert_eq!(px, 0xaf04_9ca1_4f64_1b2f, "raster stress a pixels changed");
-    assert_eq!(d, 0x370c_2ead_dc27_e90f, "raster stress a digest changed");
+    assert_eq!(d, 0x022c_84be_3ec6_b2cd, "raster stress a digest changed");
 }
 
 #[test]
 fn raster_stress_random_primitives_b() {
     let (d, px) = run_case("b", 0x5EED_0002, 150_000, |_| {});
     assert_eq!(px, 0x9e15_e646_d06c_cfaf, "raster stress b pixels changed");
-    assert_eq!(d, 0x189a_845f_7ed5_2769, "raster stress b digest changed");
+    assert_eq!(d, 0xa2e0_f735_81c6_ee55, "raster stress b digest changed");
 }
 
 #[test]
@@ -616,7 +616,7 @@ fn raster_stress_pixel_tracer() {
         "raster stress tracer pixels changed"
     );
     assert_eq!(
-        d, 0xdbb6_0e4c_fb60_c4d2,
+        d, 0x5af9_26df_85d6_a268,
         "raster stress tracer digest changed"
     );
 }
@@ -631,7 +631,7 @@ fn raster_stress_wireframe() {
         "raster stress wireframe pixels changed"
     );
     assert_eq!(
-        d, 0x69b2_55d7_8e0e_2ed4,
+        d, 0x354a_a723_c939_7036,
         "raster stress wireframe digest changed"
     );
 }

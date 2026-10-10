@@ -3106,7 +3106,62 @@ fn textured_triangle_cost(gpu: &mut Gpu, size: i32, tpage: u32, clut: u32) -> u6
     ];
     let cost = gpu.gp0_packet_timing_cost(0x24);
     let pixels = std::mem::take(gpu.timing_pixels.get_mut());
-    cost + gpu.texture_timing_surcharge(0x24, pixels)
+    let area = std::mem::take(gpu.timing_area.get_mut());
+    cost + gpu.texture_timing_surcharge(0x24, pixels, area)
+}
+
+/// hwtest v2.4 records 0x8E0 to 0x8F6 (sixteen 32 x 32 triangles, the texture
+/// coordinates spanning `span` texels; the console drew half their rows, so a
+/// triangle here, drawing all of them, pays twice the console's extra clocks
+/// a triangle): in the cache nothing extra, then the extra clocks by the
+/// console's rows.
+#[test]
+fn textured_triangles_pay_when_their_texels_outgrow_the_cache() {
+    let pos = |x: u32, y: u32| (y << 16) | x;
+    let extra = |depth: u32, span: u32| {
+        let mut gpu = Gpu::new();
+        gpu.write32(GP1_ADDR, 0x0300_0000);
+        gpu.write32(GP1_ADDR, 0x0800_0001);
+        open_draw_area(&mut gpu);
+        gpu.write32(GP0_ADDR, 0xE100_0000);
+        gpu.gp0_fifo = vec![
+            0x2480_8080,
+            pos(0, 0),
+            0,
+            pos(32, 0),
+            ((depth << 7) << 16) | span,
+            pos(0, 32),
+            span << 8,
+        ];
+        let first = gpu.gp0_packet_timing_cost(0x24);
+        let pixels = std::mem::take(gpu.timing_pixels.get_mut());
+        let area = std::mem::take(gpu.timing_area.get_mut());
+        // Nothing is cached yet, so only the read and cliff terms show; the
+        // read term is taken off by the span-32 call.
+        let surcharge = gpu.texture_timing_surcharge(0x24, pixels, area);
+        (first, surcharge)
+    };
+    for (depth, span, console) in [
+        (0, 64, 0u64),
+        (0, 128, 581),
+        (0, 255, 1213),
+        (1, 32, 0),
+        (1, 64, 416),
+        (1, 128, 1322),
+        (1, 255, 2416),
+        (2, 32, 0),
+        (2, 64, 1062),
+        (2, 128, 2487),
+        (2, 255, 2487),
+    ] {
+        let got = extra(depth, span).1.saturating_sub(extra(depth, 32).1);
+        let console = console * 2;
+        let (low, high) = (console * 6 / 10, console * 14 / 10 + 2);
+        assert!(
+            (low..=high).contains(&got),
+            "depth {depth} span {span}: {got} against the console's {console}"
+        );
+    }
 }
 
 #[test]

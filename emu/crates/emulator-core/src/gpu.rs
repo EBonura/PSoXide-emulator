@@ -545,6 +545,10 @@ pub struct Gpu {
     /// so `Gpu` stays `Sync`; it is written with plain relaxed loads/stores.
     #[serde(skip)]
     timing_pixels: std::sync::atomic::AtomicU64,
+    /// The same packet's screen area before the 480i rule took its skipped
+    /// rows off, for the texture density of [`Gpu::texture_cliff_cost`].
+    #[serde(skip)]
+    timing_area: std::sync::atomic::AtomicU64,
     /// Count of GP1 writes by opcode byte. Same diagnostic role as
     /// gp0_opcode_hist but for the display / control port. Excluded
     /// from save states.
@@ -870,6 +874,7 @@ impl Gpu {
             timing_tex_clut: 0,
             timing_tex_valid: false,
             timing_pixels: std::sync::atomic::AtomicU64::new(0),
+            timing_area: std::sync::atomic::AtomicU64::new(0),
             gp1_opcode_hist: [0; 256],
             display_start_history: std::collections::BTreeSet::new(),
             display_mode_history: std::collections::BTreeSet::new(),
@@ -2071,7 +2076,7 @@ impl Gpu {
     /// A moving UV window within one page, which the console also charges for
     /// (15-bit 16x32: 227), is not modelled. Returns 0 for anything that does
     /// not sample a texture.
-    fn texture_timing_surcharge(&mut self, op: u8, pixels: u64) -> u64 {
+    fn texture_timing_surcharge(&mut self, op: u8, pixels: u64, area: u64) -> u64 {
         let (clut, key) = match op {
             0x24..=0x27 | 0x2C..=0x2F => (self.gp0_fifo[2] >> 16, self.gp0_fifo[4] >> 16),
             0x34..=0x37 | 0x3C..=0x3F => (self.gp0_fifo[2] >> 16, self.gp0_fifo[5] >> 16),
@@ -2092,7 +2097,15 @@ impl Gpu {
         const REFILL_Q8: [u64; 3] = [256, 397, 717];
         const REFILL_START: u64 = 24;
         const CLUT_RELOAD: [u64; 3] = [25, 270, 0];
-        let mut cost = pixels * READ_Q8[depth] / 256;
+        // With the 480i rule skipping rows the read costs nothing a pixel:
+        // 4, 8 and 15-bit triangles that fit the cache took the same 5.4k
+        // clocks for sixteen (hwtest v2.4, records 0x8E0 to 0x8F8).
+        let read = if self.skipped_row_parity() >= 0 {
+            0
+        } else {
+            READ_Q8[depth]
+        };
+        let mut cost = pixels * read / 256 + self.texture_cliff_cost(op, depth, pixels, area);
         if self.timing_tex_valid {
             if key != self.timing_tex_key {
                 cost += pixels.saturating_sub(REFILL_START) * REFILL_Q8[depth] / 256;
@@ -2105,6 +2118,63 @@ impl Gpu {
         self.timing_tex_key = key;
         self.timing_tex_clut = clut;
         cost
+    }
+
+    /// What a textured triangle pays when the texels it reads outgrow the
+    /// texture cache (hwtest v2.4, records 0x8E0 to 0x92B: sixteen 32 x 32
+    /// triangles, the texture coordinates swept over 8 to 255 texels).
+    ///
+    /// Footprints that fit the cache cost nothing (5.4k clocks for the
+    /// sixteen at every depth); past it, each drawn pixel pays in proportion
+    /// to the bytes its step across the texture advances, as the misses do:
+    /// the extra per pixel read 2.3 and 4.7 (4-bit), 1.6, 5.2 and 9.4 (8-bit)
+    /// and 4.2 and 9.7 twice (15-bit) at steps of 2, 4 and 8 bytes a pixel and
+    /// beyond, which is 1.2 clocks per byte of step up to 9.7. The footprint
+    /// ramps in between 1 KB and 2.5 KB, since the 2 KB cache is
+    /// only part thrashed at 2 KB (8-bit span 64). A texture window changes
+    /// the pattern (only the 15-bit 64-texel window paid, 11k a row) and is
+    /// not modelled: those triangles are charged nothing here.
+    fn texture_cliff_cost(&self, op: u8, depth: usize, pixels: u64, area: u64) -> u64 {
+        if area == 0 || pixels == 0 || self.tex_window_mask_x | self.tex_window_mask_y != 0 {
+            return 0;
+        }
+        let uv = |index: usize| {
+            let word = self.gp0_fifo[index];
+            ((word & 0xFF) as i64, ((word >> 8) & 0xFF) as i64)
+        };
+        let corners: &[usize] = match op {
+            0x24..=0x27 => &[2, 4, 6],
+            0x2C..=0x2F => &[2, 4, 6, 8],
+            0x34..=0x37 => &[2, 5, 8],
+            0x3C..=0x3F => &[2, 5, 8, 11],
+            _ => return 0,
+        };
+        let cross = |a: (i64, i64), b: (i64, i64), c: (i64, i64)| {
+            ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)).unsigned_abs()
+        };
+        let p: Vec<(i64, i64)> = corners.iter().map(|&i| uv(i)).collect();
+        // Twice the area in texels; a quad is two triangles.
+        let mut texels_x2 = cross(p[0], p[1], p[2]);
+        if p.len() == 4 {
+            texels_x2 += cross(p[1], p[2], p[3]);
+        }
+        // Texels a pixel (Q16), its square root the step in each direction
+        // (Q8), then the bytes the step advances.
+        let ratio_q16 = (texels_x2 << 15) / area.max(1);
+        let step_q8 = isqrt_u64(ratio_q16);
+        let advance_q8 = match depth {
+            0 => step_q8 / 2,
+            1 => step_q8,
+            _ => step_q8 * 2,
+        };
+        let per_pixel_q8 = (advance_q8 * 307 / 256).min(2483);
+        let bytes = match depth {
+            0 => texels_x2 / 4,
+            1 => texels_x2 / 2,
+            _ => texels_x2,
+        };
+        let ramp_q8 = (bytes.saturating_sub(1024) * 256 / 1536).min(256);
+        pixels * per_pixel_q8 / 256 * ramp_q8 / 256
     }
 
     /// `max(setup, fill)`: the setup of a primitive overlaps its own fill.
@@ -2122,6 +2192,7 @@ impl Gpu {
             return setup;
         }
         let pixels = self.timing_polygon_pixels(vertices);
+        self.note_timing_area(pixels);
         let top = vertices.iter().map(|v| v.1).min().unwrap_or(0);
         let bottom = vertices.iter().map(|v| v.1).max().unwrap_or(0);
         let clip_top = (self.draw_area_top as i32).max(0);
@@ -2193,6 +2264,12 @@ impl Gpu {
         }
         let rows = u64::from(self.field_rule_drawn_rows(first as u32, lines as u32));
         pixels * rows / lines
+    }
+
+    fn note_timing_area(&self, area: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.timing_area
+            .store(self.timing_area.load(Relaxed).saturating_add(area), Relaxed);
     }
 
     fn note_timing_pixels(&self, pixels: u64) {
@@ -2866,7 +2943,8 @@ impl Gpu {
         // Setup is part of the fitted per-primitive cost.
         let timing_cost = self.gp0_packet_timing_cost(op as u8);
         let pixels = std::mem::take(self.timing_pixels.get_mut());
-        let timing_cost = timing_cost + self.texture_timing_surcharge(op as u8, pixels);
+        let area = std::mem::take(self.timing_area.get_mut());
+        let timing_cost = timing_cost + self.texture_timing_surcharge(op as u8, pixels, area);
         self.work.pixels = self.work.pixels.saturating_add(pixels);
         self.gp0_opcode_hist[op as usize] = self.gp0_opcode_hist[op as usize].saturating_add(1);
         self.gp0_timing_hist[op as usize] =
@@ -4772,6 +4850,20 @@ fn tri_bbox(v: [(i32, i32); 3]) -> (i32, i32, i32, i32) {
         xs[0].max(xs[1]).max(xs[2]),
         ys[0].max(ys[1]).max(ys[2]),
     )
+}
+
+/// Integer square root, rounded down.
+fn isqrt_u64(value: u64) -> u64 {
+    if value < 2 {
+        return value;
+    }
+    let mut x = value;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + value / x) / 2;
+    }
+    x
 }
 
 fn scale_gpu_pixels(pixels: u64, numerator: u64, denominator: u64) -> u64 {
