@@ -90,21 +90,54 @@ const BYTE_BIT_TIMES: u64 = 10;
 /// Serial-transfer time for one byte when BAUD is zero: the BIOS's common
 /// BAUD of 0x88.
 const DEFAULT_TRANSFER_TICKS: u64 = 0x88 * BYTE_BIT_TIMES;
-// `/ACK` timing, from hwtest v2.1 on a console (one pad, id 0x73; two memory
-// cards). The rise is measured from the DATA write and the width between the
-// edges, both through a STAT polling loop. Medians over the bytes of a poll:
-// pad rise 1677 and width 92; slot 1 card 1511 and 38; slot 2 card 1529 and
-// 74. The rise below is that less the ten bit times (1360), less the few
-// clocks the probe's own read adds on the emulator, so the probe reads the
-// console's figure back.
-/// Clocks from the end of a pad byte to its `/ACK` rising.
-const PAD_ACK_DELAY_TICKS: u64 = 309;
-/// Clocks from the end of a memory card byte to `/ACK` rising, slot 1 and 2.
-const MEMCARD_ACK_DELAY_TICKS: [u64; 2] = [143, 161];
-/// `/ACK` is a pulse, not a sticky level: its width for a pad and a card in
-/// slot 1 and 2.
+// `/ACK` timing, from hwtest v2.2 on a console (an SCPH-110 with its pad,
+// id 0x73, and cards in both slots). The rise is measured from the DATA write
+// and the width between the edges, both through a STAT polling loop; the
+// figures below are those less the ten bit times (1360) and the few clocks
+// the probe's own read adds on the emulator, so the probe reads the console's
+// figure back. The device answers each byte of a transaction in its own time,
+// so the delay depends on the byte's place in it.
+//
+// Pad, bytes 0 to 7 (the ninth byte of a poll draws no `/ACK`); the console's
+// rise was 1665, 1678, 1627, 1629, 1468, 1695, 1695, 1692 clocks, width 92.
+const PAD_ACK_DELAYS: [u64; 8] = [290, 311, 260, 262, 101, 320, 320, 325];
+/// Clocks from the end of a pad byte to its `/ACK` rising, for a byte past
+/// the table.
+const PAD_ACK_DELAY_TICKS: u64 = 328;
+// Memory card, slot 1 and 2, bytes 0 to 3 (select, command, ID bytes) as
+// measured: rise 1717, 1682, 1523, 1516 and 1691, 1552, 1465, 1497, width 44
+// and 68, 68, 80, 80. The bytes after those were not timed one by one; the
+// delay for them is fitted so a whole frame read, 140 bytes, takes what the
+// console's did, 124 HBlanks in slot 1 and 138 to 139 in slot 2 (records
+// 0x641 and 0x649, 0x693).
+const MEMCARD_ACK_DELAYS: [[u64; 4]; 2] = [[352, 309, 146, 146], [316, 177, 90, 122]];
+/// Fitted delay for the card bytes after the fourth, slot 1 and 2.
+const MEMCARD_DATA_ACK_DELAY_TICKS: [u64; 2] = [308, 512];
+/// `/ACK` is a pulse, not a sticky level: its width for a pad and for a card
+/// in slot 1 and 2 (bytes 0 to 3, then the rest).
 const PAD_ACK_PULSE_TICKS: u64 = 92;
-const MEMCARD_ACK_PULSE_TICKS: [u64; 2] = [38, 74];
+const PAD_ACK_PULSES: [u64; 8] = [100, 92, 92, 92, 92, 92, 92, 92];
+const MEMCARD_ACK_PULSES: [[u64; 4]; 2] = [[38, 44, 48, 50], [74, 74, 86, 86]];
+const MEMCARD_DATA_ACK_PULSE_TICKS: [u64; 2] = [44, 86];
+
+/// `/ACK` delay and pulse width of byte `index` of a transaction.
+fn ack_timing(is_card: bool, slot: usize, index: u32) -> (u64, u64) {
+    let index = index as usize;
+    if is_card {
+        match MEMCARD_ACK_DELAYS[slot].get(index) {
+            Some(&delay) => (delay, MEMCARD_ACK_PULSES[slot][index]),
+            None => (
+                MEMCARD_DATA_ACK_DELAY_TICKS[slot],
+                MEMCARD_DATA_ACK_PULSE_TICKS[slot],
+            ),
+        }
+    } else {
+        match PAD_ACK_DELAYS.get(index) {
+            Some(&delay) => (delay, PAD_ACK_PULSES[index]),
+            None => (PAD_ACK_DELAY_TICKS, PAD_ACK_PULSE_TICKS),
+        }
+    }
+}
 
 /// SIO0 state. Register-level accuracy for the "nothing plugged in"
 /// path; no shift-clock simulation, but every byte-write pulses an
@@ -161,6 +194,10 @@ pub struct Sio0 {
     /// Width of the `/ACK` pulse of the byte on the wire.
     #[serde(default)]
     ack_pulse_ticks: u64,
+    /// Bytes clocked since the port was selected: the devices answer each
+    /// byte of a transaction in their own time.
+    #[serde(default)]
+    byte_index: u32,
     /// Device on port 1 (controller slot 1 + memory card 1).
     port1: crate::pad::PortDevice,
     /// Device on port 2 (controller slot 2 + memory card 2).
@@ -214,6 +251,7 @@ impl Sio0 {
             ack_end_deadline: None,
             ack_delay_ticks: PAD_ACK_DELAY_TICKS,
             ack_pulse_ticks: PAD_ACK_PULSE_TICKS,
+            byte_index: 0,
             port1: crate::pad::PortDevice::empty()
                 .with_pad(crate::pad::DigitalPad::new())
                 .with_memcard(crate::pad::MemoryCard::new()),
@@ -538,6 +576,8 @@ impl Sio0 {
         let selected = self.ctrl & ctrl_bit::JOYN_OUTPUT != 0;
         let force_rx_once = self.ctrl & ctrl_bit::FORCE_RX_ONCE != 0;
         let receive_enabled = selected || force_rx_once;
+        let byte_index = self.byte_index;
+        self.byte_index = self.byte_index.saturating_add(1);
         let (rx, ack, _device_present, ack_delay_ticks, ack_pulse_ticks) = if selected {
             // Slow original-controller timing: a byte clocked before the
             // previous byte's `/ACK` deadline arrives while the device is still
@@ -556,11 +596,8 @@ impl Sio0 {
                 let slot = usize::from(self.ctrl & ctrl_bit::SLOT != 0);
                 let port = self.active_port();
                 let result = port.exchange_detailed_at(value, now);
-                let (ack_delay_ticks, ack_pulse_ticks) = if port.selected_is_memcard() {
-                    (MEMCARD_ACK_DELAY_TICKS[slot], MEMCARD_ACK_PULSE_TICKS[slot])
-                } else {
-                    (PAD_ACK_DELAY_TICKS, PAD_ACK_PULSE_TICKS)
-                };
+                let (ack_delay_ticks, ack_pulse_ticks) =
+                    ack_timing(port.selected_is_memcard(), slot, byte_index);
                 (
                     result.rx,
                     result.ack,
@@ -615,6 +652,7 @@ impl Sio0 {
             self.irq_latched = false;
             self.pending_rx = 0xFF;
             self.pending_rx_valid = false;
+            self.byte_index = 0;
             self.queued_tx = None;
             self.pending_ack = false;
             self.pending_dsr_timeout = false;
@@ -645,6 +683,7 @@ impl Sio0 {
         let old_joyn = self.last_joyn;
         let new_joyn = new_ctrl & ctrl_bit::JOYN_OUTPUT != 0;
         if old_joyn && !new_joyn {
+            self.byte_index = 0;
             self.ack_input = false;
             self.queued_tx = None;
             self.pending_ack = false;
@@ -950,14 +989,14 @@ mod tests {
         assert_ne!(stat & stat_bit::RX_NOT_EMPTY, 0, "the byte has arrived");
         assert_eq!(stat & stat_bit::IRQ, 0, "ACK follows the byte");
 
-        sio.tick(DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS - 1);
+        sio.tick(DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAYS[0] - 1);
         assert_eq!(
             sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::IRQ,
             0,
             "IRQ must not fire before the pad's ACK delay"
         );
 
-        sio.tick(DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS);
+        sio.tick(DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAYS[0]);
         let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
         assert_ne!(stat & stat_bit::ACK_INPUT, 0, "ACK input should be visible");
         assert_ne!(stat & stat_bit::IRQ, 0, "STAT IRQ bit should latch");
@@ -1231,7 +1270,7 @@ mod tests {
         sio.tick(10 + DEFAULT_TRANSFER_TICKS);
         assert_eq!(
             sio.debug_ack_deadline(),
-            Some(10 + DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS),
+            Some(10 + DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAYS[0]),
             "and /ACK rises the pad's delay behind it"
         );
         assert_eq!(sio.pop_rx(), 0xFF, "select byte answer");
@@ -1332,5 +1371,80 @@ mod tests {
             0,
             "ACK pulse should self-clear"
         );
+    }
+
+    /// A device answers each byte of a transaction in its own time, so the
+    /// `/ACK` delay follows the byte's place in it, from the select byte on,
+    /// and starts over when the port is deselected.
+    #[test]
+    fn the_ack_delay_follows_the_bytes_place_in_the_transaction() {
+        use crate::pad::{DigitalPad, PortDevice};
+
+        let mut sio = Sio0::new();
+        sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
+        sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT);
+        let t = DEFAULT_TRANSFER_TICKS;
+        let mut now = 100u64;
+        for (index, tx) in [0x01u8, 0x42, 0x00, 0x00].into_iter().enumerate() {
+            sio.write8_at(Sio0::BASE, tx, now);
+            sio.tick(now + t);
+            assert_eq!(
+                sio.debug_ack_deadline(),
+                Some(now + t + PAD_ACK_DELAYS[index]),
+                "byte {index}"
+            );
+            now += t + PAD_ACK_DELAYS[index] + 1;
+            sio.tick(now);
+        }
+        // Deselecting starts the next transaction at its first byte again.
+        sio.write16(Sio0::BASE + 0xA, 0);
+        sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT);
+        sio.write8_at(Sio0::BASE, 0x01, now);
+        sio.tick(now + t);
+        assert_eq!(
+            sio.debug_ack_deadline(),
+            Some(now + t + PAD_ACK_DELAYS[0]),
+            "the first byte of the next poll"
+        );
+    }
+
+    /// Past the four header bytes a card answers in the fitted data delay.
+    #[test]
+    fn a_card_answers_its_data_bytes_in_the_fitted_delay() {
+        use crate::pad::{MemoryCard, PortDevice};
+
+        for slot in 0..2usize {
+            let mut sio = Sio0::new();
+            let card = PortDevice::empty().with_memcard(MemoryCard::new());
+            let ctrl = if slot == 0 {
+                ctrl_bit::JOYN_OUTPUT
+            } else {
+                ctrl_bit::JOYN_OUTPUT | ctrl_bit::SLOT
+            };
+            if slot == 0 {
+                sio.attach_port1(card);
+            } else {
+                sio.attach_port2(card);
+            }
+            sio.write16(Sio0::BASE + 0xA, ctrl);
+            let t = DEFAULT_TRANSFER_TICKS;
+            let mut now = 100u64;
+            // Select, read command, two ID bytes, then address and data.
+            for (index, tx) in [0x81u8, 0x52, 0, 0, 0, 0, 0, 0].into_iter().enumerate() {
+                sio.write8_at(Sio0::BASE, tx, now);
+                sio.tick(now + t);
+                let want = match MEMCARD_ACK_DELAYS[slot].get(index) {
+                    Some(&delay) => delay,
+                    None => MEMCARD_DATA_ACK_DELAY_TICKS[slot],
+                };
+                assert_eq!(
+                    sio.debug_ack_deadline(),
+                    Some(now + t + want),
+                    "slot {slot} byte {index}"
+                );
+                now += t + want + 1;
+                sio.tick(now);
+            }
+        }
     }
 }
