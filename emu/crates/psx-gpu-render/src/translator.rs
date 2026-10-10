@@ -57,6 +57,9 @@ pub struct Translator {
     /// Filled polygons become edge strips; rectangles remain filled
     /// to match the CPU rasterizer's debug path.
     wireframe: bool,
+    /// Constants of the axis-aligned quad walk for the quad being emitted
+    /// (see [`axis_quad_words`]); its halves carry them as `AXIS_UV`.
+    axis_quad: Option<[[u32; 4]; 4]>,
     /// The primitive being lowered is a GP0 polygon (triangle or quad), so
     /// its vertices are tagged `fbits::CORNER_SAMPLED`. Set per event in
     /// `process`; rectangles, fills and lines clear it.
@@ -75,6 +78,7 @@ impl Translator {
         Self {
             interp: Interpreter::new(),
             wireframe: false,
+            axis_quad: None,
             polygon: false,
             flat: Vec::with_capacity(4 * 1024),
             runs: Vec::with_capacity(1024),
@@ -292,6 +296,7 @@ impl Translator {
                     uv: [0, 0],
                     flags: 0,
                     tex_window: 0,
+                    planes: [[0; 4]; 4],
                 },
             );
         }
@@ -493,6 +498,20 @@ impl Translator {
             self.push_wire_tri(v1, color, v3, color, v2, color, BlendKind::Opaque);
             self.push_wire_tri(v0, color, v1, color, v2, color, BlendKind::Opaque);
         } else {
+            // The CPU draws a flat quad laid out as a sprite with its own
+            // walker, and drops the whole quad when either half is too big.
+            let uv_i = |t: (u8, u8)| (i32::from(t.0), i32::from(t.1));
+            let axis = axis_quad_words(
+                [v0, v1, v2, v3],
+                [uv_i(uv0), uv_i(uv1), uv_i(uv2), uv_i(uv3)],
+            );
+            if axis.is_some()
+                && (triangle_exceeds_hw_extent(v1, v3, v2)
+                    || triangle_exceeds_hw_extent(v0, v1, v2))
+            {
+                return;
+            }
+            self.axis_quad = axis;
             self.push_tex_tri_psx(
                 v1,
                 uv16(uv1),
@@ -515,6 +534,7 @@ impl Translator {
                 prim_flags,
                 kind,
             );
+            self.axis_quad = None;
         }
     }
 
@@ -622,12 +642,30 @@ impl Translator {
     ) {
         let clip = self.current_clip();
         let tex_window = self.tex_window_word();
+        // A polygon's texture coordinates are the CPU's plane; a rectangle's
+        // are an exact one-texel step the host interpolates without error.
+        let (prim_flags, planes) = if let Some(axis) = self.axis_quad {
+            (prim_flags | fbits::AXIS_UV, axis)
+        } else if self.polygon && !self.wireframe {
+            let uv_i = |uv: (u16, u16)| (i32::from(uv.0), i32::from(uv.1));
+            let Some(planes) = attribute_planes(
+                [v0, v1, v2],
+                [(0, 0, 0); 3],
+                [uv_i(uv0), uv_i(uv1), uv_i(uv2)],
+            ) else {
+                return;
+            };
+            (prim_flags | fbits::PLANE_UV, planes)
+        } else {
+            (prim_flags, [[0; 4]; 4])
+        };
         let make = |v: (i32, i32), uv: (u16, u16)| HwVertex {
             pos: [v.0 as i16, v.1 as i16],
             color,
             uv: [uv.0, uv.1],
             flags: prim_flags,
             tex_window,
+            planes,
         };
         self.push_vertex(kind, clip, make(v0, uv0));
         self.push_vertex(kind, clip, make(v1, uv1));
@@ -757,12 +795,26 @@ impl Translator {
         kind: BlendKind,
     ) {
         let clip = self.current_clip();
+        // Only a GP0 polygon follows the CPU's plane; the line and wireframe
+        // bands that share this helper are the host's own shapes.
+        let mut planes = [[0; 4]; 4];
+        let mut prim_flags = prim_flags;
+        if self.polygon && !self.wireframe {
+            let rgb = |c: [u8; 4]| (i32::from(c[0]), i32::from(c[1]), i32::from(c[2]));
+            let Some(p) = attribute_planes([v0, v1, v2], [rgb(c0), rgb(c1), rgb(c2)], [(0, 0); 3])
+            else {
+                return;
+            };
+            planes = p;
+            prim_flags |= fbits::PLANE_RGB;
+        }
         let make = |v: (i32, i32), c: [u8; 4]| HwVertex {
             pos: [v.0 as i16, v.1 as i16],
             color: c,
             uv: [0, 0],
             flags: prim_flags,
             tex_window: 0,
+            planes,
         };
         self.push_vertex(kind, clip, make(v0, c0));
         self.push_vertex(kind, clip, make(v1, c1));
@@ -840,12 +892,23 @@ impl Translator {
     ) {
         let clip = self.current_clip();
         let tex_window = self.tex_window_word();
+        let rgb = |c: [u8; 4]| (i32::from(c[0]), i32::from(c[1]), i32::from(c[2]));
+        let uv_i = |uv: (u16, u16)| (i32::from(uv.0), i32::from(uv.1));
+        let Some(planes) = attribute_planes(
+            [v0, v1, v2],
+            [rgb(c0), rgb(c1), rgb(c2)],
+            [uv_i(uv0), uv_i(uv1), uv_i(uv2)],
+        ) else {
+            return;
+        };
+        let prim_flags = prim_flags | fbits::PLANE_RGB | fbits::PLANE_UV;
         let make = |v: (i32, i32), uv: (u16, u16), c: [u8; 4]| HwVertex {
             pos: [v.0 as i16, v.1 as i16],
             color: c,
             uv: [uv.0, uv.1],
             flags: prim_flags,
             tex_window,
+            planes,
         };
         self.push_vertex(kind, clip, make(v0, uv0, c0));
         self.push_vertex(kind, clip, make(v1, uv1, c1));
@@ -879,6 +942,7 @@ impl Translator {
             uv: [0, 0],
             flags: 0,
             tex_window: 0,
+            planes: [[0; 4]; 4],
         };
         // Two tris covering [x..x+w] × [y..y+h]. Same winding as
         // push_mono_rect -- semi-trans / mask-bit behaviour stays
@@ -970,6 +1034,86 @@ impl Translator {
             dy += chunk_h;
         }
     }
+}
+
+/// The CPU rasterizer's attribute planes for one triangle, in the order the
+/// CPU hands it the vertices (`emulator_core::gpu::tri_raster_setup`), packed
+/// the way `HwVertex::planes` carries them. `None` when the CPU draws
+/// nothing: an attribute triangle with a zero determinant or no height.
+fn attribute_planes(
+    v: [(i32, i32); 3],
+    rgb: [(i32, i32, i32); 3],
+    uv: [(i32, i32); 3],
+) -> Option<[[u32; 4]; 4]> {
+    let setup = emulator_core::gpu::tri_raster_setup(v, rgb, uv, true)?;
+    let mut words = [0u32; 16];
+    for (channel, (dadx, dady, base)) in setup.planes.into_iter().enumerate() {
+        words[channel * 3] = dadx;
+        words[channel * 3 + 1] = dady;
+        words[channel * 3 + 2] = base;
+    }
+    let mut planes = [[0u32; 4]; 4];
+    for (i, word) in words.into_iter().enumerate() {
+        planes[i / 4][i % 4] = word;
+    }
+    Some(planes)
+}
+
+/// The constants of the CPU's axis-aligned textured quad walk
+/// (`Gpu::rasterize_axis_aligned_textured_quad`): a flat textured quad whose
+/// vertices run top-left, top-right, bottom-left, bottom-right is not two
+/// planes but a four-edge walk, Q12 per row: each row's left and right UV
+/// are `start + row * step`, and the pixels between them step by the row's
+/// span divided by the width (truncated). Packed for `AXIS_UV` as
+/// `[left, top, width, left_u0, left_v0, right_u0, right_v0, d_left_u,
+/// d_left_v, d_right_u, d_right_v]`, all as i32 words. `None` when the quad
+/// does not take that path (or has no area, where the CPU draws nothing).
+fn axis_quad_words(v: [(i32, i32); 4], uv: [(i32, i32); 4]) -> Option<[[u32; 4]; 4]> {
+    let [v0, v1, v2, v3] = v;
+    let [t0, t1, t2, t3] = uv;
+    if v0.1 != v1.1 || v2.1 != v3.1 || v0.0 != v2.0 || v1.0 != v3.0 {
+        return None;
+    }
+    let (x0, x1, y0, y1) = (v0.0, v1.0, v0.1, v2.1);
+    let (left, right) = (x0.min(x1), x0.max(x1));
+    let (top, bottom) = (y0.min(y1), y0.max(y1));
+    let (width, height) = (right - left, bottom - top);
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let (top_a, bottom_a, top_b, bottom_b) = if y0 <= y1 {
+        (t0, t2, t1, t3)
+    } else {
+        (t2, t0, t3, t1)
+    };
+    let (left_top, left_bottom, right_top, right_bottom) = if x0 <= x1 {
+        (top_a, bottom_a, top_b, bottom_b)
+    } else {
+        (top_b, bottom_b, top_a, bottom_a)
+    };
+    const SHIFT: i64 = 12;
+    const HALF: i64 = 1 << (SHIFT - 1);
+    let start = |t: i32| ((i64::from(t)) << SHIFT) + HALF;
+    let step =
+        |a: i32, b: i32| (((i64::from(b) - i64::from(a)) << SHIFT) / i64::from(height)) as i32;
+    let words: [i32; 11] = [
+        left,
+        top,
+        width,
+        start(left_top.0) as i32,
+        start(left_top.1) as i32,
+        start(right_top.0) as i32,
+        start(right_top.1) as i32,
+        step(left_top.0, left_bottom.0),
+        step(left_top.1, left_bottom.1),
+        step(right_top.0, right_bottom.0),
+        step(right_top.1, right_bottom.1),
+    ];
+    let mut planes = [[0u32; 4]; 4];
+    for (i, w) in words.into_iter().enumerate() {
+        planes[i / 4][i % 4] = w as u32;
+    }
+    Some(planes)
 }
 
 // Same limits as emulator-core::gpu::raster. Apply after signed vertex
