@@ -789,6 +789,7 @@ fn filtered_out_xa_audio_sectors_are_not_queued_as_data() {
 #[test]
 fn pause_on_spun_up_drive_uses_short_followup_delay() {
     let mut cd = CdRom::new();
+    cd.disc_present = true;
     cd.motor_on = true;
     cd.reading = true;
     cd.scheduling_cycle = 1_000;
@@ -820,9 +821,57 @@ fn pause_on_spun_up_drive_uses_short_followup_delay() {
         .iter()
         .find(|ev| ev.irq == IrqType::Complete)
         .expect("pause completion chained off ACK");
+    // Out of a read the drive finishes its sector first.
     assert_eq!(
         pause_complete.deadline,
-        ack_deadline + 1 + PAUSE_COMPLETE_CYCLES_STANDBY
+        ack_deadline + 1 + PAUSE_FROM_READ_CYCLES
+    );
+}
+
+/// hwtest v2.4 records 0x500 to 0x507: just after a Pause's first response
+/// the drive still reads, and no second response has arrived.
+#[test]
+fn a_pause_out_of_a_read_leaves_the_drive_reading_until_it_completes() {
+    let mut cd = CdRom::new();
+    cd.disc_present = true;
+    cd.motor_on = true;
+    cd.reading = true;
+    cd.scheduling_cycle = 1_000;
+    cd.insert_pending_event(PendingEvent {
+        command: 0x06,
+        deadline: 20_000_000,
+        irq: IrqType::DataReady,
+        bytes: vec![0x20],
+        followup: None,
+    });
+    cd.cmd_pause();
+    let ack_deadline = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES;
+    assert!(cd.tick(ack_deadline + 1));
+    cd.irq_flag = 0;
+    cd.read8(BASE + 1);
+    // Nothing more arrives for a while, and a GetStat in the meantime sees
+    // the drive reading.
+    cd.scheduling_cycle = ack_deadline + 50_000;
+    assert!(!cd.tick(ack_deadline + 50_000));
+    cd.last_command = 0x01;
+    cd.cmd_getstat();
+    assert_eq!(
+        cd.pending
+            .iter()
+            .find(|ev| ev.command == 0x01)
+            .map(|ev| ev.bytes[0]),
+        Some(drive_status_bit::MOTOR_ON | drive_status_bit::READING)
+    );
+    // Once the Pause has completed the status is the stopped one.
+    cd.pending.clear();
+    cd.scheduling_cycle = ack_deadline + 1 + PAUSE_FROM_READ_CYCLES + 1;
+    cd.cmd_getstat();
+    assert_eq!(
+        cd.pending
+            .iter()
+            .find(|ev| ev.command == 0x01)
+            .map(|ev| ev.bytes[0]),
+        Some(drive_status_bit::MOTOR_ON)
     );
 }
 
