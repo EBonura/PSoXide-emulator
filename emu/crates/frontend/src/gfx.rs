@@ -62,6 +62,9 @@ pub struct Graphics {
     /// mirror (no CPU decode, no re-upload); the debug sidebar samples
     /// it through [`Graphics::vram_texture_id`].
     vram_view: wgpu::TextureView,
+    /// The same texture through a raw-byte view, which the GPU-side expand
+    /// renders to so the debug view shows the VRAM display codes unchanged.
+    vram_render_view: wgpu::TextureView,
     /// egui's requested time-to-next-repaint from the last frame
     /// (`Duration::MAX` when nothing is animating). Feeds the shell's
     /// redraw scheduler.
@@ -174,6 +177,10 @@ impl Graphics {
 
         let vram_texture = create_rgba_texture(&device, "psoxide3-vram");
         let vram_view = vram_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let vram_render_view = vram_texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(psx_gpu_render::RENDER_FORMAT),
+            ..Default::default()
+        });
         let vram_texture_id =
             egui_renderer.register_native_texture(&device, &vram_view, wgpu::FilterMode::Nearest);
 
@@ -210,6 +217,7 @@ impl Graphics {
             egui_winit,
             egui_renderer,
             vram_view,
+            vram_render_view,
             last_repaint_delay: std::time::Duration::MAX,
             close_requested: false,
             vram_texture_id,
@@ -441,7 +449,7 @@ impl Graphics {
     /// the mirror itself is kept current by `render_hw_frame`. The
     /// caller gates this on the debug sidebar being visible.
     pub fn prepare_vram(&self) {
-        self.hw_renderer.blit_vram_to_view(&self.vram_view);
+        self.hw_renderer.blit_vram_to_view(&self.vram_render_view);
     }
 
     /// Upload the CPU-decoded visible display area for presentation cases the
@@ -715,11 +723,12 @@ fn create_rgba_texture(device: &wgpu::Device, label: &'static str) -> wgpu::Text
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        // RENDER_ATTACHMENT: filled by the GPU-side VRAM expand blit.
+        // RENDER_ATTACHMENT: filled by the GPU-side VRAM expand blit, through
+        // the raw-byte view.
         usage: wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_DST
             | wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
+        view_formats: &[psx_gpu_render::RENDER_FORMAT],
     })
 }
 

@@ -63,6 +63,8 @@ pub(crate) mod rasterizer;
 mod replay;
 pub(crate) mod scanline;
 pub(crate) mod target;
+/// Raw-byte format of the views the HW draw and blit passes render through.
+pub use target::RENDER_FORMAT;
 mod translator;
 pub(crate) mod vram;
 
@@ -296,12 +298,14 @@ impl HwRenderer {
     /// VRAM sampler texture (one fullscreen triangle). Wireframe-mode
     /// helper; see the call site in [`HwRenderer::render_frame`].
     fn blit_vram_to_target(&mut self) {
-        self.blit_vram_to_view(self.target.view());
+        self.blit_vram_to_view(self.target.render_view());
     }
 
-    /// Expand the R16Uint VRAM texture into any `TARGET_FORMAT` color
+    /// Expand the R16Uint VRAM texture into any `RENDER_FORMAT` color
     /// attachment (one fullscreen triangle, `fs_blit`'s BGR15 -> RGB8
-    /// decode). Public so the frontend's VRAM debug view can be filled
+    /// decode). `view` must be the raw-byte (`Rgba8Unorm`) view of the
+    /// texture, like the target's render view: through an sRGB
+    /// view the display codes would be encoded a second time. Public so the frontend's VRAM debug view can be filled
     /// GPU-side instead of re-decoding half a million pixels on the CPU
     /// every frame the way `Vram::to_rgba8` does.
     pub fn blit_vram_to_view(&self, view: &wgpu::TextureView) {
@@ -899,6 +903,34 @@ mod tests {
                 h: 1,
             }
         );
+    }
+
+    /// The fullscreen blit (wireframe rebuild, VRAM debug view) must leave
+    /// the stored byte the VRAM display code, as the CPU decode does: a grey
+    /// ramp of all 32 levels, through the blit, reads back as the codes.
+    /// Rendering the blit through the sRGB view stored encode(code) instead,
+    /// so the ramp came out brighter than the same VRAM drawn or uploaded.
+    #[test]
+    fn the_fullscreen_blit_stores_the_vram_display_codes() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping HW blit test: no headless wgpu adapter");
+            return;
+        };
+        let mut vram_words = vec![0u16; (VRAM_WIDTH * VRAM_HEIGHT) as usize];
+        for level in 0..32u16 {
+            let word = level | (level << 5) | (level << 10);
+            vram_words[(40 * VRAM_WIDTH) as usize + level as usize] = word;
+        }
+        renderer.sync_texture_from_vram(&vram_words);
+        renderer.blit_vram_to_target();
+        for level in 0..32u16 {
+            let word = level | (level << 5) | (level << 10);
+            assert_eq!(
+                pixel_block(&renderer, u32::from(level), 40),
+                vec![bgr15_to_rgba8(word)],
+                "level {level}"
+            );
+        }
     }
 
     #[test]
