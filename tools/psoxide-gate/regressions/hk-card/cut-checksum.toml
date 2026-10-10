@@ -1,0 +1,51 @@
+name = "card-cut-checksum"
+title = "Interrupted save preserves the previous guest record"
+disc = "fixtures/new/hk-psx.cue"
+symbols = "fixtures/new/hk-psx.map"
+card_observe = true
+max_ticks = 2200
+[card_fixture]
+path = "fixtures/seeded.mcd"
+sha256 = "685f0cc63e192c78483e5c472203b6c749ff09dbc70efced6a70712fa4a747af"
+[[step]]
+tape = "fixtures/bench.pxtape"
+card = { action = "power_cut", command = 87, byte_index = 134, occurrence = 3, timeout = 1800 }
+[[step]]
+tape = "fixtures/load.pxtape"
+[[step.assert]]
+kind = "ram"
+sym = "HK_SAVE_LOADED"
+value = 1
+[[step.assert]]
+kind = "ram"
+sym = "hk_psx::save::LAST_SEQUENCE"
+value = 2
+[[step.assert]]
+kind = "ram"
+sym = "HK_SAVE_ERRORS"
+value = 0
+[[step.assert]]
+kind = "ram"
+sym = "HK_SAVE_FAULT"
+value = 0
+[[step.assert]]
+kind = "ram"
+sym = "HK_SAVE_WRITES"
+value = 0
+[[step]]
+card = { action = "snapshot" }
+
+[[step]]
+[[step.assert]]
+kind = "ram"
+sym = "hk_psx::save::NEXT_COPY"
+value = 0
+
+[[step.assert]]
+kind = "ram"
+sym = "HK_GAME_MODE"
+value = 1
+[[step.assert]]
+kind = "ram"
+sym = "HK_GEO_WALLET"
+value = 6

@@ -214,3 +214,74 @@ for checking an older disc against its own goldens.
   not exercised; the gate runs the emulation and the hardware renderer's draw,
   not the window.
 - **No journey yet** for most of the fleet. `psoxide-gate list` shows which.
+
+## Card save journeys
+
+A save journey can boot a raw 131,072-byte card through `card_fixture =
+{ path = "tests/cards/save.mcd", sha256 = "..." }`. Supply the complete SHA256
+of that exact fixture. The source file is only read. A missing, shortened or
+changed fixture aborts; the gate never falls back to a fresh card.
+
+Set `card_observe = true` to observe real guest card traffic one instruction
+at a time while a card transaction is active. `card_irq_ack` requires an
+observed interrupt vector entry and return spanning an entire actual card ACK
+pulse. The report includes IRQ and ACK cycle spans, EPC, command, frame, byte
+count and CTRL. No IRQ is injected and card timing is unchanged. A journey
+whose save never overlaps an IRQ fails this assertion, so choose a recorded
+route that exercises the overlap. Ordinary journeys keep their usual batching.
+
+A step with `tape = "tests/tapes/save.pxtape"` plays a poll-bound tape through
+the guest's normal pad interface, ending after all samples have been consumed.
+Video-frame tapes and empty tapes are rejected. Playback is bounded by
+`max_ticks` and a 3600-tick step limit. Input tape hashes appear in the report.
+
+Card actions need their own steps:
+
+```toml
+[[step]]
+card = { action = "snapshot" }
+[[step]]
+card = { action = "reboot" }
+[[step]]
+tape = "tests/tapes/save.pxtape"
+card = { action = "power_cut", command = 87, byte_index = 70, occurrence = 3, timeout = 1800 }
+```
+
+`snapshot` persists the current card. `reboot` persists and syncs it, reads it
+back, and boots a new CPU/bus with those bytes. `power_cut` plays its optional
+tape, or holds its optional buttons, until the selected command occurrence
+accepts the requested byte, then persists and reboots immediately. The command
+occurrence is counted from the start of that step, not the boot. The trigger
+must occur within its timeout or the journey aborts. Write command 87 uses
+accepted byte counts 7..134 for data and 135 for the checksum that commits a
+sector in the model. The model accepts bytes at transfer start, so this is a
+protocol interruption boundary, not an analog power-loss simulation.
+
+Each action writes a new `cards/card-step-NNN.mcd` under the journey's report
+folder. Existing files are refused, so use a new report directory for each run.
+The HTML links the exact images and their full hashes. Reboot preserves the
+journey's total tick budget, resets CPU/bus history, clears pads and recreates
+the hardware renderers. Follow it with a normal load route and RAM assertions
+for the selected save, game state and error counters. A card's committed sector
+count alone cannot prove the guest finished its save.
+
+`card_writes` checks successful sector commits in the card's recent protocol
+events (up to 256 events), with `min_count` defaulting to 1. `card_unchanged`
+compares the complete live card with the initial journey fixture. Always pair
+these transport checks with guest save/load assertions. Early, middle and
+pre-checksum cuts should retain the previous valid save; a cut after publishing
+the new directory entry may load the complete new save. Check that exact
+outcome through the game, and retain a live-ACK guest as a negative control for
+`card_irq_ack` plus guest save success. Fault-only journeys may use `--no-hw`;
+they supplement the normal strict visual journey and its reviewed contacts.
+
+For a diagnostic IRQ fault, use `card = { action = "irq_during_ack",
+command = 82, byte_index = 82, occurrence = 1, ack_lead = 64, timeout = 1800 }`
+on a tape or input step, with `card_observe = true`. This raises one VBlank
+pending interrupt through the normal interrupt controller before the selected
+scheduled ACK. It neither changes ACK width nor guest RAM/PC. The action fails
+unless that specific pulse is completely covered by the actual guest IRQ
+handler, and reports the injected source/cycle separately from natural overlaps.
+Run old and fixed guests with identical emulator binary, execution tier, tape,
+card and injection settings. An unrelated overlap elsewhere in the journey
+cannot satisfy the injected event's completion check.
