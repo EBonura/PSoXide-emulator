@@ -38,6 +38,14 @@ pub struct Machine {
     pub history: Vec<TickRec>,
     /// Sampled code lines (pc >> 4), per tick via `TickRec`.
     pub pc_samples: Vec<u32>,
+    pub card_observer: Option<crate::card::Observer>,
+    pub cut: Option<(u8, usize, u32)>,
+    pub cut_hit: Option<String>,
+    pub tape: Option<emulator_core::input_tape::Tape>,
+    pub irq_injection: Option<(u8, usize, u32, u64)>,
+    pub injected: Option<(u64, u64)>,
+    pub irq_ack_seen: Option<u64>,
+    pub irq_missed: Option<String>,
     deadline: u64,
     period: u64,
     last_display: (u16, u16),
@@ -118,6 +126,14 @@ impl Machine {
             ticks: 0,
             history: Vec::new(),
             pc_samples: Vec::new(),
+            card_observer: None,
+            cut: None,
+            cut_hit: None,
+            tape: None,
+            irq_injection: None,
+            injected: None,
+            irq_ack_seen: None,
+            irq_missed: None,
             deadline,
             period,
             last_display: (area.x, area.y),
@@ -156,8 +172,67 @@ impl Machine {
         let mut steps = 0u64;
         let mut audio_peak = 0u32;
         loop {
-            let n = (STEPS_PER_TICK - steps).min(PC_CHUNK).max(1);
-            let (ran, result) = self.cpu.run(&mut self.bus, n, self.deadline, |_| false);
+            let polls = self.bus.port1_completed_polls();
+            if let Some(tape) = &self.tape {
+                let index = polls.saturating_sub(tape.start_poll) as usize;
+                if polls >= tape.start_poll {
+                    tape.samples[index.min(tape.samples.len() - 1)].apply_to_bus(&mut self.bus);
+                }
+            }
+            let observing =
+                self.card_observer.is_some() || self.cut.is_some() || self.irq_injection.is_some();
+            let fine = observing
+                && (crate::card::active(&self.bus)
+                    || self.bus.sio0().debug_awaiting_ack()
+                    || self.card_observer.as_ref().is_some_and(|o| o.in_irq()));
+            let n = (STEPS_PER_TICK - steps)
+                .min(if fine { 1 } else { PC_CHUNK })
+                .max(1);
+            let has_tape = self.tape.is_some();
+            let (ran, result) = if fine {
+                (1, self.cpu.step(&mut self.bus))
+            } else {
+                self.cpu.run(&mut self.bus, n, self.deadline, |bus| {
+                    (observing && crate::card::active(bus))
+                        || (has_tape && bus.port1_completed_polls() != polls)
+                })
+            };
+            if let Some(observer) = &mut self.card_observer {
+                observer.sample(&self.cpu, &self.bus);
+            }
+            if let Some((command, index, occurrence, lead)) = self.irq_injection {
+                let (cmd, _, accepted) = crate::card::progress(&self.bus);
+                let count = self
+                    .bus
+                    .port1_memcard_command_histogram()
+                    .map(|h| h[usize::from(command)])
+                    .unwrap_or(0);
+                if cmd == command && accepted == index && count == occurrence {
+                    if let Some(ack) = self.bus.sio0().debug_ack_deadline() {
+                        let now = self.bus.cycles();
+                        let target = ack.saturating_sub(lead);
+                        if self.irq_ack_seen != Some(ack) {
+                            self.irq_ack_seen = Some(ack);
+                            if now > target {
+                                self.irq_missed = Some(format!("requested IRQ cycle {target} preceded observable ACK schedule at {now}, ACK {ack}"));
+                                self.irq_injection = None;
+                            }
+                        }
+                        if self.irq_injection.is_some() && now >= target && now < ack {
+                            self.bus
+                                .irq_mut()
+                                .raise(emulator_core::irq::IrqSource::VBlank);
+                            self.injected = Some((now, ack));
+                            self.irq_injection = None;
+                            if let Some(observer) = &mut self.card_observer {
+                                observer.target_ack = Some(ack);
+                                observer.target_observed = false;
+                                observer.target_overlap = None;
+                            }
+                        }
+                    }
+                }
+            }
             steps += ran;
             self.pc_samples.push(self.cpu.pc() >> 4);
             self.bus.run_spu_to_current_cycle();
@@ -175,6 +250,19 @@ impl Machine {
                     self.cpu.gpr(31),
                     self.cpu.gpr(29)
                 ));
+            }
+            if let Some((command, byte_index, occurrence)) = self.cut {
+                let (cmd, frame, index) = crate::card::progress(&self.bus);
+                let count = self
+                    .bus
+                    .port1_memcard_command_histogram()
+                    .map(|h| h[usize::from(command)])
+                    .unwrap_or(0);
+                if cmd == command && index == byte_index && count == occurrence {
+                    self.cut_hit = Some(format!("power cut at cycle {}, command {cmd:#04x}, frame {frame}, accepted bytes {index}, command occurrence {count}", self.bus.cycles()));
+                    self.cut = None;
+                    break;
+                }
             }
             if self.bus.cycles() >= self.deadline || steps >= STEPS_PER_TICK {
                 break;

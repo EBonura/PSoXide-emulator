@@ -37,6 +37,12 @@ pub struct Journey {
     pub pad2: Pad2Mode,
     #[serde(default)]
     pub memcard: MemcardMode,
+    /// Read-only raw card fixture, bound to its complete SHA256.
+    #[serde(default)]
+    pub card_fixture: Option<CardFixture>,
+    /// Observe guest card transport and interrupt spans without injecting IRQs.
+    #[serde(default)]
+    pub card_observe: bool,
     /// Hard stop, in route ticks (about 60 per emulated second).
     #[serde(default = "default_max_ticks")]
     pub max_ticks: u64,
@@ -92,6 +98,32 @@ pub enum MemcardMode {
     Fresh,
     /// No card in either slot.
     None,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CardFixture {
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CardAction {
+    pub action: String,
+    /// Power cut after this many bytes have been accepted in the command.
+    #[serde(default)]
+    pub byte_index: Option<usize>,
+    #[serde(default)]
+    pub command: Option<u8>,
+    /// Command occurrence counted from the start of this step, default 1.
+    #[serde(default)]
+    pub occurrence: Option<u32>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+    /// Diagnostic IRQ event this many cycles before the scheduled ACK.
+    #[serde(default)]
+    pub ack_lead: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -178,6 +210,12 @@ pub struct Step {
     /// Free-text label shown in the report.
     #[serde(default)]
     pub label: Option<String>,
+    /// Poll-bound input tape, relative to the repo, played to exhaustion.
+    #[serde(default)]
+    pub tape: Option<String>,
+    /// Snapshot, persisted reboot, or bounded byte-triggered power_cut.
+    #[serde(default)]
+    pub card: Option<CardAction>,
 
     // ---- input ----
     /// Buttons held together: cross circle square triangle start select up
@@ -386,6 +424,14 @@ impl Journey {
         if self.render.scales.iter().any(|s| *s == 0 || *s > 8) {
             return Err("render.scales must be within 1..=8".into());
         }
+        if let Some(f) = &self.card_fixture {
+            if self.memcard == MemcardMode::None
+                || f.sha256.len() != 64
+                || !f.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err("card_fixture needs an attached card and a 64-digit SHA256".into());
+            }
+        }
         let uses_port2 = self
             .steps
             .iter()
@@ -404,6 +450,14 @@ impl Journey {
                     .unwrap_or("-")
             );
             step.validate().map_err(|e| format!("{at}: {e}"))?;
+            if step
+                .card
+                .as_ref()
+                .is_some_and(|c| c.action == "irq_during_ack")
+                && !self.card_observe
+            {
+                return Err(format!("{at}: irq_during_ack requires card_observe"));
+            }
             for a in &step.asserts {
                 if let Some(from) = &a.from {
                     if !seen.contains(from) {
@@ -476,6 +530,7 @@ impl Step {
             self.has_input() || self.wait.is_some(),
             self.wait_until.is_some(),
             self.checkpoint.is_some() || !self.asserts.is_empty(),
+            self.card.is_some() || self.tape.is_some(),
         ];
         if kinds.iter().filter(|k| **k).count() == 0 {
             return Err("step does nothing (needs press/lstick/rstick, wait, wait_until, checkpoint or assert)".into());
@@ -503,6 +558,52 @@ impl Step {
         if self.wait_until.is_some() && (self.has_input() || self.wait.is_some()) {
             return Err("wait_until cannot be combined with input or wait in one step".into());
         }
+        if self.tape.is_some()
+            && (self.has_input() || self.wait.is_some() || self.wait_until.is_some())
+        {
+            return Err("tape cannot be combined with input, wait or wait_until".into());
+        }
+        if let Some(c) = &self.card {
+            if !["snapshot", "reboot", "power_cut", "irq_during_ack"].contains(&c.action.as_str()) {
+                return Err(
+                    "card action must be snapshot, reboot, power_cut or irq_during_ack".into(),
+                );
+            }
+            if ["power_cut", "irq_during_ack"].contains(&c.action.as_str()) {
+                if !matches!(c.command, Some(0x52 | 0x57))
+                    || !matches!(c.byte_index, Some(2..=135))
+                    || c.occurrence == Some(0)
+                    || c.timeout == Some(0)
+                {
+                    return Err("card fault needs command 82/87, byte_index 2..=135 and positive occurrence/timeout".into());
+                }
+            } else if c.command.is_some()
+                || c.byte_index.is_some()
+                || c.occurrence.is_some()
+                || c.timeout.is_some()
+                || self.tape.is_some()
+                || self.has_input()
+            {
+                return Err("only card faults accept a trigger, tape or input".into());
+            }
+            if c.action == "irq_during_ack" {
+                if !matches!(c.ack_lead, Some(1..=10_000)) {
+                    return Err("irq_during_ack needs ack_lead within 1..=10000 cycles".into());
+                }
+            } else if c.ack_lead.is_some() {
+                return Err("ack_lead only applies to irq_during_ack".into());
+            }
+            if self.wait.is_some()
+                || self.wait_until.is_some()
+                || self.checkpoint.is_some()
+                || !self.asserts.is_empty()
+            {
+                return Err("card action needs its own step".into());
+            }
+            if self.other.is_some() || self.hold.is_some() || self.repeat.is_some() {
+                return Err("card action does not accept other, hold or repeat".into());
+            }
+        }
         if let Some(c) = &self.wait_until {
             if !["ram", "pixels", "flat", "not_flat", "dark", "not_dark"].contains(&c.kind.as_str())
             {
@@ -521,6 +622,9 @@ impl Step {
 }
 
 pub const ASSERT_KINDS: &[&str] = &[
+    "card_writes",
+    "card_unchanged",
+    "card_irq_ack",
     "ram",
     "presenting",
     "not_flat",
@@ -541,6 +645,11 @@ impl Assert {
                 self.kind,
                 ASSERT_KINDS.join(", ")
             ));
+        }
+        if ["card_writes", "card_irq_ack"].contains(&self.kind.as_str())
+            && self.min_count == Some(0)
+        {
+            return Err("card evidence min_count must be positive".into());
         }
         if self.kind == "ram" {
             if self.sym.is_some() == self.addr.is_some() {
@@ -660,6 +769,31 @@ expect_fail = true
         assert!(parse(
             "name = \"a\"\npad2 = \"analog\"\n[[step]]\nport = 3\npress = [\"start\"]\n"
         )
+        .is_err());
+    }
+
+    #[test]
+    fn card_fault_steps_reject_missing_triggers_and_ignored_actions() {
+        let base = "name = 'save'\n[[step]]\n";
+        for bad in [
+            "card = { action = 'power_cut' }",
+            "card = { action = 'power_cut', command = 87, byte_index = 70, timeout = 0 }",
+            "card = { action = 'power_cut', command = 87, byte_index = 70, occurrence = 0 }",
+            "card = { action = 'power_cut', command = 87, byte_index = 137 }",
+            "card = { action = 'reboot', byte_index = 70 }",
+            "card = { action = 'reboot' }\nwait = 5",
+            "tape = 'save.pxtape'\npress = ['cross']",
+        ] {
+            assert!(parse(&format!("{base}{bad}")).is_err(), "{bad}");
+        }
+        parse(&format!("{base}tape = 'save.pxtape'\ncard = {{ action = 'power_cut', command = 87, byte_index = 134 }}")).unwrap();
+        assert!(parse(
+            "name = 'save'\n[card_fixture]\npath = 'save.mcd'\nsha256 = 'bad'\n[[step]]\nwait = 1"
+        )
+        .is_err());
+        assert!(parse(&format!(
+            "{base}[[step.assert]]\nkind = 'card_irq_ack'\nmin_count = 0"
+        ))
         .is_err());
     }
 }

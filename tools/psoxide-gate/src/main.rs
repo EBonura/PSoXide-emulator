@@ -6,6 +6,7 @@
 
 #![allow(missing_docs)]
 
+mod card;
 mod exec;
 mod fleet;
 mod img;
@@ -265,6 +266,7 @@ struct Opts {
     verbose: bool,
     golden_dir: Option<PathBuf>,
     strict: bool,
+    out: PathBuf,
 }
 
 impl Opts {
@@ -278,6 +280,7 @@ impl Opts {
             verbose: a.verbose,
             golden_dir: a.golden_dir.clone(),
             strict: a.strict,
+            out: a.out.clone(),
         }
     }
 }
@@ -319,6 +322,7 @@ fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
             scales: o.scales.clone(),
             verbose: o.verbose,
             strict: o.strict,
+            artifact_dir: o.out.join(&journey.name).join("cards"),
         },
     )
 }
@@ -336,6 +340,7 @@ fn aborted(name: &str, why: String) -> JourneyResult {
         wall: std::time::Duration::ZERO,
         hw_adapter: None,
         notes: Vec::new(),
+        cards: Vec::new(),
     }
 }
 
@@ -449,6 +454,7 @@ fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
         verbose: a.verbose,
         golden_dir: a.golden_dir.clone(),
         strict: false,
+        out: a.out.clone(),
     };
     let r = run_planned(job, &fleet, &opts);
     println!("{}", r.summary());
