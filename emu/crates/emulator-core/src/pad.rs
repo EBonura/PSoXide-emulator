@@ -1380,6 +1380,16 @@ impl MemoryCard {
         &self.bytes
     }
 
+    /// Current serial command, selected frame and number of bytes accepted.
+    /// Read-only diagnostic for deterministic power interruption gates.
+    pub fn debug_progress(&self) -> (u8, u16, usize) {
+        (
+            self.current_command,
+            u16::from_be_bytes([self.frame_msb, self.frame_lsb]),
+            self.byte_index,
+        )
+    }
+
     /// Histogram of command bytes observed after the `0x81` access byte.
     pub fn command_histogram(&self) -> &[u32; 256] {
         &self.command_histogram
