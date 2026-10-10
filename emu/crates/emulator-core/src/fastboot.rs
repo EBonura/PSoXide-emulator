@@ -205,6 +205,32 @@ mod tests {
     }
 
     #[test]
+    fn an_exe_the_linker_left_short_of_its_last_sector_boots_with_a_zero_tail() {
+        // psoxide.ld starts .bss where .data ends, so the file `ld.lld` writes
+        // stops inside the last sector `t_size` counts. A disc builder that
+        // skipped the post-link pad stores it as is; the loader sees the
+        // sector's remaining bytes as zeros, which is what padding writes.
+        let mut exe = vec![0u8; EXE_HEADER_BYTES];
+        exe[..8].copy_from_slice(b"PS-X EXE");
+        exe[0x10..0x14].copy_from_slice(&0x8001_0000u32.to_le_bytes());
+        exe[0x18..0x1C].copy_from_slice(&0x8001_0000u32.to_le_bytes());
+        exe[0x1C..0x20].copy_from_slice(&2048u32.to_le_bytes());
+        exe.extend_from_slice(&[0x5A; 1500]);
+        let mut builder = IsoBuilder::new();
+        builder.add_file("SYSTEM.CNF", b"BOOT = cdrom:\\GAME.EXE;1\r\n".to_vec());
+        builder.add_file("GAME.EXE", exe);
+        let disc = Disc::from_bin(builder.build_bin());
+
+        let mut bus = Bus::new_without_bios();
+        let mut cpu = Cpu::new();
+        let info = fast_boot_disc(&mut bus, &mut cpu, &disc).unwrap();
+        assert_eq!(info.payload_len, 2048);
+        assert_eq!(bus.try_read8(0x8001_0000 + 1499), Some(0x5A));
+        assert_eq!(bus.try_read8(0x8001_0000 + 1500), Some(0));
+        assert_eq!(bus.try_read8(0x8001_0000 + 2047), Some(0));
+    }
+
+    #[test]
     fn boot_argument_lands_at_0x180() {
         let mut bus = Bus::new_without_bios();
         let mut cpu = Cpu::new();
