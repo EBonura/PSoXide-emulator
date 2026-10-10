@@ -70,8 +70,8 @@
   which also print the card commands each game sent and can start from
   (`--card-in`) and save (`--card-out`) the card images.
 - 480-line interlaced frames drawn field by field show whole. With drawing to
-  the display area prohibited (GP0 E1h bit 10 clear) in 480i and the display
-  on, fills and primitives skip the lines of the field on display (GPUSTAT
+  the display area prohibited (GP0 E1h bit 10 clear) in 480i, fills and
+  primitives skip the lines of the field on display (GPUSTAT
   bit 31) and draw only the other field's. Valkyrie Profile redraws its title
   and menus this way: the screen was white whenever the frame was sampled just
   after the clear. The picture is put together from the live lines of the
@@ -82,9 +82,14 @@
   these frames now come from the CPU display like 24bpp ones, since the HW
   renderer does not apply the rule. Games that run in this mode (Valkyrie
   Profile, Gran Turismo 2, Tekken 3, Chrono Cross, Formula One 2001, one
-  WipEout 3 frame) change display hashes. The rule is not measured on the
-  console yet, and whether it holds with the display blanked is a guess (it
-  does not, here: Chrono Cross builds its menu background that way).
+  WipEout 3 frame) change display hashes. hwtest v2.4 measured the rule on
+  the console (fill, rectangle, triangles, textured quad and line follow it,
+  copies and uploads do not, 480p and 240i are exempt) and it holds with the
+  display blanked, so a blanked display no longer turns it off. Chrono Cross
+  builds its menu background blanked and draws it with textured rectangles
+  only, which the console test did not cover: with the rule applied to them
+  the menu shows every other line of the background and the texture storage
+  in the displayed area between them.
 - The hardware renderer now matches the CPU rasterizer on polygons. It draws
   each triangle half a pixel down and right, so the host's centre sampling
   lands where the PS1 samples (a pixel's top-left corner): the same pixels are
