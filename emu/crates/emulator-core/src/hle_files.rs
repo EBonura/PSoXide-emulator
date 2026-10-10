@@ -1477,6 +1477,54 @@ mod tests {
         assert_eq!(bus.read32(0x8004_000C), 1, "Exec returned 1");
     }
 
+    #[test]
+    fn load_reads_the_whole_sector_count_of_an_exe_stored_short_of_its_last_sector() {
+        // The kernel reads t_size's sectors, whatever the file's byte length:
+        // an executable linked by psoxide.ld ends mid-sector before it is
+        // padded, and its .bss starts inside that sector's tail.
+        let mut child = vec![0u8; psx_iso::EXE_HEADER_BYTES];
+        child[..8].copy_from_slice(b"PS-X EXE");
+        child[0x10..0x14].copy_from_slice(&0x8006_0000u32.to_le_bytes());
+        child[0x18..0x1C].copy_from_slice(&0x8006_0000u32.to_le_bytes());
+        child[0x1C..0x20].copy_from_slice(&0x1000u32.to_le_bytes());
+        let mut body = vec![0u8; 0x900];
+        for (i, w) in [0x3C08_8005u32, 0x0085_4821, 0xAD09_0000, 0x03E0_0008, 0]
+            .iter()
+            .enumerate()
+        {
+            body[4 * i..4 * i + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        body[0x8FC..0x900].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        child.extend_from_slice(&body);
+        let mut iso = IsoBuilder::new();
+        iso.add_file("CHILD.EXE", child);
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        bus.cdrom.insert_disc(Some(Disc::from_bin(iso.build_bin())));
+        for (i, b) in b"cdrom:\\CHILD.EXE;1\0".iter().enumerate() {
+            bus.write8_safe(0x8002_0000 + i as u32, *b);
+        }
+        // Stale words where the zero tail lands.
+        for at in (0x8006_0900u32..0x8006_1000).step_by(4) {
+            bus.write32(at, 0xDEAD_BEEF);
+        }
+        let header = 0x8002_0100;
+        let words = program_on(
+            0xA0,
+            &[
+                (0x42, [Some(0x8002_0000), Some(header), Some(0)]),
+                (0x43, [Some(header), Some(5), Some(6)]),
+            ],
+        );
+        run(&mut bus, &words, 0x8004_0000);
+        assert_eq!(bus.read32(0x8004_0008), 1, "Load");
+        assert_eq!(bus.read32(0x8005_0000), 11, "child ran");
+        assert_eq!(bus.read32(0x8006_08FC), 0x1234_5678, "last stored word");
+        for at in (0x8006_0900u32..0x8006_1000).step_by(4) {
+            assert_eq!(bus.read32(at), 0, "tail word at {at:#x}");
+        }
+    }
+
     /// Like [`program`], but call `i`'s v0 goes to `results + 4 * i`, a
     /// negative vector selects A or B by its table, and `None` passes the
     /// previous result on.
