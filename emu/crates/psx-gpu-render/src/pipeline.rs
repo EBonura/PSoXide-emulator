@@ -2,7 +2,7 @@
 
 use wgpu::util::DeviceExt;
 
-use crate::target::{RENDER_FORMAT, TARGET_FORMAT, VRAM_HEIGHT, VRAM_WIDTH};
+use crate::target::{RENDER_FORMAT, VRAM_HEIGHT, VRAM_WIDTH};
 
 /// Per-vertex data. 20 bytes, `bytemuck::Pod` so we can blit a
 /// `Vec<HwVertex>` into the GPU vertex buffer with `cast_slice`.
@@ -365,8 +365,10 @@ impl HwPipeline {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_blit"),
+                // The blit writes display codes, so it renders through the
+                // raw-byte view: an sRGB view would encode them a second time.
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: TARGET_FORMAT,
+                    format: RENDER_FORMAT,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
