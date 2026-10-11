@@ -237,6 +237,10 @@ pub struct Step {
     /// Ticks the input stays down (default 4, enough for one pad poll).
     #[serde(default)]
     pub hold: Option<u64>,
+    /// Keep ordinary pad input down until a RAM or pixel condition succeeds.
+    /// Requires a positive `timeout`; the pad is then released before `wait`.
+    #[serde(default)]
+    pub hold_until: Option<Assert>,
     /// Ticks of rest after the input is released, or the plain wait when the
     /// step has no input.
     #[serde(default)]
@@ -552,16 +556,36 @@ impl Step {
         if self.hold.is_some() && !self.has_input() {
             return Err("`hold` needs press, lstick or rstick".into());
         }
-        if self.timeout.is_some() && self.wait_until.is_none() {
-            return Err("`timeout` needs wait_until".into());
+        if self.timeout.is_some() && self.wait_until.is_none() && self.hold_until.is_none() {
+            return Err("`timeout` needs wait_until or hold_until".into());
+        }
+        if let Some(cond) = &self.hold_until {
+            if !self.has_input() {
+                return Err("hold_until needs press, lstick or rstick".into());
+            }
+            if self.hold.is_some() || self.repeat.is_some() || self.wait_until.is_some() {
+                return Err("hold_until cannot be combined with hold, repeat or wait_until".into());
+            }
+            if !matches!(self.timeout, Some(1..)) {
+                return Err("hold_until needs a positive timeout".into());
+            }
+            if !["ram", "pixels"].contains(&cond.kind.as_str()) || cond.expect_fail {
+                return Err("hold_until supports ordinary ram or pixels conditions".into());
+            }
+            cond.validate()?;
         }
         if self.wait_until.is_some() && (self.has_input() || self.wait.is_some()) {
             return Err("wait_until cannot be combined with input or wait in one step".into());
         }
         if self.tape.is_some()
-            && (self.has_input() || self.wait.is_some() || self.wait_until.is_some())
+            && (self.has_input()
+                || self.wait.is_some()
+                || self.wait_until.is_some()
+                || self.hold_until.is_some())
         {
-            return Err("tape cannot be combined with input, wait or wait_until".into());
+            return Err(
+                "tape cannot be combined with input, wait, wait_until or hold_until".into(),
+            );
         }
         if let Some(c) = &self.card {
             if !["snapshot", "reboot", "power_cut", "irq_during_ack"].contains(&c.action.as_str()) {
@@ -595,6 +619,7 @@ impl Step {
             }
             if self.wait.is_some()
                 || self.wait_until.is_some()
+                || self.hold_until.is_some()
                 || self.checkpoint.is_some()
                 || !self.asserts.is_empty()
             {
@@ -795,5 +820,38 @@ expect_fail = true
             "{base}[[step.assert]]\nkind = 'card_irq_ack'\nmin_count = 0"
         ))
         .is_err());
+    }
+
+    #[test]
+    fn bounded_hold_until_accepts_input_and_rejects_conflicting_modes() {
+        let base = "name = 'held'\n[[step]]\nlstick = [128, 0]\n";
+        let condition = "hold_until = { kind = 'ram', sym = 'PLAYER', offset = 8, signed = true, op = 'le', value = 690 }\n";
+        let valid = parse(&format!("{base}{condition}timeout = 240\nwait = 3\n")).unwrap();
+        assert_eq!(valid.steps[0].timeout, Some(240));
+        assert_eq!(valid.steps[0].wait, Some(3));
+        for suffix in [
+            "hold = 4\n",
+            "repeat = 2\n",
+            "wait_until = { kind = 'ram', sym = 'PLAYER', op = 'eq', value = 1 }\n",
+            "tape = 'input.pxtape'\n",
+            "card = { action = 'snapshot' }\n",
+        ] {
+            assert!(
+                parse(&format!("{base}{condition}timeout = 240\n{suffix}")).is_err(),
+                "{suffix}"
+            );
+        }
+        for bad in [
+            format!("{base}{condition}"),
+            format!("{base}{condition}timeout = 0\n"),
+            format!("name = 'held'\n[[step]]\n{condition}timeout = 240\n"),
+            format!("{base}hold_until = {{ kind = 'flat' }}\ntimeout = 240\n"),
+            format!("{base}hold_until = {{ kind = 'ram', sym = 'PLAYER' }}\ntimeout = 240\n"),
+            format!("{base}hold_until = {{ kind = 'pixels', color = [0, 0, 0] }}\ntimeout = 240\n"),
+            format!("{base}hold_until = {{ kind = 'ram', sym = 'PLAYER', op = 'eq', value = 1, expect_fail = true }}\ntimeout = 240\n"),
+        ] {
+            assert!(parse(&bad).is_err(), "{bad}");
+        }
+        parse(&format!("{base}hold_until = {{ kind = 'pixels', color = [0, 0, 0], min_count = 100 }}\ntimeout = 240\n")).unwrap();
     }
 }
