@@ -646,6 +646,59 @@ fn blend_state_add_quarter() -> wgpu::BlendState {
 mod tests {
     use super::*;
 
+    // Arithmetic diagnostic only. The production WGSL phase is unchanged.
+    fn absolute_fragment_phase(pixel: u32, scale: u32) -> f32 {
+        let divided = (pixel as f32 + 0.5) / scale as f32;
+        divided - divided.floor() - 0.5
+    }
+
+    fn integer_pixel_phase(pixel: u32, scale: u32) -> f32 {
+        ((pixel % scale) as f32 + 0.5) / scale as f32 - 0.5
+    }
+
+    #[test]
+    fn integer_phase_preserves_native_sample_and_scaled_edge_phases() {
+        for pixel in [0, 1, 239, 240, 511, 1023, 3071] {
+            assert_eq!(integer_pixel_phase(pixel, 1), 0.0);
+        }
+        assert_eq!(integer_pixel_phase(0, 2), -0.25);
+        assert_eq!(integer_pixel_phase(1, 2), 0.25);
+        assert_eq!(integer_pixel_phase(2, 2), -0.25);
+        assert_eq!(integer_pixel_phase(0, 3), 0.5 / 3.0 - 0.5);
+        assert_eq!(integer_pixel_phase(1, 3), 0.0);
+        assert_eq!(integer_pixel_phase(2, 3), 2.5 / 3.0 - 0.5);
+        assert_eq!(integer_pixel_phase(3, 3), integer_pixel_phase(0, 3));
+    }
+
+    #[test]
+    fn integer_phase_is_invariant_under_framebuffer_translation() {
+        for scale in [1, 2, 3] {
+            for pixel in 0..(512 * scale) {
+                assert_eq!(
+                    integer_pixel_phase(pixel, scale),
+                    integer_pixel_phase(pixel + 240 * scale, scale)
+                );
+            }
+        }
+        // The actual 3x HL fragment moves by 720 host rows between buffers.
+        assert_eq!(integer_pixel_phase(275, 3), integer_pixel_phase(995, 3));
+        assert_ne!(absolute_fragment_phase(275, 3), absolute_fragment_phase(995, 3));
+    }
+
+    #[test]
+    fn absolute_phase_can_cross_the_retained_hl_texture_boundary() {
+        let sx = absolute_fragment_phase(456, 3);
+        let uv_at = |sy| 10.5 + sx * 2.75 + sy * -1.75;
+        let top_u = uv_at(absolute_fragment_phase(275, 3));
+        let bottom_u = uv_at(absolute_fragment_phase(995, 3));
+        assert_eq!(top_u.floor(), 9.0);
+        assert_eq!(bottom_u.floor(), 8.0);
+        assert_eq!(
+            uv_at(integer_pixel_phase(275, 3)),
+            uv_at(integer_pixel_phase(995, 3))
+        );
+    }
+
     #[test]
     fn vertex_capacity_growth_covers_wireframe_spikes() {
         let initial = INITIAL_VERTEX_CAPACITY * std::mem::size_of::<HwVertex>() as u64;
