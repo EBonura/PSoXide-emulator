@@ -65,10 +65,11 @@ Third-party titles are covered by the emulator's `validate` manifests instead.
 
 `index.html` is a contact sheet. Each checkpoint writes a labeled matrix PNG:
 CPU1 (reference), HW1 and HW3 across the first row at their native image sizes.
-The second row shows HW1 versus CPU1 at 3x presentation size, then HW3 versus
-the CPU1 reference enlarged by nearest-neighbour sampling. Any nonzero RGB
-channel difference is magenta over a dimmed reference frame; each cell prints
-its exact differing-pixel count or `identical`. Embedded labels identify mode,
+The second row shows HW1 versus CPU1 at 3x presentation size, then the surviving
+HW3 differences. Both paths first map each RGB channel to its high five bits,
+then use the same 5-to-8 bit expansion. This is deterministic normalization,
+not channel tolerance. Cells print raw, normalized exact and surviving counts.
+Magenta marks surviving differences over a dimmed normalized reference. Embedded labels identify mode,
 scale, checkpoint, recorded frame identity and tick. Where the capture schema
 has no video-frame counter, the label explicitly says `frame unrecorded`;
 the emulation tick is a separate clock and is never substituted for a frame.
@@ -79,12 +80,16 @@ mode. The only release render modes are CPU1, HW1 and HW3.
 
 Every HW3 capture has paired reference/HW3 crops at 1:1 source-pixel size:
 full-frame text/HUD coverage, declared strict regions, and every 64x64 tile
-containing any exact difference, including partial edge tiles. There is no
+containing any surviving difference, including partial edge tiles. There is no
 ranking, crop limit or omitted differing region. `<checkpoint>.crop-coverage.tsv`
-records each rectangle and exact count; the non-overlapping difference-tile
-counts must sum to the full-frame exact count, with `omitted=0`.
-`<checkpoint>.exact-diffs.tsv` separates exact nonzero counts from the acceptance
-checks below the images. A tolerance PASS never claims exact identity.
+records each rectangle and projected surviving count; non-overlapping tile
+counts must sum to all surviving hardware pixels, with `omitted=0`. A native
+3D error projects to its complete 3x3 hardware box for the display and crop audit.
+`<checkpoint>.exact-diffs.tsv` separates raw counts, normalized exact counts,
+2D hardware-pixel survivors and 3D native-pixel survivors. Raw captures and
+raw zero-threshold diff PNGs remain separate data. Each game's sheet ends with
+its established differences and unresolved buckets, or `clean`; incomplete
+hardware captures cannot be clean. Never sum hardware and native pixel counts.
 
 ## The render matrix
 
@@ -96,29 +101,47 @@ window, so the persistent target holds what a player would see.
 
 - **CPU vs golden.** Exact by default. This catches any change to what the
   game draws.
-- **HW 1x vs CPU.** The CPU path keeps 15-bit colour and the hardware path
-  shades in 8 bits, so smooth surfaces differ by up to 7 levels per channel
-  with no fault. The default tolerance is 24 levels on at most 0.5% of pixels.
-- **HW 3x vs the CPU frame enlarged.** Edges fall up to a pixel away from where
-  nearest-neighbour enlargement puts them, so a pixel passes if a pixel within
-  3 of it in the enlarged frame has a matching colour. Wrong colours, missing
-  or smeared content, and black frames still fail. Default 48 levels on at most
-  4%.
-- **Strict regions.** Mark 2D-only rectangles (text, menus, splashes, panels)
-  with `strict = [{ x, y, w, h }]`, in native pixels. Each rectangle is judged
-  alone against the enlarged CPU frame, tolerating only a one-pixel shift, on
-  at most 0.2% of its pixels. This is what sees an upscale bleed: with the
-  hardware renderer before commit 5b2b5b7, VoXide's "Built with PSoXide" strict
-  rectangle fails at 3x with 96 stray pixels (0.39%), and the inventory,
-  crafting and options panels fail too; on the fix every one of them is exact.
-  Do not mark regions with 3D showing through, or scenery edges fail them.
+- **2D content.** Text, HUD, sprites and axis-aligned textured quads compare
+  exactly after normalization, at HW3 against nearest-neighbour CPU1. No
+  radius, channel or fraction allowance can hide shifted/missing glyphs.
+  Declare native bounds with `strict = [{ x, y, w, h }]` or
+  `comparison.two_d`. Conservative bounds include transparent holes and
+  override polygon classes; they never hide underlying text/HUD errors.
+- **HW1 content.** Normalized channels compare exactly, including polygon edges.
+- **3D content.** Only explicit final visible polygon runs qualify at HW3. Box-average
+  canonical normalized 8-bit hardware channels, round once to an 8-bit channel,
+  and compare to native CPU1. Never requantize the average to 5-bit codes.
+  Interiors remain exact. A polygon's declared
+  `edge_channel` (at most 24 display levels) applies only within half a native
+  pixel of its finite actual boundary, and only on its final visible pixels.
+  Hidden edges and overlapping final ownership are invalid. Axis-aligned
+  textured quad opcodes are always 2D even if supplied as polygon metadata.
+  Metadata vertices use a simple convex perimeter. Convert GP0 quad packet
+  order (a triangle strip) to perimeter indices 0,1,3,2; malformed/bowtie
+  metadata is rejected. Unsupported geometry stays unresolved and exact.
+- **Unclassified content.** Compare exactly at hardware resolution, without
+  any 3D relaxation, and report survivors separately as unresolved. Never
+  declare them 3D errors just because they differ. Final contribution data
+  must come from observable primitive/state evidence or an explicit reviewed
+  region declaration; historical triangle unions and image gradients are
+  insufficient. Invalid geometry, ownership, bounds or provenance fail closed.
+
+`comparison.polygons` records the observed GP0 `opcode`, perimeter-ordered
+native `vertices`, non-overlapping final `visible` pixel runs, `evidence` and
+`edge_channel`. Capture manifests bind this declaration to full raw-image,
+source-report and BIN hashes. A 3D mask must exclude occluded contributions;
+mixed transparency remains exact unless its visible classes are established.
 
 Frames the hardware renderer defers to the CPU (24bpp, screen offset, 480i
 field rendering) are reported SKIP with the reason in diagnostic runs. A
 required renderer SKIP fails the release gate.
 
-Per-checkpoint overrides: `tolerance` (golden), `hw1`, `hwn`, `mask`
-(rectangles ignored by every comparison, for clocks and random particles).
+`tolerance` and `mask` continue to apply to CPU golden/assert comparisons.
+Hardware comparisons do not ignore masked pixels. Legacy `hw1`, `hwn` and
+`render.strict` tolerances remain parseable for existing journeys, but do not
+relax the normalized content rules. Hardware tolerance exists only at explicit
+visible polygon edges. A capture refresh reports new presentation analysis,
+preserves prior acceptance receipts, and is not a fresh installed-disc run.
 
 ## Journey files
 

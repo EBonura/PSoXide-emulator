@@ -43,6 +43,7 @@ pub fn crop(img: &Img, r: Rect) -> Result<Img, String> {
 
 /// Every tile with any exact difference is retained, with no ranking or limit.
 /// Non-overlapping tiles make coverage count auditable without double counting.
+#[cfg(test)]
 pub fn differing_regions(frame: &Img, reference: &Img) -> Vec<Rect> {
     assert_eq!((frame.w, frame.h), (reference.w, reference.h));
     let mut regions = Vec::new();
@@ -218,8 +219,27 @@ pub fn matrix(cap: &Capture, checkpoint: &str, tick: u64) -> Img {
             ));
             let reference = cap.cpu.enlarge(scale);
             if (hw.w, hw.h) == (reference.w, reference.h) {
-                let count = hw.diff(&reference, 0, 1, &[], None).differing;
-                let overlay = exact_overlay(hw, &reference);
+                let compared = crate::compare::compare(&cap.cpu, hw, scale, &cap.comparison);
+                let (overlay, detail) = match compared {
+                    Ok(d) => (
+                        d.overlay(),
+                        format!(
+                            "RAW {} NORMALIZED {}{} 2D={}HW UNKNOWN={}HW INTERIOR={}NATIVE EDGE={}NATIVE",
+                            d.raw,
+                            d.normalized_exact,
+                            if d.has_differences() {
+                                ""
+                            } else {
+                                " IDENTICAL"
+                            },
+                            d.two_d,
+                            d.unclassified,
+                            d.interior,
+                            d.edge
+                        ),
+                    ),
+                    Err(e) => (blank(hw.w, hw.h), format!("INVALID CLASSIFICATION: {e}")),
+                };
                 let display = if scale == 1 {
                     overlay.enlarge(3)
                 } else {
@@ -227,11 +247,7 @@ pub fn matrix(cap: &Capture, checkpoint: &str, tick: u64) -> Img {
                 };
                 let mut labels =
                     label_lines(&format!("{mode} VS CPU1"), 3, checkpoint, tick, cap.frame);
-                labels.push(if count == 0 {
-                    "IDENTICAL".into()
-                } else {
-                    format!("{count} DIFFERING PIXELS (EXACT)")
-                });
+                labels.push(detail);
                 diffs.push(labeled(&display, &labels));
             } else {
                 diffs.push(labeled(
@@ -270,10 +286,11 @@ mod tests {
     fn matrix_preserves_native_cells_and_enlarges_only_hw1_diff() {
         let cpu = Img::from_rgba(320, 240, vec![100; 320 * 240 * 4]);
         let mut hw1 = cpu.clone();
-        hw1.rgba[0] = 101;
+        hw1.rgba[0] = 108;
         let mut hw3 = cpu.enlarge(3);
-        hw3.rgba[0] = 102;
+        hw3.rgba[0] = 116;
         let cap = Capture {
+            comparison: crate::compare::Layout::default(),
             frame: None,
             strict: Vec::new(),
             cpu,
@@ -285,13 +302,13 @@ mod tests {
         let page = matrix(&cap, "menu", 123);
         assert_eq!((page.w, page.h), (1928, 1534));
         assert_eq!(page.px(0, 38), [100; 3]);
-        assert_eq!(page.px(328, 38), [101, 100, 100]);
-        assert_eq!(page.px(656, 38), [102, 100, 100]);
+        assert_eq!(page.px(328, 38), [108, 100, 100]);
+        assert_eq!(page.px(656, 38), [116, 100, 100]);
         assert_eq!(page.px(0, 814), [255, 0, 255]);
         assert_eq!(page.px(2, 816), [255, 0, 255]);
-        assert_eq!(page.px(3, 814), [25; 3]);
+        assert_eq!(page.px(3, 814), [24; 3]);
         assert_eq!(page.px(968, 814), [255, 0, 255]);
-        assert_eq!(page.px(969, 814), [25; 3]);
+        assert_eq!(page.px(969, 814), [24; 3]);
         assert!(page.rgba.chunks_exact(4).all(|p| p[3] == 255));
     }
     #[test]

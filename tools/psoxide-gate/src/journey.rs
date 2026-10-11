@@ -276,6 +276,9 @@ pub struct Step {
     /// exactly at every scale. Native 1x pixel coordinates.
     #[serde(default)]
     pub strict: Vec<Rect>,
+    /// Explicit final visible comparison classes; unknown pixels stay exact.
+    #[serde(default)]
+    pub comparison: crate::compare::Layout,
     /// Skip the CPU/HW render matrix for this checkpoint (default false).
     #[serde(default)]
     pub no_matrix: bool,
@@ -547,6 +550,8 @@ impl Step {
                 || self.tolerance.is_some()
                 || !self.mask.is_empty()
                 || !self.strict.is_empty()
+                || !self.comparison.two_d.is_empty()
+                || !self.comparison.polygons.is_empty()
                 || self.no_matrix
                 || self.hw1.is_some()
                 || self.hwn.is_some())

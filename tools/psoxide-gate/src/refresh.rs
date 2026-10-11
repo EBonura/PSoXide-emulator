@@ -15,6 +15,8 @@ struct Manifest {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
+    #[serde(default)]
+    comparison: crate::compare::Layout,
     game: String,
     title: String,
     checkpoint: String,
@@ -171,6 +173,10 @@ pub fn run(manifest: &Path, out: &Path) -> Result<(), String> {
         let cpu = Img::load_png(&r.cpu)?;
         let hw1 = Img::load_png(&r.hw1)?;
         let hw3 = Img::load_png(&r.hw3)?;
+        let mut layout = r.comparison;
+        layout.two_d.extend(r.strict.iter().copied());
+        crate::compare::compare(&cpu, &hw1, 1, &layout)?;
+        crate::compare::compare(&cpu, &hw3, 3, &layout)?;
         if (hw1.w, hw1.h) != (cpu.w, cpu.h) || (hw3.w, hw3.h) != (cpu.w * 3, cpu.h * 3) {
             return Err(format!(
                 "{}:{} renderer dimensions do not match CPU1/HW1/HW3",
@@ -203,6 +209,7 @@ pub fn run(manifest: &Path, out: &Path) -> Result<(), String> {
             label: Some("verified capture refresh; original acceptance retained separately".into()),
             tick: r.tick,
             capture: Some(Capture {
+                comparison: layout,
                 frame: r.frame,
                 strict: r.strict,
                 cpu,
@@ -229,12 +236,48 @@ pub fn run(manifest: &Path, out: &Path) -> Result<(), String> {
             let b = c.hw[1].1.diff(&c.cpu.enlarge(3), 0, 1, &[], None).differing;
             let _ = writeln!(
                 inventory,
-                "{}\t{}\t{}\t{}\tunrecorded\t{a}\t{b}",
-                r.name, r.disc_id, g.name, g.tick
+                "{}\t{}\t{}\t{}\t{}\t{a}\t{b}",
+                r.name, r.disc_id, g.name, g.tick,
+                c.frame.map_or_else(|| "unrecorded".into(), |v| v.to_string())
             );
         }
     }
     std::fs::write(out.join("exact-diff-inventory.tsv"), inventory).map_err(|e| e.to_string())?;
+    let mut real = String::from(
+        "game\tBIN_SHA256\tcheckpoint\ttick\tframe\tmode\traw_exact_hardware_pixels\tnormalized_exact_hardware_pixels\t2D_survivor_hardware_pixels\tunclassified_survivor_hardware_pixels\t3D_interior_native_pixels\t3D_edge_native_pixels\taccepted_boundary_native_pixels\tclassified2D_native_pixels\tclassified3D_native_pixels\tunclassified_native_pixels\n",
+    );
+    for r in &results {
+        for g in &r.groups {
+            let c = g.capture.as_ref().unwrap();
+            for (scale, hw) in &c.hw {
+                use std::fmt::Write as _;
+                let d = crate::compare::compare(&c.cpu, hw, *scale, &c.comparison)?;
+                let cv = d.coverage();
+                let _ = writeln!(
+                    real,
+                    "{}\t{}\t{}\t{}\t{}\tHW{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    r.name,
+                    r.disc_id,
+                    g.name,
+                    g.tick,
+                    c.frame
+                        .map_or_else(|| "unrecorded".into(), |v| v.to_string()),
+                    scale,
+                    d.raw,
+                    d.normalized_exact,
+                    d.two_d,
+                    d.unclassified,
+                    d.interior,
+                    d.edge,
+                    d.accepted_edges,
+                    cv[0],
+                    cv[1],
+                    cv[2]
+                );
+            }
+        }
+    }
+    std::fs::write(out.join("real-diff-inventory.tsv"), real).map_err(|e| e.to_string())?;
     println!("report: {}", index.display());
     Ok(())
 }
@@ -346,6 +389,7 @@ mod tests {
         let report = dir.join("index.html");
         std::fs::write(&report,format!("{}<section><h3>menu <small>tick 12</small></h3><a href=\"menu.new.png\"></a><a href=\"menu.hw1.png\"></a><a href=\"menu.hw3.png\"></a></section>",hash(&bin))).unwrap();
         Record {
+            comparison: crate::compare::Layout::default(),
             game: "sample".into(),
             title: "Sample".into(),
             checkpoint: "menu".into(),
@@ -435,7 +479,7 @@ mod tests {
         let root = dir.path().join("output/sample");
         let coverage = std::fs::read_to_string(root.join("menu.crop-coverage.tsv")).unwrap();
         assert!(coverage.contains("declared-text-hud\t0\t0\t3\t3\t0"));
-        assert!(coverage.contains("covered=0 omitted=0 exact=0"));
+        assert!(coverage.contains("covered=0 omitted=0 projected=0"));
         assert!(root.join("menu.crop0001.pair.png").exists());
         assert!(!root.join("menu.cpu3.png").exists());
         let html = std::fs::read_to_string(dir.path().join("output/index.html")).unwrap();

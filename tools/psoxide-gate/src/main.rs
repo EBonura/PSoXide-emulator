@@ -7,6 +7,7 @@
 #![allow(missing_docs)]
 
 mod card;
+mod compare;
 mod contact;
 mod exec;
 mod fleet;

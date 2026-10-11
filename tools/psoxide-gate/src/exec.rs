@@ -72,6 +72,7 @@ pub struct Check {
 
 /// Everything captured at one checkpoint.
 pub struct Capture {
+    pub comparison: crate::compare::Layout,
     /// Actual captured video-frame identity when recorded; ticks are a separate clock.
     pub frame: Option<u64>,
     /// Native-resolution text/HUD regions declared by the journey.
@@ -747,6 +748,7 @@ impl Run<'_> {
             label: Some(label.into()),
             tick: self.m.ticks,
             capture: Some(Capture {
+                comparison: crate::compare::Layout::default(),
                 frame: None,
                 strict: Vec::new(),
                 cpu,
@@ -863,6 +865,11 @@ impl Run<'_> {
                 _ => (Vec::new(), None),
             };
             let cap = Capture {
+                comparison: {
+                    let mut layout = step.comparison.clone();
+                    layout.two_d.extend(step.strict.iter().copied());
+                    layout
+                },
                 frame: None,
                 strict: step.strict.clone(),
                 cpu,
@@ -892,7 +899,6 @@ impl Run<'_> {
     }
 
     fn frame_checks(&self, step: &Step, cap: &Capture, checks: &mut Vec<Check>) {
-        let cfg = &self.journey.render;
         let exact = Tolerance::EXACT;
         if step.golden != Some(false) {
             let tol = step.tolerance.unwrap_or(exact);
@@ -939,56 +945,39 @@ impl Run<'_> {
                 detail: why.clone(),
             });
         }
-        let hw1_tol = step.hw1.unwrap_or(cfg.hw1);
-        let hwn_tol = step.hwn.unwrap_or(cfg.hwn);
         for (scale, frame) in &cap.hw {
-            let base = if *scale == 1 {
-                cap.cpu.clone()
-            } else {
-                cap.cpu.enlarge(*scale)
-            };
-            let label = format!(
-                "hw {scale}x vs cpu{}",
-                if *scale == 1 { "" } else { " enlarged" }
-            );
-            if (frame.w, frame.h) != (base.w, base.h) {
-                checks.push(Check {
-                    name: label,
-                    status: Status::Fail,
-                    detail: format!(
-                        "hardware frame is {}x{}, expected {}x{}",
-                        frame.w, frame.h, base.w, base.h
-                    ),
-                });
-                continue;
+            let compared = crate::compare::compare(&cap.cpu, frame, *scale, &cap.comparison);
+            match compared {
+                Err(error) => {
+                    checks.push(Check {
+                        name: format!("normalized HW{scale} comparison"),
+                        status: Status::Fail,
+                        detail: error,
+                    });
+                    continue;
+                }
+                Ok(d) => checks.push(Check {
+                    name: format!("normalized HW{scale} comparison"),
+                    status: if !d.has_differences() {
+                        Status::Pass
+                    } else {
+                        Status::Fail
+                    },
+                    detail: d.description(),
+                }),
             }
-            let tol = if *scale == 1 { hw1_tol } else { hwn_tol };
-            // At scale s the edges sit up to s pixels from the 1x frame's.
-            let radius = if *scale == 1 { 0 } else { *scale };
-            let d = frame.diff_near(&base, tol.channel, radius, *scale, &step.mask, None);
-            checks.push(Check {
-                name: label,
-                status: if d.within(tol) {
-                    Status::Pass
-                } else {
-                    Status::Fail
-                },
-                detail: d.describe(),
-            });
-            // Each strict rectangle is judged on its own, so a bleed along one line
-            // of text cannot hide in the pixel count of a large region.
+            // Strict 2D regions never gain spatial/channel/fraction forgiveness.
             for r in &step.strict {
-                let d = frame.diff_near(
-                    &base,
-                    cfg.strict.channel,
-                    1,
+                let d = crate::compare::normalize(frame).diff(
+                    &crate::compare::normalize(&cap.cpu).enlarge(*scale),
+                    0,
                     *scale,
-                    &step.mask,
+                    &[],
                     Some(std::slice::from_ref(r)),
                 );
                 checks.push(Check {
                     name: format!("strict ({},{} {}x{}) @{scale}x", r.x, r.y, r.w, r.h),
-                    status: if d.within(cfg.strict) {
+                    status: if d.differing == 0 {
                         Status::Pass
                     } else {
                         Status::Fail

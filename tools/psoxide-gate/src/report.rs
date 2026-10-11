@@ -26,7 +26,7 @@ fn badge(s: Status) -> String {
 
 /// Preserve raw captures and add exact matrix and exhaustive paired crops.
 fn write_images(dir: &Path, group: &Group) -> Result<Vec<(String, String, String)>, String> {
-    use crate::contact::{crop, differing_regions, exact_overlay, label_lines, matrix, paired};
+    use crate::contact::{crop, exact_overlay, label_lines, matrix, paired};
     use crate::img::Rect;
     let Some(cap) = &group.capture else {
         return Ok(Vec::new());
@@ -39,7 +39,7 @@ fn write_images(dir: &Path, group: &Group) -> Result<Vec<(String, String, String
         Ok(())
     };
     put(
-        "CPU1 reference | HW1 | HW3 at native sizes; exact diffs below".into(),
+        "CPU1 reference | HW1 | HW3 at native sizes; normalized surviving diffs below".into(),
         format!("{stem}.matrix.png"),
         &matrix(cap, stem, group.tick),
         "matrix",
@@ -66,8 +66,10 @@ fn write_images(dir: &Path, group: &Group) -> Result<Vec<(String, String, String
             )?;
         }
     }
-    let mut inventory = String::from("mode\texact_differing_pixels\tcompared_pixels\tstatus\n");
-    let mut coverage = String::from("crop\tpurpose\tx\ty\tw\th\texact_differing_pixels\n");
+    let mut inventory = String::from(
+        "mode\traw_exact_pixels\tcompared_pixels\tnormalized_exact_pixels\t2D_hardware_pixels\tunclassified_hardware_pixels\t3D_interior_native_pixels\t3D_edge_native_pixels\taccepted_edge_native_pixels\tprojected_surviving_pixels\n",
+    );
+    let mut coverage = String::from("crop\tpurpose\tx\ty\tw\th\tprojected_surviving_pixels\n");
     for (scale, frame) in &cap.hw {
         put(
             format!("raw HW{scale}"),
@@ -85,25 +87,37 @@ fn write_images(dir: &Path, group: &Group) -> Result<Vec<(String, String, String
             continue;
         }
         let stats = frame.diff(&reference, 0, 1, &[], None);
+        let compared = crate::compare::compare(&cap.cpu, frame, *scale, &cap.comparison)?;
         let _ = writeln!(
             inventory,
-            "HW{scale}\t{}\t{}\t{}",
+            "HW{scale}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             stats.differing,
             stats.compared,
-            if stats.differing == 0 {
-                "identical"
-            } else {
-                "nonzero"
-            }
+            compared.normalized_exact,
+            compared.two_d,
+            compared.unclassified,
+            compared.interior,
+            compared.edge,
+            compared.accepted_edges,
+            compared.projected()
         );
         put(
             format!(
-                "HW{scale} vs CPU1: {} exact differing pixels",
-                stats.differing
+                "HW{scale} vs CPU1, surviving differences: {}",
+                compared.description()
             ),
             format!("{stem}.hw{scale}.diff.png"),
-            &exact_overlay(frame, &reference),
+            &compared.overlay(),
             "raw",
+        )?;
+        put(
+            format!(
+                "Retained raw HW{scale} diff: {} exact pixels before normalization",
+                stats.differing
+            ),
+            format!("{stem}.hw{scale}.raw.diff.png"),
+            &exact_overlay(frame, &reference),
+            "data",
         )?;
         if *scale != 3 {
             continue;
@@ -128,13 +142,13 @@ fn write_images(dir: &Path, group: &Group) -> Result<Vec<(String, String, String
                 },
             ));
         }
-        let differences = differing_regions(frame, &reference);
+        let differences = compared.regions();
         crops.extend(differences.iter().map(|r| ("difference-tile", *r)));
         let mut covered = 0;
         for (i, (purpose, r)) in crops.iter().enumerate() {
-            let hw = crop(frame, *r)?;
-            let cpu = crop(&reference, *r)?;
-            let count = hw.diff(&cpu, 0, 1, &[], None).differing;
+            let hw = crop(&compared.hardware, *r)?;
+            let cpu = crop(&compared.reference, *r)?;
+            let count = compared.in_rect(*r);
             if *purpose == "difference-tile" {
                 covered += count;
             }
@@ -149,18 +163,25 @@ fn write_images(dir: &Path, group: &Group) -> Result<Vec<(String, String, String
                 labels.push(format!("CROP {i} AT {},{} {}X{} 1:1", r.x, r.y, r.w, r.h));
                 labels
             };
-            put(format!("crop {i} {purpose}: HW3 | CPU1 reference; ({},{} {}x{}); {count} exact differing pixels", r.x, r.y, r.w, r.h),
-                format!("{id}.pair.png"), &paired(&hw, &labels("HW3"), &cpu, &labels("CPU1 REFERENCE"), 1), "crop")?;
+            put(
+                format!(
+                    "crop {i} {purpose}: normalized HW3 | CPU1 reference; ({},{} {}x{}); {count} projected surviving pixels",
+                    r.x, r.y, r.w, r.h
+                ),
+                format!("{id}.pair.png"),
+                &paired(&hw, &labels("HW3"), &cpu, &labels("CPU1 REFERENCE"), 1),
+                "crop",
+            )?;
         }
-        if covered != stats.differing {
+        if covered != compared.projected() {
             return Err("difference crop coverage mismatch".into());
         }
         let _ = writeln!(
             coverage,
-            "TOTAL\tdifference-tiles={} covered={} omitted=0 exact={}",
+            "TOTAL\tdifference-tiles={} covered={} omitted=0 projected={}",
             differences.len(),
             covered,
-            stats.differing
+            compared.projected()
         );
     }
     std::fs::write(dir.join(format!("{stem}.exact-diffs.tsv")), inventory)
@@ -200,6 +221,15 @@ fn group_html(out: &mut String, dir_rel: &str, group: &Group, shots: &[(String, 
     if !shots.is_empty() {
         out.push_str("<div class=\"shots\">");
         for (caption, file, class) in shots {
+            if class == "data" {
+                let _ = write!(
+                    out,
+                    "<p class=\"note\"><a href=\"{dir_rel}/{}\">{}</a></p>",
+                    esc(file),
+                    esc(caption)
+                );
+                continue;
+            }
             let _ = write!(
                 out,
                 "<figure class=\"{class}\"><a href=\"{dir_rel}/{f}\"><img loading=\"lazy\" src=\"{dir_rel}/{f}\"></a><figcaption>{c}</figcaption></figure>",
@@ -210,7 +240,12 @@ fn group_html(out: &mut String, dir_rel: &str, group: &Group, shots: &[(String, 
         out.push_str("</div>");
     }
     if group.capture.is_some() {
-        let _ = write!(out, "<p class=\"note\"><a href=\"{dir_rel}/{}.exact-diffs.tsv\">Exact pixel inventory</a> | <a href=\"{dir_rel}/{}.crop-coverage.tsv\">Crop coverage (all differing tiles, omitted=0)</a>. Magenta means any nonzero channel difference; unchanged reference pixels are dimmed. Acceptance checks below use their stated tolerances independently. Crops show source pixels at 1:1.</p>", esc(&group.name), esc(&group.name));
+        let _ = write!(
+            out,
+            "<p class=\"note\"><a href=\"{dir_rel}/{}.exact-diffs.tsv\">Raw and normalized comparison inventory</a> | <a href=\"{dir_rel}/{}.crop-coverage.tsv\">Surviving crop coverage (omitted=0)</a>. Magenta shows surviving differences after canonical 5-bit normalization. Declared 2D and unclassified pixels compare exactly against NN CPU1. Explicit visible 3D polygons compare after box-downsampling; only their bounded actual edges receive tolerance. 2D counts use hardware pixels; 3D counts use native pixels. For visualization each native 3D error fills its hardware box. Crops show normalized source pixels at 1:1. Raw captures and raw zero-threshold counts remain available separately.</p>",
+            esc(&group.name),
+            esc(&group.name)
+        );
     }
     if group.capture.as_ref().is_some_and(|c| c.strict.is_empty()) {
         out.push_str("<p class=\"note\">MISSING FOCUSED TEXT/HUD REGIONS: no journey rectangles supplied. The full-frame 1:1 pair preserves all pixels; focused text/HUD review remains incomplete.</p>");
@@ -352,6 +387,38 @@ pub fn write_report(
             let shots = write_images(&dir, g)?;
             group_html(&mut html, &r.name, g, &shots);
         }
+        html.push_str(
+            "<h3>Established differences and unresolved pixels after comparison rules</h3><ul>",
+        );
+        let mut any = false;
+        let mut complete = r.abort.is_none() && r.groups.iter().any(|g| g.capture.is_some());
+        for g in &r.groups {
+            let Some(c) = &g.capture else {
+                continue;
+            };
+            if c.hw.iter().all(|(s, _)| *s != 1) || c.hw.iter().all(|(s, _)| *s != 3) {
+                complete = false;
+            }
+            for (scale, frame) in &c.hw {
+                let d = crate::compare::compare(&c.cpu, frame, *scale, &c.comparison)?;
+                if d.has_differences() {
+                    any = true;
+                    let _ = write!(
+                        html,
+                        "<li>{} HW{}: {}. Unclassified differences remain unresolved; they are not automatically polygon-edge or 3D faults.</li>",
+                        esc(&g.name),
+                        scale,
+                        esc(&d.description())
+                    );
+                }
+            }
+        }
+        if !complete {
+            html.push_str("<li>Incomplete hardware captures; no clean or acceptance claim.</li>");
+        } else if !any {
+            html.push_str("<li>clean under the declared comparison rules; unclassified pixels were compared exactly, without 3D edge tolerance.</li>");
+        }
+        html.push_str("</ul>");
     }
     html.push_str("</body></html>");
     let index = out.join("index.html");
@@ -378,6 +445,7 @@ mod tests {
                 label: None,
                 tick: 1,
                 capture: Some(Capture {
+                    comparison: crate::compare::Layout::default(),
                     frame: None,
                     strict: Vec::new(),
                     cpu: Img::from_rgba(1, 1, vec![10, 20, 30, 255]),
