@@ -18,6 +18,7 @@ mod refresh;
 mod render;
 mod report;
 mod symbols;
+mod trace;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -54,6 +55,8 @@ enum Cmd {
     BeforeAfter { manifest: PathBuf },
     /// Preserve a retained frontend PPM capture as lossless PNG data.
     ConvertCapture { input: PathBuf, output: PathBuf },
+    /// Resolve a traced native VRAM pixel to its hash-verified CPU packet snapshot.
+    TracePixel { checkpoint: PathBuf, x: u16, y: u16 },
     /// Run a journey and write its frames as the new goldens, with a diff report.
     Bless(BlessArgs),
     /// List the fleet: each game, its journey and whether it exists.
@@ -104,6 +107,15 @@ struct RunArgs {
     /// Release gate: require a journey and CPU1, HW1 and HW3 at every checkpoint.
     #[arg(long)]
     strict: bool,
+    /// Retain bounded GP0 packets, CPU ownership and guest state on failed checkpoints.
+    #[arg(long)]
+    trace_failures: bool,
+    /// Extra named RAM state, e.g. DEFERRED_OVERLAYS:128 (at most 32, 256 bytes each).
+    #[arg(long, requires = "trace_failures")]
+    trace_state: Vec<String>,
+    /// Capture this named checkpoint even when its comparisons pass.
+    #[arg(long, requires = "trace_failures")]
+    trace_checkpoint: Vec<String>,
     /// Print each step as it starts.
     #[arg(short, long)]
     verbose: bool,
@@ -146,6 +158,10 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Cmd::Run(a) => cmd_run(&a),
+        Cmd::TracePixel { checkpoint, x, y } => trace::inspect(&checkpoint, x, y).map(|s| {
+            println!("{s}");
+            ExitCode::SUCCESS
+        }),
         Cmd::RefreshReport { manifest, out } => {
             refresh::run(&manifest, &out).map(|()| ExitCode::SUCCESS)
         }
@@ -294,6 +310,9 @@ struct Opts {
     verbose: bool,
     golden_dir: Option<PathBuf>,
     strict: bool,
+    trace_failures: bool,
+    trace_state: Vec<String>,
+    trace_checkpoint: Vec<String>,
     out: PathBuf,
 }
 
@@ -308,6 +327,9 @@ impl Opts {
             verbose: a.verbose,
             golden_dir: a.golden_dir.clone(),
             strict: a.strict,
+            trace_failures: a.trace_failures,
+            trace_state: a.trace_state.clone(),
+            trace_checkpoint: a.trace_checkpoint.clone(),
             out: a.out.clone(),
         }
     }
@@ -350,6 +372,10 @@ fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
             scales: o.scales.clone(),
             verbose: o.verbose,
             strict: o.strict,
+            trace_failures: o.trace_failures,
+            trace_state: o.trace_state.clone(),
+            trace_checkpoint: o.trace_checkpoint.clone(),
+            journey_path: job.journey_path.clone(),
             artifact_dir: o.out.join(&journey.name).join("cards"),
         },
     )
@@ -482,6 +508,9 @@ fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
         verbose: a.verbose,
         golden_dir: a.golden_dir.clone(),
         strict: false,
+        trace_failures: false,
+        trace_state: Vec::new(),
+        trace_checkpoint: Vec::new(),
         out: a.out.clone(),
     };
     let r = run_planned(job, &fleet, &opts);

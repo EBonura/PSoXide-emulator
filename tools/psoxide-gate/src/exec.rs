@@ -168,6 +168,10 @@ pub struct RunOptions {
     pub scales: Option<Vec<u32>>,
     pub verbose: bool,
     pub strict: bool,
+    pub trace_failures: bool,
+    pub trace_state: Vec<String>,
+    pub trace_checkpoint: Vec<String>,
+    pub journey_path: PathBuf,
     pub artifact_dir: PathBuf,
 }
 
@@ -273,6 +277,7 @@ struct Run<'a> {
     m: Machine,
     hw: Option<HwSet>,
     syms: Symbols,
+    trace: Option<crate::trace::Trace>,
     groups: Vec<Group>,
     /// CPU frame of every checkpoint so far, for `frame_diff`.
     shots: std::collections::BTreeMap<String, Img>,
@@ -321,7 +326,7 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         pad: journey.pad,
         pad2: journey.pad2,
         memcard: journey.memcard,
-        cmd_log: want_hw,
+        cmd_log: want_hw || opts.trace_failures,
     }) {
         Ok(m) => m,
         Err(e) => {
@@ -385,12 +390,17 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         }
     }
 
+    if opts.trace_failures {
+        m.bus.gpu.enable_pixel_tracer();
+    }
+    let trace = opts.trace_failures.then(crate::trace::Trace::new);
     let mut run = Run {
         journey,
         opts,
         m,
         hw,
         syms,
+        trace,
         groups: Vec::new(),
         shots: std::collections::BTreeMap::new(),
         initial_card,
@@ -606,8 +616,12 @@ impl Run<'_> {
                     pad: self.journey.pad,
                     pad2: self.journey.pad2,
                     memcard: self.journey.memcard,
-                    cmd_log: self.hw.is_some(),
+                    cmd_log: self.hw.is_some() || self.trace.is_some(),
                 })?;
+                if let Some(trace) = self.trace.as_mut() {
+                    self.m.bus.gpu.enable_pixel_tracer();
+                    trace.reboot();
+                }
                 self.m.bus.attach_memcard_port1(persisted);
                 self.m.ticks = ticks;
                 self.m.release_pads();
@@ -637,9 +651,17 @@ impl Run<'_> {
         if let Some(hw) = self.hw.as_mut() {
             hw.before_tick(&self.m.bus);
         }
+        if self.trace.is_some() {
+            self.m.bus.gpu.clear_pixel_owner_stamps();
+        }
         self.m.tick()?;
+        if let Some(trace) = self.trace.as_mut() {
+            trace.record(self.m.ticks, &self.m.bus.gpu);
+        }
         if let Some(hw) = self.hw.as_mut() {
             hw.after_tick(&mut self.m.bus);
+        } else if self.trace.is_some() {
+            self.m.bus.gpu.drain_completed_cmd_log();
         }
         Ok(())
     }
@@ -887,6 +909,29 @@ impl Run<'_> {
         }
         if let Some(cap) = &capture {
             self.shots.insert(name.clone(), cap.cpu.clone());
+        }
+        if crate::trace::capture_checkpoint(
+            &self.opts.trace_checkpoint,
+            &name,
+            checks.iter().any(|c| c.status.is_failure()),
+        ) {
+            if let Some(trace) = self.trace.as_mut() {
+                match trace.save(
+                    &self.opts.artifact_dir.join("../trace"),
+                    index,
+                    &name,
+                    &self.m,
+                    &self.opts.disc,
+                    &self.opts.repo_root,
+                    &self.opts.journey_path,
+                    &self.syms,
+                    &self.opts.trace_state,
+                    self.journey,
+                ) {
+                    Ok(note) => self.notes.push(note),
+                    Err(e) => self.notes.push(format!("trace unavailable: {e}")),
+                }
+            }
         }
         self.groups.push(Group {
             name,

@@ -1034,6 +1034,20 @@ impl Gpu {
         self.unpin_in_flight_cmd_log();
     }
 
+    /// Clear only per-tick owner stamps, preserving pending GP0 packets.
+    /// Call before a traced tick; consume owners before draining its command log.
+    pub fn clear_pixel_owner_stamps(&mut self) {
+        if let Some(owners) = self.pixel_owner.as_mut() {
+            owners.fill(u32::MAX);
+        }
+    }
+
+    /// Current owner stamps. Indices are local to the undrained command log.
+    /// They must never be cached across a drain without a stable external ID.
+    pub fn pixel_owner_stamps(&self) -> Option<&[u32]> {
+        self.pixel_owner.as_deref()
+    }
+
     /// Enable cmd_log capture WITHOUT allocating the per-pixel owner
     /// buffer. The HW (wgpu render-pipeline) renderer needs the GP0
     /// packet stream to drive its draw calls each frame, but doesn't
