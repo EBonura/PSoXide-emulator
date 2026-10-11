@@ -72,15 +72,16 @@ pub struct Check {
 
 /// Everything captured at one checkpoint.
 pub struct Capture {
+    /// Actual captured video-frame identity when recorded; ticks are a separate clock.
+    pub frame: Option<u64>,
+    /// Native-resolution text/HUD regions declared by the journey.
+    pub strict: Vec<Rect>,
     pub cpu: Img,
     pub golden: Option<Img>,
     pub golden_error: Option<String>,
     /// `(scale, frame)` per hardware scale.
     pub hw: Vec<(u32, Img)>,
     pub hw_skip: Option<String>,
-    /// Per-channel tolerances used for the hardware comparisons (for the heat maps).
-    pub hw1_channel: u8,
-    pub hwn_channel: u8,
 }
 
 pub struct Group {
@@ -746,13 +747,13 @@ impl Run<'_> {
             label: Some(label.into()),
             tick: self.m.ticks,
             capture: Some(Capture {
+                frame: None,
+                strict: Vec::new(),
                 cpu,
                 golden: None,
                 golden_error: None,
                 hw,
                 hw_skip,
-                hw1_channel: self.journey.render.hw1.channel,
-                hwn_channel: self.journey.render.hwn.channel,
             }),
             checks: vec![Check {
                 name: label.into(),
@@ -861,15 +862,14 @@ impl Run<'_> {
                 },
                 _ => (Vec::new(), None),
             };
-            let cfg = &self.journey.render;
             let cap = Capture {
+                frame: None,
+                strict: step.strict.clone(),
                 cpu,
                 golden,
                 golden_error,
                 hw,
                 hw_skip,
-                hw1_channel: step.hw1.unwrap_or(cfg.hw1).channel,
-                hwn_channel: step.hwn.unwrap_or(cfg.hwn).channel,
             };
             self.frame_checks(step, &cap, &mut checks);
             capture = Some(cap);

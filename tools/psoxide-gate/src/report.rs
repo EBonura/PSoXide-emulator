@@ -1,10 +1,9 @@
-//! The HTML contact sheet: golden | new | diff heat-map per checkpoint, the
-//! hardware renderer frames beside them, and pass/fail per check.
+//! CPU1 reference, HW1 and HW3 contact evidence with exact diffs and crop coverage.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::exec::{Capture, Group, JourneyResult, Status};
+use crate::exec::{Group, JourneyResult, Status};
 use crate::img::Img;
 
 fn esc(s: &str) -> String {
@@ -25,43 +24,10 @@ fn badge(s: Status) -> String {
     format!("<span class=\"badge {class}\">{}</span>", s.label())
 }
 
-/// A full-size page per checkpoint: CPU 1x | HW 1x above CPU 3x | HW 3x.
-/// The 1x cells are enlarged with nearest-neighbour sampling for legibility.
-fn matrix_page(cap: &Capture) -> Img {
-    let cpu3 = cap.cpu.enlarge(3);
-    let (w, h) = (cpu3.w, cpu3.h);
-    let gap = 8;
-    let mut page = Img::from_rgba(
-        2 * w + gap,
-        2 * h + gap,
-        vec![24; ((2 * w + gap) * (2 * h + gap) * 4) as usize],
-    );
-    let mut copy = |img: &Img, x: u32, y: u32| {
-        if (img.w, img.h) != (w, h) {
-            return;
-        }
-        for row in 0..h {
-            let src = (row * w * 4) as usize;
-            let dst = (((y + row) * page.w + x) * 4) as usize;
-            page.rgba[dst..dst + (w * 4) as usize]
-                .copy_from_slice(&img.rgba[src..src + (w * 4) as usize]);
-        }
-    };
-    copy(&cpu3, 0, 0);
-    if let Some((_, hw1)) = cap.hw.iter().find(|(scale, _)| *scale == 1) {
-        copy(&hw1.enlarge(3), w + gap, 0);
-    }
-    copy(&cpu3, 0, h + gap);
-    if let Some((_, hw3)) = cap.hw.iter().find(|(scale, _)| *scale == 3) {
-        copy(hw3, w + gap, h + gap);
-    }
-    page
-}
-
-/// Write PNGs for every capture into `dir` and return the file stem prefix
-/// used in the page.
+/// Preserve raw captures and add exact matrix and exhaustive paired crops.
 fn write_images(dir: &Path, group: &Group) -> Result<Vec<(String, String, String)>, String> {
-    // (caption, relative file, css class)
+    use crate::contact::{crop, differing_regions, exact_overlay, label_lines, matrix, paired};
+    use crate::img::Rect;
     let Some(cap) = &group.capture else {
         return Ok(Vec::new());
     };
@@ -72,66 +38,135 @@ fn write_images(dir: &Path, group: &Group) -> Result<Vec<(String, String, String
         shots.push((caption, file, class.to_string()));
         Ok(())
     };
-    if let Some(g) = &cap.golden {
-        put("golden".into(), format!("{stem}.golden.png"), g, "")?;
-    }
     put(
-        "new (cpu 1x)".into(),
+        "CPU1 reference | HW1 | HW3 at native sizes; exact diffs below".into(),
+        format!("{stem}.matrix.png"),
+        &matrix(cap, stem, group.tick),
+        "matrix",
+    )?;
+    put(
+        "raw CPU1 reference".into(),
         format!("{stem}.new.png"),
         &cap.cpu,
-        "",
-    )?;
-    put(
-        "cpu 3x (nearest neighbour)".into(),
-        format!("{stem}.cpu3.png"),
-        &cap.cpu.enlarge(3),
-        "",
+        "raw",
     )?;
     if let Some(g) = &cap.golden {
+        put(
+            "raw historical golden".into(),
+            format!("{stem}.golden.png"),
+            g,
+            "raw",
+        )?;
         if (g.w, g.h) == (cap.cpu.w, cap.cpu.h) {
             put(
-                "golden vs new".into(),
+                "CPU1 vs historical golden: exact difference".into(),
                 format!("{stem}.diff.png"),
-                &cap.cpu.heatmap(g, 0, 0),
-                "heat",
+                &exact_overlay(&cap.cpu, g),
+                "raw",
             )?;
         }
     }
+    let mut inventory = String::from("mode\texact_differing_pixels\tcompared_pixels\tstatus\n");
+    let mut coverage = String::from("crop\tpurpose\tx\ty\tw\th\texact_differing_pixels\n");
     for (scale, frame) in &cap.hw {
         put(
-            format!("hw {scale}x"),
+            format!("raw HW{scale}"),
             format!("{stem}.hw{scale}.png"),
             frame,
-            "",
+            "raw",
         )?;
-        let base = if *scale == 1 {
-            cap.cpu.clone()
-        } else {
-            cap.cpu.enlarge(*scale)
-        };
-        if (base.w, base.h) == (frame.w, frame.h) {
-            put(
-                format!("hw {scale}x vs cpu"),
-                format!("{stem}.hw{scale}.diff.png"),
-                &frame.heatmap(
-                    &base,
-                    if *scale == 1 {
-                        cap.hw1_channel
-                    } else {
-                        cap.hwn_channel
-                    },
-                    if *scale == 1 { 0 } else { *scale },
-                ),
-                "heat",
-            )?;
+        let reference = cap.cpu.enlarge(*scale);
+        if (frame.w, frame.h) != (reference.w, reference.h) {
+            let _ = writeln!(
+                inventory,
+                "HW{scale}\tunknown\tunknown\tsize mismatch {}x{} vs {}x{}",
+                frame.w, frame.h, reference.w, reference.h
+            );
+            continue;
         }
+        let stats = frame.diff(&reference, 0, 1, &[], None);
+        let _ = writeln!(
+            inventory,
+            "HW{scale}\t{}\t{}\t{}",
+            stats.differing,
+            stats.compared,
+            if stats.differing == 0 {
+                "identical"
+            } else {
+                "nonzero"
+            }
+        );
+        put(
+            format!(
+                "HW{scale} vs CPU1: {} exact differing pixels",
+                stats.differing
+            ),
+            format!("{stem}.hw{scale}.diff.png"),
+            &exact_overlay(frame, &reference),
+            "raw",
+        )?;
+        if *scale != 3 {
+            continue;
+        }
+        // Full-frame pair makes undeclared text/HUD coverage visible, never implicit.
+        // Journey strict regions provide the focused text/HUD pairs as well.
+        let full = Rect {
+            x: 0,
+            y: 0,
+            w: frame.w,
+            h: frame.h,
+        };
+        let mut crops = vec![("text-hud-full-frame", full)];
+        for r in &cap.strict {
+            crops.push((
+                "declared-text-hud",
+                Rect {
+                    x: r.x * 3,
+                    y: r.y * 3,
+                    w: r.w * 3,
+                    h: r.h * 3,
+                },
+            ));
+        }
+        let differences = differing_regions(frame, &reference);
+        crops.extend(differences.iter().map(|r| ("difference-tile", *r)));
+        let mut covered = 0;
+        for (i, (purpose, r)) in crops.iter().enumerate() {
+            let hw = crop(frame, *r)?;
+            let cpu = crop(&reference, *r)?;
+            let count = hw.diff(&cpu, 0, 1, &[], None).differing;
+            if *purpose == "difference-tile" {
+                covered += count;
+            }
+            let id = format!("{stem}.crop{i:04}");
+            let _ = writeln!(
+                coverage,
+                "{id}\t{purpose}\t{}\t{}\t{}\t{}\t{count}",
+                r.x, r.y, r.w, r.h
+            );
+            let labels = |mode| {
+                let mut labels = label_lines(mode, 3, stem, group.tick, cap.frame);
+                labels.push(format!("CROP {i} AT {},{} {}X{} 1:1", r.x, r.y, r.w, r.h));
+                labels
+            };
+            put(format!("crop {i} {purpose}: HW3 | CPU1 reference; ({},{} {}x{}); {count} exact differing pixels", r.x, r.y, r.w, r.h),
+                format!("{id}.pair.png"), &paired(&hw, &labels("HW3"), &cpu, &labels("CPU1 REFERENCE"), 1), "crop")?;
+        }
+        if covered != stats.differing {
+            return Err("difference crop coverage mismatch".into());
+        }
+        let _ = writeln!(
+            coverage,
+            "TOTAL\tdifference-tiles={} covered={} omitted=0 exact={}",
+            differences.len(),
+            covered,
+            stats.differing
+        );
     }
-    put(
-        "matrix page: CPU 1x | HW 1x / CPU 3x | HW 3x".into(),
-        format!("{stem}.matrix.png"),
-        &matrix_page(cap),
-        "",
-    )?;
+    std::fs::write(dir.join(format!("{stem}.exact-diffs.tsv")), inventory)
+        .map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(format!("{stem}.crop-coverage.tsv")), coverage)
+        .map_err(|e| e.to_string())?;
     Ok(shots)
 }
 
@@ -150,7 +185,11 @@ fn group_html(out: &mut String, dir_rel: &str, group: &Group, shots: &[(String, 
         out,
         "<section class=\"cp\"><h3>{} {} <small>tick {}{}</small></h3>",
         esc(&group.name),
-        badge(worst),
+        badge(if group.checks.is_empty() {
+            Status::Skip
+        } else {
+            worst
+        }),
         group.tick,
         group
             .label
@@ -170,7 +209,14 @@ fn group_html(out: &mut String, dir_rel: &str, group: &Group, shots: &[(String, 
         }
         out.push_str("</div>");
     }
+    if group.capture.is_some() {
+        let _ = write!(out, "<p class=\"note\"><a href=\"{dir_rel}/{}.exact-diffs.tsv\">Exact pixel inventory</a> | <a href=\"{dir_rel}/{}.crop-coverage.tsv\">Crop coverage (all differing tiles, omitted=0)</a>. Magenta means any nonzero channel difference; unchanged reference pixels are dimmed. Acceptance checks below use their stated tolerances independently. Crops show source pixels at 1:1.</p>", esc(&group.name), esc(&group.name));
+    }
+    if group.capture.as_ref().is_some_and(|c| c.strict.is_empty()) {
+        out.push_str("<p class=\"note\">MISSING FOCUSED TEXT/HUD REGIONS: no journey rectangles supplied. The full-frame 1:1 pair preserves all pixels; focused text/HUD review remains incomplete.</p>");
+    }
     out.push_str("<table class=\"checks\">");
+
     for c in &group.checks {
         let _ = write!(
             out,
@@ -194,7 +240,7 @@ table{border-collapse:collapse}td,th{padding:3px 10px 3px 0;text-align:left;vert
 .pass{background:var(--pass)}.fail{background:var(--fail)}.xfail,.xpass{background:var(--xf)}.skip{background:var(--skip)}
 .cp{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:12px 0}
 .shots{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:10px}
-figure{margin:0}figure img{display:block;width:320px;height:auto;image-rendering:pixelated;border:1px solid var(--line);background:#000}
+figure{margin:0}figure img{display:block;max-width:100%;height:auto;image-rendering:pixelated;border:1px solid var(--line);background:#000}.raw img{width:320px}.matrix{width:100%;overflow:auto}.matrix img,.crop img{max-width:none}.crop{overflow:auto}
 figcaption{font-size:12px;color:var(--mut);margin-top:3px}
 .detail{color:var(--mut);font-family:ui-monospace,Menlo,monospace;font-size:12px}
 .note{color:var(--mut);font-size:13px}
@@ -228,12 +274,12 @@ pub fn write_report(
     for r in results {
         let _ = write!(
             html,
-            "<tr><td><a href=\"#{n}\">{n}</a></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.1} s</td><td>{}</td></tr>",
-            badge(if r.passed() { Status::Pass } else { Status::Fail }),
+            "<tr><td><a href=\"#{n}\">{n}</a></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            badge(if r.checks().count() == 0 { Status::Skip } else if r.passed() { Status::Pass } else { Status::Fail }),
             r.checks().count(),
             r.failures(),
             r.ticks,
-            r.wall.as_secs_f64(),
+            if r.checks().count() == 0 { "unrecorded".into() } else { format!("{:.1} s", r.wall.as_secs_f64()) },
             esc(&r.disc_id),
             n = esc(&r.name)
         );
@@ -243,17 +289,37 @@ pub fn write_report(
     }
     html.push_str("</table>");
     for r in results {
+        let timing = if r.checks().count() == 0 {
+            "Capture refresh: execution timings not recorded here; see the original receipt.".into()
+        } else {
+            format!(
+                "{} ticks ({:.0} s emulated), {:.1} s wall",
+                r.ticks,
+                r.emu_secs,
+                r.wall.as_secs_f64()
+            )
+        };
         let _ = write!(
             html,
-            "<h2 id=\"{n}\">{t} {}</h2><p class=\"note\">{d}<br>{} ticks ({:.0} s emulated), {:.1} s wall{}</p>",
-            badge(if r.passed() { Status::Pass } else { Status::Fail }),
-            r.ticks,
-            r.emu_secs,
-            r.wall.as_secs_f64(),
-            r.hw_adapter.as_deref().map(|a| format!(", hardware renderer on {}", esc(a))).unwrap_or_default(),
+            "<h2 id=\"{n}\">{t} {}</h2><p class=\"note\">{d}<br>{timing}{}</p>",
+            badge(if r.checks().count() == 0 {
+                Status::Skip
+            } else if r.passed() {
+                Status::Pass
+            } else {
+                Status::Fail
+            }),
+            r.hw_adapter
+                .as_deref()
+                .map(|a| format!(", hardware renderer on {}", esc(a)))
+                .unwrap_or_default(),
             n = esc(&r.name),
             t = esc(&r.title),
-            d = esc(&format!("{} (sha256 prefix {})", r.disc.display(), r.disc_id)),
+            d = esc(&format!(
+                "{} (sha256 prefix {})",
+                r.disc.display(),
+                r.disc_id
+            )),
         );
         if let Some(a) = &r.abort {
             let _ = write!(
@@ -300,7 +366,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn contact_sheet_contains_cpu_at_both_scales_and_missing_routes() {
+    fn contact_sheet_has_three_modes_and_missing_routes() {
         let dir = tempfile::tempdir().unwrap();
         let result = JourneyResult {
             name: "sample".into(),
@@ -312,13 +378,13 @@ mod tests {
                 label: None,
                 tick: 1,
                 capture: Some(Capture {
+                    frame: None,
+                    strict: Vec::new(),
                     cpu: Img::from_rgba(1, 1, vec![10, 20, 30, 255]),
                     golden: None,
                     golden_error: None,
                     hw: Vec::new(),
                     hw_skip: None,
-                    hw1_channel: 24,
-                    hwn_channel: 48,
                 }),
                 checks: Vec::new(),
                 wants_golden: false,
@@ -339,9 +405,9 @@ mod tests {
         )
         .unwrap();
         let html = std::fs::read_to_string(index).unwrap();
-        assert!(html.contains("cpu 3x (nearest neighbour)"));
+        assert!(html.contains("CPU1 reference | HW1 | HW3"));
         assert!(html.contains("MISSING"));
-        assert!(dir.path().join("sample/menu.cpu3.png").exists());
+        assert!(!dir.path().join("sample/menu.cpu3.png").exists());
         assert!(dir.path().join("sample/menu.matrix.png").exists());
     }
 }

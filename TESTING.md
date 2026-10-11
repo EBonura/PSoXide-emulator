@@ -44,7 +44,7 @@ psoxide-gate bless oot                       # rewrite goldens, with a review re
 
 Exit code 0 means every selected journey passed. 1 means a check failed or a
 journey aborted. 2 means bad usage or an unreadable file. `--strict` is the
-release gate: it requires a journey, checkpoints and CPU/HW 1x and 3x at every
+release gate: it requires a journey, checkpoints and CPU1, HW1 and HW3 at every
 checkpoint. A missing named journey always fails. `make gate` uses `--strict`.
 `--no-hw` and reduced `--scales` are diagnostic options and cannot pass the
 release gate. The report goes to `gate-report/index.html` (or `--out`).
@@ -63,28 +63,36 @@ Third-party titles are covered by the emulator's `validate` manifests instead.
 
 ## The report
 
-`index.html` is a contact sheet. For each journey: the disc and its hash, the
-timings, and per checkpoint a row of frames: old golden, CPU 1x, CPU 3x,
-golden vs new heat map, then the hardware frame at each scale with a heat map
-against the corresponding CPU frame. Each checkpoint also writes a full-size
-`<checkpoint>.matrix.png` page: CPU 1x and HW 1x across the top, CPU 3x and
-HW 3x below. The individual frames remain available for close review. Below
-the frames, every check has PASS, FAIL, XFAIL, XPASS or SKIP and its measured
-values. One line per journey also goes to stdout.
+`index.html` is a contact sheet. Each checkpoint writes a labeled matrix PNG:
+CPU1 (reference), HW1 and HW3 across the first row at their native image sizes.
+The second row shows HW1 versus CPU1 at 3x presentation size, then HW3 versus
+the CPU1 reference enlarged by nearest-neighbour sampling. Any nonzero RGB
+channel difference is magenta over a dimmed reference frame; each cell prints
+its exact differing-pixel count or `identical`. Embedded labels identify mode,
+scale, checkpoint, recorded frame identity and tick. Where the capture schema
+has no video-frame counter, the label explicitly says `frame unrecorded`;
+the emulation tick is a separate clock and is never substituted for a frame.
 
-Heat maps: black is identical, dim blue-grey is a difference inside the
-tolerance, red through white is a pixel outside it.
+Raw captures and historical golden images are retained separately as data.
+Nearest-neighbour CPU1 enlargement is comparison-reference data, not a render
+mode. The only release render modes are CPU1, HW1 and HW3.
+
+Every HW3 capture has paired reference/HW3 crops at 1:1 source-pixel size:
+full-frame text/HUD coverage, declared strict regions, and every 64x64 tile
+containing any exact difference, including partial edge tiles. There is no
+ranking, crop limit or omitted differing region. `<checkpoint>.crop-coverage.tsv`
+records each rectangle and exact count; the non-overlapping difference-tile
+counts must sum to the full-frame exact count, with `omitted=0`.
+`<checkpoint>.exact-diffs.tsv` separates exact nonzero counts from the acceptance
+checks below the images. A tolerance PASS never claims exact identity.
 
 ## The render matrix
 
-Every checkpoint with `no_matrix` unset has four reviewable images from the same
-emulated state: CPU 1x, CPU 3x presentation by nearest-neighbour enlargement,
-hardware 1x, and hardware 3x (`render.scales` changes the hardware list in
-diagnostic runs). The CPU rasterizer runs at native resolution, so CPU 3x is an
-enlarged reference, not a second rasterization. The hardware renderers run
-alongside the CPU one throughout the journey, fed each tick's GP0 log as in the
-window, so
-the persistent target holds what a player would see.
+Every checkpoint with `no_matrix` unset captures CPU1, HW1 and HW3 from the
+same emulated state (`render.scales` changes the hardware list in diagnostic
+runs). The CPU rasterizer runs at native resolution. The hardware renderers
+run alongside it throughout the journey, fed each tick's GP0 log as in the
+window, so the persistent target holds what a player would see.
 
 - **CPU vs golden.** Exact by default. This catches any change to what the
   game draws.
@@ -196,7 +204,7 @@ CPU frame at native resolution, PNG, under `tests/golden/<name>/`, a few tens of
 kilobytes each. `psoxide-gate bless <game>` runs the journey, refuses if any
 assert (not golden, not matrix) failed unless `--force`, writes the PNGs, and
 prints new / changed / unchanged per checkpoint with the diff statistics. The
-review report beside it shows old golden, new frame and heat map. Commit the
+review report beside it shows old golden, new frame and exact magenta difference. Commit the
 PNGs with the change that caused them.
 
 A golden belongs to one build. A different build that changes pixels (a
@@ -299,3 +307,28 @@ handler, and reports the injected source/cycle separately from natural overlaps.
 Run old and fixed guests with identical emulator binary, execution tier, tape,
 card and injection settings. An unrelated overlap elsewhere in the journey
 cannot satisfy the injected event's completion check.
+
+## Refresh retained evidence
+
+`psoxide-gate refresh-report captures.toml --out <new-directory>` composes
+reports from verified raw captures without starting an emulator. Each
+`[[capture]]` record supplies `game`, `title`, `checkpoint`, `tick`, absolute
+`bin`, `report`, `cpu`, `hw1`, `hw3` paths and a full SHA256 in the matching
+`*_sha256` field. `strict` is the journey's array of native text/HUD rectangles;
+`receipt` and `notes` can identify the external artifact binding evidence.
+The command validates file hashes, renderer dimensions, the source report's
+BIN prefix and checkpoint tick. Historical reports do not record a video-frame
+counter, so omit `frame`. Artifact identity must first be verified against the
+installed library receipt; a report hash alone does not certify installation.
+It requires a new output directory and preserves the original reports.
+The refreshed report shows SKIP for acceptance and links the original report;
+only exact visual counts are recomputed.
+
+`psoxide-gate before-after pair.toml` writes a deterministic review PNG with
+one 3x presentation row with readable embedded labels. Set top-level `out` to a new absolute PNG
+path; `[before]` and `[after]` each have absolute `image`, full `sha256`, `build`,
+`checkpoint`, `mode`, `scale`, and recorded `tick`. Both sides must have matching
+checkpoint, mode, scale and image dimensions. Embedded labels and stdout give
+the exact changed-pixel count, or `no visible change` with zero. Raw screenshots
+remain unmodified. Retain this PNG for every visible landing/library swap and
+show it inline with the previous installed and new build identities.

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// An RGBA8 frame.
 #[derive(Clone, Debug)]
@@ -15,7 +15,7 @@ pub struct Img {
 
 /// A pixel rectangle in the frame's own coordinates (native 1x pixels for
 /// journey files; the gate scales them for enlarged frames).
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Rect {
     pub x: u32,
@@ -266,40 +266,6 @@ impl Img {
         stats
     }
 
-    /// Heat map of the per-pixel difference: black for equal, a dim blue-grey
-    /// for a difference inside `channel` tolerance, and red through yellow to
-    /// white for pixels that exceed it, brighter as the difference grows.
-    pub fn heatmap(&self, other: &Img, channel: u8, radius: u32) -> Img {
-        let mut out = vec![0xFFu8; (self.w * self.h * 4) as usize];
-        for y in 0..self.h {
-            for x in 0..self.w {
-                let d = self.pixel_diff(other, x, y, radius);
-                let i = ((y * self.w + x) * 4) as usize;
-                let rgb = if d == 0 {
-                    [0, 0, 0]
-                } else if d <= channel {
-                    // Within tolerance: a dim blue-grey, never mistaken for a failure.
-                    let v = 24 + (u32::from(d) * 60 / u32::from(channel.max(1))) as u8;
-                    [v / 2, v / 2, v]
-                } else {
-                    let t = (f32::from(d) / 255.0).sqrt();
-                    if t < 0.5 {
-                        [(128.0 + 255.0 * t) as u8, 0, 0]
-                    } else {
-                        let u = (t - 0.5) * 2.0;
-                        [255, (255.0 * u) as u8, (255.0 * u * u) as u8]
-                    }
-                };
-                out[i..i + 3].copy_from_slice(&rgb);
-            }
-        }
-        Img {
-            w: self.w,
-            h: self.h,
-            rgba: out,
-        }
-    }
-
     pub fn save_png(&self, path: &Path) -> Result<(), String> {
         use image::codecs::png::{CompressionType, FilterType, PngEncoder};
         use image::ImageEncoder;
@@ -323,17 +289,88 @@ impl Img {
     }
 
     pub fn load_png(path: &Path) -> Result<Img, String> {
+        if path.extension().is_some_and(|ext| ext == "ppm") {
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            return Self::load_ppm(&bytes);
+        }
         let img = image::open(path)
             .map_err(|e| format!("read {}: {e}", path.display()))?
             .to_rgba8();
         let (w, h) = img.dimensions();
         Ok(Img::from_rgba(w, h, img.into_raw()))
     }
+
+    /// Retained frontend P6 RGB capture, preserving every source pixel.
+    fn load_ppm(bytes: &[u8]) -> Result<Img, String> {
+        fn token<'a>(bytes: &'a [u8], at: &mut usize) -> Result<&'a str, String> {
+            loop {
+                while bytes.get(*at).is_some_and(u8::is_ascii_whitespace) {
+                    *at += 1;
+                }
+                if bytes.get(*at) != Some(&b'#') {
+                    break;
+                }
+                while bytes.get(*at).is_some_and(|b| *b != b'\n') {
+                    *at += 1;
+                }
+            }
+            let start = *at;
+            while bytes.get(*at).is_some_and(|b| !b.is_ascii_whitespace()) {
+                *at += 1;
+            }
+            std::str::from_utf8(&bytes[start..*at]).map_err(|e| e.to_string())
+        }
+        let mut at = 0;
+        if token(bytes, &mut at)? != "P6" {
+            return Err("capture must be binary P6 PPM".into());
+        }
+        let w: u32 = token(bytes, &mut at)?
+            .parse()
+            .map_err(|_| "invalid PPM width")?;
+        let h: u32 = token(bytes, &mut at)?
+            .parse()
+            .map_err(|_| "invalid PPM height")?;
+        if token(bytes, &mut at)? != "255" {
+            return Err("capture PPM must use 8-bit RGB".into());
+        }
+        if !bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+            return Err("missing PPM separator".into());
+        }
+        if bytes.get(at..at + 2) == Some(b"\r\n") {
+            at += 2;
+        } else {
+            at += 1;
+        }
+        let count = w
+            .checked_mul(h)
+            .and_then(|n| n.checked_mul(3))
+            .ok_or("PPM size overflow")? as usize;
+        if w == 0 || h == 0 || bytes.len() - at != count {
+            return Err("PPM pixel length mismatch".into());
+        }
+        let mut rgba = Vec::with_capacity(count / 3 * 4);
+        for rgb in bytes[at..].chunks_exact(3) {
+            rgba.extend_from_slice(rgb);
+            rgba.push(255);
+        }
+        Ok(Self::from_rgba(w, h, rgba))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ppm_parser_retains_whitespace_pixels_and_rejects_truncation() {
+        let bytes = b"P6\n# retained capture\n2 1\n255\n\x20\x0a\x0d\xff\x00\x01";
+        let image = Img::load_ppm(bytes).unwrap();
+        assert_eq!((image.w, image.h), (2, 1));
+        assert_eq!(image.px(0, 0), [32, 10, 13]);
+        assert_eq!(image.px(1, 0), [255, 0, 1]);
+        assert!(Img::load_ppm(&bytes[..bytes.len() - 1]).is_err());
+        assert!(Img::load_ppm(b"P6\n0 1\n255\n").is_err());
+    }
 
     fn solid(w: u32, h: u32, rgb: [u8; 3]) -> Img {
         let mut v = Vec::new();

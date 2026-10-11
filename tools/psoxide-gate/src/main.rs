@@ -7,11 +7,13 @@
 #![allow(missing_docs)]
 
 mod card;
+mod contact;
 mod exec;
 mod fleet;
 mod img;
 mod journey;
 mod machine;
+mod refresh;
 mod render;
 mod report;
 mod symbols;
@@ -41,6 +43,16 @@ struct Cli {
 enum Cmd {
     /// Run journeys and write the HTML contact sheet. Exit code 1 on any failure.
     Run(RunArgs),
+    /// Recompose hash-verified raw capture evidence without starting an emulator.
+    RefreshReport {
+        manifest: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Write a labeled 3x before and after evidence PNG.
+    BeforeAfter { manifest: PathBuf },
+    /// Preserve a retained frontend PPM capture as lossless PNG data.
+    ConvertCapture { input: PathBuf, output: PathBuf },
     /// Run a journey and write its frames as the new goldens, with a diff report.
     Bless(BlessArgs),
     /// List the fleet: each game, its journey and whether it exists.
@@ -88,7 +100,7 @@ struct RunArgs {
     /// Journeys running at once for `all` (each is one emulator run).
     #[arg(long, default_value_t = 1)]
     jobs: usize,
-    /// Release gate: require a journey and CPU/HW 1x and 3x at every checkpoint.
+    /// Release gate: require a journey and CPU1, HW1 and HW3 at every checkpoint.
     #[arg(long)]
     strict: bool,
     /// Print each step as it starts.
@@ -133,6 +145,21 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Cmd::Run(a) => cmd_run(&a),
+        Cmd::RefreshReport { manifest, out } => {
+            refresh::run(&manifest, &out).map(|()| ExitCode::SUCCESS)
+        }
+        Cmd::ConvertCapture { input, output } => {
+            if output.exists() {
+                Err("capture output already exists".into())
+            } else {
+                img::Img::load_png(&input)
+                    .and_then(|image| image.save_png(&output))
+                    .map(|()| ExitCode::SUCCESS)
+            }
+        }
+        Cmd::BeforeAfter { manifest } => {
+            refresh::before_after(&manifest).map(|()| ExitCode::SUCCESS)
+        }
         Cmd::Bless(a) => cmd_bless(&a),
         Cmd::List(a) => cmd_list(&a),
     };
