@@ -116,6 +116,9 @@ struct RunArgs {
     /// Capture this named checkpoint even when its comparisons pass.
     #[arg(long, requires = "trace_failures")]
     trace_checkpoint: Vec<String>,
+    /// Bounded hardware candidate trace ROI in native VRAM: x,y,width,height.
+    #[arg(long, requires_all = ["trace_failures", "trace_checkpoint"], conflicts_with = "no_hw")]
+    trace_hw_roi: Option<String>,
     /// Print each step as it starts.
     #[arg(short, long)]
     verbose: bool,
@@ -313,6 +316,7 @@ struct Opts {
     trace_failures: bool,
     trace_state: Vec<String>,
     trace_checkpoint: Vec<String>,
+    trace_hw_roi: Option<String>,
     out: PathBuf,
 }
 
@@ -330,6 +334,7 @@ impl Opts {
             trace_failures: a.trace_failures,
             trace_state: a.trace_state.clone(),
             trace_checkpoint: a.trace_checkpoint.clone(),
+            trace_hw_roi: a.trace_hw_roi.clone(),
             out: a.out.clone(),
         }
     }
@@ -375,6 +380,7 @@ fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
             trace_failures: o.trace_failures,
             trace_state: o.trace_state.clone(),
             trace_checkpoint: o.trace_checkpoint.clone(),
+            trace_hw_roi: o.trace_hw_roi.clone(),
             journey_path: job.journey_path.clone(),
             artifact_dir: o.out.join(&journey.name).join("cards"),
         },
@@ -419,6 +425,7 @@ fn print_failures(r: &JourneyResult, all: bool) {
 }
 
 fn cmd_run(a: &RunArgs) -> Result<ExitCode, String> {
+    trace::validate_submitted_selection(a.trace_hw_roi.is_some(), &a.trace_checkpoint)?;
     if a.strict && a.no_hw {
         return Err("--strict requires hardware rendering; remove --no-hw".into());
     }
@@ -511,6 +518,7 @@ fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
         trace_failures: false,
         trace_state: Vec::new(),
         trace_checkpoint: Vec::new(),
+        trace_hw_roi: None,
         out: a.out.clone(),
     };
     let r = run_planned(job, &fleet, &opts);

@@ -171,6 +171,7 @@ pub struct RunOptions {
     pub trace_failures: bool,
     pub trace_state: Vec<String>,
     pub trace_checkpoint: Vec<String>,
+    pub trace_hw_roi: Option<String>,
     pub journey_path: PathBuf,
     pub artifact_dir: PathBuf,
 }
@@ -278,6 +279,7 @@ struct Run<'a> {
     hw: Option<HwSet>,
     syms: Symbols,
     trace: Option<crate::trace::Trace>,
+    submitted_saved: usize,
     groups: Vec<Group>,
     /// CPU frame of every checkpoint so far, for `frame_diff`.
     shots: std::collections::BTreeMap<String, Img>,
@@ -305,6 +307,13 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         notes: Vec::new(),
         cards: Vec::new(),
     };
+    if let Err(e) = crate::trace::validate_submitted_selection(
+        opts.trace_hw_roi.is_some(),
+        &opts.trace_checkpoint,
+    ) {
+        result.abort = Some(e);
+        return result;
+    }
     let scales = opts
         .scales
         .clone()
@@ -357,7 +366,14 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     }
     let hw = if want_hw {
         match HwSet::new(&scales) {
-            Ok(h) => {
+            Ok(mut h) => {
+                if let Some(roi) = &opts.trace_hw_roi {
+                    if let Err(e) = h.enable_submitted_trace(roi, 0) {
+                        result.abort = Some(e);
+                        result.wall = start.elapsed();
+                        return result;
+                    }
+                }
                 result.hw_adapter = Some(h.adapter.clone());
                 Some(h)
             }
@@ -401,6 +417,7 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         hw,
         syms,
         trace,
+        submitted_saved: 0,
         groups: Vec::new(),
         shots: std::collections::BTreeMap::new(),
         initial_card,
@@ -634,7 +651,14 @@ impl Run<'_> {
                         .scales
                         .clone()
                         .unwrap_or_else(|| self.journey.render.scales.clone());
-                    self.hw = Some(HwSet::new(&scales)?);
+                    let mut hw = HwSet::new(&scales)?;
+                    if let Some(roi) = &self.opts.trace_hw_roi {
+                        hw.enable_submitted_trace(
+                            roi,
+                            self.trace.as_ref().map_or(0, |t| t.epoch()),
+                        )?;
+                    }
+                    self.hw = Some(hw);
                 }
             }
         }
@@ -659,7 +683,7 @@ impl Run<'_> {
             trace.record(self.m.ticks, &self.m.bus.gpu);
         }
         if let Some(hw) = self.hw.as_mut() {
-            hw.after_tick(&mut self.m.bus);
+            hw.after_tick_traced(&mut self.m.bus, self.m.ticks);
         } else if self.trace.is_some() {
             self.m.bus.gpu.drain_completed_cmd_log();
         }
@@ -928,7 +952,43 @@ impl Run<'_> {
                     &self.opts.trace_state,
                     self.journey,
                 ) {
-                    Ok(note) => self.notes.push(note),
+                    Ok(note) => {
+                        self.notes.push(note);
+                        if self.opts.trace_hw_roi.is_some()
+                            && self.opts.trace_checkpoint.contains(&name)
+                            && self.submitted_saved >= 2
+                        {
+                            let dir = self
+                                .opts
+                                .artifact_dir
+                                .join("../trace")
+                                .join(format!("checkpoint-{index:04}"));
+                            let omitted = "schema = 1\nretained = false\nhardware_winner_verified = false\nreason = \"two submitted-checkpoint export cap reached; evidence unknown\"\n";
+                            match std::fs::write(dir.join("hw-submitted-omitted.toml"), omitted) {
+                                Ok(()) => self.notes.push("submitted trace omitted: two-checkpoint cap reached; evidence unknown".into()),
+                                Err(e) => self.notes.push(format!("submitted trace omission receipt unavailable: {e}")),
+                            }
+                        }
+                        if let Some(hw) = self.hw.as_mut().filter(|_| {
+                            self.submitted_saved < 2 && self.opts.trace_checkpoint.contains(&name)
+                        }) {
+                            let dir = self
+                                .opts
+                                .artifact_dir
+                                .join("../trace")
+                                .join(format!("checkpoint-{index:04}"));
+                            match hw.save_submitted_trace(&dir) {
+                                Ok(Some(note)) => {
+                                    self.submitted_saved += 1;
+                                    self.notes.push(note);
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    self.notes.push(format!("submitted trace unavailable: {e}"))
+                                }
+                            }
+                        }
+                    }
                     Err(e) => self.notes.push(format!("trace unavailable: {e}")),
                 }
             }

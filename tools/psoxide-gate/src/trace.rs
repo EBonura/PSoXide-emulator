@@ -10,6 +10,13 @@ pub fn capture_checkpoint(selected: &[String], name: &str, failed: bool) -> bool
     failed || selected.iter().any(|s| s == name)
 }
 
+pub fn validate_submitted_selection(enabled: bool, selected: &[String]) -> Result<(), String> {
+    if enabled && !(1..=2).contains(&selected.len()) {
+        return Err("trace HW ROI requires one or two named checkpoints".into());
+    }
+    Ok(())
+}
+
 const LIMIT: usize = 4 * 1024 * 1024;
 const UNKNOWN: u64 = u64::MAX;
 
@@ -57,6 +64,10 @@ impl Trace {
         } else {
             UNKNOWN
         }
+    }
+
+    pub fn epoch(&self) -> u32 {
+        self.epoch
     }
 
     pub fn reboot(&mut self) {
@@ -263,8 +274,8 @@ pub fn inspect(checkpoint: &Path, x: u16, y: u16) -> Result<String, String> {
     if x >= 1024 || y >= 512 {
         return Err("VRAM coordinate out of bounds".into());
     }
-    let text = std::fs::read_to_string(checkpoint.join("receipt.toml"))
-        .map_err(|e| e.to_string())?;
+    let text =
+        std::fs::read_to_string(checkpoint.join("receipt.toml")).map_err(|e| e.to_string())?;
     let receipt: toml::Value = toml::from_str(&text).map_err(|e| e.to_string())?;
     let owners = std::fs::read(checkpoint.join("owners.bin")).map_err(|e| e.to_string())?;
     if owners.len() != 1024 * 512 * 8
@@ -357,6 +368,48 @@ mod tests {
         };
         assert!(!args.trace_failures);
         assert!(args.trace_checkpoint.is_empty());
+    }
+
+    #[test]
+    fn submitted_roi_is_explicit_and_requires_checkpoint_activation() {
+        use clap::Parser;
+        assert!(validate_submitted_selection(true, &["a".into(), "b".into(), "c".into()]).is_err());
+        assert!(validate_submitted_selection(true, &["a".into(), "b".into()]).is_ok());
+        assert!(crate::Cli::try_parse_from([
+            "gate",
+            "run",
+            "journey.toml",
+            "--trace-hw-roi",
+            "0,0,1,1"
+        ])
+        .is_err());
+        let parsed = crate::Cli::try_parse_from([
+            "gate",
+            "run",
+            "journey.toml",
+            "--trace-failures",
+            "--trace-checkpoint",
+            "baseline",
+            "--trace-hw-roi",
+            "112,80,52,260",
+        ])
+        .unwrap();
+        let crate::Cmd::Run(args) = parsed.command else {
+            panic!("wrong command")
+        };
+        assert_eq!(args.trace_hw_roi.as_deref(), Some("112,80,52,260"));
+        assert!(crate::Cli::try_parse_from([
+            "gate",
+            "run",
+            "journey.toml",
+            "--trace-failures",
+            "--trace-checkpoint",
+            "baseline",
+            "--trace-hw-roi",
+            "0,0,1,1",
+            "--no-hw"
+        ])
+        .is_err());
     }
 
     #[test]

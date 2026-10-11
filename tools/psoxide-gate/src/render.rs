@@ -17,6 +17,7 @@ pub struct HwSet {
     pre_tick_vram: Vec<u16>,
     ticks_since_wait: u32,
     pub adapter: String,
+    submitted_epoch: u32,
 }
 
 /// Why a frame could not come from the hardware renderer.
@@ -77,8 +78,34 @@ impl HwSet {
             scales: renderers,
             pre_tick_vram: initial,
             ticks_since_wait: 0,
+            submitted_epoch: 0,
             adapter: format!("{} ({:?})", info.name, info.backend),
         })
+    }
+
+    pub fn enable_submitted_trace(&mut self, text: &str, epoch: u32) -> Result<(), String> {
+        let roi = parse_submitted_roi(text)?;
+        self.submitted_epoch = epoch;
+        if let Some((_, hw)) = self.scales.iter_mut().max_by_key(|(s, _)| *s) {
+            hw.enable_submitted_trace(roi);
+        }
+        Ok(())
+    }
+
+    pub fn save_submitted_trace(&self, dir: &std::path::Path) -> Result<Option<String>, String> {
+        use sha2::{Digest, Sha256};
+        let Some((scale, hw)) = self.scales.iter().max_by_key(|(s, _)| *s) else {
+            return Ok(None);
+        };
+        let Some((bytes, truncated)) = hw.submitted_trace_bytes() else {
+            return Ok(None);
+        };
+        let receipt = std::fs::read(dir.join("receipt.toml")).map_err(|e| e.to_string())?;
+        let packets = std::fs::read(dir.join("packets.bin")).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join("hw-submitted.bin"), &bytes).map_err(|e| e.to_string())?;
+        let text = format!("schema = 1\nscale = {scale}\nbytes = {}\ntruncated = {truncated}\nhardware_winner_verified = false\ncoverage = \"ROI bounding-box candidates; exact submitted vertices/runs and sampler regions\"\ntrace_receipt_sha256 = \"{:x}\"\nraw_packets_sha256 = \"{:x}\"\nsubmitted_sha256 = \"{:x}\"\n", bytes.len(), Sha256::digest(&receipt), Sha256::digest(&packets), Sha256::digest(&bytes));
+        std::fs::write(dir.join("hw-submitted-receipt.toml"), text).map_err(|e| e.to_string())?;
+        Ok(Some(format!("bounded HW submitted candidate trace scale {scale}, {} bytes, truncated={truncated}; winner unknown",bytes.len())))
     }
 
     /// Call before running a tick.
@@ -88,9 +115,10 @@ impl HwSet {
     }
 
     /// Call after a tick: replay its command log on every renderer.
-    pub fn after_tick(&mut self, bus: &mut Bus) {
+    pub fn after_tick_traced(&mut self, bus: &mut Bus, tick: u64) {
         let log = bus.gpu.drain_completed_cmd_log();
         for (_, hw) in &mut self.scales {
+            hw.submitted_trace_context(tick, self.submitted_epoch);
             hw.render_frame(&bus.gpu, &log, &self.pre_tick_vram);
         }
         self.ticks_since_wait += 1;
@@ -128,5 +156,46 @@ impl HwSet {
             out.push((*s, Img::from_rgba(w, h, rgba)));
         }
         Ok(out)
+    }
+}
+
+fn parse_submitted_roi(text: &str) -> Result<[u16; 4], String> {
+    let values: Result<Vec<u32>, _> = text.split(',').map(str::parse).collect();
+    let v = values.map_err(|_| "trace HW ROI requires x,y,width,height".to_string())?;
+    if v.len() != 4
+        || v[2] == 0
+        || v[3] == 0
+        || v[0].checked_add(v[2]).is_none_or(|n| n > 1024)
+        || v[1].checked_add(v[3]).is_none_or(|n| n > 512)
+    {
+        return Err("trace HW ROI must be a nonempty native VRAM rectangle within 1024x512".into());
+    }
+    Ok([
+        v[0] as u16,
+        v[1] as u16,
+        (v[0] + v[2] - 1) as u16,
+        (v[1] + v[3] - 1) as u16,
+    ])
+}
+#[cfg(test)]
+mod submitted_tests {
+    use super::*;
+    #[test]
+    fn roi_parser_fails_closed_and_keeps_edge_coordinates() {
+        assert_eq!(
+            parse_submitted_roi("1023,511,1,1").unwrap(),
+            [1023, 511, 1023, 511]
+        );
+        for bad in [
+            "0,0,0,1",
+            "0,0,1,0",
+            "1023,0,2,1",
+            "0,511,1,2",
+            "4294967295,0,1,1",
+            "0,0,1",
+            "no",
+        ] {
+            assert!(parse_submitted_roi(bad).is_err());
+        }
     }
 }

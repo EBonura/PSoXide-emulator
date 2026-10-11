@@ -34,9 +34,20 @@ pub struct DrawRun {
 /// Output of [`Translator::translate`] -- vertices remain in GP0 order
 /// and `runs` describes contiguous draw ranges that share pipeline
 /// state and draw-area clipping.
+#[derive(Clone, Debug)]
+pub struct PacketSpan {
+    pub packet_index: u32,
+    pub fifo: Vec<u32>,
+    pub start: usize,
+    pub end: usize,
+    pub env: [i32; 6],
+}
+
 pub struct TranslatedFrame<'a> {
     pub vertices: &'a [HwVertex],
     pub runs: &'a [DrawRun],
+    pub packet_spans: &'a [PacketSpan],
+    pub spans_truncated: bool,
 }
 
 impl TranslatedFrame<'_> {
@@ -83,6 +94,9 @@ pub struct Translator {
     /// Ordered draw runs over `flat`. Adjacent primitives only merge
     /// when their blend kind and draw-area clip match.
     runs: Vec<DrawRun>,
+    capture_spans: Option<[u16; 4]>,
+    spans_truncated: bool,
+    packet_spans: Vec<PacketSpan>,
 }
 
 impl Translator {
@@ -96,7 +110,14 @@ impl Translator {
             scale: 1,
             flat: Vec::with_capacity(4 * 1024),
             runs: Vec::with_capacity(1024),
+            capture_spans: None,
+            spans_truncated: false,
+            packet_spans: Vec::new(),
         }
+    }
+
+    pub fn capture_packet_spans(&mut self, roi: Option<[u16; 4]>) {
+        self.capture_spans = roi;
     }
 
     /// Current draw-env state (area l/t/r/b, offset x/y) for
@@ -135,12 +156,37 @@ impl Translator {
         self.wireframe = wireframe;
         self.flat.clear();
         self.runs.clear();
+        self.packet_spans.clear();
+        self.spans_truncated = false;
         for entry in log {
+            let start = self.flat.len();
             self.process(entry);
+            if self
+                .capture_spans
+                .is_some_and(|roi| crate::submitted::intersects(&self.flat[start..], roi))
+            {
+                if self.packet_spans.len() >= 256
+                    || entry.fifo.as_slice().len() > 128
+                    || self.flat.len() - start > 96
+                {
+                    self.spans_truncated = true;
+                    continue;
+                }
+                let (l, t, r, b, x, y) = self.debug_env();
+                self.packet_spans.push(PacketSpan {
+                    packet_index: entry.index,
+                    fifo: entry.fifo.as_slice().to_vec(),
+                    start,
+                    end: self.flat.len(),
+                    env: [l, t, r, b, x, y],
+                });
+            }
         }
         TranslatedFrame {
             vertices: &self.flat,
             runs: &self.runs,
+            packet_spans: &self.packet_spans,
+            spans_truncated: self.spans_truncated,
         }
     }
 
@@ -1222,6 +1268,63 @@ mod tests {
             opcode,
             fifo: fifo.into(),
         }
+    }
+
+    #[test]
+    fn submitted_spans_preserve_exact_translation_and_raw_packet() {
+        let mut draw = entry(
+            0x20,
+            vec![0x20010203, xy(118, 83), xy(125, 87), xy(119, 91)],
+        );
+        draw.index = 17;
+        let log = [draw.clone()];
+        let mut ordinary = Translator::new();
+        let a = ordinary.translate(&log);
+        let ordinary_bytes = bytemuck::cast_slice::<HwVertex, u8>(a.vertices).to_vec();
+        let ordinary_runs = a.runs.to_vec();
+        assert!(a.packet_spans.is_empty());
+        let mut diagnostic = Translator::new();
+        diagnostic.capture_packet_spans(Some([110, 80, 140, 100]));
+        let b = diagnostic.translate(&log);
+        assert_eq!(
+            bytemuck::cast_slice::<HwVertex, u8>(b.vertices),
+            ordinary_bytes
+        );
+        assert_eq!(b.runs, ordinary_runs);
+        assert_eq!(b.packet_spans.len(), 1);
+        let span = &b.packet_spans[0];
+        assert_eq!(span.packet_index, 17);
+        assert_eq!(span.fifo, draw.fifo.as_slice());
+        assert_eq!((span.start, span.end), (0, b.vertices.len()));
+        assert!(!b.spans_truncated);
+    }
+
+    #[test]
+    fn submitted_span_cap_is_explicit_without_dropping_render_vertices() {
+        let log: Vec<_> = (0..257)
+            .map(|i| {
+                let mut e = entry(
+                    0x20,
+                    vec![0x20010203, xy(118, 83), xy(125, 87), xy(119, 91)],
+                );
+                e.index = i;
+                e
+            })
+            .collect();
+        let mut ordinary = Translator::new();
+        let a = ordinary.translate(&log);
+        let bytes = bytemuck::cast_slice::<HwVertex, u8>(a.vertices).to_vec();
+        let mut diagnostic = Translator::new();
+        diagnostic.capture_packet_spans(Some([110, 80, 140, 100]));
+        let b = diagnostic.translate(&log);
+        assert_eq!(bytemuck::cast_slice::<HwVertex, u8>(b.vertices), bytes);
+        assert_eq!(b.packet_spans.len(), 256);
+        assert!(b
+            .packet_spans
+            .iter()
+            .enumerate()
+            .all(|(i, s)| s.packet_index == i as u32));
+        assert!(b.spans_truncated);
     }
 
     #[test]

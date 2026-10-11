@@ -76,6 +76,8 @@ pub use replay::ComputeBackend;
 pub use target::{VRAM_HEIGHT, VRAM_WIDTH};
 pub use translator::Translator;
 
+mod submitted;
+
 use pipeline::HwPipeline;
 use target::{RenderTarget, MAX_SCALE};
 use translator::DrawRun;
@@ -99,6 +101,7 @@ pub struct HwRenderer {
     target: RenderTarget,
     translator: Translator,
     texture_words: Vec<u16>,
+    submitted_trace: Option<submitted::SubmittedTrace>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -145,6 +148,7 @@ impl HwRenderer {
             target,
             translator: Translator::new(),
             texture_words: vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize],
+            submitted_trace: None,
         }
     }
 
@@ -160,7 +164,21 @@ impl HwRenderer {
             target,
             translator: Translator::new(),
             texture_words: vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize],
+            submitted_trace: None,
         }
+    }
+
+    /// Opt-in bounded submitted-candidate evidence. Coordinates are native VRAM,
+    /// inclusive; this is not a hardware winner or coverage oracle.
+    pub fn enable_submitted_trace(&mut self, roi: [u16; 4]) {
+        self.translator.capture_packet_spans(Some(roi));
+        self.submitted_trace = Some(submitted::SubmittedTrace::new(roi));
+    }
+    pub fn submitted_trace_context(&mut self, tick: u64, epoch: u32) {
+        if let Some(trace) = self.submitted_trace.as_mut() { trace.tick = tick; trace.epoch = epoch; }
+    }
+    pub fn submitted_trace_bytes(&self) -> Option<(Vec<u8>, bool)> {
+        self.submitted_trace.as_ref().map(|t| t.bytes())
     }
 
     /// Stable `egui::TextureId` of the VRAM-shaped target. The
@@ -279,6 +297,9 @@ impl HwRenderer {
 
         self.translator.set_internal_scale(self.target.scale());
         let frame = self.translator.translate_with_wireframe(cmd_log, wireframe);
+        if let Some(trace) = self.submitted_trace.as_mut() {
+            trace.capture(&frame, self.target.scale(), &self.texture_words);
+        }
         if frame.total() > 0 {
             self.pipeline.upload_vertices(
                 &self.device,
