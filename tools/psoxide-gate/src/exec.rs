@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::img::{Img, Rect, Tolerance};
 use crate::journey::{Assert, Journey, Step};
-use crate::machine::{button_mask, Boot, Machine};
+use crate::machine::{button_mask, tape_end, Boot, Machine};
 use crate::render::HwSet;
 use crate::symbols::Symbols;
 
@@ -227,6 +227,44 @@ pub fn disc_id(cue_or_bin: &Path) -> String {
         .collect()
 }
 
+/// Parse and bind a tape from the same bytes that are reported in the receipt.
+/// Rebase changes only the in-memory poll origin, never the recorded file.
+fn load_step_tape(
+    file: &Path,
+    label: &str,
+    rebase: bool,
+    current_poll: u64,
+) -> Result<(emulator_core::input_tape::Tape, String), String> {
+    let raw = std::fs::read(file).map_err(|error| format!("read {}: {error}", file.display()))?;
+    let mut tape = emulator_core::input_tape::tape_from_bytes(&raw)
+        .map_err(|error| format!("{}: {error}", file.display()))?;
+    if tape.clock != emulator_core::input_tape::TapeClock::PadPoll || tape.samples.is_empty() {
+        return Err("gate tape must contain nonempty poll-bound samples".into());
+    }
+    let recorded_start = tape.start_poll;
+    if rebase {
+        tape.start_poll = current_poll;
+    }
+    let end = tape_end(&tape)?;
+    let note = format!(
+        "poll-bound tape {label} SHA256 {} recorded_start_poll {recorded_start} effective_start_poll {} samples {} end_poll {end}",
+        crate::card::hash(&raw),
+        tape.start_poll,
+        tape.samples.len()
+    );
+    Ok((tape, note))
+}
+
+fn replay_complete(
+    tape_end_poll: Option<u64>,
+    polls: u64,
+    cut_pending: bool,
+    cut_hit: bool,
+    injected_complete: bool,
+) -> bool {
+    cut_hit || (!cut_pending && tape_end_poll.is_some_and(|end| polls >= end)) || injected_complete
+}
+
 struct Run<'a> {
     journey: &'a Journey,
     opts: &'a RunOptions,
@@ -374,17 +412,13 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
 impl Run<'_> {
     fn card_step(&mut self, index: usize, step: &Step) -> Result<(), String> {
         if let Some(path) = &step.tape {
-            let tape = emulator_core::input_tape::read_tape_full(&self.opts.repo_root.join(path))?;
-            if tape.clock != emulator_core::input_tape::TapeClock::PadPoll
-                || tape.samples.is_empty()
-            {
-                return Err("gate tape must contain poll-bound samples".into());
-            }
-            let raw = std::fs::read(self.opts.repo_root.join(path)).map_err(|e| e.to_string())?;
-            self.notes.push(format!(
-                "poll-bound tape {path} SHA256 {}",
-                crate::card::hash(&raw)
-            ));
+            let (tape, note) = load_step_tape(
+                &self.opts.repo_root.join(path),
+                path,
+                step.tape_rebase,
+                self.m.bus.port1_completed_polls(),
+            )?;
+            self.notes.push(note);
             self.m.tape = Some(tape);
         }
         let action = step.card.as_ref();
@@ -433,12 +467,14 @@ impl Run<'_> {
             }
         }
         if self.m.tape.is_some() || self.m.cut.is_some() || self.m.irq_injection.is_some() {
-            let timeout = action.and_then(|c| c.timeout).unwrap_or(3600);
+            let timeout = step
+                .timeout
+                .or_else(|| action.and_then(|c| c.timeout))
+                .unwrap_or(3600);
+            let tape_end_poll = self.m.tape.as_ref().map(tape_end).transpose()?;
             let mut finished = false;
+            let mut run_error = None;
             for _ in 0..timeout {
-                let exhausted = self.m.tape.as_ref().is_some_and(|t| {
-                    self.m.bus.port1_completed_polls() >= t.start_poll + t.samples.len() as u64
-                });
                 let injected_complete = self.m.tape.is_none()
                     && self.m.injected.is_some()
                     && self
@@ -446,20 +482,40 @@ impl Run<'_> {
                         .card_observer
                         .as_ref()
                         .is_some_and(|o| o.target_observed);
-                if self.m.cut_hit.is_some()
-                    || (self.m.cut.is_none() && exhausted)
-                    || injected_complete
-                {
+                if replay_complete(
+                    tape_end_poll,
+                    self.m.bus.port1_completed_polls(),
+                    self.m.cut.is_some(),
+                    self.m.cut_hit.is_some(),
+                    injected_complete,
+                ) {
                     finished = true;
                     break;
                 }
-                self.tick()?;
+                if let Err(error) = self.tick() {
+                    run_error = Some(error);
+                    break;
+                }
             }
-            if self.m.cut_hit.is_some() {
-                finished = true;
-            }
+            let injected_complete = self.m.tape.is_none()
+                && self.m.injected.is_some()
+                && self
+                    .m
+                    .card_observer
+                    .as_ref()
+                    .is_some_and(|o| o.target_observed);
+            finished |= replay_complete(
+                tape_end_poll,
+                self.m.bus.port1_completed_polls(),
+                self.m.cut.is_some(),
+                self.m.cut_hit.is_some(),
+                injected_complete,
+            );
             self.m.tape = None;
             self.m.release_pads();
+            if let Some(error) = run_error {
+                return Err(error);
+            }
             if action.is_some_and(|c| c.action == "irq_during_ack") {
                 let ok = self.m.injected.is_some()
                     && self
@@ -1269,10 +1325,88 @@ fn ram_name(a: &Assert) -> String {
 mod tests {
     use super::*;
 
+    use emulator_core::input_tape::{tape_to_csv, write_tape_poll_bound, PadSample, TapeClock};
+
+    use crate::machine::tape_sample;
+
     fn journey(toml_text: &str) -> Journey {
         let journey: Journey = toml::from_str(toml_text).unwrap();
         journey.validate().unwrap();
         journey
+    }
+
+    #[test]
+    fn rebased_tape_uses_current_poll_and_consumes_every_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("route.pxtape");
+        let samples = [
+            PadSample::from_buttons(1),
+            PadSample::from_buttons(2),
+            PadSample::from_buttons(4),
+        ];
+        write_tape_poll_bound(&file, &samples, 4).unwrap();
+        let original = std::fs::read(&file).unwrap();
+
+        let (absolute, absolute_note) = load_step_tape(&file, "route.pxtape", false, 100).unwrap();
+        assert_eq!(absolute.start_poll, 4);
+        assert_eq!(tape_end(&absolute).unwrap(), 7);
+        assert!(100 >= tape_end(&absolute).unwrap());
+        assert!(absolute_note.contains("recorded_start_poll 4 effective_start_poll 4 samples 3"));
+
+        let (rebased, note) = load_step_tape(&file, "route.pxtape", true, 100).unwrap();
+        assert_eq!(rebased.start_poll, 100);
+        assert_eq!(tape_end(&rebased).unwrap(), 103);
+        assert_eq!(tape_sample(&rebased, 99), None);
+        for (poll, expected) in [(100, 1), (101, 2), (102, 4)] {
+            assert_eq!(tape_sample(&rebased, poll).unwrap().buttons, expected);
+            assert!(poll < tape_end(&rebased).unwrap());
+        }
+        assert_eq!(tape_sample(&rebased, 103).unwrap().buttons, 4);
+        assert!(103 >= tape_end(&rebased).unwrap());
+        assert!(
+            note.contains("recorded_start_poll 4 effective_start_poll 100 samples 3 end_poll 103")
+        );
+        assert!(note.contains(&crate::card::hash(&original)));
+        assert_eq!(std::fs::read(&file).unwrap(), original);
+    }
+
+    #[test]
+    fn tape_loader_rejects_invalid_clock_empty_and_poll_overflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("route.pxtape");
+        assert!(load_step_tape(&file, "route", true, 1).is_err());
+        let sample = [PadSample::from_buttons(1), PadSample::from_buttons(2)];
+        let frame = tape_to_csv(&sample, TapeClock::VideoFrame, 0, None);
+        std::fs::write(&file, frame).unwrap();
+        assert!(load_step_tape(&file, "route", true, 1)
+            .unwrap_err()
+            .contains("poll-bound"));
+        let empty = tape_to_csv(&[], TapeClock::PadPoll, 0, None);
+        std::fs::write(&file, empty).unwrap();
+        assert!(load_step_tape(&file, "route", false, 1)
+            .unwrap_err()
+            .contains("nonempty"));
+        let valid = tape_to_csv(&sample, TapeClock::PadPoll, 1, None);
+        std::fs::write(&file, valid).unwrap();
+        assert!(load_step_tape(&file, "route", true, u64::MAX - 1)
+            .unwrap_err()
+            .contains("overflow"));
+        let absolute_overflow = tape_to_csv(&sample, TapeClock::PadPoll, u64::MAX, None);
+        std::fs::write(&file, absolute_overflow).unwrap();
+        assert!(load_step_tape(&file, "route", false, 0)
+            .unwrap_err()
+            .contains("overflow"));
+    }
+
+    #[test]
+    fn expired_tape_cannot_complete_a_pending_power_cut() {
+        for polls in [2, 3, 100] {
+            assert!(!replay_complete(Some(2), polls, true, false, false));
+        }
+        assert!(replay_complete(Some(2), 2, false, false, false));
+        assert!(replay_complete(Some(2), 2, true, true, false));
+        assert!(replay_complete(None, 2, true, false, true));
+        assert!(!replay_complete(None, 2, true, false, false));
     }
 
     #[test]

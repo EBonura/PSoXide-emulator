@@ -11,6 +11,26 @@ use emulator_core::{button, fast_boot_disc, Bus, ButtonState, Cpu, Deinterlace};
 
 use crate::journey::{MemcardMode, Pad2Mode, PadMode};
 
+/// Return the sample live at a completed port-1 poll. A tape holds its final
+/// sample until the step observes exhaustion and releases both pads.
+pub(crate) fn tape_sample(
+    tape: &emulator_core::input_tape::Tape,
+    polls: u64,
+) -> Option<emulator_core::input_tape::PadSample> {
+    let index = usize::try_from(polls.checked_sub(tape.start_poll)?).unwrap_or(usize::MAX);
+    tape.samples
+        .get(index)
+        .copied()
+        .or_else(|| tape.samples.last().copied())
+}
+
+pub(crate) fn tape_end(tape: &emulator_core::input_tape::Tape) -> Result<u64, String> {
+    let count = u64::try_from(tape.samples.len()).map_err(|_| "tape sample count overflow")?;
+    tape.start_poll
+        .checked_add(count)
+        .ok_or_else(|| "tape end poll overflow".into())
+}
+
 /// Same cap the headless frontend and the app's frame step use.
 const STEPS_PER_TICK: u64 = 1_000_000;
 /// Instructions between program-counter samples.
@@ -174,9 +194,8 @@ impl Machine {
         loop {
             let polls = self.bus.port1_completed_polls();
             if let Some(tape) = &self.tape {
-                let index = polls.saturating_sub(tape.start_poll) as usize;
-                if polls >= tape.start_poll {
-                    tape.samples[index.min(tape.samples.len() - 1)].apply_to_bus(&mut self.bus);
+                if let Some(sample) = tape_sample(tape, polls) {
+                    sample.apply_to_bus(&mut self.bus);
                 }
             }
             let observing =

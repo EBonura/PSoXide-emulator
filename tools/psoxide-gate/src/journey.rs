@@ -213,6 +213,9 @@ pub struct Step {
     /// Poll-bound input tape, relative to the repo, played to exhaustion.
     #[serde(default)]
     pub tape: Option<String>,
+    /// Start a poll-bound tape at the current port-1 poll instead of its recorded poll.
+    #[serde(default)]
+    pub tape_rebase: bool,
     /// Snapshot, persisted reboot, or bounded byte-triggered power_cut.
     #[serde(default)]
     pub card: Option<CardAction>,
@@ -556,8 +559,18 @@ impl Step {
         if self.hold.is_some() && !self.has_input() {
             return Err("`hold` needs press, lstick or rstick".into());
         }
-        if self.timeout.is_some() && self.wait_until.is_none() && self.hold_until.is_none() {
-            return Err("`timeout` needs wait_until or hold_until".into());
+        if self.timeout.is_some()
+            && self.wait_until.is_none()
+            && self.hold_until.is_none()
+            && self.tape.is_none()
+        {
+            return Err("`timeout` needs wait_until, hold_until or tape".into());
+        }
+        if self.tape_rebase && self.tape.is_none() {
+            return Err("`tape_rebase` needs tape".into());
+        }
+        if self.tape.is_some() && self.timeout == Some(0) {
+            return Err("tape timeout must be positive".into());
         }
         if let Some(cond) = &self.hold_until {
             if !self.has_input() {
@@ -588,6 +601,9 @@ impl Step {
             );
         }
         if let Some(c) = &self.card {
+            if self.timeout.is_some() && c.timeout.is_some() {
+                return Err("step timeout conflicts with card timeout".into());
+            }
             if !["snapshot", "reboot", "power_cut", "irq_during_ack"].contains(&c.action.as_str()) {
                 return Err(
                     "card action must be snapshot, reboot, power_cut or irq_during_ack".into(),
@@ -820,6 +836,39 @@ expect_fail = true
             "{base}[[step.assert]]\nkind = 'card_irq_ack'\nmin_count = 0"
         ))
         .is_err());
+    }
+
+    #[test]
+    fn tape_rebase_requires_a_standalone_tape_and_bounded_timeout() {
+        let base = "name = 'route'\n[[step]]\n";
+        assert!(parse(&format!("{base}tape_rebase = true\n")).is_err());
+        assert!(parse(&format!(
+            "{base}tape = 'route.pxtape'\ntape_rebase = true\ntimeout = 0\n"
+        ))
+        .is_err());
+        for conflict in [
+            "press = ['start']",
+            "wait = 1",
+            "wait_until = { kind = 'not_flat' }",
+        ] {
+            assert!(parse(&format!(
+                "{base}tape = 'route.pxtape'\ntape_rebase = true\n{conflict}\n"
+            ))
+            .is_err());
+        }
+        let absolute = parse(&format!("{base}tape = 'route.pxtape'\n")).unwrap();
+        assert!(!absolute.steps[0].tape_rebase);
+        let relative = parse(&format!(
+            "{base}tape = 'route.pxtape'\ntape_rebase = true\ntimeout = 4\n"
+        ))
+        .unwrap();
+        assert!(relative.steps[0].tape_rebase);
+        assert_eq!(relative.steps[0].timeout, Some(4));
+        assert!(parse(&format!(
+            "{base}tape = 'route.pxtape'\ntimeout = 4\ncard = {{ action = 'power_cut', command = 87, byte_index = 70, timeout = 5 }}\n"
+        ))
+        .unwrap_err()
+        .contains("conflicts"));
     }
 
     #[test]

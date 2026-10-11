@@ -240,7 +240,14 @@ route that exercises the overlap. Ordinary journeys keep their usual batching.
 A step with `tape = "tests/tapes/save.pxtape"` plays a poll-bound tape through
 the guest's normal pad interface, ending after all samples have been consumed.
 Video-frame tapes and empty tapes are rejected. Playback is bounded by
-`max_ticks` and a 3600-tick step limit. Input tape hashes appear in the report.
+`max_ticks` and a 3600-tick default step limit (`timeout` overrides it).
+By default the tape keeps its recorded absolute `start_poll`. Set
+`tape_rebase = true` on the tape step to play sample zero at the current
+completed port-1 poll after earlier journey steps. This requires a tape and
+does not change its bytes. The report records its SHA256, recorded and
+effective start polls, sample count and end poll. Both modes reject an end
+poll that overflows. The final sample remains live through the remainder of
+its route tick, then both pads are released after completion or timeout.
 
 Card actions need their own steps:
 

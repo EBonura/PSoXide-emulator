@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The fleet gate can rebase a poll-bound tape to the current controller poll
+  on a journey step. Its default absolute timing is unchanged, and reports
+  retain the tape hash plus recorded and effective poll boundaries.
 - A block-mode GPU DMA of NOPs is not held up behind busy drawing. The pacing
   change made every block past the 16 words the FIFO holds wait for the
   drawing in progress, NOPs included: hwtest v2.1 and v2.2 rows 0x67 to 0x6A
