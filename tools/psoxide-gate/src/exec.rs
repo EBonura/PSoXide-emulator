@@ -610,9 +610,9 @@ impl Run<'_> {
             if step.card.is_some() || step.tape.is_some() {
                 self.card_step(i, step)?;
             }
-            self.input_and_wait(step)?;
+            self.input_and_wait(i, step)?;
             if let Some(cond) = &step.wait_until {
-                self.wait_until(i, cond, step.timeout.unwrap_or(3600))?;
+                self.wait_until(i, cond, step.timeout.unwrap_or(3600), "wait_until")?;
             }
             if step.checkpoint.is_some() || !step.asserts.is_empty() {
                 self.checkpoint(i, step);
@@ -621,7 +621,7 @@ impl Run<'_> {
         Ok(())
     }
 
-    fn input_and_wait(&mut self, step: &Step) -> Result<(), String> {
+    fn input_and_wait(&mut self, index: usize, step: &Step) -> Result<(), String> {
         if step.card.is_some() || step.tape.is_some() {
             return Ok(());
         }
@@ -646,28 +646,36 @@ impl Run<'_> {
                         o.rstick.unwrap_or(Machine::centre()),
                     );
                 }
-                self.ticks(step.hold.unwrap_or(4))?;
-                self.m.release_pads();
+                if let Some(cond) = &step.hold_until {
+                    with_pad_release(
+                        self,
+                        |run| run.wait_until(index, cond, step.timeout.unwrap(), "hold_until"),
+                        |run| run.m.release_pads(),
+                    )?;
+                } else {
+                    self.ticks(step.hold.unwrap_or(4))?;
+                    self.m.release_pads();
+                }
             }
             self.ticks(step.wait.unwrap_or(0))?;
         }
         Ok(())
     }
 
-    fn wait_until(&mut self, index: usize, cond: &Assert, timeout: u64) -> Result<(), String> {
-        for _ in 0..timeout {
-            if self.eval_wait(cond).0 {
-                return Ok(());
-            }
-            self.tick()?;
-        }
-        if self.eval_wait(cond).0 {
+    fn wait_until(
+        &mut self,
+        index: usize,
+        cond: &Assert,
+        timeout: u64,
+        label: &str,
+    ) -> Result<(), String> {
+        if poll_until(self, timeout, |run| run.eval_wait(cond).0, |run| run.tick())? {
             return Ok(());
         }
         let (_, detail) = self.eval_wait(cond);
         let msg = format!(
-            "step {}: wait_until timed out after {timeout} ticks ({detail})",
-            index + 1
+            "step {}: {label} timed out after {timeout} ticks ({detail})",
+            index + 1,
         );
         let cpu = self.m.display_image();
         let (hw, hw_skip) = match &self.hw {
@@ -679,7 +687,7 @@ impl Run<'_> {
         };
         self.groups.push(Group {
             name: format!("step {}", index + 1),
-            label: Some("wait_until".into()),
+            label: Some(label.into()),
             tick: self.m.ticks,
             capture: Some(Capture {
                 cpu,
@@ -691,7 +699,7 @@ impl Run<'_> {
                 hwn_channel: self.journey.render.hwn.channel,
             }),
             checks: vec![Check {
-                name: "wait_until".into(),
+                name: label.into(),
                 status: Status::Fail,
                 detail: msg.clone(),
             }],
@@ -1210,6 +1218,33 @@ impl Run<'_> {
     }
 }
 
+// Release the pad even when a condition times out or emulation stops with an error.
+fn with_pad_release<S, T>(
+    state: &mut S,
+    run: impl FnOnce(&mut S) -> Result<T, String>,
+    release: impl FnOnce(&mut S),
+) -> Result<T, String> {
+    let result = run(state);
+    release(state);
+    result
+}
+
+// Check before the first tick and once after the final allowed tick.
+fn poll_until<S>(
+    state: &mut S,
+    timeout: u64,
+    mut ready: impl FnMut(&mut S) -> bool,
+    mut tick: impl FnMut(&mut S) -> Result<(), String>,
+) -> Result<bool, String> {
+    for _ in 0..timeout {
+        if ready(state) {
+            return Ok(true);
+        }
+        tick(state)?;
+    }
+    Ok(ready(state))
+}
+
 fn ram_name(a: &Assert) -> String {
     let target = match (&a.sym, a.addr) {
         (Some(s), _) => s.clone(),
@@ -1294,5 +1329,182 @@ mod tests {
         let disc = dir.path().join("tiny.bin");
         std::fs::write(&disc, "abc").unwrap();
         assert_eq!(disc_id(&disc), "ba7816bf8f01");
+    }
+
+    #[test]
+    fn bounded_hold_checks_initial_and_final_state_then_releases() {
+        #[derive(Default)]
+        struct PadState {
+            ticks: u64,
+            held: bool,
+            released: bool,
+        }
+        let mut state = PadState {
+            held: true,
+            ..Default::default()
+        };
+        let result = with_pad_release(
+            &mut state,
+            |s| {
+                poll_until(
+                    s,
+                    4,
+                    |s| s.ticks == 2,
+                    |s| {
+                        s.ticks += 1;
+                        Ok(())
+                    },
+                )
+            },
+            |s| {
+                s.held = false;
+                s.released = true;
+            },
+        );
+        assert_eq!(result, Ok(true));
+        assert_eq!(state.ticks, 2);
+        assert!(!state.held && state.released);
+
+        let mut at_start = PadState {
+            held: true,
+            ..Default::default()
+        };
+        let result = with_pad_release(
+            &mut at_start,
+            |s| {
+                poll_until(
+                    s,
+                    4,
+                    |_| true,
+                    |s| {
+                        s.ticks += 1;
+                        Ok(())
+                    },
+                )
+            },
+            |s| {
+                s.held = false;
+                s.released = true;
+            },
+        );
+        assert_eq!(result, Ok(true));
+        assert_eq!(at_start.ticks, 0);
+        assert!(!at_start.held && at_start.released);
+
+        let mut at_final_tick = PadState {
+            held: true,
+            ..Default::default()
+        };
+        let result = with_pad_release(
+            &mut at_final_tick,
+            |s| {
+                poll_until(
+                    s,
+                    3,
+                    |s| s.ticks == 3,
+                    |s| {
+                        s.ticks += 1;
+                        Ok(())
+                    },
+                )
+            },
+            |s| {
+                s.held = false;
+                s.released = true;
+            },
+        );
+        assert_eq!(result, Ok(true));
+        assert_eq!(at_final_tick.ticks, 3);
+        assert!(!at_final_tick.held && at_final_tick.released);
+    }
+
+    #[test]
+    fn bounded_hold_releases_on_timeout_and_guest_error() {
+        #[derive(Default)]
+        struct PadState {
+            ticks: u64,
+            held: bool,
+            released: bool,
+        }
+        let mut timeout = PadState {
+            held: true,
+            ..Default::default()
+        };
+        let result = with_pad_release(
+            &mut timeout,
+            |s| {
+                poll_until(
+                    s,
+                    3,
+                    |_| false,
+                    |s| {
+                        s.ticks += 1;
+                        Ok(())
+                    },
+                )
+            },
+            |s| {
+                s.held = false;
+                s.released = true;
+            },
+        );
+        assert_eq!(result, Ok(false));
+        assert_eq!(timeout.ticks, 3);
+        assert!(!timeout.held && timeout.released);
+
+        let mut fault = PadState {
+            held: true,
+            ..Default::default()
+        };
+        let result = with_pad_release(
+            &mut fault,
+            |s| {
+                poll_until(
+                    s,
+                    3,
+                    |_| false,
+                    |s| {
+                        s.ticks += 1;
+                        Err("guest fault".into())
+                    },
+                )
+            },
+            |s| {
+                s.held = false;
+                s.released = true;
+            },
+        );
+        assert_eq!(result, Err("guest fault".into()));
+        assert_eq!(fault.ticks, 1);
+        assert!(!fault.held && fault.released);
+
+        let mut max_ticks = PadState {
+            held: true,
+            ..Default::default()
+        };
+        let result = with_pad_release(
+            &mut max_ticks,
+            |s| {
+                poll_until(
+                    s,
+                    3,
+                    |_| false,
+                    |s| {
+                        if s.ticks == 1 {
+                            return Err("journey exceeded max_ticks".into());
+                        }
+                        s.ticks += 1;
+                        Ok(())
+                    },
+                )
+            },
+            |s| {
+                s.held = false;
+                s.released = true;
+            },
+        );
+        assert_eq!(result, Err("journey exceeded max_ticks".into()));
+        assert_eq!(max_ticks.ticks, 1);
+        assert!(!max_ticks.held && max_ticks.released);
     }
 }

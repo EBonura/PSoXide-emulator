@@ -148,6 +148,13 @@ Steps are tables, run in order:
   frame. Allowed kinds: `ram`, `pixels`, `flat`, `not_flat`, `dark`,
   `not_dark`. Prefer these to long fixed waits: they keep a journey aligned
   when a build loads faster or slower, and a freeze becomes a precise failure.
+- **Conditional input hold.** `lstick = [128, 0]` with
+  `hold_until = { kind = "ram", sym = "PLAYER_POS", offset = 8, signed = true, op = "le", value = 690 }`
+  and a required positive `timeout` keeps the ordinary pad input down until
+  the condition succeeds or the tick bound expires. The pad is released on
+  success, timeout and guest error; `wait` can add rest after release. RAM and
+  pixel conditions use the same fields as assertions. `hold`, `repeat`,
+  `wait_until`, tapes and card actions cannot share this step.
 - **Checkpoint.** `checkpoint = "name"` captures the frame and runs the step's
   asserts. `golden = false` skips the golden comparison (animated or
   timing-dependent frames still get liveness and matrix checks).
