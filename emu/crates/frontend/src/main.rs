@@ -1505,6 +1505,12 @@ impl ApplicationHandler for Shell {
                 // Re-arming clears the log, so only do this once per
                 // Bus lifetime.
                 if let Some(bus) = self.state.bus.as_mut() {
+                    if self.hw_seen_gpu_resync_generation != self.state.gpu_resync_generation {
+                        gfx.restore_hw_environment(&bus.gpu);
+                        if let Some(backend) = self.compute_backend.as_mut() {
+                            backend.restore_environment(&bus.gpu);
+                        }
+                    }
                     if self.compute_backend.is_some() {
                         if bus.gpu.pixel_owner.is_none() {
                             bus.gpu.enable_pixel_tracer();

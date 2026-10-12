@@ -86,6 +86,10 @@ pub struct Translator {
 }
 
 impl Translator {
+    pub fn restore_environment(&mut self, words: [u32; 6]) {
+        self.interp.restore_environment(words);
+    }
+
     pub fn new() -> Self {
         Self {
             interp: Interpreter::new(),

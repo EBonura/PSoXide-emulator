@@ -1,0 +1,15 @@
+name = "oot-before-disc-switch"
+title = "Ordinary OoT title to file select before replacing the disc"
+max_ticks = 2000
+
+[[step]]
+wait = 1000
+
+[[step]]
+press = ["cross"]
+hold = 20
+wait = 980
+
+[[step]]
+checkpoint = "file-select-before-switch"
+golden = false

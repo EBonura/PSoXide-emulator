@@ -146,6 +146,16 @@ pub struct Interpreter {
 }
 
 impl Interpreter {
+    /// Restore the authoritative environment captured before a guest batch.
+    pub fn restore_environment(&mut self, words: [u32; 6]) {
+        for word in words {
+            self.interpret(&GpuCmdLogEntry {
+                index: 0,
+                opcode: (word >> 24) as u8,
+                fifo: emulator_core::gpu::GpuCmdFifo::from_slice(&[word]),
+            });
+        }
+    }
     pub fn new() -> Self {
         Self {
             state: ReplayState::new(),

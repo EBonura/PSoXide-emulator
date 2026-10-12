@@ -442,6 +442,10 @@ impl Graphics {
         self.hw_renderer.sync_target_from_vram(vram_words);
     }
 
+    pub fn restore_hw_environment(&mut self, gpu: &emulator_core::Gpu) {
+        self.hw_renderer.restore_environment(gpu);
+    }
+
     /// Fill the VRAM debug-view texture by expanding the HW renderer's
     /// live R16Uint VRAM mirror on the GPU (`fs_blit`, same BGR15->RGB8
     /// math `Vram::to_rgba8` uses). Replaces the old per-frame CPU

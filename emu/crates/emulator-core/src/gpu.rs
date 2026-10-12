@@ -1083,6 +1083,40 @@ impl Gpu {
         self.cmd_log_enabled
     }
 
+    /// Rendering attributes for restoring a replay backend after a machine
+    /// replacement or state load. Sample before executing the next batch.
+    pub fn draw_environment(&self) -> [u32; 6] {
+        let blend = match self.tex_blend_mode {
+            BlendMode::Opaque | BlendMode::Average => 0,
+            BlendMode::Add => 1,
+            BlendMode::Sub => 2,
+            BlendMode::AddQuarter => 3,
+        };
+        [
+            0xe100_0000
+                | u32::from(self.tex_page_x / 64)
+                | ((u32::from(self.tex_page_y) & 256) >> 4)
+                | ((u32::from(self.tex_page_y) & 512) << 2)
+                | (blend << 5)
+                | (u32::from(self.tex_depth) << 7)
+                | ((self.dither_enabled as u32) << 9)
+                | (self.status.raw & 0x400)
+                | ((self.tex_rect_flip_x as u32) << 12)
+                | ((self.tex_rect_flip_y as u32) << 13),
+            0xe200_0000 | self.texture_window_raw,
+            0xe300_0000 | u32::from(self.draw_area_left) | (u32::from(self.draw_area_top) << 10),
+            0xe400_0000
+                | u32::from(self.draw_area_right)
+                | (u32::from(self.draw_area_bottom) << 10),
+            0xe500_0000
+                | (self.draw_offset_x as u32 & 0x7ff)
+                | ((self.draw_offset_y as u32 & 0x7ff) << 11),
+            0xe600_0000
+                | self.mask_set_on_draw as u32
+                | ((self.mask_check_before_draw as u32) << 1),
+        ]
+    }
+
     /// Drain only complete command-log entries.
     ///
     /// CPU→VRAM uploads are one GP0 setup packet followed by many
@@ -2627,6 +2661,19 @@ impl Gpu {
                 self.draw_offset_x = 0;
                 self.draw_offset_y = 0;
                 self.gpuread_latch = 0x400;
+                // Replay backends consume GP0 packets, but GP1 reset also
+                // changes rendering attributes. Preserve that change at its
+                // exact position between draws, without executing synthetic
+                // commands or charging guest GPU time.
+                if self.cmd_log_enabled {
+                    for opcode in 0xe1..=0xe6 {
+                        self.cmd_log.push(GpuCmdLogEntry {
+                            index: self.cmd_log.len() as u32,
+                            opcode,
+                            fifo: GpuCmdFifo::from_slice(&[(opcode as u32) << 24]),
+                        });
+                    }
+                }
             }
             // GP1 0x01 -- Reset command buffer. This aborts a partial GP0
             // packet, polyline, or image transfer without resetting display

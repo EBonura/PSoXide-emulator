@@ -1,6 +1,59 @@
 use super::*;
 
 #[test]
+fn gp1_reset_logs_environment_between_draws_without_clearing_vram() {
+    let mut gpu = Gpu::new();
+    gpu.enable_cmd_log();
+    assert!(gpu.write32(GP0_ADDR, 0xe200_8421));
+    assert!(gpu.write32(GP0_ADDR, 0xe600_0003));
+    gpu.vram.set_pixel(31, 47, 0x9abc);
+    assert!(gpu.write32(GP1_ADDR, 0));
+    let log = gpu.drain_completed_cmd_log();
+    assert_eq!(
+        log.iter().map(|e| e.opcode).collect::<Vec<_>>(),
+        [0xe2, 0xe6, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6]
+    );
+    for entry in &log[2..] {
+        assert_eq!(entry.fifo.as_slice(), &[(entry.opcode as u32) << 24]);
+    }
+    assert_eq!(gpu.vram.get_pixel(31, 47), 0x9abc);
+}
+
+#[test]
+fn draw_environment_snapshot_preserves_active_attributes() {
+    let mut gpu = Gpu::new();
+    // Constructor's decoded clip is wider than its readback latch.
+    assert_eq!(gpu.draw_environment()[3], 0xe407_ffff);
+    let words = [
+        0xe100_3379,
+        0xe20a_8521,
+        0xe300_1c09,
+        0xe401_90c8,
+        0xe53f_effb,
+        0xe600_0003,
+    ];
+    for word in words {
+        assert!(gpu.write32(GP0_ADDR, word));
+    }
+    assert_eq!(gpu.draw_environment(), words);
+    assert!(gpu.write32(GP1_ADDR, 0));
+    // Status updates may retire later; the snapshot follows decoded state.
+    let mut environment = gpu.draw_environment();
+    environment[0] &= !0x400;
+    assert_eq!(
+        environment,
+        [
+            0xe100_0000,
+            0xe200_0000,
+            0xe300_0000,
+            0xe400_0000,
+            0xe500_0000,
+            0xe600_0000
+        ]
+    );
+}
+
+#[test]
 fn command_fifo_keeps_normal_packets_inline() {
     let words: Vec<u32> = (0..GPU_CMD_FIFO_INLINE_WORDS as u32).collect();
     let fifo = GpuCmdFifo::from_slice(&words);

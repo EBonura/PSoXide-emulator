@@ -221,6 +221,12 @@ impl HwRenderer {
         });
     }
 
+    /// Restore draw state on machine replacement, before replaying its first
+    /// batch. Scale changes only need a pixel resync, not this state restore.
+    pub fn restore_environment(&mut self, gpu: &Gpu) {
+        self.translator.restore_environment(gpu.draw_environment());
+    }
+
     /// Translator draw-env state for incremental-replay diagnostics.
     pub fn debug_env(&self) -> (i32, i32, i32, i32, i32, i32) {
         self.translator.debug_env()
@@ -886,6 +892,65 @@ mod tests {
         rgba.chunks_exact(4)
             .map(|px| [px[0], px[1], px[2], px[3]])
             .collect()
+    }
+
+    #[test]
+    fn different_machine_and_gp1_reset_discard_previous_draw_environment() {
+        let mut renderer =
+            headless_renderer().expect("reset regression requires a hardware adapter");
+        for scale in [1, 3, 4] {
+            renderer.set_internal_scale(scale, None);
+            for replace_machine in [false, true] {
+                let mut gpu = Gpu::new();
+                gpu.enable_cmd_log();
+                let before = gpu.vram.words().to_vec();
+                // A previous game leaves a window, mask, page, offset and clip.
+                for word in [
+                    0xe100_3379,
+                    0xe200_041f,
+                    0xe600_0003,
+                    0xe300_280a,
+                    0xe400_5014,
+                    0xe500_1002,
+                ] {
+                    assert!(gpu.write32(0x1f80_1810, word));
+                }
+                renderer.render_frame(&gpu, &gpu.cmd_log, &before);
+                gpu.drain_completed_cmd_log();
+                if replace_machine {
+                    gpu = Gpu::new();
+                    gpu.enable_cmd_log();
+                    renderer.restore_environment(&gpu);
+                } else {
+                    assert!(gpu.write32(0x1f80_1814, 0));
+                }
+                gpu.vram.set_pixel(16, 256, 0x001f);
+                gpu.vram.set_pixel(8, 256, 0x03e0);
+                let before = gpu.vram.words().to_vec();
+                renderer.sync_target_from_vram(&before);
+                // Like a game relying on reset, do not write E2 or E6.
+                for word in [
+                    0xe100_0110,
+                    0xe300_0000,
+                    0xe403_bd3f,
+                    0xe500_0000,
+                    0x6500_0000,
+                    (30 << 16) | 30,
+                    16,
+                    (1 << 16) | 1,
+                ] {
+                    assert!(gpu.write32(0x1f80_1810, word));
+                }
+                let log = gpu.drain_completed_cmd_log();
+                renderer.render_frame(&gpu, &log, &before);
+                assert_eq!(gpu.vram.get_pixel(30, 30), 0x001f);
+                assert_eq!(
+                    pixel_block(&renderer, 30, 30),
+                    vec![bgr15_to_rgba8(0x001f); (scale * scale) as usize],
+                    "scale={scale}, replace_machine={replace_machine}"
+                );
+            }
+        }
     }
 
     #[test]

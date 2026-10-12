@@ -1,5 +1,6 @@
 //! Bounded capture of the window renderer lifecycle without a window.
-//! This diagnostic produces observations, never a passing journey verdict.
+//! Optional exact fresh-boot comparison checks lifecycle isolation, not
+//! CPU/hardware rendering parity or a passing gameplay journey.
 #![allow(dead_code)]
 
 #[path = "../src/card.rs"]
@@ -23,6 +24,14 @@ use std::{collections::BTreeMap, fs, io::Write, path::PathBuf};
 struct Args {
     #[arg(long)]
     disc: PathBuf,
+    /// Play another disc first, retaining the same renderer for the target disc.
+    #[arg(long, requires = "previous_route")]
+    previous_disc: Option<PathBuf>,
+    #[arg(long, requires = "previous_disc")]
+    previous_route: Option<PathBuf>,
+    /// Require target checkpoints to equal boot1 captures from a fresh process.
+    #[arg(long, requires = "previous_disc")]
+    expect_fresh: Option<PathBuf>,
     #[arg(long)]
     route: PathBuf,
     #[arg(long)]
@@ -63,6 +72,17 @@ struct Step {
 struct Plan {
     pads: Vec<u16>,
     checkpoints: BTreeMap<u64, Vec<String>>,
+}
+
+fn require_exact(actual: &img::Img, expected: &std::path::Path) -> Result<(), String> {
+    let reference = img::Img::load_png(expected)?;
+    if actual.w != reference.w || actual.h != reference.h || actual.rgba != reference.rgba {
+        return Err(format!(
+            "lifecycle checkpoint differs from {}",
+            expected.display()
+        ));
+    }
+    Ok(())
 }
 
 fn plan(route: &Route) -> Result<Plan, String> {
@@ -163,14 +183,31 @@ fn run(a: Args) -> Result<(), String> {
     let mut hw = HwRenderer::new_headless(device.clone(), queue);
     hw.set_texture_filter(0);
     let mut last_fallback = false;
-    for generation in 1..=a.boots {
+    let previous = a
+        .previous_route
+        .as_ref()
+        .map(|path| {
+            let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
+            let route: Route = toml::from_str(&text).map_err(|e| e.to_string())?;
+            plan(&route)
+        })
+        .transpose()?;
+    let mut boots = Vec::new();
+    if let (Some(disc), Some(plan)) = (&a.previous_disc, &previous) {
+        boots.push((disc, plan));
+    }
+    boots.extend((0..a.boots).map(|_| (&a.disc, &p)));
+    for (boot_index, (disc, p)) in boots.into_iter().enumerate() {
+        let generation = boot_index + 1;
+        writeln!(log, "boot={generation} disc={}", disc.display()).map_err(|e| e.to_string())?;
         let mut m = Machine::boot(&Boot {
-            disc: &a.disc,
+            disc,
             pad: journey::PadMode::Analog,
             pad2: journey::Pad2Mode::None,
             memcard: journey::MemcardMode::Fresh,
             cmd_log: true,
         })?;
+        hw.restore_environment(&m.bus.gpu);
         let mut desired_scale = a.scale;
         let mut first_batch = true;
         while m.ticks < p.pads.len() as u64 {
@@ -231,6 +268,10 @@ fn run(a: Args) -> Result<(), String> {
                 for name in names {
                     let stem = format!("boot{generation}-{end}-{name}");
                     cpu.save_png(&a.out.join(format!("{stem}-cpu.png")))?;
+                    let reference = a.expect_fresh.as_ref().filter(|_| boot_index > 0);
+                    if let Some(dir) = reference {
+                        require_exact(&cpu, &dir.join(format!("boot1-{end}-{name}-cpu.png")))?;
+                    }
                     if fallback {
                         writeln!(
                             log,
@@ -244,8 +285,14 @@ fn run(a: Args) -> Result<(), String> {
                             u32::from(area.width) * scale,
                             u32::from(area.height) * scale,
                         );
-                        img::Img::from_rgba(w, h, rgba)
-                            .save_png(&a.out.join(format!("{stem}-hw{scale}.png")))?;
+                        let hardware = img::Img::from_rgba(w, h, rgba);
+                        hardware.save_png(&a.out.join(format!("{stem}-hw{scale}.png")))?;
+                        if let Some(dir) = reference {
+                            require_exact(
+                                &hardware,
+                                &dir.join(format!("boot1-{end}-{name}-hw{scale}.png")),
+                            )?;
+                        }
                     }
                 }
                 log.flush().map_err(|e| e.to_string())?;
@@ -257,7 +304,12 @@ fn run(a: Args) -> Result<(), String> {
             }
         }
     }
-    writeln!(log, "complete capture only; no parity verdict").map_err(|e| e.to_string())?;
+    writeln!(
+        log,
+        "complete; fresh_boot_comparison={}; no CPU/hardware parity verdict",
+        a.expect_fresh.is_some()
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

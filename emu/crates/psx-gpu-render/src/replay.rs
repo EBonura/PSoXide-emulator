@@ -53,6 +53,10 @@ pub struct ComputeBackend {
 }
 
 impl ComputeBackend {
+    pub fn restore_environment(&mut self, gpu: &emulator_core::Gpu) {
+        self.interp.restore_environment(gpu.draw_environment());
+    }
+
     /// Build the backend on a fresh headless wgpu adapter. The
     /// frontend uses this when `--gpu-compute` is enabled -- sharing
     /// the main `Graphics` device would need an `Arc<Device>`

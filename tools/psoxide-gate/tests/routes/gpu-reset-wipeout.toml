@@ -1,0 +1,71 @@
+name = "wipeout-graphics-recovery"
+title = "WipEout title, menus, race HUD and textures"
+max_ticks = 4500
+[[step]]
+wait = 80
+[[step]]
+press = ["cross"]
+hold = 4
+[[step]]
+wait = 616
+[[step]]
+checkpoint = "title"
+golden = false
+[[step]]
+wait = 79
+[[step]]
+press = ["start"]
+hold = 4
+[[step]]
+wait = 67
+[[step]]
+checkpoint = "players"
+golden = false
+[[step]]
+wait = 29
+[[step]]
+press = ["cross"]
+hold = 4
+[[step]]
+wait = 76
+[[step]]
+press = ["cross"]
+hold = 4
+[[step]]
+wait = 56
+[[step]]
+press = ["down"]
+hold = 4
+[[step]]
+wait = 16
+[[step]]
+press = ["cross"]
+hold = 4
+[[step]]
+wait = 76
+[[step]]
+press = ["cross"]
+hold = 4
+[[step]]
+wait = 76
+[[step]]
+press = ["cross"]
+hold = 4
+[[step]]
+wait = 76
+[[step]]
+press = ["cross"]
+hold = 4
+[[step]]
+wait = 792
+[[step]]
+checkpoint = "race-start"
+golden = false
+[[step]]
+wait = 108
+[[step]]
+press = ["r2"]
+hold = 1800
+[[step]]
+checkpoint = "mid-race"
+golden = false
