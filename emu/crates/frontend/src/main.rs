@@ -19,6 +19,10 @@ mod burn;
 mod web_disc;
 #[cfg(target_arch = "wasm32")]
 mod web_files;
+// Time-budgeted FLAC decode for the streamed discs. Pure Rust, so it is also
+// built for native tests.
+#[cfg(any(target_arch = "wasm32", test))]
+mod web_decode;
 // Same-origin streamed discs (the demo disc). wasm-only: native has a library.
 #[cfg(target_arch = "wasm32")]
 mod web_stream;

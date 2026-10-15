@@ -2245,8 +2245,8 @@ impl AppState {
     }
 
     /// Advance the streamed disc: progress lines while the boot payload
-    /// assembles, then model-and-boot on the data track plus first song, then
-    /// patch the remaining CD-DA tracks into the mounted disc as their
+    /// assembles, then model-and-boot on the data track alone, then patch the
+    /// CD-DA tracks (the first song included) into the mounted disc as their
     /// downloads decode. Placeholder tracks are zero-filled, which the drive
     /// plays as silence until the real sectors land -- geometry is complete
     /// from the first frame, so nothing the CD state machine sees is ever
@@ -2274,21 +2274,14 @@ impl AppState {
                 disc,
                 cue,
                 data,
-                first_pcm,
-                first_number,
                 layout,
             } => {
                 let total = data.len() + layout.iter().map(|(_, n)| n).sum::<usize>();
                 let mut data = Some(data);
-                let mut first = Some(first_pcm);
                 let result = psoxide_settings::library::disc_from_cue_pieces(&cue, |n| {
                     if n == 1 {
                         data.take()
                             .ok_or_else(|| "data piece taken twice".to_string())
-                    } else if n == first_number {
-                        first
-                            .take()
-                            .ok_or_else(|| "first track taken twice".to_string())
                     } else {
                         layout
                             .iter()

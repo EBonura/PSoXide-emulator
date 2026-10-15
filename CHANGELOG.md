@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- The web build boots the demo disc on its data track alone. The first song is
+  fetched and patched into the mounted disc like the others instead of gating
+  the first frame, FLAC decode runs on a per-frame time budget instead of three
+  blocks per frame, and `index.html` starts the manifest, data track and first
+  song while the wasm is still downloading. Measured on a local 25 Mbit link
+  the first guest frame moved from 19.7 s to 7.4 s, at 100 Mbit from 9.3 s to
+  2.2 s. Pieces are requested as `file?v=<checksum>` so a cached manifest can
+  never meet another build's data track, and the menu subtitle no longer
+  quotes a download size.
 - The fleet gate can rebase a poll-bound tape to the current controller poll
   on a journey step. Its default absolute timing is unchanged, and reports
   retain the tape hash plus recorded and effective poll boundaries.

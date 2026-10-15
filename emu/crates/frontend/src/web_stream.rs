@@ -5,24 +5,42 @@
 //! deploy stages a split delivery next to the wasm (see the demo-disc repo's
 //! `tools/web-delivery.py`): the data track gzipped, each audio track as
 //! lossless FLAC, and a small text manifest naming the pieces with sizes and
-//! FNV-1a-32 checksums. The boot gate is the data track plus the first song;
-//! the rest stream in behind the running emulator and are patched into the
-//! mounted disc as they land. A track whose bytes have not arrived plays as
-//! digital silence -- the geometry is complete from the first frame, so the
-//! drive model never sees anything a real disc could not do.
+//! FNV-1a-32 checksums. The boot gate is the data track alone; every song,
+//! the first included, streams in behind the running emulator and is patched
+//! into the mounted disc as it lands. A track whose bytes have not arrived
+//! plays as digital silence -- the geometry is complete from the first frame,
+//! so the drive model never sees anything a real disc could not do. A song
+//! patched in late changes sector contents only, never the drive's state or
+//! position, so the launcher's status-based stall watchdog has nothing to
+//! react to.
 //!
 //! Ordering note: pieces download in disc order and the launcher cycles its
 //! menu tracks in the same order, so delivery stays ahead of the playhead on
 //! any connection that can stream audio at all.
 //!
-//! FLAC decoding runs in Rust (claxon), budgeted per frame from the shell's
-//! poll so a 30 MB track never stalls a redraw. Fetches run in JS; bytes
-//! cross the boundary once per piece.
+//! FLAC decoding runs in Rust (claxon, see `web_decode`), time-budgeted per
+//! frame from the shell's poll so a 30 MB track never stalls a redraw.
+//! Fetches run in JS; bytes cross the boundary once per piece.
+//!
+//! The page can start the delivery before the wasm has even compiled:
+//! `index.html` fetches the manifest, the data track and then the first song into
+//! `window.psoxidePrefetch`, keyed by URL, and `wsFetch` adopts a prefetched
+//! response instead of asking again. Both sides build the same URLs; a
+//! mismatch only costs the head start.
+//!
+//! Every piece after the manifest is requested as `file?v=<fnv>` with the
+//! checksum the manifest names. The CDN serves these files with a cache
+//! lifetime of weeks and the manifest, cue and payloads expire on different
+//! days, so a returning visitor could otherwise pair a cached manifest with
+//! a refreshed data track. A new build changes the checksum and so the URL;
+//! the old cache entry is simply never asked for.
 
 use std::cell::RefCell;
-use std::io::Cursor;
+use std::time::Duration;
 
 use wasm_bindgen::prelude::*;
+
+use crate::web_decode::{fnv1a32, Decode};
 
 /// One disc served next to the wasm, streamed on demand.
 pub struct StreamedDisc {
@@ -45,7 +63,7 @@ pub struct StreamedDisc {
 pub static DISCS: &[StreamedDisc] = &[StreamedDisc {
     id: crate::app::DEMO_DISC_ID,
     title: "PSoXide Demo Disc",
-    subtitle: "homebrew - boots in ~25 MB, music streams in",
+    subtitle: "homebrew - music streams in while you play",
     manifest_url: "web-manifest.txt",
     cue_url: "demo-disc.cue",
 }];
@@ -65,6 +83,14 @@ pub fn find(id: &str) -> Option<&'static StreamedDisc> {
 let _slots = {};
 export function wsFetch(id, url) {
   if (_slots[id]) return;
+  // The page may already have this response in flight or landed (index.html
+  // starts the delivery while the wasm compiles). Adopt it, once.
+  const pre = window.psoxidePrefetch;
+  if (pre && pre[url]) {
+    _slots[id] = pre[url];
+    delete pre[url];
+    return;
+  }
   const s = { state: 'running', received: 0, total: 0 };
   _slots[id] = s;
   const xhr = new XMLHttpRequest();
@@ -121,15 +147,6 @@ extern "C" {
     fn ws_error(id: &str) -> String;
 }
 
-/// FNV-1a-32, the project's checksum of habit. Matches `web-delivery.py`.
-fn fnv1a32(data: &[u8]) -> u32 {
-    let mut h: u32 = 0x811C_9DC5;
-    for &b in data {
-        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
-    }
-    h
-}
-
 /// One audio piece from the manifest.
 struct TrackMeta {
     number: u8,
@@ -154,26 +171,26 @@ pub enum TrackState {
     Failed,
 }
 
-/// A decode in progress, resumed a budget at a time.
-struct Decode {
-    reader: claxon::FlacReader<Cursor<Vec<u8>>>,
-    /// Reused per-block sample buffer.
-    buffer: Vec<i32>,
-    out: Vec<u8>,
+/// A decode in progress, and which track it belongs to.
+struct ActiveDecode {
     index: usize,
+    decode: Decode,
 }
 
-/// FLAC blocks read per poll. Whole blocks only: claxon's readers resume
-/// cleanly between fully-consumed blocks, where a sample iterator dropped
-/// mid-block silently discards the block's tail. Kept small: the guest is
-/// emulating a PlayStation on the same thread, and a long decode slice
-/// underruns the CD audio, which the launcher's stall watchdog answers by
-/// restarting the song. Three blocks is ~25k samples, a fraction of a
-/// millisecond, and still decodes a full track well inside its own playtime.
-const DECODE_BUDGET_BLOCKS: usize = 3;
+/// Decode time per frame while nothing is running yet. The page is waiting
+/// on the disc anyway, so this is as fast as the host allows short of
+/// starving the redraw that shows the progress line.
+const BOOT_DECODE_BUDGET: Duration = Duration::from_millis(8);
+
+/// Decode time per frame beside a running guest. The guest emulates a
+/// PlayStation on the same thread, and a frame that runs long underruns the
+/// host's CD audio. A few milliseconds is small beside a 16.7 ms frame, and
+/// still turns a 20 MB track around in a couple of seconds where the old
+/// three blocks per frame needed over ten.
+const BACKGROUND_DECODE_BUDGET: Duration = Duration::from_millis(3);
 
 enum Phase {
-    /// Fetching manifest, cue, data piece and first track.
+    /// Fetching manifest, cue and data piece.
     Boot,
     /// The shell took the boot payload; remaining tracks stream in.
     Background,
@@ -187,7 +204,6 @@ enum Phase {
 struct Pieces {
     cue: Option<String>,
     data: Option<Vec<u8>>,
-    first_pcm: Option<Vec<u8>>,
 }
 
 struct Stream {
@@ -195,11 +211,13 @@ struct Stream {
     phase: Phase,
     tracks: Vec<TrackMeta>,
     states: Vec<TrackState>,
+    /// The data piece's file name, from the manifest.
+    data_file: String,
     data_raw_bytes: usize,
     data_fnv: u32,
     gunzip_requested: bool,
     pieces: Pieces,
-    decode: Option<Decode>,
+    decode: Option<ActiveDecode>,
     /// Decoded-and-verified tracks waiting for the shell to patch in.
     ready: Vec<(u8, Vec<u8>)>,
     error: String,
@@ -223,11 +241,8 @@ pub enum BootStatus {
         cue: String,
         /// Track 1's file extent, decompressed.
         data: Vec<u8>,
-        /// First audio track's raw sectors.
-        first_pcm: Vec<u8>,
-        /// First audio track's number.
-        first_number: u8,
         /// `(number, raw_bytes)` for every audio track, for placeholders.
+        /// Every one starts silent; the songs are patched in as they land.
         layout: Vec<(u8, usize)>,
     },
     /// The stream is dead; message handed over exactly once.
@@ -255,12 +270,12 @@ pub fn start(disc: &'static StreamedDisc) {
             return;
         }
         ws_fetch("manifest", disc.manifest_url);
-        ws_fetch("cue", disc.cue_url);
         *slot = Some(Stream {
             disc,
             phase: Phase::Boot,
             tracks: Vec::new(),
             states: Vec::new(),
+            data_file: String::new(),
             data_raw_bytes: 0,
             data_fnv: 0,
             gunzip_requested: false,
@@ -277,7 +292,10 @@ fn parse_manifest(text: &str, s: &mut Stream) -> Result<(), String> {
         let mut parts = line.split_whitespace();
         match parts.next() {
             Some("data") => {
-                let _file = parts.next().ok_or("manifest: data file missing")?;
+                s.data_file = parts
+                    .next()
+                    .ok_or("manifest: data file missing")?
+                    .to_string();
                 let _gz = parts
                     .next()
                     .and_then(|v| v.parse::<u64>().ok())
@@ -328,10 +346,18 @@ fn parse_manifest(text: &str, s: &mut Stream) -> Result<(), String> {
     Ok(())
 }
 
+/// URL of a piece named by the manifest, tied to its checksum so a cached
+/// copy from another build is never mistaken for this one. `index.html`
+/// builds the same strings for its early fetches.
+fn piece_url(file: &str, fnv: u32) -> String {
+    format!("{file}?v={fnv}")
+}
+
 /// Begin fetching track `index` if it exists and has not started.
 fn start_fetch(s: &mut Stream, index: usize) {
     if index < s.tracks.len() && s.states[index] == TrackState::Pending {
-        ws_fetch(&format!("track{index}"), &s.tracks[index].file.clone());
+        let url = piece_url(&s.tracks[index].file, s.tracks[index].fnv);
+        ws_fetch(&format!("track{index}"), &url);
         s.states[index] = TrackState::Fetching(0);
     }
 }
@@ -344,15 +370,9 @@ fn start_decode(s: &mut Stream, index: usize) {
         return;
     }
     let flac = ws_take(&slot);
-    match claxon::FlacReader::new(Cursor::new(flac)) {
-        Ok(reader) => {
-            let cap = s.tracks[index].raw_bytes;
-            s.decode = Some(Decode {
-                reader,
-                buffer: Vec::new(),
-                out: Vec::with_capacity(cap),
-                index,
-            });
+    match Decode::new(flac, s.tracks[index].raw_bytes) {
+        Ok(decode) => {
+            s.decode = Some(ActiveDecode { index, decode });
             s.states[index] = TrackState::Decoding;
         }
         Err(e) => {
@@ -362,41 +382,33 @@ fn start_decode(s: &mut Stream, index: usize) {
     }
 }
 
-/// Run the decoder for one budget slice. On completion, verify and queue the
+/// Run the decoder for one time slice. On completion, verify and queue the
 /// track for patching.
-fn pump_decode(s: &mut Stream) {
-    let Some(dec) = s.decode.as_mut() else { return };
-    let mut finished = false;
-    {
-        let mut frames = dec.reader.blocks();
-        for _ in 0..DECODE_BUDGET_BLOCKS {
-            match frames.read_next_or_eof(core::mem::take(&mut dec.buffer)) {
-                Ok(Some(block)) => {
-                    for i in 0..block.duration() {
-                        dec.out
-                            .extend_from_slice(&(block.sample(0, i) as i16).to_le_bytes());
-                        dec.out
-                            .extend_from_slice(&(block.sample(1, i) as i16).to_le_bytes());
-                    }
-                    dec.buffer = block.into_buffer();
-                }
-                Ok(None) | Err(_) => {
-                    finished = true;
-                    break;
-                }
-            }
-        }
-    }
-    if !finished {
+fn pump_decode(s: &mut Stream, budget: Duration) {
+    let Some(active) = s.decode.as_mut() else {
         return;
-    }
-    let dec = s.decode.take().expect("decode present");
-    let meta = &s.tracks[dec.index];
-    if dec.out.len() == meta.raw_bytes && fnv1a32(&dec.out) == meta.fnv {
-        s.states[dec.index] = TrackState::Ready;
-        s.ready.push((meta.number, dec.out));
+    };
+    let Some(decoded) = active.decode.pump(budget) else {
+        return;
+    };
+    let index = active.index;
+    s.decode = None;
+    let meta = &s.tracks[index];
+    // One console line per song, for timing the decode on a real browser.
+    web_sys::console::log_1(
+        &format!(
+            "[web] track {}: decoded in {} ms of work over {} ms",
+            meta.number,
+            decoded.busy.as_millis(),
+            decoded.wall.as_millis()
+        )
+        .into(),
+    );
+    if decoded.pcm.len() == meta.raw_bytes && decoded.fnv == meta.fnv {
+        s.states[index] = TrackState::Ready;
+        s.ready.push((meta.number, decoded.pcm));
     } else {
-        s.states[dec.index] = TrackState::Failed;
+        s.states[index] = TrackState::Failed;
         s.error = format!("{}: decode mismatch, leaving it silent", meta.title);
     }
 }
@@ -424,7 +436,12 @@ pub fn poll_boot() -> BootStatus {
             return BootStatus::Idle;
         }
 
-        // Manifest and cue, both tiny.
+        // A song that lands while the boot payload is still assembling
+        // decodes at the fast, nothing-is-running rate.
+        advance_tracks(s, BOOT_DECODE_BUDGET);
+
+        // The manifest, tiny. It names everything else, so the data piece
+        // and the cue start the moment it parses.
         if s.tracks.is_empty() {
             match ws_state("manifest").as_str() {
                 "done" => {
@@ -433,8 +450,8 @@ pub fn poll_boot() -> BootStatus {
                         s.phase = Phase::Failed;
                         return BootStatus::NotServed(e);
                     }
-                    ws_fetch("data", "demo-data.bin.gz");
-                    start_fetch(s, 0);
+                    ws_fetch("data", &piece_url(&s.data_file, s.data_fnv));
+                    ws_fetch("cue", &piece_url(s.disc.cue_url, s.data_fnv));
                 }
                 "error" => {
                     s.phase = Phase::Failed;
@@ -443,21 +460,16 @@ pub fn poll_boot() -> BootStatus {
                 _ => return BootStatus::Progress(format!("{}: reading manifest...", s.disc.title)),
             }
         }
-        if s.pieces.cue.is_none() {
-            match ws_state("cue").as_str() {
-                "done" => {
-                    s.pieces.cue = Some(String::from_utf8_lossy(&ws_take("cue")).into_owned())
-                }
-                "error" => return fail(s, ws_error("cue")),
-                _ => return BootStatus::Progress(format!("{}: reading cue...", s.disc.title)),
-            }
-        }
 
         // The data piece: fetch, then browser-native gunzip, then verify.
         if s.pieces.data.is_none() {
             match ws_state("data").as_str() {
                 "done" if !s.gunzip_requested => {
                     s.gunzip_requested = true;
+                    // The wire is free again: the first song starts coming
+                    // down while the data track unpacks. It no longer gates
+                    // the boot, but it is the next thing the launcher plays.
+                    start_fetch(s, 0);
                     ws_gunzip("data");
                     return BootStatus::Progress(format!(
                         "{}: unpacking data track...",
@@ -467,7 +479,10 @@ pub fn poll_boot() -> BootStatus {
                 "done" => {
                     let raw = ws_take("data");
                     if raw.len() != s.data_raw_bytes || fnv1a32(&raw) != s.data_fnv {
-                        return fail(s, "data track: checksum mismatch".into());
+                        return fail(
+                            s,
+                            "data track: checksum mismatch (try reloading the page)".into(),
+                        );
                     }
                     s.pieces.data = Some(raw);
                 }
@@ -481,65 +496,71 @@ pub fn poll_boot() -> BootStatus {
                 }
             }
         }
-
-        // First song: fetch, budgeted decode, verify.
-        if s.pieces.first_pcm.is_none() {
-            if let TrackState::Fetching(_) = s.states[0] {
-                match ws_state("track0").as_str() {
-                    "done" => {
-                        start_decode(s, 0);
-                        // The wire is free again: fetch the next song while
-                        // this one decodes.
-                        start_fetch(s, 1);
-                    }
-                    "error" => return fail(s, ws_error("track0")),
-                    _ => {
-                        let pct = if ws_total("track0") > 0.0 {
-                            (ws_received("track0") / ws_total("track0") * 100.0) as u8
-                        } else {
-                            0
-                        };
-                        s.states[0] = TrackState::Fetching(pct);
-                        return BootStatus::Progress(format!(
-                            "{}: {} {pct}%",
-                            s.disc.title, s.tracks[0].title
-                        ));
-                    }
+        if s.pieces.cue.is_none() {
+            match ws_state("cue").as_str() {
+                "done" => {
+                    s.pieces.cue = Some(String::from_utf8_lossy(&ws_take("cue")).into_owned())
                 }
-            }
-            if s.decode.as_ref().is_some_and(|d| d.index == 0) {
-                pump_decode(s);
-            }
-            match s.states[0] {
-                TrackState::Ready => {
-                    let (_, pcm) = s.ready.remove(0);
-                    s.pieces.first_pcm = Some(pcm);
-                }
-                TrackState::Failed => {
-                    let message = s.error.clone();
-                    return fail(s, message);
-                }
-                _ => {
-                    return BootStatus::Progress(format!(
-                        "{}: decoding {}...",
-                        s.disc.title, s.tracks[0].title
-                    ))
-                }
+                "error" => return fail(s, ws_error("cue")),
+                _ => return BootStatus::Progress(format!("{}: reading cue...", s.disc.title)),
             }
         }
 
-        // Everything the boot gate needs is in hand.
+        // The data track is the whole boot gate. The songs follow.
         s.phase = Phase::Background;
-        start_fetch(s, 1);
+        start_fetch(s, 0);
         BootStatus::Ready {
             disc: s.disc,
             cue: s.pieces.cue.take().expect("cue fetched"),
             data: s.pieces.data.take().expect("data fetched"),
-            first_pcm: s.pieces.first_pcm.take().expect("first track decoded"),
-            first_number: s.tracks[0].number,
             layout: s.tracks.iter().map(|t| (t.number, t.raw_bytes)).collect(),
         }
     })
+}
+
+/// Hand finished fetches to the decoder, keep the wire busy, and run the
+/// decoder for one time slice. The next fetch starts the moment the current
+/// one lands.
+fn advance_tracks(s: &mut Stream, budget: Duration) {
+    for index in 0..s.tracks.len() {
+        if let TrackState::Fetching(_) = s.states[index] {
+            let id = format!("track{index}");
+            match ws_state(&id).as_str() {
+                "done" => {
+                    if s.decode.is_none() {
+                        start_decode(s, index);
+                    }
+                    start_fetch(s, index + 1);
+                }
+                "error" => {
+                    let _ = ws_error(&id);
+                    s.states[index] = TrackState::Failed;
+                    // One lost song must not strand the ones behind it.
+                    start_fetch(s, index + 1);
+                }
+                _ => {
+                    let pct = if ws_total(&id) > 0.0 {
+                        (ws_received(&id) / ws_total(&id) * 100.0) as u8
+                    } else {
+                        0
+                    };
+                    s.states[index] = TrackState::Fetching(pct);
+                }
+            }
+        }
+    }
+    pump_decode(s, budget);
+    // A finished decode frees the decoder for the next fetched track.
+    if s.decode.is_none() {
+        for index in 0..s.tracks.len() {
+            if matches!(s.states[index], TrackState::Fetching(_))
+                && ws_state(&format!("track{index}")) == "done"
+            {
+                start_decode(s, index);
+                break;
+            }
+        }
+    }
 }
 
 /// Per-frame poll after boot: advances fetches and decodes under budget and
@@ -554,45 +575,7 @@ pub fn poll_background() -> Vec<BgEvent> {
             return Vec::new();
         }
 
-        // Hand finished fetches to the decoder and keep the wire busy: the
-        // next fetch starts the moment the current one lands.
-        for index in 1..s.tracks.len() {
-            if let TrackState::Fetching(_) = s.states[index] {
-                let id = format!("track{index}");
-                match ws_state(&id).as_str() {
-                    "done" => {
-                        if s.decode.is_none() {
-                            start_decode(s, index);
-                        }
-                        start_fetch(s, index + 1);
-                    }
-                    "error" => {
-                        let _ = ws_error(&id);
-                        s.states[index] = TrackState::Failed;
-                    }
-                    _ => {
-                        let pct = if ws_total(&id) > 0.0 {
-                            (ws_received(&id) / ws_total(&id) * 100.0) as u8
-                        } else {
-                            0
-                        };
-                        s.states[index] = TrackState::Fetching(pct);
-                    }
-                }
-            }
-        }
-        pump_decode(s);
-        // A finished decode frees the decoder for the next fetched track.
-        if s.decode.is_none() {
-            for index in 1..s.tracks.len() {
-                if matches!(s.states[index], TrackState::Fetching(_))
-                    && ws_state(&format!("track{index}")) == "done"
-                {
-                    start_decode(s, index);
-                    break;
-                }
-            }
-        }
+        advance_tracks(s, BACKGROUND_DECODE_BUDGET);
 
         let events: Vec<BgEvent> = s
             .ready
