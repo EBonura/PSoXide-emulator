@@ -40,11 +40,29 @@ const SCAN_BYTES: u64 = 892 * SECTOR_BYTES as u64;
 
 #[wasm_bindgen(inline_js = r#"
 const _img = new Map();
+function _range(url, start, end) {
+  return fetch(url, { headers: { Range: 'bytes=' + start + '-' + (end - 1) } }).then((r) => {
+    if (r.status !== 206) throw new Error(url + ': HTTP ' + r.status + ' to a range request');
+    return r.arrayBuffer();
+  });
+}
+// A split image is several files of `partBytes` each; a read that crosses a
+// file boundary becomes one request per file, joined in order.
 function _read(s, start, end) {
   if (s.blob) return s.blob.slice(start, end).arrayBuffer();
-  return fetch(s.url, { headers: { Range: 'bytes=' + start + '-' + (end - 1) } }).then((r) => {
-    if (r.status !== 206) throw new Error(s.url + ': HTTP ' + r.status + ' to a range request');
-    return r.arrayBuffer();
+  if (!s.parts) return _range(s.url, start, end);
+  const reads = [];
+  for (let p = Math.floor(start / s.partBytes); p * s.partBytes < end; p++) {
+    const from = Math.max(start, p * s.partBytes) - p * s.partBytes;
+    const to = Math.min(end, (p + 1) * s.partBytes) - p * s.partBytes;
+    reads.push(_range(s.parts[p], from, to));
+  }
+  if (reads.length === 1) return reads[0];
+  return Promise.all(reads).then((pieces) => {
+    const out = new Uint8Array(end - start);
+    let at = 0;
+    for (const piece of pieces) { out.set(new Uint8Array(piece), at); at += piece.byteLength; }
+    return out.buffer;
   });
 }
 export function wdOpenBlob(id, blob) { _img.set(id, { blob, url: null, done: [] }); return blob.size; }
@@ -58,6 +76,9 @@ export async function wdOpenUrl(id, url) {
   return total;
 }
 export function wdRegisterUrl(id, url) { _img.set(id, { blob: null, url, done: [] }); }
+export function wdRegisterParts(id, urls, partBytes) {
+  _img.set(id, { blob: null, url: null, parts: urls.split('\n'), partBytes, done: [] });
+}
 export function wdClose(id) { _img.delete(id); }
 export function wdRead(id, start, end) {
   const s = _img.get(id);
@@ -86,6 +107,8 @@ extern "C" {
     fn wd_open_url(id: u32, url: &str) -> js_sys::Promise;
     #[wasm_bindgen(js_name = wdRegisterUrl)]
     fn wd_register_url(id: u32, url: &str);
+    #[wasm_bindgen(js_name = wdRegisterParts)]
+    fn wd_register_parts(id: u32, urls: &str, part_bytes: f64);
     #[wasm_bindgen(js_name = wdClose)]
     fn wd_close(id: u32);
     #[wasm_bindgen(js_name = wdRead)]
@@ -361,7 +384,25 @@ pub async fn open_url(url: &str) -> Result<Option<Opened>, String> {
     scan(id, len as u64).await.map(Some)
 }
 
-/// Open a same-origin URL without reading it first.
+/// A disc image served beside the page whose hash and sector headers are
+/// already known (from the manifest and its sidecar), so opening it reads
+/// nothing but the first sectors.
+pub struct LazyImage {
+    /// The file URLs in order: one, or one per part of a split image.
+    pub urls: Vec<String>,
+    /// Bytes per file when split (a whole number of sectors); 0 for one file.
+    pub part_bytes: u64,
+    /// Image length in bytes.
+    pub len: u64,
+    /// [`emulator_core::game_image_hash`] of the whole image.
+    pub hash: u64,
+    /// Bytes 12..20 of every sector, 8 per sector.
+    pub headers: Vec<u8>,
+    /// Sectors to fetch up front.
+    pub boot_sectors: u64,
+}
+
+/// Open a same-origin image without reading it first.
 ///
 /// [`open_url`] reads the whole image once to hash it and index its sector
 /// headers. A deployment that already knows both (the manifest carries the
@@ -370,19 +411,32 @@ pub async fn open_url(url: &str) -> Result<Option<Opened>, String> {
 /// frames of any boot need, and everything else arrives as the game asks
 /// for it. The range request for those sectors doubles as the check that
 /// the server answers ranges at all.
-pub async fn open_url_lazy(
-    url: &str,
-    len: u64,
-    hash: u64,
-    headers: &[u8],
-    boot_sectors: u64,
-) -> Result<Opened, String> {
+pub async fn open_lazy(source: &LazyImage) -> Result<Opened, String> {
+    let LazyImage {
+        urls,
+        part_bytes,
+        len,
+        hash,
+        headers,
+        boot_sectors,
+    } = source;
+    let (len, hash, boot_sectors) = (*len, *hash, *boot_sectors);
     let sectors = len / SECTOR_BYTES as u64;
     if len == 0 || !len.is_multiple_of(SECTOR_BYTES as u64) || headers.len() as u64 != sectors * 8 {
         return Err("lazy image: length and header sidecar disagree".into());
     }
     let id = next_id();
-    wd_register_url(id, url);
+    if *part_bytes == 0 {
+        let [url] = urls.as_slice() else {
+            return Err("lazy image: one file expected without a part size".into());
+        };
+        wd_register_url(id, url);
+    } else {
+        if urls.len() as u64 != len.div_ceil(*part_bytes) {
+            return Err("lazy image: part count and image length disagree".into());
+        }
+        wd_register_parts(id, &urls.join("\n"), *part_bytes as f64);
+    }
     let mut image = Image {
         len,
         chunks: HashMap::new(),

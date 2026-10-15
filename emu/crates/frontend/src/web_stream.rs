@@ -3,7 +3,7 @@
 //! A full disc image is far too large to bake into the wasm, and even one
 //! straight download is a long sit: the pressing is mostly CD-DA. So the
 //! deploy stages a split delivery next to the wasm (see the demo-disc repo's
-//! `tools/web-delivery.py`): the data track gzipped, each audio track as
+//! `disc-tools web-delivery`): the data track gzipped, each audio track as
 //! lossless FLAC, and a small text manifest naming the pieces with sizes and
 //! FNV-1a-32 checksums. The boot gate is the data track alone; every song,
 //! the first included, streams in behind the running emulator and is patched
@@ -13,6 +13,13 @@
 //! patched in late changes sector contents only, never the drive's state or
 //! position, so the launcher's status-based stall watchdog has nothing to
 //! react to.
+//!
+//! A disc whose audio is XA has no audio tracks to split off: the music is in
+//! the data track, which is far too big to gate a boot on. Its manifest has a
+//! single `image` line instead, and the disc is served as the raw image (in
+//! numbered parts when a host caps file size) and read lazily over HTTP Range
+//! requests (see `web_disc::open_lazy`); only a small sidecar of sector headers
+//! is downloaded up front.
 //!
 //! Ordering note: pieces download in disc order and the launcher cycles its
 //! menu tracks in the same order, so delivery stays ahead of the playhead on
@@ -168,6 +175,24 @@ struct ImageMeta {
     hdr_fnv: u32,
     /// Sectors the first frames of a boot read, fetched in one request.
     boot_sectors: u64,
+    /// Bytes per file when the image is split to fit a host's file size cap
+    /// (itch.io refuses 200 MB); 0 when `file` holds the whole image.
+    part_bytes: u64,
+}
+
+impl ImageMeta {
+    /// The URL of every file the image is served as, in order, each tied to
+    /// the image hash. A split image is `file.001`, `file.002`, ... of
+    /// `part_bytes` each (the last one shorter).
+    fn urls(&self) -> Vec<String> {
+        if self.part_bytes == 0 {
+            return vec![piece_url(&self.file, self.hash)];
+        }
+        let parts = self.bytes.div_ceil(self.part_bytes);
+        (1..=parts)
+            .map(|n| piece_url(&format!("{}.{n:03}", self.file), self.hash))
+            .collect()
+    }
 }
 
 /// Where a background track stands, for the shell's progress line.
@@ -268,16 +293,8 @@ pub enum BootStatus {
     Lazy {
         /// The disc being streamed.
         disc: &'static StreamedDisc,
-        /// Image URL, tied to its hash.
-        url: String,
-        /// Image length in bytes.
-        len: u64,
-        /// `emulator_core::game_image_hash` of the image.
-        hash: u64,
-        /// Bytes 12..20 of every sector, 8 per sector.
-        headers: Vec<u8>,
-        /// Sectors to fetch up front.
-        boot_sectors: u64,
+        /// What to open, and where it is served.
+        image: crate::web_disc::LazyImage,
     },
     /// The stream is dead; message handed over exactly once.
     Failed(String),
@@ -347,8 +364,9 @@ fn parse_manifest(text: &str, s: &mut Stream) -> Result<(), String> {
             }
             Some("image") => {
                 // `image FILE BYTES GAME_IMAGE_HASH HDR_FILE HDR_RAW_BYTES
-                // HDR_FNV32 BOOT_SECTORS`: a whole-image delivery read on
-                // demand, in place of the data and track pieces.
+                // HDR_FNV32 BOOT_SECTORS [PART_BYTES]`: a whole-image delivery
+                // read on demand, in place of the data and track pieces. With
+                // PART_BYTES the image is the files FILE.001, FILE.002, ...
                 let mut next = || parts.next().ok_or("manifest: short image line");
                 let file = next()?.to_string();
                 let bytes = next()?.parse().map_err(|_| "manifest: image bytes")?;
@@ -357,6 +375,15 @@ fn parse_manifest(text: &str, s: &mut Stream) -> Result<(), String> {
                 let hdr_raw_bytes = next()?.parse().map_err(|_| "manifest: header bytes")?;
                 let hdr_fnv = next()?.parse().map_err(|_| "manifest: header fnv")?;
                 let boot_sectors = next()?.parse().map_err(|_| "manifest: boot sectors")?;
+                let part_bytes: u64 = match parts.next() {
+                    Some(v) => v.parse().map_err(|_| "manifest: part bytes")?,
+                    None => 0,
+                };
+                // A part is whole sectors, or one sector would straddle two
+                // files.
+                if !part_bytes.is_multiple_of(psx_iso::SECTOR_BYTES as u64) {
+                    return Err("manifest: part bytes are not whole sectors".into());
+                }
                 s.image = Some(ImageMeta {
                     file,
                     bytes,
@@ -365,6 +392,7 @@ fn parse_manifest(text: &str, s: &mut Stream) -> Result<(), String> {
                     hdr_raw_bytes,
                     hdr_fnv,
                     boot_sectors,
+                    part_bytes,
                 });
             }
             Some("track") => {
@@ -607,11 +635,14 @@ fn poll_lazy(s: &mut Stream) -> BootStatus {
             }
             let handoff = BootStatus::Lazy {
                 disc: s.disc,
-                url: piece_url(&image.file, image.hash),
-                len: image.bytes,
-                hash: image.hash,
-                headers,
-                boot_sectors: image.boot_sectors,
+                image: crate::web_disc::LazyImage {
+                    urls: image.urls(),
+                    part_bytes: image.part_bytes,
+                    len: image.bytes,
+                    hash: image.hash,
+                    headers,
+                    boot_sectors: image.boot_sectors,
+                },
             };
             s.phase = Phase::Done;
             handoff
