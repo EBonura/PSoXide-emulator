@@ -569,6 +569,7 @@ impl Cpu {
         run.boundary_until = bus.boundary_quiet_until();
         run.slow_boundary = u32::from(bus.irq().pending());
         run.last_boundary = 0;
+        run.ram_contended = u32::from(bus.jit_gpu_ram_contention_possible());
     }
 
     /// [`jit_chain`](crate::cpu::jit_abi::jit_chain)'s common case: compiled
@@ -733,6 +734,12 @@ impl Cpu {
         st: &mut BatchState,
     ) -> Option<NativeExit> {
         let native = self.native_ready(bus, index, irq_enabled, ram_ok, st)?;
+        // The first op's fetch is a hit, noted before compiled code (or its
+        // helpers) look at it. Should the code stop before its first op
+        // (the clock limit, the budget), no fetch happened: the interpreter
+        // fetches that op itself, and the bus must not hold a hit it never
+        // saw, or a state read between two runs differs from the step's.
+        let unfetched = st.refetch.then(|| (bus.jit_fetch_state(), st.done));
         if st.refetch {
             bus.note_cached_fetch(true);
             st.refetch = false;
@@ -751,6 +758,12 @@ impl Cpu {
             entry(&mut run);
         }
         run.flush_boundary(bus);
+        // `st.done` moves when compiled code chains past a finished block,
+        // and `run.ran` counts the block it is in.
+        if let Some((state, _)) = unfetched.filter(|&(_, done)| run.ran == 0 && st.done == done) {
+            bus.jit_restore_fetch_state(state);
+            st.refetch = true;
+        }
         run.shadow_to(self);
         self.pending_load = (run.pend_reg != 0).then_some((run.pend_reg as u8, run.pend_val));
         match run.status {

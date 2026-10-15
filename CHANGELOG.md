@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- The native CPU tier now matches the interpreter's cycle count while a GPU
+  DMA streams from main RAM. Its inline RAM load path skipped the wait a load
+  owes a GPU block transfer or list walk (19 clocks a load for a block
+  transfer, 12 for a walk), so a WipEout Rapier/Altima journey replayed with
+  identical pad input drifted from the interpreter by one controller poll
+  within about 3000 ticks, and open-loop replays then diverged for good. The
+  inline path is now taken only when no GPU DMA transfer is in flight. The
+  tier also no longer leaves a cache-hit note on the bus when it stops before
+  running the first op of a block. `jit_tape` replays a pad tape (text or
+  `.pxtape`) on a disc and compares the tier with plain `Cpu::step` run call
+  by run call, and the lockstep fuzzer now ends runs at clock deadlines and
+  compares the fetch bookkeeping too.
 - The web page offers the demo disc only. The 20 example EXEs are no longer
   copied next to the page or listed in its Homebrew folder (2.3 MB less in the
   uploaded bundle, 20 files fewer); the download still bakes and lists them.

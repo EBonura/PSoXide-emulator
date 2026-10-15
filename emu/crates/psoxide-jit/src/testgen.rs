@@ -340,7 +340,7 @@ pub fn state_bytes(cpu: &Cpu, bus: &Bus) -> Vec<u8> {
 
 /// Where two machines' serialized states first differ: the CPU's or the
 /// bus's bytes, the offset, and the CPU's COP0 registers when those differ.
-fn state_diff(ca: &Cpu, ba: &Bus, cb: &Cpu, bb: &Bus) -> String {
+pub fn state_diff(ca: &Cpu, ba: &Bus, cb: &Cpu, bb: &Bus) -> String {
     let first = |x: &[u8], y: &[u8]| {
         x.iter()
             .zip(y)
@@ -391,15 +391,24 @@ fn state_diff(ca: &Cpu, ba: &Bus, cb: &Cpu, bb: &Bus) -> String {
             postcard::to_allocvec(&ba.scheduler).unwrap(),
             postcard::to_allocvec(&bb.scheduler).unwrap(),
         ),
+        part(
+            "cdrom",
+            postcard::to_allocvec(&ba.cdrom).unwrap(),
+            postcard::to_allocvec(&bb.cdrom).unwrap(),
+        ),
         part("ram", ba.ram().to_vec(), bb.ram().to_vec()),
     ]
     .into_iter()
     .flatten()
     .collect();
+    let at = first(&ya, &yb);
+    let around = |y: &[u8]| format!("{:02x?}", &y[at.saturating_sub(8)..(at + 64).min(y.len())]);
     format!(
-        "bus bytes differ at {} of {} (parts: {parts:?}; irq raises step={:?} run={:?})",
-        first(&ya, &yb),
+        "bus bytes differ at {} of {} (step {} run {}; parts: {parts:?}; irq raises step={:?} run={:?})",
+        at,
         ya.len(),
+        around(&ya),
+        around(&yb),
         ba.irq().raise_counts(),
         bb.irq().raise_counts()
     )
@@ -408,7 +417,8 @@ fn state_diff(ca: &Cpu, ba: &Bus, cb: &Cpu, bb: &Bus) -> String {
 /// Run `instructions` instructions of the program two ways and compare:
 /// one machine runs `Cpu::run` (the batched path, with the native tier when
 /// `tier` is set) in chunks of random length drawn from `seed`
-/// (`PSOXIDE_FUZZ_SPAN` fixes the span), the other plain `Cpu::step`. CPU
+/// (`PSOXIDE_FUZZ_SPAN` fixes the span) and sometimes a clock deadline, the
+/// other plain `Cpu::step`. CPU
 /// state and cycles are compared after every chunk, the whole serialized
 /// machine every `full_every` chunks and at the end. `Err` describes the
 /// first difference; `Ok` the instructions run.
@@ -438,7 +448,14 @@ pub fn lockstep(
             None => 64,
         };
         let chunk = 1 + u64::from(rng.below(span));
-        let (_, rr) = cr.run(&mut br, chunk, u64::MAX, |_| false);
+        // Often end the run at a clock deadline too, as hosts do at the end
+        // of a frame: compiled code then stops before an op for the clock.
+        let until = if rng.chance(40) {
+            br.cycles() + 1 + u64::from(rng.below(2500))
+        } else {
+            u64::MAX
+        };
+        let (_, rr) = cr.run(&mut br, chunk, until, |_| false);
         let rr = rr.map_err(|e| e.to_string());
         let mut ri = Ok(());
         while ci.tick() < cr.tick() && ri.is_ok() {
@@ -460,7 +477,8 @@ pub fn lockstep(
             && ci.lo() == cr.lo()
             && ci.cop0() == cr.cop0()
             && bi.cycles() == br.cycles()
-            && ci.jit_debug_state() == cr.jit_debug_state();
+            && ci.jit_debug_state() == cr.jit_debug_state()
+            && bi.jit_fetch_state() == br.jit_fetch_state();
         if !same {
             let words: Vec<String> = (0..12)
                 .map(|k| {
