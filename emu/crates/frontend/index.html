@@ -15,6 +15,67 @@
       }
     </script>
     <script>
+      // Start the demo disc's delivery before the wasm has downloaded, let
+      // alone compiled: the page boots that disc at open, and its data track
+      // is the long pole. Responses wait in window.psoxidePrefetch, keyed by
+      // URL, until src/web_stream.rs asks for the same URL and adopts them
+      // (the slot shape and URL scheme below mirror its wsFetch and
+      // piece_url; keep them in step). Skipped where the page will not boot
+      // the demo disc: the embed player (an unstarted iframe costs no
+      // download) and ?disc=. A dev server with no delivery staged just
+      // gets a 404 on the manifest, which the wasm side reports as it
+      // always has.
+      window.psoxidePrefetch = {};
+      (function () {
+        if (psoxideEmbed || /[?&]disc=/.test(location.search)) return;
+        var pre = window.psoxidePrefetch;
+        function get(url, done) {
+          var s = { state: "running", received: 0, total: 0 };
+          pre[url] = s;
+          var xhr = new XMLHttpRequest();
+          xhr.open("GET", url);
+          xhr.responseType = "arraybuffer";
+          xhr.onprogress = function (e) {
+            s.received = e.loaded;
+            if (e.lengthComputable) s.total = e.total;
+          };
+          xhr.onload = function () {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              s.buf = new Uint8Array(xhr.response);
+              s.state = "done";
+              if (done) done(s.buf);
+            } else {
+              s.msg = url + ": HTTP " + xhr.status;
+              s.state = "error";
+            }
+          };
+          xhr.onerror = function () {
+            s.msg = url + ": network error";
+            s.state = "error";
+          };
+          xhr.send();
+        }
+        get("web-manifest.txt", function (bytes) {
+          // `data FILE GZ_BYTES RAW_BYTES FNV` and
+          // `track N FILE FLAC_BYTES RAW_BYTES FNV TITLE...`.
+          var data = null;
+          var first = null;
+          new TextDecoder().decode(bytes).split("\n").forEach(function (line) {
+            var p = line.trim().split(/\s+/);
+            if (p[0] === "data" && p.length >= 5) data = { file: p[1], fnv: p[4] };
+            if (p[0] === "track" && p.length >= 6 && !first) first = { file: p[2], fnv: p[5] };
+          });
+          if (!data) return;
+          get("demo-disc.cue?v=" + data.fnv);
+          // The first song waits for the data track, so the two do not split
+          // the connection and delay the one that gates the boot.
+          get(data.file + "?v=" + data.fnv, function () {
+            if (first) get(first.file + "?v=" + first.fnv);
+          });
+        });
+      })();
+    </script>
+    <script>
       // Browsers suspend the WebAudio context until a user gesture (autoplay
       // policy), so cpal's audio stays silent on the auto-booting page.
       // Capture the AudioContext cpal creates, resume it on the first user
