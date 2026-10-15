@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The web page offers the demo disc only. The 20 example EXEs are no longer
+  copied next to the page or listed in its Homebrew folder (2.3 MB less in the
+  uploaded bundle, 20 files fewer); the download still bakes and lists them.
 - The web build boots the demo disc on its data track alone. The first song is
   fetched and patched into the mounted disc like the others instead of gating
   the first frame, FLAC decode runs on a per-frame time budget instead of three

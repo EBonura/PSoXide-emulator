@@ -442,12 +442,6 @@ pub fn fetch_game(url: &str) {
     fetch_with_id(url, None);
 }
 
-/// Fetch a bundled example served next to the page and boot it under its
-/// menu id (the save-state key), like a baked-in payload used to be.
-pub fn fetch_bundled(url: &str, game_id: &str) {
-    fetch_with_id(url, Some(game_id.to_string()));
-}
-
 fn fetch_with_id(url: &str, game_id: Option<String>) {
     let url = url.to_string();
     let name = url.rsplit('/').next().unwrap_or(&url).to_string();

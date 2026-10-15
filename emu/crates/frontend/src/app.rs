@@ -189,10 +189,9 @@ enum EditorBuildCompletion {
 
 /// Top-level app state. Owns the emulator state directly -- no Arc/Mutex,
 /// single-threaded, UI reads state in-place per frame.
-/// Payloads baked into the web build. They appear in the menu and boot via
-/// the no-BIOS HLE path. Full disc images are not baked here -- they stream
-/// on demand instead (`web_stream`), because `include_bytes!` puts the image
-/// inside the wasm every visitor downloads up front.
+/// Payloads baked into the download. They appear in the menu and boot via
+/// the no-BIOS HLE path. The web build bakes and serves none: it offers the
+/// streamed demo disc only (`web_stream`), so `DISCS` is empty there.
 pub mod bundled {
     /// What a baked-in payload is, which decides both how it boots and which
     /// menu column it lands in.
@@ -217,17 +216,13 @@ pub mod bundled {
         pub subtitle: &'static str,
         /// Disc image or PSX-EXE.
         pub kind: BundledKind,
-        /// Raw payload bytes (native: compiled in).
+        /// Raw payload bytes, compiled in.
         #[cfg(not(target_arch = "wasm32"))]
         pub bytes: &'static [u8],
-        /// Where the payload is served next to the page (web). Fetched when
-        /// launched rather than compiled into the wasm every visitor
-        /// downloads; Trunk copies `assets/examples` into the build.
-        #[cfg(target_arch = "wasm32")]
-        pub url: &'static str,
     }
 
     /// A baked-in example EXE from `assets/examples/<name>.exe`.
+    #[cfg(not(target_arch = "wasm32"))]
     macro_rules! example {
         ($name:literal, $subtitle:literal) => {
             BundledDisc {
@@ -235,10 +230,7 @@ pub mod bundled {
                 title: $name,
                 subtitle: $subtitle,
                 kind: BundledKind::Exe,
-                #[cfg(not(target_arch = "wasm32"))]
                 bytes: include_bytes!(concat!("../assets/examples/", $name, ".exe")),
-                #[cfg(target_arch = "wasm32")]
-                url: concat!("examples/", $name, ".exe"),
             }
         };
     }
@@ -247,6 +239,11 @@ pub mod bundled {
     ///
     /// These are SDK/engine samples and tests; the menu lists them in the
     /// Library's Homebrew folder, apart from the games folder.
+    #[cfg(target_arch = "wasm32")]
+    pub static DISCS: &[BundledDisc] = &[];
+
+    /// The baked-in payloads in menu order (the download's).
+    #[cfg(not(target_arch = "wasm32"))]
     pub static DISCS: &[BundledDisc] = &[
         example!("game-breakout", "sample game"),
         example!("game-invaders", "sample game"),
@@ -271,6 +268,7 @@ pub mod bundled {
     ];
 
     /// Look up a baked-in disc by its menu launch id.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn find(id: &str) -> Option<&'static BundledDisc> {
         DISCS.iter().find(|d| d.id == id)
     }
@@ -1245,16 +1243,9 @@ impl AppState {
     /// path-qualified tokens because authored PSoXide discs can still
     /// share a PSX volume ID.
     pub fn launch_by_id(&mut self, id: &str) -> Result<(), String> {
-        // Baked-in payloads boot via the no-BIOS HLE path, not the library.
-        // Both targets: the download has no source tree, so its Examples come
-        // from here too.
-        #[cfg(target_arch = "wasm32")]
-        if let Some(disc) = bundled::find(id) {
-            // Fetched on demand; boots from `poll_web_uploads` when it lands,
-            // through the same path as a picked file.
-            crate::web_files::fetch_bundled(disc.url, disc.id);
-            return Ok(());
-        }
+        // Baked-in payloads boot via the no-BIOS HLE path, not the library:
+        // the download has no source tree, so its Examples come from here.
+        // The web build bakes none.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(disc) = bundled::find(id) {
             let kind = match disc.kind {

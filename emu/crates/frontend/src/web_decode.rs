@@ -164,6 +164,7 @@ mod tests {
         assert!(want.len() > 4096 * 4, "fixture spans several blocks");
         assert_eq!(done.pcm, want);
         assert_eq!(done.fnv, fnv1a32(&want));
+        assert!(done.busy <= done.wall);
     }
 
     #[test]
