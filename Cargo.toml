@@ -17,7 +17,8 @@ members = [
     "emu/crates/psx-gpu-render",
     "tools/mkisopsx",
     "tools/psoxide-gate",
-    "tools/psoxide-link"
+    "tools/psoxide-link",
+    "tools/web-lazy-image"
 ]
 # The device-side workspaces live inside this directory tree; cargo
 # requires nested workspace roots to be excluded explicitly.

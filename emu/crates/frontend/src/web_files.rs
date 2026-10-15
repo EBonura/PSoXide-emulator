@@ -482,6 +482,33 @@ fn fetch_with_id(url: &str, game_id: Option<String>) {
     });
 }
 
+/// Open a disc image the manifest described, without reading it first, and
+/// queue it like a picked file (see [`crate::web_disc::open_url_lazy`]).
+pub fn open_lazy(
+    game_id: String,
+    title: String,
+    url: String,
+    len: u64,
+    hash: u64,
+    headers: Vec<u8>,
+    boot_sectors: u64,
+) {
+    spawn_local(async move {
+        match crate::web_disc::open_url_lazy(&url, len, hash, &headers, boot_sectors).await {
+            Ok(opened) => PENDING.with(|q| {
+                q.borrow_mut().push(LoadedFile {
+                    kind: Upload::Game,
+                    name: title,
+                    game_id: Some(game_id),
+                    bytes: Vec::new(),
+                    disc: Some(opened),
+                });
+            }),
+            Err(error) => report_load_error(format!("opening {url}: {error}")),
+        }
+    });
+}
+
 async fn fetch_stream(url: &str) -> Result<Vec<u8>, String> {
     let opened = JsFuture::from(js_fetch_open(url)).await.map_err(js_error)?;
     let opened = js_sys::Array::from(&opened);

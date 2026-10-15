@@ -1,0 +1,15 @@
+[package]
+name    = "web-lazy-image"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+publish = false
+
+[dependencies]
+emulator-core = { workspace = true }
+psx-iso       = { workspace = true }
+flate2        = "1"
+
+[[bin]]
+name = "web-lazy-image"
+path = "src/main.rs"

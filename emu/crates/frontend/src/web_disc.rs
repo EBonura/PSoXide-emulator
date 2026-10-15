@@ -28,8 +28,11 @@ use wasm_bindgen_futures::JsFuture;
 /// Sectors per cached chunk.
 const CHUNK_SECTORS: u64 = 32;
 const CHUNK_BYTES: u64 = CHUNK_SECTORS * SECTOR_BYTES as u64;
-/// Chunks kept beyond the pinned boot set: about 3.6 MB.
-const CACHED_CHUNKS: usize = 48;
+/// Chunks kept beyond the pinned boot set: about 12 MB. A lazily opened
+/// image (see [`open_url_lazy`]) lives only here, so it has to hold what a
+/// game streams between two visits to the same file: XA playback reads far
+/// ahead of the data the game is also fetching.
+const CACHED_CHUNKS: usize = 160;
 /// Largest single read request, in chunks.
 const MAX_REQUEST_CHUNKS: u64 = 16;
 /// Bytes per read while scanning at open (a whole number of sectors).
@@ -54,6 +57,7 @@ export async function wdOpenUrl(id, url) {
   _img.set(id, { blob: null, url, done: [] });
   return total;
 }
+export function wdRegisterUrl(id, url) { _img.set(id, { blob: null, url, done: [] }); }
 export function wdClose(id) { _img.delete(id); }
 export function wdRead(id, start, end) {
   const s = _img.get(id);
@@ -80,6 +84,8 @@ extern "C" {
     fn wd_open_blob(id: u32, blob: &web_sys::Blob) -> f64;
     #[wasm_bindgen(js_name = wdOpenUrl)]
     fn wd_open_url(id: u32, url: &str) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = wdRegisterUrl)]
+    fn wd_register_url(id: u32, url: &str);
     #[wasm_bindgen(js_name = wdClose)]
     fn wd_close(id: u32);
     #[wasm_bindgen(js_name = wdRead)]
@@ -353,6 +359,69 @@ pub async fn open_url(url: &str) -> Result<Option<Opened>, String> {
         return Ok(None);
     }
     scan(id, len as u64).await.map(Some)
+}
+
+/// Open a same-origin URL without reading it first.
+///
+/// [`open_url`] reads the whole image once to hash it and index its sector
+/// headers. A deployment that already knows both (the manifest carries the
+/// hash and a header sidecar, produced at press time) skips that read: this
+/// fetches only `boot_sectors` sectors from the start, which the first
+/// frames of any boot need, and everything else arrives as the game asks
+/// for it. The range request for those sectors doubles as the check that
+/// the server answers ranges at all.
+pub async fn open_url_lazy(
+    url: &str,
+    len: u64,
+    hash: u64,
+    headers: &[u8],
+    boot_sectors: u64,
+) -> Result<Opened, String> {
+    let sectors = len / SECTOR_BYTES as u64;
+    if len == 0 || !len.is_multiple_of(SECTOR_BYTES as u64) || headers.len() as u64 != sectors * 8 {
+        return Err("lazy image: length and header sidecar disagree".into());
+    }
+    let id = next_id();
+    wd_register_url(id, url);
+    let mut image = Image {
+        len,
+        chunks: HashMap::new(),
+        order: VecDeque::new(),
+        pinned: HashSet::new(),
+        in_flight: HashSet::new(),
+        headers: headers
+            .chunks_exact(8)
+            .map(|h| <[u8; 8]>::try_from(h).expect("chunks of 8"))
+            .collect(),
+    };
+    let boot_bytes = (boot_sectors.max(1) * SECTOR_BYTES as u64)
+        .div_ceil(CHUNK_BYTES)
+        .saturating_mul(CHUNK_BYTES)
+        .min(len);
+    let piece = JsFuture::from(wd_read_now(id, 0.0, boot_bytes as f64))
+        .await
+        .map_err(|e| {
+            wd_close(id);
+            js_error(e)
+        })?;
+    let piece = js_sys::Uint8Array::new(&piece);
+    if u64::from(piece.length()) != boot_bytes {
+        wd_close(id);
+        return Err("lazy image: short read of the boot sectors".into());
+    }
+    let mut buf = vec![0u8; boot_bytes as usize];
+    piece.copy_to(&mut buf);
+    for (chunk, bytes) in buf.chunks(CHUNK_BYTES as usize).enumerate() {
+        image
+            .chunks
+            .insert(chunk as u64, bytes.to_vec().into_boxed_slice());
+        image.pinned.insert(chunk as u64);
+    }
+    IMAGES.with(|images| images.borrow_mut().insert(id, image));
+    Ok(Opened {
+        image: WebImage { id, len },
+        hash,
+    })
 }
 
 fn next_id() -> u32 {

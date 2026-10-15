@@ -2248,11 +2248,14 @@ impl AppState {
         let status = crate::web_stream::poll_boot();
         if matches!(
             status,
-            BootStatus::Ready { .. } | BootStatus::Failed(_) | BootStatus::NotServed(_)
+            BootStatus::Ready { .. }
+                | BootStatus::Lazy { .. }
+                | BootStatus::Failed(_)
+                | BootStatus::NotServed(_)
         ) && std::mem::take(&mut self.web_autoboot)
         {
             // The page-open boot has resolved; on failure show the menu.
-            self.menu.open = !matches!(status, BootStatus::Ready { .. });
+            self.menu.open = !matches!(status, BootStatus::Ready { .. } | BootStatus::Lazy { .. });
             if stream_failure_is_quiet(true, matches!(status, BootStatus::NotServed(_))) {
                 self.status_message = None;
                 return;
@@ -2294,6 +2297,25 @@ impl AppState {
                     }
                     Err(e) => self.status_message_set(format!("{}: {e}", disc.title)),
                 }
+            }
+            BootStatus::Lazy {
+                disc,
+                url,
+                len,
+                hash,
+                headers,
+                boot_sectors,
+            } => {
+                crate::web_files::open_lazy(
+                    disc.id.to_string(),
+                    disc.title.to_string(),
+                    url,
+                    len,
+                    hash,
+                    headers,
+                    boot_sectors,
+                );
+                self.status_message_set(format!("Opening {}...", disc.title));
             }
             BootStatus::Failed(message) | BootStatus::NotServed(message) => {
                 self.status_message_set(message)

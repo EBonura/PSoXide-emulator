@@ -156,6 +156,20 @@ struct TrackMeta {
     fnv: u32,
 }
 
+/// A whole raw image delivered for lazy HTTP Range reads, from the manifest.
+struct ImageMeta {
+    file: String,
+    bytes: u64,
+    /// `emulator_core::game_image_hash` of the image, computed at press time.
+    hash: u64,
+    /// Gzipped sidecar: bytes 12..20 of every sector.
+    hdr_file: String,
+    hdr_raw_bytes: usize,
+    hdr_fnv: u32,
+    /// Sectors the first frames of a boot read, fetched in one request.
+    boot_sectors: u64,
+}
+
 /// Where a background track stands, for the shell's progress line.
 #[derive(Clone, PartialEq, Eq)]
 pub enum TrackState {
@@ -213,6 +227,9 @@ struct Stream {
     states: Vec<TrackState>,
     /// The data piece's file name, from the manifest.
     data_file: String,
+    image: Option<ImageMeta>,
+    /// The manifest has been read and parsed.
+    manifest_parsed: bool,
     data_raw_bytes: usize,
     data_fnv: u32,
     gunzip_requested: bool,
@@ -245,6 +262,23 @@ pub enum BootStatus {
         /// Every one starts silent; the songs are patched in as they land.
         layout: Vec<(u8, usize)>,
     },
+    /// A whole image to read on demand, handed over exactly once. Nothing
+    /// else is downloaded up front: the shell opens it and boots as soon as
+    /// the sectors the boot reads have arrived.
+    Lazy {
+        /// The disc being streamed.
+        disc: &'static StreamedDisc,
+        /// Image URL, tied to its hash.
+        url: String,
+        /// Image length in bytes.
+        len: u64,
+        /// `emulator_core::game_image_hash` of the image.
+        hash: u64,
+        /// Bytes 12..20 of every sector, 8 per sector.
+        headers: Vec<u8>,
+        /// Sectors to fetch up front.
+        boot_sectors: u64,
+    },
     /// The stream is dead; message handed over exactly once.
     Failed(String),
     /// The manifest is not served (or not a manifest): this page has no
@@ -276,6 +310,8 @@ pub fn start(disc: &'static StreamedDisc) {
             tracks: Vec::new(),
             states: Vec::new(),
             data_file: String::new(),
+            image: None,
+            manifest_parsed: false,
             data_raw_bytes: 0,
             data_fnv: 0,
             gunzip_requested: false,
@@ -309,6 +345,28 @@ fn parse_manifest(text: &str, s: &mut Stream) -> Result<(), String> {
                     .and_then(|v| v.parse().ok())
                     .ok_or("manifest: data fnv")?;
             }
+            Some("image") => {
+                // `image FILE BYTES GAME_IMAGE_HASH HDR_FILE HDR_RAW_BYTES
+                // HDR_FNV32 BOOT_SECTORS`: a whole-image delivery read on
+                // demand, in place of the data and track pieces.
+                let mut next = || parts.next().ok_or("manifest: short image line");
+                let file = next()?.to_string();
+                let bytes = next()?.parse().map_err(|_| "manifest: image bytes")?;
+                let hash = next()?.parse().map_err(|_| "manifest: image hash")?;
+                let hdr_file = next()?.to_string();
+                let hdr_raw_bytes = next()?.parse().map_err(|_| "manifest: header bytes")?;
+                let hdr_fnv = next()?.parse().map_err(|_| "manifest: header fnv")?;
+                let boot_sectors = next()?.parse().map_err(|_| "manifest: boot sectors")?;
+                s.image = Some(ImageMeta {
+                    file,
+                    bytes,
+                    hash,
+                    hdr_file,
+                    hdr_raw_bytes,
+                    hdr_fnv,
+                    boot_sectors,
+                });
+            }
             Some("track") => {
                 let number: u8 = parts
                     .next()
@@ -340,7 +398,9 @@ fn parse_manifest(text: &str, s: &mut Stream) -> Result<(), String> {
             _ => {}
         }
     }
-    if s.data_raw_bytes == 0 || s.tracks.is_empty() {
+    // A lazily read image needs no data or audio pieces; a split delivery
+    // needs both.
+    if s.image.is_none() && (s.data_raw_bytes == 0 || s.tracks.is_empty()) {
         return Err("manifest: empty or unreadable".into());
     }
     Ok(())
@@ -349,7 +409,7 @@ fn parse_manifest(text: &str, s: &mut Stream) -> Result<(), String> {
 /// URL of a piece named by the manifest, tied to its checksum so a cached
 /// copy from another build is never mistaken for this one. `index.html`
 /// builds the same strings for its early fetches.
-fn piece_url(file: &str, fnv: u32) -> String {
+fn piece_url(file: &str, fnv: impl std::fmt::Display) -> String {
     format!("{file}?v={fnv}")
 }
 
@@ -442,7 +502,7 @@ pub fn poll_boot() -> BootStatus {
 
         // The manifest, tiny. It names everything else, so the data piece
         // and the cue start the moment it parses.
-        if s.tracks.is_empty() {
+        if !s.manifest_parsed {
             match ws_state("manifest").as_str() {
                 "done" => {
                     let text = String::from_utf8_lossy(&ws_take("manifest")).into_owned();
@@ -450,8 +510,13 @@ pub fn poll_boot() -> BootStatus {
                         s.phase = Phase::Failed;
                         return BootStatus::NotServed(e);
                     }
-                    ws_fetch("data", &piece_url(&s.data_file, s.data_fnv));
-                    ws_fetch("cue", &piece_url(s.disc.cue_url, s.data_fnv));
+                    s.manifest_parsed = true;
+                    if let Some(image) = &s.image {
+                        ws_fetch("hdr", &piece_url(&image.hdr_file, image.hdr_fnv));
+                    } else {
+                        ws_fetch("data", &piece_url(&s.data_file, s.data_fnv));
+                        ws_fetch("cue", &piece_url(s.disc.cue_url, s.data_fnv));
+                    }
                 }
                 "error" => {
                     s.phase = Phase::Failed;
@@ -459,6 +524,10 @@ pub fn poll_boot() -> BootStatus {
                 }
                 _ => return BootStatus::Progress(format!("{}: reading manifest...", s.disc.title)),
             }
+        }
+
+        if s.image.is_some() {
+            return poll_lazy(s);
         }
 
         // The data piece: fetch, then browser-native gunzip, then verify.
@@ -516,6 +585,40 @@ pub fn poll_boot() -> BootStatus {
             layout: s.tracks.iter().map(|t| (t.number, t.raw_bytes)).collect(),
         }
     })
+}
+
+/// The lazy delivery's only up-front piece: the header sidecar. Fetch,
+/// gunzip when the CDN did not, verify, and hand the image over.
+fn poll_lazy(s: &mut Stream) -> BootStatus {
+    let image = s.image.as_ref().expect("lazy delivery");
+    match ws_state("hdr").as_str() {
+        "done" if !s.gunzip_requested => {
+            s.gunzip_requested = true;
+            ws_gunzip("hdr");
+            BootStatus::Progress(format!("{}: indexing disc...", s.disc.title))
+        }
+        "done" => {
+            let headers = ws_take("hdr");
+            if headers.len() != image.hdr_raw_bytes || fnv1a32(&headers) != image.hdr_fnv {
+                return fail(
+                    s,
+                    "disc index: checksum mismatch (try reloading the page)".into(),
+                );
+            }
+            let handoff = BootStatus::Lazy {
+                disc: s.disc,
+                url: piece_url(&image.file, image.hash),
+                len: image.bytes,
+                hash: image.hash,
+                headers,
+                boot_sectors: image.boot_sectors,
+            };
+            s.phase = Phase::Done;
+            handoff
+        }
+        "error" => fail(s, ws_error("hdr")),
+        _ => BootStatus::Progress(format!("{}: reading disc index...", s.disc.title)),
+    }
 }
 
 /// Hand finished fetches to the decoder, keep the wire busy, and run the
