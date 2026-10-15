@@ -2298,23 +2298,8 @@ impl AppState {
                     Err(e) => self.status_message_set(format!("{}: {e}", disc.title)),
                 }
             }
-            BootStatus::Lazy {
-                disc,
-                url,
-                len,
-                hash,
-                headers,
-                boot_sectors,
-            } => {
-                crate::web_files::open_lazy(
-                    disc.id.to_string(),
-                    disc.title.to_string(),
-                    url,
-                    len,
-                    hash,
-                    headers,
-                    boot_sectors,
-                );
+            BootStatus::Lazy { disc, image } => {
+                crate::web_files::open_lazy(disc.id.to_string(), disc.title.to_string(), image);
                 self.status_message_set(format!("Opening {}...", disc.title));
             }
             BootStatus::Failed(message) | BootStatus::NotServed(message) => {

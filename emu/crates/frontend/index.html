@@ -57,14 +57,21 @@
         }
         get("web-manifest.txt", function (bytes) {
           // `data FILE GZ_BYTES RAW_BYTES FNV` and
-          // `track N FILE FLAC_BYTES RAW_BYTES FNV TITLE...`.
+          // `track N FILE FLAC_BYTES RAW_BYTES FNV TITLE...`, or for a disc
+          // read lazily over Range requests, `image FILE BYTES HASH HDR_FILE
+          // HDR_RAW_BYTES HDR_FNV32 BOOT_SECTORS [PART_BYTES]`.
           var data = null;
           var first = null;
+          var image = null;
           new TextDecoder().decode(bytes).split("\n").forEach(function (line) {
             var p = line.trim().split(/\s+/);
             if (p[0] === "data" && p.length >= 5) data = { file: p[1], fnv: p[4] };
             if (p[0] === "track" && p.length >= 6 && !first) first = { file: p[2], fnv: p[5] };
+            if (p[0] === "image" && p.length >= 8) image = { hdr: p[4], fnv: p[6] };
           });
+          // The sidecar of sector headers is the only piece a lazy disc
+          // needs before it boots; the sectors themselves come by Range.
+          if (image) return get(image.hdr + "?v=" + image.fnv);
           if (!data) return;
           get("demo-disc.cue?v=" + data.fnv);
           // The first song waits for the data track, so the two do not split

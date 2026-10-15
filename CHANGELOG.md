@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A lazily read web disc image can be split into numbered files. The manifest's
+  `image` line takes an optional last field, `PART_BYTES`, and the image is then
+  `FILE.001`, `FILE.002`, ... of that many bytes each (a whole number of
+  sectors; the last one shorter), so a host with a per-file size cap (itch.io
+  refuses 200 MB) can still serve an XA disc over Range requests. A read that
+  crosses a file boundary becomes one request per file. `index.html` also
+  prefetches the header sidecar of a lazy disc while the wasm downloads.
 - The web page offers the demo disc only. The 20 example EXEs are no longer
   copied next to the page or listed in its Homebrew folder (2.3 MB less in the
   uploaded bundle, 20 files fewer); the download still bakes and lists them.
