@@ -1,6 +1,6 @@
 # Frontend architecture
 
-The desktop frontend lives in [`emu/crates/frontend`](../emu/crates/frontend). It's a single-threaded wgpu + egui app that drives the emulator core directly -- no `Arc<Mutex<_>>`, no message-passing, no separate render thread. The UI reads emulator state in place each frame.
+The desktop frontend lives in [`emu/crates/frontend`](../emu/crates/frontend); its package and binary are named `psoxide-emulator`. It's a single-threaded wgpu + egui app that drives the emulator core directly -- no `Arc<Mutex<_>>`, no message-passing, no separate render thread. The UI reads emulator state in place each frame.
 
 ## Why single-threaded?
 
@@ -105,7 +105,7 @@ micro-profiler counters.
 
 ## Headless input scripting
 
-`frontend launch --press SPEC` drives pad 1 on the headless route clock (one
+`psoxide-emulator launch --press SPEC` drives pad 1 on the headless route clock (one
 tick per vblank period, counted from the start of the run). `SPEC` is a comma
 separated list of entries, each `tick:input[:hold]`; `hold` is a number of
 ticks and defaults to 4, long enough for the guest to poll the pad.

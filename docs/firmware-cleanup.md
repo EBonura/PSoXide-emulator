@@ -3,7 +3,7 @@
 Update, 2026-09-25: firmware loading was restored later on 2026-09-15 for
 retail discs, and is now removed for good. The HLE kernel boots retail discs
 itself (docs/COMPATIBILITY.md); the BIOS path setting, `PSOXIDE_BIOS`, the
-BIOS options of `frontend launch`, the web BIOS upload and the real-BIOS
+BIOS options of `psoxide-emulator launch`, the web BIOS upload and the real-BIOS
 modes of `hle_compat` are gone, together with the examples that needed a
 BIOS.
 

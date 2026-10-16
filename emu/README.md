@@ -8,7 +8,7 @@ silicon pixel coverage, and the core models silicon-measured GTE hazards found
 during hardware validation.
 
 These crates run on the host and are members of the repo-root HOST
-workspace. SDK/shared sources are imported by `make bootstrap`; the editor
+workspace. The SDK/shared crates it links are vendored under `sdk/` and `crates/`; the editor
 is maintained in [PSoXide-editor](https://github.com/EBonura/PSoXide-editor).
 
 ## Crates
@@ -16,7 +16,7 @@ is maintained in [PSoXide-editor](https://github.com/EBonura/PSoXide-editor).
 | Crate | Purpose |
 |-------|---------|
 | [`emulator-core`](crates/emulator-core) | CPU, bus, and peripherals. No UI, no window. Pure state machine. |
-| [`frontend`](crates/frontend) | PSoXide desktop frontend (winit + wgpu + egui). Desktop and browser application for the standalone emulator. |
+| [`frontend`](crates/frontend) | The `psoxide-emulator` package: PSoXide desktop frontend (winit + wgpu + egui). Desktop and browser application for the standalone emulator. The directory keeps its old name. |
 | [`psx-gpu-render`](crates/psx-gpu-render) | Hardware renderer: wgpu pipeline drawing GP0 primitives at an internal-resolution multiple of native VRAM (free upscaling). Lines/polylines draw as one-PSX-pixel quad bands (endpoint-inclusive, connected at any slope, upscale with the target); the software GPU stays the pixel oracle for exact Bresenham steps. |
 | [`psoxide-settings`](crates/psoxide-settings) | On-disk settings, library cache, and save-state formats. Pure logic, no GUI/wgpu deps, usable from headless CLIs. |
 | [`psoxide-validation`](crates/psoxide-validation) | Manifest and exact-hash comparison primitives for validation. Runner-agnostic. |

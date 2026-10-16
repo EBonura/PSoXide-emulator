@@ -14,6 +14,18 @@
   `.pxtape`) on a disc and compares the tier with plain `Cpu::step` run call
   by run call, and the lockstep fuzzer now ends runs at clock deadlines and
   compares the fetch bookkeeping too.
+- The desktop package and binary are now `psoxide-emulator` (the directory is
+  still `emu/crates/frontend`). `cargo run --release` from a fresh clone builds
+  and starts it: the SDK crates the emulator links are vendored under `crates/`
+  and `sdk/`, and `make bootstrap`, Python and the separate download step are
+  gone. A small `frontend` binary is built beside it and runs
+  `psoxide-emulator` with the same arguments, so scripts that call
+  `target/release/frontend` by path keep working; `cargo build -p frontend`
+  becomes `cargo build -p psoxide-emulator`. `make refresh-sdk` re-exports the
+  vendored crates from the revision pinned in `components.lock.json` and
+  `make check-sdk` (CI) fails when they drift. `tools/mkisopsx`,
+  `tools/psoxide-link` and `make examples` are no longer part of this tree; they
+  live in the SDK repository.
 - The web page offers the demo disc only. The 20 example EXEs are no longer
   copied next to the page or listed in its Homebrew folder (2.3 MB less in the
   uploaded bundle, 20 files fewer); the download still bakes and lists them.

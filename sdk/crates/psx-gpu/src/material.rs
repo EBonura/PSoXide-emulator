@@ -1,0 +1,497 @@
+//! PS1 texture material state.
+//!
+//! A material here is intentionally small: the GPU still sees plain
+//! GP0 packets, but callers can group the pieces that decide how a
+//! textured primitive samples and blends: CLUT word, tpage word,
+//! tint, raw-texture flag, dither flag, and semi-transparency mode.
+
+use psx_hw::gpu::{gp0, pack_color};
+
+/// PS1 semi-transparency mode.
+///
+/// The four non-opaque variants map directly to GP0(E1) / tpage
+/// bits 5..6. `Opaque` means the primitive command's semi-transparent
+/// bit is kept clear, so the destination pixel is overwritten.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BlendMode {
+    /// Overwrite destination pixels.
+    Opaque,
+    /// `(background + foreground) / 2`.
+    Average,
+    /// `background + foreground`, clamped per channel.
+    Add,
+    /// `background - foreground`, clamped per channel.
+    Subtract,
+    /// `background + foreground / 4`, clamped per channel.
+    AddQuarter,
+}
+
+/// GP0(E2) texture-window state.
+///
+/// Mask and offset values are stored in the hardware's 8-texel units.
+/// `TextureWindow::NONE` is a no-op window. Non-zero masks let a
+/// primitive repeat a sub-rectangle of the active tpage without
+/// physically duplicating texels in VRAM.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TextureWindow {
+    mask_x: u8,
+    mask_y: u8,
+    offset_x: u8,
+    offset_y: u8,
+}
+
+impl TextureWindow {
+    /// No texture window.
+    pub const NONE: Self = Self::new(0, 0, 0, 0);
+
+    /// Build from raw GP0(E2) fields. Each value must fit in 5 bits.
+    pub const fn new(mask_x: u8, mask_y: u8, offset_x: u8, offset_y: u8) -> Self {
+        assert!(mask_x < 32, "texture-window mask_x must be < 32");
+        assert!(mask_y < 32, "texture-window mask_y must be < 32");
+        assert!(offset_x < 32, "texture-window offset_x must be < 32");
+        assert!(offset_y < 32, "texture-window offset_y must be < 32");
+        Self {
+            mask_x,
+            mask_y,
+            offset_x,
+            offset_y,
+        }
+    }
+
+    /// Build a window for a power-of-two tile.
+    ///
+    /// `origin_*` and `size_*` are in texels. Each origin must align to its
+    /// tile size because GP0(E2) replaces the coordinate bits selected by the
+    /// mask. The complete tile must fit in the active 256x256 texture page.
+    pub const fn power_of_two_tile(origin_x: u8, origin_y: u8, size_x: u8, size_y: u8) -> Self {
+        assert!(
+            size_x >= 8 && size_x.is_power_of_two(),
+            "texture-window width must be a power of two >= 8"
+        );
+        assert!(
+            size_y >= 8 && size_y.is_power_of_two(),
+            "texture-window height must be a power of two >= 8"
+        );
+        assert!(
+            origin_x.is_multiple_of(size_x),
+            "texture-window origin_x must align to its width"
+        );
+        assert!(
+            origin_y.is_multiple_of(size_y),
+            "texture-window origin_y must align to its height"
+        );
+        assert!(size_x <= 128, "texture-window width must fit GP0(E2)");
+        assert!(size_y <= 128, "texture-window height must fit GP0(E2)");
+        assert!(
+            origin_x as u16 + size_x as u16 <= 256,
+            "texture window must fit the texture-page width"
+        );
+        assert!(
+            origin_y as u16 + size_y as u16 <= 256,
+            "texture window must fit the texture-page height"
+        );
+        let mask_x = ((!((size_x as u16) - 1)) & 0x00FF) as u8;
+        let mask_y = ((!((size_y as u16) - 1)) & 0x00FF) as u8;
+        Self::new(mask_x / 8, mask_y / 8, origin_x / 8, origin_y / 8)
+    }
+
+    /// Encoded GP0(E2) word.
+    pub const fn word(self) -> u32 {
+        gp0::tex_window(
+            self.mask_x as u32,
+            self.mask_y as u32,
+            self.offset_x as u32,
+            self.offset_y as u32,
+        )
+    }
+
+    /// Texture-page origin selected by this window, in texels.
+    ///
+    /// Power-of-two atlas placements use the raw offset fields as their
+    /// aligned page-local origin. Exposing it lets a cooker-proven surface
+    /// address the same texels directly and omit GP0(E2) from its packets.
+    pub const fn origin_texels(self) -> [u8; 2] {
+        [self.offset_x * 8, self.offset_y * 8]
+    }
+}
+
+impl BlendMode {
+    /// Decode the two tpage semi-transparency bits.
+    ///
+    /// Hardware tpage bits do not encode "opaque"; the primitive
+    /// opcode decides whether blending is active. This therefore
+    /// returns one of the four blending variants.
+    #[doc(alias = "tpage")]
+    pub const fn from_texture_page_bits(bits: u8) -> Self {
+        match bits & 0x3 {
+            0 => Self::Average,
+            1 => Self::Add,
+            2 => Self::Subtract,
+            _ => Self::AddQuarter,
+        }
+    }
+
+    /// Renamed to [`from_texture_page_bits`](Self::from_texture_page_bits).
+    #[deprecated(note = "renamed to `from_texture_page_bits`")]
+    #[inline(always)]
+    pub const fn from_tpage_bits(bits: u8) -> Self {
+        Self::from_texture_page_bits(bits)
+    }
+
+    /// Encode as GP0(E1) / tpage bits 5..6.
+    ///
+    /// `Opaque` uses the common average-blend encoding because the
+    /// primitive semi-transparent bit will be clear.
+    #[doc(alias = "tpage")]
+    pub const fn texture_page_bits(self) -> u8 {
+        match self {
+            Self::Opaque | Self::Average => 0,
+            Self::Add => 1,
+            Self::Subtract => 2,
+            Self::AddQuarter => 3,
+        }
+    }
+
+    /// True when a primitive using this material should set its
+    /// semi-transparent command bit.
+    pub const fn is_translucent(self) -> bool {
+        !matches!(self, Self::Opaque)
+    }
+}
+
+/// Textured primitive material.
+///
+/// `clut_word` is the packed CLUT handle used by indexed textures.
+/// `tpage_word` is the packed tpage word normally produced by
+/// `TexturePage::uv_word(0)`. The material rewrites the tpage blend
+/// bits from [`BlendMode`] so one base tpage can be reused across
+/// opaque and translucent variants.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TextureMaterial {
+    clut_word: u16,
+    tpage_word: u16,
+    texture_window: TextureWindow,
+    tint: (u8, u8, u8),
+    blend_mode: BlendMode,
+    raw_texture: bool,
+    dither: bool,
+}
+
+/// Prepacked material words for flat textured triangle packets.
+///
+/// Animated model render paths can emit hundreds of textured triangles with
+/// one resolved atlas material. Keeping the invariant GP0 words together avoids
+/// rebuilding texture-window, command, CLUT, and tpage state for every face.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TexturedPacketMaterial {
+    /// GP0(E2) texture-window word.
+    pub tex_window_word: u32,
+    /// Flat textured triangle command word.
+    pub color_command_word: u32,
+    /// CLUT word shifted into the high half of vertex-0 UV.
+    pub clut_high_word: u32,
+    /// TexturePage word shifted into the high half of vertex-1 UV.
+    pub tpage_high_word: u32,
+}
+
+impl TexturedPacketMaterial {
+    /// Build prepacked packet words from a texture material.
+    pub const fn from_texture(material: TextureMaterial) -> Self {
+        Self {
+            tex_window_word: material.texture_window_word(),
+            color_command_word: material.flat_textured_polygon_header(false),
+            clut_high_word: (material.clut_word() as u32) << 16,
+            tpage_high_word: (material.texture_page_word() as u32) << 16,
+        }
+    }
+
+    /// True when packets using this material need the transparent render layer.
+    pub const fn is_translucent(self) -> bool {
+        self.color_command_word & (1 << 25) != 0
+    }
+
+    /// Return packet words selecting a consecutive 16-entry 4bpp CLUT bank.
+    pub const fn with_clut_bank(mut self, bank: u8) -> Self {
+        self.clut_high_word = self.clut_high_word.wrapping_add(((bank & 3) as u32) << 16);
+        self
+    }
+}
+
+/// Prepacked material words for textured Gouraud triangle packets.
+///
+/// Hot cached-room paths emit many triangles with the same material.
+/// Keeping these invariant words beside the resolved material avoids
+/// rebuilding GP0 texture-window, command, CLUT, and tpage state for
+/// every primitive packet.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TexturedGouraudPacketMaterial {
+    /// GP0(E2) texture-window word.
+    pub tex_window_word: u32,
+    /// Textured Gouraud triangle command word without vertex-0 RGB.
+    pub color0_command_word: u32,
+    /// CLUT word shifted into the high half of vertex-0 UV.
+    pub clut_high_word: u32,
+    /// TexturePage word shifted into the high half of vertex-1 UV.
+    pub tpage_high_word: u32,
+}
+
+impl TexturedGouraudPacketMaterial {
+    /// Build prepacked Gouraud packet words from a texture material.
+    pub const fn from_texture(material: TextureMaterial) -> Self {
+        Self {
+            tex_window_word: material.texture_window_word(),
+            color0_command_word: material.textured_polygon_command(true, false),
+            clut_high_word: (material.clut_word() as u32) << 16,
+            tpage_high_word: (material.texture_page_word() as u32) << 16,
+        }
+    }
+
+    /// True when packets using this material need the transparent render layer.
+    pub const fn is_translucent(self) -> bool {
+        self.color0_command_word & (1 << 25) != 0
+    }
+}
+
+impl TextureMaterial {
+    /// Build an opaque, unmodulated texture material.
+    pub const fn new(clut_word: u16, tpage_word: u16) -> Self {
+        Self::opaque(clut_word, tpage_word, (0x80, 0x80, 0x80))
+    }
+
+    /// Build an opaque texture material with a flat tint.
+    pub const fn opaque(clut_word: u16, tpage_word: u16, tint: (u8, u8, u8)) -> Self {
+        Self {
+            clut_word,
+            tpage_word,
+            texture_window: TextureWindow::NONE,
+            tint,
+            blend_mode: BlendMode::Opaque,
+            raw_texture: false,
+            dither: false,
+        }
+    }
+
+    /// Build a translucent texture material with a flat tint.
+    ///
+    /// Textured primitives still follow PS1 texel rules: the
+    /// primitive command enables transparency, and sampled texels
+    /// with bit 15 set actually blend through the selected mode.
+    pub const fn blended(
+        clut_word: u16,
+        tpage_word: u16,
+        tint: (u8, u8, u8),
+        blend_mode: BlendMode,
+    ) -> Self {
+        Self {
+            clut_word,
+            tpage_word,
+            texture_window: TextureWindow::NONE,
+            tint,
+            blend_mode,
+            raw_texture: false,
+            dither: false,
+        }
+    }
+
+    /// Return a copy using `blend_mode`.
+    ///
+    /// For a **textured** primitive this only selects the blending equation.
+    /// Which texels actually blend is decided per texel by bit 15 of the
+    /// palette entry (`psx_vram::Color555::with_stp`); a CLUT without that bit
+    /// draws fully opaque whatever is set here, and nothing reports it. For an
+    /// untextured primitive the mode applies to the whole polygon.
+    pub const fn with_blend_mode(mut self, blend_mode: BlendMode) -> Self {
+        self.blend_mode = blend_mode;
+        self
+    }
+
+    /// Return a copy using `tint`.
+    pub const fn with_tint(mut self, tint: (u8, u8, u8)) -> Self {
+        self.tint = tint;
+        self
+    }
+
+    /// Return a copy selecting a consecutive 16-entry 4bpp CLUT bank.
+    pub const fn with_clut_bank(mut self, bank: u8) -> Self {
+        self.clut_word = self.clut_word.wrapping_add((bank & 3) as u16);
+        self
+    }
+
+    /// Return a copy using `texture_window`.
+    pub const fn with_texture_window(mut self, texture_window: TextureWindow) -> Self {
+        self.texture_window = texture_window;
+        self
+    }
+
+    /// Return a copy with raw texture modulation enabled or disabled.
+    ///
+    /// Raw-texture mode bypasses RGB tint modulation. It is useful for
+    /// palettes or direct textures that already carry final colors.
+    pub const fn with_raw_texture(mut self, raw_texture: bool) -> Self {
+        self.raw_texture = raw_texture;
+        self
+    }
+
+    /// Return a copy with draw-mode dithering enabled or disabled.
+    pub const fn with_dither(mut self, dither: bool) -> Self {
+        self.dither = dither;
+        self
+    }
+
+    /// Packed CLUT word for the first textured UV word.
+    pub const fn clut_word(self) -> u16 {
+        self.clut_word
+    }
+
+    /// Packed tpage word for textured polygon UV words.
+    ///
+    /// The material owns the tpage blend and dither bits; all other
+    /// tpage address/depth bits are preserved from the original word.
+    #[doc(alias = "tpage")]
+    #[doc(alias = "getTPage")]
+    pub const fn texture_page_word(self) -> u16 {
+        let blend_bits = (self.blend_mode.texture_page_bits() as u16) << 5;
+        let dither_bit = (self.dither as u16) << 9;
+        (self.tpage_word & !(0x0060 | 0x0200)) | blend_bits | dither_bit
+    }
+
+    /// GP0(E2) texture-window word for this material.
+    pub const fn texture_window_word(self) -> u32 {
+        self.texture_window.word()
+    }
+
+    /// Flat tint used by non-Gouraud textured primitives.
+    pub const fn tint(self) -> (u8, u8, u8) {
+        self.tint
+    }
+
+    /// Active blend mode.
+    pub const fn blend_mode(self) -> BlendMode {
+        self.blend_mode
+    }
+
+    /// True when the primitive command should set its semi-transparent bit.
+    pub const fn is_translucent(self) -> bool {
+        self.blend_mode.is_translucent()
+    }
+
+    /// True when the primitive command should set its raw-texture bit.
+    pub const fn is_raw_texture(self) -> bool {
+        self.raw_texture
+    }
+
+    /// True when the material asks GP0(E1) / primitive tpage state for dithering.
+    pub const fn is_dithered(self) -> bool {
+        self.dither
+    }
+
+    /// Textured polygon command bits without the low RGB payload.
+    pub const fn textured_polygon_command(self, gouraud: bool, quad: bool) -> u32 {
+        gp0::polygon_opcode(gouraud, quad, true, self.is_translucent(), self.raw_texture)
+    }
+
+    /// Prepacked words for textured Gouraud triangle packet emission.
+    pub const fn textured_gouraud_packet_material(self) -> TexturedGouraudPacketMaterial {
+        TexturedGouraudPacketMaterial::from_texture(self)
+    }
+
+    /// Prepacked words for flat textured triangle packet emission.
+    pub const fn textured_packet_material(self) -> TexturedPacketMaterial {
+        TexturedPacketMaterial::from_texture(self)
+    }
+
+    /// Textured polygon header with the material's flat tint.
+    pub const fn flat_textured_polygon_header(self, quad: bool) -> u32 {
+        let (r, g, b) = self.tint;
+        self.textured_polygon_command(false, quad) | pack_color(r, g, b)
+    }
+
+    /// Textured rectangle command with the material's flat tint.
+    pub const fn textured_rect_header(self) -> u32 {
+        let (r, g, b) = self.tint;
+        psx_hw::gpu::packet::TEXTURED_RECT
+            | ((self.is_translucent() as u32) << 25)
+            | ((self.raw_texture as u32) << 24)
+            | pack_color(r, g, b)
+    }
+
+    /// GP0(E1) draw-mode word implied by this material.
+    ///
+    /// Textured rectangles read their tpage from this state. Textured
+    /// polygons embed the tpage word directly, but applying the same
+    /// material state before drawing keeps subsequent sprite draws in
+    /// sync.
+    pub const fn draw_mode_word(self) -> u32 {
+        let tpage = self.texture_page_word();
+        gp0::draw_mode(
+            (tpage & 0x0F) as u32,
+            ((tpage >> 4) & 1) as u32,
+            self.blend_mode.texture_page_bits() as u32,
+            ((tpage >> 7) & 0x3) as u32,
+            self.dither,
+            true,
+        )
+    }
+
+    /// Apply this material's tpage, blend, depth, dither, and texture-window state.
+    #[deprecated(note = "use `Gpu::set_draw_mode`")]
+    pub fn apply_draw_mode(self) {
+        crate::gpu::set_draw_mode(self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BlendMode, TextureMaterial, TextureWindow};
+
+    #[test]
+    fn blend_mode_decodes_tpage_bits() {
+        assert_eq!(BlendMode::from_texture_page_bits(0), BlendMode::Average);
+        assert_eq!(BlendMode::from_texture_page_bits(1), BlendMode::Add);
+        assert_eq!(BlendMode::from_texture_page_bits(2), BlendMode::Subtract);
+        assert_eq!(BlendMode::from_texture_page_bits(3), BlendMode::AddQuarter);
+        assert_eq!(BlendMode::from_texture_page_bits(4), BlendMode::Average);
+    }
+
+    #[test]
+    #[should_panic(expected = "texture-window origin_x must align to its width")]
+    fn power_of_two_window_rejects_an_origin_only_aligned_to_eight_texels() {
+        let _ = TextureWindow::power_of_two_tile(8, 0, 32, 32);
+    }
+
+    #[test]
+    fn material_encodes_blend_dither_and_command_bits() {
+        let material =
+            TextureMaterial::blended(0x1234, 0x018F, (0x80, 0x40, 0x20), BlendMode::AddQuarter)
+                .with_texture_window(super::TextureWindow::power_of_two_tile(64, 64, 64, 64))
+                .with_raw_texture(true)
+                .with_dither(true);
+
+        assert_eq!(material.clut_word(), 0x1234);
+        assert_eq!((material.texture_page_word() >> 5) & 0x3, 3);
+        assert_eq!((material.texture_page_word() >> 9) & 0x1, 1);
+        assert_eq!(material.texture_window_word(), 0xE204_2318);
+        assert_eq!(material.texture_window.origin_texels(), [64, 64]);
+        assert_eq!((material.textured_rect_header() >> 24) & 0xFF, 0x67);
+        assert_eq!(
+            (material.flat_textured_polygon_header(true) >> 24) & 0xFF,
+            0x2F
+        );
+    }
+
+    #[test]
+    fn gouraud_packet_material_is_compact_and_tracks_translucency() {
+        let opaque = TextureMaterial::opaque(0x1234, 0x018f, (0x80, 0x80, 0x80))
+            .textured_gouraud_packet_material();
+        let translucent =
+            TextureMaterial::blended(0x1234, 0x018f, (0x80, 0x80, 0x80), BlendMode::Average)
+                .textured_gouraud_packet_material();
+
+        assert_eq!(
+            core::mem::size_of::<super::TexturedGouraudPacketMaterial>(),
+            16
+        );
+        assert!(!opaque.is_translucent());
+        assert!(translucent.is_translucent());
+    }
+}

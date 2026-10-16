@@ -6,8 +6,8 @@ license = "GPL-2.0-or-later"
 publish = false
 description = "Regenerates docs/COMPATIBILITY.md from the compat tables and hle_compat reports."
 
-# Standalone on purpose: the tool must run before `make bootstrap` has
-# hydrated the main workspace's members, so it is not one of them.
+# Standalone on purpose: a small build-time tool that must not pull the
+# emulator workspace's dependency graph into its own build.
 [workspace]
 
 [dependencies]

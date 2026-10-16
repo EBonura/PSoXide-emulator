@@ -13,11 +13,11 @@
 //!     use; this tool adds its wasm32-unknown-unknown target.
 //!   - trunk, exactly `TRUNK_VERSION` below
 //!     (`cargo install trunk --version <TRUNK_VERSION> --locked`, or a release binary).
-//!   - git and make.
-//!   - Network on a cold run: `make bootstrap` builds the SDK's
-//!     psoxide-components, which fetches the locked SDK sources from GitHub,
-//!     and trunk downloads the wasm-bindgen CLI matching `Cargo.lock` and the
-//!     wasm-opt pinned in `Trunk.toml` unless the ones on PATH already match.
+//!   - git.
+//!   - Network on a cold run: trunk downloads the wasm-bindgen CLI matching
+//!     `Cargo.lock` and the wasm-opt pinned in `Trunk.toml` unless the ones on
+//!     PATH already match. The SDK crates are vendored in the tree, so nothing
+//!     else is fetched.
 //!
 //! Usage: `cargo run --release --manifest-path tools/web-player/Cargo.toml -- --out DIR`
 //! (DIR must be new or empty).
@@ -211,7 +211,6 @@ fn build(out_arg: &Path) -> Result<()> {
         "rustup",
         &["target", "add", "wasm32-unknown-unknown"],
     )?;
-    run(&root, &[], &[], "make", &["bootstrap"])?;
     run(
         &frontend,
         &trunk_env,
@@ -257,7 +256,7 @@ fn build(out_arg: &Path) -> Result<()> {
         format!("Source: https://github.com/EBonura/PSoXide-emulator/tree/{revision}\n"),
         "Build: cargo run --release --manifest-path tools/web-player/Cargo.toml -- --out player\n"
             .to_string(),
-        "Locked SDK sources: see components.lock.json and `make bootstrap` in that source tree.\n"
+        "Vendored SDK sources: crates/ and sdk/ in that source tree, at the revision in components.lock.json.\n"
             .to_string(),
         read_text(&root.join("LICENSE"))?,
     ];

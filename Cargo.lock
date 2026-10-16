@@ -1418,56 +1418,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "frontend"
-version = "0.1.0"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "clap",
- "claxon",
- "console_error_panic_hook",
- "cpal",
- "egui",
- "egui-wgpu",
- "egui-winit",
- "emulator-core",
- "gilrs",
- "image",
- "js-sys",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "pollster 0.3.0",
- "psoxide-debug-ui",
- "psoxide-jit",
- "psoxide-settings",
- "psoxide-validation",
- "psx-asset",
- "psx-bsp",
- "psx-engine",
- "psx-gpu",
- "psx-gpu-render",
- "psx-gte",
- "psx-hw",
- "psx-iso",
- "psx-trace",
- "psx-vram",
- "psxed-project",
- "psxed-ui",
- "rfd",
- "rmcp",
- "schemars",
- "serde",
- "tokio",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "web-time",
- "wgpu",
- "winit",
-]
-
-[[package]]
 name = "futures"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2303,12 +2253,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
-name = "lz4_flex"
-version = "0.11.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
-
-[[package]]
 name = "mach2"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2402,14 +2346,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "mkisopsx"
-version = "0.1.0"
-dependencies = [
- "lz4_flex",
- "psx-iso",
 ]
 
 [[package]]
@@ -3152,6 +3088,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "psoxide-emulator"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "claxon",
+ "console_error_panic_hook",
+ "cpal",
+ "egui",
+ "egui-wgpu",
+ "egui-winit",
+ "emulator-core",
+ "gilrs",
+ "image",
+ "js-sys",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "pollster 0.3.0",
+ "psoxide-debug-ui",
+ "psoxide-jit",
+ "psoxide-settings",
+ "psoxide-validation",
+ "psx-asset",
+ "psx-bsp",
+ "psx-engine",
+ "psx-gpu",
+ "psx-gpu-render",
+ "psx-gte",
+ "psx-hw",
+ "psx-iso",
+ "psx-trace",
+ "psx-vram",
+ "psxed-project",
+ "psxed-ui",
+ "rfd",
+ "rmcp",
+ "schemars",
+ "serde",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "psoxide-gate"
 version = "0.1.0"
 dependencies = [
@@ -3178,13 +3164,6 @@ dependencies = [
  "postcard",
  "psoxide-settings",
  "psx-iso",
-]
-
-[[package]]
-name = "psoxide-link"
-version = "0.1.0"
-dependencies = [
- "serde_json",
 ]
 
 [[package]]

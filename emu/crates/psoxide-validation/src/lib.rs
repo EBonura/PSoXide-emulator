@@ -169,7 +169,7 @@ impl FromStr for ValidationRunner {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "psoxide" | "frontend" => Ok(Self::Psoxide),
+            "psoxide" | "psoxide-emulator" | "frontend" => Ok(Self::Psoxide),
             "redux" | "pcsx-redux" | "pcsx_redux" => Ok(Self::Redux),
             "duckstation" | "duck" => Ok(Self::Duckstation),
             _ => Err(ValidationRunnerParseError(value.to_string())),
