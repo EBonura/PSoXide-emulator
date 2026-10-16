@@ -4931,7 +4931,7 @@ fn isqrt_u64(value: u64) -> u64 {
         return value;
     }
     let mut x = value;
-    let mut y = (x + 1) / 2;
+    let mut y = x.div_ceil(2);
     while y < x {
         x = y;
         y = (x + value / x) / 2;
