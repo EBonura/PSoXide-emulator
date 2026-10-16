@@ -703,7 +703,8 @@ fn emit_ram_address(a: &mut Asm, word: u32) -> Vec<crate::a64::Fixup> {
 }
 
 /// A main-RAM load at w9 (checked aligned and in RAM) in the common case,
-/// leaving the value in w0; what `jit_ram_load` does, inline: no I-cache
+/// leaving the value in w0; what `jit_ram_load` does, inline: no GPU DMA
+/// transfer in flight to wait for, no I-cache
 /// fill still using the bus, no DRAM refresh due and the load's end below
 /// the quiet limit, so the load costs its six wait clocks, and it comes from
 /// cached code (the fetch was a hit), so
@@ -713,6 +714,10 @@ fn emit_fast_load(a: &mut Asm, word: u32) -> Vec<crate::a64::Fixup> {
     const LOAD_WAIT: u32 = 6;
     let state = off::LOAD_STATE as u32;
     let mut helper = Vec::new();
+    // A GPU DMA transfer in flight may make this load wait for the bus
+    // (`Bus::ram_read_stalls`): the helper knows how long.
+    a.ldr_w(13, X_RUN, off::RAM_CONTENDED as u32);
+    helper.push(a.cbnz_w(13));
     // x10 = now, the clock with this op's issue applied.
     a.ldr_x(10, X_CYCLES, 0);
     a.add_x(10, 10, X_ISSUE);

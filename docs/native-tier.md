@@ -26,6 +26,12 @@ when `PSOXIDE_JIT=1`. Its default remains the interpreter. The native-tier
 serialized machine state every 100 run calls by default, and at completion.
 `--full-every` sets that interval; zero disables the intermediate checks.
 
+`jit_tape` replays a pad tape on a disc (a text file of hex button masks per
+frame, or a recorded `.pxtape`) and compares the tier (or, with `run` in place of
+`tier`, the cached interpreter) with plain `Cpu::step` after every run call, reporting the first difference with the
+instruction, program counter and cycle count; `--refine-at` and `--sub` re-run
+the failing stretch in smaller pieces to find the instruction.
+
 The tier is experimental. Performance comparisons must use the same host
 loop and game windows, verify that the tier was installed, and compare
 final machine state. It is not yet the fastest measured recompiler.

@@ -158,6 +158,12 @@ pub struct NativeRun {
     /// Clock of the last branch boundary [`jit_chain`] passed quietly and
     /// has not yet recorded in the bus (0: none).
     pub last_boundary: u64,
+    /// A GPU DMA transfer is in flight, so a main-RAM load may owe it a
+    /// wait ([`Bus::jit_gpu_ram_contention_possible`]): compiled code then
+    /// leaves loads to [`jit_ram_load`] instead of its inline path, which
+    /// has no such wait. Refreshed wherever a device access or a block
+    /// entry could have started or ended a transfer.
+    pub ram_contended: u32,
 }
 
 /// Exit: stopped before op `ran` of the current block (the interpreter
@@ -224,6 +230,7 @@ impl NativeRun {
             boundary_until: 0,
             slow_boundary: 1,
             last_boundary: 0,
+            ram_contended: u32::from(bus.jit_gpu_ram_contention_possible()),
         }
     }
 }
@@ -445,6 +452,8 @@ pub mod native_run {
     pub const SLOW_BOUNDARY: usize = core::mem::offset_of!(NativeRun, slow_boundary);
     /// `last_boundary`
     pub const LAST_BOUNDARY: usize = core::mem::offset_of!(NativeRun, last_boundary);
+    /// `ram_contended`
+    pub const RAM_CONTENDED: usize = core::mem::offset_of!(NativeRun, ram_contended);
 }
 
 /// Helper result: go on with the next op.
@@ -598,6 +607,8 @@ pub unsafe extern "C" fn jit_batch_memory(run: *mut NativeRun, index: u32) -> u3
         run.slow_boundary |= u32::from(bus.irq().pending());
         run.ram_ok =
             u32::from(run.irq_enabled != 0 && cpu.block_ram_matches(bus, run.block as usize - 1));
+        // ... and whether a GPU DMA transfer now competes for main RAM.
+        run.ram_contended = u32::from(bus.jit_gpu_ram_contention_possible());
     }
     run.shadow_from(cpu);
     match cpu.pending_load.take() {

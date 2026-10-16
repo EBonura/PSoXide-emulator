@@ -28,6 +28,17 @@ impl Bus {
         ]
     }
 
+    /// Whether a GPU DMA transfer (a block transfer or a linked-list walk)
+    /// is in flight, so that a main-RAM load may owe it a wait
+    /// (`ram_read_stalls`). Conservative: the transfer may be parked and
+    /// the load free of it, in which case the exact path says so. Compiled
+    /// code takes its inline load path only when this is false, and
+    /// transfers start and end only through device accesses and scheduler
+    /// events, which compiled code hands to the interpreter's own code.
+    pub(crate) fn jit_gpu_ram_contention_possible(&self) -> bool {
+        self.dma_block_runs[0].is_some() || self.experimental_gpu_list.is_some()
+    }
+
     /// Whether the last instruction fetch left the RAM bus alone (a cache
     /// hit): then a RAM load competes with no code fetch.
     pub(crate) fn jit_fetch_off_ram_bus(&self) -> bool {
@@ -53,6 +64,20 @@ impl Bus {
         } else {
             self.gpu.decay_busy(n);
         }
+    }
+
+    /// Fetch bookkeeping that lockstep checkers compare, and that the
+    /// native tier saves and restores around a hit it notes early: whether
+    /// the last fetch was noted as a cache hit, and whether it used the RAM
+    /// bus.
+    #[doc(hidden)]
+    pub fn jit_fetch_state(&self) -> (bool, bool) {
+        (self.last_fetch_hit, self.code_fetch_on_ram_bus)
+    }
+
+    /// Put back what [`Bus::jit_fetch_state`] returned.
+    pub(crate) fn jit_restore_fetch_state(&mut self, state: (bool, bool)) {
+        (self.last_fetch_hit, self.code_fetch_on_ram_bus) = state;
     }
 
     /// Main RAM's bytes, for compiled code's look at the next instruction.
