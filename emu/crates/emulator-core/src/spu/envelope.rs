@@ -158,12 +158,6 @@ impl VolumeEnvelope {
         self.raw
     }
 
-    /// Alias of [`VolumeEnvelope::reg_read`] for code that mixes with the
-    /// register word itself.
-    pub fn raw(&self) -> u16 {
-        self.raw
-    }
-
     /// Advance one 44.1 kHz sample.
     pub fn tick(&mut self) {
         if !self.sweep_active {

@@ -44,11 +44,12 @@
 //! value is a legacy scaling kept because nothing measured contradicts it,
 //! the code says so:
 //!
-//! - the reverb output volume register is applied as Q14 (0x4000 = unity)
-//!   and the main volume register word as signed Q15, both as the earlier
-//!   mixer did; the documented Q15 treatment of the reverb output volume
-//!   would halve the wet level;
 //! - a reverb work area at or below 0x0200, or 0xFFFF, is treated as off.
+//!
+//! Output levels follow the documentation, not a console measurement: the
+//! fixed main and voice volume registers hold half the level (0x3FFF is
+//! 0x7FFE, about unity) and every volume is applied as signed Q15, the
+//! reverb output volume and the CD input volume included.
 //!
 //! This module no longer contains code derived from another emulator.
 //! See `LICENSE` and `docs/PROVENANCE.md`.
@@ -81,9 +82,9 @@ pub const VOICE_BASE: u32 = 0x1F80_1C00;
 /// One past the end of the voice bank (24 * 16 = 0x180 bytes → 0x1F80_1D80).
 pub const VOICE_END: u32 = 0x1F80_1D80;
 
-/// Main Volume Left (16-bit, Q14).
+/// Main Volume Left (fixed level is bits 14..0 doubled; bit 15 set = sweep).
 pub const MAIN_VOL_L: u32 = 0x1F80_1D80;
-/// Main Volume Right (16-bit, Q14).
+/// Main Volume Right (same encoding as the left one).
 pub const MAIN_VOL_R: u32 = 0x1F80_1D82;
 /// Reverb output volume Left.
 pub const REVERB_VOL_L: u32 = 0x1F80_1D84;
@@ -154,7 +155,7 @@ pub const REVERB_CFG_BASE: u32 = 0x1F80_1DC0;
 /// Per-voice offsets within the 16-byte voice block.
 #[allow(dead_code)]
 mod voice_offset {
-    /// +0..1 volume left (Q14, or sweep config if bit 15 set).
+    /// +0..1 volume left (half the level, or sweep config if bit 15 set).
     pub const VOLUME_L: u32 = 0x0;
     /// +2..3 volume right.
     pub const VOLUME_R: u32 = 0x2;
@@ -1692,14 +1693,6 @@ impl Spu {
         ((i64::from(a) * i64::from(volume)) >> 15) as i32
     }
 
-    /// Apply the reverb output volume register. The register is taken as
-    /// Q14 here (0x4000 is unity); see the Provenance notes in the module
-    /// header.
-    fn scale_reverb_output(sample: i32, vol: i16) -> i32 {
-        ((i64::from(sample) * i64::from(vol)) / 0x4000)
-            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
-    }
-
     /// Advance the reverb by one 44.1 kHz sample and return the current
     /// wet output of both channels.
     fn mix_reverb(&mut self, input_l: i32, input_r: i32) -> (i32, i32) {
@@ -1772,7 +1765,7 @@ impl Spu {
             }
             out = Self::reverb_mul(out, v) + delayed;
         }
-        Self::scale_reverb_output(out, out_volume)
+        Self::reverb_mul(out, i32::from(out_volume))
     }
 
     // ============================================================
@@ -1939,16 +1932,17 @@ impl Spu {
 
         // 4. Process the wet reverb bus, then apply MAIN VOLUME as the final
         //    stage: the clamped (dry + wet) sum is scaled by the main-volume
-        //    register word as a signed Q15 value, `(s * vol) >> 15`. Leaving
-        //    it out makes the output about twice as loud as the console
-        //    and clips the 24-voice sum far more often.
+        //    level as a signed Q15 value, `(s * level) >> 15`. The level is
+        //    the live one (`VolumeEnvelope::current`): a fixed register
+        //    word (bit 15 clear) is half the level, so 0x3FFF is 0x7FFE,
+        //    about unity, and a sweep moves it sample by sample.
         let (wet_l, wet_r) = self.mix_reverb(reverb_in_l, reverb_in_r);
         let dry_l = sum_l;
         let dry_r = sum_r;
         let mixed_l = saturate_i16(dry_l.saturating_add(wet_l)) as i32;
         let mixed_r = saturate_i16(dry_r.saturating_add(wet_r)) as i32;
-        let out_l = saturate_i16((mixed_l * self.main_vol_l.raw() as i16 as i32) >> 15);
-        let out_r = saturate_i16((mixed_r * self.main_vol_r.raw() as i16 as i32) >> 15);
+        let out_l = saturate_i16((mixed_l * i32::from(self.main_vol_l.current)) >> 15);
+        let out_r = saturate_i16((mixed_r * i32::from(self.main_vol_r.current)) >> 15);
         self.dbg_dry_energy = self
             .dbg_dry_energy
             .saturating_add(dry_l.unsigned_abs() as u64 + dry_r.unsigned_abs() as u64);

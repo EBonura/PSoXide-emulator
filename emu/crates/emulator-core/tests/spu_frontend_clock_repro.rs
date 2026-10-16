@@ -6,8 +6,8 @@ fn mixed_volume_transition(eager: bool) -> Vec<(i16, i16)> {
     b.write16(spu::SPUCNT, 0xc001);
     b.write16(spu::CD_VOL_L, 0x7fff);
     b.write16(spu::CD_VOL_R, 0x7fff);
-    b.write16(spu::MAIN_VOL_L, 0x7fff);
-    b.write16(spu::MAIN_VOL_R, 0x7fff);
+    b.write16(spu::MAIN_VOL_L, 0x3fff);
+    b.write16(spu::MAIN_VOL_R, 0x3fff);
     b.tick((spu::SAMPLE_CYCLES * 4) as u32);
     if eager {
         b.run_spu_to_current_cycle();
