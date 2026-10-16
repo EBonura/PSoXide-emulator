@@ -5233,10 +5233,10 @@ mod tests {
         // `nop`): records 0xD1 to 0xDB grow 6.85 clocks a spin, where the `lw`
         // alone costs 5 (record 0x4F) and the three others 3 more. The wait
         // of the read hides the last of them, as a RAM load's does.
-        let addiu = (0x09 << 26) | (9 << 21) | (10 << 16) | 0;
+        let addiu = (0x09 << 26) | (9 << 21) | (10 << 16); // addiu $10, $9, 0
         assert_eq!(warm_turn_of_a_register_poll(0x1044, addiu), 7);
         // An instruction that needs the loaded value ends the shadow.
-        let uses = (0x25 << 0) | (8 << 21) | (10 << 11);
+        let uses = 0x25 | (8 << 21) | (10 << 11); // or $10, $8, $0: funct 0x25 reads $8
         assert_eq!(warm_turn_of_a_register_poll(0x1044, uses), 8);
         // The CD-ROM and SPU buses are not on die: their reads hide nothing.
         for imm in [0x1800, 0x1C00] {
