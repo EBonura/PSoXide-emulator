@@ -56,14 +56,12 @@ pub struct Graphics {
     pub egui_winit: egui_winit::State,
     pub egui_renderer: egui_wgpu::Renderer,
 
-    /// Render-attachment view of the persistent 1024×512 RGBA8 VRAM
+    /// Raw-byte render-attachment view of the persistent 1024×512 RGBA8 VRAM
     /// debug texture (the view keeps the texture alive). Filled GPU-side
     /// in `prepare_vram` by expanding the HW renderer's R16Uint VRAM
-    /// mirror (no CPU decode, no re-upload); the debug sidebar samples
-    /// it through [`Graphics::vram_texture_id`].
-    vram_view: wgpu::TextureView,
-    /// The same texture through a raw-byte view, which the GPU-side expand
-    /// renders to so the debug view shows the VRAM display codes unchanged.
+    /// mirror (no CPU decode, no re-upload) and rendered to so the debug view
+    /// shows the VRAM display codes unchanged; the debug sidebar samples the
+    /// texture through [`Graphics::vram_texture_id`].
     vram_render_view: wgpu::TextureView,
     /// egui's requested time-to-next-repaint from the last frame
     /// (`Duration::MAX` when nothing is animating). Feeds the shell's
@@ -216,7 +214,6 @@ impl Graphics {
             egui_ctx,
             egui_winit,
             egui_renderer,
-            vram_view,
             vram_render_view,
             last_repaint_delay: std::time::Duration::MAX,
             close_requested: false,

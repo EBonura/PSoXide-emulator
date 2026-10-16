@@ -121,10 +121,6 @@ impl RenderTarget {
         true
     }
 
-    pub fn view(&self) -> &wgpu::TextureView {
-        &self.view
-    }
-
     /// View the draw passes render through (see [`RENDER_FORMAT`]).
     pub fn render_view(&self) -> &wgpu::TextureView {
         &self.render_view
