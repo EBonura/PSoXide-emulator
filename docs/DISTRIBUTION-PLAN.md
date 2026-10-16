@@ -2,6 +2,16 @@
 
 Date: 2026-10-09. Status: design plus one proof of concept. Round 2 (names, parity audit, import library) folded in.
 
+**Status 2026-10-16.** The P0 slice of this plan has landed on this branch: the package and binary are
+`psoxide-emulator` (with a `frontend` alias binary for old script paths), and the SDK crates the emulator links are
+vendored, so `cargo run --release` works on a fresh clone. It differs from the proof of concept below in four ways:
+`rust-toolchain.toml` stays (the nightly pin is unchanged), the package is `psoxide-emulator` rather than `psoxide`,
+`tools/psoxide-gate` and `tools/web-lazy-image` stay in the workspace, and `make refresh-sdk` / `make check-sdk`
+(CI) keep the vendored copies tied to `components.lock.json`. Sections 1.1 and 1.2 describe the tree as it was on
+2026-10-09 (main c743674) and are kept as the record of that measurement. Everything past P0 (release binaries,
+signing, the editor split, Import) is not started and, per the 2026-10-09 scope cut, not scheduled. The drafts in
+`docs/distribution/` are unreviewed starting points, not shipped files.
+
 This plan covers four things: a build-from-source path as short as the one on getartcraft.com/apps,
 prebuilt downloads for every platform, an Import feature that builds the Half-Life and Hollow Knight
 ports from the user's own game files inside both apps, a clean split of the emulator and editor into
