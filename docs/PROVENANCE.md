@@ -99,11 +99,14 @@ Crash Bandicoot's first 35 seconds differ in 4.9% of the samples with a
 root-mean-square difference of 0.2 LSB on a signal of 1062 (about -74 dB);
 seven of the 20 compat titles produce byte-identical audio for their whole run.
 
-Legacy scalings kept because nothing measured contradicts them (flagged in
-`spu.rs`): the reverb output volume is applied as Q14, and the main volume
-register word is applied as a signed Q15 number (the documented fixed-volume
-encoding would double it). A reverb work area at or below 0x0200, or 0xFFFF,
-is treated as off. ADPCM prediction rounds each weighted term separately.
+Output levels follow the documentation, not a console measurement: the fixed
+main and voice volume registers hold half the level (0x3FFF is 0x7FFE, about
+unity), a main volume sweep moves that level, and the reverb output and CD
+input volumes are signed Q15. (The first rewrite kept a legacy scaling that
+applied the main volume register word itself, which halved every game, with
+the reverb output at Q14 to compensate.) A reverb work area at or below
+0x0200, or 0xFFFF, is treated as off. ADPCM prediction rounds each weighted
+term separately.
 
 ## Not rewritten: behaviour first matched to PCSX-Redux
 

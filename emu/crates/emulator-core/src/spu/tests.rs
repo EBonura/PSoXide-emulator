@@ -733,8 +733,8 @@ fn cd_audio_input_routes_through_cd_volume() {
 #[test]
 fn cd_audio_underrun_repeats_the_last_frame_briefly_then_goes_silent() {
     let mut s = Spu::new();
-    s.main_vol_l.write(0x7FFF);
-    s.main_vol_r.write(0x7FFF);
+    s.main_vol_l.write(0x3FFF);
+    s.main_vol_r.write(0x3FFF);
     s.write16(SPUCNT, SPUCNT_CD_AUDIO_ENABLE);
     s.write16(CD_VOL_L, 0x7FFF);
     s.write16(CD_VOL_R, 0x7FFF);
@@ -755,32 +755,72 @@ fn cd_audio_underrun_repeats_the_last_frame_briefly_then_goes_silent() {
     assert_eq!(out[1], out[2], "the held frame repeats the second frame");
 }
 
+/// Final output of one sample with a 0x4000 CD frame at unity CD volume, for a
+/// main volume register word (left channel).
+fn main_volume_output(mv: u16) -> i16 {
+    let mut s = Spu::new();
+    s.main_vol_l.write(mv);
+    s.main_vol_r.write(mv);
+    s.write16(SPUCNT, SPUCNT_CD_AUDIO_ENABLE);
+    s.write16(CD_VOL_L, 0x7FFF);
+    s.write16(CD_VOL_R, 0x7FFF);
+    s.feed_cd_audio(&[(0x4000, 0x4000)]);
+    s.tick_sample(SAMPLE_CYCLES);
+    s.drain_audio()[0].0
+}
+
 #[test]
-fn main_volume_scales_the_final_mix() {
-    // Main volume is applied as the final stage (PSX-SPX /
-    // PSX-SPX): out = (clamp(dry + wet) * main_vol_raw) >> 15. Raw 0 silences
-    // the mix; 0x3FFF (~half in Q15) is ~half of full-scale 0x7FFF.
-    let cap = |mv: u16| {
-        let mut s = Spu::new();
-        s.main_vol_l.write(mv);
-        s.main_vol_r.write(mv);
-        s.write16(SPUCNT, SPUCNT_CD_AUDIO_ENABLE);
-        s.write16(CD_VOL_L, 0x7FFF);
-        s.write16(CD_VOL_R, 0x7FFF);
-        s.feed_cd_audio(&[(0x4000, 0x4000)]);
-        s.tick_sample(SAMPLE_CYCLES);
-        s.drain_audio()[0]
-    };
-    assert_eq!(cap(0), (0, 0), "main volume 0 must silence the mix");
-    let (half_l, _) = cap(0x3FFF);
-    let (full_l, _) = cap(0x7FFF);
-    assert!(
-        half_l > 0 && full_l > 0,
-        "positive main volume must pass audio"
+fn main_volume_fixed_register_word_is_half_the_level() {
+    // PSX-SPX: a fixed volume register holds "volume/2", so 0x3FFF is the
+    // level 0x7FFE, which is unity within one LSB at Q15. After the CD
+    // volume (0x7FFF) the 0x4000 frame is 0x3FFF; 0x7FFE keeps all but one.
+    assert_eq!(
+        main_volume_output(0),
+        0,
+        "main volume 0 must silence the mix"
     );
+    let unity = main_volume_output(0x3FFF);
+    assert_eq!(unity, 0x3FFE, "0x3FFF must pass the signal at unity");
+    let half = main_volume_output(0x1FFF);
+    assert_eq!(
+        half, 0x1FFE,
+        "0x1FFF must be exactly one octave down (-6 dB)"
+    );
+    // The register's bit 14 is a sign bit of the half-level: 0x4000 is the
+    // most negative level, a full-scale phase inversion.
+    let inverted = main_volume_output(0x4000);
+    assert_eq!(
+        inverted, -0x3FFF,
+        "0x4000 must invert the signal at full scale"
+    );
+    // 0x7FFF reads as -1 in 15 bits: a level of -2/32768, effectively silent.
+    assert!(main_volume_output(0x7FFF).abs() <= 1);
+}
+
+#[test]
+fn main_volume_sweep_moves_the_output_level() {
+    // A sweep word (bit 15 set) is not a level: the output follows the live
+    // level that the sweep moves, starting from the previous level.
+    let mut s = Spu::new();
+    s.main_vol_l.write(0x3FFF);
+    s.main_vol_r.write(0x3FFF);
+    // Linear decrease, shift 0, step selector 0: fastest decrement.
+    s.main_vol_l.write(0x8000 | 0x2000);
+    s.main_vol_r.write(0x8000 | 0x2000);
+    s.write16(SPUCNT, SPUCNT_CD_AUDIO_ENABLE);
+    s.write16(CD_VOL_L, 0x7FFF);
+    s.write16(CD_VOL_R, 0x7FFF);
+    let mut last = i16::MAX;
+    for n in 0..8 {
+        s.feed_cd_audio(&[(0x4000, 0x4000)]);
+        s.tick_sample(n * SAMPLE_CYCLES);
+        let (l, _) = s.drain_audio()[0];
+        assert!(l <= last, "a decreasing sweep never raises the output");
+        last = l;
+    }
     assert!(
-        (half_l as i32 * 2 - full_l as i32).abs() <= 4,
-        "0x3FFF main volume should be ~half of 0x7FFF: {half_l} vs {full_l}"
+        last < 0x3000,
+        "the sweep must have pulled the level down: {last}"
     );
 }
 
@@ -812,10 +852,9 @@ fn cd_audio_input_respects_spucnt_route_enable() {
 #[test]
 fn cd_audio_volume_is_signed_q15_not_voice_sweep_volume() {
     let mut s = Spu::new();
-    // Full-unity main volume so this isolates the CD-input volume (main volume
-    // now scales the final mix, so 0x3FFF here would halve the level under test).
-    s.main_vol_l.write(0x7FFF);
-    s.main_vol_r.write(0x7FFF);
+    // Unity main volume so this isolates the CD-input volume.
+    s.main_vol_l.write(0x3FFF);
+    s.main_vol_r.write(0x3FFF);
     s.write16(SPUCNT, SPUCNT_CD_AUDIO_ENABLE);
     s.write16(CD_VOL_L, 0x7FFF);
     s.write16(CD_VOL_R, 0x8000);
@@ -940,10 +979,13 @@ fn reverb_network_turns_bus_input_into_wet_output() {
 }
 
 #[test]
-fn reverb_output_depth_register_is_q14() {
-    assert_eq!(Spu::scale_reverb_output(0x4000, 0x4000), 0x4000);
-    assert_eq!(Spu::scale_reverb_output(0x4000, 0x3FFF), 0x3FFF);
-    assert_eq!(Spu::scale_reverb_output(0x4000, 0xC000u16 as i16), -0x4000);
+fn reverb_output_depth_register_is_signed_q15() {
+    assert_eq!(Spu::reverb_mul(0x4000, 0x7FFF), 0x3FFF);
+    assert_eq!(Spu::reverb_mul(0x4000, 0x4000), 0x2000);
+    assert_eq!(
+        Spu::reverb_mul(0x4000, i32::from(0xC000u16 as i16)),
+        -0x2000
+    );
 }
 
 #[test]
@@ -1751,8 +1793,8 @@ fn negative_fixed_voice_volume_inverts_output_sign() {
     // so this isolates the per-voice Q15 application (>>15).
     let mix = |vol_raw: u16| {
         let mut s = Spu::new();
-        s.main_vol_l.write(0x7FFF);
-        s.main_vol_r.write(0x7FFF);
+        s.main_vol_l.write(0x3FFF);
+        s.main_vol_r.write(0x3FFF);
         s.write16(SPUCNT, SPUCNT_UNMUTE);
         s.voices[0].vol_l.write(vol_raw);
         s.voices[0].vol_r.write(vol_raw);
@@ -1793,8 +1835,8 @@ fn reverb_wet_output_is_the_second_all_pass_result() {
     use reverb_reg::*;
     let mut s = Spu::new();
     s.write16(REVERB_BASE, 0x1000); // base active; curr_addr = 0x4000
-    s.write16(REVERB_VOL_L, 0x4000); // unity in scale_reverb_output (/0x4000)
-    s.write16(REVERB_VOL_R, 0x4000);
+    s.write16(REVERB_VOL_L, 0x7FFF); // Q15, one LSB under unity
+    s.write16(REVERB_VOL_R, 0x7FFF);
 
     write_reverb_cfg(&mut s, M_LSAME, 4);
     write_reverb_cfg(&mut s, M_RSAME, 5);
@@ -1812,7 +1854,7 @@ fn reverb_wet_output_is_the_second_all_pass_result() {
 
     let (l, _) = s.mix_reverb(0, 0);
     let (_, r) = s.mix_reverb(0, 0);
-    assert_eq!(l, 1234, "left wet must be the second all-pass result");
+    assert_eq!(l, 1233, "left wet must be the second all-pass result");
     assert_eq!(r, -567, "right wet must keep its sign");
 }
 
@@ -2101,8 +2143,8 @@ fn kon_applies_after_sample_emit_not_before_for_hardware_parity() {
     // appears on the NEXT tick.
     let mut s = Spu::new();
     s.write16(SPUCNT, SPUCNT_UNMUTE);
-    s.main_vol_l.write(0x7FFF);
-    s.main_vol_r.write(0x7FFF);
+    s.main_vol_l.write(0x3FFF);
+    s.main_vol_r.write(0x3FFF);
 
     // A constant +0x1000 ADPCM block (predictor 0, shift 0, all data
     // nibbles = 1) at byte 0x20, so a keyed voice would be audible.

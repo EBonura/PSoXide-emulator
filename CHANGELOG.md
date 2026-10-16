@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- The SPU main volume is applied as the console documents it. A fixed
+  register word holds half the level, so 0x3FFF is 0x7FFE (about unity), and a
+  main volume sweep now moves the output. The mixer used the register word
+  itself, so every game was 6.02 dB quieter than the documentation and
+  DuckStation give (checked on three discs: the loudness rose by exactly
+  6.0 dB). The reverb output volume is now Q15 rather than Q14, so the wet
+  level is unchanged; a write of 0x7FFF to the main volume is now a level of
+  about zero, as on the other emulator, not full scale. Not yet confirmed on
+  the console.
 - Pause now takes the time the console takes. Measured on the console (hwtest
   v2.7, run FB89, records 0x340 to 0x3B8): from the command, a Pause out of a
   read completes after 3.80 to 3.84 million clocks at single speed and 1.69
