@@ -1,0 +1,320 @@
+//! PSX-EXE parsing.
+//!
+//! PSX-EXE is the raw executable format the BIOS knows how to load.
+//! Every commercial disc's main executable is a PSX-EXE; homebrew
+//! uses the same format. The file layout:
+//!
+//! ```text
+//!   00h-07h  "PS-X EXE" magic
+//!   08h-0Fh  zero-filled
+//!   10h      initial PC
+//!   14h      initial GP (`$r28`)
+//!   18h      load address in RAM (t_addr)
+//!   1Ch      payload size (t_size, excluding the 2 KiB header)
+//!   20h-27h  data section (address, size) -- usually zero-sized
+//!   28h-2Fh  BSS section (address, size) -- zeroed by the BIOS
+//!   30h      initial SP base (`$r29` high bits)
+//!   34h      initial SP offset added to the base
+//!   38h-4Bh  reserved
+//!   4Ch-7FFh reserved region text (zero-filled by PSoXide)
+//!   800h-..  payload bytes; loaded verbatim to `t_addr`
+//! ```
+//!
+//! The header is always exactly 2048 bytes; everything after is copied
+//! byte-for-byte into RAM at `t_addr`. Side-loading bypasses the BIOS
+//! entirely: set the CPU's PC/GP/SP to the header values after copying
+//! the payload and execution starts in the homebrew.
+//!
+//! `t_size` is whole sectors, because the BIOS reads sectors. The SDK's
+//! linker script starts `.bss` at the true end of `.data`, so `t_size` can
+//! reach up to 2047 bytes past the last byte the linker writes; those bytes
+//! are zeros that land in the first bytes of `.bss`, which `_start` clears.
+//! [`pad_to_payload`] writes them into the flat file the linker produced.
+
+use alloc::vec::Vec;
+
+/// PSX-EXE header size in bytes.
+pub const EXE_HEADER_BYTES: usize = 2048;
+
+const MAGIC: &[u8; 8] = b"PS-X EXE";
+
+/// Errors surfaced while parsing a PSX-EXE.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExeError {
+    /// File shorter than a 2 KiB header.
+    TooShort,
+    /// Magic string didn't match "PS-X EXE".
+    BadMagic,
+    /// Header says the payload is N bytes but the file doesn't carry that many.
+    TruncatedPayload {
+        /// Expected payload size per header.
+        expected: usize,
+        /// Bytes actually present past the header.
+        actual: usize,
+    },
+}
+
+/// Parsed PSX-EXE. Owns the payload bytes so a caller can drop the
+/// original file.
+#[derive(Debug)]
+pub struct Exe {
+    /// Value for `$pc` at entry.
+    pub initial_pc: u32,
+    /// Value for `$gp` at entry.
+    pub initial_gp: u32,
+    /// Destination address in RAM where [`Exe::payload`] goes.
+    pub load_addr: u32,
+    /// `$r29` base. The BIOS initialises the stack pointer as
+    /// `initial_sp_base + initial_sp_offset` -- we do the same. If both
+    /// are zero the caller should leave the CPU's SP alone so the
+    /// default reset state survives.
+    pub initial_sp_base: u32,
+    /// Additive offset on top of [`initial_sp_base`].
+    pub initial_sp_offset: u32,
+    /// BSS section start address (zero if no BSS).
+    pub bss_addr: u32,
+    /// BSS section byte count (zero if no BSS).
+    pub bss_size: u32,
+    /// Code + data payload, verbatim. Length matches the header's
+    /// `t_size` field.
+    pub payload: Vec<u8>,
+}
+
+impl Exe {
+    /// Parse a raw PSX-EXE byte stream. The slice must contain the
+    /// full header (2 KiB) plus `t_size` payload bytes, except that up to
+    /// a sector short of a whole-sector `t_size` is read as zeros (see
+    /// [`pad_to_payload`], which writes them into the file instead).
+    pub fn parse(bytes: &[u8]) -> Result<Self, ExeError> {
+        if bytes.len() < EXE_HEADER_BYTES {
+            return Err(ExeError::TooShort);
+        }
+        if &bytes[0..8] != MAGIC {
+            return Err(ExeError::BadMagic);
+        }
+
+        let initial_pc = read_u32_le(&bytes[0x10..]);
+        let initial_gp = read_u32_le(&bytes[0x14..]);
+        let load_addr = read_u32_le(&bytes[0x18..]);
+        let t_size = read_u32_le(&bytes[0x1C..]);
+        let bss_addr = read_u32_le(&bytes[0x28..]);
+        let bss_size = read_u32_le(&bytes[0x2C..]);
+        let initial_sp_base = read_u32_le(&bytes[0x30..]);
+        let initial_sp_offset = read_u32_le(&bytes[0x34..]);
+
+        let payload_available = bytes.len() - EXE_HEADER_BYTES;
+        let wanted = t_size as usize;
+        // A linker that starts `.bss` where `.data` ends (psoxide.ld) writes
+        // a flat file that stops short of the whole sectors `t_size` counts,
+        // and the missing tail is zeros the loader would have read from the
+        // rest of the sector. A raw file is accepted that way when the size
+        // is whole sectors and under one sector is missing; any other
+        // shortfall is a truncated file.
+        let tail_only = wanted.is_multiple_of(EXE_HEADER_BYTES)
+            && wanted - payload_available.min(wanted) < EXE_HEADER_BYTES;
+        if wanted > payload_available && !tail_only {
+            return Err(ExeError::TruncatedPayload {
+                expected: wanted,
+                actual: payload_available,
+            });
+        }
+
+        let mut payload =
+            bytes[EXE_HEADER_BYTES..EXE_HEADER_BYTES + wanted.min(payload_available)].to_vec();
+        payload.resize(wanted, 0);
+
+        Ok(Self {
+            initial_pc,
+            initial_gp,
+            load_addr,
+            initial_sp_base,
+            initial_sp_offset,
+            bss_addr,
+            bss_size,
+            payload,
+        })
+    }
+
+    /// Effective stack pointer -- `base + offset`, or `None` when both
+    /// fields are zero (caller should keep the CPU's reset SP).
+    pub fn initial_sp(&self) -> Option<u32> {
+        if self.initial_sp_base == 0 && self.initial_sp_offset == 0 {
+            None
+        } else {
+            Some(self.initial_sp_base.wrapping_add(self.initial_sp_offset))
+        }
+    }
+}
+
+/// Zero-fill a flat executable to the length its header claims.
+///
+/// `psoxide.ld` starts `.bss` where `.data` ends and rounds `t_size` up to
+/// whole sectors, so the file `ld.lld --oformat=binary` writes ends before
+/// the last sector does. Returns how many zero bytes were added, none for an
+/// executable that already carries its `t_size` (every older link). A
+/// shortfall of a whole sector or more is not a linker's trimmed `.bss` but
+/// a truncated file, and is refused.
+pub fn pad_to_payload(bytes: &mut Vec<u8>) -> Result<usize, ExeError> {
+    if bytes.len() < EXE_HEADER_BYTES {
+        return Err(ExeError::TooShort);
+    }
+    if &bytes[0..8] != MAGIC {
+        return Err(ExeError::BadMagic);
+    }
+    let expected = read_u32_le(&bytes[0x1C..]) as usize;
+    let actual = bytes.len() - EXE_HEADER_BYTES;
+    let Some(missing) = expected.checked_sub(actual) else {
+        return Ok(0);
+    };
+    if missing >= EXE_HEADER_BYTES {
+        return Err(ExeError::TruncatedPayload { expected, actual });
+    }
+    bytes.resize(bytes.len() + missing, 0);
+    Ok(missing)
+}
+
+fn read_u32_le(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    fn make_exe(pc: u32, t_addr: u32, payload: &[u8]) -> Vec<u8> {
+        let mut v = vec![0u8; EXE_HEADER_BYTES];
+        v[..8].copy_from_slice(MAGIC);
+        v[0x10..0x14].copy_from_slice(&pc.to_le_bytes());
+        v[0x18..0x1C].copy_from_slice(&t_addr.to_le_bytes());
+        v[0x1C..0x20].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        v.extend_from_slice(payload);
+        v
+    }
+
+    #[test]
+    fn parses_minimal_exe() {
+        let raw = make_exe(0x8001_0000, 0x8001_0000, &[0xDE, 0xAD, 0xBE, 0xEF]);
+        let exe = Exe::parse(&raw).unwrap();
+        assert_eq!(exe.initial_pc, 0x8001_0000);
+        assert_eq!(exe.load_addr, 0x8001_0000);
+        assert_eq!(exe.payload, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn rejects_short_file() {
+        assert!(matches!(Exe::parse(&[0u8; 10]), Err(ExeError::TooShort)));
+    }
+
+    #[test]
+    fn rejects_bad_magic() {
+        let mut raw = vec![0u8; EXE_HEADER_BYTES];
+        raw[..8].copy_from_slice(b"NOT-EXE!");
+        assert!(matches!(Exe::parse(&raw), Err(ExeError::BadMagic)));
+    }
+
+    #[test]
+    fn rejects_truncated_payload() {
+        let mut raw = vec![0u8; EXE_HEADER_BYTES];
+        raw[..8].copy_from_slice(MAGIC);
+        raw[0x1C..0x20].copy_from_slice(&100u32.to_le_bytes());
+        assert!(matches!(
+            Exe::parse(&raw),
+            Err(ExeError::TruncatedPayload {
+                expected: 100,
+                actual: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn pads_a_short_last_sector_with_zeros() {
+        let mut raw = make_exe(0x8001_0000, 0x8001_0000, &[1; 2048]);
+        let whole = raw.clone();
+        raw[0x1C..0x20].copy_from_slice(&2048u32.to_le_bytes());
+        raw.truncate(EXE_HEADER_BYTES + 1500);
+        assert_eq!(pad_to_payload(&mut raw), Ok(548));
+        assert_eq!(raw.len(), whole.len());
+        assert!(raw[EXE_HEADER_BYTES + 1500..].iter().all(|&b| b == 0));
+        assert_eq!(
+            &raw[..EXE_HEADER_BYTES + 1500],
+            &whole[..EXE_HEADER_BYTES + 1500]
+        );
+        assert!(Exe::parse(&raw).is_ok());
+    }
+
+    #[test]
+    fn parse_reads_a_short_last_sector_as_zeros() {
+        let mut raw = make_exe(0x8001_0000, 0x8001_0000, &[1; 1500]);
+        raw[0x1C..0x20].copy_from_slice(&2048u32.to_le_bytes());
+        let exe = Exe::parse(&raw).unwrap();
+        assert_eq!(exe.payload.len(), 2048);
+        assert!(exe.payload[..1500].iter().all(|&b| b == 1));
+        assert!(exe.payload[1500..].iter().all(|&b| b == 0));
+        // The same bytes padded in the file parse to the same payload.
+        pad_to_payload(&mut raw).unwrap();
+        assert_eq!(Exe::parse(&raw).unwrap().payload, exe.payload);
+    }
+
+    #[test]
+    fn parse_still_refuses_other_shortfalls() {
+        // A whole sector or more missing.
+        let mut raw = make_exe(0x8001_0000, 0x8001_0000, &[1; 2048]);
+        raw[0x1C..0x20].copy_from_slice(&4096u32.to_le_bytes());
+        assert!(matches!(
+            Exe::parse(&raw),
+            Err(ExeError::TruncatedPayload {
+                expected: 4096,
+                actual: 2048
+            })
+        ));
+        // A size that is not whole sectors never came from the linker.
+        let mut odd = make_exe(0x8001_0000, 0x8001_0000, &[1; 1000]);
+        odd[0x1C..0x20].copy_from_slice(&1500u32.to_le_bytes());
+        assert!(matches!(
+            Exe::parse(&odd),
+            Err(ExeError::TruncatedPayload {
+                expected: 1500,
+                actual: 1000
+            })
+        ));
+    }
+
+    #[test]
+    fn padding_leaves_a_whole_file_alone() {
+        let mut raw = make_exe(0x8001_0000, 0x8001_0000, &[7; 2048]);
+        let before = raw.clone();
+        assert_eq!(pad_to_payload(&mut raw), Ok(0));
+        assert_eq!(raw, before);
+        // Bytes past t_size, such as an old link's extra sectors, are kept.
+        raw.extend_from_slice(&[9; 100]);
+        assert_eq!(pad_to_payload(&mut raw), Ok(0));
+        assert_eq!(raw.len(), before.len() + 100);
+    }
+
+    #[test]
+    fn padding_refuses_a_truncated_file() {
+        let mut raw = make_exe(0x8001_0000, 0x8001_0000, &[1; 4096]);
+        raw.truncate(EXE_HEADER_BYTES + 2048);
+        assert_eq!(
+            pad_to_payload(&mut raw),
+            Err(ExeError::TruncatedPayload {
+                expected: 4096,
+                actual: 2048
+            })
+        );
+        assert_eq!(raw.len(), EXE_HEADER_BYTES + 2048);
+        assert_eq!(pad_to_payload(&mut vec![0; 10]), Err(ExeError::TooShort));
+        assert_eq!(
+            pad_to_payload(&mut vec![0; EXE_HEADER_BYTES]),
+            Err(ExeError::BadMagic)
+        );
+    }
+
+    #[test]
+    fn initial_sp_returns_none_when_zero() {
+        let raw = make_exe(0, 0, &[]);
+        let exe = Exe::parse(&raw).unwrap();
+        assert_eq!(exe.initial_sp(), None);
+    }
+}

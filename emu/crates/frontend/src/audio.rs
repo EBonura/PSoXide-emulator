@@ -512,7 +512,7 @@ mod tests {
     //! Drives the real consumer and producer code at simulated timings and
     //! counts audible discontinuities in what the speaker would get. The
     //! `Legacy*` types reproduce the pre-prefill behaviour so every scenario
-    //! can be compared before and after: `cargo test -p frontend audio::tests
+    //! can be compared before and after: `cargo test -p psoxide-emulator audio::tests
     //! -- --nocapture` prints the table.
 
     use super::*;

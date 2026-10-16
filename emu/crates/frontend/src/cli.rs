@@ -8,7 +8,7 @@
 //!    thin layer over a tested CLI. "Does the game library scan
 //!    find my games?" becomes a deterministic test instead of a
 //!    click-test.
-//! 2. **Regression scripts.** `frontend launch <game> --steps 100M
+//! 2. **Regression scripts.** `psoxide-emulator launch <game> --steps 100M
 //!    --dump-hash` is a one-liner you can wrap in a shell test to
 //!    pin BIOS / SDK behaviour without rebuilding the GUI.
 //! 3. **CI.** No display server → `cargo test` on Linux boxes
@@ -4814,7 +4814,7 @@ mod press_script_tests {
         }
         std::fs::write(&exe_path, exe).unwrap();
         let cli = Cli::try_parse_from([
-            "frontend",
+            "psoxide-emulator",
             "launch",
             "--path",
             exe_path.to_str().unwrap(),
@@ -4850,9 +4850,13 @@ mod press_script_tests {
         ] {
             assert!(parse_ram_watch_address(address).is_err(), "{address}");
         }
-        assert!(
-            Cli::try_parse_from(["frontend", "launch", "--route-watch-u32", "0x80000000"]).is_err()
-        );
+        assert!(Cli::try_parse_from([
+            "psoxide-emulator",
+            "launch",
+            "--route-watch-u32",
+            "0x80000000"
+        ])
+        .is_err());
     }
 
     #[test]
@@ -4868,7 +4872,7 @@ mod press_script_tests {
     #[test]
     fn launch_parses_independent_memory_cards_for_both_ports() {
         let cli = Cli::try_parse_from([
-            "frontend",
+            "psoxide-emulator",
             "launch",
             "--path",
             "game.exe",
@@ -4889,7 +4893,7 @@ mod press_script_tests {
     #[test]
     fn launch_parses_the_poll_stop() {
         let cli = Cli::try_parse_from([
-            "frontend",
+            "psoxide-emulator",
             "launch",
             "--path",
             "game.cue",
@@ -4906,7 +4910,7 @@ mod press_script_tests {
     #[test]
     fn launch_parses_low_level_profile_outputs_and_hex_stack_root() {
         let cli = Cli::try_parse_from([
-            "frontend",
+            "psoxide-emulator",
             "launch",
             "--path",
             "game.exe",
@@ -5232,16 +5236,22 @@ mod press_script_tests {
     fn external_firmware_options_are_rejected() {
         for args in [
             vec![
-                "frontend",
+                "psoxide-emulator",
                 "launch",
                 "--path",
                 "game.cue",
                 "--bios",
                 "firmware.bin",
             ],
-            vec!["frontend", "launch", "--path", "game.cue", "--bios-boot"],
             vec![
-                "frontend",
+                "psoxide-emulator",
+                "launch",
+                "--path",
+                "game.cue",
+                "--bios-boot",
+            ],
+            vec![
+                "psoxide-emulator",
                 "launch",
                 "--path",
                 "game.cue",

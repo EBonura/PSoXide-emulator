@@ -1,0 +1,70 @@
+//! `hello-tri` -- the smallest interesting PSoXide homebrew.
+//!
+//! Initialises the GPU, clears the framebuffer to dark blue, and
+//! draws one Gouraud-shaded triangle per frame with a slight
+//! time-based wobble so you can tell the render loop is alive.
+//!
+//! Running it end-to-end proves:
+//! - The PSX-EXE loader correctly seeded PC / SP / GP.
+//! - `_start` cleared BSS and reached `main()`.
+//! - The GPU's GP1 commands configure the display.
+//! - Triangle rasterisation + vsync behave.
+
+#![no_std]
+#![no_main]
+
+// Pull psx-rt in so the linker keeps `_start`, the panic handler,
+// and (if enabled) the heap allocator; a plain dependency doesn't
+// force the link because we don't call anything from it.
+extern crate psx_rt;
+
+use psx_gpu::display::{DisplayConfig, DoubleBuffer, Resolution, VideoMode};
+use psx_gpu::prim::TriGouraud;
+use psx_gpu::Gpu;
+use psx_rt::tty;
+
+#[no_mangle]
+fn main() {
+    tty::println("hello-tri: booted via HLE BIOS");
+
+    let Some(peripherals) = psx_rt::Peripherals::take() else {
+        return;
+    };
+    let mut gpu = Gpu::new(
+        peripherals.gpu_dma,
+        DisplayConfig::new(VideoMode::Ntsc, Resolution::R320X240),
+    );
+
+    // Double-buffer: buffer A at VRAM (0, 0), buffer B at (0, 240).
+    // The TV always scans out a stable completed frame while we
+    // draw into the other buffer. PS1 games do this universally --
+    // workload-light demos like this one wouldn't flicker even
+    // single-buffered, but adopting the pattern here keeps every
+    // example on the same footing.
+    let mut fb = DoubleBuffer::new(Resolution::R320X240);
+    // Bootstrap draw-area / offset to the first back buffer (A).
+    // `DoubleBuffer::swap` re-applies them every flip.
+    gpu.set_draw_area((0, 0), (319, 239));
+    gpu.set_draw_offset((0, 0));
+
+    tty::println("hello-tri: entering render loop");
+    let mut frame: u16 = 0;
+    loop {
+        // Clear the back buffer (the one we're about to draw into).
+        fb.clear(&mut gpu, (0, 0, 64));
+
+        // Wobble the triangle: ±30 px vertical bounce.
+        let wobble = (((frame % 60) as i16) - 30).abs();
+        let verts = [(160, 40 + wobble), (60, 200 - wobble), (260, 200 - wobble)];
+        gpu.draw(&TriGouraud::new(
+            verts,
+            [(255, 64, 64), (64, 255, 64), (64, 64, 255)],
+        ));
+
+        gpu.wait_idle();
+        psx_rt::interrupts::wait_vblank();
+        fb.swap(&mut gpu);
+
+        frame = frame.wrapping_add(1);
+    }
+}

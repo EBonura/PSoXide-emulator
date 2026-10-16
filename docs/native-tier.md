@@ -8,7 +8,7 @@ operations continue through the interpreter.
 Build the desktop frontend with:
 
 ```sh
-cargo build --release -p frontend --features native-jit
+cargo build --release -p psoxide-emulator --features native-jit
 ```
 
 This also enables the tier for headless `launch` commands. Set

@@ -1,0 +1,117 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//! Volatile MMIO primitives.
+//!
+//! The lowest layer of the SDK. Wraps `core::ptr::read_volatile` /
+//! `write_volatile` in zero-overhead helpers that each peripheral
+//! module builds on. Keeping these centralised means we can audit
+//! every MMIO touchpoint in one file.
+//!
+//! All functions here are `#[inline(always)]` and `unsafe` -- they
+//! accept arbitrary addresses and widths. Higher-level SDK crates
+//! present safe APIs on top of these.
+
+#![no_std]
+#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
+#![deny(unsafe_op_in_unsafe_fn)]
+#![warn(missing_docs)]
+
+pub mod cd;
+pub mod cdda;
+pub mod cdrom;
+pub mod controller_port;
+pub mod disc_base;
+pub mod dma;
+pub mod gpu;
+pub mod irq;
+pub mod periph;
+pub mod timers;
+
+/// Read a 32-bit word from `addr`. Caller must guarantee `addr` is
+/// valid MMIO for a 32-bit read.
+///
+/// # Safety
+/// Targets unchecked memory-mapped I/O. The caller is responsible for
+/// the address mapping and any side effects.
+#[inline(always)]
+pub unsafe fn read_u32(addr: u32) -> u32 {
+    // SAFETY: the caller guarantees `addr` is mapped and valid for an aligned 32-bit volatile read
+    // (this fn's `# Safety`).
+    unsafe { core::ptr::read_volatile(addr as *const u32) }
+}
+
+/// Read a 16-bit half-word from `addr`.
+///
+/// # Safety
+/// See [`read_u32`].
+#[inline(always)]
+pub unsafe fn read_u16(addr: u32) -> u16 {
+    // SAFETY: the caller guarantees `addr` is mapped and valid for an aligned 16-bit volatile read
+    // (this fn's `# Safety`).
+    unsafe { core::ptr::read_volatile(addr as *const u16) }
+}
+
+/// Read an 8-bit byte from `addr`.
+///
+/// # Safety
+/// See [`read_u32`].
+#[inline(always)]
+pub unsafe fn read_u8(addr: u32) -> u8 {
+    // SAFETY: the caller guarantees `addr` is mapped and valid for an 8-bit volatile read (this
+    // fn's `# Safety`).
+    unsafe { core::ptr::read_volatile(addr as *const u8) }
+}
+
+/// Write a 32-bit word to `addr`.
+///
+/// # Safety
+/// See [`read_u32`].
+#[inline(always)]
+pub unsafe fn write_u32(addr: u32, value: u32) {
+    // SAFETY: the caller guarantees `addr` is mapped and valid for an aligned 32-bit volatile write
+    // (this fn's `# Safety`).
+    unsafe { core::ptr::write_volatile(addr as *mut u32, value) }
+}
+
+/// Write a 16-bit half-word to `addr`.
+///
+/// # Safety
+/// See [`read_u32`].
+#[inline(always)]
+pub unsafe fn write_u16(addr: u32, value: u16) {
+    // SAFETY: the caller guarantees `addr` is mapped and valid for an aligned 16-bit volatile write
+    // (this fn's `# Safety`).
+    unsafe { core::ptr::write_volatile(addr as *mut u16, value) }
+}
+
+/// Write an 8-bit byte to `addr`.
+///
+/// # Safety
+/// See [`read_u32`].
+#[inline(always)]
+pub unsafe fn write_u8(addr: u32, value: u8) {
+    // SAFETY: the caller guarantees `addr` is mapped and valid for an 8-bit volatile write (this
+    // fn's `# Safety`).
+    unsafe { core::ptr::write_volatile(addr as *mut u8, value) }
+}
+
+/// Renamed to [`read_u8`].
+///
+/// # Safety
+/// See [`read_u8`].
+#[deprecated(note = "renamed to `read_u8`")]
+#[inline(always)]
+pub unsafe fn read8(addr: u32) -> u8 {
+    // SAFETY: same contract as the renamed function.
+    unsafe { read_u8(addr) }
+}
+
+/// Renamed to [`write_u8`].
+///
+/// # Safety
+/// See [`write_u8`].
+#[deprecated(note = "renamed to `write_u8`")]
+#[inline(always)]
+pub unsafe fn write8(addr: u32, value: u8) {
+    // SAFETY: same contract as the renamed function.
+    unsafe { write_u8(addr, value) }
+}

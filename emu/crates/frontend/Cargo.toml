@@ -1,10 +1,13 @@
 [package]
-name = "frontend"
+name = "psoxide-emulator"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
+# `cargo run` from the repository root starts the emulator, not the `frontend`
+# compatibility alias that src/bin/frontend.rs builds beside it.
+default-run = "psoxide-emulator"
 
 [features]
 # The standalone emulator has no editor dependency.

@@ -5,16 +5,28 @@
       "repository": "EBonura/PSoXide",
       "revision": "6f7381576a2bb4306bb28f36e42ccdf67feb3946",
       "paths": [
-        "sdk",
-        "crates",
-        "tools/mkisopsx",
-        "tools/psoxide-link",
-        "tools/guest_symbol_gate.sh",
-        "assets/audio/freesfx",
-        "assets/textures/brick-wall.psxt",
-        "assets/textures/floor.psxt",
-        "tools/sdk-examples.mk"
-      ]
+        "sdk/Cargo.toml",
+        "sdk/crates/psx-asset",
+        "sdk/crates/psx-gpu",
+        "sdk/crates/psx-gte",
+        "sdk/crates/psx-gte-core",
+        "sdk/crates/psx-io",
+        "sdk/crates/psx-math",
+        "sdk/crates/psx-spu",
+        "sdk/crates/psx-telemetry",
+        "sdk/crates/psx-vram",
+        "sdk/examples/hello-gte",
+        "sdk/examples/hello-input",
+        "sdk/examples/hello-memcard",
+        "sdk/examples/hello-ot",
+        "sdk/examples/hello-tex",
+        "sdk/examples/hello-tri",
+        "crates/psx-hw",
+        "crates/psx-iso",
+        "crates/psx-trace",
+        "crates/psxed-format"
+      ],
+      "vendored": true
     }
   }
 }
