@@ -291,6 +291,21 @@ pub struct CdRom {
     /// already says the drive is stopping. `None` when no Stop is in flight.
     /// Saved with the state, so a restore mid spin-down finishes it on time.
     spindown_until: Option<u64>,
+    /// Cycle until which the drive still reports "reading" after a Pause out
+    /// of a read (hwtest v2.7 run FB89, WATCH trials: a GetStat just after the
+    /// acknowledge says 0x22, a few milliseconds later 0x02). The Pause's
+    /// second response comes much later and does not gate it. 0 when none.
+    #[serde(default)]
+    pause_reading_until: u64,
+    /// Sectors delivered since the last ReadN/ReadS began. A Pause out of a
+    /// read takes longer the more of the read has gone by
+    /// ([`pause_from_read_cycles`]).
+    #[serde(default)]
+    sectors_since_read: u32,
+    /// The last ReadN/ReadS began with a head travel of at least
+    /// [`PAUSE_FAR_SEEK_SECTORS`].
+    #[serde(default)]
+    read_began_far: bool,
     /// The head last went to a CD-DA track and has not gone back to data
     /// since. The next data operation then pays
     /// [`AUDIO_TO_DATA_SETTLE_CYCLES`], and a Play with this clear pays
@@ -592,6 +607,9 @@ impl CdRom {
             drive_state: DriveState::Stopped,
             motor_on: false,
             spindown_until: None,
+            pause_reading_until: 0,
+            sectors_since_read: 0,
+            read_began_far: false,
             head_on_audio: false,
             disc_present: false,
             setloc_msf: (0, 0, 0),
@@ -1045,6 +1063,7 @@ impl CdRom {
         self.disc_present = self.disc.is_some();
         self.motor_on = self.disc_present;
         self.spindown_until = None;
+        self.pause_reading_until = 0;
         self.head_on_audio = false;
         self.drive_state = if self.disc_present {
             DriveState::Standby
@@ -1271,6 +1290,15 @@ impl CdRom {
         // of appending another logical response stream behind them.
         self.responses.clear();
         self.command_busy = true;
+        // A command written while a Pause's second response is pending
+        // replaces it: the drive still pauses, but INT2 never comes (hwtest
+        // v2.7 run FB89, WATCH trials, records 0x380 to 0x3B8: a GetStat sent
+        // between the Pause's two responses, early or late, in all four
+        // trials, and no INT2 within 8,000,000 clocks, against 1.2 to 3.8
+        // million without one). Only GetStat was sent on the console; the
+        // controller holds one pending response, so any command is taken to
+        // do the same.
+        self.drop_pending_command_irq(0x09, IrqType::Complete);
         // Stash the issue-time cycle so each `schedule_*_response`
         // call below resolves its absolute deadline against the
         // right anchor, without threading `now` through every
@@ -1597,7 +1625,7 @@ impl CdRom {
         if self.motor_on || self.spindown_until.is_some() {
             s |= drive_status_bit::MOTOR_ON;
         }
-        if self.reading {
+        if self.reading || self.scheduling_cycle < self.pause_reading_until {
             s |= drive_status_bit::READING;
         }
         s
@@ -1737,6 +1765,7 @@ impl CdRom {
         self.lid_deadline = None;
         self.lid_bootstrap_pending = false;
         self.reading = false;
+        self.pause_reading_until = 0;
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
         self.halt_cdda();
@@ -1760,31 +1789,65 @@ impl CdRom {
 
     fn cmd_pause(&mut self) {
         let was_motor_on = self.motor_on;
+        let was_reading = self.reading;
+        let ack_extra = if self.disc_present && !self.cmd_issued_during_cdda {
+            PAUSE_ACK_CYCLES - FIRST_RESPONSE_WITH_MEDIA_CYCLES
+        } else {
+            0
+        };
+        // A Pause while the head is still travelling to the first sector of a
+        // read is refused, and the read carries on (hwtest v2.7 run FB89,
+        // records 0x35C to 0x35E and 0x370 to 0x372: six of six trials, a
+        // far seek, answered with INT5 and status 0x03 (0x43 once), no INT3
+        // ahead of it, and the drive was still busy when the cleanup Pause
+        // went out). The error code in the second byte was not recorded; 0x80
+        // is the one the other refused commands here use.
+        if was_reading && self.location_changed {
+            let stat = (self.stat_byte() & !drive_status_bit::READING) | drive_status_bit::ERROR;
+            self.insert_pending_event(PendingEvent {
+                command: self.last_command,
+                deadline: self.first_response_deadline().saturating_add(ack_extra),
+                irq: IrqType::Error,
+                bytes: vec![stat, 0x80],
+                followup: None,
+            });
+            return;
+        }
         // Pause halts the sector-read chain but leaves the motor on.
         // Missing this flip meant DataReady events kept chaining
         // `load_next_sector + schedule_sector_event` indefinitely
         // after the BIOS asked us to pause, producing a runaway
         // pending queue that burned the entire CPU budget on
         // peripheral-scheduling overhead.
+        // The acknowledge reports the drive as it was when the command
+        // arrived, reading included (watch trials: 0x22 at the Pause's INT3).
+        self.pause_reading_until = 0;
+        let ack_stat = self.stat_byte();
         self.reading = false;
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
         self.halt_cdda();
         self.cdda_sample_index = 0;
         self.reset_xa_stream();
-        let ack_stat = self.stat_byte();
-        self.schedule_first_response(vec![ack_stat]);
+        self.schedule_first_response_after(vec![ack_stat], ack_extra);
         let stat = self.stat_byte();
-        // Gate-pinned: a short follow-up when the drive is already spun up
-        // ("standby"), a much longer one only from a stopped / not-ready
-        // state. Commercial titles hit the standby path. PSX-SPX's PSone
-        // figures differ (see `cdrom/timing.rs`) and moving to them changes
-        // every compat hash.
         let delay = if self.cmd_issued_during_cdda {
             // Console (record 0x301): leaving CD-DA takes 123 ms from the
             // command, measured at the poll, so count it from the command
             // rather than from the acknowledge.
             PAUSE_FROM_CDDA_CYCLES.saturating_sub(self.first_response_delay())
+        } else if was_motor_on && was_reading {
+            // Out of a read the drive reports reading for a few milliseconds
+            // more, then the second response comes whole sector periods
+            // later (see `pause_from_read_cycles`).
+            self.pause_reading_until = self
+                .scheduling_cycle
+                .saturating_add(PAUSE_READING_STATUS_CYCLES);
+            pause_from_read_cycles(
+                self.sector_read_cycles(),
+                self.sectors_since_read,
+                self.read_began_far,
+            )
         } else if was_motor_on {
             PAUSE_COMPLETE_CYCLES_STANDBY
         } else if self.mode & 0x80 != 0 {
@@ -1826,6 +1889,7 @@ impl CdRom {
         // DataReady chains from a previous ReadN don't keep firing
         // across the reset boundary.
         self.reading = false;
+        self.pause_reading_until = 0;
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
         self.halt_cdda();
@@ -1866,6 +1930,7 @@ impl CdRom {
         let complete_pending = self.drop_pending_command_irq(0x0A, IrqType::Complete);
         self.responses.clear();
         self.reading = false;
+        self.pause_reading_until = 0;
         self.cancel_pending_data_ready_events();
         self.seek_done = true;
         self.setloc_pending = false;
@@ -1910,6 +1975,7 @@ impl CdRom {
         // succeeds immediately on the real drive -- BIOS rarely calls
         // SeekL without a disc.
         self.reading = false;
+        self.pause_reading_until = 0;
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
         self.halt_cdda();
@@ -1971,6 +2037,9 @@ impl CdRom {
             return;
         }
         self.cancel_pending_data_ready_events();
+        self.pause_reading_until = 0;
+        self.sectors_since_read = 0;
+        self.read_began_far = false;
         // Starting a read resets the sector buffers. Anything the previous
         // read left behind belongs to a position software has just moved away
         // from, and handing it over would answer the new read with old data.
@@ -1995,7 +2064,9 @@ impl CdRom {
         if self.setloc_pending {
             let (m, s, f) = self.setloc_msf;
             let target = msf_to_lba(m, s, f);
-            travel = travel.saturating_add(self.seek_travel_cycles(target.abs_diff(self.read_lba)));
+            let distance = target.abs_diff(self.read_lba);
+            self.read_began_far = distance >= PAUSE_FAR_SEEK_SECTORS;
+            travel = travel.saturating_add(self.seek_travel_cycles(distance));
             self.work.seeks = self.work.seeks.saturating_add(1);
             // The head is moving: no header to report until the first
             // sector at the target arrives (psx-spx GetlocL).
@@ -2352,6 +2423,7 @@ impl CdRom {
         }
         self.motor_on = true;
         self.reading = false;
+        self.pause_reading_until = 0;
         self.read_rescheduled = false;
         self.cancel_pending_data_ready_events();
         self.clear_data_fifo();
@@ -2560,6 +2632,7 @@ impl CdRom {
                 }
             } else if ev.irq == IrqType::DataReady {
                 should_raise_irq = self.load_next_sector();
+                self.sectors_since_read = self.sectors_since_read.saturating_add(1);
                 // The sector has landed either way. Whether the CPU is told
                 // about it is a separate question: the interrupt line is still
                 // holding the previous, unacknowledged one, and hardware will

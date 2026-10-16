@@ -68,10 +68,77 @@ pub(super) const RESET_SECOND_RESPONSE_CYCLES: u64 = 4_790_000;
 /// already stopped 0x1D7B).
 pub(super) const STOP_SECOND_RESPONSE_CYCLES: u64 = CD_READ_TIME * 4; // 1,806,336
 
-/// Pause second response with the motor already running. **Pinned**: every
-/// compat hash list moves with the PSX-SPX figures (paused: 0x1DF2; pausing
-/// a read: 0x21181C single speed, 0x10BD93 double speed).
-pub(super) const PAUSE_COMPLETE_CYCLES_STANDBY: u64 = 7_000;
+/// Pause second response with the motor running and no read in progress,
+/// counted from the acknowledge. **Console** (hwtest v2.7 run FB89, records
+/// 0x350 to 0x35B and 0x364 to 0x36F): the second response follows the first
+/// by 8.0 to 8.6 thousand clocks in the six idle trials (acknowledges 30,112,
+/// 50,176, 51,520 and 29,664, 55,872, 148,512 against second responses
+/// 38,560, 58,712, 59,616 and 37,720, 64,432, 156,544, paired in order, each
+/// trial's own pairing not being recorded), so the spread of the second
+/// response from the command is the acknowledge's, not this delay's. PSX-SPX gives 0x1DF2 (7,666).
+pub(super) const PAUSE_COMPLETE_CYCLES_STANDBY: u64 = 8_300;
+
+/// Pause acknowledge with a disc present, from the command byte. **Console**
+/// (hwtest v2.7 run FB89): the minimum of every cell that holds a read or a seek is
+/// 32,832 to 33,024 clocks at both speeds (records 0x357 to 0x377); idle
+/// cells reach 29,664 and 30,112; the medians sit 0 to 20 thousand above the
+/// floor and one idle trial took 148,512, which looks like the controller
+/// firmware's loop phase. The model keeps the floor, minus the 30 clocks of MMIO the probe's
+/// own timing adds. GetStat's 19,234 is shorter, as on the console.
+pub(super) const PAUSE_ACK_CYCLES: u64 = 32_870;
+
+/// How long after a Pause out of a read the drive still reports "reading".
+/// **Console** (hwtest v2.7 WATCH trials, records 0x380 to 0x3B8): a GetStat
+/// sent right after the Pause's acknowledge, answered at 72,448 (single) and
+/// 81,536 (double) clocks from the Pause, still said 0x22; the next one,
+/// answered at 233,088 (double speed) and 291,968 (single speed) said 0x02, as
+/// did every later one. The change lies in that window and the figure is its
+/// middle, not a measurement. The Pause's own acknowledge says 0x22 too.
+pub(super) const PAUSE_READING_STATUS_CYCLES: u64 = 150_000;
+
+/// Pause second response out of a read, counted from the acknowledge, in
+/// hundredths of a sector period (one period is 451,584 clocks at single
+/// speed, 225,792 at double: the response scales with the drive speed).
+///
+/// **Console** (hwtest v2.7 run FB89, records 0x354 to 0x377): measured from
+/// the Pause command the response takes, at single and double speed,
+///
+/// ```text
+/// first sector of a read     2,423,344..2,462,384    1,222,208..1,244,328
+/// settled (12th sector)      3,797,000..3,835,000    1,689,176..1,933,504
+/// first sector, far seek     2,790,888..2,839,032    1,420,856..1,436,536
+/// ```
+///
+/// which is, after the acknowledge ([`PAUSE_ACK_CYCLES`]) and in periods,
+/// 5.27 to 5.38 for the first sector, 8.33 to 8.42 settled (one double speed
+/// trial 7.34, a whole period shorter, unexplained) and 6.11 to 6.22 after a
+/// far seek, at both speeds. Only the first and twelfth sector were measured;
+/// [`pause_from_read_cycles`] interpolates between them.
+pub(super) const PAUSE_FIRST_SECTOR_PERIODS_X100: u64 = 533;
+pub(super) const PAUSE_FAR_FIRST_SECTOR_PERIODS_X100: u64 = 617;
+pub(super) const PAUSE_SETTLED_PERIODS_X100: u64 = 839;
+
+/// A read whose head travel is at least this many sectors counts as a far
+/// seek for [`PAUSE_FAR_FIRST_SECTOR_PERIODS_X100`] (the console trials were
+/// a few sectors and 14,436; the threshold is the last point of the seek
+/// curve, not a measurement).
+pub(super) const PAUSE_FAR_SEEK_SECTORS: u32 = 512;
+
+/// Pause second response out of a read: `sectors` sectors have been delivered
+/// since the ReadN, `far` says the head travelled a long way to start it, and
+/// `period` is the sector period at the current speed. One sector read adds
+/// one period up to the settled figure (a guess between the two measured
+/// points: 1 and 12 sectors).
+pub(super) fn pause_from_read_cycles(period: u64, sectors: u32, far: bool) -> u64 {
+    let first = if far {
+        PAUSE_FAR_FIRST_SECTOR_PERIODS_X100
+    } else {
+        PAUSE_FIRST_SECTOR_PERIODS_X100
+    };
+    let extra = u64::from(sectors.saturating_sub(1)) * 100;
+    let hundredths = (first + extra).min(PAUSE_SETTLED_PERIODS_X100);
+    period * hundredths / 100
+}
 
 /// Pause second response from a stopped drive (doubled at double speed).
 /// **Unsourced**; not distinguished by the gates.
@@ -123,9 +190,8 @@ pub(super) const CD_READ_TIME: u64 = 451_584;
 /// then takes this long to leave the controller idle. In CPU cycles the
 /// emulator completes at exactly this figure; the harness reads it 5.6%
 /// low (116 ms) for the Timer 1 reason above. A Pause from any other state
-/// keeps its older, gate-pinned figures ([`PAUSE_COMPLETE_CYCLES_STANDBY`]):
-/// the console has no measurement for Pause from a data read (record
-/// `0x300` is 62 ms, but it includes the transport's own latency).
+/// keeps its own figures ([`PAUSE_COMPLETE_CYCLES_STANDBY`]):
+/// a Pause from a data read has its own console figures ([`pause_from_read_cycles`]).
 pub(super) const PAUSE_FROM_CDDA_CYCLES: u64 = 1231 * MS / 10;
 
 /// Extra time the first sector of a data operation takes when the head was

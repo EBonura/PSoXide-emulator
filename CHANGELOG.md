@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- Pause now takes the time the console takes. Measured on the console (hwtest
+  v2.7, run FB89, records 0x340 to 0x3B8): from the command, a Pause out of a
+  read completes after 3.80 to 3.84 million clocks at single speed and 1.69
+  to 1.93 million at double with the head settled (the twelfth sector), 2.42
+  to 2.46 and 1.22 to 1.24 million at the first sector, 2.79 to 2.84 and 1.42
+  to 1.44 million at the first sector after a far seek; an idle drive
+  answers in 37,720 to 156,544 clocks. The emulator answered all of them in
+  about 26,300 (an earlier unlanded estimate said 120,000). The figures scale
+  with the sector period, so with the drive speed, though not in whole
+  periods: counted from the acknowledge, 5.33, 6.17 and 8.39 periods. The model keeps
+  them (first sector, first sector after a head travel of 512 sectors or
+  more, settled), and adds a period per sector delivered between the first
+  and the settled figure (a guess: the console was timed at 1 and 12
+  sectors only). The Pause acknowledge takes the console's 32.9 thousand
+  clocks (GetStat keeps 19.2 thousand) and says 0x22, still reading, which
+  a GetStat sent within a few milliseconds also says; the second response
+  says 0x02. A Pause from an idle drive follows its acknowledge by 8.3
+  thousand clocks (was 7,000), which is the console's gap in all six idle
+  trials. Two behaviours that were absent: a command written between the
+  Pause's two responses cancels the second (GetStat, in four of four
+  console trials; the model cancels on any command, an assumption), and a
+  Pause while the head is still travelling to the first sector of a read is
+  refused with INT5, status 0x03, and no INT3 (six of six trials; the error
+  byte was not recorded, 0x80 is a placeholder), the read carrying on. Stop,
+  Init, Reset, SeekL, Play and an eject end the short "reading" window.
+  Every compat game still boots to the same stop reason, final frames move
+  with the timing (17 of 20 display hashes).
 - The native CPU tier now matches the interpreter's cycle count while a GPU
   DMA streams from main RAM. Its inline RAM load path skipped the wait a load
   owes a GPU block transfer or list walk (19 clocks a load for a block

@@ -807,12 +807,12 @@ fn pause_on_spun_up_drive_uses_short_followup_delay() {
         "Pause should cancel the in-flight read chain"
     );
 
-    let ack_deadline = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES;
+    let ack_deadline = 1_000 + FIRST_RESPONSE_CYCLES;
     assert!(cd.tick(ack_deadline + 1));
     assert_eq!(
         cd.read8(BASE + 1),
-        drive_status_bit::MOTOR_ON,
-        "Pause ACK should report the stopped read state"
+        drive_status_bit::MOTOR_ON | drive_status_bit::READING,
+        "the Pause ACK reports the drive as it was: still reading (console 0x22)"
     );
     cd.irq_flag = 0;
     let pause_complete = cd
@@ -820,9 +820,15 @@ fn pause_on_spun_up_drive_uses_short_followup_delay() {
         .iter()
         .find(|ev| ev.irq == IrqType::Complete)
         .expect("pause completion chained off ACK");
+    // A read that has delivered no sector yet: the first-sector figure.
     assert_eq!(
         pause_complete.deadline,
-        ack_deadline + 1 + PAUSE_COMPLETE_CYCLES_STANDBY
+        ack_deadline + 1 + pause_from_read_cycles(cd.sector_read_cycles(), 0, false)
+    );
+    assert_eq!(
+        pause_complete.bytes[0],
+        drive_status_bit::MOTOR_ON,
+        "the second response says stopped (console 0x02)"
     );
 }
 
@@ -1795,13 +1801,15 @@ fn pause_from_cdda_completes_123_ms_after_the_command() {
 }
 
 #[test]
-fn pause_of_a_data_read_keeps_the_short_followup() {
+fn pause_of_an_idle_drive_follows_its_acknowledge_by_the_console_gap() {
     let mut cd = CdRom::new();
     cd.insert_disc(Some(cdda_disc()));
     cd.queue_command(0x09, 1_000);
-    let ack_at = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES;
+    let ack_at = 1_000 + PAUSE_ACK_CYCLES;
     let done = completion_deadline(&mut cd, ack_at, IrqType::Complete).expect("completion");
     assert_eq!(done, ack_at + 1 + PAUSE_COMPLETE_CYCLES_STANDBY);
+    // Records 0x350 to 0x352 and 0x364 to 0x366: 37,720 to 156,544 clocks.
+    assert!((37_720..=156_544).contains(&(done - 1_000)));
 }
 
 #[test]
@@ -2019,4 +2027,325 @@ fn spindown_and_head_position_survive_a_save_state_round_trip() {
     let back: CdRom = postcard::from_bytes(&bytes).expect("deserialise");
     assert_eq!(back.spindown_until, Some(123_456_789));
     assert!(back.head_on_audio);
+}
+
+// --- Pause out of a read (hwtest v2.7, run FB89, records 0x340 to 0x3B8) ---
+
+/// A data disc long enough for a seek that counts as far.
+fn long_data_disc() -> Disc {
+    Disc::from_bin(vec![0u8; psx_iso::SECTOR_BYTES * 1_200])
+}
+
+/// Start a read of `lba` on a drive at `mode`, the way a game does, and
+/// deliver `sectors` of it. Returns the cycle after the last delivery.
+fn read_and_deliver(cd: &mut CdRom, mode: u8, lba: u32, sectors: u32) -> u64 {
+    let mut now = 1_000;
+    cd.push_param(mode);
+    cd.queue_command(0x0E, now);
+    now += 100_000;
+    cd.tick(now);
+    cd.irq_flag = 0;
+    let (m, s, f) = lba_to_msf(lba);
+    cd.push_param(bin_to_bcd(m));
+    cd.push_param(bin_to_bcd(s));
+    cd.push_param(bin_to_bcd(f));
+    cd.queue_command(0x02, now);
+    now += 100_000;
+    cd.tick(now);
+    cd.irq_flag = 0;
+    cd.queue_command(0x06, now);
+    let mut delivered = 0;
+    let end = now + 400_000_000;
+    while delivered < sectors && now < end {
+        now += 1_000;
+        if cd.tick(now) {
+            if cd.irq_flag == IrqType::DataReady as u8 {
+                delivered += 1;
+            }
+            cd.irq_flag = 0;
+        }
+    }
+    assert_eq!(delivered, sectors, "the read delivered its sectors");
+    now
+}
+
+/// Cycles from a Pause written at `now` to its second response, with the
+/// acknowledge delivered on the way.
+fn pause_to_second_response(cd: &mut CdRom, now: u64) -> u64 {
+    cd.queue_command(0x09, now);
+    let ack_at = now + PAUSE_ACK_CYCLES;
+    let done = completion_deadline(cd, ack_at, IrqType::Complete).expect("second response");
+    done - now
+}
+
+#[test]
+fn a_pause_out_of_a_read_completes_inside_the_consoles_range_at_both_speeds() {
+    // (mode, first LBA, sectors delivered before the Pause, console min..max
+    // in clocks from the Pause, records)
+    let cases: [(u8, u32, u32, u64, u64); 6] = [
+        // 0x358-0x35A: 1x, first sector, near
+        (0x00, 100, 1, 2_423_344, 2_462_384),
+        // 0x36C-0x36E: 2x
+        (0x80, 100, 1, 1_222_208, 1_244_328),
+        // 0x354-0x356: 1x, twelfth sector
+        (0x00, 100, 12, 3_797_000, 3_835_000),
+        // 0x368-0x36A: 2x (the low end is the trial a period short)
+        (0x80, 100, 12, 1_689_176, 1_933_504),
+        // 0x360-0x362: 1x, first sector after a far seek
+        (0x00, 1_000, 1, 2_790_888, 2_839_032),
+        // 0x374-0x376: 2x
+        (0x80, 1_000, 1, 1_420_856, 1_436_536),
+    ];
+    for (mode, lba, sectors, low, high) in cases {
+        let mut cd = CdRom::new();
+        cd.insert_disc(Some(long_data_disc()));
+        // The head starts at the beginning, so LBA 1,000 is a far seek and
+        // LBA 100 is not.
+        let now = read_and_deliver(&mut cd, mode, lba, sectors) + 4_000;
+        let took = pause_to_second_response(&mut cd, now);
+        assert!(
+            (low..=high).contains(&took),
+            "mode {mode:#04x} lba {lba} after {sectors} sectors: {took} not in {low}..={high}"
+        );
+    }
+}
+
+#[test]
+fn a_pause_out_of_a_read_scales_with_the_sector_period() {
+    for sectors in [0u32, 1, 2, 3, 4, 12, 100] {
+        for far in [false, true] {
+            let single = pause_from_read_cycles(CD_READ_TIME, sectors, far);
+            let double = pause_from_read_cycles(CD_READ_TIME / 2, sectors, far);
+            assert!(
+                single.abs_diff(double * 2) <= 2,
+                "{sectors} sectors, far {far}: {single} vs {double}"
+            );
+        }
+    }
+    // Later sectors never shorten it, and it stops growing at the settled figure.
+    let mut last = 0;
+    for sectors in 0..20 {
+        let now = pause_from_read_cycles(CD_READ_TIME, sectors, false);
+        assert!(now >= last);
+        last = now;
+    }
+    assert_eq!(last, CD_READ_TIME * PAUSE_SETTLED_PERIODS_X100 / 100);
+    assert_eq!(
+        pause_from_read_cycles(CD_READ_TIME, 12, true),
+        pause_from_read_cycles(CD_READ_TIME, 12, false),
+        "the far-seek offset is gone by the twelfth sector"
+    );
+}
+
+#[test]
+fn the_pause_acknowledge_takes_the_consoles_33_thousand_clocks_and_says_reading() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(long_data_disc()));
+    let now = read_and_deliver(&mut cd, 0x00, 100, 2) + 4_000;
+    cd.queue_command(0x09, now);
+    let ack = cd.pending.front().expect("acknowledge queued");
+    assert_eq!(ack.irq, IrqType::Acknowledge);
+    assert_eq!(ack.deadline, now + PAUSE_ACK_CYCLES);
+    assert!((32_832..=33_024).contains(&PAUSE_ACK_CYCLES));
+    // 0x22: motor on and reading, as at the Pause's INT3 in every watch trial.
+    assert_eq!(
+        ack.bytes[0],
+        drive_status_bit::MOTOR_ON | drive_status_bit::READING
+    );
+}
+
+#[test]
+fn a_getstat_soon_after_a_pause_still_reads_reading_and_a_later_one_does_not() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(long_data_disc()));
+    let now = read_and_deliver(&mut cd, 0x00, 100, 12) + 4_000;
+    cd.queue_command(0x09, now);
+    cd.tick(now + PAUSE_ACK_CYCLES + 1);
+    cd.irq_flag = 0;
+    let status_of_getstat = |cd: &mut CdRom, at: u64| {
+        cd.responses.clear();
+        cd.pending.retain(|ev| ev.command != 0x01);
+        cd.queue_command(0x01, at);
+        cd.pending
+            .iter()
+            .find(|ev| ev.command == 0x01)
+            .map(|ev| ev.bytes[0])
+            .expect("GetStat answers")
+    };
+    // EARLY trials: sent at the acknowledge, answered at 72,448 and 81,536.
+    assert_eq!(
+        status_of_getstat(&mut cd, now + 40_000),
+        drive_status_bit::MOTOR_ON | drive_status_bit::READING
+    );
+    // The next one in those trials was answered at 233,088 and 291,968.
+    assert_eq!(
+        status_of_getstat(&mut cd, now + 233_088),
+        drive_status_bit::MOTOR_ON
+    );
+}
+
+#[test]
+fn a_command_between_the_two_responses_cancels_the_second() {
+    for command in [0x01u8, 0x0E, 0x19] {
+        let mut cd = CdRom::new();
+        cd.insert_disc(Some(long_data_disc()));
+        let now = read_and_deliver(&mut cd, 0x00, 100, 12) + 4_000;
+        cd.queue_command(0x09, now);
+        cd.tick(now + PAUSE_ACK_CYCLES + 1);
+        cd.irq_flag = 0;
+        assert!(cd.pending.iter().any(|ev| ev.irq == IrqType::Complete));
+        cd.push_param(0x00);
+        cd.queue_command(command, now + 60_000);
+        assert!(
+            !cd.pending
+                .iter()
+                .any(|ev| ev.command == 0x09 && ev.irq == IrqType::Complete),
+            "command {command:#04x} left the Pause's INT2 pending"
+        );
+        // And nothing from the Pause ever arrives, however long the wait
+        // (the console watched 8,000,000 clocks).
+        let mut t = now + 60_000;
+        while t < now + 9_000_000 {
+            t += 10_000;
+            if cd.tick(t) {
+                assert_ne!(cd.irq_flag, IrqType::Complete as u8, "INT2 arrived");
+                cd.irq_flag = 0;
+            }
+        }
+        // The drive did pause: nothing is reading once the window is over.
+        cd.scheduling_cycle = t;
+        assert_eq!(cd.stat_byte() & drive_status_bit::READING, 0);
+    }
+}
+
+#[test]
+fn a_command_after_the_second_response_has_nothing_to_cancel() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(long_data_disc()));
+    let now = read_and_deliver(&mut cd, 0x00, 100, 2) + 4_000;
+    cd.queue_command(0x09, now);
+    let done = now + PAUSE_ACK_CYCLES + 1 + pause_from_read_cycles(CD_READ_TIME, 2, false) + 1;
+    let mut t = now;
+    let mut seen = false;
+    while t < done + 1_000 {
+        t += 1_000;
+        if cd.tick(t) {
+            seen |= cd.irq_flag == IrqType::Complete as u8;
+            cd.irq_flag = 0;
+        }
+    }
+    assert!(seen, "INT2 arrives when nothing interferes");
+}
+
+#[test]
+fn a_pause_during_the_seek_of_a_read_is_refused_and_the_read_goes_on() {
+    for mode in [0x00u8, 0x80] {
+        let mut cd = CdRom::new();
+        cd.insert_disc(Some(long_data_disc()));
+        let mut now = 1_000;
+        cd.push_param(mode);
+        cd.queue_command(0x0E, now);
+        now += 100_000;
+        cd.tick(now);
+        cd.irq_flag = 0;
+        let (m, s, f) = lba_to_msf(1_000);
+        cd.push_param(bin_to_bcd(m));
+        cd.push_param(bin_to_bcd(s));
+        cd.push_param(bin_to_bcd(f));
+        cd.queue_command(0x02, now);
+        now += 100_000;
+        cd.tick(now);
+        cd.irq_flag = 0;
+        cd.queue_command(0x06, now);
+        now += FIRST_RESPONSE_WITH_MEDIA_CYCLES + 2;
+        assert!(cd.tick(now));
+        cd.irq_flag = 0;
+        // ReadN is acknowledged and the head is on its way: Pause now.
+        cd.queue_command(0x09, now);
+        let refusal = cd.pending.front().expect("a refusal").clone();
+        assert_eq!(refusal.irq, IrqType::Error, "INT5, not INT3");
+        assert_eq!(refusal.deadline, now + PAUSE_ACK_CYCLES);
+        // Console: status 0x03, error plus motor on, reading clear (records
+        // 0x35C-0x35E, 0x370-0x372; once 0x43 with the seek bit).
+        assert_eq!(
+            refusal.bytes[0],
+            drive_status_bit::ERROR | drive_status_bit::MOTOR_ON
+        );
+        assert!(
+            !cd.pending
+                .iter()
+                .any(|ev| ev.irq == IrqType::Acknowledge && ev.command == 0x09),
+            "no INT3 for it"
+        );
+        assert!(
+            !cd.pending
+                .iter()
+                .any(|ev| ev.irq == IrqType::Complete && ev.command == 0x09),
+            "no INT2 for it"
+        );
+        // The read carries on: sectors still come, and a Pause after the
+        // first one is accepted.
+        assert!(cd.reading);
+        let mut got = 0;
+        let mut t = now;
+        while got == 0 && t < now + 400_000_000 {
+            t += 1_000;
+            if cd.tick(t) {
+                if cd.irq_flag == IrqType::DataReady as u8 {
+                    got += 1;
+                }
+                cd.irq_flag = 0;
+            }
+        }
+        assert_eq!(got, 1, "the read delivered its first sector");
+        cd.queue_command(0x09, t + 4_000);
+        assert!(cd
+            .pending
+            .iter()
+            .any(|ev| ev.irq == IrqType::Acknowledge && ev.command == 0x09));
+    }
+}
+
+/// A Stop (or Init, Reset, SeekL, Play, a new disc) that follows a Pause out
+/// of a read ends the "still reading" window: the drive is then stopping or
+/// being reset, not finishing a sector.
+#[test]
+fn commands_that_move_the_drive_end_the_reading_window() {
+    type Action = fn(&mut CdRom);
+    let actions: [(&str, Action); 5] = [
+        ("Stop", |cd| cd.queue_command(0x08, 1_000_000)),
+        ("Init", |cd| cd.queue_command(0x1C, 1_000_000)),
+        ("Reset", |cd| cd.queue_command(0x0A, 1_000_000)),
+        ("SeekL", |cd| cd.queue_command(0x15, 1_000_000)),
+        ("eject", |cd| cd.insert_disc(None)),
+    ];
+    for (name, action) in actions {
+        let mut cd = CdRom::new();
+        cd.insert_disc(Some(long_data_disc()));
+        let now = read_and_deliver(&mut cd, 0x00, 100, 2) + 4_000;
+        cd.queue_command(0x09, now);
+        assert_ne!(cd.pause_reading_until, 0, "{name}: window open");
+        // Well inside the window.
+        cd.scheduling_cycle = now + 10_000;
+        action(&mut cd);
+        cd.scheduling_cycle = now + 20_000;
+        assert_eq!(
+            cd.stat_byte() & drive_status_bit::READING,
+            0,
+            "{name} left the drive reading"
+        );
+    }
+}
+
+#[test]
+fn the_pause_window_and_read_counters_survive_a_save_state_round_trip() {
+    let mut cd = CdRom::new();
+    cd.pause_reading_until = 99_000;
+    cd.sectors_since_read = 7;
+    cd.read_began_far = true;
+    let bytes = postcard::to_allocvec(&cd).expect("serialise");
+    let back: CdRom = postcard::from_bytes(&bytes).expect("deserialise");
+    assert_eq!(back.pause_reading_until, 99_000);
+    assert_eq!(back.sectors_since_read, 7);
+    assert!(back.read_began_far);
 }
