@@ -3099,6 +3099,90 @@ fn interlaced_480_draws_skip_the_displayed_field() {
     }
 }
 
+/// The rule holds with the display blanked: hwtest v2.4 (records 0x84B to
+/// 0x852) drew a fill, a rectangle, triangles and a line with GP1(03h) off and
+/// read 0xAAAA and 0x5555 back for the two fields, as with the display on.
+/// Drawn here with the display on and off: the pictures must match, and the
+/// rows of the field on show stay untouched in both.
+#[test]
+fn interlaced_480_rule_holds_with_the_display_blanked() {
+    let xy = |x: u32, y: u32| (y << 16) | x;
+    let draw = |display_off: bool, field_flips: u32| {
+        let mut gpu = Gpu::new();
+        gpu.write32(GP1_ADDR, 0x0300_0000 | u32::from(display_off));
+        gpu.write32(GP1_ADDR, 0x0800_0026); // 480 lines, interlaced
+        gpu.write32(GP0_ADDR, 0xE100_0000); // drawing to the display area prohibited
+        for _ in 0..field_flips {
+            gpu.toggle_vblank_field();
+        }
+        let shown = gpu.read32(GP1_ADDR).unwrap() >> 31;
+        // Fill, flat rectangle, flat triangle and a line, each on its own
+        // columns, all eight rows tall.
+        gpu.write32(GP0_ADDR, 0x0200_00FF);
+        gpu.write32(GP0_ADDR, xy(0, 0));
+        gpu.write32(GP0_ADDR, (8 << 16) | 16);
+        gpu.write32(GP0_ADDR, 0x6000_FF00);
+        gpu.write32(GP0_ADDR, xy(32, 0));
+        gpu.write32(GP0_ADDR, (8 << 16) | 16);
+        gpu.write32(GP0_ADDR, 0x2000_FF00);
+        gpu.write32(GP0_ADDR, xy(64, 0));
+        gpu.write32(GP0_ADDR, xy(80, 0));
+        gpu.write32(GP0_ADDR, xy(64, 8));
+        gpu.write32(GP0_ADDR, 0x4000_00FF);
+        gpu.write32(GP0_ADDR, xy(100, 0));
+        gpu.write32(GP0_ADDR, xy(100, 7));
+        (gpu, shown)
+    };
+    for flips in 0..2 {
+        let (blank, shown) = draw(true, flips);
+        let (lit, lit_shown) = draw(false, flips);
+        assert_eq!(shown, lit_shown);
+        assert_eq!(shown, if flips == 0 { 1 } else { 0 }, "field on show");
+        for (kind, x) in [("fill", 4), ("rect", 36), ("triangle", 65), ("line", 100)] {
+            for y in 0..8u16 {
+                // Row parity y & 1 names the lines of field `shown`.
+                let on_show = u32::from(y & 1) == shown;
+                assert_eq!(
+                    blank.vram.get_pixel(x, y) != 0,
+                    !on_show,
+                    "{kind} row {y} (field {shown}, display off)"
+                );
+                assert_eq!(
+                    blank.vram.get_pixel(x, y),
+                    lit.vram.get_pixel(x, y),
+                    "{kind} row {y} (field {shown}) differs with the display on"
+                );
+            }
+        }
+    }
+}
+
+/// The halved draw cost follows the rule, so it holds with the display
+/// blanked too (hwtest v2.4 records 0x843 to 0x84A, 0.51 to 0.53).
+#[test]
+fn interlaced_480_draw_cost_is_halved_with_the_display_blanked() {
+    let xy = |x: u32, y: u32| (y << 16) | x;
+    let area = [0xE300_0000, 0xE400_0000 | 1023 | (511 << 10), 0xE500_0000];
+    let cost = |gp1_display: u32, e1: u32| {
+        let mut gpu = Gpu::new();
+        gpu.write32(GP1_ADDR, gp1_display);
+        gpu.write32(GP1_ADDR, 0x0800_0026);
+        for &word in &area {
+            gpu.write32(GP0_ADDR, word);
+        }
+        gpu.write32(GP0_ADDR, 0xE100_0000 | e1);
+        let before = gpu.gp0_timing_histogram()[0x60];
+        for word in [0x60FF_FFFF, xy(640, 256), xy(256, 240)] {
+            gpu.write32(GP0_ADDR, word);
+        }
+        gpu.gp0_timing_histogram()[0x60] - before
+    };
+    let (blank_rule, blank_free) = (cost(0x0300_0001, 0), cost(0x0300_0001, 1 << 10));
+    assert_eq!(blank_rule, cost(0x0300_0000, 0), "same cost as display on");
+    let ratio = blank_rule as f64 / blank_free as f64;
+    assert!((0.50..0.53).contains(&ratio), "{blank_rule} {blank_free}");
+}
+
 /// Field-rendered 480i frames are presented whole: the lines of the other
 /// field come from when it was last on display.
 #[test]
