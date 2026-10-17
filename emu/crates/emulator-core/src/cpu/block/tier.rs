@@ -873,10 +873,15 @@ impl Cpu {
         let memory = matches!(op.class, OpClass::Load | OpClass::Store);
         match op.class {
             OpClass::Alu | OpClass::Branch => self.execute_register_op(op, pc),
+            // The steps below settle the clock before they look at it. That
+            // is one step's cycles when the batch is past the GPU's quiet
+            // span (`limit`, where each step is applied at once), so it is
+            // the exact advance, bounded by the hard limit, not the quiet
+            // advance, which holds only below the quiet span.
             OpClass::Load | OpClass::Store if op.word >> 26 >= 0x30 => {
                 // LWC2/SWC2: through `execute`, which checks the GTE is
                 // enabled.
-                bus.advance_quiet(*issue);
+                bus.advance_exact(*issue);
                 *issue = 0;
                 self.pc = pc;
                 let _ = self.execute(op.word, pc, delay, bus);
@@ -885,7 +890,7 @@ impl Cpu {
                 }
             }
             OpClass::Load | OpClass::Store => {
-                bus.advance_quiet(*issue);
+                bus.advance_exact(*issue);
                 *issue = 0;
                 self.execute_memory_op(op, addr, bus);
                 if op.class == OpClass::Store {
@@ -894,7 +899,7 @@ impl Cpu {
             }
             _ => {
                 // Multiply/divide, HI/LO and GTE moves read the clock.
-                bus.advance_quiet(*issue);
+                bus.advance_exact(*issue);
                 *issue = 0;
                 self.pc = pc;
                 let _ = self.execute(op.word, pc, delay, bus);

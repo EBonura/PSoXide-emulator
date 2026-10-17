@@ -140,10 +140,14 @@ impl Bus {
 
     /// Advance the clock by `n` with the ordinary (exact) path, for a batch
     /// stepping past the soft limit of [`Bus::quiet_limits`] one step at a
-    /// time.
+    /// time. `n` is one step's cycles: unlike [`Bus::advance_quiet`] it need
+    /// not stay below the soft limit (the GPU's quiet span, which is already
+    /// over then), but it must not reach the hard limit, where the next
+    /// scheduler event or SPU sample falls due.
     #[doc(hidden)]
     #[inline(always)]
     pub fn advance_exact(&mut self, n: u64) {
+        debug_assert!(n == 0 || self.cycles + n < self.quiet_limits().0);
         self.advance_cycles(n as u32);
     }
 
