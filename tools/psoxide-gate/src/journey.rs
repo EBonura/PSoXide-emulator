@@ -152,52 +152,15 @@ pub struct RenderCfg {
     /// Hardware-renderer internal scales to capture besides the CPU frame.
     #[serde(default = "default_scales")]
     pub scales: Vec<u32>,
-    /// HW 1x against the CPU frame.
-    #[serde(default = "default_hw1")]
-    pub hw1: Tolerance,
-    /// HW 3x (and any larger scale) against the enlarged CPU frame.
-    #[serde(default = "default_hwn")]
-    pub hwn: Tolerance,
-    /// Strict regions: HW against the enlarged CPU frame inside `strict`
-    /// rectangles must match to this.
-    #[serde(default = "default_strict")]
-    pub strict: Tolerance,
 }
 
 fn default_scales() -> Vec<u32> {
     vec![1, 3]
 }
-// The CPU rasterizer keeps 15-bit colour and the hardware renderer shades in
-// 8 bits, so a flat or Gouraud surface differs by up to 7 levels per channel
-// with no fault. Measured on OoT's title, menu, cutscene and gameplay frames:
-// at 1x under 0.5% of pixels differ by more than 16; at 3x the polygon edges
-// (finer geometry than the 1x oracle) put up to 1.5% over 32.
-fn default_hw1() -> Tolerance {
-    Tolerance {
-        channel: 24,
-        fraction: 0.005,
-    }
-}
-fn default_hwn() -> Tolerance {
-    Tolerance {
-        channel: 48,
-        fraction: 0.04,
-    }
-}
-fn default_strict() -> Tolerance {
-    Tolerance {
-        channel: 16,
-        fraction: 0.002,
-    }
-}
-
 impl Default for RenderCfg {
     fn default() -> Self {
         RenderCfg {
             scales: default_scales(),
-            hw1: default_hw1(),
-            hwn: default_hwn(),
-            strict: default_strict(),
         }
     }
 }
@@ -282,10 +245,6 @@ pub struct Step {
     /// Skip the CPU/HW render matrix for this checkpoint (default false).
     #[serde(default)]
     pub no_matrix: bool,
-    #[serde(default)]
-    pub hw1: Option<Tolerance>,
-    #[serde(default)]
-    pub hwn: Option<Tolerance>,
     #[serde(default, rename = "assert")]
     pub asserts: Vec<Assert>,
 }
@@ -552,13 +511,10 @@ impl Step {
                 || !self.strict.is_empty()
                 || !self.comparison.two_d.is_empty()
                 || !self.comparison.polygons.is_empty()
-                || self.no_matrix
-                || self.hw1.is_some()
-                || self.hwn.is_some())
+                || self.no_matrix)
         {
             return Err(
-                "golden/tolerance/mask/strict/no_matrix/hw1/hwn only apply to a checkpoint step"
-                    .into(),
+                "golden/tolerance/mask/strict/no_matrix only apply to a checkpoint step".into(),
             );
         }
         if self.hold.is_some() && !self.has_input() {

@@ -137,10 +137,10 @@ field rendering) are reported SKIP with the reason in diagnostic runs. A
 required renderer SKIP fails the release gate.
 
 `tolerance` and `mask` continue to apply to CPU golden/assert comparisons.
-Hardware comparisons do not ignore masked pixels. Legacy `hw1`, `hwn` and
-`render.strict` tolerances remain parseable for existing journeys, but do not
-relax the normalized content rules. Hardware tolerance exists only at explicit
-visible polygon edges. A capture refresh reports new presentation analysis,
+Hardware comparisons do not ignore masked pixels. The old `hw1`, `hwn` and
+`render.strict` channel tolerances are gone (the gate stopped reading them when
+comparison became exact) and a journey that still names them is rejected as an
+unknown key. Hardware tolerance exists only at explicit visible polygon edges. A capture refresh reports new presentation analysis,
 preserves prior acceptance receipts, and is not a fresh installed-disc run.
 
 ## Journey files
@@ -157,7 +157,7 @@ TOML, unknown keys are errors. Top level:
 | `pad`, `pad2` | `analog` (default), `digital`, `dualshock`; port 2 defaults to `none` |
 | `memcard` | `fresh` (default) or `none` |
 | `max_ticks` | hard stop |
-| `[render]` | `scales`, `hw1`, `hwn`, `strict` defaults |
+| `[render]` | `scales` default |
 
 Time is in route ticks, the headless frontend's clock: one vblank period of
 emulated cycles, about 60 a second. `launch --press` and the editor's tape use
