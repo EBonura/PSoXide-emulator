@@ -24,8 +24,15 @@ SDK_INSTALL = cargo install --locked --git $(SDK_GIT) --rev $(SDK_REV) --root "$
 help:
 	@echo "make check | test | build | run | gate | material-audit | refresh-sdk | check-sdk"
 	@echo "(or just: cargo run --release)"
+# Every feature of every crate except the frontend's `editor` (and its
+# `editor-preview-benchmark` add-on). `editor` compiles the PSoXide-editor
+# crates and assets into the frontend; here those are empty placeholders
+# (emu/crates/editor-placeholders), so that feature builds only in the editor
+# workspace, which checks it there. The frontend's other features are checked
+# explicitly.
 check:
-	cargo check --locked --workspace --all-features
+	cargo check --locked --workspace --all-features --exclude psoxide-emulator
+	cargo check --locked -p psoxide-emulator --features native-jit,mcp
 test:
 	cargo test --locked --workspace
 fmt:

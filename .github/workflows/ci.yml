@@ -13,5 +13,5 @@ jobs:
       - run: make check-sdk
       - run: make material-audit
       - run: cargo fmt --all -- --check
-      - run: cargo check --locked --workspace --all-features
+      - run: make check
       - run: cargo test --locked --workspace
