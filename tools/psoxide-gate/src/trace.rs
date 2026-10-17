@@ -263,8 +263,8 @@ pub fn inspect(checkpoint: &Path, x: u16, y: u16) -> Result<String, String> {
     if x >= 1024 || y >= 512 {
         return Err("VRAM coordinate out of bounds".into());
     }
-    let text = std::fs::read_to_string(checkpoint.join("receipt.toml"))
-        .map_err(|e| e.to_string())?;
+    let text =
+        std::fs::read_to_string(checkpoint.join("receipt.toml")).map_err(|e| e.to_string())?;
     let receipt: toml::Value = toml::from_str(&text).map_err(|e| e.to_string())?;
     let owners = std::fs::read(checkpoint.join("owners.bin")).map_err(|e| e.to_string())?;
     if owners.len() != 1024 * 512 * 8

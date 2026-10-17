@@ -237,8 +237,12 @@ pub fn run(manifest: &Path, out: &Path) -> Result<(), String> {
             let _ = writeln!(
                 inventory,
                 "{}\t{}\t{}\t{}\t{}\t{a}\t{b}",
-                r.name, r.disc_id, g.name, g.tick,
-                c.frame.map_or_else(|| "unrecorded".into(), |v| v.to_string())
+                r.name,
+                r.disc_id,
+                g.name,
+                g.tick,
+                c.frame
+                    .map_or_else(|| "unrecorded".into(), |v| v.to_string())
             );
         }
     }

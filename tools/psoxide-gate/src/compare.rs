@@ -413,7 +413,9 @@ mod tests {
         let hw = image(24, 24, 248);
         let same = compare(&cpu, &hw, 3, &Layout::default()).unwrap();
         assert!(!same.has_differences());
-        assert!(same.description().starts_with("identical after comparison rules;"));
+        assert!(same
+            .description()
+            .starts_with("identical after comparison rules;"));
         let wrong = image(24, 24, 240);
         assert_eq!(
             compare(&cpu, &wrong, 3, &Layout::default())
@@ -522,31 +524,27 @@ mod tests {
             evidence: "observed canonical quad".into(),
             edge_channel: 24,
         };
-        assert!(
-            classify(
-                &Layout {
-                    two_d: vec![],
-                    polygons: vec![p.clone()]
-                },
-                8,
-                8
-            )
-            .unwrap()
-            .iter()
-            .all(|c| *c == Class::TwoD)
-        );
+        assert!(classify(
+            &Layout {
+                two_d: vec![],
+                polygons: vec![p.clone()]
+            },
+            8,
+            8
+        )
+        .unwrap()
+        .iter()
+        .all(|c| *c == Class::TwoD));
         p.vertices = packet.to_vec();
-        assert!(
-            classify(
-                &Layout {
-                    two_d: vec![],
-                    polygons: vec![p]
-                },
-                8,
-                8
-            )
-            .is_err()
-        );
+        assert!(classify(
+            &Layout {
+                two_d: vec![],
+                polygons: vec![p]
+            },
+            8,
+            8
+        )
+        .is_err());
         assert!(packet_perimeter(&packet[..2]).is_err());
     }
     #[test]
@@ -644,17 +642,15 @@ mod tests {
     fn unsafe_metadata_fails_closed() {
         let mut p = polygon();
         p.evidence.clear();
-        assert!(
-            classify(
-                &Layout {
-                    two_d: vec![],
-                    polygons: vec![p]
-                },
-                8,
-                8
-            )
-            .is_err()
-        );
+        assert!(classify(
+            &Layout {
+                two_d: vec![],
+                polygons: vec![p]
+            },
+            8,
+            8
+        )
+        .is_err());
         let mut p = polygon();
         p.visible.push(Rect {
             x: 6,
@@ -662,57 +658,49 @@ mod tests {
             w: 1,
             h: 1,
         });
-        assert!(
-            classify(
-                &Layout {
-                    two_d: vec![],
-                    polygons: vec![p]
-                },
-                8,
-                8
-            )
-            .is_err()
-        );
+        assert!(classify(
+            &Layout {
+                two_d: vec![],
+                polygons: vec![p]
+            },
+            8,
+            8
+        )
+        .is_err());
         let mut p = polygon();
         p.edge_channel = 255;
-        assert!(
-            classify(
-                &Layout {
-                    two_d: vec![],
-                    polygons: vec![p]
-                },
-                8,
-                8
-            )
-            .is_err()
-        );
-        assert!(
-            classify(
-                &Layout {
-                    two_d: vec![Rect {
-                        x: 8,
-                        y: 0,
-                        w: 1,
-                        h: 1
-                    }],
-                    polygons: vec![]
-                },
-                8,
-                8
-            )
-            .is_err()
-        );
+        assert!(classify(
+            &Layout {
+                two_d: vec![],
+                polygons: vec![p]
+            },
+            8,
+            8
+        )
+        .is_err());
+        assert!(classify(
+            &Layout {
+                two_d: vec![Rect {
+                    x: 8,
+                    y: 0,
+                    w: 1,
+                    h: 1
+                }],
+                polygons: vec![]
+            },
+            8,
+            8
+        )
+        .is_err());
         let p = polygon();
-        assert!(
-            classify(
-                &Layout {
-                    two_d: vec![],
-                    polygons: vec![p.clone(), p]
-                },
-                8,
-                8
-            )
-            .is_err()
-        );
+        assert!(classify(
+            &Layout {
+                two_d: vec![],
+                polygons: vec![p.clone(), p]
+            },
+            8,
+            8
+        )
+        .is_err());
     }
 }
