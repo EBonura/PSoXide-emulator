@@ -72,7 +72,7 @@ pgo-profile:
 	RUSTFLAGS="-Cprofile-generate=$(PGO_RAW)" $(PGO_BUILD) --target-dir target/pgo-gen
 	LLVM_PROFILE_FILE="$(PGO_RAW)/p_%m_%p.profraw" target/pgo-gen/release/examples/bench_suite --reps 1
 	mkdir -p pgo
-	"$(LLVM_PROFDATA)" merge -o "$(PGO_PROFDATA)" "$(PGO_RAW)"/*.profraw
+	"$(LLVM_PROFDATA)" merge --sparse -o "$(PGO_PROFDATA)" "$(PGO_RAW)"/*.profraw
 
 # The fleet gate (TESTING.md): every game's journey on the CPU and hardware
 # renderers. GATE_ARGS e.g. "run nitroxide" or "run all --jobs 2".
