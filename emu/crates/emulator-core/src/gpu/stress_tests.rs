@@ -755,3 +755,77 @@ fn display_hash_and_rgba_match_the_per_pixel_reference() {
         assert!(s.gpu.display_rgba8() == rgba, "display_rgba8");
     }
 }
+
+/// `display_hash` as it was before it worked a row at a time over the
+/// presented frame: the whole of `presented_words(Weave)` first.
+fn presented_frame_display_hash(gpu: &Gpu) -> DisplayHash {
+    if !gpu.display_configured {
+        return (psx_hw::hash::Fnv1a64::new().finish(), 0, 0, 0);
+    }
+    let da = gpu.display_area();
+    let mut h = psx_hw::hash::Fnv1a64::new();
+    let mut byte_len = 0usize;
+    let effective_h = da.height.min((VRAM_HEIGHT as u16).saturating_sub(da.y));
+    let effective_w = if da.bpp24 {
+        da.width.min(rgb24_pixels_left(da.x))
+    } else {
+        da.width.min((VRAM_WIDTH as u16).saturating_sub(da.x))
+    };
+    let row_bytes = usize::from(effective_w) * if da.bpp24 { 3 } else { 2 };
+    let mut bytes = [0u8; VRAM_WIDTH * 2];
+    let presented = gpu.presented_words(Deinterlace::Weave);
+    for dy in 0..effective_h {
+        let start = usize::from(da.y + dy) * VRAM_WIDTH + usize::from(da.x);
+        let halfwords = row_bytes.div_ceil(2);
+        for (pair, &word) in bytes.chunks_exact_mut(2).zip(&presented[start..start + halfwords]) {
+            pair.copy_from_slice(&word.to_le_bytes());
+        }
+        h.update(&bytes[..row_bytes]);
+        byte_len += row_bytes;
+    }
+    (h.finish(), effective_w as u32, effective_h as u32, byte_len)
+}
+
+#[test]
+fn display_hash_and_bytes_match_the_presented_frame_with_field_rendering() {
+    let mut s = Stress::new(0x5EED_0006);
+    let mut with_hold = 0;
+    for round in 0..500 {
+        let rng = &mut s.rng;
+        let start = rng.word() & 0x7FFFF;
+        let x1 = (0x260 + rng.range(-400, 400)) as u32;
+        let hrange = (x1 & 0xFFF) | ((x1 + 2560) & 0xFFF) << 12;
+        let y1 = rng.below(0x40);
+        let y2 = y1 + rng.below(520);
+        let vrange = (y1 & 0x3FF) | (y2 & 0x3FF) << 10;
+        // 480i (vertical resolution and interlace bits) half the time, with
+        // the colour depth and horizontal resolution random.
+        let mode = (rng.word() & 0x43) | if rng.chance(50) { 0x24 } else { 0 } | (rng.word() & 0x10);
+        s.gp1(0x0500_0000 | start);
+        s.gp1(0x0600_0000 | hrange);
+        s.gp1(0x0700_0000 | vrange);
+        s.gp1(0x0800_0000 | mode);
+        // Drawing to the display area prohibited, so the fields are held.
+        s.gp0(0xE100_0000);
+        for _ in 0..3 {
+            for _ in 0..4000 {
+                let at = (s.rng.word() as usize) % (VRAM_WIDTH * VRAM_HEIGHT);
+                let v = s.rng.word() as u16;
+                s.gpu.vram.words_mut()[at] = v;
+            }
+            s.gpu.toggle_vblank_field();
+        }
+        if s.gpu.held_rows().is_some() {
+            with_hold += 1;
+        }
+        let want = presented_frame_display_hash(&s.gpu);
+        assert_eq!(s.gpu.display_hash(), want, "display_hash, round {round}");
+        let mut bytes = Vec::new();
+        s.gpu.display_bytes_into(&mut bytes);
+        let mut h = psx_hw::hash::Fnv1a64::new();
+        h.update(&bytes);
+        assert_eq!(bytes.len(), want.3, "display_bytes_into length, round {round}");
+        assert_eq!(h.finish(), want.0, "display_bytes_into bytes, round {round}");
+    }
+    assert!(with_hold > 50, "field rendering was exercised ({with_hold} rounds)");
+}
