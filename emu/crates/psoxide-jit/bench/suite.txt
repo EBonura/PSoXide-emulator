@@ -1,0 +1,16 @@
+# bench_suite manifest: name | disc | from | frames | input | ds_shift
+# Windows are frames from the EXE entry. Commercial rows match the 2026-10-01
+# scoreboard (plan-final.json) so old rival numbers stay comparable.
+crash       | Crash Bandicoot (USA)/Crash Bandicoot (USA).cue                                   | 6000 | 7200 | pulses:common
+tekken3     | Tekken 3 (USA)/Tekken 3 (USA).cue                                                 | 3000 | 4200 | pulses:common
+wipeout2097 | WipEout 2097 (Europe)/WipEout 2097 (Europe)/WipEout 2097 (Europe).cue             | 3600 | 4800 | pulses:common
+re2         | Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue | 1000 | 1600 | pulses:none | 450
+mslugx      | Metal Slug X (USA)/Metal Slug X (USA).cue                                         | 4800 | 6000 | pulses:common
+hl          | Half-Life (hl-psx).cue                                                            | 5400 | 6600 | pulses:common
+# Our games, driven by Manny's recorded pad tapes (no DuckStation row: it cannot replay them).
+hl-tape     | Half-Life (hl-psx).cue                                                            | 1000 | 3000 | tape:hl-ch3-2026-10-08.pxtape
+hk-tape     | hk-psx.cue                                                                        |  500 | 2300 | tape:hk-2026-10-03.pxtape
+quake-tape  | quake-psx.cue                                                                     | 1000 | 4000 | tape:quake-2026-10-09.pxtape
+wipeout-tape| WipEout PSoXide.cue                                                               |  800 | 3000 | tape:wipeout-2026-10-02-issues.pxtape
+nitro-tape  | NitroXide/NitroXide.cue                                                           | 1000 | 3500 | tape:nitroxide-2026-10-15.pxtape
+voxide-tape | VoXide/VoXide.cue                                                                 |  500 | 1800 | tape:voxide-2026-10-15.pxtape

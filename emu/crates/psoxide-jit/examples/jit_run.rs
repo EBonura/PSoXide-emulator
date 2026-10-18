@@ -4,14 +4,17 @@
 //! native tier installed).
 //!
 //! usage:
-//!   jit_run bench    <disc.cue> <frames> <step|run|tier> [--from N] [--pulses P] [--hash-log F]
+//!   jit_run bench    <disc.cue> <frames> <step|run|tier> [--from N] [--pulses P | --tape T] [--hash-log F]
 //!   jit_run lockstep <disc.cue> <frames> <run|tier> [--pulses P] [--full-every N]
 //!   jit_run fuzz     <run|tier> <first seed> <seeds> <body> <gte%> <instructions>
 //!   jit_run synth    <step|run|tier> <body> <alu%> <mem%> <branch%> <muldiv%> <instructions>
 //!
 //! `bench` runs frame by frame as the emu-bench harness does (to the next
 //! VBlank, then the pad pulses and the SPU catch-up) and reports frames per
-//! host CPU-second over frames `from..frames`. `lockstep` runs a second
+//! host CPU-second over frames `from..frames`, and per billion host cycles
+//! (the macOS per-process cycle and instruction counters, which other load on
+//! the machine moves far less than CPU time). `--tape` drives the pad from a
+//! `.pxtape` or text tape instead of pulses. `lockstep` runs a second
 //! machine with plain `Cpu::step` beside it, compares CPU state, cycles and
 //! frame boundaries after every VBlank and the whole serialized machine
 //! every `--full-every` run calls and at the end. `fuzz` does the same on
@@ -24,6 +27,7 @@ mod pad_support;
 
 use std::path::Path;
 
+use emulator_core::input_tape::PadSample;
 use emulator_core::{fast_boot_disc, Bus, Cpu, EmulatorStateRef};
 
 #[repr(C)]
@@ -42,8 +46,34 @@ struct Rusage {
     rest: [i64; 14],
 }
 
+/// `rusage_info_v4` from `<sys/resource.h>`: a uuid then 40 u64 counters.
+#[repr(C)]
+struct RusageInfoV4 {
+    uuid: [u8; 16],
+    counters: [u64; 40],
+}
+
 extern "C" {
     fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+    fn getpid() -> i32;
+    fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut RusageInfoV4) -> i32;
+}
+
+/// Host instructions and cycles retired by this process so far, all threads
+/// (zeros where the kernel does not report them).
+fn host_counters() -> (u64, u64) {
+    let mut info = RusageInfoV4 {
+        uuid: [0; 16],
+        counters: [0; 40],
+    };
+    // SAFETY: the kernel fills the buffer for flavour 4 (RUSAGE_INFO_V4).
+    if unsafe { proc_pid_rusage(getpid(), 4, &mut info) } != 0 {
+        return (0, 0);
+    }
+    // user_time .. diskio_byteswritten are 18 counters, then 7 QoS times,
+    // billed and serviced system time, logical_writes and the lifetime max
+    // footprint: instructions is the 30th counter, cycles the 31st.
+    (info.counters[29], info.counters[30])
 }
 
 fn cpu_seconds() -> f64 {
@@ -56,21 +86,88 @@ fn cpu_seconds() -> f64 {
         + ru.stime.usec as f64 * 1e-6
 }
 
-fn boot(cue: &Path) -> (Cpu, Bus) {
+/// Boot a disc through the HLE kernel. A tape run also forces the analog pad
+/// mode and loads the disc's SBI sidecar, as `jit_tape` does.
+fn boot(cue: &Path, tape: bool) -> (Cpu, Bus) {
     let disc = disc_support::load_disc_path(cue).unwrap_or_else(|e| panic!("{e}"));
     let mut bus = Bus::new_without_bios();
     let mut cpu = Cpu::new();
     fast_boot_disc(&mut bus, &mut cpu, &disc).unwrap_or_else(|e| panic!("boot: {e:?}"));
     bus.cdrom.insert_disc(Some(disc));
+    if tape {
+        if let Ok(Some(lbas)) = psoxide_settings::library::load_sbi_for(cue) {
+            bus.cdrom.set_bad_subq_sectors(lbas);
+        }
+    }
     bus.attach_digital_pad_port1();
+    if tape {
+        let _ = bus.force_port1_analog_mode();
+    }
     bus.attach_memcard_port1(Vec::new());
     (cpu, bus)
+}
+
+/// A pad tape driving port 1 in place of pulses: a `.pxtape` (by completed
+/// controller polls, or by video frame) or a text file with one four-digit
+/// hex button mask per frame.
+struct TapeDrive {
+    samples: Vec<PadSample>,
+    poll_bound: bool,
+    start_poll: u64,
+    held: Option<usize>,
+}
+
+impl TapeDrive {
+    fn load(path: &str) -> Self {
+        if path.ends_with(".pxtape") {
+            let t = emulator_core::input_tape::read_tape_full(Path::new(path)).expect("pxtape");
+            Self {
+                poll_bound: t.clock == emulator_core::input_tape::TapeClock::PadPoll,
+                start_poll: t.start_poll,
+                samples: t.samples,
+                held: None,
+            }
+        } else {
+            let samples = std::fs::read_to_string(path)
+                .expect("tape")
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| {
+                    PadSample::from_buttons(u16::from_str_radix(l.trim(), 16).expect("tape line"))
+                })
+                .collect();
+            Self {
+                samples,
+                poll_bound: false,
+                start_poll: 0,
+                held: None,
+            }
+        }
+    }
+
+    /// Apply the sample the machine should hold now, if it changed.
+    fn apply(&mut self, bus: &mut Bus, frame: u64) {
+        let last = self.samples.len() - 1;
+        let index = if self.poll_bound {
+            let polls = bus.port1_completed_polls();
+            (polls >= self.start_poll).then(|| ((polls - self.start_poll) as usize).min(last))
+        } else {
+            Some((frame as usize).min(last))
+        };
+        if let Some(k) = index {
+            if self.held != Some(k) {
+                self.held = Some(k);
+                self.samples[k].apply_to_bus(bus);
+            }
+        }
+    }
 }
 
 /// What the harness does at frame boundaries, identically for every mode:
 /// SPU catch-up and audio drain as the frontends do, and the pad pulses.
 struct Host {
     pulses: Vec<pad_support::PadPulse>,
+    tape: Option<TapeDrive>,
     mask: Option<u16>,
     base_vblank: u64,
     frame: u64,
@@ -78,6 +175,9 @@ struct Host {
     boundaries: Vec<u64>,
     /// Display hash at each frame boundary.
     hashes: Vec<u64>,
+    /// Whether to hash the display at frame boundaries (lockstep and
+    /// `--hash-log`; the plain timing run leaves it out, as the frontends do).
+    record_hashes: bool,
 }
 
 impl Host {
@@ -85,18 +185,26 @@ impl Host {
         let pulses = pad_support::parse_pad_pulses(pulses).expect("--pulses");
         let mut host = Self {
             pulses,
+            tape: None,
             mask: None,
             base_vblank: bus.irq().raise_counts()[0],
             frame: 0,
             boundaries: Vec::new(),
             hashes: Vec::new(),
+            record_hashes: true,
         };
         pad_support::sync_pad_mask(bus, 0, &host.pulses, &mut host.mask);
         host
     }
 
     /// Run the CPU up to the next VBlank (one step in `step` mode).
-    fn advance(&self, cpu: &mut Cpu, bus: &mut Bus, mode: &str) -> Result<(), String> {
+    fn advance(&mut self, cpu: &mut Cpu, bus: &mut Bus, mode: &str) -> Result<(), String> {
+        let polls = bus.port1_completed_polls();
+        let mut watch_polls = false;
+        if let Some(tape) = &mut self.tape {
+            tape.apply(bus, self.frame);
+            watch_polls = tape.poll_bound;
+        }
         if mode == "step" {
             return cpu.step(bus).map_err(|e| e.to_string());
         }
@@ -104,6 +212,7 @@ impl Host {
         let frame = self.frame;
         cpu.run(bus, 1 << 20, u64::MAX, |bus| {
             bus.irq().raise_counts()[0] - base != frame
+                || (watch_polls && bus.port1_completed_polls() != polls)
         })
         .1
         .map_err(|e| e.to_string())
@@ -120,7 +229,9 @@ impl Host {
         }
         self.frame = vblank;
         self.boundaries.push(cpu.tick());
-        self.hashes.push(bus.gpu.display_hash().0);
+        if self.record_hashes {
+            self.hashes.push(bus.gpu.display_hash().0);
+        }
         pad_support::sync_pad_mask(bus, 0, &self.pulses, &mut self.mask);
     }
 }
@@ -142,17 +253,29 @@ fn install(
     (mode == "tier").then(|| psoxide_jit::install_tier(cpu).expect("native tier"))
 }
 
-fn bench(cue: &Path, frames: u64, mode: &str, pulses: &str, hash_log: Option<&str>, from: u64) {
-    let (mut cpu, mut bus) = boot(cue);
+fn bench(
+    cue: &Path,
+    frames: u64,
+    mode: &str,
+    pulses: &str,
+    tape: Option<&str>,
+    hash_log: Option<&str>,
+    from: u64,
+) {
+    let (mut cpu, mut bus) = boot(cue, tape.is_some());
     let mut host = Host::new(&mut bus, pulses);
+    host.tape = tape.map(TapeDrive::load);
+    host.record_hashes = hash_log.is_some();
     let tier = install(&mut cpu, mode);
     let mut t0 = cpu_seconds();
+    let mut hc0 = host_counters();
     let mut tick0 = cpu.tick();
     let mut cycles0 = bus.cycles();
     let mut timing = from == 0;
     while host.frame < frames {
         if !timing && host.frame >= from {
             timing = true;
+            hc0 = host_counters();
             t0 = cpu_seconds();
             tick0 = cpu.tick();
             cycles0 = bus.cycles();
@@ -164,10 +287,16 @@ fn bench(cue: &Path, frames: u64, mode: &str, pulses: &str, hash_log: Option<&st
         host.after(&cpu, &mut bus);
     }
     let cpu_s = cpu_seconds() - t0;
+    let hc1 = host_counters();
+    let (host_insn, host_cycles) = (hc1.0 - hc0.0, hc1.1 - hc0.1);
+    let timed_frames = host.frame - from;
     println!(
-        "mode={mode} frames={} timed_from={from} cpu_s={cpu_s:.3} fps_per_cpu_s={:.1} instructions={} cycles={} display_hash={:016x} state_hash={:016x}",
+        "mode={mode} frames={} timed_from={from} cpu_s={cpu_s:.3} fps_per_cpu_s={:.1} host_ginsn={:.4} host_gcycles={:.4} fps_per_gcycle={:.2} instructions={} cycles={} display_hash={:016x} state_hash={:016x}",
         host.frame,
-        (host.frame - from) as f64 / cpu_s,
+        timed_frames as f64 / cpu_s,
+        host_insn as f64 * 1e-9,
+        host_cycles as f64 * 1e-9,
+        timed_frames as f64 / (host_cycles.max(1) as f64 * 1e-9),
         cpu.tick() - tick0,
         bus.cycles() - cycles0,
         bus.gpu.display_hash().0,
@@ -201,8 +330,8 @@ fn describe(cpu: &Cpu, bus: &Bus) -> String {
 }
 
 fn lockstep(cue: &Path, frames: u64, mode: &str, pulses: &str, full_every: u64) {
-    let (mut ci, mut bi) = boot(cue);
-    let (mut cj, mut bj) = boot(cue);
+    let (mut ci, mut bi) = boot(cue, false);
+    let (mut cj, mut bj) = boot(cue, false);
     let mut hi = Host::new(&mut bi, pulses);
     let mut hj = Host::new(&mut bj, pulses);
     let tier = install(&mut cj, mode);
@@ -339,6 +468,7 @@ fn main() {
         v
     };
     let pulses = take("--pulses").unwrap_or_default();
+    let tape = take("--tape");
     let hash_log = take("--hash-log");
     let from: u64 = take("--from")
         .map(|v| v.parse().expect("--from"))
@@ -353,6 +483,7 @@ fn main() {
             n(2),
             &args[3],
             &pulses,
+            tape.as_deref(),
             hash_log.as_deref(),
             from,
         ),
