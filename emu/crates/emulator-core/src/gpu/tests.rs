@@ -3382,9 +3382,13 @@ fn interlaced_480_deinterlace_modes_combine_the_fields() {
 }
 
 #[test]
-fn display_fingerprint_tracks_displayed_pixels_exactly_as_display_hash_does() {
+fn display_bytes_track_displayed_pixels_exactly_as_display_hash_does() {
     let mut gpu = Gpu::new();
-    // 320x240, 15bpp, from VRAM (0, 0).
+    // Nothing configured: no picture and no bytes.
+    let mut bytes = Vec::new();
+    assert_eq!(gpu.display_bytes_into(&mut bytes), None);
+    assert!(bytes.is_empty());
+    // 320x226, 15bpp, from VRAM (0, 0).
     for word in [
         0x0800_0001,
         0x0500_0000,
@@ -3393,24 +3397,25 @@ fn display_fingerprint_tracks_displayed_pixels_exactly_as_display_hash_does() {
     ] {
         assert!(gpu.write32(GP1_ADDR, word));
     }
-    let hash = |g: &Gpu| g.display_hash().0;
-    let (h0, f0) = (hash(&gpu), gpu.display_fingerprint());
-    assert_eq!(
-        f0,
-        gpu.display_fingerprint(),
-        "stable for an unchanged picture"
-    );
+    let snapshot = |g: &Gpu| {
+        let mut bytes = Vec::new();
+        let shape = g.display_bytes_into(&mut bytes);
+        (g.display_hash().0, shape, bytes)
+    };
+    let first = snapshot(&gpu);
+    assert_eq!(first.1, Some((320, 226)));
+    assert_eq!(first.2.len(), 320 * 226 * 2);
+    assert_eq!(first, snapshot(&gpu), "stable for an unchanged picture");
     // A pixel outside the displayed rectangle changes neither.
     gpu.vram.set_pixel(900, 400, 0x1234);
-    assert_eq!((hash(&gpu), gpu.display_fingerprint()), (h0, f0));
-    // A pixel inside it changes both, including the last column of a row and a row's
-    // trailing halfwords (320 is a multiple of 4; the odd-width case is the remainder arm).
+    assert_eq!(first, snapshot(&gpu));
+    // A pixel inside it changes both, including the last column of a row.
     for (x, y) in [(0, 0), (319, 0), (5, 100), (319, 200)] {
-        let before = (hash(&gpu), gpu.display_fingerprint());
-        gpu.vram.set_pixel(x, y, 0x7fff ^ (x as u16) ^ (y as u16));
-        let after = (hash(&gpu), gpu.display_fingerprint());
+        let before = snapshot(&gpu);
+        gpu.vram.set_pixel(x, y, 0x7fff ^ x ^ y);
+        let after = snapshot(&gpu);
         assert_ne!(before.0, after.0, "display_hash sees ({x}, {y})");
-        assert_ne!(before.1, after.1, "display_fingerprint sees ({x}, {y})");
+        assert_ne!(before.2, after.2, "display_bytes_into sees ({x}, {y})");
     }
 }
 

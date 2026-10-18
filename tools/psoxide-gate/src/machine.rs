@@ -69,8 +69,13 @@ pub struct Machine {
     deadline: u64,
     period: u64,
     last_display: (u16, u16),
-    last_hash: u64,
     track_display: bool,
+    /// The displayed picture at the previous tick: its size and bytes (see
+    /// `Gpu::display_bytes_into`); `None` size is a display not yet configured.
+    last_shape: Option<(u16, u16)>,
+    last_bytes: Vec<u8>,
+    /// Scratch for the current tick's displayed bytes, swapped with `last_bytes`.
+    scratch_bytes: Vec<u8>,
 }
 
 pub struct Boot<'a> {
@@ -161,8 +166,10 @@ impl Machine {
             deadline,
             period,
             last_display: (area.x, area.y),
-            last_hash: 0,
             track_display: opts.track_display,
+            last_shape: None,
+            last_bytes: Vec::new(),
+            scratch_bytes: Vec::new(),
         })
     }
 
@@ -306,10 +313,16 @@ impl Machine {
         let start = (area.x, area.y);
         let flipped = start != self.last_display;
         self.last_display = start;
+        // Whether the picture differs from the previous tick's. Comparing the pixels
+        // themselves is the same test as comparing a hash of them without the
+        // collision, and cheaper than hashing: a copy and a compare against the last
+        // tick's, where the serial hash was about 6% of a gate run and the word-wise
+        // fingerprint after it 1 to 1.4%.
         let changed = if self.track_display {
-            let hash = self.bus.gpu.display_fingerprint();
-            let changed = hash != self.last_hash;
-            self.last_hash = hash;
+            let shape = self.bus.gpu.display_bytes_into(&mut self.scratch_bytes);
+            let changed = shape != self.last_shape || self.scratch_bytes != self.last_bytes;
+            self.last_shape = shape;
+            std::mem::swap(&mut self.last_bytes, &mut self.scratch_bytes);
             changed
         } else {
             false
