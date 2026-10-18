@@ -206,6 +206,7 @@ fn run(a: Args) -> Result<(), String> {
             pad2: journey::Pad2Mode::None,
             memcard: journey::MemcardMode::Fresh,
             cmd_log: true,
+            track_display: true,
         })?;
         hw.restore_environment(&m.bus.gpu);
         let mut desired_scale = a.scale;
