@@ -69,7 +69,11 @@ pub struct Machine {
     deadline: u64,
     period: u64,
     last_display: (u16, u16),
-    last_hash: u64,
+    /// The displayed bytes at the previous tick (see `Gpu::display_bytes_into`),
+    /// `None` before the first tick.
+    last_bytes: Option<Vec<u8>>,
+    /// Scratch for the current tick's displayed bytes, swapped with `last_bytes`.
+    scratch_bytes: Vec<u8>,
 }
 
 pub struct Boot<'a> {
@@ -157,7 +161,8 @@ impl Machine {
             deadline,
             period,
             last_display: (area.x, area.y),
-            last_hash: 0,
+            last_bytes: None,
+            scratch_bytes: Vec::new(),
         })
     }
 
@@ -301,9 +306,16 @@ impl Machine {
         let start = (area.x, area.y);
         let flipped = start != self.last_display;
         self.last_display = start;
-        let (hash, ..) = self.bus.gpu.display_hash();
-        let changed = hash != self.last_hash;
-        self.last_hash = hash;
+        // Whether the picture differs from the previous tick's. Comparing the
+        // bytes the display hash covers is the same test as comparing their
+        // hashes (without the collision), at a fraction of the cost: the
+        // serial hash was about 6% of a gate run.
+        self.bus.gpu.display_bytes_into(&mut self.scratch_bytes);
+        let changed = self.last_bytes.as_deref() != Some(self.scratch_bytes.as_slice());
+        match &mut self.last_bytes {
+            Some(last) => std::mem::swap(last, &mut self.scratch_bytes),
+            None => self.last_bytes = Some(std::mem::take(&mut self.scratch_bytes)),
+        }
         self.history.push(TickRec {
             flipped,
             changed,

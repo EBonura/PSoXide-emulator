@@ -984,28 +984,20 @@ impl Gpu {
             // recorded with this rule).
             return (psx_hw::hash::Fnv1a64::new().finish(), 0, 0, 0);
         }
-        let da = self.display_area();
+        let (da, effective_w, effective_h, row_bytes) = self.display_rows();
         let mut h = psx_hw::hash::Fnv1a64::new();
         let mut byte_len = 0usize;
-        let vram_w = crate::VRAM_WIDTH as u16;
-        let vram_h = crate::VRAM_HEIGHT as u16;
-        let effective_h = da.height.min(vram_h.saturating_sub(da.y));
-        let effective_w = if da.bpp24 {
-            da.width.min(rgb24_pixels_left(da.x))
-        } else {
-            da.width.min(vram_w.saturating_sub(da.x))
-        };
         // Each row's bytes are contiguous in VRAM (little-endian halfwords
         // from `da.x`; the clipping above keeps them inside the row): 2 per
         // pixel at 15bpp, 3 packed bytes per pixel at 24bpp. Hash them a
         // row at a time.
-        let row_bytes = usize::from(effective_w) * if da.bpp24 { 3 } else { 2 };
         let mut bytes = [0u8; VRAM_WIDTH * 2];
-        let presented = self.presented_words(Deinterlace::Weave);
-        let words = &*presented;
+        let hold = self.held_rows();
         for dy in 0..effective_h {
-            let start = usize::from(da.y + dy) * VRAM_WIDTH + usize::from(da.x);
+            let y = usize::from(da.y + dy);
             let halfwords = row_bytes.div_ceil(2);
+            let start = usize::from(da.x);
+            let words = self.presented_row(y, hold);
             for (pair, &word) in bytes
                 .chunks_exact_mut(2)
                 .zip(&words[start..start + halfwords])
@@ -1016,6 +1008,77 @@ impl Gpu {
             byte_len += row_bytes;
         }
         (h.finish(), effective_w as u32, effective_h as u32, byte_len)
+    }
+
+    /// The bytes [`Gpu::display_hash`] hashes, in the same order, written
+    /// over `out`. A host that only needs to know whether the picture changed
+    /// from one frame to the next compares these to the previous frame's
+    /// instead of hashing them: a copy and a compare run several times
+    /// faster than the serial hash and cannot collide.
+    pub fn display_bytes_into(&self, out: &mut Vec<u8>) {
+        out.clear();
+        if !self.display_configured {
+            return;
+        }
+        let (da, _, effective_h, row_bytes) = self.display_rows();
+        let halfwords = row_bytes.div_ceil(2);
+        let hold = self.held_rows();
+        out.resize(usize::from(effective_h) * row_bytes, 0);
+        for (dy, row) in out.chunks_exact_mut(row_bytes.max(1)).enumerate() {
+            let y = usize::from(da.y) + dy;
+            let start = usize::from(da.x);
+            let words = self.presented_row(y, hold);
+            let src = &words[start..start + halfwords];
+            let (pairs, tail) = row.split_at_mut(row_bytes & !1);
+            for (pair, &word) in pairs.chunks_exact_mut(2).zip(src) {
+                pair.copy_from_slice(&word.to_le_bytes());
+            }
+            if let [last] = tail {
+                *last = src[halfwords - 1].to_le_bytes()[0];
+            }
+        }
+    }
+
+    /// The display area clipped to VRAM, as `(area, width in pixels, rows,
+    /// bytes per row)`: what [`Gpu::display_hash`] and
+    /// [`Gpu::display_bytes_into`] cover.
+    fn display_rows(&self) -> (DisplayArea, u16, u16, usize) {
+        let da = self.display_area();
+        let vram_w = crate::VRAM_WIDTH as u16;
+        let vram_h = crate::VRAM_HEIGHT as u16;
+        let effective_h = da.height.min(vram_h.saturating_sub(da.y));
+        let effective_w = if da.bpp24 {
+            da.width.min(rgb24_pixels_left(da.x))
+        } else {
+            da.width.min(vram_w.saturating_sub(da.x))
+        };
+        let row_bytes = usize::from(effective_w) * if da.bpp24 { 3 } else { 2 };
+        (da, effective_w, effective_h, row_bytes)
+    }
+
+    /// While field rendering is in effect, the VRAM rows `first..last` whose
+    /// parity is not `shown` come from the held field (see
+    /// [`Gpu::presented_words`] with [`Deinterlace::Weave`]).
+    fn held_rows(&self) -> Option<(usize, usize, i32)> {
+        let shown = self.skipped_row_parity();
+        if shown < 0 || self.field_hold_fields < 2 {
+            return None;
+        }
+        let first = usize::from(self.display_start_y);
+        let last = (first + usize::from(self.effective_display_height())).min(VRAM_HEIGHT);
+        Some((first, last, shown))
+    }
+
+    /// One whole VRAM row (1024 halfwords) as `presented_words(Weave)`
+    /// would show it, without building the whole frame.
+    fn presented_row(&self, y: usize, hold: Option<(usize, usize, i32)>) -> &[u16] {
+        let row = y * VRAM_WIDTH..(y + 1) * VRAM_WIDTH;
+        match hold {
+            Some((first, last, shown)) if (first..last).contains(&y) && (y & 1) as i32 != shown => {
+                &self.field_hold[row]
+            }
+            _ => &self.vram.words()[row],
+        }
     }
 
     /// Enable per-pixel command tracing. Allocates the 2 MiB owner
