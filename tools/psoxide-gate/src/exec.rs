@@ -327,6 +327,7 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         pad2: journey.pad2,
         memcard: journey.memcard,
         cmd_log: want_hw || opts.trace_failures,
+        track_display: journey.uses_display_history(),
     }) {
         Ok(m) => m,
         Err(e) => {
@@ -617,6 +618,7 @@ impl Run<'_> {
                     pad2: self.journey.pad2,
                     memcard: self.journey.memcard,
                     cmd_log: self.hw.is_some() || self.trace.is_some(),
+                    track_display: self.journey.uses_display_history(),
                 })?;
                 if let Some(trace) = self.trace.as_mut() {
                     self.m.bus.gpu.enable_pixel_tracer();

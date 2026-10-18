@@ -970,6 +970,48 @@ impl Gpu {
         }
     }
 
+    /// A word-at-a-time fingerprint of the displayed pixels, for "did the picture change since
+    /// the last look" checks that never compare it against a recorded value (a gate asks once
+    /// per tick, and [`Gpu::display_hash`]'s byte-wise FNV was about 6% of a gate run). Covers
+    /// exactly the bytes `display_hash` covers; the value itself carries no meaning and may
+    /// change between versions.
+    pub fn display_fingerprint(&self) -> u64 {
+        const K: u64 = 0x9E37_79B9_7F4A_7C15;
+        if !self.display_configured {
+            return 0;
+        }
+        let da = self.display_area();
+        let vram_w = crate::VRAM_WIDTH as u16;
+        let vram_h = crate::VRAM_HEIGHT as u16;
+        let effective_h = da.height.min(vram_h.saturating_sub(da.y));
+        let effective_w = if da.bpp24 {
+            da.width.min(rgb24_pixels_left(da.x))
+        } else {
+            da.width.min(vram_w.saturating_sub(da.x))
+        };
+        let row_bytes = usize::from(effective_w) * if da.bpp24 { 3 } else { 2 };
+        let halfwords = row_bytes.div_ceil(2);
+        let presented = self.presented_words(Deinterlace::Weave);
+        let words = &*presented;
+        let mut h = K ^ (u64::from(effective_w) << 16 | u64::from(effective_h));
+        for dy in 0..effective_h {
+            let start = usize::from(da.y + dy) * VRAM_WIDTH + usize::from(da.x);
+            let row = &words[start..start + halfwords];
+            let mut quads = row.chunks_exact(4);
+            for q in &mut quads {
+                let w = u64::from(q[0])
+                    | u64::from(q[1]) << 16
+                    | u64::from(q[2]) << 32
+                    | u64::from(q[3]) << 48;
+                h = (h ^ w).wrapping_mul(K).rotate_left(29);
+            }
+            for &w in quads.remainder() {
+                h = (h ^ u64::from(w)).wrapping_mul(K).rotate_left(29);
+            }
+        }
+        h
+    }
+
     /// FNV-1a-64 over the visible display area's 15bpp pixel bytes,
     /// for frame comparisons. Rows are packed tightly (no stride padding)
     /// so a given (width, height, bpp) maps to a specific byte sequence.

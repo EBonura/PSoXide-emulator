@@ -70,6 +70,7 @@ pub struct Machine {
     period: u64,
     last_display: (u16, u16),
     last_hash: u64,
+    track_display: bool,
 }
 
 pub struct Boot<'a> {
@@ -79,6 +80,9 @@ pub struct Boot<'a> {
     pub memcard: MemcardMode,
     /// Arm the GP0 command log (needed by the hardware renderer).
     pub cmd_log: bool,
+    /// Hash the display every tick so `TickRec::changed` is real. Off, `changed` stays false
+    /// (only the `presenting` check reads it).
+    pub track_display: bool,
 }
 
 impl Machine {
@@ -158,6 +162,7 @@ impl Machine {
             period,
             last_display: (area.x, area.y),
             last_hash: 0,
+            track_display: opts.track_display,
         })
     }
 
@@ -301,9 +306,14 @@ impl Machine {
         let start = (area.x, area.y);
         let flipped = start != self.last_display;
         self.last_display = start;
-        let (hash, ..) = self.bus.gpu.display_hash();
-        let changed = hash != self.last_hash;
-        self.last_hash = hash;
+        let changed = if self.track_display {
+            let hash = self.bus.gpu.display_fingerprint();
+            let changed = hash != self.last_hash;
+            self.last_hash = hash;
+            changed
+        } else {
+            false
+        };
         self.history.push(TickRec {
             flipped,
             changed,

@@ -454,6 +454,19 @@ impl Journey {
         self.steps.iter().filter(|s| s.checkpoint.is_some())
     }
 
+    /// Whether any check reads the per-tick display history (`presenting`), the only
+    /// consumer of `TickRec::changed`. Without one the machine skips hashing the display
+    /// every tick, which was about 6% of a gate run.
+    pub fn uses_display_history(&self) -> bool {
+        self.steps.iter().any(|s| {
+            s.asserts
+                .iter()
+                .chain(s.hold_until.iter())
+                .chain(s.wait_until.iter())
+                .any(|a| a.kind == "presenting")
+        })
+    }
+
     pub fn needs_hw(&self) -> bool {
         self.checkpoints().any(|s| !s.no_matrix) && !self.render.scales.is_empty()
     }

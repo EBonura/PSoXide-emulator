@@ -3380,3 +3380,36 @@ fn interlaced_480_deinterlace_modes_combine_the_fields() {
         gpu.display_rgba8_with(Deinterlace::Weave).0
     );
 }
+
+#[test]
+fn display_fingerprint_tracks_displayed_pixels_exactly_as_display_hash_does() {
+    let mut gpu = Gpu::new();
+    // 320x240, 15bpp, from VRAM (0, 0).
+    for word in [
+        0x0800_0001,
+        0x0500_0000,
+        0x0600_0000 | 0x260 << 12 | 0x200,
+        0x0700_0000 | 0x0f2 << 10 | 0x010,
+    ] {
+        assert!(gpu.write32(GP1_ADDR, word));
+    }
+    let hash = |g: &Gpu| g.display_hash().0;
+    let (h0, f0) = (hash(&gpu), gpu.display_fingerprint());
+    assert_eq!(
+        f0,
+        gpu.display_fingerprint(),
+        "stable for an unchanged picture"
+    );
+    // A pixel outside the displayed rectangle changes neither.
+    gpu.vram.set_pixel(900, 400, 0x1234);
+    assert_eq!((hash(&gpu), gpu.display_fingerprint()), (h0, f0));
+    // A pixel inside it changes both, including the last column of a row and a row's
+    // trailing halfwords (320 is a multiple of 4; the odd-width case is the remainder arm).
+    for (x, y) in [(0, 0), (319, 0), (5, 100), (319, 200)] {
+        let before = (hash(&gpu), gpu.display_fingerprint());
+        gpu.vram.set_pixel(x, y, 0x7fff ^ (x as u16) ^ (y as u16));
+        let after = (hash(&gpu), gpu.display_fingerprint());
+        assert_ne!(before.0, after.0, "display_hash sees ({x}, {y})");
+        assert_ne!(before.1, after.1, "display_fingerprint sees ({x}, {y})");
+    }
+}
