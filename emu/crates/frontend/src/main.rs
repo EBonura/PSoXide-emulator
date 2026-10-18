@@ -121,9 +121,9 @@ fn guest_frame_dt(vblank_period: Option<u64>) -> f32 {
         .unwrap_or(FALLBACK_FRAME_DT)
 }
 /// Paused redraw cadence while interaction is plausible: a pad was
-/// recently used, the Menu overlay is up, or the editor workspace is
-/// front. Matches the run cadence so pad-driven menu navigation feels
-/// identical paused or running.
+/// recently used or the Menu overlay is up. Matches the run cadence so
+/// pad-driven menu navigation feels identical paused or running. (The
+/// editor workspace chooses its own cadence, see `schedule_next_redraw`.)
 #[cfg(not(target_arch = "wasm32"))]
 const ACTIVE_TICK_DT: f32 = 1.0 / 60.0;
 /// Paused redraw cadence when fully idle. Redraws still happen (each
@@ -2150,8 +2150,22 @@ impl Shell {
             let in_editor = self.state.workspace.is_editor();
             let pad_active =
                 now.duration_since(self.last_pad_activity).as_secs_f32() < PAD_ACTIVITY_WINDOW_SECS;
-            let tick = if self.state.menu.open || in_editor || pad_active {
+            let tick = if self.state.menu.open || pad_active {
                 ACTIVE_TICK_DT
+            } else if in_editor {
+                // The editor knows whether anything is happening: it keeps
+                // the display rate while the user works and for a moment
+                // after, and lets an untouched window tick at a fraction of
+                // that. Input events and egui's own repaint requests still
+                // wake the loop at once.
+                #[cfg(feature = "editor")]
+                {
+                    self.state.editor.redraw_interval().as_secs_f32()
+                }
+                #[cfg(not(feature = "editor"))]
+                {
+                    ACTIVE_TICK_DT
+                }
             } else {
                 IDLE_TICK_DT
             };
