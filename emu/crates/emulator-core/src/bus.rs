@@ -2245,6 +2245,11 @@ impl Bus {
                     left -= quiet;
                     continue;
                 }
+                let moved = self.advance_gpu_list_payload(left);
+                if moved > 0 {
+                    left -= moved;
+                    continue;
+                }
                 self.cycles = self.cycles.wrapping_add(1);
                 self.gpu.decay_busy(1);
                 self.advance_experimental_gpu_list();
@@ -3396,6 +3401,9 @@ impl Bus {
         } else {
             0
         };
+        if list_quiet == 0 {
+            return 0;
+        }
         let gpu_quiet = self.gpu.fifo_quiet_cycles().min(u64::from(u32::MAX)) as u32;
         list_quiet.min(gpu_quiet)
     }
@@ -3420,6 +3428,45 @@ impl Bus {
             }
         }
         self.experimental_gpu_list = Some(list);
+    }
+
+    /// Up to `left` cycles of the list walk's payload phase: each moves one
+    /// word from RAM into the GPU's DMA FIFO, exactly as a cycle of
+    /// [`Bus::advance_experimental_gpu_list`] does when a node's payload is
+    /// being delivered (channel running, setup delay over, the FIFO with
+    /// room), without re-deciding that for every word. Stops as soon as the
+    /// payload ends, the FIFO fills or the channel stops, leaving that cycle
+    /// to the general path. Returns the cycles taken.
+    fn advance_gpu_list_payload(&mut self, left: u32) -> u32 {
+        let overflow_drops = self.gpu_dma_overflow_drops;
+        let mut done = 0;
+        while done < left {
+            let Some(list) = self.experimental_gpu_list.as_mut() else {
+                break;
+            };
+            if list.setup_cycles > 0
+                || list.need_header
+                || list.remaining == 0
+                || self.dma.channels[2].channel_control & (1 << 24) == 0
+                || !self.dma.is_channel_enabled(2)
+                || (!overflow_drops && !self.gpu.dma_fifo_has_room())
+            {
+                break;
+            }
+            self.cycles = self.cycles.wrapping_add(1);
+            self.gpu.decay_busy(1);
+            done += 1;
+            // The cycle's decay can drain the FIFO into a command that
+            // narrows it (an upload): the word waits, as in the general path.
+            if !overflow_drops && !self.gpu.dma_fifo_has_room() {
+                break;
+            }
+            let word = read_ram_u32(&self.ram[..], list.word);
+            self.gpu.gp0_push_dma(word);
+            list.word = list.word.wrapping_add(4);
+            list.remaining -= 1;
+        }
+        done
     }
 
     fn advance_experimental_gpu_list(&mut self) {
