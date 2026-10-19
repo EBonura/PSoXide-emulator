@@ -1519,7 +1519,18 @@ impl Cpu {
     }
 
     #[inline]
+    fn tripwire(&self, bus: &mut Bus, addr: u32, width: u32, write: bool, value: u32) {
+        if crate::env_flag!("PSOXIDE_TRIPWIRE") {
+            let phys = memory::to_physical(addr);
+            let scratch_off = (0x1F80_0000..0x1F80_0400).contains(&phys)
+                && self.cache_control & 0x88 != 0x88;
+            bus.tripwire_access(self.pc, self.gpr(29), addr, width, write, value, scratch_off);
+        }
+    }
+
+    #[inline]
     fn read_byte(&self, addr: u32, bus: &mut Bus) -> u8 {
+        self.tripwire(bus, addr, 1, false, 0);
         if let Some(offset) = Self::cache_control_lane(addr) {
             return (self.read_cache_control() >> (offset * 8)) as u8;
         }
@@ -1528,6 +1539,7 @@ impl Cpu {
 
     #[inline]
     fn read_half(&self, addr: u32, bus: &mut Bus) -> u16 {
+        self.tripwire(bus, addr, 2, false, 0);
         if let Some(offset) = Self::cache_control_lane(addr) {
             return (self.read_cache_control() >> (offset * 8)) as u16;
         }
@@ -1536,6 +1548,7 @@ impl Cpu {
 
     #[inline]
     fn read_word(&self, addr: u32, bus: &mut Bus) -> u32 {
+        self.tripwire(bus, addr, 4, false, 0);
         if addr == memory::cache_control::ADDR {
             return self.read_cache_control();
         }
@@ -1551,6 +1564,7 @@ impl Cpu {
 
     #[inline]
     fn write_word(&mut self, addr: u32, value: u32, bus: &mut Bus) {
+        self.tripwire(bus, addr, 4, true, value);
         if addr == memory::cache_control::ADDR {
             self.write_cache_control(value);
             return;
@@ -1567,11 +1581,13 @@ impl Cpu {
             }
             return;
         }
+        bus.cpu_store_pc = self.pc;
         bus.cpu_write32(addr, value);
     }
 
     #[inline]
     fn write_byte(&mut self, addr: u32, value: u32, bus: &mut Bus) {
+        self.tripwire(bus, addr, 1, true, value);
         if let Some(offset) = Self::cache_control_lane(addr) {
             let shift = offset * 8;
             let merged = (self.read_cache_control() & !(0xFF << shift)) | ((value & 0xFF) << shift);
@@ -1585,6 +1601,7 @@ impl Cpu {
 
     #[inline]
     fn write_half(&mut self, addr: u32, value: u32, bus: &mut Bus) {
+        self.tripwire(bus, addr, 2, true, value);
         if let Some(offset) = Self::cache_control_lane(addr) {
             let shift = offset * 8;
             let merged =
@@ -1756,6 +1773,16 @@ impl Cpu {
     ) -> (u64, Result<(), ExecutionError>) {
         let mut steps = 0;
         while steps < max_steps {
+            if bus.cpu_hung {
+                // quake-gp0 experiment: the CPU is stalled on a GP0 store for
+                // good. Time passes, nothing executes, no interrupt is taken.
+                let now = bus.cycles();
+                if now < until_cycle {
+                    bus.add_cycles((until_cycle - now).min(u64::from(u32::MAX / 2)) as u32);
+                }
+                steps += 1;
+                break;
+            }
             // A waiting HLE call retried with nothing else happening is
             // charged without re-running the call; same instructions, same
             // cycles, same stop point (see `skip_hle_wait_stepwise`).

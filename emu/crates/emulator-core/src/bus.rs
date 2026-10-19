@@ -451,6 +451,21 @@ pub struct Bus {
     gpu_linked_list_fifo_guard: bool,
     #[serde(skip, default = "gpu_dma_overflow_drops_from_env")]
     gpu_dma_overflow_drops: bool,
+    /// Experiment (quake-gp0): PC of the CPU store in flight, for traces.
+    #[serde(skip)]
+    pub(crate) cpu_store_pc: u32,
+    /// Experiment (quake-gp0, `PSOXIDE_SILICON_GP0`): a CPU GP0 store blocked
+    /// on a FIFO that never drained; the CPU executes nothing from here on.
+    #[serde(skip)]
+    pub(crate) cpu_hung: bool,
+    #[serde(skip)]
+    gp0dma_events: u64,
+    #[serde(skip)]
+    gp0dma_total: u64,
+    #[serde(skip)]
+    tripwire_seen: std::collections::BTreeMap<(u8, u32, u32), u64>,
+    #[serde(skip)]
+    tripwire_min_sp: u32,
     /// Derived scheduling hint, not positional save-state data. After restore,
     /// inspect CHCR and the completion event once to recover an armed wait.
     #[serde(skip, default = "check_gpu_request_after_restore")]
@@ -585,6 +600,12 @@ impl Bus {
             gpu_linked_list_log_enabled: false,
             gpu_linked_list_fifo_guard: gpu_linked_list_fifo_guard_from_env(),
             gpu_dma_overflow_drops: gpu_dma_overflow_drops_from_env(),
+            cpu_store_pc: 0,
+            cpu_hung: false,
+            gp0dma_events: 0,
+            gp0dma_total: 0,
+            tripwire_seen: std::collections::BTreeMap::new(),
+            tripwire_min_sp: 0x8020_0000,
             gpu_dma_waiting_for_request: false,
             gpu_dma_wait: 0,
             experimental_gpu_list: None,
@@ -2616,7 +2637,105 @@ impl Bus {
         })
     }
 
+    /// `PSOXIDE_TRIPWIRE=1` (quake-gp0): log CPU accesses that real hardware may
+    /// not tolerate and that emulators answer silently: memory-control
+    /// registers, cache_control, EXP1/EXP2/EXP3, the hole after the
+    /// scratchpad, any other unmapped range. One line per distinct
+    /// (category, pc, address) the first time, then at each power-of-two count.
+    #[inline(never)]
+    pub(crate) fn tripwire_access(
+        &mut self,
+        pc: u32,
+        sp: u32,
+        virt: u32,
+        width: u32,
+        write: bool,
+        value: u32,
+        scratch_off: bool,
+    ) {
+        if (0x1F80_0000..0x1F80_0400).contains(&to_physical(sp)) {
+            let key = (10u8, 0u32, 0u32);
+            let count = self.tripwire_seen.entry(key).or_insert(0);
+            *count += 1;
+            if count.is_power_of_two() {
+                eprintln!("[tripwire] SCRATCHPAD STACK in use sp={sp:#010x} pc={pc:#010x} cyc={} n={count}", self.cycles);
+            }
+        }
+        if (0x8000_0000..0x8020_0000).contains(&sp) && sp < self.tripwire_min_sp {
+            if self.tripwire_min_sp.wrapping_sub(sp) >= 512 || sp < 0x801F_4000 {
+                eprintln!("[tripwire] STACK new low sp={sp:#010x} (depth {} bytes below the top) pc={pc:#010x} cyc={}", 0x8020_0000u32 - sp, self.cycles);
+            }
+            if self.tripwire_min_sp.wrapping_sub(sp) >= 512 || sp < 0x801F_4000 {
+                self.tripwire_min_sp = sp;
+            }
+        }
+        let phys = to_physical(virt);
+        let cat: u8;
+        let name: &str;
+        if scratch_off {
+            cat = 9;
+            name = "SCRATCHPAD_WHILE_DISABLED";
+        } else if (0xFFFE_0130..0xFFFE_0134).contains(&virt) {
+            cat = 2;
+            name = "CACHE_CONTROL";
+        } else if (0x1F80_1000..=0x1F80_1023).contains(&phys) || phys == 0x1F80_1060 {
+            cat = 1;
+            name = "MEMCTL";
+        } else if (0x1F00_0000..0x1F80_0000).contains(&phys) {
+            cat = 3;
+            name = "EXP1";
+        } else if (0x1F80_0400..0x1F80_1000).contains(&phys) {
+            cat = 4;
+            name = "SCRATCH_HOLE";
+        } else if (0x1F80_2000..0x1F80_4000).contains(&phys) {
+            if (0x1F80_2020..0x1F80_2030).contains(&phys) || phys == 0x1F80_2041 {
+                return;
+            }
+            cat = 5;
+            name = "EXP2";
+        } else if (0x1FA0_0000..0x1FC0_0000).contains(&phys) {
+            cat = 6;
+            name = "EXP3";
+        } else if (0x0080_0000..0x1F00_0000).contains(&phys) || phys >= 0x1FC8_0000 {
+            cat = 7;
+            name = "UNMAPPED";
+        } else {
+            return;
+        }
+        let key = (cat, pc, phys & !3);
+        let count = self.tripwire_seen.entry(key).or_insert(0);
+        *count += 1;
+        let n = *count;
+        if n.is_power_of_two() {
+            eprintln!(
+                "[tripwire] {name} {} w{width} addr={virt:#010x} val={value:#010x} pc={pc:#010x} sp={sp:#010x} cyc={} n={n}",
+                if write { "WRITE" } else { "READ" },
+                self.cycles
+            );
+        }
+    }
+
+    /// `PSOXIDE_TRIPWIRE=1`: a DMA address that is not main RAM proper.
+    fn tripwire_dma_address(&mut self, what: &str, ch: usize, addr: u32) {
+        let a = addr & 0x00FF_FFFF;
+        if a >= 0x0020_0000 {
+            let key = (8u8, ch as u32, a);
+            let count = self.tripwire_seen.entry(key).or_insert(0);
+            *count += 1;
+            if count.is_power_of_two() {
+                eprintln!(
+                    "[tripwire] DMA {what} ch{ch} address {a:#08x} is outside the 2 MB of RAM (mirror/unmapped) cyc={} n={count}",
+                    self.cycles
+                );
+            }
+        }
+    }
+
     fn run_dma_channel(&mut self, ch: usize) {
+        if crate::env_flag!("PSOXIDE_TRIPWIRE") {
+            let base = self.dma.channels[ch].base;
+            self.tripwire_dma_address("MADR", ch, base);
+        }
         self.gpu_quiet_until = 0;
         if Self::dma_wedge_mask() & (1 << ch) != 0 {
             // No transfer, no scheduled completion: CHCR keeps its START
@@ -3492,6 +3611,9 @@ impl Bus {
                 .schedule(crate::scheduler::EventSlot::GpuDma, self.cycles, 1);
             return;
         } else {
+            if crate::env_flag!("PSOXIDE_TRIPWIRE") {
+                self.tripwire_dma_address("list-next", 2, list.next);
+            }
             list.address = list.next & 0x001f_fffc;
             list.need_header = true;
         }
@@ -4021,8 +4143,17 @@ impl Bus {
         if to_physical(virt) < memory::ram::MIRROR_END {
             // The write buffer's drain time was set when the store was queued.
         }
+        if crate::env_flag!("PSOXIDE_TRACE_CPU_GP0_DMA")
+            && (to_physical(virt) == crate::gpu::GP0_ADDR
+                || to_physical(virt) == crate::gpu::GP1_ADDR)
+        {
+            self.trace_cpu_gpu_store_during_walk(to_physical(virt), value);
+        }
         if to_physical(virt) == crate::gpu::GP0_ADDR {
             self.gpu_quiet_until = 0;
+            if crate::env_flag!("PSOXIDE_SILICON_GP0") && !self.silicon_gp0_wait_for_room(value) {
+                return;
+            }
             if !self.gpu.note_cpu_gp0_arrival() {
                 // Strict-FIFO mode: silicon loses the word outright, and a
                 // lost word stalls nothing.
@@ -4032,6 +4163,85 @@ impl Bus {
             self.add_cycles(stall);
         }
         self.write32(virt, value);
+    }
+
+    /// `PSOXIDE_TRACE_CPU_GP0_DMA=1`: report every CPU store to GP0 or GP1
+    /// that lands while the channel-2 linked-list walk is in flight, with
+    /// where the walk and the GPU's packet assembler stand.
+    #[inline(never)]
+    fn trace_cpu_gpu_store_during_walk(&mut self, phys: u32, value: u32) {
+        let chcr = self.dma.channels[2].channel_control;
+        let busy = chcr & (1 << 24) != 0;
+        let list = self.experimental_gpu_list.as_ref();
+        self.gp0dma_total += 1;
+        if self.gp0dma_total.is_power_of_two() {
+            eprintln!(
+                "[gp0dma] total CPU GP0/GP1 stores so far={} (during a walk={})",
+                self.gp0dma_total, self.gp0dma_events
+            );
+        }
+        if !busy {
+            return;
+        }
+        self.gp0dma_events += 1;
+        let n = self.gp0dma_events;
+        let (asm_have, asm_expect, upload, polyline, fifo) = self.gpu.trace_assembler_state();
+        let walk = match list {
+            Some(l) => format!(
+                "walk(addr={:#010x} need_header={} remaining={} setup={})",
+                l.address, l.need_header, l.remaining, l.setup_cycles
+            ),
+            None => format!("no-walk-state(sync={})", (chcr >> 9) & 3),
+        };
+        let mid = list.is_some_and(|l| !l.need_header && l.remaining > 0);
+        if n <= 200 || n.is_power_of_two() {
+            eprintln!(
+                "[gp0dma] #{n} cyc={} pc={:#010x} {} word={value:#010x} {walk} mid_node={mid} asm={asm_have}/{asm_expect} upload={upload} polyline={polyline} fifo={fifo}",
+                self.cycles,
+                self.cpu_store_pc,
+                if phys == crate::gpu::GP0_ADDR { "GP0" } else { "GP1" },
+            );
+        }
+    }
+
+    /// `PSOXIDE_SILICON_GP0=1`: a CPU GP0 store blocks while the input FIFO
+    /// has no room (silicon stalls the bus; the default model drops the
+    /// word). Returns `false` once the FIFO has not drained for
+    /// `PSOXIDE_SILICON_GP0_HANG_CYCLES` (default 20 M): the CPU is then hung
+    /// for good (nothing executes, no interrupt is taken).
+    #[inline(never)]
+    fn silicon_gp0_wait_for_room(&mut self, value: u32) -> bool {
+        if self.gpu.dma_fifo_has_room() {
+            return true;
+        }
+        let limit: u64 = std::env::var("PSOXIDE_SILICON_GP0_HANG_CYCLES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20_000_000);
+        let mut waited: u64 = 0;
+        while !self.gpu.dma_fifo_has_room() {
+            if waited >= limit {
+                let (have, expect, upload, polyline, fifo) = self.gpu.trace_assembler_state();
+                eprintln!(
+                    "[silicon-gp0] CPU HUNG on GP0 store pc={:#010x} word={value:#010x} cyc={} fifo={fifo} asm={have}/{expect} upload={upload} polyline={polyline} chcr2={:#010x} gpustat={:#010x}",
+                    self.cpu_store_pc,
+                    self.cycles,
+                    self.dma.channels[2].channel_control,
+                    self.gpu.status_raw(),
+                );
+                self.cpu_hung = true;
+                return false;
+            }
+            self.add_cycles(16);
+            waited += 16;
+        }
+        if waited != 0 && crate::env_flag!("PSOXIDE_TRACE_CPU_GP0_DMA") {
+            eprintln!(
+                "[silicon-gp0] GP0 store pc={:#010x} blocked {waited} cycles for FIFO room",
+                self.cpu_store_pc
+            );
+        }
+        true
     }
 
     fn write32_impl(&mut self, virt: u32, phys: u32, value: u32) {

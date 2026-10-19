@@ -84,7 +84,7 @@ impl Bus {
     #[doc(hidden)]
     #[inline(always)]
     pub fn quiet_limit(&self) -> u64 {
-        if self.limits.frozen() || self.gpu_dma_waiting_for_request {
+        if self.limits.frozen() || self.gpu_dma_waiting_for_request || self.cpu_hung {
             return self.cycles;
         }
         let mut limit = self.scheduler.lowest_target().min(self.spu_sample_deadline);
@@ -118,7 +118,7 @@ impl Bus {
     #[doc(hidden)]
     #[inline(always)]
     pub fn quiet_limits(&self) -> (u64, u64) {
-        if self.limits.frozen() || self.gpu_dma_waiting_for_request {
+        if self.limits.frozen() || self.gpu_dma_waiting_for_request || self.cpu_hung {
             return (self.cycles, self.cycles);
         }
         let hard = self.scheduler.lowest_target().min(self.spu_sample_deadline);

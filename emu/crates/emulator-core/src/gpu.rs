@@ -1749,6 +1749,23 @@ impl Gpu {
         self.busy_credit.min(u64::from(u32::MAX)) as u32
     }
 
+    /// quake-gp0 trace: words held by the packet assembler, the words its
+    /// packet needs, upload and polyline mode, and the input FIFO length.
+    pub(crate) fn trace_assembler_state(&self) -> (usize, usize, bool, bool, usize) {
+        (
+            self.gp0_fifo.len(),
+            self.gp0_expected as usize,
+            self.vram_upload.is_some(),
+            self.polyline.is_some(),
+            self.dma_input_fifo.len(),
+        )
+    }
+
+    /// quake-gp0 trace: raw GPUSTAT.
+    pub(crate) fn status_raw(&self) -> u32 {
+        self.status.raw
+    }
+
     /// The real GP0 FIFO is this many words deep.
     pub const GP0_FIFO_DEPTH: u32 = 16;
 
