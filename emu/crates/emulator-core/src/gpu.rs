@@ -54,6 +54,8 @@ pub const GP1_ADDR: u32 = 0x1F80_1814;
 /// following GPUSTAT read but before the second. The captured SCPH-9902
 /// transition lands twelve CPU clock cycles after the command write.
 pub(crate) const GP1_STATUS_LATCH_CYCLES: u64 = 12;
+/// Bus cycle of the latest architectural GPU write, for experiment traces only.
+static TRACE_NOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const GPU_DMA_DIRECTION_LATCH_CYCLES: u64 = 12;
 const GPU_DMA_DIRECTION_FAST_LATCH_CYCLES: u64 = 5;
 
@@ -1559,9 +1561,43 @@ impl Gpu {
         self.wire_pixels_prev = std::mem::take(&mut self.wire_pixels_current);
     }
 
+    /// Experiment: `PSOXIDE_GPU_COST_SCALE=<n>` multiplies every draw cost by n (a slower GPU).
+    fn experiment_scale(cost: u64) -> u64 {
+        static SCALE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let s = *SCALE.get_or_init(|| {
+            std::env::var("PSOXIDE_GPU_COST_SCALE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1)
+        });
+        // `PSOXIDE_GPU_COST_JITTER=<seed>`: every charge is multiplied by 1..=5 from an xorshift
+        // stream, so GPU completion times scatter across frames.
+        static JITTER: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let seed = *JITTER.get_or_init(|| {
+            std::env::var("PSOXIDE_GPU_COST_JITTER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        });
+        if seed == 0 {
+            return cost.saturating_mul(s);
+        }
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static STATE: AtomicU64 = AtomicU64::new(0);
+        let mut x = STATE.load(Ordering::Relaxed);
+        if x == 0 {
+            x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        }
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        STATE.store(x, Ordering::Relaxed);
+        cost.saturating_mul(s).saturating_mul(1 + (x >> 33) % 5)
+    }
+
     /// Add CPU/bus-cycle work to the GPU execution backlog.
     pub fn charge_busy(&mut self, cost: u64) {
-        let cost = if self.limit_free_draw { 0 } else { cost };
+        let cost = if self.limit_free_draw { 0 } else { Self::experiment_scale(cost) };
         self.busy_credit = self.busy_credit.saturating_add(cost);
         if cost > 0 {
             self.cmd_ingest_credit = self.cmd_ingest_credit.max(GP1_STATUS_LATCH_CYCLES);
@@ -1571,7 +1607,7 @@ impl Gpu {
     /// Add DMA-fed work and retain the queue prefix through it. Later CPU
     /// commands can extend total busy time without extending DMA busy time.
     fn charge_dma_busy(&mut self, cost: u64) {
-        let cost = if self.limit_free_draw { 0 } else { cost };
+        let cost = if self.limit_free_draw { 0 } else { Self::experiment_scale(cost) };
         self.busy_credit = self.busy_credit.saturating_add(cost);
         self.dma_busy_credit = self.busy_credit;
         if cost > 0 {
@@ -2363,6 +2399,7 @@ impl Gpu {
     /// GP1(04h) DMA-direction changes are posted to GPUSTAT; direct host-side
     /// callers retain the immediate legacy behaviour through [`Gpu::write32`].
     pub fn write32_at(&mut self, phys: u32, value: u32, now: u64) -> bool {
+        TRACE_NOW.store(now, std::sync::atomic::Ordering::Relaxed);
         self.write32_inner(phys, value, Some(now))
     }
 
@@ -4759,6 +4796,13 @@ impl Gpu {
         // means 1024 / 512 respectively.
         let (w, h) = vram_transfer_size(wh);
         let remaining = vram_transfer_words(wh);
+        if crate::env_flag!("PSOXIDE_TRACE_GP0_A0") {
+            eprintln!(
+                "[gpu] A0 upload tick={} x={x} y={y} w={w} h={h} words={remaining} busy_credit={}",
+                TRACE_NOW.load(std::sync::atomic::Ordering::Relaxed) / 571_246,
+                self.busy_credit
+            );
+        }
         self.work.vram_upload_pixels = self
             .work
             .vram_upload_pixels

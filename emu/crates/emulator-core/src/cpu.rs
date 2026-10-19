@@ -624,6 +624,13 @@ pub struct Cpu {
     /// exception?". Excluded from save states.
     #[serde(skip)]
     should_take_interrupt_steps: u64,
+    /// Experiment: sample the interrupt line after every plain instruction,
+    /// not only at taken-branch boundaries (`PSOXIDE_IRQ_EVERY_INSN=1`;
+    /// interpreter only, run with `PSOXIDE_NO_BLOCK_CACHE=1`).
+    irq_every_insn: bool,
+    /// `PSOXIDE_IRQ_EVERY_INSN=2`: also take an interrupt between a branch and
+    /// its delay slot, with EPC = the branch and Cause.BD set (silicon).
+    irq_in_delay_slot: bool,
     /// Address of a GTE command about to execute, recorded at the start of
     /// the instruction before it when no interrupt was pending then. An
     /// interrupt found pending when that command starts was raised during
@@ -790,6 +797,8 @@ impl Cpu {
             exception_counts: [0; 32],
             irq_line_high_steps: 0,
             should_take_interrupt_steps: 0,
+            irq_every_insn: std::env::var_os("PSOXIDE_IRQ_EVERY_INSN").is_some(),
+            irq_in_delay_slot: std::env::var("PSOXIDE_IRQ_EVERY_INSN").as_deref() == Ok("2"),
             gte_irq_watch: None,
             branch_delay_next: false,
             executing_in_branch_delay: false,
@@ -2173,10 +2182,33 @@ impl Cpu {
         // and the IRQ only dispatches at the NEXT delay slot -- a
         // consistent 5-6 instruction delay that compounds into a visible
         // drift over a long run.
-        if in_delay_slot {
+        let every_boundary = self.irq_every_insn
+            && !in_delay_slot
+            && self.pending_pc.is_none()
+            && !self.branch_delay_next
+            && self.pending_load.is_none()
+            && self.pending_exception_pc.is_none();
+        // A branch (taken or not) has just retired and its delay slot is next:
+        // silicon takes the interrupt here with EPC = the branch, BD = 1, and
+        // the slot instruction does not run.
+        let before_delay_slot = self.irq_in_delay_slot
+            && !in_delay_slot
+            && (self.pending_pc.is_some() || self.branch_delay_next)
+            && self.pending_load.is_none()
+            && self.pending_exception_pc.is_none();
+        if in_delay_slot || every_boundary || before_delay_slot {
             bus.drain_scheduler_events_post_op();
         }
-        if gte_irq_taken_after && self.pending_exception_pc.is_none() {
+        if before_delay_slot && self.should_take_interrupt(bus) {
+            self.pending_pc = None;
+            self.branch_delay_next = false;
+            self.should_take_interrupt_steps = self.should_take_interrupt_steps.saturating_add(1);
+            self.enter_exception(ExceptionCode::Interrupt, pc_before.wrapping_add(4), true);
+            self.pc = self
+                .pending_exception_pc
+                .take()
+                .expect("enter_exception staged a vector");
+        } else if gte_irq_taken_after && self.pending_exception_pc.is_none() {
             // The GTE command has run; EPC stays on it, so a handler that
             // returns to EPC runs it a second time (hwtest v1.24 0xC9).
             self.should_take_interrupt_steps = self.should_take_interrupt_steps.saturating_add(1);
@@ -2185,7 +2217,7 @@ impl Cpu {
                 .pending_exception_pc
                 .take()
                 .expect("enter_exception staged a vector");
-        } else if in_delay_slot && self.should_take_interrupt(bus) {
+        } else if (in_delay_slot || every_boundary) && self.should_take_interrupt(bus) {
             self.should_take_interrupt_steps = self.should_take_interrupt_steps.saturating_add(1);
             // The IRQ is taken cleanly between instructions, not in a
             // delay slot of its own.

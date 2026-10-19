@@ -4068,6 +4068,20 @@ impl Bus {
         }
         if Dma::contains(phys) {
             self.settle_dma_block_runs_for_write(phys);
+            // Silicon (console-cd-dma-unreliable, b456747d): a CHCR write that
+            // sets START while START is still latched is IGNORED. Experiment
+            // switch `PSOXIDE_CHCR_BUSY_IGNORE=1`.
+            if crate::env_flag!("PSOXIDE_CHCR_BUSY_IGNORE")
+                && (phys.wrapping_sub(Dma::BASE) & 0xF) == 0x8
+                && phys.wrapping_sub(Dma::BASE) < 0x70
+                && value & (1 << 24) != 0
+                && self.dma.read32(phys) & (1 << 24) != 0
+            {
+                if crate::env_flag!("PSOXIDE_TRACE_CHCR_BUSY_IGNORE") {
+                    eprintln!("[dma] busy CHCR kick ignored @ {phys:#010x} value={value:#010x}");
+                }
+                return;
+            }
             if self.dma.write32(phys, value) {
                 self.irq.raise(IrqSource::Dma);
             }

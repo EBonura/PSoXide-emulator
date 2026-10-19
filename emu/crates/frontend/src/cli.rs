@@ -990,7 +990,9 @@ fn run_headless_launch(
     if !args.texture_filter.eq_ignore_ascii_case("all") {
         parse_texture_filter(&args.texture_filter)?;
     }
-    let capture_gpu_commands = args.dump_hw.is_some() || args.gpu_frame_stats_log.is_some();
+    let capture_gpu_commands = args.dump_hw.is_some()
+        || args.gpu_frame_stats_log.is_some()
+        || args.dump_draws.is_some();
 
     let mut cpu = Cpu::new();
 
@@ -1159,6 +1161,19 @@ fn run_headless_launch(
         attach_headless_playtest_pad(&mut bus, args.digital_pad, args.dualshock_pad);
         bus.set_port1_buttons(ButtonState::default());
         bus.set_port1_sticks(0x80, 0x80, 0x80, 0x80);
+        // Experiment: stall the CPU for N bus cycles after the restore, shifting
+        // every later interrupt, DMA and GPU event relative to the program.
+        if let Some(shift) = std::env::var("PSOXIDE_PHASE_SHIFT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            let mut left = shift;
+            while left > 0 {
+                let n = left.min(1000) as u32;
+                bus.tick(n);
+                left -= u64::from(n);
+            }
+        }
         if capture_gpu_commands {
             bus.gpu.enable_cmd_log();
         }
@@ -2439,6 +2454,30 @@ fn run_headless_launch(
                 total,
                 samples.len()
             );
+        }
+    }
+
+    if args.dump_hw.is_none() {
+        if let Some(path) = args.dump_draws.as_ref() {
+            use std::io::Write as _;
+            let mut out = std::io::BufWriter::new(
+                std::fs::File::create(path)
+                    .map_err(|e| format!("create {}: {e}", path.display()))?,
+            );
+            for entry in bus.gpu.cmd_log.iter() {
+                let keep = if matches!(entry.opcode, 0xA0..=0xBF) { 3 } else { entry.fifo.len() };
+                let words: Vec<String> =
+                    entry.fifo.iter().take(keep).map(|w| format!("{w:08X}")).collect();
+                writeln!(
+                    out,
+                    "{},{:02X},{},{}",
+                    entry.index,
+                    entry.opcode,
+                    entry.fifo.len(),
+                    words.join(",")
+                )
+                .map_err(|e| format!("write {}: {e}", path.display()))?;
+            }
         }
     }
 

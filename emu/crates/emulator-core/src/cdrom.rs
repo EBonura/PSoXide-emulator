@@ -1312,6 +1312,9 @@ impl CdRom {
         // Drain parameters into a local vec -- handlers need them and
         // pop-order matches push-order.
         let params: Vec<u8> = self.params.drain(..).collect();
+        if crate::env_flag!("PSOXIDE_TRACE_CD_CMD") {
+            eprintln!("[cd] cycle={now} cmd={command:#04x} params={params:02x?}");
+        }
         if self.command_log.len() < self.command_log_cap {
             let mut logged_params = [0u8; PARAM_FIFO_DEPTH];
             let n = params.len().min(PARAM_FIFO_DEPTH);
