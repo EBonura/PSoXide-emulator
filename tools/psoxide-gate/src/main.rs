@@ -154,7 +154,22 @@ fn parse_repo(s: &str) -> Result<(String, PathBuf), String> {
     Ok((name.to_string(), PathBuf::from(path)))
 }
 
+/// The GPU linked-list FIFO guard (`PSOXIDE_CHECK_GPU_LL_FIFO`, see
+/// `docs/gpu-linked-list-diagnostic.md`) is on for every gate run unless the
+/// caller set the variable (`=0` turns it off): silicon freezes on a list node
+/// over the GPU's 16-word FIFO (WipEout's 41-word title node, Celeste 0.2.3)
+/// while the emulator draws it, so a gate that does not check lets the freeze
+/// reach a console. `None` when the caller already chose.
+fn ll_guard_default(current: Option<&std::ffi::OsStr>) -> Option<&'static str> {
+    current.is_none().then_some("1")
+}
+
 fn main() -> ExitCode {
+    if let Some(value) = ll_guard_default(std::env::var_os("PSOXIDE_CHECK_GPU_LL_FIFO").as_deref())
+    {
+        // Before any thread exists: the guard is read when a bus is built.
+        std::env::set_var("PSOXIDE_CHECK_GPU_LL_FIFO", value);
+    }
     let cli = Cli::parse();
     let result = match cli.command {
         Cmd::Run(a) => cmd_run(&a),
@@ -617,6 +632,15 @@ fn cmd_list(a: &CommonArgs) -> Result<ExitCode, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_list_guard_defaults_on_and_yields_to_the_caller() {
+        use std::ffi::OsStr;
+        assert_eq!(ll_guard_default(None), Some("1"));
+        assert_eq!(ll_guard_default(Some(OsStr::new("0"))), None);
+        assert_eq!(ll_guard_default(Some(OsStr::new("1"))), None);
+        assert_eq!(ll_guard_default(Some(OsStr::new(""))), None);
+    }
 
     #[test]
     fn release_gate_never_substitutes_a_build_for_the_library_disc() {

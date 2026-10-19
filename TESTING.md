@@ -33,6 +33,8 @@ The rules below close those holes.
 
 ## Running it
 
+Every run checks GPU list nodes against the 16-word FIFO (`PSOXIDE_CHECK_GPU_LL_FIFO=1`, set by the gate unless you set the variable; `=0` turns it off), because silicon freezes on a longer node and the emulator does not.
+
 ```sh
 cargo build --release -p psoxide-gate        # or: make gate
 psoxide-gate list                            # each game, journey and whether it exists

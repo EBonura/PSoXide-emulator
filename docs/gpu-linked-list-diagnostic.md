@@ -9,7 +9,11 @@ number, payload count, and DMA mode before submitting that node's payload.
 This is an **opt-in conformance diagnostic**, not finite-FIFO emulation and not a
 prediction of which words real hardware loses. It must not become a default rule
 for arbitrary games: variable-length primitives and transfers need more detailed
-hardware treatment.
+hardware treatment. The one exception is `psoxide-gate`, the fleet gate, which
+sets it for the run when the variable is unset (`PSOXIDE_CHECK_GPU_LL_FIFO=0`
+turns it off): on silicon a node over 16 words froze WipEout's title (a
+41-word node) and Celeste 0.2.3 while the emulator drew them, and no fleet
+title other than the old WipEout build trips it.
 
 Sony's [SCEA Advanced GPU presentation, March 1996](https://psx.arthus.net/sdk/Psy-Q/DOCS/CONF/SCEA/adv_gpu.pdf)
 describes a 64-byte (16-word) FIFO (page index 2), source-chain requests when the
