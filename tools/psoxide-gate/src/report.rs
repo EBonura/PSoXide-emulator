@@ -34,7 +34,7 @@ fn write_images(dir: &Path, group: &Group) -> Result<Vec<(String, String, String
     let mut shots = Vec::new();
     let stem = &group.name;
     let mut put = |caption: String, file: String, img: &Img, class: &str| -> Result<(), String> {
-        img.save_png(&dir.join(&file))?;
+        img.save_png_report(&dir.join(&file))?;
         shots.push((caption, file, class.to_string()));
         Ok(())
     };

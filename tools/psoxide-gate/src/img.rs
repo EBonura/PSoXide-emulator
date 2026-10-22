@@ -266,8 +266,24 @@ impl Img {
         stats
     }
 
+    /// Smallest PNG: the golden images that are committed to the repos.
     pub fn save_png(&self, path: &Path) -> Result<(), String> {
-        use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+        self.save_png_with(path, image::codecs::png::CompressionType::Best)
+    }
+
+    /// Quick lossless PNG for the throw-away report pages: the same pixels as
+    /// [`Img::save_png`] in a small fraction of the time (the report used to be a
+    /// sixth of a short gate run) at about twice the bytes.
+    pub fn save_png_report(&self, path: &Path) -> Result<(), String> {
+        self.save_png_with(path, image::codecs::png::CompressionType::Fast)
+    }
+
+    fn save_png_with(
+        &self,
+        path: &Path,
+        compression: image::codecs::png::CompressionType,
+    ) -> Result<(), String> {
+        use image::codecs::png::{FilterType, PngEncoder};
         use image::ImageEncoder;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -281,7 +297,7 @@ impl Img {
         }
         PngEncoder::new_with_quality(
             std::io::BufWriter::new(file),
-            CompressionType::Best,
+            compression,
             FilterType::Adaptive,
         )
         .write_image(&rgb, self.w, self.h, image::ExtendedColorType::Rgb8)
@@ -378,6 +394,24 @@ mod tests {
             v.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
         }
         Img::from_rgba(w, h, v)
+    }
+
+    #[test]
+    fn report_png_decodes_to_the_same_pixels_as_the_golden_png() {
+        let mut img = solid(37, 23, [0, 0, 0]);
+        for (i, byte) in img.rgba.iter_mut().enumerate() {
+            if i % 4 != 3 {
+                *byte = (i.wrapping_mul(31) ^ (i >> 3)) as u8;
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (golden, report) = (dir.path().join("golden.png"), dir.path().join("report.png"));
+        img.save_png(&golden).unwrap();
+        img.save_png_report(&report).unwrap();
+        for path in [&golden, &report] {
+            let back = Img::load_png(path).unwrap();
+            assert_eq!((back.w, back.h, &back.rgba), (img.w, img.h, &img.rgba));
+        }
     }
 
     #[test]
