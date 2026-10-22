@@ -4385,6 +4385,7 @@ impl Gpu {
             or_v: u32::from(self.tex_window_offset_y) & my,
             page_x: u32::from(self.tex_page_x),
             page_y: u32::from(self.tex_page_y),
+            windowed: mx | my != 0,
         }
     }
 

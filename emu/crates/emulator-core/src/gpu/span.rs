@@ -80,6 +80,9 @@ pub(super) struct TexFetch {
     pub or_v: u32,
     pub page_x: u32,
     pub page_y: u32,
+    /// Whether the texture window changes any coordinate (`and_u`, `or_u`,
+    /// `and_v` and `or_v` are not the identity pair 0xff, 0).
+    pub windowed: bool,
 }
 
 impl TexFetch {
@@ -97,16 +100,22 @@ impl TexFetch {
     }
 
     /// The resolved 16-bit texel at 8-bit `(u, v)`; 0 means transparent.
+    ///
+    /// `WINDOW` says the texture window applies; without it `u` and `v`
+    /// (8-bit) are used as they are.
     #[inline(always)]
-    pub(super) fn texel<const D: u8>(
+    pub(super) fn texel<const D: u8, const WINDOW: bool>(
         &self,
         vram: &[u16; VRAM_LEN],
         clut: &[u16; 256],
         u: u32,
         v: u32,
     ) -> u16 {
-        let u = (u & self.and_u) | self.or_u;
-        let v = (v & self.and_v) | self.or_v;
+        let (u, v) = if WINDOW {
+            ((u & self.and_u) | self.or_u, (v & self.and_v) | self.or_v)
+        } else {
+            (u, v)
+        };
         let row = (((self.page_y + v) as usize) & (VRAM_HEIGHT - 1)) * VRAM_WIDTH;
         let at = |x: u32| vram[(row + ((x as usize) & (VRAM_WIDTH - 1))) & (VRAM_LEN - 1)];
         match D {
@@ -369,10 +378,18 @@ fn tex_span_chunked<const D: u8, const SHADE: u8, const DITHER: bool, const GENE
     while x < end {
         let n = (end - x).min(LANES);
         let mut texel = [0u16; LANES];
-        for t in texel.iter_mut().take(n) {
-            *t = tex.texel::<D>(vram, clut, u >> 24, v >> 24);
-            u = u.wrapping_add(du);
-            v = v.wrapping_add(dv);
+        if tex.windowed {
+            for t in texel.iter_mut().take(n) {
+                *t = tex.texel::<D, true>(vram, clut, u >> 24, v >> 24);
+                u = u.wrapping_add(du);
+                v = v.wrapping_add(dv);
+            }
+        } else {
+            for t in texel.iter_mut().take(n) {
+                *t = tex.texel::<D, false>(vram, clut, u >> 24, v >> 24);
+                u = u.wrapping_add(du);
+                v = v.wrapping_add(dv);
+            }
         }
         let out = shade_lanes::<SHADE, DITHER>(&texel, &rgb, prim.tint, &doff);
         let at = row + x;
@@ -530,9 +547,9 @@ pub(super) fn tex_tri_exact(
         let row = y as usize * VRAM_WIDTH;
         for x in xs..xe {
             let texel = match depth {
-                0 => tex.texel::<DEPTH_4>(vram, clut, u >> 24, v >> 24),
-                1 => tex.texel::<DEPTH_8>(vram, clut, u >> 24, v >> 24),
-                _ => tex.texel::<DEPTH_15>(vram, clut, u >> 24, v >> 24),
+                0 => tex.texel::<DEPTH_4, true>(vram, clut, u >> 24, v >> 24),
+                1 => tex.texel::<DEPTH_8, true>(vram, clut, u >> 24, v >> 24),
+                _ => tex.texel::<DEPTH_15, true>(vram, clut, u >> 24, v >> 24),
             };
             if texel != 0 {
                 let (kr, kg, kb) = if shade == SHADE_GOURAUD {
