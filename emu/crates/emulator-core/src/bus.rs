@@ -36,6 +36,7 @@ mod cc_dma;
 mod idle;
 mod jit_support;
 mod mmio_fast;
+pub(crate) use mmio_fast::IoWord;
 
 use block_support::RamPages;
 pub(crate) use block_support::RamStamp;
@@ -4185,23 +4186,16 @@ impl Bus {
         }
 
         if phys == IRQ_STAT_ADDR {
-            self.run_spu_to_current_cycle();
-            return self.irq.stat();
+            return self.read32_irq_stat();
         }
         if phys == IRQ_MASK_ADDR {
-            return (self.data_bus_latch & 0xffff_0000) | self.irq.mask();
+            return self.read32_irq_mask();
         }
         if Timers::contains(phys) {
-            if self.ram_write_buffer_ready_cycle > self.cycles {
-                self.advance_cycles((self.ram_write_buffer_ready_cycle - self.cycles) as u32);
-            }
-            self.ram_write_buffer_ready_cycle = self.cycles;
-            self.service_timers();
-            return (self.data_bus_latch & 0xffff_0000) | self.timers.read32(phys);
+            return self.read32_timers(phys);
         }
         if Dma::contains(phys) {
-            self.settle_dma_block_runs();
-            return self.dma.read32(phys);
+            return self.read32_dma(phys);
         }
         if let Some(v) = self.gpu.read32_at(phys, self.cycles) {
             self.service_gpu_irq();
@@ -4212,8 +4206,7 @@ impl Bus {
             return self.spu.read32_at(phys, self.cycles);
         }
         if Sio0::contains(phys) {
-            self.service_sio0();
-            return self.sio0.read32(phys).unwrap_or(0);
+            return self.read32_sio0(phys);
         }
         if Sio1::contains(phys) {
             return self.sio1.read32(phys);
@@ -4320,12 +4313,11 @@ impl Bus {
             return;
         }
         if phys == IRQ_STAT_ADDR {
-            self.run_spu_to_current_cycle();
-            self.irq.write_stat_at(value, self.cycles);
+            self.write32_irq_stat(value);
             return;
         }
         if phys == IRQ_MASK_ADDR {
-            self.irq.write_mask_at(value, self.cycles);
+            self.write32_irq_mask(value);
             return;
         }
         if Timers::contains(phys) {

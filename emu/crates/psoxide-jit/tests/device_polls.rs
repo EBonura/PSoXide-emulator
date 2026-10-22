@@ -1,10 +1,11 @@
-//! Byte loads and stores of the CD-ROM registers, the guest's polling
-//! traffic, run through the native tier's CD-ROM access path must leave the
-//! machine where plain `Cpu::step` leaves it: the index and status polls,
-//! command and parameter writes, response and data FIFO pops, interrupt
-//! acknowledges, with and without the CD-ROM interrupt enabled, in branch
-//! delay slots, next to load delays, and mixed with RAM and other device
-//! accesses. Lockstep against the interpreter, whole-machine compare.
+//! The device accesses of a guest's polling loops, run through the native
+//! tier's device paths, must leave the machine where plain `Cpu::step`
+//! leaves it: CD-ROM index and status polls, command and parameter writes,
+//! response and data FIFO pops, interrupt acknowledges; word loads of the
+//! interrupt, root-counter, DMA, GPU and controller-port registers; stores to
+//! the interrupt registers; with and without interrupts enabled, in branch
+//! delay slots, next to load delays, and mixed with RAM accesses. Lockstep
+//! against the interpreter, whole-machine compare.
 #![cfg(target_arch = "aarch64")]
 
 use psoxide_jit::testgen::{lockstep, program, Rng, CODE_BASE, DATA_BASE};
@@ -48,13 +49,40 @@ fn access(rng: &mut Rng) -> u32 {
         9 => i(0x23, IO, tmp(rng), 0x044), // lw JOY_STAT
         10 => i(0x2b, RAM, tmp(rng), 4 * rng.below(64)), // sw to RAM
         11 => i(0x23, RAM, tmp(rng), 4 * rng.below(64)), // lw from RAM
-        12 => i(
+        12 => io_access(rng),
+        _ => r(0x21, tmp(rng), tmp(rng), tmp(rng), 0), // addu
+    }
+}
+
+/// An access to an on-die register that polling loops use.
+fn io_access(rng: &mut Rng) -> u32 {
+    // Word loads: I_STAT, I_MASK, the root counters, DMA registers, GPUREAD
+    // and GPUSTAT, the controller port.
+    const LOADS: [u32; 28] = [
+        0x070, 0x074, 0x070, 0x074, 0x100, 0x104, 0x108, 0x110, 0x114, 0x118, 0x120, 0x124, 0x128,
+        0x0a0, 0x0a8, 0x0e8, 0x0f0, 0x0f4, 0x810, 0x814, 0x814, 0x040, 0x044, 0x044, 0x044, 0x048,
+        0x04a, 0x04e,
+    ];
+    match rng.below(10) {
+        0..=6 => i(
             0x23,
             IO,
             tmp(rng),
-            [0x070, 0x074, 0x100][rng.below(3) as usize],
+            LOADS[rng.below(LOADS.len() as u32) as usize],
         ),
-        _ => r(0x21, tmp(rng), tmp(rng), tmp(rng), 0), // addu
+        // Stores: acknowledge and mask interrupts, set up a root counter's
+        // mode and target, send a byte to the controller port.
+        7 => i(0x2b, IO, tmp(rng), [0x070, 0x074][rng.below(2) as usize]),
+        8 => i(
+            0x2b,
+            IO,
+            tmp(rng),
+            [0x104, 0x108, 0x114, 0x118, 0x124, 0x128][rng.below(6) as usize],
+        ),
+        9 => i(0x28, IO, tmp(rng), 0x040),
+        // A display-control command to the GPU, which the GPU applies when
+        // the clock reaches it.
+        _ => i(0x2b, IO, tmp(rng), 0x814),
     }
 }
 
@@ -93,9 +121,26 @@ fn cdrom_program(rng: &mut Rng, body_len: usize, irq: bool) -> Vec<u32> {
         i(0x0d, IO, IO, 0x1000),
         i(0x0f, 0, RAM, DATA_BASE >> 16),
     ];
+    // The controller port: mode, baud and control as the pad protocol sets
+    // them, so the byte stores start transfers.
+    code.extend([
+        i(0x09, 0, 2, 0x000d),
+        i(0x29, IO, 2, 0x048),
+        i(0x09, 0, 2, 0x0088),
+        i(0x29, IO, 2, 0x04e),
+        i(0x09, 0, 2, 0x1003),
+        i(0x29, IO, 2, 0x04a),
+    ]);
     if irq {
+        // Timer 2 interrupts every few hundred cycles; I_MASK = VBlank,
+        // CD-ROM, Timer 2 and the controller; SR = IEc | IM2 | CU2.
+        let target = 0x100 + rng.below(0x700);
         code.extend([
-            i(0x09, 0, 2, 0x0005), // addiu r2, r0, 5: VBlank | CD-ROM
+            i(0x09, 0, 2, target), // addiu r2, r0, target
+            i(0x29, IO, 2, 0x128), // sh r2, 0x128(r17)
+            i(0x09, 0, 2, 0x0058), // addiu r2, r0, 0x58
+            i(0x29, IO, 2, 0x124), // sh r2, 0x124(r17)
+            i(0x09, 0, 2, 0x00c5), // addiu r2, r0, 0xc5
             i(0x2b, IO, 2, 0x074), // sw r2, 0x74(r17): I_MASK
             i(0x0f, 0, 2, 0x4000), // lui r2, 0x4000
             i(0x0d, 2, 2, 0x0401), // ori r2, r2, 0x401
@@ -184,24 +229,33 @@ fn cdrom_program(rng: &mut Rng, body_len: usize, irq: bool) -> Vec<u32> {
     code
 }
 
-fn run(seed: u64, irq: bool) {
+fn run(seed: u64, body: usize, irq: bool) {
     let mut rng = Rng::new(seed);
-    let code = cdrom_program(&mut rng, 60, irq);
+    let code = cdrom_program(&mut rng, body, irq);
     let (_, handler) = program(&mut Rng::new(1), 1, 0);
     lockstep(&code, &handler, 200_000, 100, seed, true)
         .unwrap_or_else(|e| panic!("seed {seed} irq {irq}: {e}"));
 }
 
 #[test]
-fn cdrom_polls_without_interrupts() {
+fn device_polls_without_interrupts() {
     for seed in 1..=24 {
-        run(seed, false);
+        run(seed, 60, false);
     }
 }
 
 #[test]
-fn cdrom_polls_with_the_cdrom_interrupt() {
+fn device_polls_with_interrupts() {
     for seed in 100..=124 {
-        run(seed, true);
+        run(seed, 60, true);
+    }
+}
+
+/// A body larger than the instruction cache: the accesses come right after
+/// line fills, whose bus time the register reads wait for.
+#[test]
+fn device_polls_next_to_instruction_cache_fills() {
+    for seed in 200..=205 {
+        run(seed, 1_800, seed % 2 == 0);
     }
 }

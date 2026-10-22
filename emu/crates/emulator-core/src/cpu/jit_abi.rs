@@ -721,7 +721,7 @@ fn device_memory_op(
     index: u32,
     addr: u32,
 ) -> u32 {
-    if let Some(result) = cdrom_byte_access(run, cpu, bus, op, index, addr) {
+    if let Some(result) = fast_device_access(run, cpu, bus, op, index, addr) {
         return result;
     }
     // A device may read the GPU or the timers: hand the deferred decay and
@@ -780,7 +780,8 @@ fn device_memory_op(
         }
         None => run.pend_reg = 0,
     }
-    if !device_step_done(run, cpu, bus, addr, mark) {
+    let ram_untouched = matches!(op.class, crate::cpu::block::OpClass::Load);
+    if !device_step_done(run, cpu, bus, addr, mark, ram_untouched) {
         return NATIVE_STOP;
     }
     if run.ram_ok == 0 && run.irq_enabled != 0 {
@@ -797,7 +798,10 @@ fn device_memory_op(
 /// again), the boundary's quiet clock, the interrupt lines, RAM under the
 /// block (a DMA), and whether a GPU DMA transfer now competes for main RAM.
 /// `mark` is the interrupt raise total and the controller port's activity
-/// before the access.
+/// before the access. `ram_untouched` says the access cannot have written
+/// main RAM (a load, a register write that starts no transfer): the block's
+/// words then still match if they did before, and the comparison is not
+/// repeated.
 #[inline(always)]
 fn device_step_done(
     run: &mut NativeRun,
@@ -805,6 +809,7 @@ fn device_step_done(
     bus: &mut Bus,
     addr: u32,
     mark: crate::cpu::block::DeviceMark,
+    ram_untouched: bool,
 ) -> bool {
     // SAFETY: the batch state outlives the native run.
     let st = unsafe { &mut *run.batch };
@@ -815,24 +820,39 @@ fn device_step_done(
     run.limit = st.limit;
     run.boundary_until = bus.boundary_quiet_until();
     run.slow_boundary |= u32::from(bus.irq().pending());
-    run.ram_ok =
-        u32::from(run.irq_enabled != 0 && cpu.block_ram_matches(bus, run.block as usize - 1));
+    if !(ram_untouched && run.irq_enabled != 0 && run.ram_ok != 0) {
+        run.ram_ok =
+            u32::from(run.irq_enabled != 0 && cpu.block_ram_matches(bus, run.block as usize - 1));
+    }
     // ... and whether a GPU DMA transfer now competes for main RAM.
     run.ram_contended = u32::from(bus.jit_gpu_ram_contention_possible());
     true
 }
 
-/// [`jit_batch_memory`] for a byte load (`LB`, `LBU`) or store (`SB`) to a
-/// CD-ROM register, the commonest device access by far (guests poll the
-/// index/status and interrupt-flag registers in tight loops). The same
-/// effects as the generic path, in the same order, without its dispatch:
-/// the batch step's issue cycle, load-delay commit and load shadow, the
-/// bus's CD-ROM access ([`Bus::cpu_cdrom_load8`], [`Bus::cpu_cdrom_store8`])
-/// and [`device_step_done`]. `None`, nothing changed, when the access is
-/// anything else or the generic path would not take its plain branch (a
-/// limit oracle, a streaming code fill, the cache isolated).
+/// How a fast device access reaches its register.
+#[derive(Clone, Copy)]
+enum FastAccess {
+    /// `LB`, `LBU` or `SB` of a CD-ROM register.
+    CdromByte,
+    /// `LW` of an interrupt, root-counter, DMA, GPU or SIO0 register.
+    IoLoad32(crate::bus::IoWord),
+    /// `SW` to `I_STAT` (`false`) or `I_MASK` (`true`).
+    IrqStore32(bool),
+}
+
+/// [`jit_batch_memory`] for the device accesses guests make in tight
+/// polling loops: byte loads and stores of the CD-ROM registers, word loads
+/// of the interrupt, root-counter, DMA, GPU and controller-port registers,
+/// word stores to the interrupt registers. The same effects as the generic
+/// path, in the same order, without its dispatch: the batch step's issue
+/// cycle, load-delay commit and load shadow, the bus's access
+/// ([`Bus::cpu_cdrom_load8`], [`Bus::cpu_cdrom_store8`], [`Bus::cpu_io_load32`],
+/// [`Bus::cpu_irq_store32`]) and [`device_step_done`]. `None`, nothing
+/// changed, when the access is anything else or the generic path would not
+/// take its plain branch (a limit oracle, a streaming code fill, the cache
+/// isolated).
 #[inline(always)]
-fn cdrom_byte_access(
+fn fast_device_access(
     run: &mut NativeRun,
     cpu: &mut Cpu,
     bus: &mut Bus,
@@ -841,15 +861,27 @@ fn cdrom_byte_access(
     addr: u32,
 ) -> Option<u32> {
     let opcode = op.word >> 26;
-    if !matches!(opcode, 0x20 | 0x24 | 0x28) {
-        return None;
-    }
     let phys = psx_hw::memory::to_physical(addr);
-    if !crate::cdrom::CdRom::contains(phys)
-        || bus.limits.configured()
-        || !bus.code_stream_idle()
-        || cpu.cache_isolated()
-    {
+    let access = match opcode {
+        0x20 | 0x24 | 0x28 if crate::cdrom::CdRom::contains(phys) => FastAccess::CdromByte,
+        0x23 => FastAccess::IoLoad32(Bus::io_word_register(phys)?),
+        0x2b if matches!(
+            Bus::io_word_register(phys),
+            Some(crate::bus::IoWord::IrqStat)
+        ) =>
+        {
+            FastAccess::IrqStore32(false)
+        }
+        0x2b if matches!(
+            Bus::io_word_register(phys),
+            Some(crate::bus::IoWord::IrqMask)
+        ) =>
+        {
+            FastAccess::IrqStore32(true)
+        }
+        _ => return None,
+    };
+    if bus.limits.configured() || !bus.code_stream_idle() || cpu.cache_isolated() {
         return None;
     }
     // A device may read the GPU or the timers: hand the last branch
@@ -874,18 +906,30 @@ fn cdrom_byte_access(
     // before the access.
     bus.advance_exact(run.issue + u64::from(crate::cpu::timing::cycle_cost(op.word)));
     run.issue = 0;
-    let load = opcode != 0x28;
     let mut value = 0;
-    if load {
-        let byte = bus.cpu_cdrom_load8(phys);
-        value = if opcode == 0x20 {
-            byte as i8 as i32 as u32
-        } else {
-            u32::from(byte)
-        };
-    } else {
-        bus.cpu_cdrom_store8(phys, cpu.gpr(op.rt));
-    }
+    let load = match access {
+        FastAccess::CdromByte if opcode != 0x28 => {
+            let byte = bus.cpu_cdrom_load8(phys);
+            value = if opcode == 0x20 {
+                byte as i8 as i32 as u32
+            } else {
+                u32::from(byte)
+            };
+            true
+        }
+        FastAccess::CdromByte => {
+            bus.cpu_cdrom_store8(phys, cpu.gpr(op.rt));
+            false
+        }
+        FastAccess::IoLoad32(register) => {
+            value = bus.cpu_io_load32(register, phys);
+            true
+        }
+        FastAccess::IrqStore32(mask) => {
+            bus.cpu_irq_store32(mask, cpu.gpr(op.rt));
+            false
+        }
+    };
     run.ran += 1;
     // The load in flight lands now; a load of this op's takes its place.
     if committing {
@@ -905,7 +949,7 @@ fn cdrom_byte_access(
         run.shadow_pos = 0;
         run.shadow_reg = u32::from(op.rt);
     }
-    if !device_step_done(run, cpu, bus, addr, mark) {
+    if !device_step_done(run, cpu, bus, addr, mark, true) {
         return Some(NATIVE_STOP);
     }
     Some(if run.ram_ok == 0 && run.irq_enabled != 0 {
