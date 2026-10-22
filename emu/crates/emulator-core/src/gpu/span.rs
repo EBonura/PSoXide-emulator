@@ -394,21 +394,29 @@ fn tex_span_chunked<const D: u8, const SHADE: u8, const DITHER: bool, const GENE
         let out = shade_lanes::<SHADE, DITHER>(&texel, &rgb, prim.tint, &doff);
         let at = row + x;
         if GENERAL {
+            // The flags are copied out so the lane loop below reads no
+            // memory but the lanes: through the references it re-loaded them
+            // per lane and stayed scalar and branchy.
+            let (semi, blend, mask_check) = (prim.semi, prim.blend, merge.mask_check);
             with_chunk_keeping(vram, at, n, |dst| {
-                let blended = if prim.semi {
-                    blend_lanes(dst, &out, prim.blend)
+                let blended = if semi {
+                    blend_lanes(dst, &out, blend)
                 } else {
                     out
                 };
+                // Per lane, with masks of all ones or none (no branches):
+                // a lane is drawn when its texel is not 0 and the mask test
+                // does not protect it; a semi-transparent texel (bit 15)
+                // takes the blended colour.
+                let protect = u16::from(mask_check);
                 for i in 0..LANES {
                     let (d, t) = (dst[i], texel[i]);
-                    let skip = t == 0 || (merge.mask_check && d & 0x8000 != 0);
-                    let px = if prim.semi && t & 0x8000 != 0 {
-                        blended[i]
-                    } else {
-                        out[i]
-                    };
-                    dst[i] = if skip { d } else { px | mask_or };
+                    let opaque = 0u16.wrapping_sub(u16::from(t != 0));
+                    let protected = 0u16.wrapping_sub((d >> 15) & protect);
+                    let draw = opaque & !protected;
+                    let blend_it = 0u16.wrapping_sub((t >> 15) & u16::from(semi));
+                    let px = (blended[i] & blend_it) | (out[i] & !blend_it);
+                    dst[i] = (d & !draw) | ((px | mask_or) & draw);
                 }
             });
         } else if at + LANES <= VRAM_LEN {
