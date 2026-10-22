@@ -292,41 +292,63 @@ fn blend_lanes(bg: &[u16; LANES], fg: &[u16; LANES], mode: BlendMode) -> [u16; L
     out
 }
 
-/// Run `f` on the `n` (at most `LANES`) pixels of VRAM from `at` as one
-/// chunk. Lanes past `n` start as zero and are not stored back.
-#[inline(always)]
-fn with_chunk(vram: &mut [u16; VRAM_LEN], at: usize, n: usize, f: impl FnOnce(&mut [u16; LANES])) {
-    if n == LANES {
-        f((&mut vram[at..at + LANES]).try_into().unwrap());
-    } else {
+/// Run `body` on the `n` (at most `LANES`) pixels of VRAM from `at` as one
+/// chunk, `chunk` naming the `&mut [u16; LANES]`. Lanes past `n` start as
+/// zero and are not stored back.
+///
+/// A macro, not a function taking a closure: that closure was compiled out
+/// of line, and every live vector register spilled around it for each chunk.
+macro_rules! with_chunk {
+    ($vram:expr, $at:expr, $n:expr, |$chunk:ident| $body:block) => {{
+        let (vram, at, n) = (&mut *$vram, $at, $n);
+        let whole = n == LANES;
         let mut buf = [0u16; LANES];
-        for (i, b) in buf.iter_mut().enumerate().take(n) {
-            *b = vram[(at + i) & (VRAM_LEN - 1)];
+        if !whole {
+            for (i, b) in buf.iter_mut().enumerate().take(n) {
+                *b = vram[(at + i) & (VRAM_LEN - 1)];
+            }
         }
-        f(&mut buf);
-        for (i, &b) in buf.iter().enumerate().take(n) {
-            vram[(at + i) & (VRAM_LEN - 1)] = b;
+        let $chunk: &mut [u16; LANES] = if whole {
+            (&mut vram[at..at + LANES]).try_into().unwrap()
+        } else {
+            &mut buf
+        };
+        $body
+        if !whole {
+            for (i, &b) in buf.iter().enumerate().take(n) {
+                vram[(at + i) & (VRAM_LEN - 1)] = b;
+            }
         }
-    }
+    }};
 }
 
-/// [`with_chunk`] for a closure that leaves the lanes past `n` as they are
+/// `with_chunk!` for a body that leaves the lanes past `n` as they are
 /// (the textured loops: a lane past `n` has texel 0 and is never drawn). A
 /// chunk whose eight lanes lie inside VRAM is then read and written back
 /// whole, whatever `n` is, with no per-lane copies for the short chunks at
 /// the ends of a span.
-#[inline(always)]
-fn with_chunk_keeping(
-    vram: &mut [u16; VRAM_LEN],
-    at: usize,
-    n: usize,
-    f: impl FnOnce(&mut [u16; LANES]),
-) {
-    if at + LANES <= VRAM_LEN {
-        f((&mut vram[at..at + LANES]).try_into().unwrap());
-    } else {
-        with_chunk(vram, at, n, f);
-    }
+macro_rules! with_chunk_keeping {
+    ($vram:expr, $at:expr, $n:expr, |$chunk:ident| $body:block) => {{
+        let (vram, at, n) = (&mut *$vram, $at, $n);
+        let whole = at + LANES <= VRAM_LEN;
+        let mut buf = [0u16; LANES];
+        if !whole {
+            for (i, b) in buf.iter_mut().enumerate().take(n) {
+                *b = vram[(at + i) & (VRAM_LEN - 1)];
+            }
+        }
+        let $chunk: &mut [u16; LANES] = if whole {
+            (&mut vram[at..at + LANES]).try_into().unwrap()
+        } else {
+            &mut buf
+        };
+        $body
+        if !whole {
+            for (i, &b) in buf.iter().enumerate().take(n) {
+                vram[(at + i) & (VRAM_LEN - 1)] = b;
+            }
+        }
+    }};
 }
 
 /// How the pixels of an untraced primitive land in VRAM: `plain` is an
@@ -336,6 +358,39 @@ fn with_chunk_keeping(
 pub(super) struct Merge {
     pub mask_check: bool,
     pub mask_or: u16,
+}
+
+/// Merge a chunk of shaded texels into the destination of a general
+/// (semi-transparent or mask-tested) textured primitive. A separate
+/// `inline(always)` function, not a closure body: as a closure called at two
+/// sites of `with_chunk_keeping!` it was compiled out of line, which spilled
+/// every live vector register around each chunk.
+#[inline(always)]
+fn merge_tex_chunk(
+    dst: &mut [u16; LANES],
+    texel: &[u16; LANES],
+    out: &[u16; LANES],
+    (semi, blend, mask_check): (bool, BlendMode, bool),
+    mask_or: u16,
+) {
+    let blended = if semi {
+        blend_lanes(dst, out, blend)
+    } else {
+        *out
+    };
+    // Per lane, with masks of all ones or none (no branches): a lane is
+    // drawn when its texel is not 0 and the mask test does not protect it; a
+    // semi-transparent texel (bit 15) takes the blended colour.
+    let protect = u16::from(mask_check);
+    for i in 0..LANES {
+        let (d, t) = (dst[i], texel[i]);
+        let opaque = 0u16.wrapping_sub(u16::from(t != 0));
+        let protected = 0u16.wrapping_sub((d >> 15) & protect);
+        let draw = opaque & !protected;
+        let blend_it = 0u16.wrapping_sub((t >> 15) & u16::from(semi));
+        let px = (blended[i] & blend_it) | (out[i] & !blend_it);
+        dst[i] = (d & !draw) | ((px | mask_or) & draw);
+    }
 }
 
 /// One span of an untraced textured primitive whose texture page does not
@@ -394,30 +449,9 @@ fn tex_span_chunked<const D: u8, const SHADE: u8, const DITHER: bool, const GENE
         let out = shade_lanes::<SHADE, DITHER>(&texel, &rgb, prim.tint, &doff);
         let at = row + x;
         if GENERAL {
-            // The flags are copied out so the lane loop below reads no
-            // memory but the lanes: through the references it re-loaded them
-            // per lane and stayed scalar and branchy.
             let (semi, blend, mask_check) = (prim.semi, prim.blend, merge.mask_check);
-            with_chunk_keeping(vram, at, n, |dst| {
-                let blended = if semi {
-                    blend_lanes(dst, &out, blend)
-                } else {
-                    out
-                };
-                // Per lane, with masks of all ones or none (no branches):
-                // a lane is drawn when its texel is not 0 and the mask test
-                // does not protect it; a semi-transparent texel (bit 15)
-                // takes the blended colour.
-                let protect = u16::from(mask_check);
-                for i in 0..LANES {
-                    let (d, t) = (dst[i], texel[i]);
-                    let opaque = 0u16.wrapping_sub(u16::from(t != 0));
-                    let protected = 0u16.wrapping_sub((d >> 15) & protect);
-                    let draw = opaque & !protected;
-                    let blend_it = 0u16.wrapping_sub((t >> 15) & u16::from(semi));
-                    let px = (blended[i] & blend_it) | (out[i] & !blend_it);
-                    dst[i] = (d & !draw) | ((px | mask_or) & draw);
-                }
+            with_chunk_keeping!(vram, at, n, |dst| {
+                merge_tex_chunk(dst, &texel, &out, (semi, blend, mask_check), mask_or);
             });
         } else if at + LANES <= VRAM_LEN {
             // The chunk's eight lanes lie inside VRAM: merge the opaque
@@ -663,14 +697,21 @@ fn merge_flat_lanes(
         }
         return;
     }
-    with_chunk(vram, at, n, |dst| {
-        let px = blend_lanes(dst, fg, mode);
-        for i in 0..LANES {
-            let d = dst[i];
-            let skip = merge.mask_check && d & 0x8000 != 0;
-            dst[i] = if skip { d } else { px[i] | mask_or };
-        }
+    with_chunk!(vram, at, n, |dst| {
+        merge_blend_chunk(dst, fg, mode, merge);
     });
+}
+
+/// Blend a chunk of untextured pixels into `dst`, subject to the mask test
+/// (an `inline(always)` function for the reason given at `merge_tex_chunk`).
+#[inline(always)]
+fn merge_blend_chunk(dst: &mut [u16; LANES], fg: &[u16; LANES], mode: BlendMode, merge: Merge) {
+    let px = blend_lanes(dst, fg, mode);
+    for i in 0..LANES {
+        let d = dst[i];
+        let skip = merge.mask_check && d & 0x8000 != 0;
+        dst[i] = if skip { d } else { px[i] | merge.mask_or };
+    }
 }
 
 /// Draw a set-up flat (untextured) triangle, untraced.
