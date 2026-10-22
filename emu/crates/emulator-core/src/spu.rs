@@ -601,6 +601,14 @@ pub struct Spu {
     ram: Box<[u16; SPU_RAM_HALFWORDS]>,
     /// 24 voices.
     voices: [Voice; NUM_VOICES],
+    /// The voices that may be audible or changing state. A clear bit is a
+    /// voice that is idle (keyed off, past its start delay, no volume sweep)
+    /// and stays so until a key-on or a volume write sets its bit again, so
+    /// the mixer skips it without looking at it. A set bit proves nothing:
+    /// the mixer clears it when it finds the voice idle. All bits set after a
+    /// restore. Excluded from save states.
+    #[serde(skip, default = "all_voices")]
+    voices_in_play: u32,
 
     /// SPU control register (0x1F80_1DAA). Bit 15 = SPU enable, bit 6 =
     /// IRQ enable, bits 5..4 = RAM transfer mode, bit 7 = reverb master.
@@ -706,24 +714,6 @@ pub struct Spu {
     /// save states.
     #[serde(skip)]
     dbg_keyon_cfg: [(u32, u16, u16, u16, i16, i16); NUM_VOICES],
-    /// Per-voice envelope/decode trace, snapshotted every 1024 output
-    /// samples: (decoded_sample_pre_adsr, envelope_level, phase). Bisects
-    /// premature note cutoff -- decoded->0 with envelope held = decode/loop
-    /// bug; envelope->0 = ADSR/key-off. Capped, diagnostic-only. Excluded
-    /// from save states.
-    #[serde(skip)]
-    dbg_trace: [Vec<(i16, i32, u8)>; NUM_VOICES],
-    /// Output-sample clock that gates dbg_trace snapshots. Excluded from
-    /// save states.
-    #[serde(skip)]
-    dbg_sample_idx: u32,
-    /// Per-voice running max of |decoded sample| and envelope within the
-    /// current trace window; pushed + reset at each snapshot boundary.
-    /// Excluded from save states.
-    #[serde(skip)]
-    dbg_acc_smax: [i32; NUM_VOICES],
-    #[serde(skip)]
-    dbg_acc_emax: [i32; NUM_VOICES],
     /// Accumulated |dry| and |wet (reverb)| output magnitude over the run.
     /// A near-zero wet/dry ratio means the reverb bus is not contributing --
     /// missing reverb tails read as dry, "cut-off" notes vs the oracle.
@@ -830,6 +820,7 @@ impl Spu {
         Self {
             ram,
             voices: std::array::from_fn(|_| Voice::default()),
+            voices_in_play: all_voices(),
             spucnt: 0,
             spustat: 0,
             spustat_control: 0,
@@ -864,10 +855,6 @@ impl Spu {
             dbg_koff_count: [0; NUM_VOICES],
             dbg_sampstop_count: [0; NUM_VOICES],
             dbg_keyon_cfg: [(0, 0, 0, 0, 0, 0); NUM_VOICES],
-            dbg_trace: core::array::from_fn(|_| Vec::new()),
-            dbg_sample_idx: 0,
-            dbg_acc_smax: [0; NUM_VOICES],
-            dbg_acc_emax: [0; NUM_VOICES],
             dbg_dry_energy: 0,
             dbg_wet_energy: 0,
             dbg_pmon_ever: 0,
@@ -1130,12 +1117,6 @@ impl Spu {
     /// Diagnostic: per-voice note-end tally (key-off count, sample-stop count).
     pub fn voice_end_counts(&self) -> ([u32; NUM_VOICES], [u32; NUM_VOICES]) {
         (self.dbg_koff_count, self.dbg_sampstop_count)
-    }
-
-    /// Diagnostic: per-voice (start_addr, adsr_lo, adsr_hi, raw_pitch,
-    /// vol_l, vol_r) captured at the last key-on.
-    pub fn voice_trace(&self) -> &[Vec<(i16, i32, u8)>; NUM_VOICES] {
-        &self.dbg_trace
     }
 
     /// Diagnostic: (dry_energy, wet_energy, spucnt, reverb_on, pmon, noise_on)
@@ -1436,8 +1417,14 @@ impl Spu {
     fn write_voice_reg(&mut self, v: usize, off: u32, value: u16) {
         let voice = &mut self.voices[v];
         match off {
-            voice_offset::VOLUME_L => voice.vol_l.write(value),
-            voice_offset::VOLUME_R => voice.vol_r.write(value),
+            voice_offset::VOLUME_L => {
+                voice.vol_l.write(value);
+                self.voices_in_play |= 1 << v;
+            }
+            voice_offset::VOLUME_R => {
+                voice.vol_r.write(value);
+                self.voices_in_play |= 1 << v;
+            }
             voice_offset::PITCH => voice.raw_pitch = value,
             voice_offset::START_ADDR => {
                 // Echo the full 16-bit register on read; the decoder uses
@@ -1669,8 +1656,15 @@ impl Spu {
             return 0;
         }
         let span = SPU_RAM_HALFWORDS as i32 - start;
-        let at = self.reverb.curr_addr as i32 + offset.saturating_mul(4) + extra;
-        (start + (at - start).rem_euclid(span)) as usize
+        let from_start = self.reverb.curr_addr as i32 + offset.saturating_mul(4) + extra - start;
+        // Almost every access lands inside the buffer; the division is for
+        // the ones that wrap.
+        let within = if (0..span).contains(&from_start) {
+            from_start
+        } else {
+            from_start.rem_euclid(span)
+        };
+        (start + within) as usize
     }
 
     fn reverb_read(&self, offset: i32) -> i32 {
@@ -1801,15 +1795,19 @@ impl Spu {
         //     are ticked in `tick_voice` after each voice's sample is
         //     applied (apply, then tick).
         //     CD/external/reverb volumes are fixed (`write_signed_q15`,
-        //     a no-op tick); main volume may be sweep-programmed.
+        //     nothing to tick); main volume may be sweep-programmed.
         self.main_vol_l.tick();
         self.main_vol_r.tick();
-        self.cd_vol_l.tick();
-        self.cd_vol_r.tick();
-        self.ext_vol_l.tick();
-        self.ext_vol_r.tick();
-        self.reverb_vol_l.tick();
-        self.reverb_vol_r.tick();
+        debug_assert!(![
+            &self.cd_vol_l,
+            &self.cd_vol_r,
+            &self.ext_vol_l,
+            &self.ext_vol_r,
+            &self.reverb_vol_l,
+            &self.reverb_vol_r,
+        ]
+        .iter()
+        .any(|volume| volume.sweep_active));
 
         // 2. For each voice, step envelope + ADPCM playback, accumulate
         //    stereo contribution. A voice that modulates the next one
@@ -1823,25 +1821,27 @@ impl Spu {
         let mut sum_r: i32 = 0;
         let mut reverb_in_l: i32 = 0;
         let mut reverb_in_r: i32 = 0;
-        for v in 0..NUM_VOICES {
+        let mut in_play = self.voices_in_play;
+        while in_play != 0 {
+            let v = in_play.trailing_zeros() as usize;
+            in_play &= in_play - 1;
             // A keyed-off voice past its start delay with fixed volumes
-            // outputs silence and changes nothing but its diagnostics:
-            // exactly what `tick_voice` does for it, without the walk
-            // through decode, envelope and volume.
+            // outputs silence and changes nothing: exactly what `tick_voice`
+            // does for it, without the walk through decode, envelope and
+            // volume. It leaves the voices in play until it is woken.
             let voice = &self.voices[v];
             if voice.phase == AdsrPhase::Off
                 && voice.start_delay == 0
                 && !voice.vol_l.sweep_active
                 && !voice.vol_r.sweep_active
             {
-                self.idle_voice_diagnostics(v);
                 self.voices[v].last_sample = 0;
+                self.voices_in_play &= !(1 << v);
                 continue;
             }
             let (l, r) = self.tick_voice(v);
-            if l != 0 || r != 0 {
-                self.dbg_voiced_samples[v] = self.dbg_voiced_samples[v].saturating_add(1);
-            }
+            self.dbg_voiced_samples[v] =
+                self.dbg_voiced_samples[v].saturating_add(u32::from((l | r) != 0));
             sum_l += i32::from(l);
             sum_r += i32::from(r);
             if self.reverb_on & (1 << v) != 0 {
@@ -1849,7 +1849,6 @@ impl Spu {
                 reverb_in_r += i32::from(r);
             }
         }
-        self.dbg_sample_idx = self.dbg_sample_idx.wrapping_add(1);
         self.dbg_pmon_ever |= self.pmon;
         self.dbg_noise_ever |= self.noise_on;
 
@@ -1995,6 +1994,7 @@ impl Spu {
             let key_on = kon & bit != 0;
             if key_on {
                 self.voices[v].key_on();
+                self.voices_in_play |= bit;
                 self.dbg_kon_count[v] = self.dbg_kon_count[v].saturating_add(1);
                 let vc = &self.voices[v];
                 let cfg = (
@@ -2014,22 +2014,6 @@ impl Spu {
         }
     }
 
-    /// The diagnostic trace bookkeeping `tick_voice` does for an idle
-    /// voice (decoded sample 0, envelope held at its latched level).
-    #[inline(always)]
-    fn idle_voice_diagnostics(&mut self, v: usize) {
-        let env = self.voices[v].envelope;
-        if env > self.dbg_acc_emax[v] {
-            self.dbg_acc_emax[v] = env;
-        }
-        if self.dbg_sample_idx & 0x3ff == 0 && self.dbg_trace[v].len() < 2600 {
-            let ph = self.voices[v].phase as u8;
-            self.dbg_trace[v].push((self.dbg_acc_smax[v] as i16, self.dbg_acc_emax[v], ph));
-            self.dbg_acc_smax[v] = 0;
-            self.dbg_acc_emax[v] = 0;
-        }
-    }
-
     /// Advance one voice by one output sample. Returns `(l, r)`
     /// pre-main-volume, post-voice-volume contribution in i16 scale.
     fn tick_voice(&mut self, v: usize) -> (i16, i16) {
@@ -2046,23 +2030,6 @@ impl Spu {
         // Advance ADSR envelope.
         let env = self.voices[v].step_envelope();
         let mixed_i16 = apply_adsr_volume(sample_i16, env);
-
-        // Diagnostic trace: track per-window max decode amplitude + envelope,
-        // snapshot every 1024 samples to bisect premature cutoffs
-        // (decode-silence with envelope held vs envelope-drop).
-        let s_abs = (sample_i16 as i32).abs();
-        if s_abs > self.dbg_acc_smax[v] {
-            self.dbg_acc_smax[v] = s_abs;
-        }
-        if env > self.dbg_acc_emax[v] {
-            self.dbg_acc_emax[v] = env;
-        }
-        if self.dbg_sample_idx & 0x3ff == 0 && self.dbg_trace[v].len() < 2600 {
-            let ph = self.voices[v].phase as u8;
-            self.dbg_trace[v].push((self.dbg_acc_smax[v] as i16, self.dbg_acc_emax[v], ph));
-            self.dbg_acc_smax[v] = 0;
-            self.dbg_acc_emax[v] = 0;
-        }
 
         let voice = &mut self.voices[v];
         voice.last_sample = mixed_i16;
@@ -2337,6 +2304,11 @@ fn apply_adsr_volume(sample: i16, envelope: i32) -> i16 {
     // 0x3FFF decay sample confirms.
     let env = envelope.clamp(0, 0x7fff);
     (((sample as i32) * env) >> 15) as i16
+}
+
+/// The bit set of all [`NUM_VOICES`] voices.
+fn all_voices() -> u32 {
+    (1 << NUM_VOICES) - 1
 }
 
 /// Clamp a 32-bit sample to signed 16-bit range.
