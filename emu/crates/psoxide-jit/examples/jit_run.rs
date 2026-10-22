@@ -178,6 +178,9 @@ struct Host {
     /// Whether to hash the display at frame boundaries (lockstep and
     /// `--hash-log`; the plain timing run leaves it out, as the frontends do).
     record_hashes: bool,
+    /// FNV-1a over every drained SPU output sample, left then right, as
+    /// little-endian bytes: the audio stream's identity across builds.
+    audio_hash: u64,
 }
 
 impl Host {
@@ -192,6 +195,7 @@ impl Host {
             boundaries: Vec::new(),
             hashes: Vec::new(),
             record_hashes: true,
+            audio_hash: 0xcbf2_9ce4_8422_2325,
         };
         pad_support::sync_pad_mask(bus, 0, &host.pulses, &mut host.mask);
         host
@@ -221,7 +225,12 @@ impl Host {
     fn after(&mut self, cpu: &Cpu, bus: &mut Bus) {
         bus.run_spu_to_current_cycle();
         if bus.spu.audio_queue_len() != 0 {
-            let _ = bus.spu.drain_audio();
+            for (left, right) in bus.spu.drain_audio() {
+                for byte in left.to_le_bytes().into_iter().chain(right.to_le_bytes()) {
+                    self.audio_hash =
+                        (self.audio_hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
         }
         let vblank = bus.irq().raise_counts()[0] - self.base_vblank;
         if vblank == self.frame {
@@ -291,7 +300,7 @@ fn bench(
     let (host_insn, host_cycles) = (hc1.0 - hc0.0, hc1.1 - hc0.1);
     let timed_frames = host.frame - from;
     println!(
-        "mode={mode} frames={} timed_from={from} cpu_s={cpu_s:.3} fps_per_cpu_s={:.1} host_ginsn={:.4} host_gcycles={:.4} fps_per_gcycle={:.2} instructions={} cycles={} display_hash={:016x} state_hash={:016x}",
+        "mode={mode} frames={} timed_from={from} cpu_s={cpu_s:.3} fps_per_cpu_s={:.1} host_ginsn={:.4} host_gcycles={:.4} fps_per_gcycle={:.2} instructions={} cycles={} display_hash={:016x} state_hash={:016x} audio_hash={:016x}",
         host.frame,
         timed_frames as f64 / cpu_s,
         host_insn as f64 * 1e-9,
@@ -301,6 +310,7 @@ fn bench(
         bus.cycles() - cycles0,
         bus.gpu.display_hash().0,
         fnv(&state_bytes(&cpu, &bus)),
+        host.audio_hash,
     );
     if let Some(stats) = &tier {
         println!("tier: {:?}", *stats.lock().expect("tier stats"));
