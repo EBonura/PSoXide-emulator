@@ -239,7 +239,7 @@ pub(super) struct Cursor {
 }
 
 mod tier;
-pub(in crate::cpu) use tier::irq_raise_total;
+pub(in crate::cpu) use tier::DeviceMark;
 pub use tier::{tier_batch, BatchState, BlockCompiler, NATIVE_DECLINED};
 
 /// Decoded blocks, indexed by the physical word they start at.

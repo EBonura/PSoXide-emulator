@@ -234,14 +234,14 @@ impl Cpu {
                 // a caller looks at: run it, then end the batch, unless it
                 // was one [`Cpu::device_step_quiet`] lets the batch go past.
                 let mut device = false;
-                let mut raised = 0;
+                let mut mark = DeviceMark::default();
                 if memory {
                     addr = self.gpr(op.rs).wrapping_add((op.word as i16) as i32 as u32);
                     match tier_access_kind(op.word, addr) {
                         Access::Quiet => {}
                         Access::Device => {
                             device = true;
-                            raised = irq_raise_total(bus);
+                            mark = DeviceMark::take(bus);
                         }
                         Access::Unsafe => break 'blocks,
                     }
@@ -280,7 +280,7 @@ impl Cpu {
                     }
                     break 'blocks;
                 }
-                if device && self.device_step_quiet(bus, addr, raised, &mut st) {
+                if device && self.device_step_quiet(bus, addr, mark, &mut st) {
                     device = false;
                     // A DMA it started may have written this block's words.
                     ram_ok = false;
@@ -319,7 +319,9 @@ impl Cpu {
     /// counts, telemetry and pad polls ([`Cpu::run`]), so the step must be
     /// to the I/O ports other than the serial ports (pads, memory cards)
     /// and must not have raised an interrupt (`raised` is the raise total
-    /// before it). Anything else the access changed that the batch relies
+    /// before it) or changed the controller port's state (`mark`), except
+    /// by a plain read of one of its status registers that left it alone.
+    /// Anything else the access changed that the batch relies
     /// on is taken up again: the clock limits (it may have scheduled an
     /// event or ended the GPU's quiet span) are recomputed here, and the
     /// caller drops its RAM check. The branch-boundary work reads the rest
@@ -329,10 +331,10 @@ impl Cpu {
         &mut self,
         bus: &Bus,
         addr: u32,
-        raised: u64,
+        mark: DeviceMark,
         st: &mut BatchState,
     ) -> bool {
-        self.device_step_quiet_inline(bus, addr, raised, st)
+        self.device_step_quiet_inline(bus, addr, mark, st)
     }
 
     /// [`Cpu::device_step_quiet`] for a caller that wants it inline (the
@@ -342,13 +344,20 @@ impl Cpu {
         &mut self,
         bus: &Bus,
         addr: u32,
-        raised: u64,
+        mark: DeviceMark,
         st: &mut BatchState,
     ) -> bool {
         let phys = memory::to_physical(addr);
-        if !(0x1f80_1000..0x1f80_2000).contains(&phys)
-            || (0x1f80_1040..0x1f80_1060).contains(&phys)
-            || irq_raise_total(bus) != raised
+        if !(0x1f80_1000..0x1f80_2000).contains(&phys) || irq_raise_total(bus) != mark.raised {
+            return false;
+        }
+        // The serial ports. The second one always ends the batch. The
+        // controller port's registers are polled in tight loops; an access
+        // that left its state alone (no write, no data read, no transfer or
+        // ACK step due at that clock) cannot have moved a pad poll or the
+        // memory-card selection, which are all `stop_after` can look at.
+        if (0x1f80_1040..0x1f80_1060).contains(&phys)
+            && !((0x1f80_1040..0x1f80_1050).contains(&phys) && bus.sio0_activity() == mark.sio0)
         {
             return false;
         }
@@ -948,6 +957,25 @@ impl Cpu {
             }
         }
         Some(branch_after_this)
+    }
+}
+
+/// What a device access must leave alone for the batch to go on: the
+/// interrupts raised so far and the controller port's activity count.
+#[derive(Clone, Copy, Default)]
+pub(in crate::cpu) struct DeviceMark {
+    raised: u64,
+    sio0: u64,
+}
+
+impl DeviceMark {
+    /// The marks as of now, before the access.
+    #[inline(always)]
+    pub(in crate::cpu) fn take(bus: &Bus) -> Self {
+        Self {
+            raised: irq_raise_total(bus),
+            sio0: bus.sio0_activity(),
+        }
     }
 }
 

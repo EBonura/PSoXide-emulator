@@ -211,6 +211,11 @@ pub struct Sio0 {
     ack_deadline: Option<u64>,
     /// Absolute cycle at which the ACK pulse ends.
     ack_end_deadline: Option<u64>,
+    /// Counts every change the CPU's batch loop must not run past: a
+    /// register write, a data read and any state-machine step ([`Sio0::tick`]).
+    /// Host-side, never serialized. See [`Sio0::activity`].
+    #[serde(skip)]
+    activity: u64,
     /// Delay for the currently selected device kind.
     ack_delay_ticks: u64,
     /// Width of the `/ACK` pulse of the byte on the wire.
@@ -274,6 +279,7 @@ impl Sio0 {
             transfer_deadline: None,
             ack_deadline: None,
             ack_end_deadline: None,
+            activity: 0,
             ack_delay_ticks: PAD_ACK_DELAY_TICKS,
             ack_pulse_ticks: PAD_ACK_PULSE_TICKS,
             byte_index: 0,
@@ -461,6 +467,7 @@ impl Sio0 {
     /// Pop the RX slot, returning 0xFF when empty. Used by all three
     /// widths of DATA read -- the real chip zero-extends on the bus.
     fn pop_rx(&mut self) -> u8 {
+        self.activity += 1;
         self.rx.take().unwrap_or(0xff)
     }
 
@@ -476,11 +483,22 @@ impl Sio0 {
         }
     }
 
+    /// A count that moves whenever the port's observable state may have:
+    /// every register write, every data read and every step of the transfer
+    /// state machine ([`Sio0::tick`]). A read of the status, mode, control
+    /// or baud register that leaves it unchanged changed nothing a caller of
+    /// `Cpu::run` can look at (pad polls, memory-card selection), which is
+    /// what lets a batch go past it.
+    pub fn activity(&self) -> u64 {
+        self.activity
+    }
+
     /// Advance any pending transfer / ACK timers to `now`.
     pub fn tick(&mut self, now: u64) {
         loop {
             if let Some(deadline) = self.transfer_deadline {
                 if deadline <= now {
+                    self.activity += 1;
                     self.transfer_deadline = None;
                     if self.pending_rx_valid {
                         self.rx = Some(self.pending_rx);
@@ -501,6 +519,7 @@ impl Sio0 {
 
             if let Some(deadline) = self.ack_deadline {
                 if deadline <= now {
+                    self.activity += 1;
                     self.ack_deadline = None;
                     self.awaiting_ack = false;
                     let ack_pulse = self.pending_ack;
@@ -529,6 +548,7 @@ impl Sio0 {
 
             if let Some(deadline) = self.ack_end_deadline {
                 if deadline <= now {
+                    self.activity += 1;
                     self.ack_end_deadline = None;
                     self.ack_input = false;
                     continue;
@@ -755,6 +775,7 @@ impl Sio0 {
 
     /// Cycle-aware 16-bit write dispatch.
     pub fn write16_at(&mut self, phys: u32, value: u16, now: u64) -> bool {
+        self.activity += 1;
         match phys - Self::BASE {
             offset::DATA => self.write_data_at(value as u8, now),
             offset::STAT => {}
@@ -774,6 +795,7 @@ impl Sio0 {
 
     /// Cycle-aware 8-bit write dispatch.
     pub fn write8_at(&mut self, phys: u32, value: u8, now: u64) -> bool {
+        self.activity += 1;
         match phys - Self::BASE {
             offset::DATA => self.write_data_at(value, now),
             _ => return false,

@@ -71,6 +71,12 @@ impl RamPages {
 }
 
 impl Bus {
+    /// [`Sio0::activity`] of the controller port, for the batch loop.
+    #[inline(always)]
+    pub(crate) fn sio0_activity(&self) -> u64 {
+        self.sio0.activity()
+    }
+
     /// First bus cycle at which a tick could do more than move counters, or
     /// the current cycle when ticks are not plain counter updates at all.
     ///

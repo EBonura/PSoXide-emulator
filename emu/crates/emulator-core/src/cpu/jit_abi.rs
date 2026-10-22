@@ -615,7 +615,7 @@ fn device_memory_op(
     // A device may read the GPU or the timers: hand the deferred decay and
     // the last branch boundary to the bus first.
     run.flush_boundary(bus);
-    let raised = crate::cpu::block::irq_raise_total(bus);
+    let mark = crate::cpu::block::DeviceMark::take(bus);
     let pc = run.vaddr.wrapping_add(4 * index);
     cpu.tick = run.tick0 + run.ran;
     cpu.pc = pc;
@@ -668,7 +668,7 @@ fn device_memory_op(
         }
         None => run.pend_reg = 0,
     }
-    if !device_step_done(run, cpu, bus, addr, raised) {
+    if !device_step_done(run, cpu, bus, addr, mark) {
         return NATIVE_STOP;
     }
     if run.ram_ok == 0 && run.irq_enabled != 0 {
@@ -684,18 +684,19 @@ fn device_memory_op(
 /// take up again what the access may have changed: the limits (just taken
 /// again), the boundary's quiet clock, the interrupt lines, RAM under the
 /// block (a DMA), and whether a GPU DMA transfer now competes for main RAM.
-/// `raised` is the interrupt raise total before the access.
+/// `mark` is the interrupt raise total and the controller port's activity
+/// before the access.
 #[inline(always)]
 fn device_step_done(
     run: &mut NativeRun,
     cpu: &mut Cpu,
     bus: &mut Bus,
     addr: u32,
-    raised: u64,
+    mark: crate::cpu::block::DeviceMark,
 ) -> bool {
     // SAFETY: the batch state outlives the native run.
     let st = unsafe { &mut *run.batch };
-    if !cpu.device_step_quiet_inline(bus, addr, raised, st) {
+    if !cpu.device_step_quiet_inline(bus, addr, mark, st) {
         run.status = NATIVE_STOPPED;
         return false;
     }
@@ -742,7 +743,7 @@ fn cdrom_byte_access(
     // A device may read the GPU or the timers: hand the last branch
     // boundary to the bus first (the deferred decay is already applied).
     run.flush_boundary(bus);
-    let raised = crate::cpu::block::irq_raise_total(bus);
+    let mark = crate::cpu::block::DeviceMark::take(bus);
     cpu.tick = run.tick0 + run.ran;
     cpu.pc = run.vaddr.wrapping_add(4 * index);
     // The batch step takes the load in flight, a delay slot's branch and
@@ -792,7 +793,7 @@ fn cdrom_byte_access(
         run.shadow_pos = 0;
         run.shadow_reg = u32::from(op.rt);
     }
-    if !device_step_done(run, cpu, bus, addr, raised) {
+    if !device_step_done(run, cpu, bus, addr, mark) {
         return Some(NATIVE_STOP);
     }
     Some(if run.ram_ok == 0 && run.irq_enabled != 0 {
