@@ -457,13 +457,12 @@ fn tex_span_chunked<const D: u8, const SHADE: u8, const DITHER: bool, const GENE
             // The chunk's eight lanes lie inside VRAM: merge the opaque
             // lanes into the destination and store all of it back. Lanes
             // past `n` have texel 0, so they keep what is there.
+            // With lane masks, not `if`: the compiler turns a select between
+            // a new value and the old one into a conditional store per lane.
             let dst: &mut [u16; LANES] = (&mut vram[at..at + LANES]).try_into().unwrap();
             for i in 0..LANES {
-                dst[i] = if texel[i] != 0 {
-                    out[i] | mask_or
-                } else {
-                    dst[i]
-                };
+                let draw = 0u16.wrapping_sub(u16::from(texel[i] != 0));
+                dst[i] = (dst[i] & !draw) | ((out[i] | mask_or) & draw);
             }
         } else {
             for i in 0..n {
