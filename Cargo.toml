@@ -48,6 +48,40 @@ dbg_macro = "deny"
 todo = "deny"
 too_many_arguments = "allow"
 
+# Google's Rust style guide (docs/STYLE.md). Clean today in this tree, so denied for the
+# crates that opt in with `[lints] workspace = true`; tools/style-ratchet.sh pins every
+# crate, enrolled or not, at zero.
+wrong_self_convention = "deny"
+should_implement_trait = "deny"
+len_without_is_empty = "deny"
+borrowed_box = "deny"
+ptr_arg = "deny"
+new_without_default = "deny"
+new_ret_no_self = "deny"
+missing_safety_doc = "deny"
+unnecessary_unwrap = "deny"
+from_over_into = "deny"
+inherent_to_string = "deny"
+rc_buffer = "deny"
+rc_mutex = "deny"
+get_first = "deny"
+
+# Not clean yet. Allowed here so -D warnings stays green, counted by tools/style-ratchet.sh
+# against tools/style-ratchet.baseline: a count may fall, never rise.
+undocumented_unsafe_blocks = "allow"
+enum_glob_use = "allow"
+must_use_candidate = "allow"
+unwrap_used = "allow"
+exhaustive_enums = "allow"
+exhaustive_structs = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+wildcard_imports = "allow"
+string_add = "allow"
+string_add_assign = "allow"
+fn_params_excessive_bools = "allow"
+needless_for_each = "allow"
+
 [workspace.dependencies]
 # ---- Workspace-internal path deps (relative to the repo root) ----------
 psx-hw       = { path = "crates/psx-hw" }
