@@ -3030,12 +3030,19 @@ impl Bus {
             return None;
         }
         let total_words = mdec_dma_word_count(ch.block_control, ch.channel_control);
-        let step: u32 = if (ch.channel_control >> 1) & 1 != 0 {
-            0xffff_fffcu32
-        } else {
-            4
-        };
-        let mut addr = ch.base & 0x001f_fffc;
+        let descending = (ch.channel_control >> 1) & 1 != 0;
+        let start = ch.base & 0x001f_fffc;
+        let end = u64::from(start) + u64::from(total_words) * 4;
+        if !descending && end <= self.ram.len() as u64 {
+            // The usual transfer: an ascending run inside RAM, handed over in place.
+            self.mdec
+                .dma_write_in_bytes(&self.ram[start as usize..end as usize]);
+            // MADR ends where the last word went (hwtest v2.1 record 0x798).
+            self.dma.channels[0].base = end as u32 & 0x00ff_ffff;
+            return Some(total_words);
+        }
+        let step: u32 = if descending { 0xffff_fffcu32 } else { 4 };
+        let mut addr = start;
         let mut words: Vec<u32> = Vec::with_capacity(total_words as usize);
         for _ in 0..total_words {
             words.push(read_ram_u32(&self.ram[..], addr));
@@ -3062,12 +3069,28 @@ impl Bus {
             return None;
         }
         let total_words = mdec_dma_word_count(ch.block_control, ch.channel_control);
-        let step: u32 = if (ch.channel_control >> 1) & 1 != 0 {
-            0xffff_fffcu32
-        } else {
-            4
-        };
-        let mut addr = ch.base & 0x001f_fffc;
+        let descending = (ch.channel_control >> 1) & 1 != 0;
+        let start = ch.base & 0x001f_fffc;
+        if !descending {
+            // The usual transfer: ascending, so the words land in RAM as one
+            // run (two when it wraps past the end of RAM).
+            let mut addr = start;
+            let mut left = total_words as usize;
+            while left > 0 {
+                let offset = (addr & 0x001f_ffff) as usize;
+                let words = left.min((self.ram.len() - offset) / 4);
+                let bytes = words * 4;
+                self.mdec
+                    .dma_read_out_bytes(&mut self.ram[offset..offset + bytes]);
+                self.ram_pages.touch_range(offset, bytes);
+                addr = addr.wrapping_add(bytes as u32);
+                left -= words;
+            }
+            // MADR ends where the last word went (hwtest v2.1 record 0x798).
+            self.dma.channels[1].base = addr & 0x00ff_ffff;
+            return Some(total_words);
+        }
+        let mut addr = start;
         let mut words = vec![0u32; total_words as usize];
         self.mdec.dma_read_out(&mut words);
         for word in words {
@@ -3076,7 +3099,7 @@ impl Bus {
                 self.ram[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
                 self.ram_pages.touch(offset);
             }
-            addr = addr.wrapping_add(step);
+            addr = addr.wrapping_add(0xffff_fffc);
         }
         // MADR ends where the last word went (hwtest v2.1 record 0x798).
         self.dma.channels[1].base = addr & 0x00ff_ffff;
