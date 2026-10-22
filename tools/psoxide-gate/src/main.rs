@@ -154,21 +154,30 @@ fn parse_repo(s: &str) -> Result<(String, PathBuf), String> {
     Ok((name.to_string(), PathBuf::from(path)))
 }
 
-/// The GPU linked-list FIFO guard (`PSOXIDE_CHECK_GPU_LL_FIFO`, see
-/// `docs/gpu-linked-list-diagnostic.md`) is on for every gate run unless the
-/// caller set the variable (`=0` turns it off): silicon freezes on a list node
-/// over the GPU's 16-word FIFO (WipEout's 41-word title node, Celeste 0.2.3)
-/// while the emulator draws it, so a gate that does not check lets the freeze
-/// reach a console. `None` when the caller already chose.
+/// Diagnostic guards that are on for every gate run unless the caller set the
+/// variable (`=0` turns one off). Each makes the emulator fail on a pattern
+/// that freezes silicon and that the emulator would otherwise run happily:
+/// - `PSOXIDE_CHECK_GPU_LL_FIFO`, see `docs/gpu-linked-list-diagnostic.md`: a
+///   list node over the GPU's 16-word FIFO (WipEout's 41-word title node,
+///   Celeste 0.2.3);
+/// - `PSOXIDE_CHECK_CC_DMA`, see `emu/crates/emulator-core/src/bus/cc_dma.rs`:
+///   a `cache_control` bus-bit change or `SR.IsC` set (the BIOS `FlushCache`)
+///   while a DMA channel is busy, which made the next instruction fetch return
+///   the DMA's word on a console (Quake PSX).
+const GATE_GUARDS: [&str; 2] = ["PSOXIDE_CHECK_GPU_LL_FIFO", "PSOXIDE_CHECK_CC_DMA"];
+
+/// What to set a guard variable to: `Some("1")` when the caller left it unset,
+/// `None` when the caller already chose.
 fn ll_guard_default(current: Option<&std::ffi::OsStr>) -> Option<&'static str> {
     current.is_none().then_some("1")
 }
 
 fn main() -> ExitCode {
-    if let Some(value) = ll_guard_default(std::env::var_os("PSOXIDE_CHECK_GPU_LL_FIFO").as_deref())
-    {
-        // Before any thread exists: the guard is read when a bus is built.
-        std::env::set_var("PSOXIDE_CHECK_GPU_LL_FIFO", value);
+    for guard in GATE_GUARDS {
+        if let Some(value) = ll_guard_default(std::env::var_os(guard).as_deref()) {
+            // Before any thread exists: the guards are read when a bus is built.
+            std::env::set_var(guard, value);
+        }
     }
     let cli = Cli::parse();
     let result = match cli.command {
@@ -640,6 +649,12 @@ mod tests {
         assert_eq!(ll_guard_default(Some(OsStr::new("0"))), None);
         assert_eq!(ll_guard_default(Some(OsStr::new("1"))), None);
         assert_eq!(ll_guard_default(Some(OsStr::new(""))), None);
+    }
+
+    #[test]
+    fn the_gate_turns_on_the_list_and_the_cache_control_dma_guards() {
+        assert!(GATE_GUARDS.contains(&"PSOXIDE_CHECK_GPU_LL_FIFO"));
+        assert!(GATE_GUARDS.contains(&"PSOXIDE_CHECK_CC_DMA"));
     }
 
     #[test]

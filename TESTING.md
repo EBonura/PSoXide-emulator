@@ -33,7 +33,7 @@ The rules below close those holes.
 
 ## Running it
 
-Every run checks GPU list nodes against the 16-word FIFO (`PSOXIDE_CHECK_GPU_LL_FIFO=1`, set by the gate unless you set the variable; `=0` turns it off), because silicon freezes on a longer node and the emulator does not.
+Every run checks GPU list nodes against the 16-word FIFO (`PSOXIDE_CHECK_GPU_LL_FIFO=1`, set by the gate unless you set the variable; `=0` turns it off), because silicon freezes on a longer node and the emulator does not. It also fails a run that changes `cache_control` bus bits 13..16, 7 or 3, or sets `SR.IsC` (the BIOS `FlushCache`), while any DMA channel is busy (`PSOXIDE_CHECK_CC_DMA=1`, same default and `=0` switch; `warn` prints and counts instead of failing; see `docs/cache-control-dma-tripwire.md`).
 
 ```sh
 cargo build --release -p psoxide-gate        # or: make gate

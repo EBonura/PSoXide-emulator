@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- A cache-control / DMA tripwire (`PSOXIDE_CHECK_CC_DMA`, on for every
+  `psoxide-gate` run). Changing `cache_control` bits 13..16, 7 or 3, or setting
+  `SR.IsC` (which is what the BIOS `FlushCache` does), while any DMA channel is
+  busy now fails the run with the PC, the old and new values and every busy
+  channel's MADR, BCR and CHCR. On the console that sequence made the next
+  instruction fetch return the DMA's list word (the Quake PSX freeze); the
+  emulator never reproduced it. `warn` counts instead of failing, and `inject`
+  also hands the guest the DMA's word as its next bus fetch. See
+  docs/cache-control-dma-tripwire.md.
 - The SPU main volume is applied as the console documents it. A fixed
   register word holds half the level, so 0x3FFF is 0x7FFE (about unity), and a
   main volume sweep now moves the output. The mixer used the register word

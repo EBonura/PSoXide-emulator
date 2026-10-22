@@ -24,7 +24,7 @@ use psx_hw::memory;
 use psx_trace::InstructionRecord;
 use thiserror::Error;
 
-use crate::bus::{AccessWidth, Bus};
+use crate::bus::{AccessWidth, Bus, CcDmaEvent};
 use crate::freelook::{self, FreelookState};
 use psx_gte_core::Gte;
 
@@ -710,6 +710,11 @@ pub struct Cpu {
     /// produces the same results.
     #[serde(skip, default = "block_cache_default")]
     block_cache_enabled: bool,
+    /// `PSOXIDE_CHECK_CC_DMA=inject`: the word the next instruction fetch
+    /// that reaches the bus returns instead of the real one (the silicon
+    /// fault after a cache-control change under a busy DMA channel).
+    #[serde(skip)]
+    fetch_glitch: Option<u32>,
 }
 
 fn block_cache_default() -> bool {
@@ -809,6 +814,7 @@ impl Cpu {
             blocks: BlockCache::default(),
             cursor: Cursor::default(),
             block_cache_enabled: block_cache_default(),
+            fetch_glitch: None,
         }
     }
 
@@ -1136,6 +1142,9 @@ impl Cpu {
 
     #[inline(never)]
     fn fetch_instruction_slow(&mut self, addr: u32, bus: &mut Bus) -> u32 {
+        if let Some(word) = self.fetch_glitch.take() {
+            return word;
+        }
         if self.instruction_cache_event_profile_enabled {
             self.last_instruction_cache_refill = None;
         }
@@ -1498,9 +1507,28 @@ impl Cpu {
         self.cache_control & !((1 << 6) | (1 << 10))
     }
 
+    /// Report a bus-reconfiguring action to the cache-control / DMA tripwire
+    /// and, in inject mode, arm the fetch glitch. Block execution is turned
+    /// off from then on, so every fetch goes through `fetch_instruction`.
     #[inline]
-    fn write_cache_control(&mut self, value: u32) {
-        self.cache_control = value & !((1 << 6) | (1 << 10));
+    fn cc_dma_event(&mut self, bus: &mut Bus, event: CcDmaEvent) {
+        if let Some(word) = bus.cc_dma_check(self.pc, event) {
+            self.fetch_glitch = Some(word);
+            self.set_block_cache_enabled(false);
+        }
+    }
+
+    #[inline]
+    fn write_cache_control(&mut self, value: u32, bus: &mut Bus) {
+        let new = value & !((1 << 6) | (1 << 10));
+        self.cc_dma_event(
+            bus,
+            CcDmaEvent::CacheControl {
+                old: self.cache_control,
+                new,
+            },
+        );
+        self.cache_control = new;
     }
 
     #[inline]
@@ -1543,7 +1571,7 @@ impl Cpu {
     #[inline]
     fn write_word(&mut self, addr: u32, value: u32, bus: &mut Bus) {
         if addr == memory::cache_control::ADDR {
-            self.write_cache_control(value);
+            self.write_cache_control(value, bus);
             return;
         }
         if self.cache_isolated() {
@@ -1566,7 +1594,7 @@ impl Cpu {
         if let Some(offset) = Self::cache_control_lane(addr) {
             let shift = offset * 8;
             let merged = (self.read_cache_control() & !(0xFF << shift)) | ((value & 0xFF) << shift);
-            self.write_cache_control(merged);
+            self.write_cache_control(merged, bus);
             return;
         }
         if !self.cache_isolated() {
@@ -1580,7 +1608,7 @@ impl Cpu {
             let shift = offset * 8;
             let merged =
                 (self.read_cache_control() & !(0xFFFF << shift)) | ((value & 0xFFFF) << shift);
-            self.write_cache_control(merged);
+            self.write_cache_control(merged, bus);
             return;
         }
         if !self.cache_isolated() {
@@ -1967,6 +1995,15 @@ impl Cpu {
                 if out.flush_icache {
                     self.instruction_cache.invalidate_all();
                 }
+                if out.table == crate::hle_bios::Table::A && out.func == 0x44 {
+                    self.cc_dma_event(
+                        bus,
+                        CcDmaEvent::HleFlushCache {
+                            ra,
+                            cc: self.cache_control,
+                        },
+                    );
+                }
                 if let Some(v0) = out.v0 {
                     self.set_gpr(2, v0);
                 }
@@ -2257,7 +2294,7 @@ impl Cpu {
             0x0F => self.op_lui(instr),
             0x10 => {
                 if self.cop_instruction_usable(0) {
-                    self.dispatch_cop0(instr)
+                    self.dispatch_cop0(instr, bus)
                 } else {
                     self.raise_coprocessor_unusable(0, pc, in_delay_slot, bus)
                 }
@@ -2378,11 +2415,11 @@ impl Cpu {
 
     /// Dispatch table for COP0 instructions (primary opcode `0x10`).
     /// The sub-operation lives in bits 25..=21.
-    fn dispatch_cop0(&mut self, instr: u32) -> Result<(), ExecutionError> {
+    fn dispatch_cop0(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
         let cop_op = ((instr >> 21) & 0x1F) as u8;
         match cop_op {
             0x00 => self.op_mfc0(instr),
-            0x04 => self.op_mtc0(instr),
+            0x04 => self.op_mtc0(instr, bus),
             0x10 => self.op_rfe(),
             // The R3000A accepts the unused COP0 operation fields as inert
             // encodings. `cpu/cop::testCop0InvalidOpcode` observes no trap.
@@ -2745,7 +2782,7 @@ impl Cpu {
     }
 
     /// `MTC0 rt, rd` -- move from CPU GPR `rt` to COP0 register `rd`.
-    fn op_mtc0(&mut self, instr: u32) -> Result<(), ExecutionError> {
+    fn op_mtc0(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
         // Opt-in trace: catch anything setting SR.BEV (bit 22) mid-run --
         // exceptions then vector through the ROM handler and fall off the
         // mapped BIOS, which presents as a wild pc at 0xbfc80000.
@@ -2763,7 +2800,17 @@ impl Cpu {
 
         let rt = ((instr >> 16) & 0x1F) as u8;
         let rd = ((instr >> 11) & 0x1F) as usize;
-        self.cop0[rd] = self.gpr(rt);
+        let value = self.gpr(rt);
+        if rd == 12 {
+            self.cc_dma_event(
+                bus,
+                CcDmaEvent::Status {
+                    old: self.cop0[12],
+                    new: value,
+                },
+            );
+        }
+        self.cop0[rd] = value;
         Ok(())
     }
 
@@ -3910,6 +3957,7 @@ impl Default for Cpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bus::CcDmaMode;
 
     fn synthetic_bios_with_first_word(word: u32) -> Vec<u8> {
         synthetic_bios_with_words(&[word])
@@ -4327,6 +4375,230 @@ mod tests {
         cpu.step(&mut bus).unwrap();
         assert_eq!(cpu.pc(), 0x8002_4000);
         assert_eq!(cpu.fetch(&mut bus), 0x8888_8888);
+    }
+
+    /// DMA2 mid linked-list walk: CHCR busy, linked-list sync, from RAM.
+    fn start_fake_dma2_walk(bus: &mut Bus) {
+        bus.fake_busy_dma_channel(2, 0x000A_2B4C, 0x0100_0401);
+    }
+
+    /// A CPU as the BIOS leaves it: `cache_control` at its normal value.
+    fn booted_cpu() -> Cpu {
+        let mut cpu = Cpu::new();
+        cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+        cpu
+    }
+
+    fn tripwire_message(run: impl FnOnce() + std::panic::UnwindSafe) -> Option<String> {
+        let error = std::panic::catch_unwind(run).err()?;
+        error
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| error.downcast_ref::<&str>().map(|s| (*s).to_string()))
+    }
+
+    #[test]
+    fn cache_control_bus_bits_change_under_a_busy_dma_channel_is_a_hazard() {
+        let mut cpu = booted_cpu();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.set_cc_dma_mode(CcDmaMode::Fail);
+        start_fake_dma2_walk(&mut bus);
+        cpu.pc = 0xA001_166C;
+        // The SDK flush's first write: 0x1E988 -> 0x804 clears bits 13..16, 7, 3.
+        let message = tripwire_message(std::panic::AssertUnwindSafe(|| {
+            cpu.write_word(memory::cache_control::ADDR, 0x804, &mut bus)
+        }))
+        .expect("a bus-bit change under a busy DMA2 must trip");
+        assert!(message.contains("CC_DMA_HAZARD"), "{message}");
+        assert!(message.contains("pc=0xa001166c"), "{message}");
+        assert!(message.contains("0x1e988 -> 0x00804"), "{message}");
+        assert!(message.contains("DMA2[MADR=0x000a2b4c"), "{message}");
+        assert!(message.contains("CHCR=0x01000401"), "{message}");
+    }
+
+    #[test]
+    fn cache_control_byte_and_half_writes_trip_too() {
+        for write in [0u8, 1] {
+            let mut cpu = booted_cpu();
+            let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+            bus.set_cc_dma_mode(CcDmaMode::Fail);
+            start_fake_dma2_walk(&mut bus);
+            let message = tripwire_message(std::panic::AssertUnwindSafe(|| {
+                // Byte 1 holds bits 8..15, so clearing it drops bits 13..15.
+                if write == 0 {
+                    cpu.write_byte(memory::cache_control::ADDR + 1, 0, &mut bus)
+                } else {
+                    cpu.write_half(memory::cache_control::ADDR, 0x0804, &mut bus)
+                }
+            }));
+            assert!(message.is_some(), "write kind {write} must trip");
+        }
+    }
+
+    #[test]
+    fn cache_control_changes_that_are_safe_do_not_trip() {
+        let mut cpu = booted_cpu();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.set_cc_dma_mode(CcDmaMode::Fail);
+        start_fake_dma2_walk(&mut bus);
+        // Same value, and toggling only TAG (bit 2) and IS1 (bit 11): not bus bits.
+        cpu.write_word(
+            memory::cache_control::ADDR,
+            CACHE_CONTROL_BIOS_NORMAL,
+            &mut bus,
+        );
+        cpu.write_word(
+            memory::cache_control::ADDR,
+            CACHE_CONTROL_BIOS_NORMAL ^ CACHE_CONTROL_TAG ^ CACHE_CONTROL_IS1,
+            &mut bus,
+        );
+        assert_eq!(bus.cc_dma_hits(), 0);
+    }
+
+    #[test]
+    fn cache_control_flush_with_every_dma_channel_idle_does_not_trip() {
+        let mut cpu = booted_cpu();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.set_cc_dma_mode(CcDmaMode::Fail);
+        cpu.write_word(memory::cache_control::ADDR, 0x804, &mut bus);
+        cpu.write_word(
+            memory::cache_control::ADDR,
+            CACHE_CONTROL_BIOS_NORMAL,
+            &mut bus,
+        );
+        assert_eq!(bus.cc_dma_hits(), 0);
+    }
+
+    #[test]
+    fn every_dma_channel_counts_as_busy() {
+        for ch in 0..7 {
+            let mut cpu = booted_cpu();
+            let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+            bus.set_cc_dma_mode(CcDmaMode::Fail);
+            bus.fake_busy_dma_channel(ch, 0, 1 << 24);
+            let tripped = tripwire_message(std::panic::AssertUnwindSafe(|| {
+                cpu.write_word(memory::cache_control::ADDR, 0x804, &mut bus)
+            }));
+            assert!(tripped.is_some(), "channel {ch} busy must trip");
+        }
+    }
+
+    #[test]
+    fn setting_status_isolate_cache_under_a_busy_dma_channel_is_a_hazard() {
+        // mtc0 $t0, $12 at the BIOS entry, with IsC in $t0.
+        let mut cpu = booted_cpu();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0x4088_6000)).unwrap();
+        bus.set_cc_dma_mode(CcDmaMode::Fail);
+        start_fake_dma2_walk(&mut bus);
+        cpu.pc = 0xBFC0_0000;
+        cpu.gprs[8] = 1 << 16;
+        let message = tripwire_message(std::panic::AssertUnwindSafe(|| {
+            let _ = cpu.step(&mut bus);
+        }))
+        .expect("setting IsC under a busy DMA2 must trip");
+        assert!(message.contains("CC_DMA_HAZARD"), "{message}");
+        assert!(message.contains("pc=0xbfc00000"), "{message}");
+        assert!(message.contains("IsC set"), "{message}");
+
+        // Clearing IsC, or writing SR with IsC already set, is not the hazard.
+        let mut cpu = booted_cpu();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0x4088_6000)).unwrap();
+        bus.set_cc_dma_mode(CcDmaMode::Fail);
+        start_fake_dma2_walk(&mut bus);
+        cpu.pc = 0xBFC0_0000;
+        cpu.cop0[12] = 1 << 16;
+        cpu.gprs[8] = 1 << 16;
+        let _ = cpu.step(&mut bus);
+        assert_eq!(bus.cc_dma_hits(), 0);
+    }
+
+    #[test]
+    fn hle_flush_cache_under_a_busy_dma_channel_is_a_hazard() {
+        let mut cpu = booted_cpu();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.enable_hle_bios();
+        bus.set_cc_dma_mode(CcDmaMode::Fail);
+        start_fake_dma2_walk(&mut bus);
+        cpu.pc = 0xA0;
+        cpu.gprs[9] = 0x44;
+        cpu.gprs[31] = 0x8007_F3B0;
+        let message = tripwire_message(std::panic::AssertUnwindSafe(|| {
+            let _ = cpu.step(&mut bus);
+        }))
+        .expect("HLE FlushCache under a busy DMA2 must trip");
+        assert!(message.contains("HLE A(44h) FlushCache"), "{message}");
+        assert!(message.contains("ra=0x8007f3b0"), "{message}");
+
+        // With the walk finished the same call is fine.
+        let mut cpu = booted_cpu();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.enable_hle_bios();
+        bus.set_cc_dma_mode(CcDmaMode::Fail);
+        cpu.pc = 0xA0;
+        cpu.gprs[9] = 0x44;
+        cpu.gprs[31] = 0x8007_F3B0;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.cc_dma_hits(), 0);
+    }
+
+    #[test]
+    fn warn_mode_counts_without_panicking_and_off_mode_ignores() {
+        let mut cpu = booted_cpu();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        start_fake_dma2_walk(&mut bus);
+        bus.set_cc_dma_mode(CcDmaMode::Off);
+        cpu.write_word(memory::cache_control::ADDR, 0x804, &mut bus);
+        assert_eq!(bus.cc_dma_hits(), 0);
+        bus.set_cc_dma_mode(CcDmaMode::Warn);
+        cpu.write_word(
+            memory::cache_control::ADDR,
+            CACHE_CONTROL_BIOS_NORMAL,
+            &mut bus,
+        );
+        cpu.write_word(memory::cache_control::ADDR, 0x804, &mut bus);
+        assert_eq!(bus.cc_dma_hits(), 2);
+    }
+
+    #[test]
+    fn inject_mode_returns_the_dma_word_for_the_next_bus_fetch_only() {
+        let mut cpu = booted_cpu();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.set_cc_dma_mode(CcDmaMode::Inject);
+        // The console's wild fetch: a list header read as a `j`.
+        bus.write32(0x000A_2B4C, 0x090A_2B4D);
+        bus.write32(0x0000_2000, 0x1111_1111);
+        bus.write32(0x0000_2004, 0x2222_2222);
+        bus.fake_busy_dma_channel(2, 0x000A_2B4C, 0x0100_0401);
+        cpu.write_word(memory::cache_control::ADDR, 0x804, &mut bus);
+        assert_eq!(bus.cc_dma_hits(), 1);
+        cpu.pc = 0xA000_2000; // KSEG1: always a bus fetch
+        assert_eq!(cpu.fetch(&mut bus), 0x090A_2B4D);
+        assert_eq!(cpu.fetch(&mut bus), 0x1111_1111, "one fetch only");
+        cpu.pc = 0xA000_2004;
+        assert_eq!(cpu.fetch(&mut bus), 0x2222_2222);
+    }
+
+    #[test]
+    fn warn_mode_never_changes_a_fetch() {
+        let mut cpu = booted_cpu();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.set_cc_dma_mode(CcDmaMode::Warn);
+        bus.write32(0x000A_2B4C, 0x090A_2B4D);
+        bus.write32(0x0000_2000, 0x1111_1111);
+        bus.fake_busy_dma_channel(2, 0x000A_2B4C, 0x0100_0401);
+        cpu.write_word(memory::cache_control::ADDR, 0x804, &mut bus);
+        cpu.pc = 0xA000_2000;
+        assert_eq!(cpu.fetch(&mut bus), 0x1111_1111);
+    }
+
+    #[test]
+    fn cc_dma_mode_parses_the_env_values() {
+        assert_eq!(CcDmaMode::parse(None), CcDmaMode::Off);
+        assert_eq!(CcDmaMode::parse(Some("0")), CcDmaMode::Off);
+        assert_eq!(CcDmaMode::parse(Some("1")), CcDmaMode::Fail);
+        assert_eq!(CcDmaMode::parse(Some("fail")), CcDmaMode::Fail);
+        assert_eq!(CcDmaMode::parse(Some("warn")), CcDmaMode::Warn);
+        assert_eq!(CcDmaMode::parse(Some("inject")), CcDmaMode::Inject);
     }
 
     #[test]

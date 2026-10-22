@@ -32,11 +32,13 @@ use crate::telemetry::GuestTelemetry;
 use crate::timers::Timers;
 
 mod block_support;
+mod cc_dma;
 mod idle;
 mod jit_support;
 
 use block_support::RamPages;
 pub(crate) use block_support::RamStamp;
+pub use cc_dma::{CcDmaEvent, CcDmaMode, CC_BUS_BITS};
 mod memory_timing;
 mod timing;
 
@@ -451,6 +453,11 @@ pub struct Bus {
     gpu_linked_list_fifo_guard: bool,
     #[serde(skip, default = "gpu_dma_overflow_drops_from_env")]
     gpu_dma_overflow_drops: bool,
+    /// Cache-control / DMA tripwire (`PSOXIDE_CHECK_CC_DMA`); see `bus/cc_dma.rs`.
+    #[serde(skip, default = "cc_dma::cc_dma_mode_from_env")]
+    cc_dma_mode: CcDmaMode,
+    #[serde(skip)]
+    cc_dma_hits: u64,
     /// Derived scheduling hint, not positional save-state data. After restore,
     /// inspect CHCR and the completion event once to recover an armed wait.
     #[serde(skip, default = "check_gpu_request_after_restore")]
@@ -585,6 +592,8 @@ impl Bus {
             gpu_linked_list_log_enabled: false,
             gpu_linked_list_fifo_guard: gpu_linked_list_fifo_guard_from_env(),
             gpu_dma_overflow_drops: gpu_dma_overflow_drops_from_env(),
+            cc_dma_mode: cc_dma::cc_dma_mode_from_env(),
+            cc_dma_hits: 0,
             gpu_dma_waiting_for_request: false,
             gpu_dma_wait: 0,
             experimental_gpu_list: None,
