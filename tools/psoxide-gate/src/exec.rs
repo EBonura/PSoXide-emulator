@@ -286,7 +286,20 @@ struct Run<'a> {
     notes: Vec<String>,
 }
 
+/// Run one journey. The disc fingerprint (a SHA-256 over the whole image) is
+/// computed on its own thread while the journey runs: it only labels the
+/// report, so it need not delay the emulation.
 pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
+    let disc = opts.disc.clone();
+    let fingerprint = std::thread::spawn(move || disc_id(&disc));
+    let mut result = run_journey_inner(journey, opts);
+    result.disc_id = fingerprint
+        .join()
+        .unwrap_or_else(|_| "unreadable".to_string());
+    result
+}
+
+fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     let start = Instant::now();
     let mut result = JourneyResult {
         name: journey.name.clone(),
@@ -295,7 +308,7 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
             .clone()
             .unwrap_or_else(|| journey.name.clone()),
         disc: opts.disc.clone(),
-        disc_id: disc_id(&opts.disc),
+        disc_id: String::new(),
         groups: Vec::new(),
         abort: None,
         ticks: 0,

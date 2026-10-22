@@ -266,8 +266,23 @@ impl Img {
         stats
     }
 
+    /// Smallest PNG: the golden images that are committed to the repos.
     pub fn save_png(&self, path: &Path) -> Result<(), String> {
-        use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+        self.save_png_with(path, image::codecs::png::CompressionType::Best)
+    }
+
+    /// Quick lossless PNG for the throw-away report pages: the same pixels
+    /// as [`Img::save_png`] in a fraction of the time.
+    pub fn save_png_report(&self, path: &Path) -> Result<(), String> {
+        self.save_png_with(path, image::codecs::png::CompressionType::Fast)
+    }
+
+    fn save_png_with(
+        &self,
+        path: &Path,
+        compression: image::codecs::png::CompressionType,
+    ) -> Result<(), String> {
+        use image::codecs::png::{FilterType, PngEncoder};
         use image::ImageEncoder;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -281,7 +296,7 @@ impl Img {
         }
         PngEncoder::new_with_quality(
             std::io::BufWriter::new(file),
-            CompressionType::Best,
+            compression,
             FilterType::Adaptive,
         )
         .write_image(&rgb, self.w, self.h, image::ExtendedColorType::Rgb8)
