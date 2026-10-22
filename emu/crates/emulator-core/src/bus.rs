@@ -2118,27 +2118,29 @@ impl Bus {
     #[inline]
     fn queue_store(&mut self) -> u32 {
         let now = self.cycles;
-        let queue = &mut self.write_queue;
+        let mut queue = self.write_queue;
         // The queue holds completion times in ascending order, then zeros
         // (every store below keeps it so), so the writes that have landed
-        // are a prefix of the occupied slots.
+        // are a prefix of the occupied slots. Straight-line code over the
+        // four slots: the generic slice moves compile to libc calls.
         debug_assert!(queue
             .windows(2)
             .all(|w| w[1] == 0 || (w[0] != 0 && w[0] < w[1])));
-        let mut len = queue.iter().take_while(|&&slot| slot != 0).count();
-        let landed = queue[..len].iter().take_while(|&&slot| slot <= now).count();
+        let landed = queue
+            .iter()
+            .filter(|&&slot| slot != 0 && slot <= now)
+            .count();
+        let mut len = queue.iter().filter(|&&slot| slot != 0).count();
         if landed != 0 {
-            queue.copy_within(landed..len, 0);
+            queue = shift_write_queue(queue, landed);
             len -= landed;
-            queue[len..].fill(0);
         }
         let mut wait = 0;
         if len == queue.len() {
             // Full: the oldest write has to land first.
             wait = queue[0] - now;
-            queue.copy_within(1.., 0);
+            queue = shift_write_queue(queue, 1);
             len -= 1;
-            queue[len] = 0;
         }
         let issued = now + wait;
         let newest = if len == 0 { 0 } else { queue[len - 1] };
@@ -2149,8 +2151,8 @@ impl Bus {
             // write starts when the fill lets go.
             completion = completion.max(self.code_fill_busy_until + Self::WRITE_AFTER_FILL);
         }
-        let queue = &mut self.write_queue;
         queue[len] = completion;
+        self.write_queue = queue;
         self.ram_write_buffer_ready_cycle = completion;
         wait as u32
     }
@@ -4892,6 +4894,19 @@ fn gpu_download_cycles(total_words: u32) -> u32 {
 /// Word read from a RAM slice at a physical RAM offset (already masked
 /// to the 2 MiB range). Used by the DMA-GPU paths to pull command
 /// words without going through the full bus dispatch.
+/// The write buffer's slots after the oldest `by` (at most four) left,
+/// emptied slots zero.
+#[inline(always)]
+fn shift_write_queue(queue: [u64; 4], by: usize) -> [u64; 4] {
+    match by {
+        0 => queue,
+        1 => [queue[1], queue[2], queue[3], 0],
+        2 => [queue[2], queue[3], 0, 0],
+        3 => [queue[3], 0, 0, 0],
+        _ => [0; 4],
+    }
+}
+
 fn read_ram_u32(ram: &[u8], phys: u32) -> u32 {
     let offset = (phys & 0x001f_ffff) as usize;
     if offset + 4 <= ram.len() {
@@ -6075,6 +6090,74 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// The store queue before it was written as straight-line code over the
+    /// four slots (slice moves instead): the behaviour `Bus::queue_store`
+    /// must keep.
+    fn queue_store_reference(
+        queue: &mut [u64; 4],
+        now: u64,
+        code_fill_busy_until: u64,
+    ) -> (u32, u64) {
+        let mut len = queue.iter().take_while(|&&slot| slot != 0).count();
+        let landed = queue[..len].iter().take_while(|&&slot| slot <= now).count();
+        if landed != 0 {
+            queue.copy_within(landed..len, 0);
+            len -= landed;
+            queue[len..].fill(0);
+        }
+        let mut wait = 0;
+        if len == queue.len() {
+            wait = queue[0] - now;
+            queue.copy_within(1.., 0);
+            len -= 1;
+            queue[len] = 0;
+        }
+        let issued = now + wait;
+        let newest = if len == 0 { 0 } else { queue[len - 1] };
+        let mut completion =
+            (issued + Bus::WRITE_QUEUE_FIRST).max(newest + Bus::WRITE_QUEUE_PERIOD);
+        if code_fill_busy_until > issued {
+            completion = completion.max(code_fill_busy_until + Bus::WRITE_AFTER_FILL);
+        }
+        queue[len] = completion;
+        (wait as u32, completion)
+    }
+
+    #[test]
+    fn queue_store_matches_the_slice_version_on_random_store_streams() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        let mut reference = [0u64; 4];
+        bus.cycles = 1_000;
+        for _ in 0..200_000 {
+            // Bursts of stores a clock or two apart, now and then a long gap
+            // that lets the whole queue land, now and then a code fill.
+            bus.cycles += match next() % 16 {
+                0 => 1 + next() % 40,
+                1 => 20,
+                n => n % 3,
+            };
+            bus.code_fill_busy_until = if next() % 5 == 0 {
+                bus.cycles + next() % 30
+            } else {
+                0
+            };
+            let (wait, completion) =
+                queue_store_reference(&mut reference, bus.cycles, bus.code_fill_busy_until);
+            assert_eq!(bus.queue_store(), wait);
+            assert_eq!(bus.write_queue, reference);
+            assert_eq!(bus.ram_write_buffer_ready_cycle, completion);
+            // The caller charges the wait.
+            bus.cycles += u64::from(wait);
         }
     }
 
