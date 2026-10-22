@@ -1390,14 +1390,18 @@ impl Bus {
             self.service_timers();
         }
         self.drain_scheduler_events();
-        let cdrom_irq_pending =
-            self.irq.stat() & self.irq.mask() & (1 << (IrqSource::Cdrom as u32)) != 0;
-        if self
-            .cdrom
-            .tick_with_irq_pending(self.cycles, cdrom_irq_pending)
-            && self.cdrom.should_wake_cpu()
-        {
-            self.irq.raise(IrqSource::Cdrom);
+        // Past the drive's idle bound a tick has something to do; before it
+        // the tick is a no-op ([`CdRom::idle_until`]).
+        if self.cycles > self.cdrom.idle_until() {
+            let cdrom_irq_pending =
+                self.irq.stat() & self.irq.mask() & (1 << (IrqSource::Cdrom as u32)) != 0;
+            if self
+                .cdrom
+                .tick_with_irq_pending(self.cycles, cdrom_irq_pending)
+                && self.cdrom.should_wake_cpu()
+            {
+                self.irq.raise(IrqSource::Cdrom);
+            }
         }
         // SIO0 wake-up comes from the scheduler dispatch above
         // (`EventSlot::Sio0` in `drain_scheduler_events_inner`),
