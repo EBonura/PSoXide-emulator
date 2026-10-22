@@ -3449,3 +3449,29 @@ fn isqrt_u64_matches_the_newton_iteration() {
         assert_eq!(isqrt_u64(value), newton(value), "{value}");
     }
 }
+
+/// `mul_div` is the 128-bit `a * b / den` it replaced, including for
+/// products that overflow 64 bits and for the one overflowing quotient.
+#[test]
+fn mul_div_matches_the_wide_division() {
+    fn wide(a: i64, b: i64, den: i64) -> i64 {
+        ((i128::from(a) * i128::from(b)) / i128::from(den)) as i64
+    }
+    let mut state = 0x853c_49e6_748f_ea9bu64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for _ in 0..500_000 {
+        // Magnitudes from a few bits up to the full range.
+        let shift = |bits: u64| 64 - (bits % 64).max(1);
+        let a = (next() as i64) >> shift(next());
+        let b = (next() as i64) >> shift(next());
+        let den = ((next() as i64) >> shift(next())).max(1) * if next() & 1 == 0 { 1 } else { -1 };
+        assert_eq!(mul_div(a, b, den), wide(a, b, den), "{a} {b} {den}");
+    }
+    assert_eq!(mul_div(i64::MIN, 1, -1), wide(i64::MIN, 1, -1));
+    assert_eq!(mul_div(i64::MAX, i64::MAX, 7), wide(i64::MAX, i64::MAX, 7));
+}

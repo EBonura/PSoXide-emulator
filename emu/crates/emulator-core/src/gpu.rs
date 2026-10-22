@@ -5155,6 +5155,17 @@ impl TimingPoly {
     }
 }
 
+/// `a * b / den`, truncated toward zero, the product taken exactly. Screen
+/// coordinates in Q16.16 keep the product far below 2^63, so the 64-bit
+/// division (a 128-bit one is a library call) is the one that runs; the wide
+/// product is the fallback for anything larger.
+fn mul_div(a: i64, b: i64, den: i64) -> i64 {
+    match a.checked_mul(b) {
+        Some(product) => product.wrapping_div(den),
+        None => ((i128::from(a) * i128::from(b)) / i128::from(den)) as i64,
+    }
+}
+
 /// Clip `polygon` against one drawing-area edge into `out` (cleared first).
 fn clip_timing_polygon(
     polygon: &TimingPoly,
@@ -5184,9 +5195,7 @@ fn clip_timing_polygon(
             return a;
         }
         let num = bound - ac;
-        let lerp = |av: i64, bv: i64| {
-            av + ((i128::from(bv - av) * i128::from(num)) / i128::from(den)) as i64
-        };
+        let lerp = |av: i64, bv: i64| av + mul_div(bv - av, num, den);
         if x_axis {
             (bound, lerp(a.1, b.1))
         } else {
