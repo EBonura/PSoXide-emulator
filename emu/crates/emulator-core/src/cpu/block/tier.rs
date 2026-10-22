@@ -332,6 +332,19 @@ impl Cpu {
         raised: u64,
         st: &mut BatchState,
     ) -> bool {
+        self.device_step_quiet_inline(bus, addr, raised, st)
+    }
+
+    /// [`Cpu::device_step_quiet`] for a caller that wants it inline (the
+    /// native tier's device helper); the batch loop keeps the call.
+    #[inline(always)]
+    pub(in crate::cpu) fn device_step_quiet_inline(
+        &mut self,
+        bus: &Bus,
+        addr: u32,
+        raised: u64,
+        st: &mut BatchState,
+    ) -> bool {
         let phys = memory::to_physical(addr);
         if !(0x1f80_1000..0x1f80_2000).contains(&phys)
             || (0x1f80_1040..0x1f80_1060).contains(&phys)
@@ -341,6 +354,20 @@ impl Cpu {
         }
         self.batch_new_limits(bus, st);
         true
+    }
+
+    /// Whether the batch can run a load or store of `word` to `addr`, and if
+    /// so whether it goes to a device (`Some(true)`) rather than main RAM or
+    /// the scratchpad (`Some(false)`); `None` for an access it must leave to
+    /// the interpreter. One classification for the native tier's memory
+    /// helper.
+    #[inline(always)]
+    pub(in crate::cpu) fn batch_access_device(word: u32, addr: u32) -> Option<bool> {
+        match tier_access_kind(word, addr) {
+            Access::Quiet => Some(false),
+            Access::Device => Some(true),
+            Access::Unsafe => None,
+        }
     }
 
     /// SR IEc and IM2 are both set: the interrupt line can be taken.
@@ -928,20 +955,6 @@ impl Cpu {
 #[inline(always)]
 pub(in crate::cpu) fn irq_raise_total(bus: &Bus) -> u64 {
     bus.irq().raise_counts().iter().sum()
-}
-
-/// Whether a batched load or store of `word` to `addr` is [`Access::Quiet`]
-/// (LWC2/SWC2 too: word aligned).
-#[inline(always)]
-pub(in crate::cpu) fn quiet_access(word: u32, addr: u32) -> bool {
-    matches!(tier_access_kind(word, addr), Access::Quiet)
-}
-
-/// Whether a batched load or store of `word` to `addr` goes to a device
-/// (I/O, BIOS, expansion): not quiet, but one the batch may run.
-#[inline(always)]
-pub(in crate::cpu) fn device_access(word: u32, addr: u32) -> bool {
-    matches!(tier_access_kind(word, addr), Access::Device)
 }
 
 #[inline(always)]

@@ -35,6 +35,7 @@ mod block_support;
 mod cc_dma;
 mod idle;
 mod jit_support;
+mod mmio_fast;
 
 use block_support::RamPages;
 pub(crate) use block_support::RamStamp;

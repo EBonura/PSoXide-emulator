@@ -525,18 +525,11 @@ pub unsafe extern "C" fn jit_batch_memory(run: *mut NativeRun, index: u32) -> u3
         return NATIVE_STOP;
     }
     let addr = cpu.gpr(op.rs).wrapping_add((op.word as i16) as i32 as u32);
-    let device = !crate::cpu::block::quiet_access(op.word, addr);
-    if device && !crate::cpu::block::device_access(op.word, addr) {
-        return NATIVE_STOP;
+    match Cpu::batch_access_device(op.word, addr) {
+        None => return NATIVE_STOP,
+        Some(true) => return device_memory_op(run, cpu, bus, op, index, addr),
+        Some(false) => {}
     }
-    // A device may read the GPU or the timers: hand the deferred decay and
-    // the last branch boundary to the bus first.
-    let raised = if device {
-        run.flush_boundary(bus);
-        crate::cpu::block::irq_raise_total(bus)
-    } else {
-        0
-    };
     let pc = run.vaddr.wrapping_add(4 * index);
     cpu.tick = run.tick0 + run.ran;
     cpu.pc = pc;
@@ -584,32 +577,6 @@ pub unsafe extern "C" fn jit_batch_memory(run: *mut NativeRun, index: u32) -> u3
     let stored = matches!(op.class, crate::cpu::block::OpClass::Store);
     run.ram_ok =
         u32::from(ram_ok || (stored && run.ram_ok != 0 && !store_hits_block(run, addr, 4)));
-    if device {
-        // SAFETY: the batch state outlives the native run.
-        let st = unsafe { &mut *run.batch };
-        if !cpu.device_step_quiet(bus, addr, raised, st) {
-            run.status = NATIVE_STOPPED;
-            run.shadow_from(cpu);
-            match cpu.pending_load.take() {
-                Some((reg, value)) => {
-                    run.pend_reg = u32::from(reg);
-                    run.pend_val = value;
-                }
-                None => run.pend_reg = 0,
-            }
-            return NATIVE_STOP;
-        }
-        // What the access may have changed: the limits (just taken again),
-        // the boundary's quiet clock, the interrupt lines, and RAM under
-        // the block (a DMA).
-        run.limit = st.limit;
-        run.boundary_until = bus.boundary_quiet_until();
-        run.slow_boundary |= u32::from(bus.irq().pending());
-        run.ram_ok =
-            u32::from(run.irq_enabled != 0 && cpu.block_ram_matches(bus, run.block as usize - 1));
-        // ... and whether a GPU DMA transfer now competes for main RAM.
-        run.ram_contended = u32::from(bus.jit_gpu_ram_contention_possible());
-    }
     run.shadow_from(cpu);
     match cpu.pending_load.take() {
         Some((reg, value)) => {
@@ -623,6 +590,216 @@ pub unsafe extern "C" fn jit_batch_memory(run: *mut NativeRun, index: u32) -> u3
     } else {
         NATIVE_CONTINUE
     }
+}
+
+/// [`jit_batch_memory`] for a device access (I/O, BIOS, expansion; the
+/// access is already known to be one the batch can run, and the budget and
+/// clock checks have passed): byte loads and stores of the CD-ROM
+/// registers through their own path, everything else through the batch's
+/// step, after which the batch goes on only if [`Cpu::device_step_quiet`]
+/// allows (else `status` becomes [`NATIVE_STOPPED`] and it returns
+/// [`NATIVE_STOP`] with the op run). Kept out of line so the common quiet
+/// accesses do not carry its frame.
+#[inline(never)]
+fn device_memory_op(
+    run: &mut NativeRun,
+    cpu: &mut Cpu,
+    bus: &mut Bus,
+    op: crate::cpu::block::DecodedOp,
+    index: u32,
+    addr: u32,
+) -> u32 {
+    if let Some(result) = cdrom_byte_access(run, cpu, bus, op, index, addr) {
+        return result;
+    }
+    // A device may read the GPU or the timers: hand the deferred decay and
+    // the last branch boundary to the bus first.
+    run.flush_boundary(bus);
+    let raised = crate::cpu::block::irq_raise_total(bus);
+    let pc = run.vaddr.wrapping_add(4 * index);
+    cpu.tick = run.tick0 + run.ran;
+    cpu.pc = pc;
+    cpu.pending_load = (run.pend_reg != 0).then_some((run.pend_reg as u8, run.pend_val));
+    let delay = op.flags & crate::cpu::block::op_flags::DELAY_SLOT != 0;
+    if delay {
+        cpu.pending_pc = (run.taken != 0).then_some(run.target);
+    }
+    let mut refetch = false;
+    let mut ram_ok = run.ram_ok != 0;
+    run.shadow_to(cpu);
+    let stepped = cpu.batch_step(
+        bus,
+        op,
+        pc,
+        delay,
+        addr,
+        &mut run.issue,
+        &mut refetch,
+        run.limit,
+        &mut ram_ok,
+    );
+    debug_assert!(
+        stepped.is_some(),
+        "a device access in compiled code never waits on a fetch"
+    );
+    run.ran += 1;
+    // LWC2/SWC2 can trap when CU2 is disabled, including in a delay slot.
+    // Hand the exception back before inspecting the device or chaining.
+    if let Some(vector) = cpu.pending_exception_pc.take() {
+        run.shadow_from(cpu);
+        match cpu.pending_load.take() {
+            Some((reg, value)) => {
+                run.pend_reg = u32::from(reg);
+                run.pend_val = value;
+            }
+            None => run.pend_reg = 0,
+        }
+        cpu.pc = vector;
+        run.status = NATIVE_EXCEPTION;
+        return NATIVE_STOP;
+    }
+    // `run.ram_ok` stands: a device access leaves main RAM alone, and
+    // `device_step_done` looks again.
+    run.shadow_from(cpu);
+    match cpu.pending_load.take() {
+        Some((reg, value)) => {
+            run.pend_reg = u32::from(reg);
+            run.pend_val = value;
+        }
+        None => run.pend_reg = 0,
+    }
+    if !device_step_done(run, cpu, bus, addr, raised) {
+        return NATIVE_STOP;
+    }
+    if run.ram_ok == 0 && run.irq_enabled != 0 {
+        NATIVE_STOP
+    } else {
+        NATIVE_CONTINUE
+    }
+}
+
+/// What [`jit_batch_memory`] does after a device access has run: let the
+/// batch go on only if [`Cpu::device_step_quiet`] allows (else `status`
+/// becomes [`NATIVE_STOPPED`] and this returns `false`, the op run), and
+/// take up again what the access may have changed: the limits (just taken
+/// again), the boundary's quiet clock, the interrupt lines, RAM under the
+/// block (a DMA), and whether a GPU DMA transfer now competes for main RAM.
+/// `raised` is the interrupt raise total before the access.
+#[inline(always)]
+fn device_step_done(
+    run: &mut NativeRun,
+    cpu: &mut Cpu,
+    bus: &mut Bus,
+    addr: u32,
+    raised: u64,
+) -> bool {
+    // SAFETY: the batch state outlives the native run.
+    let st = unsafe { &mut *run.batch };
+    if !cpu.device_step_quiet_inline(bus, addr, raised, st) {
+        run.status = NATIVE_STOPPED;
+        return false;
+    }
+    run.limit = st.limit;
+    run.boundary_until = bus.boundary_quiet_until();
+    run.slow_boundary |= u32::from(bus.irq().pending());
+    run.ram_ok =
+        u32::from(run.irq_enabled != 0 && cpu.block_ram_matches(bus, run.block as usize - 1));
+    // ... and whether a GPU DMA transfer now competes for main RAM.
+    run.ram_contended = u32::from(bus.jit_gpu_ram_contention_possible());
+    true
+}
+
+/// [`jit_batch_memory`] for a byte load (`LB`, `LBU`) or store (`SB`) to a
+/// CD-ROM register, the commonest device access by far (guests poll the
+/// index/status and interrupt-flag registers in tight loops). The same
+/// effects as the generic path, in the same order, without its dispatch:
+/// the batch step's issue cycle, load-delay commit and load shadow, the
+/// bus's CD-ROM access ([`Bus::cpu_cdrom_load8`], [`Bus::cpu_cdrom_store8`])
+/// and [`device_step_done`]. `None`, nothing changed, when the access is
+/// anything else or the generic path would not take its plain branch (a
+/// limit oracle, a streaming code fill, the cache isolated).
+#[inline(always)]
+fn cdrom_byte_access(
+    run: &mut NativeRun,
+    cpu: &mut Cpu,
+    bus: &mut Bus,
+    op: crate::cpu::block::DecodedOp,
+    index: u32,
+    addr: u32,
+) -> Option<u32> {
+    let opcode = op.word >> 26;
+    if !matches!(opcode, 0x20 | 0x24 | 0x28) {
+        return None;
+    }
+    let phys = psx_hw::memory::to_physical(addr);
+    if !crate::cdrom::CdRom::contains(phys)
+        || bus.limits.configured()
+        || !bus.code_stream_idle()
+        || cpu.cache_isolated()
+    {
+        return None;
+    }
+    // A device may read the GPU or the timers: hand the last branch
+    // boundary to the bus first (the deferred decay is already applied).
+    run.flush_boundary(bus);
+    let raised = crate::cpu::block::irq_raise_total(bus);
+    cpu.tick = run.tick0 + run.ran;
+    cpu.pc = run.vaddr.wrapping_add(4 * index);
+    // The batch step takes the load in flight, a delay slot's branch and
+    // the shadow, and leaves them consumed.
+    let committing = run.pend_reg != 0;
+    cpu.pending_load = None;
+    if committing {
+        cpu.committing_load = None;
+    }
+    if op.flags & crate::cpu::block::op_flags::DELAY_SLOT != 0 {
+        cpu.pending_pc = None;
+    }
+    cpu.branch_delay_next = false;
+    cpu.executing_in_branch_delay = false;
+    // The memory op's issue cycle (a load shadow never hides it), applied
+    // before the access.
+    bus.advance_exact(run.issue + u64::from(crate::cpu::timing::cycle_cost(op.word)));
+    run.issue = 0;
+    let load = opcode != 0x28;
+    let mut value = 0;
+    if load {
+        let byte = bus.cpu_cdrom_load8(phys);
+        value = if opcode == 0x20 {
+            byte as i8 as i32 as u32
+        } else {
+            u32::from(byte)
+        };
+    } else {
+        bus.cpu_cdrom_store8(phys, cpu.gpr(op.rt));
+    }
+    run.ran += 1;
+    // The load in flight lands now; a load of this op's takes its place.
+    if committing {
+        let reg = (run.pend_reg & 31) as usize;
+        if reg != 0 {
+            cpu.gprs[reg] = run.pend_val;
+        }
+    }
+    if load && op.rt != 0 {
+        run.pend_reg = u32::from(op.rt);
+        run.pend_val = value;
+    } else {
+        run.pend_reg = 0;
+    }
+    run.shadow = u32::from(bus.take_ram_load_from_cached_code());
+    if run.shadow != 0 {
+        run.shadow_pos = 0;
+        run.shadow_reg = u32::from(op.rt);
+    }
+    if !device_step_done(run, cpu, bus, addr, raised) {
+        return Some(NATIVE_STOP);
+    }
+    Some(if run.ram_ok == 0 && run.irq_enabled != 0 {
+        NATIVE_STOP
+    } else {
+        NATIVE_CONTINUE
+    })
 }
 
 /// Run op `index` of the block, an [`OpClass::Other`](crate::cpu::block::OpClass)

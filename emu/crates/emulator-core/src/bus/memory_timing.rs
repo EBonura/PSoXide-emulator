@@ -251,6 +251,13 @@ impl MemoryControl {
         2
     }
 
+    /// [`MemoryControl::read_stalls`] for a byte read of a CD-ROM register
+    /// (`0x1F80_1800..0x1F80_1804`): the programmed CD-ROM delay.
+    #[inline(always)]
+    pub(super) fn cdrom_byte_read_stalls(&self) -> u32 {
+        self.cdrom_stalls[AccessWidth::Byte.index()]
+    }
+
     /// CPU store stall on a programmable external bus, beyond the issue
     /// cycle. Only the SPU is modelled: hwtest v1.22 record `0xFD` (64
     /// halfword stores to an SPU register) reads 911 cycles on silicon, 14.2
