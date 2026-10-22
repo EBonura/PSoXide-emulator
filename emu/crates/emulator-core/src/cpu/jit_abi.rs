@@ -530,6 +530,9 @@ pub unsafe extern "C" fn jit_batch_memory(run: *mut NativeRun, index: u32) -> u3
         Some(true) => return device_memory_op(run, cpu, bus, op, index, addr),
         Some(false) => {}
     }
+    if let Some(result) = quiet_memory_access(run, cpu, bus, op, index, addr) {
+        return result;
+    }
     let pc = run.vaddr.wrapping_add(4 * index);
     cpu.tick = run.tick0 + run.ran;
     cpu.pc = pc;
@@ -590,6 +593,115 @@ pub unsafe extern "C" fn jit_batch_memory(run: *mut NativeRun, index: u32) -> u3
     } else {
         NATIVE_CONTINUE
     }
+}
+
+/// [`jit_batch_memory`] for the quiet accesses compiled code does not do
+/// itself and that are not worth the batch step's dispatch: loads and stores
+/// to the scratchpad through a cached segment (LB, LBU, LH, LHU, LW, SB, SH,
+/// SW; the geometry engine's working memory) and byte and halfword stores to
+/// main RAM. The same effects as the generic path, in the same order: the
+/// batch step's issue cycle, load-delay commit and load shadow, and the
+/// bus's own access (the scratchpad costs nothing beyond the issue cycle).
+/// `None`, nothing changed, when the access is anything else or the generic
+/// path would not take its plain branch (a limit oracle, a streaming code
+/// fill, the cache isolated).
+#[inline(always)]
+fn quiet_memory_access(
+    run: &mut NativeRun,
+    cpu: &mut Cpu,
+    bus: &mut Bus,
+    op: crate::cpu::block::DecodedOp,
+    index: u32,
+    addr: u32,
+) -> Option<u32> {
+    let opcode = op.word >> 26;
+    let phys = psx_hw::memory::to_physical(addr);
+    let ram_store = phys < psx_hw::memory::ram::MIRROR_END && matches!(opcode, 0x28 | 0x29);
+    if !ram_store {
+        if !matches!(
+            opcode,
+            0x20 | 0x21 | 0x23 | 0x24 | 0x25 | 0x28 | 0x29 | 0x2b
+        ) {
+            return None;
+        }
+        // Cached segments only: the uncached alias is not the scratchpad.
+        let base = psx_hw::memory::scratchpad::BASE;
+        if (0xa000_0000..0xc000_0000).contains(&addr)
+            || !(base..base + psx_hw::memory::scratchpad::SIZE as u32).contains(&phys)
+        {
+            return None;
+        }
+    }
+    if bus.limits.configured() || !bus.code_stream_idle() || cpu.cache_isolated() {
+        return None;
+    }
+    cpu.tick = run.tick0 + run.ran;
+    cpu.pc = run.vaddr.wrapping_add(4 * index);
+    // The batch step takes the load in flight, a delay slot's branch and
+    // the shadow, and leaves them consumed.
+    let committing = run.pend_reg != 0;
+    cpu.pending_load = None;
+    if committing {
+        cpu.committing_load = None;
+    }
+    if op.flags & crate::cpu::block::op_flags::DELAY_SLOT != 0 {
+        cpu.pending_pc = None;
+    }
+    cpu.branch_delay_next = false;
+    cpu.executing_in_branch_delay = false;
+    // The memory op's issue cycle (a load shadow never hides it), applied
+    // before the access.
+    bus.advance_exact(run.issue + u64::from(crate::cpu::timing::cycle_cost(op.word)));
+    run.issue = 0;
+    let load = opcode < 0x28;
+    let mut value = 0;
+    if load {
+        // `Cpu::charge_read`: a zero-cycle charge.
+        bus.add_cycles(0);
+        value = match opcode {
+            0x20 => bus.read8(addr) as i8 as i32 as u32,
+            0x24 => u32::from(bus.read8(addr)),
+            0x21 => bus.read16(addr) as i16 as i32 as u32,
+            0x25 => u32::from(bus.read16(addr)),
+            _ => bus.read32(addr),
+        };
+    } else {
+        let source = cpu.gpr(op.rt);
+        match opcode {
+            0x28 => bus.cpu_write8(addr, source),
+            0x29 => bus.cpu_write16(addr, source),
+            _ => bus.cpu_write32(addr, source),
+        }
+    }
+    run.ran += 1;
+    // The load in flight lands now; a load of this op's takes its place.
+    if committing {
+        let reg = (run.pend_reg & 31) as usize;
+        if reg != 0 {
+            cpu.gprs[reg] = run.pend_val;
+        }
+    }
+    if load && op.rt != 0 {
+        run.pend_reg = u32::from(op.rt);
+        run.pend_val = value;
+    } else {
+        run.pend_reg = 0;
+    }
+    run.shadow = u32::from(bus.take_ram_load_from_cached_code());
+    if run.shadow != 0 {
+        run.shadow_pos = 0;
+        run.shadow_reg = u32::from(op.rt);
+    }
+    // A store to main RAM may have landed on the block's own words (or the
+    // word after); the scratchpad is no part of RAM.
+    if ram_store && run.ram_ok != 0 && store_hits_block(run, addr, 4) {
+        run.ram_ok = 0;
+    }
+    Some(if run.ram_ok == 0 && run.irq_enabled != 0 {
+        NATIVE_STOP
+    } else {
+        NATIVE_CONTINUE
+    })
 }
 
 /// [`jit_batch_memory`] for a device access (I/O, BIOS, expansion; the
