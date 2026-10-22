@@ -3637,16 +3637,20 @@ impl Bus {
     }
 
     fn advance_experimental_gpu_list(&mut self) {
-        let Some(mut list) = self.experimental_gpu_list.take() else {
+        if self.experimental_gpu_list.is_none() {
             return;
-        };
+        }
         if self.dma.channels[2].channel_control & (1 << 24) == 0 {
+            // The walk is dropped, not paused.
+            self.experimental_gpu_list = None;
             return;
         }
         if !self.dma.is_channel_enabled(2) {
-            self.experimental_gpu_list = Some(list);
             return;
         }
+        let Some(list) = self.experimental_gpu_list.as_mut() else {
+            return;
+        };
         if list.setup_cycles > 0 {
             list.setup_cycles -= 1;
         } else if list.need_header {
@@ -3694,7 +3698,6 @@ impl Bus {
             if !self.gpu_dma_overflow_drops && !self.gpu.dma_fifo_has_room() {
                 // A node larger than the FIFO: the channel waits for the GPU
                 // to drain rather than lose words (see the env switch).
-                self.experimental_gpu_list = Some(list);
                 return;
             }
             let word = read_ram_u32(&self.ram[..], list.word);
@@ -3702,14 +3705,14 @@ impl Bus {
             list.word = list.word.wrapping_add(4);
             list.remaining -= 1;
         } else if list.next & 0x0080_0000 != 0 {
+            // End of the list: the walk is done, the completion event is due.
+            self.experimental_gpu_list = None;
             self.scheduler
                 .schedule(crate::scheduler::EventSlot::GpuDma, self.cycles, 1);
-            return;
         } else {
             list.address = list.next & 0x001f_fffc;
             list.need_header = true;
         }
-        self.experimental_gpu_list = Some(list);
     }
 
     fn dma_gpu_linked_list(&mut self) -> u32 {
@@ -6006,6 +6009,67 @@ mod tests {
                                 == postcard::to_allocvec(&reference).unwrap(),
                             "resumed after {before_pause}, batch {cycles}, cycle {}",
                             reference.cycles
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The bus clock's batches and caches must leave exactly the state the
+    /// plain per-cycle loop leaves, whatever the step size: the walk's
+    /// payload pushes, its waits on a busy GPU, the known-not-quiet marker and
+    /// the walk-moving flag the RAM accesses ask for.
+    #[test]
+    fn gpu_list_walk_matches_the_per_cycle_reference_for_any_step() {
+        for split in [false, true] {
+            for step in [1u32, 2, 3, 5, 8, 13, 64] {
+                let make = || {
+                    let mut bus = experimental_draw_burst(split);
+                    bus.run_dma_channel(2);
+                    bus
+                };
+                let mut batched = make();
+                let mut reference = make();
+                let mut total = 0u64;
+                while total < 6_000 {
+                    // Ask the way the CPU does: a RAM access, then the clock.
+                    let moving = batched.gpu_list_walk_is_moving();
+                    let list = reference.experimental_gpu_list.as_ref();
+                    assert_eq!(
+                        moving,
+                        list.is_some_and(|l| reference.gpu_list_walk_is_moving_slow(l)),
+                        "split {split}, step {step}, cycle {total}: walk-moving flag"
+                    );
+                    batched.add_zero_cycles();
+                    batched.add_cycles(step);
+                    for _ in 0..step {
+                        reference.cycles = reference.cycles.wrapping_add(1);
+                        reference.gpu.decay_busy(1);
+                        reference.advance_experimental_gpu_list();
+                    }
+                    let before = total;
+                    total += u64::from(step);
+                    let sample = |bus: &Bus| {
+                        let list = bus.experimental_gpu_list.as_ref();
+                        (
+                            bus.cycles,
+                            bus.gpu.credits(),
+                            bus.gpu.dma_input_fifo_snapshot(),
+                            bus.gpu.gp0_write_count(),
+                            list.map(|l| (l.address, l.word, l.remaining, l.setup_cycles)),
+                        )
+                    };
+                    assert!(
+                        sample(&batched) == sample(&reference),
+                        "split {split}, step {step}, cycle {total}"
+                    );
+                    // The whole machine, now and then (it is a megabyte).
+                    if before / 1_000 != total / 1_000 || total >= 6_000 {
+                        assert!(
+                            postcard::to_allocvec(&batched).unwrap()
+                                == postcard::to_allocvec(&reference).unwrap(),
+                            "split {split}, step {step}, cycle {total}: whole state"
                         );
                     }
                 }

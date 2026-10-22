@@ -1646,29 +1646,40 @@ impl Gpu {
     }
 
     #[inline(never)]
-    fn decay_busy_fifo(&mut self, mut cycles: u64) {
+    fn decay_busy_fifo(&mut self, cycles: u64) {
         // Host fast path: when the FIFO cannot make progress during these
         // cycles (nothing queued, or the head waits on a busy GPU that stays
-        // busy throughout), the slow path below reduces to the three credit
+        // busy throughout), the slow path reduces to the three credit
         // subtractions at the end. Exactly equivalent; it only skips the
-        // drain calls that would find nothing to do.
+        // drain calls that would find nothing to do. Kept apart from the
+        // drain loop so this common case does not pay for its frame.
         if self.experimental_dma_fifo && self.fifo_quiet_cycles() < cycles {
-            self.drain_dma_input_fifo();
-            while cycles > 0
-                && (!self.dma_input_fifo.is_empty() || self.deferred_irq_command.is_some())
-            {
-                let elapsed = self.busy_credit.max(1).min(cycles);
-                self.busy_credit = self.busy_credit.saturating_sub(elapsed);
-                self.dma_busy_credit = self.dma_busy_credit.saturating_sub(elapsed);
-                self.cmd_ingest_credit = self.cmd_ingest_credit.saturating_sub(elapsed);
-                cycles -= elapsed;
-                if self.busy_credit == 0 {
-                    if let Some((word, from_dma)) = self.deferred_irq_command.take() {
-                        self.gp0_write(word, from_dma);
-                    }
+            self.decay_busy_fifo_draining(cycles);
+            return;
+        }
+        self.busy_credit = self.busy_credit.saturating_sub(cycles);
+        self.dma_busy_credit = self.dma_busy_credit.saturating_sub(cycles);
+        self.cmd_ingest_credit = self.cmd_ingest_credit.saturating_sub(cycles);
+    }
+
+    /// [`Gpu::decay_busy_fifo`] when the FIFO may make progress during the
+    /// `cycles`: drain it as the credit runs out.
+    #[inline(never)]
+    fn decay_busy_fifo_draining(&mut self, mut cycles: u64) {
+        self.drain_dma_input_fifo();
+        while cycles > 0 && (!self.dma_input_fifo.is_empty() || self.deferred_irq_command.is_some())
+        {
+            let elapsed = self.busy_credit.max(1).min(cycles);
+            self.busy_credit = self.busy_credit.saturating_sub(elapsed);
+            self.dma_busy_credit = self.dma_busy_credit.saturating_sub(elapsed);
+            self.cmd_ingest_credit = self.cmd_ingest_credit.saturating_sub(elapsed);
+            cycles -= elapsed;
+            if self.busy_credit == 0 {
+                if let Some((word, from_dma)) = self.deferred_irq_command.take() {
+                    self.gp0_write(word, from_dma);
                 }
-                self.drain_dma_input_fifo();
             }
+            self.drain_dma_input_fifo();
         }
         self.busy_credit = self.busy_credit.saturating_sub(cycles);
         self.dma_busy_credit = self.dma_busy_credit.saturating_sub(cycles);
