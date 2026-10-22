@@ -1,17 +1,17 @@
 //! Runs one journey: boots the disc, plays the steps, and judges every
 //! checkpoint across the CPU/hardware render matrix.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-
-use sha2::{Digest, Sha256};
 
 use crate::img::{Img, Rect, Tolerance};
 use crate::journey::{Assert, Journey, Step};
 use crate::machine::{button_mask, tape_end, Boot, Machine};
 use crate::render::HwSet;
 use crate::symbols::Symbols;
+
+mod digest;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -217,20 +217,10 @@ pub fn disc_id(cue_or_bin: &Path) -> String {
     let Ok(mut file) = std::fs::File::open(&target) else {
         return "missing or unreadable".into();
     };
-    let mut hash = Sha256::new();
-    let mut block = [0u8; 1024 * 1024];
-    loop {
-        match file.read(&mut block) {
-            Ok(0) => break,
-            Ok(n) => hash.update(&block[..n]),
-            Err(_) => return "unreadable".into(),
-        }
-    }
-    hash.finalize()
-        .iter()
-        .take(6)
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    let Ok(hash) = digest::sha256_of(&mut file) else {
+        return "unreadable".into();
+    };
+    hash.iter().take(6).map(|b| format!("{b:02x}")).collect()
 }
 
 /// Parse and bind a tape from the same bytes that are reported in the receipt.
@@ -286,7 +276,19 @@ struct Run<'a> {
     notes: Vec<String>,
 }
 
+/// Run one journey. The disc fingerprint (a SHA-256 over the whole image) only labels the
+/// report, so it is computed on its own thread beside the journey instead of before it.
 pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
+    let disc = opts.disc.clone();
+    let fingerprint = std::thread::spawn(move || disc_id(&disc));
+    let mut result = run_journey_inner(journey, opts);
+    result.disc_id = fingerprint
+        .join()
+        .unwrap_or_else(|_| "unreadable".to_string());
+    result
+}
+
+fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     let start = Instant::now();
     let mut result = JourneyResult {
         name: journey.name.clone(),
@@ -295,7 +297,7 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
             .clone()
             .unwrap_or_else(|| journey.name.clone()),
         disc: opts.disc.clone(),
-        disc_id: disc_id(&opts.disc),
+        disc_id: String::new(),
         groups: Vec::new(),
         abort: None,
         ticks: 0,
