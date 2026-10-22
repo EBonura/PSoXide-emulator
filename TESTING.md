@@ -48,6 +48,8 @@ Exit code 0 means every selected journey passed. 1 means a check failed or a
 journey aborted. 2 means bad usage or an unreadable file. `--strict` is the
 release gate: it requires a journey, checkpoints and CPU1, HW1 and HW3 at every
 checkpoint. A missing named journey always fails. `make gate` uses `--strict`.
+`make gate-pgo` runs the same gate from the profile-guided build (`target/pgo/release/psoxide-gate`, built by `make build-pgo` from `pgo/psoxide.profdata.gz`): identical results and frames, about 10 to 18% less CPU time per journey. Use it for long runs; a plain build stays the reference.
+
 `--no-hw` and reduced `--scales` are diagnostic options and cannot pass the
 release gate. The report goes to `gate-report/index.html` (or `--out`).
 

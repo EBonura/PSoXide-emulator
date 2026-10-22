@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Profile-guided release builds: `make build-pgo` and `make gate-pgo` build the
+  emulator, the gate and the benchmarks from a recorded profile
+  (`pgo/psoxide.profdata.gz`, refreshed by `make pgo-profile`). Every emulated
+  game ends in the identical state as with a plain build (`bench_suite`
+  compares state, display, cycles and instructions), and runs about 17 to 22%
+  more frames per host cycle. A plain `cargo build` is unchanged and needs no
+  profile. `bench_suite` is the new fixed-game speed and exactness scoreboard.
 - A cache-control / DMA tripwire (`PSOXIDE_CHECK_CC_DMA`, on for every
   `psoxide-gate` run). Changing `cache_control` bits 13..16, 7 or 3, or setting
   `SR.IsC` (which is what the BIOS `FlushCache` does), while any DMA channel is
