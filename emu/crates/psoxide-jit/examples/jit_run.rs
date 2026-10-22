@@ -312,6 +312,12 @@ fn bench(
         fnv(&state_bytes(&cpu, &bus)),
         host.audio_hash,
     );
+    println!(
+        "mdec: macroblocks={} commands={} params={}",
+        bus.mdec.macroblocks_decoded(),
+        bus.mdec.commands_seen(),
+        bus.mdec.params_seen(),
+    );
     if let Some(stats) = &tier {
         println!("tier: {:?}", *stats.lock().expect("tier stats"));
     }
