@@ -396,6 +396,16 @@ impl Voice {
         }
     }
 
+    /// Keyed off, past its start delay, and no volume sweep running: the
+    /// voice outputs silence and changes nothing.
+    #[inline(always)]
+    fn is_idle(&self) -> bool {
+        self.phase == AdsrPhase::Off
+            && self.start_delay == 0
+            && !self.vol_l.sweep_active
+            && !self.vol_r.sweep_active
+    }
+
     /// Take a decoded sample into the interpolation window.
     fn push_tap(&mut self, sample: i16) {
         self.taps = [self.taps[1], self.taps[2], self.taps[3], sample];
@@ -1841,6 +1851,12 @@ impl Spu {
         let mut sum_r: i32 = 0;
         let mut reverb_in_l: i32 = 0;
         let mut reverb_in_r: i32 = 0;
+        debug_assert!(
+            (0..NUM_VOICES)
+                .filter(|v| self.voices_in_play & (1 << v) == 0)
+                .all(|v| self.voices[v].is_idle() && self.voices[v].last_sample == 0),
+            "a voice outside the voices in play is not idle"
+        );
         let mut in_play = self.voices_in_play;
         while in_play != 0 {
             let v = in_play.trailing_zeros() as usize;
@@ -1849,12 +1865,7 @@ impl Spu {
             // outputs silence and changes nothing: exactly what `tick_voice`
             // does for it, without the walk through decode, envelope and
             // volume. It leaves the voices in play until it is woken.
-            let voice = &self.voices[v];
-            if voice.phase == AdsrPhase::Off
-                && voice.start_delay == 0
-                && !voice.vol_l.sweep_active
-                && !voice.vol_r.sweep_active
-            {
+            if self.voices[v].is_idle() {
                 self.voices[v].last_sample = 0;
                 self.voices_in_play &= !(1 << v);
                 continue;

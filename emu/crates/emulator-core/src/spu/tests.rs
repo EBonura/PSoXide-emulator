@@ -2726,3 +2726,53 @@ fn xa_resampler_handles_18900_streams_by_interpolating_to_37800() {
         assert!(resid_db < -30.0, "{freq} Hz residual {resid_db:.1} dB");
     }
 }
+
+// -- Voices in play --
+
+#[test]
+fn an_idle_voice_leaves_the_mixer_and_a_key_on_brings_it_back() {
+    let mut s = Spu::new();
+    assert_eq!(s.voices_in_play, all_voices());
+    s.tick_sample(SAMPLE_CYCLES);
+    assert_eq!(s.voices_in_play, 0, "nothing is keyed on");
+
+    s.write16(KON_LO, 1 << 3);
+    s.tick_sample(2 * SAMPLE_CYCLES); // the key-on lands at the end of this tick
+    assert_eq!(s.voices[3].phase, AdsrPhase::Attack);
+    assert_eq!(s.voices_in_play, 1 << 3);
+    for n in 3..30 {
+        s.tick_sample(n * SAMPLE_CYCLES);
+    }
+    assert_eq!(s.voices_in_play, 1 << 3, "an attacking voice stays in play");
+}
+
+#[test]
+fn a_volume_sweep_written_to_an_idle_voice_runs() {
+    let mut s = Spu::new();
+    s.tick_sample(SAMPLE_CYCLES);
+    assert_eq!(s.voices_in_play, 0);
+
+    // Linear increase from the current level (0), fastest rate.
+    s.write16(VOICE_BASE + 5 * 16 + voice_offset::VOLUME_L, 0x8000);
+    assert_eq!(s.voices_in_play, 1 << 5);
+    let before = s.voices[5].vol_l.current;
+    for n in 2..10 {
+        s.tick_sample(n * SAMPLE_CYCLES);
+    }
+    assert!(
+        s.voices[5].vol_l.current > before,
+        "the sweep moved the level"
+    );
+}
+
+#[test]
+fn a_voice_that_finishes_its_release_drops_out_of_play() {
+    let mut s = Spu::new();
+    s.voices[2].phase = AdsrPhase::Release;
+    s.voices[2].envelope = 1;
+    s.voices[2].adsr_hi = 0x0000; // release shift 0: the fastest fall
+    s.tick_sample(SAMPLE_CYCLES);
+    assert_eq!(s.voices[2].phase, AdsrPhase::Off);
+    s.tick_sample(2 * SAMPLE_CYCLES);
+    assert_eq!(s.voices_in_play & (1 << 2), 0);
+}

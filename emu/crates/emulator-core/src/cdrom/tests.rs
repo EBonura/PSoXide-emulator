@@ -2349,3 +2349,72 @@ fn the_pause_window_and_read_counters_survive_a_save_state_round_trip() {
     assert_eq!(back.sectors_since_read, 7);
     assert!(back.read_began_far);
 }
+
+/// The cached idle bound is what the bus polls at every branch boundary. It
+/// has to equal the earliest of the drive's deadlines after anything that
+/// moves one of them: commands, ticks that deliver, Stop's spin-down, a
+/// Play's seek, a lid rescan and a re-inserted disc.
+#[test]
+fn the_idle_bound_follows_every_deadline() {
+    fn check(cd: &CdRom, what: &str) {
+        assert_eq!(cd.idle_until(), cd.compute_idle_until(), "{what}");
+    }
+    let mut cd = CdRom::new();
+    check(&cd, "new");
+    assert_eq!(cd.idle_until(), u64::MAX);
+    cd.insert_disc(Some(cdda_disc()));
+    check(&cd, "insert");
+    cd.cmd_init();
+    check(&cd, "init");
+    assert!(cd.idle_until() < u64::MAX);
+    let mut now = 0;
+    for _ in 0..40 {
+        now += 2_000_000;
+        cd.tick(now);
+        check(&cd, "tick after init");
+        cd.irq_flag = 0;
+        cd.responses.clear();
+    }
+    cd.cmd_play(&[0x02]);
+    check(&cd, "play");
+    assert!(cd.cdda_seek_done_at.is_some());
+    for _ in 0..40 {
+        now += 2_000_000;
+        cd.tick(now);
+        check(&cd, "tick during play");
+        cd.irq_flag = 0;
+        cd.responses.clear();
+    }
+    cd.cmd_stop();
+    check(&cd, "stop");
+    assert!(cd.spindown_until.is_some());
+    for _ in 0..40 {
+        now += 2_000_000;
+        cd.tick(now);
+        check(&cd, "tick during spin-down");
+        cd.irq_flag = 0;
+        cd.responses.clear();
+    }
+    cd.cmd_read();
+    check(&cd, "read");
+    cd.cmd_pause();
+    check(&cd, "pause");
+    cd.insert_disc(None);
+    check(&cd, "eject");
+    cd.insert_disc(Some(cdda_disc()));
+    check(&cd, "reinsert");
+}
+
+/// A restored drive carries no cached bound; a first tick sets it.
+#[test]
+fn a_restored_drive_ticks_once_to_learn_its_idle_bound() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(cdda_disc()));
+    cd.cmd_init();
+    let bytes = postcard::to_allocvec(&cd).expect("serialize");
+    let mut restored: CdRom = postcard::from_bytes(&bytes).expect("deserialize");
+    assert_eq!(restored.idle_until(), 0);
+    restored.tick(1);
+    assert_eq!(restored.idle_until(), restored.compute_idle_until());
+    assert_eq!(restored.idle_until(), cd.idle_until());
+}

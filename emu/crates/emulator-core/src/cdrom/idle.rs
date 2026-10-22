@@ -20,7 +20,7 @@ impl CdRom {
         self.idle_bound = self.compute_idle_until();
     }
 
-    fn compute_idle_until(&self) -> u64 {
+    pub(super) fn compute_idle_until(&self) -> u64 {
         let lid = self.lid_deadline.unwrap_or(u64::MAX);
         let seek = self
             .cdda_seek_done_at
