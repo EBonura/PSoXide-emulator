@@ -2323,10 +2323,13 @@ impl Gpu {
         let cross = |a: (i64, i64), b: (i64, i64), c: (i64, i64)| {
             ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)).unsigned_abs()
         };
-        let p: Vec<(i64, i64)> = corners.iter().map(|&i| uv(i)).collect();
+        let mut p = [(0i64, 0i64); 4];
+        for (point, &i) in p.iter_mut().zip(corners) {
+            *point = uv(i);
+        }
         // Twice the area in texels; a quad is two triangles.
         let mut texels_x2 = cross(p[0], p[1], p[2]);
-        if p.len() == 4 {
+        if corners.len() == 4 {
             texels_x2 += cross(p[1], p[2], p[3]);
         }
         // Texels a pixel (Q16), its square root the step in each direction
@@ -5035,16 +5038,7 @@ fn tri_bbox(v: [(i32, i32); 3]) -> (i32, i32, i32, i32) {
 
 /// Integer square root, rounded down.
 fn isqrt_u64(value: u64) -> u64 {
-    if value < 2 {
-        return value;
-    }
-    let mut x = value;
-    let mut y = x.div_ceil(2);
-    while y < x {
-        x = y;
-        y = (x + value / x) / 2;
-    }
-    x
+    value.isqrt()
 }
 
 fn scale_gpu_pixels(pixels: u64, numerator: u64, denominator: u64) -> u64 {

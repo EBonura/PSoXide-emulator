@@ -188,12 +188,30 @@ fn advance(acc: &mut [u32; LANES], step: u32) {
     }
 }
 
+/// The dither offsets of every `LANES` consecutive pixels, by
+/// `(y & 3) * 4 + (x & 3)` of the first one. The matrix repeats every four
+/// pixels, so a row of chunks that starts at `x` uses the one entry.
+const DITHER_ROWS: [[i16; LANES]; 16] = {
+    let mut rows = [[0i16; LANES]; 16];
+    let mut at = 0;
+    while at < 16 {
+        let (y, x) = (at / 4, at % 4);
+        let mut i = 0;
+        while i < LANES {
+            rows[at][i] = DITHER_OFFSETS[y * 4 + ((x + i) & 3)] as i16;
+            i += 1;
+        }
+        at += 1;
+    }
+    rows
+};
+
 /// The dither offsets of `LANES` consecutive pixels of row `y` from `x`.
 /// The matrix repeats every four pixels, so this holds for every chunk of
 /// a span that starts at `x`.
 #[inline(always)]
-fn dither_lanes(x: i32, y: i32) -> [i32; LANES] {
-    core::array::from_fn(|i| DITHER_OFFSETS[((y & 3) * 4 + ((x + i as i32) & 3)) as usize])
+fn dither_lanes(x: i32, y: i32) -> [i16; LANES] {
+    DITHER_ROWS[(((y & 3) * 4) + (x & 3)) as usize]
 }
 
 /// `modulate_tint` / `modulate_tint_dithered` over a chunk of texels (the
@@ -204,7 +222,7 @@ fn shade_lanes<const SHADE: u8, const DITHER: bool>(
     texel: &[u16; LANES],
     rgb: &[[u32; LANES]; 3],
     tint: (u32, u32, u32),
-    doff: &[i32; LANES],
+    doff: &[i16; LANES],
 ) -> [u16; LANES] {
     if SHADE == SHADE_RAW {
         return *texel;
@@ -227,7 +245,7 @@ fn shade_lanes<const SHADE: u8, const DITHER: bool>(
         let ch = |c: usize, t5: u16| -> u16 {
             if DITHER {
                 let m = ((k[c][i] * (t5 << 3)) >> 7).min(0xff) as i16;
-                ((m + doff[i] as i16).clamp(0, 255) >> 3) as u16
+                ((m + doff[i]).clamp(0, 255) >> 3) as u16
             } else {
                 ((k[c][i] * t5) >> 7).min(0x1f)
             }
@@ -280,6 +298,25 @@ fn with_chunk(vram: &mut [u16; VRAM_LEN], at: usize, n: usize, f: impl FnOnce(&m
         for (i, &b) in buf.iter().enumerate().take(n) {
             vram[(at + i) & (VRAM_LEN - 1)] = b;
         }
+    }
+}
+
+/// [`with_chunk`] for a closure that leaves the lanes past `n` as they are
+/// (the textured loops: a lane past `n` has texel 0 and is never drawn). A
+/// chunk whose eight lanes lie inside VRAM is then read and written back
+/// whole, whatever `n` is, with no per-lane copies for the short chunks at
+/// the ends of a span.
+#[inline(always)]
+fn with_chunk_keeping(
+    vram: &mut [u16; VRAM_LEN],
+    at: usize,
+    n: usize,
+    f: impl FnOnce(&mut [u16; LANES]),
+) {
+    if at + LANES <= VRAM_LEN {
+        f((&mut vram[at..at + LANES]).try_into().unwrap());
+    } else {
+        with_chunk(vram, at, n, f);
     }
 }
 
@@ -340,7 +377,7 @@ fn tex_span_chunked<const D: u8, const SHADE: u8, const DITHER: bool, const GENE
         let out = shade_lanes::<SHADE, DITHER>(&texel, &rgb, prim.tint, &doff);
         let at = row + x;
         if GENERAL {
-            with_chunk(vram, at, n, |dst| {
+            with_chunk_keeping(vram, at, n, |dst| {
                 let blended = if prim.semi {
                     blend_lanes(dst, &out, prim.blend)
                 } else {
@@ -357,9 +394,10 @@ fn tex_span_chunked<const D: u8, const SHADE: u8, const DITHER: bool, const GENE
                     dst[i] = if skip { d } else { px | mask_or };
                 }
             });
-        } else if n == LANES {
-            // A whole chunk inside the row: merge the opaque lanes into
-            // the destination and store all of it back.
+        } else if at + LANES <= VRAM_LEN {
+            // The chunk's eight lanes lie inside VRAM: merge the opaque
+            // lanes into the destination and store all of it back. Lanes
+            // past `n` have texel 0, so they keep what is there.
             let dst: &mut [u16; LANES] = (&mut vram[at..at + LANES]).try_into().unwrap();
             for i in 0..LANES {
                 dst[i] = if texel[i] != 0 {
@@ -558,7 +596,7 @@ pub(super) fn shaded_tri<const DITHER: bool>(
                 let ch = |c: usize| {
                     let v = (rgb[c][i] >> 24) as i16;
                     if DITHER {
-                        ((v + doff[i] as i16).clamp(0, 255) >> 3) as u16
+                        ((v + doff[i]).clamp(0, 255) >> 3) as u16
                     } else {
                         (v >> 3) as u16
                     }

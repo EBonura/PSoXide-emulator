@@ -3413,3 +3413,39 @@ fn display_fingerprint_tracks_displayed_pixels_exactly_as_display_hash_does() {
         assert_ne!(before.1, after.1, "display_fingerprint sees ({x}, {y})");
     }
 }
+
+/// The texture-cliff charge takes the integer square root of a ratio; the
+/// std `isqrt` must agree with the Newton iteration it replaced.
+#[test]
+fn isqrt_u64_matches_the_newton_iteration() {
+    fn newton(value: u64) -> u64 {
+        if value < 2 {
+            return value;
+        }
+        let mut x = value;
+        let mut y = x.div_ceil(2);
+        while y < x {
+            x = y;
+            y = (x + value / x) / 2;
+        }
+        x
+    }
+    for value in 0..=300_000u64 {
+        assert_eq!(isqrt_u64(value), newton(value), "{value}");
+    }
+    // Around perfect squares, where an off-by-one would show, and a spread
+    // of large values (the charge's inputs stay below 2^40).
+    for root in (1u64..1 << 20).step_by(7) {
+        for value in [root * root - 1, root * root, root * root + 1] {
+            assert_eq!(isqrt_u64(value), newton(value), "{value}");
+        }
+    }
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..200_000 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let value = state >> 24;
+        assert_eq!(isqrt_u64(value), newton(value), "{value}");
+    }
+}
