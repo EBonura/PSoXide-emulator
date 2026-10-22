@@ -274,6 +274,12 @@ pub struct CdRom {
     /// Scheduled events waiting for their cycle deadlines. Processed
     /// in order by [`CdRom::tick`].
     pending: VecDeque<PendingEvent>,
+    /// Cache of [`CdRom::idle_until`]: refreshed by `refresh_idle` wherever
+    /// `pending`, `lid_deadline`, `spindown_until` or `cdda_seek_done_at`
+    /// changes. Zero after a restore, which only makes the first branch
+    /// boundary run a (then idle) tick that sets it. Excluded from save states.
+    #[serde(skip)]
+    idle_bound: u64,
     /// Internal lid / rescan timer. It runs on its own deadline rather than
     /// as a visible CDROM IRQ packet.
     lid_deadline: Option<u64>,
@@ -602,6 +608,7 @@ impl CdRom {
             irq_mask: 0x1f,
             irq_flag: 0,
             pending: VecDeque::new(),
+            idle_bound: u64::MAX,
             lid_deadline: None,
             lid_bootstrap_pending: false,
             drive_state: DriveState::Stopped,
@@ -787,6 +794,7 @@ impl CdRom {
     fn halt_cdda(&mut self) {
         self.drive_status &= !(drive_status_bit::PLAYING | drive_status_bit::SEEKING);
         self.cdda_seek_done_at = None;
+        self.refresh_idle();
     }
 
     fn suppress_data_ready(&mut self) -> bool {
@@ -1063,6 +1071,7 @@ impl CdRom {
         self.disc_present = self.disc.is_some();
         self.motor_on = self.disc_present;
         self.spindown_until = None;
+        self.refresh_idle();
         self.pause_reading_until = 0;
         self.head_on_audio = false;
         self.drive_state = if self.disc_present {
@@ -1071,6 +1080,7 @@ impl CdRom {
             DriveState::Stopped
         };
         self.lid_deadline = None;
+        self.refresh_idle();
         self.lid_bootstrap_pending = false;
         self.reading = false;
         self.read_rescheduled = false;
@@ -1398,6 +1408,7 @@ impl CdRom {
     fn update_spindown(&mut self, now: u64) {
         if self.spindown_until.is_some_and(|until| now >= until) {
             self.spindown_until = None;
+            self.refresh_idle();
         }
     }
 
@@ -1420,6 +1431,7 @@ impl CdRom {
     fn data_head_penalty(&mut self) -> u64 {
         let now = self.scheduling_cycle;
         let penalty = if let Some(until) = self.spindown_until.take() {
+            self.refresh_idle();
             // The read interrupts the Stop. Its completion never happens.
             self.drop_pending_command_irq(0x08, IrqType::Complete);
             until
@@ -1538,12 +1550,14 @@ impl CdRom {
             .position(|existing| existing.deadline > event.deadline)
             .unwrap_or(self.pending.len());
         self.pending.insert(idx, event);
+        self.refresh_idle();
     }
 
     fn drop_pending_command_irq(&mut self, command: u8, irq: IrqType) -> bool {
         let before = self.pending.len();
         self.pending
             .retain(|event| !(event.command == command && event.irq == irq));
+        self.refresh_idle();
         let mut dropped = self.pending.len() != before;
         for event in self.pending.iter_mut() {
             if event
@@ -1560,6 +1574,7 @@ impl CdRom {
 
     fn schedule_lid_transition_at(&mut self, now: u64, delay: u64) {
         self.lid_deadline = Some(now.saturating_add(delay));
+        self.refresh_idle();
     }
 
     fn tick_lid_state_machine(&mut self, cycles_now: u64) {
@@ -1568,6 +1583,7 @@ impl CdRom {
                 break;
             }
             self.lid_deadline = None;
+            self.refresh_idle();
             match self.drive_state {
                 DriveState::Stopped => {}
                 DriveState::Standby => {
@@ -1608,6 +1624,7 @@ impl CdRom {
     fn cancel_pending_data_ready_events(&mut self) {
         self.deferred_data_ready = false;
         self.pending.retain(|ev| ev.irq != IrqType::DataReady);
+        self.refresh_idle();
         for ev in self.pending.iter_mut() {
             if ev
                 .followup
@@ -1763,6 +1780,7 @@ impl CdRom {
         self.motor_on = false;
         self.drive_state = DriveState::Stopped;
         self.lid_deadline = None;
+        self.refresh_idle();
         self.lid_bootstrap_pending = false;
         self.reading = false;
         self.pause_reading_until = 0;
@@ -1778,6 +1796,7 @@ impl CdRom {
                     .saturating_add(STOP_FROM_SPINNING_CYCLES)
             });
             self.spindown_until = Some(until);
+            self.refresh_idle();
             until.saturating_sub(self.first_response_deadline())
         } else {
             STOP_SECOND_RESPONSE_CYCLES
@@ -1861,6 +1880,7 @@ impl CdRom {
     fn cmd_motor_on(&mut self) {
         self.motor_on = true;
         self.spindown_until = None;
+        self.refresh_idle();
         self.drive_state = DriveState::Standby;
         self.schedule_first_response(vec![self.stat_byte()]);
     }
@@ -1898,6 +1918,7 @@ impl CdRom {
         self.reset_xa_stream();
         self.muted = false;
         self.spindown_until = None;
+        self.refresh_idle();
         self.head_on_audio = false;
         self.last_sector_header = [0; 4];
         self.last_sector_subheader = [0; 4];
@@ -1912,6 +1933,7 @@ impl CdRom {
         self.drive_status |= drive_status_bit::SHELL_OPEN;
         self.drive_state = DriveState::RescanCd;
         self.lid_deadline = None;
+        self.refresh_idle();
         self.lid_bootstrap_pending = true;
     }
 
@@ -1941,6 +1963,7 @@ impl CdRom {
             | drive_status_bit::ERROR
             | drive_status_bit::SEEK_ERROR);
         self.cdda_seek_done_at = None;
+        self.refresh_idle();
         self.cdda_sample_index = 0;
         self.clear_data_fifo();
         self.reset_xa_stream();
@@ -1951,9 +1974,11 @@ impl CdRom {
         self.mode = 0x20;
         self.motor_on = true;
         self.spindown_until = None;
+        self.refresh_idle();
         self.head_on_audio = false;
         self.drive_state = DriveState::Standby;
         self.lid_deadline = None;
+        self.refresh_idle();
         self.lid_bootstrap_pending = false;
         self.drive_status |= drive_status_bit::MOTOR_ON;
         self.muted = false;
@@ -2440,6 +2465,7 @@ impl CdRom {
         // (console record 0x305); a Play that finds it already there does not.
         // A Play over a Stop's spin-down simply ends the Stop.
         self.spindown_until = None;
+        self.refresh_idle();
         let settle = if self.head_on_audio {
             0
         } else {
@@ -2451,6 +2477,7 @@ impl CdRom {
                 .saturating_add(seek_cycles(from_lba.abs_diff(self.read_lba)))
                 .saturating_add(settle),
         );
+        self.refresh_idle();
         self.schedule_first_response(vec![self.stat_byte()]);
     }
 
@@ -2464,6 +2491,7 @@ impl CdRom {
             return;
         }
         self.cdda_seek_done_at = None;
+        self.refresh_idle();
         self.drive_status &= !drive_status_bit::SEEKING;
         self.drive_status |= drive_status_bit::PLAYING;
     }
@@ -2574,6 +2602,7 @@ impl CdRom {
                 // The event body is never re-run.
                 let delay = IRQ_RESCHEDULE_CYCLES;
                 if let Some(mut ev) = self.pending.pop_front() {
+                    self.refresh_idle();
                     ev.deadline = cycles_now.saturating_add(delay);
                     self.insert_pending_event(ev);
                 }
@@ -2605,6 +2634,7 @@ impl CdRom {
             self.waiting_for_sector = false;
 
             let ev = self.pending.pop_front().unwrap();
+            self.refresh_idle();
 
             // If the drive was paused/reset between this event's
             // scheduling and now, drop it silently. On real
@@ -2730,6 +2760,7 @@ impl CdRom {
             break;
         }
 
+        self.refresh_idle();
         raised
     }
 
