@@ -1990,25 +1990,6 @@ impl Bus {
     /// Clocks to restart the pipeline after jumping out of a streamed line.
     const STREAM_RESTART_CYCLES: u32 = 2;
 
-    /// What [`Bus::streaming_fill_wait`] would return for `phys` now,
-    /// without changing anything.
-    pub(crate) fn streaming_fill_wait_peek(&self, phys: u32) -> u32 {
-        if !self.code_stream_active {
-            return 0;
-        }
-        let settled = self.code_fill_busy_until + u64::from(Self::STREAM_RESTART_CYCLES);
-        if self.cycles >= settled {
-            return 0;
-        }
-        if phys == self.code_stream_next {
-            if phys == self.code_stream_end {
-                return 0;
-            }
-            return self.code_stream_next_ready.saturating_sub(self.cycles) as u32;
-        }
-        (settled - self.cycles) as u32
-    }
-
     /// Called with every fetch address before the fetch is costed; returns
     /// the clocks the core waits on a streaming line fill.
     ///
@@ -2052,6 +2033,46 @@ impl Bus {
         }
         self.code_stream_active = false;
         (settled - self.cycles) as u32
+    }
+
+    /// [`Bus::streaming_fill_wait`] for a fetch of `phys` at clock `now`,
+    /// the clock of a batch with issue cycles not yet applied: the wait, and
+    /// the stream state moved on as the real call would, or `None` (nothing
+    /// changed) when `now` plus the wait would reach `limit`.
+    #[inline]
+    pub(crate) fn streaming_fill_wait_bounded(
+        &mut self,
+        phys: u32,
+        now: u64,
+        limit: u64,
+    ) -> Option<u32> {
+        if !self.code_stream_active {
+            return Some(0);
+        }
+        let settled = self.code_fill_busy_until + u64::from(Self::STREAM_RESTART_CYCLES);
+        // `Some(next ready time)` when the stream goes on, `None` when it ends.
+        let (wait, goes_on) = if now >= settled {
+            (0, false)
+        } else if phys == self.code_stream_next {
+            if phys == self.code_stream_end {
+                (0, false)
+            } else {
+                (self.code_stream_next_ready.saturating_sub(now) as u32, true)
+            }
+        } else {
+            ((settled - now) as u32, false)
+        };
+        if now + u64::from(wait) + 1 >= limit {
+            return None;
+        }
+        if goes_on {
+            self.code_stream_next = phys.wrapping_add(4);
+            // The bus delivers on its own clock, however fast the core eats.
+            self.code_stream_next_ready += 2;
+        } else {
+            self.code_stream_active = false;
+        }
+        Some(wait)
     }
 
     /// Whether an instruction fetch may skip [`Bus::streaming_fill_wait`]:

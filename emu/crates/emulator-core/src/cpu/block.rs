@@ -385,13 +385,18 @@ impl Cpu {
     #[cold]
     #[inline(never)]
     fn batch_fetch_streaming(bus: &mut Bus, pc: u32, issue: &mut u64, limit: u64) -> bool {
-        bus.advance_quiet(*issue);
-        *issue = 0;
-        let wait = bus.streaming_fill_wait_peek(memory::to_physical(pc));
-        if bus.cycles() + u64::from(wait) + 1 >= limit {
+        let now = bus.cycles() + *issue;
+        let Some(wait) = bus.streaming_fill_wait_bounded(memory::to_physical(pc), now, limit)
+        else {
+            bus.advance_quiet(*issue);
+            *issue = 0;
             return false;
-        }
-        Self::block_fetch_streaming(bus, pc);
+        };
+        // The issue cycles and the wait are one advance: below the quiet
+        // limit clock advances add up.
+        bus.advance_quiet(*issue + u64::from(wait));
+        *issue = 0;
+        bus.note_cached_fetch(wait == 0);
         bus.add_zero_cycles();
         true
     }

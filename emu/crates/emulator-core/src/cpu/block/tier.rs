@@ -464,7 +464,13 @@ impl Cpu {
             self.irq_line_high_steps = self.irq_line_high_steps.saturating_add(st.uncounted);
         }
         st.uncounted = 0;
-        let stepped = self.execute_one_cached(bus);
+        // Outside any block the caller has just failed to enter one at this
+        // PC (nothing changed since): no second look.
+        let stepped = if self.cursor.block == 0 {
+            self.execute_one_inner(bus)
+        } else {
+            self.execute_one_cached(bus)
+        };
         debug_assert!(stepped.is_ok(), "a batch step runs a valid instruction");
         st.done += 1;
         // The step set the fetch flags its own way.
