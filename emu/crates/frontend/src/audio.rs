@@ -28,10 +28,8 @@
 
 #![cfg_attr(target_arch = "wasm32", allow(rustdoc::broken_intra_doc_links))]
 
-use std::sync::{
-    atomic::{AtomicU32, AtomicU64, Ordering},
-    Arc, Mutex,
-};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 

@@ -260,7 +260,7 @@ impl PortDevice {
                     }
                 }
                 None => SerialExchange {
-                    rx: 0xFF,
+                    rx: 0xff,
                     ack: false,
                     device_present: false,
                 },
@@ -275,7 +275,7 @@ impl PortDevice {
                     }
                 }
                 None => SerialExchange {
-                    rx: 0xFF,
+                    rx: 0xff,
                     ack: false,
                     device_present: false,
                 },
@@ -293,13 +293,13 @@ impl PortDevice {
                             // dummy/Hi-Z byte here; the actual ID bytes
                             // start on the following command byte.
                             SerialExchange {
-                                rx: 0xFF,
+                                rx: 0xff,
                                 ack: true,
                                 device_present: true,
                             }
                         } else {
                             SerialExchange {
-                                rx: 0xFF,
+                                rx: 0xff,
                                 ack: false,
                                 device_present: false,
                             }
@@ -316,14 +316,14 @@ impl PortDevice {
                             }
                         } else {
                             SerialExchange {
-                                rx: 0xFF,
+                                rx: 0xff,
                                 ack: false,
                                 device_present: false,
                             }
                         }
                     }
                     _ => SerialExchange {
-                        rx: 0xFF,
+                        rx: 0xff,
                         ack: false,
                         device_present: false,
                     },
@@ -625,7 +625,7 @@ impl DigitalPad {
             mode_before_config: PadMode::Digital,
             cmd: 0,
             step: 0,
-            motor_mapping: [0xFF; 6],
+            motor_mapping: [0xff; 6],
             config_param: 0,
             analog_locked: false,
             motor_small: false,
@@ -776,7 +776,7 @@ impl DigitalPad {
         match self.mode {
             PadMode::Digital => 0x41,
             PadMode::Analog => 0x73,
-            PadMode::Config => 0xF3,
+            PadMode::Config => 0xf3,
         }
     }
 
@@ -785,14 +785,14 @@ impl DigitalPad {
     /// analog sticks when present.
     fn poll_byte(&self, step: u8) -> u8 {
         match step {
-            1 => 0x5A,
-            2 => !(self.buttons.bits() & 0xFF) as u8,
-            3 => !((self.buttons.bits() >> 8) & 0xFF) as u8,
+            1 => 0x5a,
+            2 => !(self.buttons.bits() & 0xff) as u8,
+            3 => !((self.buttons.bits() >> 8) & 0xff) as u8,
             4 => self.right_x,
             5 => self.right_y,
             6 => self.left_x,
             7 => self.left_y,
-            _ => 0xFF,
+            _ => 0xff,
         }
     }
 
@@ -822,8 +822,8 @@ impl DigitalPad {
         // that clocks out ID_high (`0x5A`).
         if self.step == 1 {
             self.step = 2;
-            self.record_trace_byte(tx, 0x5A);
-            return (0x5A, true);
+            self.record_trace_byte(tx, 0x5a);
+            return (0x5a, true);
         }
 
         // Steps 2..N: payload bytes. `self.step` currently names
@@ -855,10 +855,10 @@ impl DigitalPad {
                 PadMode::Digital => DIGITAL_POLL_LAST,
                 PadMode::Analog | PadMode::Config => ANALOG_POLL_LAST,
             },
-            0x43 | 0x44 | 0x45 | 0x46 | 0x47 | 0x4C | 0x4D if !self.analog_capable => {
+            0x43 | 0x44 | 0x45 | 0x46 | 0x47 | 0x4c | 0x4d if !self.analog_capable => {
                 DIGITAL_POLL_LAST
             }
-            0x43 | 0x44 | 0x45 | 0x46 | 0x47 | 0x4C | 0x4D => ANALOG_POLL_LAST,
+            0x43 | 0x44 | 0x45 | 0x46 | 0x47 | 0x4c | 0x4d => ANALOG_POLL_LAST,
             // Unknown command -- abort after the ID bytes (steps
             // 0 + 1) have been exchanged.
             _ => 1,
@@ -950,7 +950,7 @@ impl DigitalPad {
             // response is the PREVIOUS mapping byte at that slot --
             // games read the returned bytes to confirm their
             // mapping took effect.
-            0x4D => {
+            0x4d => {
                 let slot = (self.step.saturating_sub(2)) as usize;
                 if slot < self.motor_mapping.len() {
                     let prev = self.motor_mapping[slot];
@@ -977,14 +977,14 @@ impl DigitalPad {
                 }
                 self.command_47_byte(self.step)
             }
-            0x4C => {
+            0x4c => {
                 if self.step == 2 {
                     self.config_param = tx;
                 }
                 self.command_4c_byte(self.step)
             }
 
-            _ => 0xFF,
+            _ => 0xff,
         }
     }
 
@@ -996,7 +996,7 @@ impl DigitalPad {
             (0x01, 5) => 0x01,
             (0x00, 6) => 0x00,
             (0x01, 6) => 0x01,
-            (0x00, 7) => 0x0A,
+            (0x00, 7) => 0x0a,
             (0x01, 7) => 0x14,
             _ => 0x00,
         }
@@ -1286,7 +1286,7 @@ impl MemoryCard {
             write_buffer: [0u8; MEMCARD_FRAME_SIZE],
             write_buffer_len: 0,
             byte_index: 0,
-            spdr: 0xFF,
+            spdr: 0xff,
             dirty: false,
             command_histogram: [0; 256],
             recent_events: [MemcardEvent::default(); MEMCARD_RECENT_EVENTS],
@@ -1353,7 +1353,7 @@ impl MemoryCard {
             write_buffer: [0u8; MEMCARD_FRAME_SIZE],
             write_buffer_len: 0,
             byte_index: 0,
-            spdr: 0xFF,
+            spdr: 0xff,
             dirty: false,
             command_histogram: [0; 256],
             recent_events: [MemcardEvent::default(); MEMCARD_RECENT_EVENTS],
@@ -1422,7 +1422,7 @@ impl MemoryCard {
         self.frame_lsb = 0;
         self.write_checksum = 0;
         self.write_buffer_len = 0;
-        self.spdr = 0xFF;
+        self.spdr = 0xff;
         self.current_command = 0;
     }
 
@@ -1457,7 +1457,7 @@ impl MemoryCard {
                     // OK=0x00).
                     (self.flag_byte(), true)
                 } else {
-                    (0xFF, false)
+                    (0xff, false)
                 }
             }
             MemcardState::GotAddr => match tx {
@@ -1465,25 +1465,25 @@ impl MemoryCard {
                     // "R" -- read.
                     self.record_command(tx);
                     self.state = MemcardState::Read(MemcardReadState::SendId1);
-                    (0x5A, true)
+                    (0x5a, true)
                 }
                 0x57 => {
                     // "W" -- write.
                     self.record_command(tx);
                     self.state = MemcardState::Write(MemcardWriteState::SendId1);
-                    (0x5A, true)
+                    (0x5a, true)
                 }
                 0x53 => {
                     // "S" -- get ID.
                     self.record_command(tx);
                     self.state = MemcardState::GetId(MemcardGetIdState::SendId1);
-                    (0x5A, true)
+                    (0x5a, true)
                 }
                 _ => {
                     self.record_command(tx);
-                    self.record_event(MemcardEventKind::Unsupported, tx, 0, 0xFF);
+                    self.record_event(MemcardEventKind::Unsupported, tx, 0, 0xff);
                     self.reset();
-                    (0xFF, false)
+                    (0xff, false)
                 }
             },
             MemcardState::Read(rs) => self.exchange_read(rs, tx),
@@ -1497,7 +1497,7 @@ impl MemoryCard {
         match rs {
             SendId1 => {
                 self.state = MemcardState::Read(SendId2);
-                (0x5D, true)
+                (0x5d, true)
             }
             SendId2 => {
                 self.state = MemcardState::Read(RxMsb);
@@ -1512,11 +1512,11 @@ impl MemoryCard {
                 self.frame_lsb = tx;
                 self.record_current_frame(MemcardEventKind::Frame, 0);
                 self.state = MemcardState::Read(SendAck1);
-                (0x5C, true)
+                (0x5c, true)
             }
             SendAck1 => {
                 self.state = MemcardState::Read(SendAck2);
-                (0x5D, true)
+                (0x5d, true)
             }
             SendAck2 => {
                 self.state = MemcardState::Read(EchoMsb);
@@ -1561,7 +1561,7 @@ impl MemoryCard {
         match ws {
             SendId1 => {
                 self.state = MemcardState::Write(SendId2);
-                (0x5D, true)
+                (0x5d, true)
             }
             SendId2 => {
                 self.state = MemcardState::Write(RxMsb);
@@ -1599,19 +1599,19 @@ impl MemoryCard {
                 if ok {
                     self.commit_write_buffer();
                     self.state = MemcardState::Write(SendAck1);
-                    (0x5C, true)
+                    (0x5c, true)
                 } else {
-                    self.record_current_frame(MemcardEventKind::End, 0x4E);
+                    self.record_current_frame(MemcardEventKind::End, 0x4e);
                     self.reset();
-                    (0x4E, false)
+                    (0x4e, false)
                 }
             }
             SendAck1 => {
                 self.state = MemcardState::Write(SendAck2);
-                (0x5D, true)
+                (0x5d, true)
             }
             SendAck2 => {
-                let end = if self.dirty { 0x47 } else { 0x4E };
+                let end = if self.dirty { 0x47 } else { 0x4e };
                 self.record_current_frame(MemcardEventKind::End, end);
                 self.reset();
                 (end, true)
@@ -1624,7 +1624,7 @@ impl MemoryCard {
         match gs {
             SendId1 => {
                 self.state = MemcardState::GetId(SendId2);
-                (0x5D, true)
+                (0x5d, true)
             }
             SendId2 => {
                 self.state = MemcardState::GetId(SendCommandAck1);
@@ -1632,11 +1632,11 @@ impl MemoryCard {
             }
             SendCommandAck1 => {
                 self.state = MemcardState::GetId(SendCommandAck2);
-                (0x5C, true)
+                (0x5c, true)
             }
             SendCommandAck2 => {
                 self.state = MemcardState::GetId(SendInfo(0));
-                (0x5D, true)
+                (0x5d, true)
             }
             SendInfo(i) => {
                 // Standard PSX card ID bytes: 04 00 00 80
@@ -1662,7 +1662,7 @@ impl MemoryCard {
     fn read_frame_byte(&self, i: u16) -> u8 {
         let frame = ((self.frame_msb as usize) << 8) | (self.frame_lsb as usize);
         let offset = frame * MEMCARD_FRAME_SIZE + (i as usize);
-        self.bytes.get(offset).copied().unwrap_or(0xFF)
+        self.bytes.get(offset).copied().unwrap_or(0xff)
     }
 
     fn commit_write_buffer(&mut self) {
@@ -1718,9 +1718,9 @@ mod tests {
     fn full_digital_poll_all_released() {
         let mut pad = DigitalPad::new();
         assert_eq!(pad.exchange(0x42), (0x41, true));
-        assert_eq!(pad.exchange(0x00), (0x5A, true));
-        assert_eq!(pad.exchange(0x00), (0xFF, true)); // all released → 0xFF
-        assert_eq!(pad.exchange(0x00), (0xFF, false)); // last byte
+        assert_eq!(pad.exchange(0x00), (0x5a, true));
+        assert_eq!(pad.exchange(0x00), (0xff, true)); // all released → 0xFF
+        assert_eq!(pad.exchange(0x00), (0xff, false)); // last byte
                                                        // Transaction state should have reset.
         assert_eq!(pad.step, 0);
         assert_eq!(pad.cmd, 0);
@@ -1734,7 +1734,7 @@ mod tests {
         let _ = pad.exchange(0x00);
         let (b1, _) = pad.exchange(0x00);
         // START = bit 3; active-low on the wire: !0x08 = 0xF7.
-        assert_eq!(b1, 0xF7);
+        assert_eq!(b1, 0xf7);
     }
 
     #[test]
@@ -1746,7 +1746,7 @@ mod tests {
         let _ = pad.exchange(0x00);
         let (b2, _) = pad.exchange(0x00);
         // CROSS = bit 14; (bits >> 8) = bit 6 → !0x40 = 0xBF.
-        assert_eq!(b2, 0xBF);
+        assert_eq!(b2, 0xbf);
     }
 
     #[test]
@@ -1755,7 +1755,7 @@ mod tests {
         // PortDevice already consumed the select byte, so the pad's
         // first observed byte is the command itself.
         assert_eq!(pad.exchange(0x42), (0x41, true));
-        assert_eq!(pad.exchange(0x00), (0x5A, true));
+        assert_eq!(pad.exchange(0x00), (0x5a, true));
     }
 
     #[test]
@@ -1764,9 +1764,9 @@ mod tests {
         assert_eq!(pad.exchange(0x99), (0x41, true));
         // Hardware still clocks out `0x5A`; the payload step is where
         // the command actually aborts.
-        assert_eq!(pad.exchange(0x00), (0x5A, true));
+        assert_eq!(pad.exchange(0x00), (0x5a, true));
         // Payload byte returns 0xFF + no ack.
-        assert_eq!(pad.exchange(0x00), (0xFF, false));
+        assert_eq!(pad.exchange(0x00), (0xff, false));
         assert_eq!(pad.step, 0);
     }
 
@@ -1784,7 +1784,7 @@ mod tests {
         assert_eq!(pad.mode(), PadMode::Config);
 
         // Switch to analog: 0x44, 0x00, 0x01, 0x02, 0, 0, 0, 0.
-        assert_eq!(pad.exchange(0x44), (0xF3, true)); // config ID
+        assert_eq!(pad.exchange(0x44), (0xf3, true)); // config ID
         let _ = pad.exchange(0x00);
         let _ = pad.exchange(0x01); // analog
         for _ in 3..8 {
@@ -1811,17 +1811,17 @@ mod tests {
         // A digital-only controller answers with its ordinary short packet
         // and drops ACK after the two button bytes. It never enters config.
         assert_eq!(pad.exchange(0x43), (0x41, true));
-        assert_eq!(pad.exchange(0x00), (0x5A, true));
-        assert_eq!(pad.exchange(0x01), (0xFF, true));
-        assert_eq!(pad.exchange(0x00), (0xFF, false));
+        assert_eq!(pad.exchange(0x00), (0x5a, true));
+        assert_eq!(pad.exchange(0x01), (0xff, true));
+        assert_eq!(pad.exchange(0x00), (0xff, false));
         assert_eq!(pad.mode(), PadMode::Digital);
         assert!(!pad.force_analog_mode());
         assert!(!pad.press_analog_button());
 
         assert_eq!(pad.exchange(0x42), (0x41, true));
-        assert_eq!(pad.exchange(0x00), (0x5A, true));
-        assert_eq!(pad.exchange(0x00), (0xFF, true));
-        assert_eq!(pad.exchange(0x00), (0xFF, false));
+        assert_eq!(pad.exchange(0x00), (0x5a, true));
+        assert_eq!(pad.exchange(0x00), (0xff, true));
+        assert_eq!(pad.exchange(0x00), (0xff, false));
     }
 
     #[test]
@@ -1853,9 +1853,9 @@ mod tests {
         pad.set_sticks(0x10, 0x20, 0x30, 0x40);
         // Poll in analog mode.
         assert_eq!(pad.exchange(0x42), (0x73, true)); // analog ID
-        assert_eq!(pad.exchange(0x00), (0x5A, true));
-        assert_eq!(pad.exchange(0x00).0, 0xFF); // buttons low -- all released
-        assert_eq!(pad.exchange(0x00).0, 0xFF); // buttons high -- all released
+        assert_eq!(pad.exchange(0x00), (0x5a, true));
+        assert_eq!(pad.exchange(0x00).0, 0xff); // buttons low -- all released
+        assert_eq!(pad.exchange(0x00).0, 0xff); // buttons high -- all released
         assert_eq!(pad.exchange(0x00).0, 0x10); // right X
         assert_eq!(pad.exchange(0x00).0, 0x20); // right Y
         assert_eq!(pad.exchange(0x00).0, 0x30); // left X
@@ -1870,14 +1870,14 @@ mod tests {
 
         let seq0 = [0x46, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         let expected0 = [
-            (0xF3, true),
-            (0x5A, true),
+            (0xf3, true),
+            (0x5a, true),
             (0x00, true),
             (0x00, true),
             (0x01, true),
             (0x02, true),
             (0x00, true),
-            (0x0A, false),
+            (0x0a, false),
         ];
         for (tx, expected) in seq0.into_iter().zip(expected0) {
             assert_eq!(pad.exchange(tx), expected);
@@ -1885,8 +1885,8 @@ mod tests {
 
         let seq1 = [0x46, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
         let expected1 = [
-            (0xF3, true),
-            (0x5A, true),
+            (0xf3, true),
+            (0x5a, true),
             (0x00, true),
             (0x00, true),
             (0x01, true),
@@ -1906,8 +1906,8 @@ mod tests {
 
         let seq47 = [0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         let expected47 = [
-            (0xF3, true),
-            (0x5A, true),
+            (0xf3, true),
+            (0x5a, true),
             (0x00, true),
             (0x00, true),
             (0x02, true),
@@ -1921,8 +1921,8 @@ mod tests {
 
         let seq47_nonzero = [0x47, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
         let expected47_nonzero = [
-            (0xF3, true),
-            (0x5A, true),
+            (0xf3, true),
+            (0x5a, true),
             (0x00, true),
             (0x00, true),
             (0x00, true),
@@ -1934,10 +1934,10 @@ mod tests {
             assert_eq!(pad.exchange(tx), expected);
         }
 
-        let seq4c0 = [0x4C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let seq4c0 = [0x4c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         let expected4c0 = [
-            (0xF3, true),
-            (0x5A, true),
+            (0xf3, true),
+            (0x5a, true),
             (0x00, true),
             (0x00, true),
             (0x00, true),
@@ -1949,10 +1949,10 @@ mod tests {
             assert_eq!(pad.exchange(tx), expected);
         }
 
-        let seq4c1 = [0x4C, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let seq4c1 = [0x4c, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
         let expected4c1 = [
-            (0xF3, true),
-            (0x5A, true),
+            (0xf3, true),
+            (0x5a, true),
             (0x00, true),
             (0x00, true),
             (0x00, true),
@@ -1973,9 +1973,9 @@ mod tests {
         // digital-length shape because the command byte still reports
         // the current Digital ID.
         assert_eq!(pad.exchange(0x43), (0x41, true));
-        assert_eq!(pad.exchange(0x00), (0x5A, true));
-        assert_eq!(pad.exchange(0x01).0, 0xFF);
-        assert_eq!(pad.exchange(0x00).0, 0xFF);
+        assert_eq!(pad.exchange(0x00), (0x5a, true));
+        assert_eq!(pad.exchange(0x01).0, 0xff);
+        assert_eq!(pad.exchange(0x00).0, 0xff);
         pad.reset();
         assert_eq!(pad.mode(), PadMode::Config);
 
@@ -1998,7 +1998,7 @@ mod tests {
         for (i, tx) in query_mode.into_iter().enumerate() {
             rx[i] = pad.exchange(tx).0;
         }
-        assert_eq!(rx, [0xF3, 0x5A, 0x01, 0x02, 0x01, 0x02, 0x01, 0x00]);
+        assert_eq!(rx, [0xf3, 0x5a, 0x01, 0x02, 0x01, 0x02, 0x01, 0x00]);
 
         let exit_config = [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         for tx in exit_config {
@@ -2012,9 +2012,9 @@ mod tests {
         let mut pad = DigitalPad::new();
         pad.mode = PadMode::Config;
 
-        assert_eq!(pad.exchange(0x4E), (0xF3, true));
-        assert_eq!(pad.exchange(0x00), (0x5A, true));
-        assert_eq!(pad.exchange(0x00), (0xFF, false));
+        assert_eq!(pad.exchange(0x4e), (0xf3, true));
+        assert_eq!(pad.exchange(0x00), (0x5a, true));
+        assert_eq!(pad.exchange(0x00), (0xff, false));
         assert_eq!(pad.step, 0);
         assert_eq!(pad.cmd, 0);
     }
@@ -2031,8 +2031,8 @@ mod tests {
     #[test]
     fn no_device_always_returns_ff() {
         let mut port = PortDevice::empty();
-        assert_eq!(port.exchange(0x01), (0xFF, false));
-        assert_eq!(port.exchange(0x42), (0xFF, false));
+        assert_eq!(port.exchange(0x01), (0xff, false));
+        assert_eq!(port.exchange(0x42), (0xff, false));
     }
 
     #[test]
@@ -2043,7 +2043,7 @@ mod tests {
         // After deselect, a fresh 0x01 should start from Idle again
         // and succeed.
         let (rx, ack) = port.exchange(0x01);
-        assert_eq!(rx, 0xFF);
+        assert_eq!(rx, 0xff);
         assert!(ack);
         assert_eq!(port.exchange(0x42), (0x41, true));
     }
@@ -2051,7 +2051,7 @@ mod tests {
     #[test]
     fn rumble_mapping_defaults_to_unmapped() {
         let pad = DigitalPad::new();
-        assert_eq!(pad.motor_mapping, [0xFF; 6]);
+        assert_eq!(pad.motor_mapping, [0xff; 6]);
         assert_eq!(pad.motor_state(), (false, 0));
     }
 
@@ -2059,15 +2059,15 @@ mod tests {
     fn command_0x4d_stores_mapping_and_returns_previous() {
         let mut pad = DigitalPad::new();
         // Preload a distinctive mapping.
-        pad.motor_mapping = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
-        let mapping = [0x00u8, 0x01, 0xFF, 0xFF, 0xFF, 0xFF];
+        pad.motor_mapping = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        let mapping = [0x00u8, 0x01, 0xff, 0xff, 0xff, 0xff];
         // Run the 0x4D transaction.
-        assert_eq!(pad.exchange(0x4D).0, 0x41); // ID low (Digital is fine for test)
-        assert_eq!(pad.exchange(0x00).0, 0x5A);
+        assert_eq!(pad.exchange(0x4d).0, 0x41); // ID low (Digital is fine for test)
+        assert_eq!(pad.exchange(0x00).0, 0x5a);
         // Send 6 mapping bytes, one per payload slot; expect the
         // previous value in the response.
         for (i, &m) in mapping.iter().enumerate() {
-            let expected_prev = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF][i];
+            let expected_prev = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff][i];
             let (rx, _) = pad.exchange(m);
             assert_eq!(rx, expected_prev, "slot {i}");
         }
@@ -2079,15 +2079,15 @@ mod tests {
         let mut pad = DigitalPad::new();
         pad.mode = PadMode::Analog;
         // slot 0 -> small motor, slot 1 -> big motor.
-        pad.motor_mapping = [0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF];
+        pad.motor_mapping = [0x00, 0x01, 0xff, 0xff, 0xff, 0xff];
         // Poll: 0x42, then the placeholder byte, then 6 TX bytes.
         // First TX byte is the
         // small-motor on/off (0xFF = on); second is big-motor
         // strength.
         assert_eq!(pad.exchange(0x42).0, 0x73);
-        assert_eq!(pad.exchange(0x00).0, 0x5A);
+        assert_eq!(pad.exchange(0x00).0, 0x5a);
         // Payload step 2 -- small motor slot. 0xFF turns it on.
-        let _ = pad.exchange(0xFF);
+        let _ = pad.exchange(0xff);
         // Payload step 3 -- big motor slot. 0x80 = half strength.
         let _ = pad.exchange(0x80);
         // Consume remaining payload bytes.
@@ -2128,25 +2128,25 @@ mod tests {
         pad.buttons = ButtonState::from_bits(button::START);
 
         assert_eq!(pad.exchange(0x42), (0x41, true));
-        assert_eq!(pad.exchange(0x00), (0x5A, true));
-        assert_eq!(pad.exchange(0x00), (0xF7, true));
-        assert_eq!(pad.exchange(0x00), (0xFF, false));
+        assert_eq!(pad.exchange(0x00), (0x5a, true));
+        assert_eq!(pad.exchange(0x00), (0xf7, true));
+        assert_eq!(pad.exchange(0x00), (0xff, false));
 
         let polls = pad.recent_polls();
         assert_eq!(polls.len(), 1);
         assert!(polls[0].complete);
         assert_eq!(polls[0].len, 4);
         assert_eq!(&polls[0].tx[..4], &[0x42, 0x00, 0x00, 0x00]);
-        assert_eq!(&polls[0].rx[..4], &[0x41, 0x5A, 0xF7, 0xFF]);
+        assert_eq!(&polls[0].rx[..4], &[0x41, 0x5a, 0xf7, 0xff]);
     }
 
     #[test]
     fn small_motor_follows_bit_zero_of_mapped_byte() {
         // PSX-SPX: the small motor is a digital on/off driven by bit 0.
-        for (tx, on) in [(0x00, false), (0x01, true), (0xFE, false), (0xFF, true)] {
+        for (tx, on) in [(0x00, false), (0x01, true), (0xfe, false), (0xff, true)] {
             let mut pad = DigitalPad::new();
             pad.mode = PadMode::Analog;
-            pad.motor_mapping = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+            pad.motor_mapping = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff];
             // Poll command, fill byte, then the mapped slot.
             let _ = pad.exchange(0x42);
             let _ = pad.exchange(0x00);
@@ -2165,9 +2165,9 @@ mod tests {
         let mut card = MemoryCard::new();
         // Memory cards are full-duplex: each transfer returns the byte
         // prepared by the previous transfer.
-        assert_eq!(card.exchange(0x81), (0xFF, true));
+        assert_eq!(card.exchange(0x81), (0xff, true));
         assert_eq!(card.exchange(0x53), (0x08, true)); // NEW flag set
-        assert_eq!(card.exchange(0x00), (0x5A, true));
+        assert_eq!(card.exchange(0x00), (0x5a, true));
         // Then the 8-byte ID sequence.
         let mut seq = vec![];
         for _ in 0..10 {
@@ -2175,7 +2175,7 @@ mod tests {
             seq.push((rx, ack));
         }
         // 5A(just above) then 5D, 00, 5C, 5D, 04, 00, 00, 80
-        assert_eq!(seq[0], (0x5D, true));
+        assert_eq!(seq[0], (0x5d, true));
     }
 
     #[test]
@@ -2185,7 +2185,7 @@ mod tests {
         let pattern: Vec<u8> = (0..MEMCARD_FRAME_SIZE).map(|i| (i * 3) as u8).collect();
         let checksum: u8 = pattern.iter().fold(0u8, |a, b| a ^ b);
         // Protocol: 0x81, 'W' (0x57), 0x00, 0x00, MSB (0x00), LSB (0x00), data*128, checksum
-        assert_eq!(card.exchange(0x81), (0xFF, true));
+        assert_eq!(card.exchange(0x81), (0xff, true));
         assert_eq!(card.exchange(0x57), (0x08, true));
         card.exchange(0x00); // id2
         card.exchange(0x00); // pad
@@ -2210,7 +2210,7 @@ mod tests {
 
         // Read frame 0 back and verify contents match.
         card.reset();
-        assert_eq!(card.exchange(0x81), (0xFF, true));
+        assert_eq!(card.exchange(0x81), (0xff, true));
         assert_eq!(card.exchange(0x52), (0x00, true)); // flag = 0 now
         card.exchange(0x00); // id2
         card.exchange(0x00); // pad

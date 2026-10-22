@@ -119,12 +119,12 @@ impl VolumeEnvelope {
     pub fn write(&mut self, raw: u16) {
         self.raw = raw;
         if raw & 0x8000 == 0 {
-            let half = ((raw & 0x7FFF) << 1) as i16 >> 1;
+            let half = ((raw & 0x7fff) << 1) as i16 >> 1;
             self.current = half.wrapping_mul(2);
             self.sweep_active = false;
             return;
         }
-        let shift = ((raw >> 2) & 0x1F) as u8;
+        let shift = ((raw >> 2) & 0x1f) as u8;
         let selector = (raw & 3) as u8;
         let exponential = raw & (1 << 14) != 0;
         let decreasing = raw & (1 << 13) != 0;
@@ -171,14 +171,14 @@ impl VolumeEnvelope {
         if self.toward_zero {
             // Stops at zero from either side.
             let floor = if self.negative { -0x8000 } else { 0 };
-            let ceil = if self.negative { 0 } else { 0x7FFF };
+            let ceil = if self.negative { 0 } else { 0x7fff };
             let clamped = moved.clamp(floor, ceil);
             self.current = clamped as i16;
             self.sweep_active = clamped != 0;
         } else {
-            let clamped = moved.clamp(-0x8000, 0x7FFF);
+            let clamped = moved.clamp(-0x8000, 0x7fff);
             self.current = clamped as i16;
-            let end_stop = if self.negative { -0x8000 } else { 0x7FFF };
+            let end_stop = if self.negative { -0x8000 } else { 0x7fff };
             self.sweep_active = clamped != end_stop;
         }
     }
@@ -191,24 +191,24 @@ impl VolumeEnvelope {
 
 /// Attack: bit 15 exponential, bits 14..10 shift, bits 9..8 step.
 pub(super) fn attack_slope(lo: u16) -> Slope {
-    Slope::rising(((lo >> 10) & 0x1F) as u8, (lo >> 8) as u8, lo & 0x8000 != 0)
+    Slope::rising(((lo >> 10) & 0x1f) as u8, (lo >> 8) as u8, lo & 0x8000 != 0)
 }
 
 /// Decay: bits 7..4 shift; always an exponential decrease with step -8.
 pub(super) fn decay_slope(lo: u16) -> Slope {
-    Slope::falling(((lo >> 4) & 0xF) as u8, 0, true)
+    Slope::falling(((lo >> 4) & 0xf) as u8, 0, true)
 }
 
 /// The level at which decay hands over to sustain: `(N + 1) * 0x800` for the
 /// register's 4-bit sustain field `N`.
 pub(super) fn sustain_threshold(lo: u16) -> i32 {
-    (i32::from(lo & 0xF) + 1) * 0x800
+    (i32::from(lo & 0xf) + 1) * 0x800
 }
 
 /// Sustain: bit 15 (of `hi`) exponential, bit 14 decrease, bits 12..8
 /// shift, bits 7..6 step.
 pub(super) fn sustain_slope(hi: u16) -> Slope {
-    let shift = ((hi >> 8) & 0x1F) as u8;
+    let shift = ((hi >> 8) & 0x1f) as u8;
     let selector = (hi >> 6) as u8;
     let exponential = hi & 0x8000 != 0;
     if hi & 0x4000 != 0 {
@@ -221,5 +221,5 @@ pub(super) fn sustain_slope(hi: u16) -> Slope {
 /// Release: bit 5 exponential, bits 4..0 shift; always a decrease with
 /// step -8.
 pub(super) fn release_slope(hi: u16) -> Slope {
-    Slope::falling((hi & 0x1F) as u8, 0, hi & (1 << 5) != 0)
+    Slope::falling((hi & 0x1f) as u8, 0, hi & (1 << 5) != 0)
 }

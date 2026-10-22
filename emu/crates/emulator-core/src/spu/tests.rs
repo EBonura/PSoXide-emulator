@@ -26,15 +26,15 @@ fn spucnt_round_trip_and_spustat_mirror() {
     s.write16(SPUCNT, 0x8010);
     assert_eq!(s.spucnt(), 0x8010);
     // SPUSTAT lower 6 bits mirror SPUCNT lower 6 bits.
-    assert_eq!(s.spustat() & 0x3F, 0x10);
+    assert_eq!(s.spustat() & 0x3f, 0x10);
 }
 
 #[test]
 fn spustat_read_only_drops_writes() {
     let mut s = Spu::new();
     s.write16(SPUCNT, 0x8010);
-    s.write16(SPUSTAT, 0xFFFF);
-    assert_eq!(s.spustat() & 0x3F, 0x10);
+    s.write16(SPUSTAT, 0xffff);
+    assert_eq!(s.spustat() & 0x3f, 0x10);
 }
 
 #[test]
@@ -42,14 +42,14 @@ fn retail_bios_shell_audio_profile_matches_pa5_hardware_snapshot() {
     let mut s = Spu::new();
     s.apply_retail_bios_shell_audio_profile();
 
-    assert_eq!(s.read16(SPUCNT), 0xC085);
+    assert_eq!(s.read16(SPUCNT), 0xc085);
     assert_eq!(s.read16(SPUSTAT), 0x0805);
-    assert_eq!(s.read16(REVERB_VOL_L), 0x5EBC);
-    assert_eq!(s.read16(REVERB_VOL_R), 0x5EBC);
-    assert_eq!(s.read16(REVERB_BASE), 0xE128);
-    assert_eq!(s.read16(EON_LO), 0xFFFF);
-    assert_eq!(s.read16(EON_HI), 0x00FF);
-    assert_eq!(s.read16(REVERB_CFG_BASE), 0x033D);
+    assert_eq!(s.read16(REVERB_VOL_L), 0x5ebc);
+    assert_eq!(s.read16(REVERB_VOL_R), 0x5ebc);
+    assert_eq!(s.read16(REVERB_BASE), 0xe128);
+    assert_eq!(s.read16(EON_LO), 0xffff);
+    assert_eq!(s.read16(EON_HI), 0x00ff);
+    assert_eq!(s.read16(REVERB_CFG_BASE), 0x033d);
     assert_eq!(s.read16(REVERB_CFG_BASE + 62), 0x8000);
 }
 
@@ -57,20 +57,20 @@ fn retail_bios_shell_audio_profile_matches_pa5_hardware_snapshot() {
 fn voice_bank_round_trips_volume_pitch_start_loop() {
     let mut s = Spu::new();
     let base = VOICE_BASE + 5 * 16;
-    s.write16(base + voice_offset::VOLUME_L, 0x3FFF);
+    s.write16(base + voice_offset::VOLUME_L, 0x3fff);
     s.write16(base + voice_offset::VOLUME_R, 0x1234);
     s.write16(base + voice_offset::PITCH, 0x1000);
     s.write16(base + voice_offset::START_ADDR, 0x0020);
     s.write16(base + voice_offset::REPEAT_ADDR, 0x0040);
-    s.write16(base + voice_offset::ADSR_LO, 0x80FF);
-    s.write16(base + voice_offset::ADSR_HI, 0x1F20);
-    assert_eq!(s.read16(base + voice_offset::VOLUME_L), 0x3FFF);
+    s.write16(base + voice_offset::ADSR_LO, 0x80ff);
+    s.write16(base + voice_offset::ADSR_HI, 0x1f20);
+    assert_eq!(s.read16(base + voice_offset::VOLUME_L), 0x3fff);
     assert_eq!(s.read16(base + voice_offset::VOLUME_R), 0x1234);
     assert_eq!(s.read16(base + voice_offset::PITCH), 0x1000);
     assert_eq!(s.read16(base + voice_offset::START_ADDR), 0x0020);
     assert_eq!(s.read16(base + voice_offset::REPEAT_ADDR), 0x0040);
-    assert_eq!(s.read16(base + voice_offset::ADSR_LO), 0x80FF);
-    assert_eq!(s.read16(base + voice_offset::ADSR_HI), 0x1F20);
+    assert_eq!(s.read16(base + voice_offset::ADSR_LO), 0x80ff);
+    assert_eq!(s.read16(base + voice_offset::ADSR_HI), 0x1f20);
 }
 
 #[test]
@@ -92,8 +92,8 @@ fn voice_adsr_current_manual_write_preserves_signed_16_bit_value() {
     let mut s = Spu::new();
     let envx = VOICE_BASE + voice_offset::ADSR_CURRENT;
 
-    s.write16(envx, 0xFFFF);
-    assert_eq!(s.read16(envx), 0xFFFF);
+    s.write16(envx, 0xffff);
+    assert_eq!(s.read16(envx), 0xffff);
     assert_eq!(s.voices[0].envelope, -1);
 
     s.write16(envx, 0x8000);
@@ -108,10 +108,10 @@ fn voice_adsr_current_manual_write_preserves_signed_16_bit_value() {
 #[test]
 fn current_main_volume_regs_do_not_mirror_main_volume() {
     let mut s = Spu::new();
-    s.write16(MAIN_VOL_L, 0x3FFF);
+    s.write16(MAIN_VOL_L, 0x3fff);
     s.write16(MAIN_VOL_R, 0x2000);
 
-    assert_eq!(s.read16(MAIN_VOL_L), 0x3FFF);
+    assert_eq!(s.read16(MAIN_VOL_L), 0x3fff);
     assert_eq!(s.read16(MAIN_VOL_R), 0x2000);
     assert_eq!(s.read16(CURRENT_MAIN_VOL_L), 0);
     assert_eq!(s.read16(CURRENT_MAIN_VOL_R), 0);
@@ -120,7 +120,7 @@ fn current_main_volume_regs_do_not_mirror_main_volume() {
     s.write16(CURRENT_MAIN_VOL_R, 0x2222);
     assert_eq!(s.read16(CURRENT_MAIN_VOL_L), 0x1111);
     assert_eq!(s.read16(CURRENT_MAIN_VOL_R), 0x2222);
-    assert_eq!(s.read16(MAIN_VOL_L), 0x3FFF);
+    assert_eq!(s.read16(MAIN_VOL_L), 0x3fff);
     assert_eq!(s.read16(MAIN_VOL_R), 0x2000);
 }
 
@@ -144,17 +144,17 @@ fn kon_koff_reads_round_trip_after_tick_drains_pending() {
     // BIOS's SPU-init probe writes 0xFFFF to KOFF then reads it
     // back -- we must echo the written value.
     let mut s = Spu::new();
-    s.write16(KON_LO, 0xFFFF);
-    s.write16(KON_HI, 0x00FF);
-    s.write16(KOFF_LO, 0xFFFF);
-    s.write16(KOFF_HI, 0x00FF);
+    s.write16(KON_LO, 0xffff);
+    s.write16(KON_HI, 0x00ff);
+    s.write16(KOFF_LO, 0xffff);
+    s.write16(KOFF_HI, 0x00ff);
     // Drain pending by ticking the SPU.
     s.tick_sample(0);
     // Reads must still return the raw written values.
-    assert_eq!(s.read16(KON_LO), 0xFFFF);
-    assert_eq!(s.read16(KON_HI), 0x00FF);
-    assert_eq!(s.read16(KOFF_LO), 0xFFFF);
-    assert_eq!(s.read16(KOFF_HI), 0x00FF);
+    assert_eq!(s.read16(KON_LO), 0xffff);
+    assert_eq!(s.read16(KON_HI), 0x00ff);
+    assert_eq!(s.read16(KOFF_LO), 0xffff);
+    assert_eq!(s.read16(KOFF_HI), 0x00ff);
 }
 
 #[test]
@@ -183,20 +183,20 @@ fn kon_wins_over_same_sample_koff() {
 #[test]
 fn endx_write_one_clears_bits() {
     let mut s = Spu::new();
-    s.endx_latched = 0xFFFF_FFFF;
-    s.write16(ENDX_LO, 0x00F0);
-    assert_eq!(s.endx_latched & 0xFFFF, 0xFF0F);
+    s.endx_latched = 0xffff_ffff;
+    s.write16(ENDX_LO, 0x00f0);
+    assert_eq!(s.endx_latched & 0xffff, 0xff0f);
 }
 
 #[test]
 fn kon_clears_endx_for_started_voices() {
     let mut s = Spu::new();
-    s.endx_latched = 0xFFFF_FFFF;
+    s.endx_latched = 0xffff_ffff;
     s.write16(KON_LO, 0x0003);
     // KON queue path clears ENDX immediately for those bits.
     assert_eq!(s.endx_latched & 0x3, 0);
     // Other bits untouched.
-    assert_eq!(s.endx_latched >> 2, 0x3FFF_FFFF);
+    assert_eq!(s.endx_latched >> 2, 0x3fff_ffff);
 }
 
 // -- Transfer FIFO --
@@ -207,10 +207,10 @@ fn transfer_fifo_writes_into_spu_ram_and_advances() {
     s.write16(SPUCNT, 1 << 4); // arm Manual-Write transfer mode
     s.tick_sample(SAMPLE_CYCLES);
     s.write16(TRANSFER_ADDR, 0x0010); // 0x10 * 8 = 0x80 bytes
-    s.write16(TRANSFER_FIFO, 0xBEEF);
-    s.write16(TRANSFER_FIFO, 0xCAFE);
-    assert_eq!(s.ram[0x80 >> 1], 0xBEEF);
-    assert_eq!(s.ram[(0x80 >> 1) + 1], 0xCAFE);
+    s.write16(TRANSFER_FIFO, 0xbeef);
+    s.write16(TRANSFER_FIFO, 0xcafe);
+    assert_eq!(s.ram[0x80 >> 1], 0xbeef);
+    assert_eq!(s.ram[(0x80 >> 1) + 1], 0xcafe);
     // Transfer addr advanced by 4 bytes.
     assert_eq!(s.transfer_addr, 0x84);
 }
@@ -222,8 +222,8 @@ fn stopped_mode_fifo_write_waits_for_manual_transfer() {
     // while stopped and drain in order when mode 1 is selected.
     let mut s = Spu::new();
     s.write16(TRANSFER_ADDR, 0x0010); // 0x80 bytes; mode still Stop (0)
-    s.write16(TRANSFER_FIFO, 0xBEEF);
-    s.write16(TRANSFER_FIFO, 0xCAFE);
+    s.write16(TRANSFER_FIFO, 0xbeef);
+    s.write16(TRANSFER_FIFO, 0xcafe);
     assert_eq!(
         s.ram[0x80 >> 1],
         0,
@@ -231,8 +231,8 @@ fn stopped_mode_fifo_write_waits_for_manual_transfer() {
     );
     s.write16(SPUCNT, 1 << 4);
     s.tick_sample(SAMPLE_CYCLES);
-    assert_eq!(s.ram[0x80 >> 1], 0xBEEF);
-    assert_eq!(s.ram[(0x80 >> 1) + 1], 0xCAFE);
+    assert_eq!(s.ram[0x80 >> 1], 0xbeef);
+    assert_eq!(s.ram[(0x80 >> 1) + 1], 0xcafe);
     assert_eq!(s.transfer_addr, 0x84);
 }
 
@@ -271,7 +271,7 @@ fn irq_fires_when_transfer_hits_irq_addr_with_enable() {
     s.tick_sample(SAMPLE_CYCLES);
     s.write16(IRQ_ADDR, 0x0010); // 0x10 * 8 = 0x80 bytes
     s.write16(TRANSFER_ADDR, 0x0010);
-    s.write16(TRANSFER_FIFO, 0xAAAA);
+    s.write16(TRANSFER_FIFO, 0xaaaa);
     assert!(s.take_irq_pending());
     // Subsequent read clears the pending flag.
     assert!(!s.take_irq_pending());
@@ -284,7 +284,7 @@ fn irq_does_not_fire_without_enable_bit() {
     let mut s = Spu::new();
     s.write16(IRQ_ADDR, 0x0010);
     s.write16(TRANSFER_ADDR, 0x0010);
-    s.write16(TRANSFER_FIFO, 0xAAAA);
+    s.write16(TRANSFER_FIFO, 0xaaaa);
     assert!(!s.take_irq_pending());
 }
 
@@ -389,11 +389,11 @@ fn adpcm_decode_clamps_each_sample_to_i16_like_hardware() {
     s.decode_next_block(0);
 
     assert_eq!(
-        s.voices[0].sample_buf[1], 0x7FFF,
+        s.voices[0].sample_buf[1], 0x7fff,
         "decoded ADPCM sample must saturate to i16 (was unclamped 0xD900)"
     );
     assert!(
-        s.voices[0].s_1 <= 0x7FFF,
+        s.voices[0].s_1 <= 0x7fff,
         "ADPCM filter history must be i16-saturated, not the raw i32 sum: {}",
         s.voices[0].s_1
     );
@@ -458,7 +458,7 @@ fn adpcm_flag_1_alone_stops_voice() {
 fn adpcm_stop_flag_turns_voice_off_after_final_block_is_consumed() {
     let mut s = Spu::new();
     s.voices[0].phase = AdsrPhase::Attack;
-    s.voices[0].envelope = 0x7FFF;
+    s.voices[0].envelope = 0x7fff;
     s.voices[0].counter = COUNTER_ONE;
     s.voices[0].sample_index = ADPCM_SAMPLES_PER_BLOCK;
     s.voices[0].stop_after_block = true;
@@ -486,13 +486,13 @@ fn adpcm_flag_4_updates_loop_addr_when_unlocked() {
 fn adpcm_flag_4_ignored_when_software_locked_loop_addr() {
     let mut s = Spu::new();
     s.voices[0].current_addr = 0x80;
-    s.voices[0].loop_addr = 0xAAA0;
+    s.voices[0].loop_addr = 0xaaa0;
     s.voices[0].loop_addr_locked = true;
     let mut block = [0u8; 16];
     block[1] = 0x4;
     write_adpcm_block(&mut s, 0x80, &block);
     s.decode_next_block(0);
-    assert_eq!(s.voices[0].loop_addr, 0xAAA0);
+    assert_eq!(s.voices[0].loop_addr, 0xaaa0);
 }
 
 // -- ADSR envelope --
@@ -518,9 +518,9 @@ fn adsr_attack_saturates_and_transitions_to_decay() {
     s.voices[0].adsr_lo = 0; // linear attack, shift 0
     s.voices[0].phase = AdsrPhase::Attack;
     // Force envelope near max and step once -- should transition.
-    s.voices[0].envelope = 0x7FFE;
+    s.voices[0].envelope = 0x7ffe;
     s.voices[0].step_envelope();
-    assert_eq!(s.voices[0].envelope, 0x7FFF);
+    assert_eq!(s.voices[0].envelope, 0x7fff);
     assert_eq!(s.voices[0].phase, AdsrPhase::Decay);
 }
 
@@ -530,7 +530,7 @@ fn adsr_decay_reaches_sustain_and_transitions() {
     s.voices[0].adsr_lo = 0; // decay shift 0, sustain level 0
     s.voices[0].adsr_hi = 1 << 5;
     s.voices[0].phase = AdsrPhase::Decay;
-    s.voices[0].envelope = 0x7FFF;
+    s.voices[0].envelope = 0x7fff;
     for _ in 0..10000 {
         s.voices[0].step_envelope();
         if s.voices[0].phase == AdsrPhase::Sustain {
@@ -612,16 +612,16 @@ fn adsr_mix_uses_full_q15_envelope() {
     // consecutive NOISE onset samples pinned this against the previous
     // ten-bit (env>>5)/1023 form.
     assert_eq!(apply_adsr_volume(0x4000, 31), 15);
-    assert_eq!(apply_adsr_volume(1023, 0x7FFF), 1022);
-    assert_eq!(apply_adsr_volume(-1023, 0x7FFF), -1023);
+    assert_eq!(apply_adsr_volume(1023, 0x7fff), 1022);
+    assert_eq!(apply_adsr_volume(-1023, 0x7fff), -1023);
     // The console-measured onset: LFSR value 2472 through the FLAT_ADSR
     // attack/decay/sustain envelope sequence.
     for (env, want) in [
         (0x3800, 1081),
         (0x7000, 2163),
-        (0x7FFF, 2471),
-        (0x3FFF, 1235),
-        (0x77FF, 2317),
+        (0x7fff, 2471),
+        (0x3fff, 1235),
+        (0x77ff, 2317),
     ] {
         assert_eq!(apply_adsr_volume(2472, env), want);
     }
@@ -646,13 +646,13 @@ fn stress_test_many_voices_at_high_pitch_no_panic() {
     // samples. Would have caught the Gaussian OOB before the
     // Crash 1 run did.
     let mut s = Spu::new();
-    s.main_vol_l.write(0x3FFF);
-    s.main_vol_r.write(0x3FFF);
+    s.main_vol_l.write(0x3fff);
+    s.main_vol_r.write(0x3fff);
     s.write16(SPUCNT, SPUCNT_UNMUTE);
     // Seed SPU RAM with a repeating ADPCM block so each voice
     // has something to decode.
     let mut block = [0u8; 16];
-    block[0] = 0x0C; // shift=0x0C, filter=0
+    block[0] = 0x0c; // shift=0x0C, filter=0
     block[1] = 0x02; // flag 2 = repeat
                      // Loop this one block for the first 0x1000 bytes of RAM.
     for base in (0..0x1000).step_by(16) {
@@ -660,24 +660,24 @@ fn stress_test_many_voices_at_high_pitch_no_panic() {
             let idx = (base + i) / 2;
             let byte = *block_byte as u16;
             if (base + i) & 1 == 0 {
-                s.ram[idx] = (s.ram[idx] & 0xFF00) | byte;
+                s.ram[idx] = (s.ram[idx] & 0xff00) | byte;
             } else {
-                s.ram[idx] = (s.ram[idx] & 0x00FF) | (byte << 8);
+                s.ram[idx] = (s.ram[idx] & 0x00ff) | (byte << 8);
             }
         }
     }
     // Configure all 24 voices: max pitch, KON, loud volume.
     for v in 0..NUM_VOICES {
         let base = VOICE_BASE + (v as u32) * 16;
-        s.write16(base + voice_offset::VOLUME_L, 0x3FFF);
-        s.write16(base + voice_offset::VOLUME_R, 0x3FFF);
-        s.write16(base + voice_offset::PITCH, 0x3FFF);
+        s.write16(base + voice_offset::VOLUME_L, 0x3fff);
+        s.write16(base + voice_offset::VOLUME_R, 0x3fff);
+        s.write16(base + voice_offset::PITCH, 0x3fff);
         s.write16(base + voice_offset::START_ADDR, 0);
-        s.write16(base + voice_offset::ADSR_LO, 0x00FF);
+        s.write16(base + voice_offset::ADSR_LO, 0x00ff);
         s.write16(base + voice_offset::ADSR_HI, 0x0000);
     }
-    s.write16(KON_LO, 0xFFFF);
-    s.write16(KON_HI, 0x00FF);
+    s.write16(KON_LO, 0xffff);
+    s.write16(KON_HI, 0x00ff);
     // Tick through one NTSC frame's worth of samples. If any
     // voice's state goes out of bounds we'd panic here.
     for _ in 0..735 {
@@ -692,8 +692,8 @@ fn silent_spu_outputs_zero() {
     let mut s = Spu::new();
     // 0x3FFF = max static volume (bits 0..=13 all set, bits
     // 14/15 clear → no phase-invert, no sweep).
-    s.main_vol_l.write(0x3FFF);
-    s.main_vol_r.write(0x3FFF);
+    s.main_vol_l.write(0x3fff);
+    s.main_vol_r.write(0x3fff);
     s.tick_sample(SAMPLE_CYCLES);
     let out = s.drain_audio();
     assert_eq!(out, vec![(0, 0)]);
@@ -702,8 +702,8 @@ fn silent_spu_outputs_zero() {
 #[test]
 fn silent_voice_contributes_zero_even_with_main_volume() {
     let mut s = Spu::new();
-    s.main_vol_l.write(0x3FFF);
-    s.main_vol_r.write(0x3FFF);
+    s.main_vol_l.write(0x3fff);
+    s.main_vol_r.write(0x3fff);
     for _ in 0..10 {
         s.tick_sample(SAMPLE_CYCLES);
     }
@@ -714,11 +714,11 @@ fn silent_voice_contributes_zero_even_with_main_volume() {
 #[test]
 fn cd_audio_input_routes_through_cd_volume() {
     let mut s = Spu::new();
-    s.main_vol_l.write(0x3FFF);
-    s.main_vol_r.write(0x3FFF);
+    s.main_vol_l.write(0x3fff);
+    s.main_vol_r.write(0x3fff);
     s.write16(SPUCNT, SPUCNT_CD_AUDIO_ENABLE);
-    s.write16(CD_VOL_L, 0x3FFF);
-    s.write16(CD_VOL_R, 0x3FFF);
+    s.write16(CD_VOL_L, 0x3fff);
+    s.write16(CD_VOL_R, 0x3fff);
     // Push one stereo sample and tick.
     s.feed_cd_audio(&[(0x4000, 0x4000)]);
     s.tick_sample(SAMPLE_CYCLES);
@@ -733,11 +733,11 @@ fn cd_audio_input_routes_through_cd_volume() {
 #[test]
 fn cd_audio_underrun_repeats_the_last_frame_briefly_then_goes_silent() {
     let mut s = Spu::new();
-    s.main_vol_l.write(0x3FFF);
-    s.main_vol_r.write(0x3FFF);
+    s.main_vol_l.write(0x3fff);
+    s.main_vol_r.write(0x3fff);
     s.write16(SPUCNT, SPUCNT_CD_AUDIO_ENABLE);
-    s.write16(CD_VOL_L, 0x7FFF);
-    s.write16(CD_VOL_R, 0x7FFF);
+    s.write16(CD_VOL_L, 0x7fff);
+    s.write16(CD_VOL_R, 0x7fff);
     // Nothing queued yet: silence, and no repeat of a frame never played.
     s.tick_sample(SAMPLE_CYCLES);
     assert_eq!(s.drain_audio()[0], (0, 0));
@@ -762,8 +762,8 @@ fn main_volume_output(mv: u16) -> i16 {
     s.main_vol_l.write(mv);
     s.main_vol_r.write(mv);
     s.write16(SPUCNT, SPUCNT_CD_AUDIO_ENABLE);
-    s.write16(CD_VOL_L, 0x7FFF);
-    s.write16(CD_VOL_R, 0x7FFF);
+    s.write16(CD_VOL_L, 0x7fff);
+    s.write16(CD_VOL_R, 0x7fff);
     s.feed_cd_audio(&[(0x4000, 0x4000)]);
     s.tick_sample(SAMPLE_CYCLES);
     s.drain_audio()[0].0
@@ -779,22 +779,22 @@ fn main_volume_fixed_register_word_is_half_the_level() {
         0,
         "main volume 0 must silence the mix"
     );
-    let unity = main_volume_output(0x3FFF);
-    assert_eq!(unity, 0x3FFE, "0x3FFF must pass the signal at unity");
-    let half = main_volume_output(0x1FFF);
+    let unity = main_volume_output(0x3fff);
+    assert_eq!(unity, 0x3ffe, "0x3FFF must pass the signal at unity");
+    let half = main_volume_output(0x1fff);
     assert_eq!(
-        half, 0x1FFE,
+        half, 0x1ffe,
         "0x1FFF must be exactly one octave down (-6 dB)"
     );
     // The register's bit 14 is a sign bit of the half-level: 0x4000 is the
     // most negative level, a full-scale phase inversion.
     let inverted = main_volume_output(0x4000);
     assert_eq!(
-        inverted, -0x3FFF,
+        inverted, -0x3fff,
         "0x4000 must invert the signal at full scale"
     );
     // 0x7FFF reads as -1 in 15 bits: a level of -2/32768, effectively silent.
-    assert!(main_volume_output(0x7FFF).abs() <= 1);
+    assert!(main_volume_output(0x7fff).abs() <= 1);
 }
 
 #[test]
@@ -802,14 +802,14 @@ fn main_volume_sweep_moves_the_output_level() {
     // A sweep word (bit 15 set) is not a level: the output follows the live
     // level that the sweep moves, starting from the previous level.
     let mut s = Spu::new();
-    s.main_vol_l.write(0x3FFF);
-    s.main_vol_r.write(0x3FFF);
+    s.main_vol_l.write(0x3fff);
+    s.main_vol_r.write(0x3fff);
     // Linear decrease, shift 0, step selector 0: fastest decrement.
     s.main_vol_l.write(0x8000 | 0x2000);
     s.main_vol_r.write(0x8000 | 0x2000);
     s.write16(SPUCNT, SPUCNT_CD_AUDIO_ENABLE);
-    s.write16(CD_VOL_L, 0x7FFF);
-    s.write16(CD_VOL_R, 0x7FFF);
+    s.write16(CD_VOL_L, 0x7fff);
+    s.write16(CD_VOL_R, 0x7fff);
     let mut last = i16::MAX;
     for n in 0..8 {
         s.feed_cd_audio(&[(0x4000, 0x4000)]);
@@ -827,10 +827,10 @@ fn main_volume_sweep_moves_the_output_level() {
 #[test]
 fn cd_audio_input_respects_spucnt_route_enable() {
     let mut s = Spu::new();
-    s.main_vol_l.write(0x3FFF);
-    s.main_vol_r.write(0x3FFF);
-    s.write16(CD_VOL_L, 0x7FFF);
-    s.write16(CD_VOL_R, 0x7FFF);
+    s.main_vol_l.write(0x3fff);
+    s.main_vol_r.write(0x3fff);
+    s.write16(CD_VOL_L, 0x7fff);
+    s.write16(CD_VOL_R, 0x7fff);
 
     s.feed_cd_audio(&[(0x4000, 0x4000)]);
     s.tick_sample(SAMPLE_CYCLES);
@@ -853,10 +853,10 @@ fn cd_audio_input_respects_spucnt_route_enable() {
 fn cd_audio_volume_is_signed_q15_not_voice_sweep_volume() {
     let mut s = Spu::new();
     // Unity main volume so this isolates the CD-input volume.
-    s.main_vol_l.write(0x3FFF);
-    s.main_vol_r.write(0x3FFF);
+    s.main_vol_l.write(0x3fff);
+    s.main_vol_r.write(0x3fff);
     s.write16(SPUCNT, SPUCNT_CD_AUDIO_ENABLE);
-    s.write16(CD_VOL_L, 0x7FFF);
+    s.write16(CD_VOL_L, 0x7fff);
     s.write16(CD_VOL_R, 0x8000);
 
     s.feed_cd_audio(&[(0x4000, 0x4000)]);
@@ -878,10 +878,10 @@ fn write_reverb_cfg(s: &mut Spu, reg: usize, value: u16) {
 fn configure_passthrough_reverb(s: &mut Spu) {
     use reverb_reg::*;
 
-    write_reverb_cfg(s, V_IIR, 0x7FFF);
-    write_reverb_cfg(s, V_COMB1, 0x7FFF);
-    write_reverb_cfg(s, V_LIN, 0x7FFF);
-    write_reverb_cfg(s, V_RIN, 0x7FFF);
+    write_reverb_cfg(s, V_IIR, 0x7fff);
+    write_reverb_cfg(s, V_COMB1, 0x7fff);
+    write_reverb_cfg(s, V_LIN, 0x7fff);
+    write_reverb_cfg(s, V_RIN, 0x7fff);
 
     // Separate L/R and A/B cells so the test fixture doesn't stomp one
     // channel with another while using a tiny synthetic preset. Real games
@@ -938,13 +938,13 @@ fn reverb_addresses_wrap_within_the_work_area() {
     let mut s = Spu::new();
     // 0xFFFE is where psx-spu's init parks the work area: eight halfwords at
     // the top of RAM.
-    for base in [0x1000u16, 0xE128, 0xFFFE] {
+    for base in [0x1000u16, 0xe128, 0xfffe] {
         s.write16(REVERB_BASE, base);
         let start = s.reverb_base_halfword() as i32;
         let span = SPU_RAM_HALFWORDS as i32 - start;
-        for curr in [start, start + 3, 0x3FFFF] {
+        for curr in [start, start + 3, 0x3ffff] {
             s.reverb.curr_addr = curr as u32;
-            for offset in [-0x4000, -0x11, -1, 0, 1, 0x11, 0x3FFF, 0x7FFF] {
+            for offset in [-0x4000, -0x11, -1, 0, 1, 0x11, 0x3fff, 0x7fff] {
                 for extra in [0, 1, -1] {
                     let idx = s.reverb_ram_index(offset, extra) as i32;
                     assert!(
@@ -964,8 +964,8 @@ fn reverb_addresses_wrap_within_the_work_area() {
 fn reverb_network_turns_bus_input_into_wet_output() {
     let mut s = Spu::new();
     s.write16(REVERB_BASE, 0x1000);
-    s.write16(REVERB_VOL_L, 0x7FFF);
-    s.write16(REVERB_VOL_R, 0x7FFF);
+    s.write16(REVERB_VOL_L, 0x7fff);
+    s.write16(REVERB_VOL_R, 0x7fff);
     s.write16(SPUCNT, SPUCNT_REVERB_MASTER_ENABLE);
     configure_passthrough_reverb(&mut s);
 
@@ -980,10 +980,10 @@ fn reverb_network_turns_bus_input_into_wet_output() {
 
 #[test]
 fn reverb_output_depth_register_is_signed_q15() {
-    assert_eq!(Spu::reverb_mul(0x4000, 0x7FFF), 0x3FFF);
+    assert_eq!(Spu::reverb_mul(0x4000, 0x7fff), 0x3fff);
     assert_eq!(Spu::reverb_mul(0x4000, 0x4000), 0x2000);
     assert_eq!(
-        Spu::reverb_mul(0x4000, i32::from(0xC000u16 as i16)),
+        Spu::reverb_mul(0x4000, i32::from(0xc000u16 as i16)),
         -0x2000
     );
 }
@@ -1015,16 +1015,16 @@ fn reverb_wet_path_is_scaled_by_main_volume() {
         s.main_vol_l.write(mv);
         s.main_vol_r.write(mv);
         s.write16(REVERB_BASE, 0x1000);
-        s.write16(REVERB_VOL_L, 0x7FFF);
-        s.write16(REVERB_VOL_R, 0x7FFF);
+        s.write16(REVERB_VOL_L, 0x7fff);
+        s.write16(REVERB_VOL_R, 0x7fff);
         s.write16(SPUCNT, SPUCNT_UNMUTE | SPUCNT_REVERB_MASTER_ENABLE);
         s.write16(EON_LO, 0x0001);
         configure_passthrough_reverb(&mut s);
 
-        s.voices[0].vol_l.write(0x3FFF);
-        s.voices[0].vol_r.write(0x3FFF);
+        s.voices[0].vol_l.write(0x3fff);
+        s.voices[0].vol_r.write(0x3fff);
         s.voices[0].phase = AdsrPhase::Sustain;
-        s.voices[0].envelope = 0x7FFF;
+        s.voices[0].envelope = 0x7fff;
         s.voices[0].raw_pitch = 0x1000;
         s.voices[0].sample_buf = [0x4000; ADPCM_SAMPLES_PER_BLOCK];
         s.voices[0].sample_index = 0;
@@ -1042,7 +1042,7 @@ fn reverb_wet_path_is_scaled_by_main_volume() {
         "main volume 0 silences the wet path too (reverb is added before main volume)"
     );
     assert!(
-        run(0x7FFF).iter().any(|&(l, r)| l != 0 || r != 0),
+        run(0x7fff).iter().any(|&(l, r)| l != 0 || r != 0),
         "EON voice should be audible through reverb at full main volume"
     );
 }
@@ -1052,10 +1052,10 @@ fn volume_envelope_static_mode_snaps_level_on_write() {
     // Fixed mode stores the signed 15-bit field * 2 (full Q15), so
     // 0x3FFF -> +0x7FFE and a set bit14 is a real negative volume.
     let mut env = VolumeEnvelope::new();
-    env.write(0x3FFF); // max positive (+0x7FFE in Q15)
-    assert_eq!(env.current, 0x7FFE);
+    env.write(0x3fff); // max positive (+0x7FFE in Q15)
+    assert_eq!(env.current, 0x7ffe);
     env.write(0x4100); // bit14 set -> negative: signed15(0x4100)= -0x3F00, *2 = -0x7E00
-    assert_eq!(env.current, -0x7E00);
+    assert_eq!(env.current, -0x7e00);
 }
 
 #[test]
@@ -1076,7 +1076,7 @@ fn volume_envelope_sweep_mode_animates_from_prior_level() {
     // Rate 0x7F is the hardware never-ticks case: level frozen.
     let mut frozen = VolumeEnvelope::new();
     frozen.current = 0x3000;
-    frozen.write(0x807F);
+    frozen.write(0x807f);
     assert!(!frozen.sweep_active);
     for _ in 0..10 {
         frozen.tick();
@@ -1121,7 +1121,7 @@ fn gaussian_interp_of_silence_is_silence() {
 fn gaussian_interp_nonzero_input_produces_output() {
     // All four samples at max positive -- output should be non-
     // zero and in range.
-    let out = gauss_interpolate([0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF], 0x80);
+    let out = gauss_interpolate([0x7fff, 0x7fff, 0x7fff, 0x7fff], 0x80);
     assert!(out > 0);
 }
 
@@ -1130,9 +1130,9 @@ fn gaussian_interp_handles_frac_past_0x10000() {
     // Defensive clamp: the caller keeps the remainder below one
     // source sample, but out-of-range values still shouldn't
     // index past the end of the coefficient table.
-    for frac in [0x10000, 0x10004, 0x1FFFF, 0xFFFF_FFFF] {
+    for frac in [0x10000, 0x10004, 0x1ffff, 0xffff_ffff] {
         let _ = gauss_interpolate([0, 0, 0, 0], frac);
-        let _ = gauss_interpolate([0x1234, 0x5678, -0x100, 0x7FFF], frac);
+        let _ = gauss_interpolate([0x1234, 0x5678, -0x100, 0x7fff], frac);
     }
 }
 
@@ -1166,7 +1166,7 @@ fn xa_decoder_filter_zero_only_scales_by_range() {
     widened[3] = -8 << 12;
     let mut state = XaDecoderState::new();
     let mut out = [0i16; 28];
-    xa_decode_block(&mut state, 0x0C, &widened, &mut out);
+    xa_decode_block(&mut state, 0x0c, &widened, &mut out);
     assert_eq!(&out[..5], &[1, -1, 7, -8, 0]);
 }
 
@@ -1204,7 +1204,7 @@ fn xa_decoder_history_keeps_fractions_below_one_output_step() {
     widened[0] = 1 << 12;
     let mut state = XaDecoderState::new();
     let mut out = [0i16; 28];
-    xa_decode_block(&mut state, 0x1C, &widened, &mut out);
+    xa_decode_block(&mut state, 0x1c, &widened, &mut out);
     assert_eq!(&out[..3], &[1, 0, 0]);
 }
 
@@ -1231,7 +1231,7 @@ fn xa_decoder_clamps_output_but_not_history() {
 fn xa_decoder_reserved_range_acts_like_nine_and_high_header_bits_are_ignored() {
     let mut widened = [0i16; 28];
     widened[0] = 0x4000;
-    for header in [0x0D, 0x0E, 0x0F] {
+    for header in [0x0d, 0x0e, 0x0f] {
         let mut state = XaDecoderState::new();
         let mut out = [0i16; 28];
         xa_decode_block(&mut state, header, &widened, &mut out);
@@ -1240,7 +1240,7 @@ fn xa_decoder_reserved_range_acts_like_nine_and_high_header_bits_are_ignored() {
     let mut plain = [0i16; 28];
     xa_decode_block(&mut XaDecoderState::new(), 0x19, &widened, &mut plain);
     let mut dirty = [0i16; 28];
-    xa_decode_block(&mut XaDecoderState::new(), 0xD9, &widened, &mut dirty);
+    xa_decode_block(&mut XaDecoderState::new(), 0xd9, &widened, &mut dirty);
     assert_eq!(plain, dirty);
 }
 
@@ -1251,10 +1251,10 @@ fn volume_envelope_write_static_level() {
     // Full signed-Q15 fixed level: bits 0..14 sign-extended (bit14 is
     // the sign), times 2. 0x3FFF -> +0x7FFE; 0x4100 -> -0x7E00.
     let mut env = VolumeEnvelope::new();
-    env.write(0x3FFF);
-    assert_eq!(env.current, 0x7FFE);
+    env.write(0x3fff);
+    assert_eq!(env.current, 0x7ffe);
     env.write(0x4100);
-    assert_eq!(env.current, -0x7E00);
+    assert_eq!(env.current, -0x7e00);
 }
 
 // -- Output buffer cap --
@@ -1284,7 +1284,7 @@ fn noise_advances_when_clock_set() {
     // 0x20000 >> 15 = 4, equal to the smallest step, so the level changes
     // on every sample.
     let mut s = Spu::new();
-    s.write16(SPUCNT, 0x3C00);
+    s.write16(SPUCNT, 0x3c00);
     for _ in 0..8 {
         let v0 = s.noise_val;
         s.noise_tick();
@@ -1313,7 +1313,7 @@ fn noise_period_grows_with_lower_shift() {
 #[test]
 fn noise_level_takes_in_the_xnor_of_bits_15_12_11_10() {
     let mut s = Spu::new();
-    s.write16(SPUCNT, 0x3C00);
+    s.write16(SPUCNT, 0x3c00);
     // Bits 15/12/11/10 all clear: XNOR is 1.
     s.noise_val = 0;
     s.noise_tick();
@@ -1336,16 +1336,16 @@ fn fmod_modulator_voice_stays_audible() {
     // and both reach the mix: a modulator is silenced only by its volume.
     let render = |voices: std::ops::Range<usize>| {
         let mut s = Spu::new();
-        s.main_vol_l.write(0x3FFF);
-        s.main_vol_r.write(0x3FFF);
+        s.main_vol_l.write(0x3fff);
+        s.main_vol_r.write(0x3fff);
         s.write16(SPUCNT, SPUCNT_UNMUTE);
         s.write16(PMON_LO, 0x0002); // voice 1 is modulated by voice 0
         for v in voices {
             let base = VOICE_BASE + (v as u32) * 16;
-            s.write16(base + voice_offset::VOLUME_L, 0x3FFF);
-            s.write16(base + voice_offset::VOLUME_R, 0x3FFF);
+            s.write16(base + voice_offset::VOLUME_L, 0x3fff);
+            s.write16(base + voice_offset::VOLUME_R, 0x3fff);
             s.voices[v].phase = AdsrPhase::Sustain;
-            s.voices[v].envelope = 0x7FFF;
+            s.voices[v].envelope = 0x7fff;
             s.voices[v].last_sample = 0x4000;
             s.voices[v].sample_buf = [0x4000; ADPCM_SAMPLES_PER_BLOCK];
             s.voices[v].sample_index = 0;
@@ -1369,10 +1369,10 @@ fn fmod_modulator_voice_stays_audible() {
 #[test]
 fn spucnt_mute_zeroes_voice_sample_history() {
     let mut s = Spu::new();
-    s.main_vol_l.write(0x3FFF);
-    s.main_vol_r.write(0x3FFF);
+    s.main_vol_l.write(0x3fff);
+    s.main_vol_r.write(0x3fff);
     s.voices[0].phase = AdsrPhase::Sustain;
-    s.voices[0].envelope = 0x7FFF;
+    s.voices[0].envelope = 0x7fff;
     s.voices[0].sample_buf = [0x4000; ADPCM_SAMPLES_PER_BLOCK];
     s.voices[0].sample_index = 0;
 
@@ -1390,12 +1390,12 @@ fn fmod_modulator_still_updates_last_sample() {
     let mut s = Spu::new();
     s.write16(PMON_LO, 0x0002);
     s.voices[0].phase = AdsrPhase::Sustain;
-    s.voices[0].envelope = 0x7FFF;
+    s.voices[0].envelope = 0x7fff;
     s.voices[0].sample_buf = [0x1234; ADPCM_SAMPLES_PER_BLOCK];
     s.voices[0].sample_index = 0;
     s.voices[1].raw_pitch = 0x1000;
     s.voices[1].phase = AdsrPhase::Sustain;
-    s.voices[1].envelope = 0x7FFF;
+    s.voices[1].envelope = 0x7fff;
 
     s.tick_sample(SAMPLE_CYCLES);
     // last_sample for voice 0 should be approximately envelope *
@@ -1454,7 +1454,7 @@ fn single_block_loop_with_flag7_keeps_playing() {
     s.voices[0].start_addr = 0x20;
     s.voices[0].raw_pitch = 0x1000; // one input sample per output sample
     s.voices[0].phase = AdsrPhase::Sustain;
-    s.voices[0].envelope = 0x7FFF;
+    s.voices[0].envelope = 0x7fff;
     s.voices[0].current_addr = 0x20;
     s.voices[0].sample_index = ADPCM_SAMPLES_PER_BLOCK; // force first decode
     s.voices[0].counter = COUNTER_ONE;
@@ -1497,7 +1497,7 @@ fn endx_latches_after_loop_end_block_finishes_not_when_decoded() {
     s.voices[0].loop_addr = 0x20;
     s.voices[0].raw_pitch = 0x1000; // one input sample per output sample
     s.voices[0].phase = AdsrPhase::Attack;
-    s.voices[0].envelope = 0x7FFF;
+    s.voices[0].envelope = 0x7fff;
     s.voices[0].current_addr = 0x20;
     s.voices[0].sample_index = ADPCM_SAMPLES_PER_BLOCK; // force first decode
     s.voices[0].counter = COUNTER_ONE;
@@ -1592,7 +1592,7 @@ fn adsr_decay_is_always_exponential_regardless_of_release_mode() {
             adsr_lo: (8 << 4) | 2,
             adsr_hi: if release_exp { 1 << 5 } else { 0 },
             phase: AdsrPhase::Decay,
-            envelope: 0x7FFF,
+            envelope: 0x7fff,
             ..Voice::default()
         };
         v.pacer.reset();
@@ -1654,7 +1654,7 @@ fn adsr_release_exponential_reaches_off_at_zero() {
     let mut v = Voice {
         adsr_hi: 1 << 5,
         phase: AdsrPhase::Release,
-        envelope: 0x7FFF,
+        envelope: 0x7fff,
         ..Voice::default()
     };
 
@@ -1709,7 +1709,7 @@ fn volume_envelope_increasing_linear_sweep_ramps_each_tick() {
     for _ in 0..200 {
         env.tick();
     }
-    assert_eq!(env.current, 0x7FFF);
+    assert_eq!(env.current, 0x7fff);
     assert!(!env.sweep_active, "sweep deactivates once it pins at max");
 }
 
@@ -1743,7 +1743,7 @@ fn volume_envelope_rate_0x7f_sweep_never_ticks() {
     // (counter_increment collapses to 0). The level must stay put.
     let mut env = VolumeEnvelope::new();
     env.current = 0x1234;
-    env.write(0x8000 | 0x007F);
+    env.write(0x8000 | 0x007f);
     assert!(
         !env.sweep_active,
         "rate 0x7F has zero increment -> inactive"
@@ -1767,10 +1767,10 @@ fn volume_envelope_fixed_level_is_signed_q15_times_two() {
     let cases: &[(u16, i16)] = &[
         (0x0000, 0),
         (0x1000, 0x2000),
-        (0x3FFF, 0x7FFE),
+        (0x3fff, 0x7ffe),
         (0x4000, -0x8000),
         (0x6000, -0x4000),
-        (0x7FFF, -2),
+        (0x7fff, -2),
     ];
     for &(raw, want) in cases {
         let mut env = VolumeEnvelope::new();
@@ -1793,13 +1793,13 @@ fn negative_fixed_voice_volume_inverts_output_sign() {
     // so this isolates the per-voice Q15 application (>>15).
     let mix = |vol_raw: u16| {
         let mut s = Spu::new();
-        s.main_vol_l.write(0x3FFF);
-        s.main_vol_r.write(0x3FFF);
+        s.main_vol_l.write(0x3fff);
+        s.main_vol_r.write(0x3fff);
         s.write16(SPUCNT, SPUCNT_UNMUTE);
         s.voices[0].vol_l.write(vol_raw);
         s.voices[0].vol_r.write(vol_raw);
         s.voices[0].phase = AdsrPhase::Sustain;
-        s.voices[0].envelope = 0x7FFF;
+        s.voices[0].envelope = 0x7fff;
         s.voices[0].sample_buf = [0x4000; ADPCM_SAMPLES_PER_BLOCK];
         s.voices[0].sample_index = 0;
         s.voices[0].counter = 0;
@@ -1808,7 +1808,7 @@ fn negative_fixed_voice_volume_inverts_output_sign() {
         s.drain_audio()[0]
     };
 
-    let (pos_l, _) = mix(0x3FFF); // +0x7FFE current
+    let (pos_l, _) = mix(0x3fff); // +0x7FFE current
     let (neg_l, _) = mix(0x4000); // -0x8000 current
     assert!(
         pos_l > 0,
@@ -1835,8 +1835,8 @@ fn reverb_wet_output_is_the_second_all_pass_result() {
     use reverb_reg::*;
     let mut s = Spu::new();
     s.write16(REVERB_BASE, 0x1000); // base active; curr_addr = 0x4000
-    s.write16(REVERB_VOL_L, 0x7FFF); // Q15, one LSB under unity
-    s.write16(REVERB_VOL_R, 0x7FFF);
+    s.write16(REVERB_VOL_L, 0x7fff); // Q15, one LSB under unity
+    s.write16(REVERB_VOL_R, 0x7fff);
 
     write_reverb_cfg(&mut s, M_LSAME, 4);
     write_reverb_cfg(&mut s, M_RSAME, 5);
@@ -1904,15 +1904,15 @@ fn pa5_master_off_reverb_reads_dma_work_area_until_output_depth_is_zero() {
     // produced -30 dBFS noise. Zeroing only vLOUT suppressed it to the
     // -86.8 dBFS capture floor. Reproduce that causal mechanism here.
     const BIOS_REVERB_CFG: [u16; 32] = [
-        0x033D, 0x0231, 0x7E00, 0x5000, 0xB400, 0xB000, 0x4C00, 0xB000, 0x6000, 0x5400, 0x1ED6,
-        0x1A31, 0x1D14, 0x183B, 0x1BC2, 0x16B2, 0x1A32, 0x15EF, 0x15EE, 0x1055, 0x1334, 0x0F2D,
-        0x11F6, 0x0C5D, 0x1056, 0x0AE1, 0x0AE0, 0x07A2, 0x0464, 0x0232, 0x8000, 0x8000,
+        0x033d, 0x0231, 0x7e00, 0x5000, 0xb400, 0xb000, 0x4c00, 0xb000, 0x6000, 0x5400, 0x1ed6,
+        0x1a31, 0x1d14, 0x183b, 0x1bc2, 0x16b2, 0x1a32, 0x15ef, 0x15ee, 0x1055, 0x1334, 0x0f2d,
+        0x11f6, 0x0c5d, 0x1056, 0x0ae1, 0x0ae0, 0x07a2, 0x0464, 0x0232, 0x8000, 0x8000,
     ];
 
     let mut s = Spu::new();
-    s.write16(REVERB_VOL_L, 0x5EBC);
-    s.write16(REVERB_VOL_R, 0x5EBC);
-    s.write16(REVERB_BASE, 0xE128);
+    s.write16(REVERB_VOL_L, 0x5ebc);
+    s.write16(REVERB_VOL_R, 0x5ebc);
+    s.write16(REVERB_BASE, 0xe128);
     for (index, value) in BIOS_REVERB_CFG.into_iter().enumerate() {
         write_reverb_cfg(&mut s, index, value);
     }
@@ -1926,7 +1926,7 @@ fn pa5_master_off_reverb_reads_dma_work_area_until_output_depth_is_zero() {
     for (index, word) in s.ram[work_base..].iter_mut().enumerate() {
         *word = ((index as u16).wrapping_mul(0x1357) ^ 0x7878).rotate_left(3);
     }
-    let before_hash = s.ram.iter().fold(0x811C_9DC5u32, |hash, &word| {
+    let before_hash = s.ram.iter().fold(0x811c_9dc5u32, |hash, &word| {
         (hash ^ word as u32).wrapping_mul(0x0100_0193)
     });
 
@@ -1939,7 +1939,7 @@ fn pa5_master_off_reverb_reads_dma_work_area_until_output_depth_is_zero() {
         wet_peak > 100,
         "master-off read/APF path must expose uploaded reverb-work data: {wet_peak}"
     );
-    let after_hash = s.ram.iter().fold(0x811C_9DC5u32, |hash, &word| {
+    let after_hash = s.ram.iter().fold(0x811c_9dc5u32, |hash, &word| {
         (hash ^ word as u32).wrapping_mul(0x0100_0193)
     });
     assert_eq!(
@@ -2026,7 +2026,7 @@ fn adpcm_reserved_shift_13_to_15_acts_as_shift_9() {
     // ADPCM header byte: shift is the LOW nibble (bits 0..3), filter the
     // high nibble. So
     // shift 15 with predictor 0 is 0x0F, NOT 0xF0 (which would be shift 0).
-    block[0] = 0x0F; // predictor 0, shift 15 (reserved)
+    block[0] = 0x0f; // predictor 0, shift 15 (reserved)
     block[2] = 0x01; // sample0 nibble = 1, sample1 nibble = 0
     write_adpcm_block(&mut s, 0x20, &block);
     s.voices[0].current_addr = 0x20;
@@ -2058,12 +2058,12 @@ fn adpcm_decode_clamps_predictor_history_to_i16() {
 
     // History must be saturated, matching PSX-SPX/nocash.
     assert!(
-        s.voices[0].s_1 <= 0x7FFF && s.voices[0].s_1 >= -0x8000,
+        s.voices[0].s_1 <= 0x7fff && s.voices[0].s_1 >= -0x8000,
         "s_1 must be i16-saturated: {}",
         s.voices[0].s_1
     );
     assert!(
-        s.voices[0].s_2 <= 0x7FFF && s.voices[0].s_2 >= -0x8000,
+        s.voices[0].s_2 <= 0x7fff && s.voices[0].s_2 >= -0x8000,
         "s_2 must be i16-saturated: {}",
         s.voices[0].s_2
     );
@@ -2071,9 +2071,9 @@ fn adpcm_decode_clamps_predictor_history_to_i16() {
     // nibble +7): sample0 = 0x7000; sample1 = 0x7000 + (0x7000*60>>6)
     // = 0xD900 -> clamped to 0x7FFF; every later sample also clamps.
     assert_eq!(s.voices[0].sample_buf[0], 0x7000);
-    assert_eq!(s.voices[0].sample_buf[1], 0x7FFF);
+    assert_eq!(s.voices[0].sample_buf[1], 0x7fff);
     assert!(
-        s.voices[0].sample_buf[2..].iter().all(|&v| v == 0x7FFF),
+        s.voices[0].sample_buf[2..].iter().all(|&v| v == 0x7fff),
         "all subsequent samples stay at the +0x7FFF rail once saturated"
     );
 }
@@ -2085,7 +2085,7 @@ fn gaussian_table_is_hardware_nocash_table() {
     // table (peak 0x59B3), not an 11-bit 1024-entry curve (peak 0x519).
     assert_eq!(GAUSS_TABLE.len(), 0x200);
     assert_eq!(GAUSS_TABLE[0], -1);
-    assert_eq!(GAUSS_TABLE[0x1FF], 0x59B3);
+    assert_eq!(GAUSS_TABLE[0x1ff], 0x59b3);
     // First 16 coefficients are -1 on hardware.
     for (k, entry) in GAUSS_TABLE.iter().enumerate().take(16) {
         assert_eq!(*entry, -1, "entry {k}");
@@ -2097,7 +2097,7 @@ fn gaussian_interp_matches_hardware_golden_vector() {
     // Golden 4-tap window at phase i=250 (counter fraction 0xFA1).
     // The hardware table gives 13344; the 11-bit curve gives 9153, so this
     // discriminates the two.
-    let out = gauss_interpolate([-31831, -31193, 32367, -31905], 0xFA1);
+    let out = gauss_interpolate([-31831, -31193, 32367, -31905], 0xfa1);
     assert_eq!(out, 13344);
 }
 
@@ -2121,8 +2121,8 @@ fn gaussian_interp_dc_gain_has_hardware_droop() {
 fn gaussian_interp_phase_index_is_bits_4_to_11_of_the_counter() {
     // A window with a single non-zero newest tap scales purely by
     // GAUSS_TABLE[i], where i = (counter >> 4) & 0xFF.
-    for counter in [0x000u32, 0x012, 0x800, 0xFA1, 0xFFF] {
-        let i = ((counter >> 4) & 0xFF) as usize;
+    for counter in [0x000u32, 0x012, 0x800, 0xfa1, 0xfff] {
+        let i = ((counter >> 4) & 0xff) as usize;
         let expected = saturate_i16((GAUSS_TABLE[i] * 0x4000) >> 15);
         assert_eq!(
             gauss_interpolate([0, 0, 0, 0x4000], counter),
@@ -2143,8 +2143,8 @@ fn kon_applies_after_sample_emit_not_before_for_hardware_parity() {
     // appears on the NEXT tick.
     let mut s = Spu::new();
     s.write16(SPUCNT, SPUCNT_UNMUTE);
-    s.main_vol_l.write(0x3FFF);
-    s.main_vol_r.write(0x3FFF);
+    s.main_vol_l.write(0x3fff);
+    s.main_vol_r.write(0x3fff);
 
     // A constant +0x1000 ADPCM block (predictor 0, shift 0, all data
     // nibbles = 1) at byte 0x20, so a keyed voice would be audible.
@@ -2156,11 +2156,11 @@ fn kon_applies_after_sample_emit_not_before_for_hardware_parity() {
     write_adpcm_block(&mut s, 0x20, &block);
 
     let base = VOICE_BASE; // voice 0
-    s.write16(base + voice_offset::VOLUME_L, 0x3FFF);
-    s.write16(base + voice_offset::VOLUME_R, 0x3FFF);
+    s.write16(base + voice_offset::VOLUME_L, 0x3fff);
+    s.write16(base + voice_offset::VOLUME_R, 0x3fff);
     s.write16(base + voice_offset::PITCH, 0x1000);
     s.write16(base + voice_offset::START_ADDR, 0x0004); // 0x4 << 3 = byte 0x20
-    s.write16(base + voice_offset::ADSR_LO, 0x000F); // linear attack, fastest rate
+    s.write16(base + voice_offset::ADSR_LO, 0x000f); // linear attack, fastest rate
     s.write16(base + voice_offset::ADSR_HI, 0x0000);
 
     // Voice is Off before KON.
@@ -2257,7 +2257,7 @@ fn voice1_voice3_outputs_written_to_capture_buffers() {
     let mut s = Spu::new();
     s.write16(SPUCNT, SPUCNT_UNMUTE);
     s.voices[1].phase = AdsrPhase::Sustain;
-    s.voices[1].envelope = 0x7FFF;
+    s.voices[1].envelope = 0x7fff;
     s.voices[1].sample_buf = [0x4000; ADPCM_SAMPLES_PER_BLOCK];
     s.voices[1].sample_index = 0;
     s.voices[1].counter = 0;
@@ -2275,7 +2275,7 @@ fn voice1_voice3_outputs_written_to_capture_buffers() {
         "voice 1 post-ADSR output must land in its capture buffer (0x800)"
     );
     assert_eq!(
-        s.ram[0xC00 >> 1],
+        s.ram[0xc00 >> 1],
         0,
         "idle voice 3 captures silence (0xC00)"
     );
@@ -2401,7 +2401,7 @@ fn cancelled_manual_mode_leaves_queued_fifo_data_uncommitted() {
     s.apply_scph_9902_profile();
     s.write16_at(TRANSFER_ADDR, 0, 100);
     s.write16_at(SPUCNT, 0x0010, 100);
-    s.write16_at(TRANSFER_FIFO, 0xCAFE, 110);
+    s.write16_at(TRANSFER_FIFO, 0xcafe, 110);
     s.write16_at(SPUCNT, 0, 120);
     s.tick_sample(768);
 
@@ -2416,12 +2416,12 @@ fn default_manual_mode_accepts_fifo_before_sample_boundary() {
     let mut s = Spu::new();
     s.write16_at(TRANSFER_ADDR, 0, 100);
     s.write16_at(SPUCNT, 0x0010, 100);
-    s.write16_at(TRANSFER_FIFO, 0xCAFE, 110);
+    s.write16_at(TRANSFER_FIFO, 0xcafe, 110);
 
     s.write16(TRANSFER_ADDR, 0);
     let mut readback = [0u16; 1];
     s.dma_read(&mut readback);
-    assert_eq!(readback, [0xCAFE]);
+    assert_eq!(readback, [0xcafe]);
 }
 
 #[test]
@@ -2433,7 +2433,7 @@ fn unstable_dma_read_inserts_ffff_and_drops_each_block_tail() {
     s.write16(TRANSFER_ADDR, 0);
     let mut unstable = [0u16; 8];
     s.dma_read_blocks(&mut unstable, 4, false);
-    assert_eq!(unstable, [0xFFFF, 0, 1, 2, 0xFFFF, 4, 5, 6]);
+    assert_eq!(unstable, [0xffff, 0, 1, 2, 0xffff, 4, 5, 6]);
 
     s.write16(TRANSFER_ADDR, 0);
     let mut stable = [0u16; 8];
@@ -2497,15 +2497,15 @@ fn default_capture_half_flag_uses_conventional_polarity() {
 fn park_voice_and_render(block: &[u8; 16], samples: usize) -> Vec<i16> {
     let mut s = Spu::new();
     s.write16(SPUCNT, SPUCNT_UNMUTE);
-    s.main_vol_l.write(0x3FFF);
-    s.main_vol_r.write(0x3FFF);
+    s.main_vol_l.write(0x3fff);
+    s.main_vol_r.write(0x3fff);
     write_adpcm_block(&mut s, 0x1000, block);
     let base = VOICE_BASE;
-    s.write16(base + voice_offset::VOLUME_L, 0x3FFF);
-    s.write16(base + voice_offset::VOLUME_R, 0x3FFF);
+    s.write16(base + voice_offset::VOLUME_L, 0x3fff);
+    s.write16(base + voice_offset::VOLUME_R, 0x3fff);
     s.write16(base + voice_offset::PITCH, 0x1000); // unity: 28 samples/block
     s.write16(base + voice_offset::START_ADDR, (0x1000 >> 3) as u16);
-    s.write16(base + voice_offset::ADSR_LO, 0x00FF); // instant attack, full sustain
+    s.write16(base + voice_offset::ADSR_LO, 0x00ff); // instant attack, full sustain
     s.write16(base + voice_offset::ADSR_HI, 0x0000);
     s.write16(KON_LO, 0x0001);
     let mut out = Vec::with_capacity(samples);
@@ -2534,7 +2534,7 @@ fn a_corrupted_parking_block_self_loops_and_sounds() {
     // REPEAT and LOOP_START, so the voice parks on it exactly as before --
     // but the data nibbles are no longer zero.
     let block = [
-        0xFF, 0xFF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+        0xff, 0xff, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
         0x77,
     ];
     let out = park_voice_and_render(&block, 600);
@@ -2645,7 +2645,7 @@ fn xa_resampler_zigzag_weights_have_the_documented_dc_gain() {
     for phase in 0..7 {
         let sum: i32 = xa_resample::ZIGZAG.iter().map(|row| row[phase]).sum();
         assert!(
-            (0x73E0..=0x7420).contains(&sum),
+            (0x73e0..=0x7420).contains(&sum),
             "table {} sums to {sum:#x}",
             phase + 1
         );

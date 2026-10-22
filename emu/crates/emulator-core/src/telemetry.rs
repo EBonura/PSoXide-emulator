@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use psx_hw::memory;
 
 /// Physical base of PSoXide's emulator-only telemetry port.
-pub const BASE_PHYS: u32 = memory::expansion2::BASE + 0x0F00;
+pub const BASE_PHYS: u32 = memory::expansion2::BASE + 0x0f00;
 /// Event command register. A write appends one telemetry event.
 pub const EVENT_PHYS: u32 = BASE_PHYS;
 /// Event value register. The next command write snapshots this value.
@@ -24,8 +24,8 @@ const EVENT_CAP: usize = 65_536;
 const LOG_CAP: usize = 2_048;
 const LOG_LINE_CAP: usize = 384;
 const KIND_SHIFT: u32 = 24;
-const KIND_MASK: u32 = 0xFF;
-const ID_MASK: u32 = 0xFFFF;
+const KIND_MASK: u32 = 0xff;
+const ID_MASK: u32 = 0xffff;
 
 pub use psx_telemetry::{
     counter, counter_desc, stage, stage_desc, task, task_desc, COUNTER_COUNT, STAGE_COUNT,
@@ -160,7 +160,7 @@ impl GuestTelemetry {
                 true
             }
             LOG_PHYS => {
-                self.push_debug_log_byte((value & 0xFF) as u8, cycles);
+                self.push_debug_log_byte((value & 0xff) as u8, cycles);
                 true
             }
             _ => false,

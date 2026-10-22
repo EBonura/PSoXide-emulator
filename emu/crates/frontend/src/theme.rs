@@ -8,11 +8,9 @@
 // come online one panel at a time.
 #![allow(dead_code)]
 
-use egui::{
-    epaint::CornerRadius,
-    style::{TextStyle, WidgetVisuals},
-    Color32, FontFamily, FontId, Stroke, Visuals,
-};
+use egui::epaint::CornerRadius;
+use egui::style::{TextStyle, WidgetVisuals};
+use egui::{Color32, FontFamily, FontId, Stroke, Visuals};
 
 // --- Base palette ---
 

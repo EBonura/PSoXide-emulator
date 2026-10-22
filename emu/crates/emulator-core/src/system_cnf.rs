@@ -23,7 +23,7 @@ pub const DEFAULT_TCB: u32 = 4;
 /// "EVENT = 10", hexadecimal).
 pub const DEFAULT_EVENT: u32 = 0x10;
 /// Stack top when `SYSTEM.CNF` has no `STACK` line (psx-spx).
-pub const DEFAULT_STACK: u32 = 0x801F_FF00;
+pub const DEFAULT_STACK: u32 = 0x801f_ff00;
 /// Kernel RAM address that receives the optional `BOOT` argument.
 pub const BOOT_ARG_ADDR: u32 = 0x0000_0180;
 /// Size of the argument area at [`BOOT_ARG_ADDR`], terminator included.
@@ -32,9 +32,9 @@ pub const BOOT_ARG_BYTES: usize = 128;
 /// `$sp` at EXE entry when `STACK` evaluates to 0. The BIOS then keeps the
 /// caller's stack (psx-spx); this is the value measured at entry on every
 /// census disc whose `STACK` has a `0x` prefix.
-pub const CALLER_STACK_SP: u32 = 0x801F_FDD8;
+pub const CALLER_STACK_SP: u32 = 0x801f_fdd8;
 /// `$fp` measured at EXE entry in the same case.
-pub const CALLER_STACK_FP: u32 = 0x801F_FF00;
+pub const CALLER_STACK_FP: u32 = 0x801f_ff00;
 
 /// Parsed `SYSTEM.CNF` (or the defaults the BIOS uses without one).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,7 +177,7 @@ fn parse_hex_prefix(value: &[u8]) -> u32 {
 }
 
 fn trim(bytes: &[u8]) -> &[u8] {
-    let is_space = |b: &u8| matches!(b, b'\0' | b'\t' | b' ' | 0x0B | 0x0C | b'"');
+    let is_space = |b: &u8| matches!(b, b'\0' | b'\t' | b' ' | 0x0b | 0x0c | b'"');
     let start = bytes
         .iter()
         .position(|b| !is_space(b))
@@ -299,9 +299,9 @@ mod tests {
         let mut exe = vec![0u8; EXE_HEADER_BYTES];
         exe[..8].copy_from_slice(b"PS-X EXE");
         exe[0x10..0x14].copy_from_slice(&pc.to_le_bytes());
-        exe[0x18..0x1C].copy_from_slice(&0x8001_0000u32.to_le_bytes());
-        exe[0x1C..0x20].copy_from_slice(&4u32.to_le_bytes());
-        exe[0x30..0x34].copy_from_slice(&0x801F_FF00u32.to_le_bytes());
+        exe[0x18..0x1c].copy_from_slice(&0x8001_0000u32.to_le_bytes());
+        exe[0x1c..0x20].copy_from_slice(&4u32.to_le_bytes());
+        exe[0x30..0x34].copy_from_slice(&0x801f_ff00u32.to_le_bytes());
         exe.extend_from_slice(&[0; 4]);
         exe
     }
@@ -314,8 +314,8 @@ mod tests {
         .unwrap();
         assert_eq!(cnf.boot_path, "SLUS_005.94;1");
         assert_eq!(cnf.boot_arg, None);
-        assert_eq!((cnf.tcb, cnf.event, cnf.stack), (4, 0x10, 0x801F_FFF0));
-        assert_eq!(cnf.entry_stack(), (0x801F_FFF0, 0x801F_FFF0));
+        assert_eq!((cnf.tcb, cnf.event, cnf.stack), (4, 0x10, 0x801f_fff0));
+        assert_eq!(cnf.entry_stack(), (0x801f_fff0, 0x801f_fff0));
     }
 
     #[test]
@@ -333,7 +333,7 @@ mod tests {
     fn missing_keys_use_documented_defaults() {
         let cnf = SystemCnf::parse(b"boot=cdrom:\\dir\\foo.exe").unwrap();
         assert_eq!(cnf.boot_path, "DIR;1\\FOO.EXE;1");
-        assert_eq!((cnf.tcb, cnf.event, cnf.stack), (4, 0x10, 0x801F_FF00));
+        assert_eq!((cnf.tcb, cnf.event, cnf.stack), (4, 0x10, 0x801f_ff00));
         assert!(SystemCnf::parse(b"TCB = 4\r\n").is_none());
     }
 

@@ -7,12 +7,9 @@
 //! through SIO0 MMIO exactly as a game's pad handler does, asserting the
 //! polled wire bytes carry the recorded buttons.
 
-use emulator_core::{
-    button,
-    input_tape::{read_tape, write_tape, PadSample},
-    sio::Sio0,
-    Bus,
-};
+use emulator_core::input_tape::{read_tape, write_tape, PadSample};
+use emulator_core::sio::Sio0;
+use emulator_core::{button, Bus};
 
 /// JOY_CTRL select bit (`1 << 1`): asserts /DTR so port 1 is addressed.
 const JOYN_OUTPUT: u16 = 0x0002;
@@ -29,13 +26,13 @@ fn exchange(bus: &mut Bus, tx: u8) -> u8 {
 /// Run a full digital-pad poll on port 1 and return the 16-bit button word
 /// as the controller put it on the wire (active-low: a pressed bit reads 0).
 fn poll_pad_wire(bus: &mut Bus) -> u16 {
-    bus.write16(Sio0::BASE + 0x0A, JOYN_OUTPUT); // select port 1
-    assert_eq!(exchange(bus, 0x01), 0xFF, "select-byte dummy reply");
+    bus.write16(Sio0::BASE + 0x0a, JOYN_OUTPUT); // select port 1
+    assert_eq!(exchange(bus, 0x01), 0xff, "select-byte dummy reply");
     assert_eq!(exchange(bus, 0x42), 0x41, "digital pad id low");
-    assert_eq!(exchange(bus, 0x00), 0x5A, "digital pad id high");
+    assert_eq!(exchange(bus, 0x00), 0x5a, "digital pad id high");
     let lo = exchange(bus, 0x00);
     let hi = exchange(bus, 0x00);
-    bus.write16(Sio0::BASE + 0x0A, 0x0000); // deselect: resets the pad fsm
+    bus.write16(Sio0::BASE + 0x0a, 0x0000); // deselect: resets the pad fsm
     u16::from_le_bytes([lo, hi])
 }
 

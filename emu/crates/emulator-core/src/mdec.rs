@@ -62,12 +62,12 @@
 // ===============================================================
 
 /// Base address of the MDEC MMIO port.
-pub const MDEC_BASE: u32 = 0x1F80_1820;
+pub const MDEC_BASE: u32 = 0x1f80_1820;
 /// Command / parameter register (writes issue commands or deliver
 /// parameter words; reads return queued output pixels).
-pub const MDEC_CMD_DATA: u32 = 0x1F80_1820;
+pub const MDEC_CMD_DATA: u32 = 0x1f80_1820;
 /// Status register (read) / control register (write).
-pub const MDEC_CTRL_STAT: u32 = 0x1F80_1824;
+pub const MDEC_CTRL_STAT: u32 = 0x1f80_1824;
 
 // Command field in `reg0`:
 //   31..29 : command code (1 = decode, 2 = load quantization, 3 = cosine table)
@@ -98,7 +98,7 @@ const MDEC1_BUSY: u32 = 0x2000_0000;
 #[allow(dead_code)]
 const MDEC1_DREQ: u32 = 0x1800_0000;
 #[allow(dead_code)]
-const MDEC1_FIFO: u32 = 0xC000_0000;
+const MDEC1_FIFO: u32 = 0xc000_0000;
 #[allow(dead_code)]
 const MDEC1_RGB24: u32 = 0x0200_0000;
 #[allow(dead_code)]
@@ -145,7 +145,7 @@ const RESET_BUSY_CYCLES: u64 = 39;
 const RESET_CAPTURE_CYCLES: u64 = 5;
 
 /// End-of-data sentinel in an RLE coefficient stream.
-const MDEC_END_OF_DATA: u16 = 0xFE00;
+const MDEC_END_OF_DATA: u16 = 0xfe00;
 
 /// Block size constants -- 8×8 DCT blocks, 6 blocks per macroblock
 /// (Cb, Cr, Y1, Y2, Y3, Y4).
@@ -296,7 +296,7 @@ impl Mdec {
 
     /// Read a 32-bit word from an MDEC register.
     pub fn read32(&mut self, phys: u32) -> u32 {
-        match phys & 0x1F80_1FFF {
+        match phys & 0x1f80_1fff {
             MDEC_CMD_DATA => {
                 if self.out_queue.len() < 2 {
                     self.decode_until_output_words(1);
@@ -322,7 +322,7 @@ impl Mdec {
     /// Register read from the bus at CPU cycle `now`. Unlike [`Mdec::read32`]
     /// this sees a reset that is still completing.
     pub fn read32_at(&mut self, phys: u32, now: u64) -> u32 {
-        let value = if phys & 0x1F80_1FFF == MDEC_CTRL_STAT && self.resetting(now) {
+        let value = if phys & 0x1f80_1fff == MDEC_CTRL_STAT && self.resetting(now) {
             self.reset_status
         } else {
             self.read32(phys)
@@ -340,7 +340,7 @@ impl Mdec {
         if crate::env_flag!("PSOXIDE_TRACE_MDEC_IO") {
             eprintln!("[mdec-io] w cycle={now} addr={phys:#010x} value={value:#010x}");
         }
-        if phys & 0x1F80_1FFF == MDEC_CTRL_STAT {
+        if phys & 0x1f80_1fff == MDEC_CTRL_STAT {
             if value & MDEC1_RESET != 0 {
                 let busy = if self.resetting(now) {
                     self.reset_status
@@ -390,7 +390,7 @@ impl Mdec {
     /// Write a 32-bit word to an MDEC register. Commands + data
     /// arrive at `0x1820`, control bits at `0x1824`.
     pub fn write32(&mut self, phys: u32, value: u32) {
-        match phys & 0x1F80_1FFF {
+        match phys & 0x1f80_1fff {
             MDEC_CMD_DATA => self.command_write(value),
             MDEC_CTRL_STAT => self.control_write(value),
             _ => {}
@@ -565,9 +565,9 @@ impl Mdec {
         }
         // Parameter words still expected, minus one (FFFFh when none). The
         // latched `reg1` never carries this field.
-        status &= !0xFFFF;
+        status &= !0xffff;
         if !self.fresh_from_reset {
-            status |= self.expected_param_words.wrapping_sub(1) & 0xFFFF;
+            status |= self.expected_param_words.wrapping_sub(1) & 0xffff;
         }
         if self.command_code() == 1 {
             status |= self.output_depth() << 25;
@@ -617,7 +617,7 @@ impl Mdec {
         self.command_history.push(value);
         self.direct_param_words_received = 0;
         self.expected_param_words = match self.command_code() {
-            1 => value & 0xFFFF,
+            1 => value & 0xffff,
             2 => {
                 if value & 1 != 0 {
                     32
@@ -872,7 +872,7 @@ fn decode_block(
     };
 
     block.fill(0);
-    let q_scale = (head >> 10) & 0x3F;
+    let q_scale = (head >> 10) & 0x3f;
     let dc = rle_val(head);
     let coefficient = if q_scale == 0 {
         dc << 5
@@ -886,7 +886,7 @@ fn decode_block(
                 0
             }
     };
-    block[ZIG_ZAG_MATRIX[0]] = coefficient.clamp(-0x4000, 0x3FFF) as i16;
+    block[ZIG_ZAG_MATRIX[0]] = coefficient.clamp(-0x4000, 0x3fff) as i16;
 
     let mut index = 0usize;
     while index < DSIZE2 - 1 {
@@ -910,7 +910,7 @@ fn decode_block(
                         0
                     }
             };
-            block[ZIG_ZAG_MATRIX[index]] = coefficient.clamp(-0x4000, 0x3FFF) as i16;
+            block[ZIG_ZAG_MATRIX[index]] = coefficient.clamp(-0x4000, 0x3fff) as i16;
         }
     }
     true
@@ -1049,12 +1049,12 @@ mod tests {
 
     #[test]
     fn contains_covers_both_registers() {
-        assert!(Mdec::contains(0x1F80_1820));
-        assert!(Mdec::contains(0x1F80_1823));
-        assert!(Mdec::contains(0x1F80_1824));
-        assert!(Mdec::contains(0x1F80_1827));
-        assert!(!Mdec::contains(0x1F80_181C));
-        assert!(!Mdec::contains(0x1F80_1828));
+        assert!(Mdec::contains(0x1f80_1820));
+        assert!(Mdec::contains(0x1f80_1823));
+        assert!(Mdec::contains(0x1f80_1824));
+        assert!(Mdec::contains(0x1f80_1827));
+        assert!(!Mdec::contains(0x1f80_181c));
+        assert!(!Mdec::contains(0x1f80_1828));
     }
 
     #[test]
@@ -1099,7 +1099,7 @@ mod tests {
         let mut m = Mdec::new();
         m.write32(MDEC_CTRL_STAT, 0x6000_0000);
         m.write32(MDEC_CMD_DATA, 0x3200_0006);
-        m.dma_write_in(&[0xFE00_0000; 6]);
+        m.dma_write_in(&[0xfe00_0000; 6]);
 
         let stat = m.read32(MDEC_CTRL_STAT);
         assert_eq!(stat & MDEC1_BUSY, MDEC1_BUSY);
@@ -1117,7 +1117,7 @@ mod tests {
         m.write32(MDEC_CMD_DATA, 0x4000_0001);
         assert_eq!(m.commands_seen(), 1);
         // DMA0 carries the payload after the command register is latched.
-        m.dma_write_in(&[0xDEAD_BEEF]);
+        m.dma_write_in(&[0xdead_beef]);
         assert_eq!(m.params_seen(), 1);
     }
 
@@ -1198,11 +1198,11 @@ mod tests {
         let word = 0b1010_1000_0001_0010_u16; // run=42, value=0x12 (hmm)
                                               // Let me pick a cleaner example:
                                               // run = 5 (top 6 bits = 000101), val = 0x1F (low 10 bits = 00_0001_1111 = 31).
-        let word2 = (5u16 << 10) | 0x001F;
+        let word2 = (5u16 << 10) | 0x001f;
         assert_eq!(rle_run(word2), 5);
         assert_eq!(rle_val(word2), 31);
         // Negative value: low 10 bits = 0x3FF = -1 signed.
-        let word3 = 0x03FF;
+        let word3 = 0x03ff;
         assert_eq!(rle_val(word3), -1);
         // Unused variable so compiler is happy.
         let _ = rle_run(word);
@@ -1238,7 +1238,7 @@ mod tests {
     #[test]
     fn signed_output_keeps_the_twos_complement_byte() {
         let rgb = yuv_to_rgb(-1, 0, 0);
-        assert_eq!(output_byte(rgb[0], true), 0xFF);
+        assert_eq!(output_byte(rgb[0], true), 0xff);
         assert_eq!(output_byte(yuv_to_rgb(5, 0, 0)[0], true), 5);
     }
 
@@ -1281,7 +1281,7 @@ mod tests {
         m.dma_write_in(&[0x0101_0101; 32]);
 
         m.write32(MDEC_CMD_DATA, 0x2000_0001);
-        m.dma_write_in(&[0xFE00_0000]);
+        m.dma_write_in(&[0xfe00_0000]);
 
         let status = m.read32(MDEC_CTRL_STAT);
         assert_eq!(status & MDEC1_EMPTY, 0);
@@ -1299,7 +1299,7 @@ mod tests {
         m.dma_write_in(&[0x0101_0101; 32]);
 
         m.write32(MDEC_CMD_DATA, 0x2800_0001);
-        m.dma_write_in(&[0xFE00_0000]);
+        m.dma_write_in(&[0xfe00_0000]);
 
         assert_eq!(m.read32(MDEC_CTRL_STAT) & MDEC1_OUTPUT_DEPTH_MASK, 1 << 25);
         let mut output = [0u32; 16];
@@ -1389,10 +1389,10 @@ mod tests {
         m.write32_at(MDEC_CMD_DATA, 0x4000_0001, 0);
         m.write32_at(MDEC_CMD_DATA, 0, 1);
         m.write32_at(MDEC_CTRL_STAT, 0x8000_0000, 100);
-        assert_eq!(m.read32_at(MDEC_CTRL_STAT, 113), 0xA004_0000);
+        assert_eq!(m.read32_at(MDEC_CTRL_STAT, 113), 0xa004_0000);
         assert_eq!(
             m.read32_at(MDEC_CTRL_STAT, 100 + RESET_BUSY_CYCLES - 1),
-            0xA004_0000
+            0xa004_0000
         );
         assert_eq!(
             m.read32_at(MDEC_CTRL_STAT, 100 + RESET_BUSY_CYCLES),
@@ -1422,7 +1422,7 @@ mod tests {
         assert!(!m.dma_in_enabled());
         m.write32_at(MDEC_CMD_DATA, 0x6000_0000, 200);
         assert!(!m.dma_in_request());
-        assert_eq!(m.read32_at(MDEC_CTRL_STAT, 201), 0xA004_001F);
+        assert_eq!(m.read32_at(MDEC_CTRL_STAT, 201), 0xa004_001f);
 
         // The v1.25 driver (7 cycles behind), even from busy: kept.
         let mut m = Mdec::new();
@@ -1438,14 +1438,14 @@ mod tests {
     fn status_counts_parameter_words_left() {
         let mut m = Mdec::new();
         m.write32(MDEC_CTRL_STAT, 0x8000_0000);
-        assert_eq!(m.read32(MDEC_CTRL_STAT) & 0xFFFF, 0);
+        assert_eq!(m.read32(MDEC_CTRL_STAT) & 0xffff, 0);
         m.write32(MDEC_CTRL_STAT, 0x6000_0000);
         m.write32(MDEC_CMD_DATA, 0x4000_0001);
-        assert_eq!(m.read32(MDEC_CTRL_STAT), 0xB004_001F);
+        assert_eq!(m.read32(MDEC_CTRL_STAT), 0xb004_001f);
         m.write32(MDEC_CMD_DATA, 0);
-        assert_eq!(m.read32(MDEC_CTRL_STAT) & 0xFFFF, 0x1E);
+        assert_eq!(m.read32(MDEC_CTRL_STAT) & 0xffff, 0x1e);
         m.dma_write_in(&[0; 31]);
-        assert_eq!(m.read32(MDEC_CTRL_STAT), 0x8004_FFFF);
+        assert_eq!(m.read32(MDEC_CTRL_STAT), 0x8004_ffff);
     }
 
     #[test]
@@ -1454,7 +1454,7 @@ mod tests {
         let mut m = Mdec::new();
         m.write32(MDEC_CMD_DATA, 0x4000_0001);
         m.dma_write_in(&[0x0101_0101; 32]);
-        let words = [0xFE00_0010u32; 12]; // two DC-only macroblocks
+        let words = [0xfe00_0010u32; 12]; // two DC-only macroblocks
         m.write32(MDEC_CMD_DATA, 0x3800_0000 | words.len() as u32);
         for word in words {
             m.write32(MDEC_CMD_DATA, word);
@@ -1473,7 +1473,7 @@ mod tests {
         let mut m = Mdec::new();
         assert_eq!(m.state(), MdecState::Idle);
         m.write32(MDEC_CMD_DATA, 0x3000_0006);
-        m.dma_write_in(&[0xFE00_0000; 6]);
+        m.dma_write_in(&[0xfe00_0000; 6]);
         assert_eq!(m.state(), MdecState::DecodeReady);
         let mut out = [0u32; 1];
         m.dma_read_out(&mut out);

@@ -297,10 +297,10 @@ mod tests {
     #[test]
     fn full_upload_round_trip_is_byte_identical() {
         let g = fresh();
-        let mut state = 0xACE1u16;
+        let mut state = 0xace1u16;
         let mut src = Vec::with_capacity((VRAM_WIDTH * VRAM_HEIGHT) as usize);
         for _ in 0..(VRAM_WIDTH * VRAM_HEIGHT) {
-            state = state.wrapping_mul(0x4F1B).wrapping_add(0x7C5D);
+            state = state.wrapping_mul(0x4f1b).wrapping_add(0x7c5d);
             src.push(state);
         }
         g.upload_full(&src).expect("upload");
@@ -311,10 +311,10 @@ mod tests {
     #[test]
     fn partial_upload_does_not_disturb_neighbours() {
         let g = fresh();
-        let block = vec![0xFFFFu16; 16];
+        let block = vec![0xffffu16; 16];
         g.upload_rect(100, 200, 4, 4, &block).expect("upload");
         let inside = g.download_rect(100, 200, 4, 4).expect("download");
-        assert!(inside.iter().all(|&w| w == 0xFFFF));
+        assert!(inside.iter().all(|&w| w == 0xffff));
         let left = g.download_rect(99, 200, 1, 4).expect("download");
         assert!(left.iter().all(|&w| w == 0), "left column unchanged");
         let top = g.download_rect(100, 199, 4, 1).expect("download");
@@ -331,20 +331,20 @@ mod tests {
         let mut cpu = Vram::new();
         for &(x, y, val) in &[
             (0u16, 0u16, 0x1234u16),
-            (1023, 0, 0xABCDu16),
+            (1023, 0, 0xabcdu16),
             (0, 511, 0x4321u16),
-            (1023, 511, 0xCAFEu16),
-            (512, 256, 0xBEEFu16),
+            (1023, 511, 0xcafeu16),
+            (512, 256, 0xbeefu16),
         ] {
             cpu.set_pixel(x, y, val);
             g.upload_rect(x as u32, y as u32, 1, 1, &[val]).unwrap();
         }
         for &(x, y, val) in &[
             (0u32, 0u32, 0x1234u16),
-            (1023, 0, 0xABCD),
+            (1023, 0, 0xabcd),
             (0, 511, 0x4321),
-            (1023, 511, 0xCAFE),
-            (512, 256, 0xBEEF),
+            (1023, 511, 0xcafe),
+            (512, 256, 0xbeef),
         ] {
             assert_eq!(g.read_pixel(x, y).unwrap(), val, "GPU @ ({x},{y})");
             assert_eq!(cpu.get_pixel(x as u16, y as u16), val, "CPU @ ({x},{y})");
@@ -354,11 +354,11 @@ mod tests {
     #[test]
     fn rect_at_extreme_corners() {
         let g = fresh();
-        g.upload_rect(VRAM_WIDTH - 1, VRAM_HEIGHT - 1, 1, 1, &[0x7FFF])
+        g.upload_rect(VRAM_WIDTH - 1, VRAM_HEIGHT - 1, 1, 1, &[0x7fff])
             .unwrap();
         assert_eq!(
             g.read_pixel(VRAM_WIDTH - 1, VRAM_HEIGHT - 1).unwrap(),
-            0x7FFF
+            0x7fff
         );
     }
 
@@ -394,9 +394,9 @@ mod tests {
     #[test]
     fn clear_resets_full_texture() {
         let g = fresh();
-        let block = vec![0xAAAAu16; 64];
+        let block = vec![0xaaaau16; 64];
         g.upload_rect(50, 50, 8, 8, &block).unwrap();
-        assert_eq!(g.read_pixel(53, 53).unwrap(), 0xAAAA);
+        assert_eq!(g.read_pixel(53, 53).unwrap(), 0xaaaa);
         g.clear();
         assert_eq!(g.read_pixel(53, 53).unwrap(), 0);
         assert_eq!(g.read_pixel(0, 0).unwrap(), 0);
@@ -421,13 +421,13 @@ mod tests {
         // 2000 writes scattered across all of VRAM.
         let g = fresh();
         let mut cpu = Vram::new();
-        let mut state = 0x9E37u16;
+        let mut state = 0x9e37u16;
         for _ in 0..2000 {
-            state = state.wrapping_mul(0x4F1B).wrapping_add(0x7C5D);
+            state = state.wrapping_mul(0x4f1b).wrapping_add(0x7c5d);
             let x = (state as u32) % VRAM_WIDTH;
-            state = state.wrapping_mul(0x4F1B).wrapping_add(0x7C5D);
+            state = state.wrapping_mul(0x4f1b).wrapping_add(0x7c5d);
             let y = (state as u32) % VRAM_HEIGHT;
-            state = state.wrapping_mul(0x4F1B).wrapping_add(0x7C5D);
+            state = state.wrapping_mul(0x4f1b).wrapping_add(0x7c5d);
             cpu.set_pixel(x as u16, y as u16, state);
             g.upload_rect(x, y, 1, 1, &[state]).unwrap();
         }

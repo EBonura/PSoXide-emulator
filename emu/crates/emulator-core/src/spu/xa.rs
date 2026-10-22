@@ -89,7 +89,7 @@ pub fn xa_decode_block(
     widened: &[i16; 28],
     out: &mut [i16; 28],
 ) {
-    let range = match header & 0x0F {
+    let range = match header & 0x0f {
         r if r > XA_MAX_RANGE => XA_RESERVED_RANGE_AS,
         r => r,
     };
@@ -106,7 +106,7 @@ pub fn xa_decode_block(
             .wrapping_add(older.wrapping_mul(neg))
             >> 10;
         let value = ((i32::from(sample) >> range) << HISTORY_FRAC_BITS).wrapping_add(predicted);
-        *dst = (value >> HISTORY_FRAC_BITS).clamp(-0x8000, 0x7FFF) as i16;
+        *dst = (value >> HISTORY_FRAC_BITS).clamp(-0x8000, 0x7fff) as i16;
         older = newest;
         newest = value;
     }

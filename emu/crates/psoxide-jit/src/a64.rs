@@ -98,23 +98,23 @@ impl Asm {
 
     /// Load a 64-bit constant into `xd`.
     pub fn mov64(&mut self, rd: u8, value: u64) {
-        self.emit(0xD280_0000 | ((value & 0xFFFF) as u32) << 5 | rd as u32);
+        self.emit(0xd280_0000 | ((value & 0xffff) as u32) << 5 | rd as u32);
         for shift in [16u32, 32, 48] {
-            let part = ((value >> shift) & 0xFFFF) as u32;
+            let part = ((value >> shift) & 0xffff) as u32;
             if part != 0 {
-                self.emit(0xF280_0000 | (shift / 16) << 21 | part << 5 | rd as u32);
+                self.emit(0xf280_0000 | (shift / 16) << 21 | part << 5 | rd as u32);
             }
         }
     }
 
     /// `MOV xd, xm`.
     pub fn mov_x(&mut self, rd: u8, rm: u8) {
-        self.emit(0xAA00_0000 | (rm as u32) << 16 | (ZR as u32) << 5 | rd as u32);
+        self.emit(0xaa00_0000 | (rm as u32) << 16 | (ZR as u32) << 5 | rd as u32);
     }
 
     /// `MOV wd, wm`.
     pub fn mov_w(&mut self, rd: u8, rm: u8) {
-        self.emit(0x2A00_0000 | (rm as u32) << 16 | (ZR as u32) << 5 | rd as u32);
+        self.emit(0x2a00_0000 | (rm as u32) << 16 | (ZR as u32) << 5 | rd as u32);
     }
 
     fn rrr(&mut self, base: u32, rd: u8, rn: u8, rm: u8) {
@@ -123,43 +123,43 @@ impl Asm {
 
     /// `ADD wd, wn, wm`.
     pub fn add_w(&mut self, rd: u8, rn: u8, rm: u8) {
-        self.rrr(0x0B00_0000, rd, rn, rm);
+        self.rrr(0x0b00_0000, rd, rn, rm);
     }
     /// `SUB wd, wn, wm`.
     pub fn sub_w(&mut self, rd: u8, rn: u8, rm: u8) {
-        self.rrr(0x4B00_0000, rd, rn, rm);
+        self.rrr(0x4b00_0000, rd, rn, rm);
     }
     /// `AND wd, wn, wm`.
     pub fn and_w(&mut self, rd: u8, rn: u8, rm: u8) {
-        self.rrr(0x0A00_0000, rd, rn, rm);
+        self.rrr(0x0a00_0000, rd, rn, rm);
     }
     /// `ORR wd, wn, wm`.
     pub fn orr_w(&mut self, rd: u8, rn: u8, rm: u8) {
-        self.rrr(0x2A00_0000, rd, rn, rm);
+        self.rrr(0x2a00_0000, rd, rn, rm);
     }
     /// `ORN wd, wn, wm` (`wn | !wm`).
     pub fn orn_w(&mut self, rd: u8, rn: u8, rm: u8) {
-        self.rrr(0x2A20_0000, rd, rn, rm);
+        self.rrr(0x2a20_0000, rd, rn, rm);
     }
     /// `EOR wd, wn, wm`.
     pub fn eor_w(&mut self, rd: u8, rn: u8, rm: u8) {
-        self.rrr(0x4A00_0000, rd, rn, rm);
+        self.rrr(0x4a00_0000, rd, rn, rm);
     }
     /// `LSLV wd, wn, wm`.
     pub fn lslv_w(&mut self, rd: u8, rn: u8, rm: u8) {
-        self.rrr(0x1AC0_2000, rd, rn, rm);
+        self.rrr(0x1ac0_2000, rd, rn, rm);
     }
     /// `LSRV wd, wn, wm`.
     pub fn lsrv_w(&mut self, rd: u8, rn: u8, rm: u8) {
-        self.rrr(0x1AC0_2400, rd, rn, rm);
+        self.rrr(0x1ac0_2400, rd, rn, rm);
     }
     /// `ASRV wd, wn, wm`.
     pub fn asrv_w(&mut self, rd: u8, rn: u8, rm: u8) {
-        self.rrr(0x1AC0_2800, rd, rn, rm);
+        self.rrr(0x1ac0_2800, rd, rn, rm);
     }
     /// `CMP wn, wm`.
     pub fn cmp_w(&mut self, rn: u8, rm: u8) {
-        self.rrr(0x6B00_0000, ZR, rn, rm);
+        self.rrr(0x6b00_0000, ZR, rn, rm);
     }
     /// `ADD wd, wn, #imm12`.
     pub fn add_w_imm(&mut self, rd: u8, rn: u8, imm12: u32) {
@@ -173,7 +173,7 @@ impl Asm {
     }
     /// `CSET wd, cond`.
     pub fn cset_w(&mut self, rd: u8, cond: Cond) {
-        self.emit(0x1A9F_07E0 | cond.invert() << 12 | rd as u32);
+        self.emit(0x1a9f_07e0 | cond.invert() << 12 | rd as u32);
     }
 
     /// `LSL wd, wn, #sh` (0 < sh < 32).
@@ -194,26 +194,26 @@ impl Asm {
     /// `LDR wt, [xn, #off]` (off a multiple of 4 below 16 KiB).
     pub fn ldr_w(&mut self, rt: u8, rn: u8, off: u32) {
         debug_assert!(off.is_multiple_of(4) && off < 16384);
-        self.emit(0xB940_0000 | (off / 4) << 10 | (rn as u32) << 5 | rt as u32);
+        self.emit(0xb940_0000 | (off / 4) << 10 | (rn as u32) << 5 | rt as u32);
     }
     /// `STR wt, [xn, #off]`.
     pub fn str_w(&mut self, rt: u8, rn: u8, off: u32) {
         debug_assert!(off.is_multiple_of(4) && off < 16384);
-        self.emit(0xB900_0000 | (off / 4) << 10 | (rn as u32) << 5 | rt as u32);
+        self.emit(0xb900_0000 | (off / 4) << 10 | (rn as u32) << 5 | rt as u32);
     }
     /// `LDR xt, [xn, #off]` (off a multiple of 8 below 32 KiB).
     pub fn ldr_x(&mut self, rt: u8, rn: u8, off: u32) {
         debug_assert!(off.is_multiple_of(8) && off < 32768);
-        self.emit(0xF940_0000 | (off / 8) << 10 | (rn as u32) << 5 | rt as u32);
+        self.emit(0xf940_0000 | (off / 8) << 10 | (rn as u32) << 5 | rt as u32);
     }
     /// `STR xt, [xn, #off]`.
     pub fn str_x(&mut self, rt: u8, rn: u8, off: u32) {
         debug_assert!(off.is_multiple_of(8) && off < 32768);
-        self.emit(0xF900_0000 | (off / 8) << 10 | (rn as u32) << 5 | rt as u32);
+        self.emit(0xf900_0000 | (off / 8) << 10 | (rn as u32) << 5 | rt as u32);
     }
     /// `ADD xd, xn, xm`.
     pub fn add_x(&mut self, rd: u8, rn: u8, rm: u8) {
-        self.rrr(0x8B00_0000, rd, rn, rm);
+        self.rrr(0x8b00_0000, rd, rn, rm);
     }
     /// `ADD xd, xn, #imm12`.
     pub fn add_x_imm(&mut self, rd: u8, rn: u8, imm12: u32) {
@@ -222,7 +222,7 @@ impl Asm {
     }
     /// `CMP xn, xm`.
     pub fn cmp_x(&mut self, rn: u8, rm: u8) {
-        self.rrr(0xEB00_0000, ZR, rn, rm);
+        self.rrr(0xeb00_0000, ZR, rn, rm);
     }
 
     /// `LDRB wt, [xn]`.
@@ -237,52 +237,52 @@ impl Asm {
 
     /// `LDR wt, [xn, xm, LSL #2]`.
     pub fn ldr_w_idx4(&mut self, rt: u8, rn: u8, rm: u8) {
-        self.emit(0xB860_7800 | (rm as u32) << 16 | (rn as u32) << 5 | rt as u32);
+        self.emit(0xb860_7800 | (rm as u32) << 16 | (rn as u32) << 5 | rt as u32);
     }
 
     /// `STR wt, [xn, xm, LSL #2]`.
     pub fn str_w_idx4(&mut self, rt: u8, rn: u8, rm: u8) {
-        self.emit(0xB820_7800 | (rm as u32) << 16 | (rn as u32) << 5 | rt as u32);
+        self.emit(0xb820_7800 | (rm as u32) << 16 | (rn as u32) << 5 | rt as u32);
     }
 
     /// `STP xt1, xt2, [sp, #off]!` (pre-index, off a multiple of 8).
     pub fn stp_x_pre(&mut self, rt1: u8, rt2: u8, off: i32) {
-        let imm7 = ((off / 8) as u32) & 0x7F;
-        self.emit(0xA980_0000 | imm7 << 15 | (rt2 as u32) << 10 | (SP as u32) << 5 | rt1 as u32);
+        let imm7 = ((off / 8) as u32) & 0x7f;
+        self.emit(0xa980_0000 | imm7 << 15 | (rt2 as u32) << 10 | (SP as u32) << 5 | rt1 as u32);
     }
     /// `STP xt1, xt2, [sp, #off]`.
     pub fn stp_x(&mut self, rt1: u8, rt2: u8, off: i32) {
-        let imm7 = ((off / 8) as u32) & 0x7F;
-        self.emit(0xA900_0000 | imm7 << 15 | (rt2 as u32) << 10 | (SP as u32) << 5 | rt1 as u32);
+        let imm7 = ((off / 8) as u32) & 0x7f;
+        self.emit(0xa900_0000 | imm7 << 15 | (rt2 as u32) << 10 | (SP as u32) << 5 | rt1 as u32);
     }
     /// `LDP xt1, xt2, [sp, #off]`.
     pub fn ldp_x(&mut self, rt1: u8, rt2: u8, off: i32) {
-        let imm7 = ((off / 8) as u32) & 0x7F;
-        self.emit(0xA940_0000 | imm7 << 15 | (rt2 as u32) << 10 | (SP as u32) << 5 | rt1 as u32);
+        let imm7 = ((off / 8) as u32) & 0x7f;
+        self.emit(0xa940_0000 | imm7 << 15 | (rt2 as u32) << 10 | (SP as u32) << 5 | rt1 as u32);
     }
     /// `LDP xt1, xt2, [sp], #off` (post-index).
     pub fn ldp_x_post(&mut self, rt1: u8, rt2: u8, off: i32) {
-        let imm7 = ((off / 8) as u32) & 0x7F;
-        self.emit(0xA8C0_0000 | imm7 << 15 | (rt2 as u32) << 10 | (SP as u32) << 5 | rt1 as u32);
+        let imm7 = ((off / 8) as u32) & 0x7f;
+        self.emit(0xa8c0_0000 | imm7 << 15 | (rt2 as u32) << 10 | (SP as u32) << 5 | rt1 as u32);
     }
     /// `MOV x29, sp`.
     pub fn mov_fp_sp(&mut self) {
         // ADD x29, sp, #0
-        self.emit(0x9100_03FD);
+        self.emit(0x9100_03fd);
     }
 
     /// `BLR xn`.
     pub fn blr(&mut self, rn: u8) {
-        self.emit(0xD63F_0000 | (rn as u32) << 5);
+        self.emit(0xd63f_0000 | (rn as u32) << 5);
     }
     /// `BR xn`.
     pub fn br(&mut self, rn: u8) {
-        self.emit(0xD61F_0000 | (rn as u32) << 5);
+        self.emit(0xd61f_0000 | (rn as u32) << 5);
     }
     /// `CBZ xt, <label>` to be bound later.
     pub fn cbz_x(&mut self, rt: u8) -> Fixup {
         let at = self.pos();
-        self.emit(0xB400_0000 | rt as u32);
+        self.emit(0xb400_0000 | rt as u32);
         Fixup {
             at,
             kind: FixupKind::Imm19,
@@ -290,7 +290,7 @@ impl Asm {
     }
     /// `RET`.
     pub fn ret(&mut self) {
-        self.emit(0xD65F_03C0);
+        self.emit(0xd65f_03c0);
     }
 
     /// `CBZ wt, <label>` to be bound later.
@@ -337,11 +337,11 @@ impl Asm {
         match fixup.kind {
             FixupKind::Imm19 => {
                 assert!((-(1 << 18)..(1 << 18)).contains(&delta));
-                *word |= ((delta as u32) & 0x7FFFF) << 5;
+                *word |= ((delta as u32) & 0x7ffff) << 5;
             }
             FixupKind::Imm26 => {
                 assert!((-(1 << 25)..(1 << 25)).contains(&delta));
-                *word |= (delta as u32) & 0x3FF_FFFF;
+                *word |= (delta as u32) & 0x3ff_ffff;
             }
         }
     }

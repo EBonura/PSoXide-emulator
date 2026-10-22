@@ -7,8 +7,9 @@
 
 use psx_iso::{BootError, Disc};
 
+use crate::gpu::GP1_ADDR;
 use crate::system_cnf::{load_disc_boot, BOOT_ARG_ADDR};
-use crate::{gpu::GP1_ADDR, Bus, Cpu};
+use crate::{Bus, Cpu};
 
 /// Summary of a successful disc fast boot.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,11 +94,11 @@ pub fn fast_boot_disc(
 }
 
 /// DMA control register.
-const DPCR_ADDR: u32 = 0x1F80_10F0;
+const DPCR_ADDR: u32 = 0x1f80_10f0;
 /// Interrupt mask register.
-const I_MASK_ADDR: u32 = 0x1F80_1074;
+const I_MASK_ADDR: u32 = 0x1f80_1074;
 /// GPU command port.
-const GP0_ADDR: u32 = 0x1F80_1810;
+const GP0_ADDR: u32 = 0x1f80_1810;
 
 /// Hardware state a disc executable inherits from a real boot, for the HLE
 /// HLE boot. Every value was constant across the 38 census runs (31 discs)
@@ -113,15 +114,15 @@ fn apply_hle_entry_state(bus: &mut Bus) {
     // master enable, the GPU and CD-ROM channel enables and their
     // completion flags set, so the master flag is high.
     bus.write32(DPCR_ADDR, 0x0000_9099);
-    bus.set_dicr_raw(0x8C8C_0000);
+    bus.set_dicr_raw(0x8c8c_0000);
     // CD-ROM and DMA interrupts unmasked.
-    bus.write32(I_MASK_ADDR, 0x0000_000C);
+    bus.write32(I_MASK_ADDR, 0x0000_000c);
     bus.apply_hle_entry_audio_profile();
     // Shell display: 640x480 interlaced, 15-bit, NTSC (an NTSC BIOS leaves
     // this even for PAL discs), with dithering and drawing to the displayed
     // field enabled.
     bus.write32(GP1_ADDR, 0x0800_0027);
-    bus.write32(GP0_ADDR, 0xE100_0600);
+    bus.write32(GP0_ADDR, 0xe100_0600);
 }
 
 #[cfg(test)]
@@ -133,10 +134,10 @@ mod tests {
         let mut exe = vec![0u8; EXE_HEADER_BYTES];
         exe[..8].copy_from_slice(b"PS-X EXE");
         exe[0x10..0x14].copy_from_slice(&0x8001_0000u32.to_le_bytes());
-        exe[0x18..0x1C].copy_from_slice(&0x8001_0000u32.to_le_bytes());
-        exe[0x1C..0x20].copy_from_slice(&4u32.to_le_bytes());
+        exe[0x18..0x1c].copy_from_slice(&0x8001_0000u32.to_le_bytes());
+        exe[0x1c..0x20].copy_from_slice(&4u32.to_le_bytes());
         // Header stack fields are ignored on disc boot.
-        exe[0x30..0x34].copy_from_slice(&0x801F_0000u32.to_le_bytes());
+        exe[0x30..0x34].copy_from_slice(&0x801f_0000u32.to_le_bytes());
         exe.extend_from_slice(&[0; 4]);
         let mut builder = IsoBuilder::new();
         builder.add_file("SYSTEM.CNF", system_cnf.to_vec());
@@ -149,14 +150,14 @@ mod tests {
         for (cnf, sp, fp) in [
             (
                 &b"BOOT = cdrom:\\GAME.EXE;1\r\nSTACK = 801FFFF0\r\n"[..],
-                0x801F_FFF0,
-                0x801F_FFF0,
+                0x801f_fff0,
+                0x801f_fff0,
             ),
-            (b"BOOT = cdrom:\\GAME.EXE;1\r\n", 0x801F_FF00, 0x801F_FF00),
+            (b"BOOT = cdrom:\\GAME.EXE;1\r\n", 0x801f_ff00, 0x801f_ff00),
             (
                 b"BOOT = cdrom:\\GAME.EXE;1\r\nSTACK = 0x801FFFF0\r\n",
-                0x801F_FDD8,
-                0x801F_FF00,
+                0x801f_fdd8,
+                0x801f_ff00,
             ),
         ] {
             let mut bus = Bus::new_without_bios();
@@ -174,17 +175,17 @@ mod tests {
         let mut cpu = Cpu::new();
         fast_boot_disc(&mut bus, &mut cpu, &disc(b"BOOT = cdrom:\\GAME.EXE;1\r\n")).unwrap();
         assert_eq!(bus.read32(DPCR_ADDR), 0x0000_9099);
-        assert_eq!(bus.read32(0x1F80_10F4), 0x8C8C_0000);
-        assert_eq!(bus.read32(I_MASK_ADDR) & 0xFFFF, 0x000C);
+        assert_eq!(bus.read32(0x1f80_10f4), 0x8c8c_0000);
+        assert_eq!(bus.read32(I_MASK_ADDR) & 0xffff, 0x000c);
         assert_eq!(bus.read32(0x60), 2);
-        assert_eq!(bus.read16(0x1F80_1D80), 0x3FFF);
-        assert_eq!(bus.read16(0x1F80_1D82), 0x37EF);
-        assert_eq!(bus.read16(0x1F80_1DAA), 0xC085);
-        assert_eq!(bus.read16(0x1F80_1DAC), 0x0004);
-        assert_eq!(bus.read16(0x1F80_1DB0), 0);
-        let gpustat = bus.read32(0x1F80_1814);
+        assert_eq!(bus.read16(0x1f80_1d80), 0x3fff);
+        assert_eq!(bus.read16(0x1f80_1d82), 0x37ef);
+        assert_eq!(bus.read16(0x1f80_1daa), 0xc085);
+        assert_eq!(bus.read16(0x1f80_1dac), 0x0004);
+        assert_eq!(bus.read16(0x1f80_1db0), 0);
+        let gpustat = bus.read32(0x1f80_1814);
         // 640x480 interlaced, NTSC, display on, dither and draw-to-display.
-        assert_eq!(gpustat & 0x00FF_0600, 0x004E_0600);
+        assert_eq!(gpustat & 0x00ff_0600, 0x004e_0600);
         assert_eq!(gpustat & (1 << 23), 0);
         // The IRQ mask must not raise anything at entry.
         assert!(!bus.external_interrupt_pending());
@@ -213,9 +214,9 @@ mod tests {
         let mut exe = vec![0u8; EXE_HEADER_BYTES];
         exe[..8].copy_from_slice(b"PS-X EXE");
         exe[0x10..0x14].copy_from_slice(&0x8001_0000u32.to_le_bytes());
-        exe[0x18..0x1C].copy_from_slice(&0x8001_0000u32.to_le_bytes());
-        exe[0x1C..0x20].copy_from_slice(&2048u32.to_le_bytes());
-        exe.extend_from_slice(&[0x5A; 1500]);
+        exe[0x18..0x1c].copy_from_slice(&0x8001_0000u32.to_le_bytes());
+        exe[0x1c..0x20].copy_from_slice(&2048u32.to_le_bytes());
+        exe.extend_from_slice(&[0x5a; 1500]);
         let mut builder = IsoBuilder::new();
         builder.add_file("SYSTEM.CNF", b"BOOT = cdrom:\\GAME.EXE;1\r\n".to_vec());
         builder.add_file("GAME.EXE", exe);
@@ -225,7 +226,7 @@ mod tests {
         let mut cpu = Cpu::new();
         let info = fast_boot_disc(&mut bus, &mut cpu, &disc).unwrap();
         assert_eq!(info.payload_len, 2048);
-        assert_eq!(bus.try_read8(0x8001_0000 + 1499), Some(0x5A));
+        assert_eq!(bus.try_read8(0x8001_0000 + 1499), Some(0x5a));
         assert_eq!(bus.try_read8(0x8001_0000 + 1500), Some(0));
         assert_eq!(bus.try_read8(0x8001_0000 + 2047), Some(0));
     }

@@ -44,9 +44,9 @@ use timing::*;
 
 /// Base MMIO address -- the whole controller fits in 4 bytes at
 /// `0x1F80_1800..=0x1F80_1803`.
-pub const BASE: u32 = 0x1F80_1800;
+pub const BASE: u32 = 0x1f80_1800;
 /// Range end (exclusive) -- `BASE + 4`.
-pub const END: u32 = 0x1F80_1804;
+pub const END: u32 = 0x1f80_1804;
 
 /// Status-byte bits (read from `0x1F80_1800` at any index).
 #[allow(dead_code)]
@@ -169,7 +169,7 @@ struct PendingFollowup {
 
 /// `PendingEvent::command` of an INT1 that announces a sector which landed
 /// while the CPU held the previous interrupt (no sector is read for it).
-const DEFERRED_DATA_READY: u8 = 0xFF;
+const DEFERRED_DATA_READY: u8 = 0xff;
 
 /// Cycles from the acknowledge to the held INT1. PSX-SPX only says there
 /// is "a small delay" between acknowledging one interrupt and the next
@@ -599,7 +599,7 @@ impl CdRom {
             // blocked every CDROM IRQ from reaching the CPU at boot: the BIOS
             // then polled the latched flag instead of getting its usual
             // ISR-driven acknowledge. See `should_wake_cpu`.
-            irq_mask: 0x1F,
+            irq_mask: 0x1f,
             irq_flag: 0,
             pending: VecDeque::new(),
             lid_deadline: None,
@@ -1134,8 +1134,8 @@ impl CdRom {
             //   idx=1 → interrupt flag,
             //   idx=2 → mirror of enable,
             //   idx=3 → mirror of flag.
-            (3, 0) | (3, 2) => self.irq_mask | 0xE0,
-            (3, 1) | (3, 3) => self.irq_flag | 0xE0,
+            (3, 0) | (3, 2) => self.irq_mask | 0xe0,
+            (3, 1) | (3, 3) => self.irq_flag | 0xe0,
             _ => 0,
         }
     }
@@ -1170,7 +1170,7 @@ impl CdRom {
             (2, 0) => self.push_param(value),
             // 0x1F80_1802 idx=1 -- interrupt enable.
             (2, 1) => {
-                self.irq_mask = value & 0x1F;
+                self.irq_mask = value & 0x1f;
                 return self.should_wake_cpu();
             }
             // 0x1F80_1802 idx=2/3 -- audio volume.
@@ -1195,7 +1195,7 @@ impl CdRom {
             // 0x1F80_1803 idx=1 -- acknowledge interrupts (write-1-to-
             // clear on the low 5 bits; bit 6 resets the param FIFO too).
             (3, 1) => {
-                self.irq_flag &= !(value & 0x1F);
+                self.irq_flag &= !(value & 0x1f);
                 if self.irq_flag == 0 && self.deferred_data_ready && self.reading {
                     self.deferred_data_ready = false;
                     self.insert_pending_event(PendingEvent {
@@ -1346,14 +1346,14 @@ impl CdRom {
             0x09 => self.cmd_pause(),
             // Reset: abort in-flight drive activity, spin the motor,
             // and complete after the long reset delay.
-            0x0A => self.cmd_reset(),
+            0x0a => self.cmd_reset(),
             // Mute / Demute.
-            0x0B => self.cmd_mute(true),
-            0x0C => self.cmd_mute(false),
+            0x0b => self.cmd_mute(true),
+            0x0c => self.cmd_mute(false),
             // Setfilter -- XA file/channel filter.
-            0x0D => self.cmd_set_filter(&params),
+            0x0d => self.cmd_set_filter(&params),
             // Getparam -- mode/filter query.
-            0x0F => self.cmd_get_param(),
+            0x0f => self.cmd_get_param(),
             // GetlocL -- current logical MSF + mode + subheader.
             0x10 => self.cmd_get_loc_l(),
             // GetlocP -- current play position (track, index, MSF).
@@ -1368,25 +1368,25 @@ impl CdRom {
             // ReadS -- read without auto-retry. Data arrives the same
             // way as ReadN for our purposes; games use ReadS for
             // audio/video streaming where a retry would cause hitching.
-            0x1B => self.cmd_read(),
+            0x1b => self.cmd_read(),
             // SetMode: 1 byte (speed, CD-DA enable, filter, etc.).
             // We accept and store; full behaviour in 6d.
-            0x0E => self.cmd_setmode(&params),
+            0x0e => self.cmd_setmode(&params),
             // SeekL: seek to last-SetLoc position (logical sectors).
             0x15 | 0x16 => self.cmd_seek(),
             // Test: sub-op in param[0]. Most common: 0x20 = get
             // drive version / BIOS date (6-byte response).
             0x19 => self.cmd_test(&params),
             // GetID: "what kind of disc is this?"
-            0x1A => self.cmd_getid(),
+            0x1a => self.cmd_getid(),
             // ReadTOC: re-read the table of contents. The BIOS
             // issues this during disc-boot to learn the track
             // layout; without a response the BIOS hangs waiting
             // for INT2 (Complete), stranding commercial titles at the
             // Sony splash.
-            0x1E => self.cmd_read_toc(),
+            0x1e => self.cmd_read_toc(),
             // Init -- lid/rescan state machine; no CPU-visible INT2.
-            0x1C => self.cmd_init(),
+            0x1c => self.cmd_init(),
             _ => self.cmd_getstat(),
         }
     }
@@ -1926,8 +1926,8 @@ impl CdRom {
     }
 
     fn cmd_reset(&mut self) {
-        let ack_pending = self.drop_pending_command_irq(0x0A, IrqType::Acknowledge);
-        let complete_pending = self.drop_pending_command_irq(0x0A, IrqType::Complete);
+        let ack_pending = self.drop_pending_command_irq(0x0a, IrqType::Acknowledge);
+        let complete_pending = self.drop_pending_command_irq(0x0a, IrqType::Complete);
         self.responses.clear();
         self.reading = false;
         self.pause_reading_until = 0;
@@ -2193,7 +2193,7 @@ impl CdRom {
             self.xa_filter_file = file;
             self.xa_filter_channel = channel;
         }
-        if file != self.xa_filter_file || channel != self.xa_filter_channel || channel == 0xFF {
+        if file != self.xa_filter_file || channel != self.xa_filter_channel || channel == 0xff {
             return;
         }
         if self.xa_first_sector == 1 || self.xa_coding.is_none() {
@@ -2335,7 +2335,7 @@ impl CdRom {
             return;
         };
         let track = bcd_to_bin(params.first().copied().unwrap_or(0));
-        if track == 0xFF {
+        if track == 0xff {
             let stat = self.stat_byte() | drive_status_bit::ERROR;
             self.schedule_error_response(vec![stat]);
             return;
@@ -2391,14 +2391,14 @@ impl CdRom {
             match params.first() {
                 Some(&bcd) => eprintln!(
                     "[cdda] play track bcd=0x{bcd:02X} (decimal {})",
-                    (bcd >> 4) * 10 + (bcd & 0x0F)
+                    (bcd >> 4) * 10 + (bcd & 0x0f)
                 ),
                 None => eprintln!("[cdda] play resume (no track parameter)"),
             }
         }
         if let Some(&track_bcd) = params.first() {
             let track = bcd_to_bin(track_bcd);
-            if track == 0xFF {
+            if track == 0xff {
                 let stat = self.stat_byte() | drive_status_bit::ERROR;
                 self.schedule_error_response(vec![stat]);
                 return;
@@ -2476,7 +2476,7 @@ impl CdRom {
         // PSX-SPX's table of CDROM firmware versions (10 Jun 1998, vC3 (a)).
         match params.first().copied() {
             Some(0x20) => {
-                self.schedule_first_response(vec![0x98, 0x06, 0x10, 0xC3]);
+                self.schedule_first_response(vec![0x98, 0x06, 0x10, 0xc3]);
             }
             _ => self.cmd_getstat(),
         }
@@ -3117,7 +3117,7 @@ fn decode_xa_native(
             let mut widened = [0i16; WORDS];
             for (word, dst) in words.chunks_exact(4).zip(widened.iter_mut()) {
                 *dst = if nbits == 4 {
-                    let nibble = (word[block / 2] >> ((block % 2) * 4)) & 0x0F;
+                    let nibble = (word[block / 2] >> ((block % 2) * 4)) & 0x0f;
                     // `nibble << 12` as a signed 16-bit value: the nibble's
                     // top bit becomes the sign bit.
                     i16::from_le_bytes([0, nibble << 4])

@@ -111,7 +111,7 @@ impl DiffStats {
 impl Img {
     pub fn from_rgba(w: u32, h: u32, mut rgba: Vec<u8>) -> Img {
         for px in rgba.chunks_exact_mut(4) {
-            px[3] = 0xFF;
+            px[3] = 0xff;
         }
         Img { w, h, rgba }
     }

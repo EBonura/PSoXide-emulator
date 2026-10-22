@@ -87,7 +87,7 @@ impl GpuStatus {
         // through `Gpu::apply_gp1_display` in the outer impl so they
         // can update the display-area fields. We still apply the
         // subset that touches GPUSTAT bits (0x08).
-        let cmd = (value >> 24) & 0xFF;
+        let cmd = (value >> 24) & 0xff;
         match cmd {
             0x00 => *self = Self::new(),
             0x02 => self.raw &= !(1 << 24),
@@ -117,7 +117,7 @@ impl GpuStatus {
                     | (bpp << 21)
                     | (vinter << 22)
                     | (hres2 << 16);
-                self.raw = (self.raw & !0x007F_0000) | status_bits;
+                self.raw = (self.raw & !0x007f_0000) | status_bits;
             }
             _ => {}
         }

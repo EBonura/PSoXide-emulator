@@ -9,11 +9,11 @@ mod offset {
     pub const DATA: u32 = 0x0;
     pub const STAT: u32 = 0x4;
     pub const MODE: u32 = 0x8;
-    pub const CTRL: u32 = 0xA;
-    pub const BAUD: u32 = 0xE;
+    pub const CTRL: u32 = 0xa;
+    pub const BAUD: u32 = 0xe;
 }
 
-const MODE_WRITE_MASK: u16 = 0x017F;
+const MODE_WRITE_MASK: u16 = 0x017f;
 const CTRL_RESET: u16 = 1 << 6;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -25,7 +25,7 @@ pub struct Sio1 {
 }
 
 impl Sio1 {
-    pub const BASE: u32 = 0x1F80_1050;
+    pub const BASE: u32 = 0x1f80_1050;
     pub const SIZE: u32 = 0x10;
 
     pub fn new() -> Self {

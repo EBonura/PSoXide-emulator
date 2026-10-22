@@ -100,7 +100,7 @@ pub mod flags {
     /// `tpage_x` must be a multiple of 64 (PSX alignment),
     /// `tpage_y` must be 0 or 256.
     pub fn pack_tpage(tpage_x: u32, tpage_y: u32, depth: u32) -> u32 {
-        let tx = (tpage_x / 64) & 0xF;
+        let tx = (tpage_x / 64) & 0xf;
         let ty = if tpage_y >= 256 { 1u32 } else { 0u32 };
         let d = depth & 0x3;
         tx | (ty << 4) | (d << 5)
@@ -109,8 +109,8 @@ pub mod flags {
     /// Pack CLUT origin (in pixels) into the flag bits.
     /// `clut_x` must be a multiple of 16, `clut_y` must be 0..=511.
     pub fn pack_clut(clut_x: u32, clut_y: u32) -> u32 {
-        let cx = (clut_x / 16) & 0x3F;
-        let cy = clut_y & 0x1FF;
+        let cx = (clut_x / 16) & 0x3f;
+        let cy = clut_y & 0x1ff;
         (cx << 7) | (cy << 13)
     }
 }

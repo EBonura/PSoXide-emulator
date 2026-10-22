@@ -346,7 +346,7 @@ impl Machine {
 
     pub fn ram_bytes(&self, addr: u32, len: usize) -> Option<&[u8]> {
         let ram = self.bus.ram();
-        let off = (addr & 0x1F_FFFF) as usize;
+        let off = (addr & 0x1f_ffff) as usize;
         // KUSEG/KSEG0/KSEG1 main-RAM aliases only.
         let seg = addr >> 29;
         if !matches!(seg, 0 | 4 | 5) {

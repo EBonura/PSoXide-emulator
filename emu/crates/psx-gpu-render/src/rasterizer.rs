@@ -765,9 +765,9 @@ impl Rasterizer {
         ];
         let unpack_rgb = |c: u32| {
             (
-                (c & 0xFF) as i32,
-                ((c >> 8) & 0xFF) as i32,
-                ((c >> 16) & 0xFF) as i32,
+                (c & 0xff) as i32,
+                ((c >> 8) & 0xff) as i32,
+                ((c >> 16) & 0xff) as i32,
             )
         };
         let rgb = [unpack_rgb(tri.c0), unpack_rgb(tri.c1), unpack_rgb(tri.c2)];
@@ -910,16 +910,16 @@ impl Rasterizer {
             (tri.v2[0], tri.v2[1]),
         ];
         let uv = [
-            ((tri.uv0 & 0xFF) as i32, ((tri.uv0 >> 8) & 0xFF) as i32),
-            ((tri.uv1 & 0xFF) as i32, ((tri.uv1 >> 8) & 0xFF) as i32),
-            ((tri.uv2 & 0xFF) as i32, ((tri.uv2 >> 8) & 0xFF) as i32),
+            ((tri.uv0 & 0xff) as i32, ((tri.uv0 >> 8) & 0xff) as i32),
+            ((tri.uv1 & 0xff) as i32, ((tri.uv1 >> 8) & 0xff) as i32),
+            ((tri.uv2 & 0xff) as i32, ((tri.uv2 >> 8) & 0xff) as i32),
         ];
         // Vertex tints are 24-bit RGB packed in the c0/c1/c2 fields.
         let unpack_rgb = |c: u32| {
             (
-                (c & 0xFF) as i32,
-                ((c >> 8) & 0xFF) as i32,
-                ((c >> 16) & 0xFF) as i32,
+                (c & 0xff) as i32,
+                ((c >> 8) & 0xff) as i32,
+                ((c >> 16) & 0xff) as i32,
             )
         };
         let rgb = [unpack_rgb(tri.c0), unpack_rgb(tri.c1), unpack_rgb(tri.c2)];
@@ -1034,9 +1034,9 @@ impl Rasterizer {
             (tri.v2[0], tri.v2[1]),
         ];
         let uv = [
-            ((tri.uv0 & 0xFF) as i32, ((tri.uv0 >> 8) & 0xFF) as i32),
-            ((tri.uv1 & 0xFF) as i32, ((tri.uv1 >> 8) & 0xFF) as i32),
-            ((tri.uv2 & 0xFF) as i32, ((tri.uv2 >> 8) & 0xFF) as i32),
+            ((tri.uv0 & 0xff) as i32, ((tri.uv0 >> 8) & 0xff) as i32),
+            ((tri.uv1 & 0xff) as i32, ((tri.uv1 >> 8) & 0xff) as i32),
+            ((tri.uv2 & 0xff) as i32, ((tri.uv2 >> 8) & 0xff) as i32),
         ];
         let setup = match scanline::build_setup(v, uv, [(0, 0, 0); 3], true) {
             Some(s) => s,

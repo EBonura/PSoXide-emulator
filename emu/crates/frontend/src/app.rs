@@ -32,10 +32,9 @@ use crate::playtest_disc::{
     project_disc_volume_id, DEFAULT_EMBEDDED_PLAYTEST_VOLUME_ID,
 };
 use crate::playtest_input::{PlaytestInputEvent, PlaytestInputTape, Port1PadSample};
-use crate::ui;
 use crate::ui::memory::MemoryView;
 use crate::ui::menu::{LibraryItem as MenuLibraryItem, MenuState, PadBindTarget, SaveStateRow};
-use crate::{paths_equivalent, repo_root_dir};
+use crate::{paths_equivalent, repo_root_dir, ui};
 
 /// Ring-buffer capacity for the execution-history panel. 16 rows is
 /// the "what just ran" context window -- enough to spot a tight loop
@@ -5434,8 +5433,8 @@ mod tests {
         let mut exe = vec![0u8; psx_iso::EXE_HEADER_BYTES];
         exe[..8].copy_from_slice(b"PS-X EXE");
         exe[0x10..0x14].copy_from_slice(&0x8001_0000u32.to_le_bytes());
-        exe[0x18..0x1C].copy_from_slice(&0x8001_0000u32.to_le_bytes());
-        exe[0x1C..0x20].copy_from_slice(&4u32.to_le_bytes());
+        exe[0x18..0x1c].copy_from_slice(&0x8001_0000u32.to_le_bytes());
+        exe[0x1c..0x20].copy_from_slice(&4u32.to_le_bytes());
         exe.extend_from_slice(&[0; 4]);
         let mut builder = psx_iso::IsoBuilder::new();
         builder.add_file("SYSTEM.CNF", b"BOOT = cdrom:\\GAME.EXE;1\r\n".to_vec());
@@ -5461,22 +5460,22 @@ mod tests {
     /// takes ten bit times on the wire, so each one is let through (RX not
     /// empty in SIO0_STAT) before the next goes out, as a driver waits.
     fn write_card_frame0(bus: &mut Bus, fill: u8) {
-        bus.write16(0x1F80_104A, 0x0003); // TX enable + /CS on port 1
+        bus.write16(0x1f80_104a, 0x0003); // TX enable + /CS on port 1
         let mut bytes = vec![0x81, 0x57, 0x00, 0x00, 0x00, 0x00];
         bytes.extend(std::iter::repeat_n(fill, 128));
         let checksum = (0..128).fold(0u8, |acc, _| acc ^ fill);
         bytes.extend([checksum, 0x00, 0x00, 0x00]);
         for byte in bytes {
-            bus.write8(0x1F80_1040, byte);
+            bus.write8(0x1f80_1040, byte);
             let mut waited = 0;
-            while bus.read32(0x1F80_1044) & 0x2 == 0 {
+            while bus.read32(0x1f80_1044) & 0x2 == 0 {
                 assert!(waited < 100_000, "SIO0 byte never arrived");
                 bus.tick(64);
                 waited += 64;
             }
-            let _ = bus.read8(0x1F80_1040);
+            let _ = bus.read8(0x1f80_1040);
         }
-        bus.write16(0x1F80_104A, 0x0000);
+        bus.write16(0x1f80_104a, 0x0000);
     }
 
     /// EM2: launch ids pick the file, never the save. A game reached by its
@@ -5533,7 +5532,7 @@ mod tests {
 
         let card = state.paths.memcard_file(&entry.id, 1);
         std::fs::create_dir_all(card.parent().unwrap()).unwrap();
-        let old_bytes = vec![0x5Au8; emulator_core::pad::MEMCARD_SIZE];
+        let old_bytes = vec![0x5au8; emulator_core::pad::MEMCARD_SIZE];
         std::fs::write(&card, &old_bytes).unwrap();
 
         state.launch_entry(&entry).unwrap();
@@ -5541,10 +5540,10 @@ mod tests {
         let backup = state.paths.pre_hle_memcard_file(&entry.id, 1);
         assert_eq!(std::fs::read(&backup).unwrap(), old_bytes);
 
-        write_card_frame0(state.bus.as_mut().unwrap(), 0xC3);
+        write_card_frame0(state.bus.as_mut().unwrap(), 0xc3);
         state.flush_memcard_port1().unwrap();
         let saved = std::fs::read(&card).unwrap();
-        assert!(saved[..128].iter().all(|&b| b == 0xC3), "the save landed");
+        assert!(saved[..128].iter().all(|&b| b == 0xc3), "the save landed");
 
         // Later launches keep the first copy, not the card as it is now.
         state.launch_entry(&entry).unwrap();

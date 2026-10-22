@@ -12,12 +12,12 @@
 
 use psx_hw::memory;
 
-pub(super) const BASE: u32 = 0x1F80_1000;
+pub(super) const BASE: u32 = 0x1f80_1000;
 pub(super) const END: u32 = BASE + 9 * 4;
-pub(super) const RAM_SIZE_ADDR: u32 = 0x1F80_1060;
+pub(super) const RAM_SIZE_ADDR: u32 = 0x1f80_1060;
 
-const MEM_DELAY_WRITE_MASK: u32 = 0xAF1F_FFFF;
-const COMMON_DELAY_WRITE_MASK: u32 = 0x0003_FFFF;
+const MEM_DELAY_WRITE_MASK: u32 = 0xaf1f_ffff;
+const COMMON_DELAY_WRITE_MASK: u32 = 0x0003_ffff;
 
 // The late PAL CXD8606CQ capture exposes an ordinary 515-clock row cadence.
 // The probe observes one clock less (514) because it timestamps after the
@@ -105,15 +105,15 @@ impl Default for MemoryControl {
         // homebrew can immediately replace them through the MMIO handlers.
         let mut control = Self {
             regs: [
-                0x1F00_0000, // expansion 1 base
-                0x1F80_2000, // expansion 2 base
-                0x0013_243F, // expansion 1 delay/size
+                0x1f00_0000, // expansion 1 base
+                0x1f80_2000, // expansion 2 base
+                0x0013_243f, // expansion 1 delay/size
                 0x0000_3022, // expansion 3 delay/size
-                0x0013_243F, // BIOS delay/size
-                0x2009_31E1, // SPU delay/size
+                0x0013_243f, // BIOS delay/size
+                0x2009_31e1, // SPU delay/size
                 0x0002_0943, // CD-ROM delay/size (late PAL retail hardware)
                 0x0007_0777, // expansion 2 delay/size
-                0x0000_132C, // common delay (SCPH-9902 PAL silicon capture)
+                0x0000_132c, // common delay (SCPH-9902 PAL silicon capture)
             ],
             ram_size: default_ram_size(),
             bios_stalls: [0; 3],
@@ -132,7 +132,7 @@ impl Default for MemoryControl {
 /// What the BIOS leaves in RAM_SIZE. The upper half reads back as garbage on
 /// silicon (`0x8C610B88` on the console that took the v1.22 captures).
 fn default_ram_size() -> u32 {
-    0x0000_0B88
+    0x0000_0b88
 }
 
 impl MemoryControl {
@@ -165,8 +165,8 @@ impl MemoryControl {
         let shift = (offset & 3) * 8;
         let value = self.regs[index];
         match width {
-            AccessWidth::Byte => (value >> shift) & 0xFF,
-            AccessWidth::Half => (value >> shift) & 0xFFFF,
+            AccessWidth::Byte => (value >> shift) & 0xff,
+            AccessWidth::Half => (value >> shift) & 0xffff,
             AccessWidth::Word => value,
         }
     }
@@ -176,8 +176,8 @@ impl MemoryControl {
         let index = (offset >> 2) as usize;
         let shift = (offset & 3) * 8;
         let lane_mask = match width {
-            AccessWidth::Byte => 0xFF,
-            AccessWidth::Half => 0xFFFF,
+            AccessWidth::Byte => 0xff,
+            AccessWidth::Half => 0xffff,
             AccessWidth::Word => u32::MAX,
         } << shift;
         let write_mask = match index {
@@ -213,7 +213,7 @@ impl MemoryControl {
         }
         if (memory::scratchpad::BASE..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
             .contains(&phys)
-            && !(0xA000_0000..0xC000_0000).contains(&virt)
+            && !(0xa000_0000..0xc000_0000).contains(&virt)
         {
             return 0;
         }
@@ -235,10 +235,10 @@ impl MemoryControl {
         {
             return self.exp3_stalls[width.index()];
         }
-        if (0x1F80_1800..0x1F80_1804).contains(&phys) {
+        if (0x1f80_1800..0x1f80_1804).contains(&phys) {
             return self.cdrom_stalls[width.index()];
         }
-        if (0x1F80_1C00..0x1F80_2000).contains(&phys) {
+        if (0x1f80_1c00..0x1f80_2000).contains(&phys) {
             return self.spu_stalls[width.index()];
         }
         if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
@@ -259,7 +259,7 @@ impl MemoryControl {
     /// the measured 27 for loads. Nothing has measured the other buses.
     pub(super) fn write_stalls(&self, virt: u32, width: AccessWidth) -> u32 {
         let phys = memory::to_physical(virt);
-        if (0x1F80_1C00..0x1F80_2000).contains(&phys) {
+        if (0x1f80_1c00..0x1f80_2000).contains(&phys) {
             self.spu_write_stalls[width.index()]
         } else {
             0
@@ -335,7 +335,7 @@ impl MemoryControl {
     /// per halfword. The late PAL COMMON0=12 capture takes 16,688 clocks for
     /// 512 halfwords, identifying a 32-clock cadence plus fixed polling cost.
     pub(super) fn spu_dma_halfword_cycles(&self) -> u32 {
-        if self.regs[8] & 0xF <= 5 {
+        if self.regs[8] & 0xf <= 5 {
             16
         } else {
             32
@@ -349,7 +349,7 @@ impl MemoryControl {
         let fifo_cycles = word_count
             .saturating_mul(2)
             .saturating_mul(self.spu_dma_halfword_cycles());
-        if self.regs[8] & 0xF <= 5 {
+        if self.regs[8] & 0xf <= 5 {
             fifo_cycles
         } else {
             fifo_cycles
@@ -362,7 +362,7 @@ impl MemoryControl {
     /// override nibble is non-zero. With the BIOS value (`0x200931E1`) the
     /// controller inserts a dirty halfword at each DMA block boundary.
     pub(super) fn spu_dma_read_is_stable(&self) -> bool {
-        (self.regs[5] >> 24) & 0xF != 0
+        (self.regs[5] >> 24) & 0xf != 0
     }
 
     fn recalculate(&mut self) {
@@ -376,7 +376,7 @@ impl MemoryControl {
             stall.saturating_add(2)
         });
         self.bios_stalls = calculate_stalls(self.regs[4], common);
-        let legacy_shortcuts = common & 0xF <= 5;
+        let legacy_shortcuts = common & 0xf <= 5;
         self.spu_stalls = calculate_stalls(self.regs[5], common).map(|stall| {
             // The earlier public silicon profile uses COMMON0=5 and takes a
             // three-cycle SPU bridge shortcut. The late PAL COMMON0=12
@@ -388,7 +388,7 @@ impl MemoryControl {
                 stall
             }
         });
-        self.spu_write_stalls = calculate_access_stalls(self.regs[5], common, self.regs[5] & 0xF);
+        self.spu_write_stalls = calculate_access_stalls(self.regs[5], common, self.regs[5] & 0xf);
         self.cdrom_stalls = calculate_stalls(self.regs[6], common).map(|stall| {
             // Likewise, the one-cycle CD bridge surcharge is visible in the
             // earlier short-COMMON0 profile but not in the late PAL timings.
@@ -424,7 +424,7 @@ impl MemoryControl {
 /// the complete access time because the instruction issue cycle is charged by
 /// the CPU itself.
 fn calculate_stalls(delay: u32, common: u32) -> [u32; 3] {
-    calculate_access_stalls(delay, common, (delay >> 4) & 0xF)
+    calculate_access_stalls(delay, common, (delay >> 4) & 0xf)
 }
 
 /// The same equation for either direction: `access` is the delay register's
@@ -435,9 +435,9 @@ fn calculate_access_stalls(delay: u32, common: u32, access: u32) -> [u32; 3] {
     let use_com2 = delay & (1 << 10) != 0;
     let use_com3 = delay & (1 << 11) != 0;
     let bus_16bit = delay & (1 << 12) != 0;
-    let com0 = (common & 0xF) as i32;
-    let com2 = ((common >> 8) & 0xF) as i32;
-    let com3 = ((common >> 12) & 0xF) as i32;
+    let com0 = (common & 0xf) as i32;
+    let com2 = ((common >> 8) & 0xf) as i32;
+    let com3 = ((common >> 12) & 0xf) as i32;
 
     let mut first = 0i32;
     let mut sequential = 0i32;
@@ -483,9 +483,9 @@ mod tests {
     fn retail_bios_waits_match_silicon_access_time_shape() {
         let control = MemoryControl::default();
         assert_eq!(control.bios_stalls, [8, 16, 32]);
-        assert_eq!(control.read_stalls(0xBFC0_0000, AccessWidth::Byte), 8);
-        assert_eq!(control.read_stalls(0xBFC0_0000, AccessWidth::Half), 16);
-        assert_eq!(control.read_stalls(0xBFC0_0000, AccessWidth::Word), 32);
+        assert_eq!(control.read_stalls(0xbfc0_0000, AccessWidth::Byte), 8);
+        assert_eq!(control.read_stalls(0xbfc0_0000, AccessWidth::Half), 16);
+        assert_eq!(control.read_stalls(0xbfc0_0000, AccessWidth::Word), 32);
     }
 
     #[test]
@@ -493,7 +493,7 @@ mod tests {
         let control = MemoryControl::default();
         for width in [AccessWidth::Byte, AccessWidth::Half, AccessWidth::Word] {
             assert_eq!(control.read_stalls(0x8000_0000, width), 6);
-            assert_eq!(control.read_stalls(0x1F80_0000, width), 0);
+            assert_eq!(control.read_stalls(0x1f80_0000, width), 0);
         }
     }
 
@@ -518,8 +518,8 @@ mod tests {
     #[test]
     fn partial_register_writes_recalculate_waits_and_apply_masks() {
         let mut control = MemoryControl::default();
-        control.write(BASE + 0x10, AccessWidth::Byte, 0x0F);
-        assert_eq!(control.read(BASE + 0x10, AccessWidth::Byte), 0x0F);
+        control.write(BASE + 0x10, AccessWidth::Byte, 0x0f);
+        assert_eq!(control.read(BASE + 0x10, AccessWidth::Byte), 0x0f);
         assert_ne!(control.bios_stalls, [6, 12, 24]);
 
         control.write(BASE + 0x20, AccessWidth::Word, u32::MAX);

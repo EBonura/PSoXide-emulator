@@ -111,7 +111,7 @@ fn print_cdrom_commands(bus: &Bus) {
     let hist = bus.cdrom.command_histogram();
     println!(
         "CD CMDS:  GetStat={} Play={} Pause={} Demute={} SetMode={}",
-        hist[0x01], hist[0x03], hist[0x09], hist[0x0C], hist[0x0E],
+        hist[0x01], hist[0x03], hist[0x09], hist[0x0c], hist[0x0e],
     );
     for entry in bus.cdrom.command_log().iter().take(16) {
         println!(

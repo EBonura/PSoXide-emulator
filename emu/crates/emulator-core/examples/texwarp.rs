@@ -342,12 +342,12 @@ fn reset_draw_state(gpu: &mut Gpu) {
     let mut w = |word: u32| {
         gpu.write32(GP0_ADDR, word);
     };
-    w(0xE1000000 | TPAGE); // draw mode / texpage, dither off
-    w(0xE2000000); // texture window: no mask, no offset
-    w(0xE3000000); // draw area top-left = (0,0)
-    w(0xE4000000 | (((H - 1) as u32) << 10) | (W - 1) as u32);
-    w(0xE5000000); // draw offset = 0
-    w(0xE6000000); // mask: don't force, don't test
+    w(0xe1000000 | TPAGE); // draw mode / texpage, dither off
+    w(0xe2000000); // texture window: no mask, no offset
+    w(0xe3000000); // draw area top-left = (0,0)
+    w(0xe4000000 | (((H - 1) as u32) << 10) | (W - 1) as u32);
+    w(0xe5000000); // draw offset = 0
+    w(0xe6000000); // mask: don't force, don't test
     w(0x02000000); // fill rect, colour 0
     w(0);
     w(((H as u32) << 16) | W as u32);
@@ -357,13 +357,13 @@ fn reset_draw_state(gpu: &mut Gpu) {
 fn submit(gpu: &mut Gpu, p: &Prim) {
     let quad = p.0.len() == 4;
     // 0x25 = tri, textured, opaque, raw; 0x2D = the quad form.
-    let cmd: u32 = if quad { 0x2D } else { 0x25 };
+    let cmd: u32 = if quad { 0x2d } else { 0x25 };
     let mut w = |word: u32| {
         gpu.write32(GP0_ADDR, word);
     };
     w((cmd << 24) | 0x808080);
     for (i, v) in p.0.iter().enumerate() {
-        w(((v.y as u32 & 0xFFFF) << 16) | (v.x as u32 & 0xFFFF));
+        w(((v.y as u32 & 0xffff) << 16) | (v.x as u32 & 0xffff));
         // Vertex 0 carries the CLUT word (unused in 15bpp), vertex 1 the tpage.
         let attr = match i {
             0 => 0,
@@ -435,7 +435,7 @@ fn measure(
             if texel & 0x8000 == 0 {
                 continue; // not drawn
             }
-            let idx = texel & 0x0FFF;
+            let idx = texel & 0x0fff;
             let (su, sv) = ((idx & 63) as f64, (idx >> 6) as f64);
 
             let Some((s, t)) = sc.unproject(px as f64 + 0.5, py as f64 + 0.5) else {
@@ -770,7 +770,7 @@ fn write_uv(path: &std::path::Path, gpu: &Gpu) {
             if t & 0x8000 == 0 {
                 buf.extend_from_slice(&[16, 16, 32]);
             } else {
-                let idx = t & 0x0FFF;
+                let idx = t & 0x0fff;
                 buf.extend_from_slice(&[((idx & 63) * 4) as u8, ((idx >> 6) * 4) as u8, 64]);
             }
         }

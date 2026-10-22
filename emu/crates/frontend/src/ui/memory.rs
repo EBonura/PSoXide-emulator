@@ -12,8 +12,7 @@ use std::ops::Range;
 use egui::{Color32, Stroke, StrokeKind};
 use emulator_core::{Bus, Cpu};
 
-use crate::disasm;
-use crate::theme;
+use crate::{disasm, theme};
 
 const BYTES_PER_ROW: usize = 16;
 const ROWS: usize = 64;
@@ -61,7 +60,7 @@ impl MemoryView {
     /// in disasm.
     pub fn jump_to(&mut self, addr: u32) {
         let mask = match self.mode {
-            ViewMode::Hex | ViewMode::Visual => !0x0F,
+            ViewMode::Hex | ViewMode::Visual => !0x0f,
             ViewMode::Disasm => !0x03,
         };
         self.addr = addr & mask;
@@ -137,9 +136,9 @@ fn draw_header(
     ui.horizontal_wrapped(|ui| {
         for (label, target) in [
             ("RAM", Some(0x8000_0000)),
-            ("Scratch", Some(0x1F80_0000)),
-            ("MMIO", Some(0x1F80_1000)),
-            ("ROM", Some(0xBFC0_0000)),
+            ("Scratch", Some(0x1f80_0000)),
+            ("MMIO", Some(0x1f80_1000)),
+            ("ROM", Some(0xbfc0_0000)),
             ("PC", None),
         ] {
             if ui.small_button(label).clicked() {
@@ -156,7 +155,7 @@ fn draw_header(
 fn apply_addr_input(view: &mut MemoryView) {
     let s = view.addr_input.trim_start_matches("0x").trim();
     if let Ok(a) = u32::from_str_radix(s, 16) {
-        view.addr = a & !0x0F;
+        view.addr = a & !0x0f;
         view.addr_input = format!("{:08X}", view.addr);
     }
 }
@@ -348,7 +347,7 @@ fn draw_local_visual_map(
 }
 
 fn ram_offset(virt: u32, ram_len: usize) -> Option<usize> {
-    let phys = virt & 0x1FFF_FFFF;
+    let phys = virt & 0x1fff_ffff;
     let mirror_end = (ram_len as u32).saturating_mul(4);
     if phys < mirror_end {
         Some(phys as usize % ram_len)
@@ -432,8 +431,8 @@ fn aggregate_byte_color(bytes: &[u8]) -> Color32 {
         }
         nonzero += 1;
         hi_hist[(byte >> 4) as usize] += 1;
-        low_hist[(byte & 0x0F) as usize] += 1;
-        low_sum += (byte & 0x0F) as usize;
+        low_hist[(byte & 0x0f) as usize] += 1;
+        low_sum += (byte & 0x0f) as usize;
     }
 
     if nonzero == 0 {
@@ -521,12 +520,12 @@ fn byte_color(byte: u8) -> Color32 {
     if byte == 0 {
         return Color32::from_rgb(4, 4, 7);
     }
-    if byte == 0xFF {
+    if byte == 0xff {
         return Color32::from_rgb(238, 238, 226);
     }
 
     let base = value_family_color(byte >> 4);
-    let lift = 72 + (byte & 0x0F) as u16 * 8;
+    let lift = 72 + (byte & 0x0f) as u16 * 8;
     Color32::from_rgb(
         scale_channel(base.r(), lift),
         scale_channel(base.g(), lift),
@@ -543,23 +542,23 @@ fn value_family_color(family: u8) -> Color32 {
     // low half of each byte then modulates brightness in `byte_color`.
     const PALETTE: [Color32; 16] = [
         Color32::from_rgb(0x00, 0x00, 0x00),
-        Color32::from_rgb(0x1D, 0x2B, 0x53),
-        Color32::from_rgb(0x7E, 0x25, 0x53),
+        Color32::from_rgb(0x1d, 0x2b, 0x53),
+        Color32::from_rgb(0x7e, 0x25, 0x53),
         Color32::from_rgb(0x00, 0x87, 0x51),
-        Color32::from_rgb(0xAB, 0x52, 0x36),
-        Color32::from_rgb(0x5F, 0x57, 0x4F),
-        Color32::from_rgb(0xC2, 0xC3, 0xC7),
-        Color32::from_rgb(0xFF, 0xF1, 0xE8),
-        Color32::from_rgb(0xFF, 0x00, 0x4D),
-        Color32::from_rgb(0xFF, 0xA3, 0x00),
-        Color32::from_rgb(0xFF, 0xEC, 0x27),
-        Color32::from_rgb(0x00, 0xE4, 0x36),
-        Color32::from_rgb(0x29, 0xAD, 0xFF),
-        Color32::from_rgb(0x83, 0x76, 0x9C),
-        Color32::from_rgb(0xFF, 0x77, 0xA8),
-        Color32::from_rgb(0xFF, 0xCC, 0xAA),
+        Color32::from_rgb(0xab, 0x52, 0x36),
+        Color32::from_rgb(0x5f, 0x57, 0x4f),
+        Color32::from_rgb(0xc2, 0xc3, 0xc7),
+        Color32::from_rgb(0xff, 0xf1, 0xe8),
+        Color32::from_rgb(0xff, 0x00, 0x4d),
+        Color32::from_rgb(0xff, 0xa3, 0x00),
+        Color32::from_rgb(0xff, 0xec, 0x27),
+        Color32::from_rgb(0x00, 0xe4, 0x36),
+        Color32::from_rgb(0x29, 0xad, 0xff),
+        Color32::from_rgb(0x83, 0x76, 0x9c),
+        Color32::from_rgb(0xff, 0x77, 0xa8),
+        Color32::from_rgb(0xff, 0xcc, 0xaa),
     ];
-    PALETTE[(family & 0x0F) as usize]
+    PALETTE[(family & 0x0f) as usize]
 }
 
 fn row_has_breakpoint(base: u32, breakpoints: &BTreeSet<u32>, bytes_per_row: usize) -> bool {
@@ -663,7 +662,7 @@ fn format_row(bus: &Bus, base: u32, has_bp: bool, has_pc: bool, bytes_per_row: u
 }
 
 fn printable_ascii(b: u8) -> char {
-    if (0x20..0x7F).contains(&b) {
+    if (0x20..0x7f).contains(&b) {
         b as char
     } else {
         '.'

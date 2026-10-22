@@ -47,9 +47,9 @@ use memory_timing::MemoryControl;
 use timing::*;
 
 /// Physical address of `I_STAT` (interrupt status / ack register).
-const IRQ_STAT_ADDR: u32 = 0x1F80_1070;
+const IRQ_STAT_ADDR: u32 = 0x1f80_1070;
 /// Physical address of `I_MASK` (interrupt enable register).
-const IRQ_MASK_ADDR: u32 = 0x1F80_1074;
+const IRQ_MASK_ADDR: u32 = 0x1f80_1074;
 
 /// `#[serde(with = "big_bytes")]` for boxed fixed-size byte buffers
 /// (`Bus::ram`, `Bus::io`). Plain `Box<[u8; N]>: Serialize` would work
@@ -211,7 +211,7 @@ const MDEC_OUT_CYCLES_PER_WORD: u64 = 24;
 
 /// Start of the on-die I/O registers. Any CPU access at or above it may
 /// change GPU or DMA state.
-const IO_SPACE_START: u32 = 0x1F80_1000;
+const IO_SPACE_START: u32 = 0x1f80_1000;
 
 /// The PS1 system bus.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -620,8 +620,8 @@ impl Bus {
             return;
         };
         let byte = match spec.trim() {
-            "" | "1" | "true" | "yes" => 0xAA,
-            s => u8::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or(0xAA),
+            "" | "1" | "true" | "yes" => 0xaa,
+            s => u8::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or(0xaa),
         };
         self.ram.fill(byte);
         self.ram_pages.touch_all();
@@ -642,7 +642,7 @@ impl Bus {
     /// retail disc boot or parity checks against a real BIOS.
     pub fn new_without_bios() -> Self {
         let mut bios = vec![0u8; memory::bios::SIZE];
-        bios[..4].copy_from_slice(&0x3C08_0013u32.to_le_bytes());
+        bios[..4].copy_from_slice(&0x3c08_0013u32.to_le_bytes());
         // The HLE kernel's character font, where B(51h) points games.
         crate::hle_font::install(&mut bios);
         Self::new(bios).expect("synthetic BIOS size is fixed")
@@ -1631,7 +1631,7 @@ impl Bus {
             } else {
                 u32::from(count)
             },
-            block_words: channel.block_control & 0xFFFF,
+            block_words: channel.block_control & 0xffff,
             madr: channel.base,
             backward: (channel.channel_control >> 1) & 1 != 0,
             count,
@@ -1683,9 +1683,9 @@ impl Bus {
             run.madr.wrapping_sub(bytes)
         } else {
             run.madr.wrapping_add(bytes)
-        } & 0x00FF_FFFF;
-        let left = u32::from(run.count).wrapping_sub(done) & 0xFFFF;
-        channel.block_control = (channel.block_control & 0xFFFF) | (left << 16);
+        } & 0x00ff_ffff;
+        let left = u32::from(run.count).wrapping_sub(done) & 0xffff;
+        channel.block_control = (channel.block_control & 0xffff) | (left << 16);
     }
 
     fn complete_dma_channel(&mut self, ch: usize) -> bool {
@@ -1766,8 +1766,8 @@ impl Bus {
             stalls += fill_wait.min(CODE_FILL_MMIO_WAIT_CAP) as u32;
             // The core's own registers' wait overlaps the instructions behind
             // the load just as a RAM load's does (see `Cpu::hides_in_load_shadow`).
-            let on_die = !(0x1F80_1800..0x1F80_1804).contains(&phys)
-                && !(0x1F80_1C00..0x1F80_2000).contains(&phys);
+            let on_die = !(0x1f80_1800..0x1f80_1804).contains(&phys)
+                && !(0x1f80_1c00..0x1f80_2000).contains(&phys);
             if on_die {
                 self.ram_load_from_cached_code =
                     !self.code_fetch_on_ram_bus && self.cycles >= self.code_fill_busy_until;
@@ -1842,7 +1842,7 @@ impl Bus {
         }
         let access_gap = self.cycles.saturating_sub(self.last_cpu_ram_access_cycle);
         self.last_cpu_ram_access_cycle = self.cycles;
-        let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
+        let refresh_stall = if (0xa000_0000..0xc000_0000).contains(&virt) {
             if access_gap <= 16 {
                 6
             } else {
@@ -1885,7 +1885,7 @@ impl Bus {
     #[inline(always)]
     pub(crate) fn ram_write_stalls(&mut self, virt: u32) -> u32 {
         self.last_cpu_ram_access_cycle = self.cycles;
-        let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
+        let refresh_stall = if (0xa000_0000..0xc000_0000).contains(&virt) {
             memory_timing::DRAM_REFRESH_UNCACHED_STALL_CYCLES
         } else {
             memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES
@@ -2157,13 +2157,13 @@ impl Bus {
         );
         let start = self.cycles + u64::from(fill_wait + refresh);
         // One extra setup clock when a miss starts the fill mid-line.
-        let mid_line = u32::from(lead_words == 0 && phys & 0xC != 0);
+        let mid_line = u32::from(lead_words == 0 && phys & 0xc != 0);
         let bus_cycles = words * 2 + mid_line;
         let stall = if streaming {
             let stall = 2 + mid_line + lead_words * 2;
             self.code_stream_active = true;
             self.code_stream_next = (phys & !3).wrapping_add(4);
-            self.code_stream_end = (phys & !0xF)
+            self.code_stream_end = (phys & !0xf)
                 .wrapping_add(0x10)
                 .min((phys & !3).wrapping_add((words - lead_words) * 4));
             self.code_stream_next_ready = start + u64::from(stall) + 2;
@@ -2586,8 +2586,8 @@ impl Bus {
     /// Zero an address range in main RAM after KSEG/KUSEG address
     /// normalization. The end address is exclusive.
     pub fn clear_ram_range(&mut self, start_addr: u32, end_addr: u32) {
-        let start = (start_addr & 0x001F_FFFF) as usize;
-        let end = (end_addr & 0x001F_FFFF) as usize;
+        let start = (start_addr & 0x001f_ffff) as usize;
+        let end = (end_addr & 0x001f_ffff) as usize;
         if end <= start {
             return;
         }
@@ -2926,11 +2926,11 @@ impl Bus {
         }
         let total_words = mdec_dma_word_count(ch.block_control, ch.channel_control);
         let step: u32 = if (ch.channel_control >> 1) & 1 != 0 {
-            0xFFFF_FFFCu32
+            0xffff_fffcu32
         } else {
             4
         };
-        let mut addr = ch.base & 0x001F_FFFC;
+        let mut addr = ch.base & 0x001f_fffc;
         let mut words: Vec<u32> = Vec::with_capacity(total_words as usize);
         for _ in 0..total_words {
             words.push(read_ram_u32(&self.ram[..], addr));
@@ -2938,7 +2938,7 @@ impl Bus {
         }
         self.mdec.dma_write_in(&words);
         // MADR ends where the last word went (hwtest v2.1 record 0x798).
-        self.dma.channels[0].base = addr & 0x00FF_FFFF;
+        self.dma.channels[0].base = addr & 0x00ff_ffff;
         Some(total_words)
     }
 
@@ -2958,15 +2958,15 @@ impl Bus {
         }
         let total_words = mdec_dma_word_count(ch.block_control, ch.channel_control);
         let step: u32 = if (ch.channel_control >> 1) & 1 != 0 {
-            0xFFFF_FFFCu32
+            0xffff_fffcu32
         } else {
             4
         };
-        let mut addr = ch.base & 0x001F_FFFC;
+        let mut addr = ch.base & 0x001f_fffc;
         let mut words = vec![0u32; total_words as usize];
         self.mdec.dma_read_out(&mut words);
         for word in words {
-            let offset = (addr & 0x001F_FFFF) as usize;
+            let offset = (addr & 0x001f_ffff) as usize;
             if offset + 4 <= self.ram.len() {
                 self.ram[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
                 self.ram_pages.touch(offset);
@@ -2974,7 +2974,7 @@ impl Bus {
             addr = addr.wrapping_add(step);
         }
         // MADR ends where the last word went (hwtest v2.1 record 0x798).
-        self.dma.channels[1].base = addr & 0x00FF_FFFF;
+        self.dma.channels[1].base = addr & 0x00ff_ffff;
         Some(total_words)
     }
 
@@ -3018,13 +3018,13 @@ impl Bus {
         // the much faster main-RAM DMA bus transaction.
         let (word_count, block_words): (u32, u32) = match sync_mode {
             0 => {
-                let words = bcr & 0xFFFF;
+                let words = bcr & 0xffff;
                 (words, words)
             }
             1 => {
-                let block_size = bcr & 0xFFFF;
+                let block_size = bcr & 0xffff;
                 // A block count of 0 is 65,536 blocks, not none (hwtest v2.1).
-                let block_count = match (bcr >> 16) & 0xFFFF {
+                let block_count = match (bcr >> 16) & 0xffff {
                     0 => 0x1_0000,
                     count => count,
                 };
@@ -3040,11 +3040,11 @@ impl Bus {
         let halfword_count = word_count.saturating_mul(2);
         let to_spu = ch.channel_control & 1 != 0;
         let step: u32 = if (ch.channel_control >> 1) & 1 != 0 {
-            0xFFFF_FFFEu32
+            0xffff_fffeu32
         } else {
             2
         };
-        let mut addr = ch.base & 0x001F_FFFF;
+        let mut addr = ch.base & 0x001f_ffff;
         if to_spu {
             let mut words: Vec<u16> = Vec::with_capacity(halfword_count as usize);
             for _ in 0..halfword_count {
@@ -3070,7 +3070,7 @@ impl Bus {
             );
             for word in words {
                 write_ram_u16(&mut self.ram[..], addr, word);
-                self.ram_pages.touch((addr & 0x001F_FFFF) as usize);
+                self.ram_pages.touch((addr & 0x001f_ffff) as usize);
                 addr = addr.wrapping_add(step);
             }
         }
@@ -3122,10 +3122,10 @@ impl Bus {
         // LBA 0 on empty input.
         let bcr = ch.block_control;
         let requested_words = match sync_mode {
-            0 => bcr & 0xFFFF,
+            0 => bcr & 0xffff,
             1 => {
-                let block_size = bcr & 0xFFFF;
-                let block_count = (bcr >> 16) & 0xFFFF;
+                let block_size = bcr & 0xffff;
+                let block_count = (bcr >> 16) & 0xffff;
                 block_size * block_count.max(1)
             }
             _ => {
@@ -3143,9 +3143,9 @@ impl Bus {
         } else {
             requested_words
         };
-        let mut addr = ch.base & 0x001F_FFFC;
+        let mut addr = ch.base & 0x001f_fffc;
         let step: u32 = if (ch.channel_control >> 1) & 1 != 0 {
-            0xFFFF_FFFCu32
+            0xffff_fffcu32
         } else {
             4
         };
@@ -3156,7 +3156,7 @@ impl Bus {
             let b2 = self.cdrom.pop_dma_data_byte() as u32;
             let b3 = self.cdrom.pop_dma_data_byte() as u32;
             let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-            let offset = (addr & 0x001F_FFFF) as usize;
+            let offset = (addr & 0x001f_ffff) as usize;
             if offset + 4 <= self.ram.len() {
                 self.ram[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
                 self.ram_pages.touch(offset);
@@ -3262,11 +3262,11 @@ impl Bus {
     fn dma_gpu_block(&mut self, to_device: bool) -> u32 {
         self.gpu_dma_wait = 0;
         let ch = self.dma.channels[2];
-        let mut addr = ch.base & 0x001F_FFFC;
+        let mut addr = ch.base & 0x001f_fffc;
         let bcr = ch.block_control;
-        let block_size = bcr & 0xFFFF;
+        let block_size = bcr & 0xffff;
         // A block count of 0 is 65,536 blocks, not none (hwtest v2.1).
-        let block_count = match (bcr >> 16) & 0xFFFF {
+        let block_count = match (bcr >> 16) & 0xffff {
             0 => 0x1_0000,
             count => count,
         };
@@ -3276,7 +3276,7 @@ impl Bus {
         let upload_active = to_device && self.gpu.vram_upload_active();
         let step = if (ch.channel_control >> 1) & 1 != 0 {
             // Decrement mode -- rarely used for GPU but handle for safety.
-            0xFFFF_FFFCu32
+            0xffff_fffcu32
         } else {
             4
         };
@@ -3302,7 +3302,7 @@ impl Bus {
                     .read32_at(crate::gpu::GP0_ADDR, self.cycles)
                     .unwrap_or(0);
                 write_ram_u32(&mut self.ram[..], addr, word);
-                self.ram_pages.touch((addr & 0x001F_FFFF) as usize);
+                self.ram_pages.touch((addr & 0x001f_ffff) as usize);
                 addr = addr.wrapping_add(step);
             }
         }
@@ -3326,11 +3326,11 @@ impl Bus {
 
     fn dma_gpu_manual(&mut self, to_device: bool) -> u32 {
         let ch = self.dma.channels[2];
-        let mut addr = ch.base & 0x001F_FFFC;
-        let total_words = dma_count_16(ch.block_control & 0xFFFF);
+        let mut addr = ch.base & 0x001f_fffc;
+        let total_words = dma_count_16(ch.block_control & 0xffff);
         let upload_active = to_device && self.gpu.vram_upload_active();
         let step = if (ch.channel_control >> 1) & 1 != 0 {
-            0xFFFF_FFFC
+            0xffff_fffc
         } else {
             4
         };
@@ -3348,7 +3348,7 @@ impl Bus {
                     .read32_at(crate::gpu::GP0_ADDR, self.cycles)
                     .unwrap_or(0);
                 write_ram_u32(&mut self.ram[..], addr, word);
-                self.ram_pages.touch((addr & 0x001F_FFFF) as usize);
+                self.ram_pages.touch((addr & 0x001f_ffff) as usize);
                 addr = addr.wrapping_add(step);
             }
         }
@@ -3508,7 +3508,7 @@ impl Bus {
     }
 
     fn dma_gpu_linked_list(&mut self) -> u32 {
-        let mut addr = self.dma.channels[2].base & 0x001F_FFFC;
+        let mut addr = self.dma.channels[2].base & 0x001f_fffc;
         let transfer = self.gpu_linked_list_transfer;
         self.gpu_linked_list_transfer = self.gpu_linked_list_transfer.wrapping_add(1);
         // Count traversed headers and payload words, then apply the captured
@@ -3522,7 +3522,7 @@ impl Bus {
                 self.gpu_linked_list_log.push((transfer, addr, header));
             }
             node_count = node_count.saturating_add(1);
-            let word_count = (header >> 24) & 0xFF;
+            let word_count = (header >> 24) & 0xff;
             // See docs/gpu-linked-list-diagnostic.md: this checks the 16-word
             // GPU FIFO payload envelope, not Sony's stricter total-size rule
             // for MargePrim (which includes the DMA tag). No overflow/drop
@@ -3544,7 +3544,7 @@ impl Bus {
             if (header & 0x800000) != 0 {
                 return gpu_command_linked_cycles(total_words, node_count);
             }
-            addr = header & 0x00FF_FFFF;
+            addr = header & 0x00ff_ffff;
         }
         gpu_command_linked_cycles(total_words, node_count)
     }
@@ -3601,17 +3601,17 @@ impl Bus {
         if (memory::expansion1::BASE..memory::expansion1::BASE + memory::expansion1::SIZE as u32)
             .contains(&phys)
         {
-            return Some(0xFF);
+            return Some(0xff);
         }
         if (memory::expansion2::BASE..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
             .contains(&phys)
         {
-            return Some(0xFF);
+            return Some(0xff);
         }
         if (memory::expansion3::BASE..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
             .contains(&phys)
         {
-            return Some(0xFF);
+            return Some(0xff);
         }
         None
     }
@@ -3629,7 +3629,7 @@ impl Bus {
         let value = self.read8_impl(virt, phys);
         let shift = (phys & 3) * 8;
         self.data_bus_latch =
-            (self.data_bus_latch & !(0xFF << shift)) | (u32::from(value) << shift);
+            (self.data_bus_latch & !(0xff << shift)) | (u32::from(value) << shift);
         self.trace_mmio(MmioKind::R8, phys, value as u32);
         value
     }
@@ -3653,7 +3653,7 @@ impl Bus {
         if (memory::expansion1::BASE..memory::expansion1::BASE + memory::expansion1::SIZE as u32)
             .contains(&phys)
         {
-            return 0xFF;
+            return 0xff;
         }
         if MemoryControl::contains(phys) {
             return self.memory_control.read(phys, AccessWidth::Byte) as u8;
@@ -3701,12 +3701,12 @@ impl Bus {
         if (memory::expansion2::BASE..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
             .contains(&phys)
         {
-            return 0xFF;
+            return 0xff;
         }
         if (memory::expansion3::BASE..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
             .contains(&phys)
         {
-            return 0xFF;
+            return 0xff;
         }
         // Unmapped read on real hardware returns the last bus
         // value (essentially random from software's POV). Many
@@ -3717,7 +3717,7 @@ impl Bus {
         if self.log_unmapped_read_once(virt) {
             eprintln!("[bus] unmapped read8 @ virt={virt:#010x} phys={phys:#010x}");
         }
-        0xFF
+        0xff
     }
 
     /// Read a 16-bit little-endian half-word from a virtual address.
@@ -3731,7 +3731,7 @@ impl Bus {
         let value = self.read16_impl(virt, phys);
         let shift = (phys & 2) * 8;
         self.data_bus_latch =
-            (self.data_bus_latch & !(0xFFFF << shift)) | (u32::from(value) << shift);
+            (self.data_bus_latch & !(0xffff << shift)) | (u32::from(value) << shift);
         self.trace_mmio(MmioKind::R16, phys, value as u32);
         value
     }
@@ -3758,7 +3758,7 @@ impl Bus {
         if (memory::expansion1::BASE..memory::expansion1::BASE + memory::expansion1::SIZE as u32)
             .contains(&phys)
         {
-            return 0xFFFF;
+            return 0xffff;
         }
         if MemoryControl::contains(phys) {
             return self.memory_control.read(phys, AccessWidth::Half) as u16;
@@ -3810,17 +3810,17 @@ impl Bus {
         if (memory::expansion2::BASE..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
             .contains(&phys)
         {
-            return 0xFFFF;
+            return 0xffff;
         }
         if (memory::expansion3::BASE..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
             .contains(&phys)
         {
-            return 0xFFFF;
+            return 0xffff;
         }
         if self.log_unmapped_read_once(virt) {
             eprintln!("[bus] unmapped read16 @ virt={virt:#010x} phys={phys:#010x}");
         }
-        0xFFFF
+        0xffff
     }
 
     /// Read a 32-bit little-endian word from a virtual address. This is
@@ -3913,7 +3913,7 @@ impl Bus {
         if (memory::expansion1::BASE..memory::expansion1::BASE + memory::expansion1::SIZE as u32)
             .contains(&phys)
         {
-            return 0xFFFF_FFFF;
+            return 0xffff_ffff;
         }
 
         if MemoryControl::contains(phys) {
@@ -3928,7 +3928,7 @@ impl Bus {
             return self.irq.stat();
         }
         if phys == IRQ_MASK_ADDR {
-            return (self.data_bus_latch & 0xFFFF_0000) | self.irq.mask();
+            return (self.data_bus_latch & 0xffff_0000) | self.irq.mask();
         }
         if Timers::contains(phys) {
             if self.ram_write_buffer_ready_cycle > self.cycles {
@@ -3936,7 +3936,7 @@ impl Bus {
             }
             self.ram_write_buffer_ready_cycle = self.cycles;
             self.service_timers();
-            return (self.data_bus_latch & 0xFFFF_0000) | self.timers.read32(phys);
+            return (self.data_bus_latch & 0xffff_0000) | self.timers.read32(phys);
         }
         if Dma::contains(phys) {
             self.settle_dma_block_runs();
@@ -3978,13 +3978,13 @@ impl Bus {
                 ..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
                 .contains(&phys)
         {
-            return 0xFFFF_FFFF;
+            return 0xffff_ffff;
         }
 
         if self.log_unmapped_read_once(virt) {
             eprintln!("[bus] unmapped read32 @ virt={virt:#010x} phys={phys:#010x}");
         }
-        0xFFFF_FFFF
+        0xffff_ffff
     }
 
     /// Write a 32-bit little-endian word to a virtual address.
@@ -4095,7 +4095,7 @@ impl Bus {
             // cycle drift `probe_cycle_first_divergence` flagged at
             // step 19474544.
             let offset = phys.wrapping_sub(Dma::BASE);
-            let field = offset & 0xF;
+            let field = offset & 0xf;
             let is_chcr_write = field == 0x8;
             let start_bit_set = value & (1 << 24) != 0;
             if is_chcr_write && start_bit_set {
@@ -4223,7 +4223,7 @@ impl Bus {
         if phys < memory::ram::MIRROR_END {
             // The write buffer's drain time was set when the store was queued.
         }
-        self.trace_mmio(MmioKind::W8, phys, source & 0xFF);
+        self.trace_mmio(MmioKind::W8, phys, source & 0xff);
         if !self.cpu_write_narrow_mmio(virt, phys, source, AccessWidth::Byte) {
             self.write8_impl(virt, phys, source as u8);
         }
@@ -4240,7 +4240,7 @@ impl Bus {
         if phys < memory::ram::MIRROR_END {
             // The write buffer's drain time was set when the store was queued.
         }
-        self.trace_mmio(MmioKind::W16, phys, source & 0xFFFF);
+        self.trace_mmio(MmioKind::W16, phys, source & 0xffff);
         if !self.cpu_write_narrow_mmio(virt, phys, source, AccessWidth::Half) {
             self.write16_impl(virt, phys, source as u16);
         }
@@ -4282,7 +4282,7 @@ impl Bus {
                 eprintln!(
                     "[timers] mode-write t{} value={:04x} cycle={} next-vblank={} period={}",
                     (phys - Timers::BASE) / Timers::STRIDE,
-                    word & 0xFFFF,
+                    word & 0xffff,
                     self.cycles,
                     self.next_vblank_cycle(),
                     self.vblank_period
@@ -4378,7 +4378,7 @@ impl Bus {
         // public test suites print to (the ps1-tests programs, homebrew).
         // Forward to stdout so their console-verified corpora run
         // headless with a capturable TTY.
-        if phys == 0x1F80_2080 {
+        if phys == 0x1f80_2080 {
             use std::io::Write;
             let mut out = std::io::stdout().lock();
             let _ = out.write_all(&[value]);
@@ -4574,7 +4574,7 @@ impl Bus {
 #[inline]
 fn scratchpad_offset(virt: u32, phys: u32) -> Option<usize> {
     // KSEG1 spans 0xA000_0000..0xC000_0000 (uncached).
-    if (0xA000_0000..0xC000_0000).contains(&virt) {
+    if (0xa000_0000..0xc000_0000).contains(&virt) {
         return None;
     }
     let base = memory::scratchpad::BASE;
@@ -4594,7 +4594,7 @@ fn read_u32_le(bytes: &[u8]) -> u32 {
 
 #[inline]
 fn dma_count_16(raw: u32) -> u32 {
-    match raw & 0xFFFF {
+    match raw & 0xffff {
         0 => 0x1_0000,
         count => count,
     }
@@ -4684,7 +4684,7 @@ fn gpu_download_cycles(total_words: u32) -> u32 {
 /// to the 2 MiB range). Used by the DMA-GPU paths to pull command
 /// words without going through the full bus dispatch.
 fn read_ram_u32(ram: &[u8], phys: u32) -> u32 {
-    let offset = (phys & 0x001F_FFFF) as usize;
+    let offset = (phys & 0x001f_ffff) as usize;
     if offset + 4 <= ram.len() {
         u32::from_le_bytes([
             ram[offset],
@@ -4698,7 +4698,7 @@ fn read_ram_u32(ram: &[u8], phys: u32) -> u32 {
 }
 
 fn write_ram_u32(ram: &mut [u8], phys: u32, value: u32) {
-    let offset = (phys & 0x001F_FFFF) as usize;
+    let offset = (phys & 0x001f_ffff) as usize;
     if offset + 4 <= ram.len() {
         ram[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
@@ -4708,7 +4708,7 @@ fn write_ram_u32(ram: &mut [u8], phys: u32, value: u32) {
 /// halfwords: the BCR product counts 32-bit words, each feeding two samples,
 /// and the completion delay is half that product.
 fn read_ram_u16(ram: &[u8], phys: u32) -> u16 {
-    let offset = (phys & 0x001F_FFFF) as usize;
+    let offset = (phys & 0x001f_ffff) as usize;
     if offset + 2 <= ram.len() {
         u16::from_le_bytes([ram[offset], ram[offset + 1]])
     } else {
@@ -4717,7 +4717,7 @@ fn read_ram_u16(ram: &[u8], phys: u32) -> u16 {
 }
 
 fn write_ram_u16(ram: &mut [u8], phys: u32, value: u16) {
-    let offset = (phys & 0x001F_FFFF) as usize;
+    let offset = (phys & 0x001f_ffff) as usize;
     if offset + 2 <= ram.len() {
         ram[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
     }
@@ -4725,10 +4725,10 @@ fn write_ram_u16(ram: &mut [u8], phys: u32, value: u16) {
 
 fn mdec_dma_word_count(block_control: u32, channel_control: u32) -> u32 {
     match (channel_control >> 9) & 0x3 {
-        0 => block_control & 0xFFFF,
+        0 => block_control & 0xffff,
         1 => {
-            let block_size = block_control & 0xFFFF;
-            let block_count = (block_control >> 16).max(1) & 0xFFFF;
+            let block_size = block_control & 0xffff;
+            let block_count = (block_control >> 16).max(1) & 0xffff;
             block_size * block_count
         }
         _ => 0,
@@ -4753,7 +4753,7 @@ mod tests {
     fn synthetic_bios() -> Vec<u8> {
         // 512 KiB. First word is 0xDEADBEEF little-endian, then zeros.
         let mut bios = vec![0u8; memory::bios::SIZE];
-        bios[0..4].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+        bios[0..4].copy_from_slice(&0xdead_beefu32.to_le_bytes());
         bios
     }
 
@@ -4768,8 +4768,8 @@ mod tests {
     #[test]
     fn new_without_bios_exposes_retail_reset_vector_word() {
         let mut bus = Bus::new_without_bios();
-        assert_eq!(bus.read32(0xBFC0_0000), 0x3C08_0013);
-        assert_eq!(bus.read32(0xBFC0_0004), 0);
+        assert_eq!(bus.read32(0xbfc0_0000), 0x3c08_0013);
+        assert_eq!(bus.read32(0xbfc0_0004), 0);
     }
 
     #[test]
@@ -4822,7 +4822,7 @@ mod tests {
     fn gpu_irq_command_latches_and_acknowledges_i_stat() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
 
-        bus.write32(crate::gpu::GP0_ADDR, 0x1F00_0000);
+        bus.write32(crate::gpu::GP0_ADDR, 0x1f00_0000);
         assert_eq!(bus.read32(crate::gpu::GP1_ADDR) & (1 << 24), 0);
         bus.add_cycles(crate::gpu::GP1_STATUS_LATCH_CYCLES as u32);
         assert_ne!(bus.read32(crate::gpu::GP1_ADDR) & (1 << 24), 0);
@@ -4843,9 +4843,9 @@ mod tests {
 
     #[test]
     fn timer2_target_sticky_survives_lazy_bus_service() {
-        const TIMER2_COUNTER: u32 = 0x1F80_1120;
-        const TIMER2_MODE: u32 = 0x1F80_1124;
-        const TIMER2_TARGET: u32 = 0x1F80_1128;
+        const TIMER2_COUNTER: u32 = 0x1f80_1120;
+        const TIMER2_MODE: u32 = 0x1f80_1124;
+        const TIMER2_TARGET: u32 = 0x1f80_1128;
         const MODE_RESET_AT_TARGET: u32 = 1 << 3;
         const MODE_REACHED_TARGET: u32 = 1 << 11;
 
@@ -4857,7 +4857,7 @@ mod tests {
         bus.tick(8192);
 
         let mode = bus.read32(TIMER2_MODE);
-        let counter = bus.read32(TIMER2_COUNTER) & 0xFFFF;
+        let counter = bus.read32(TIMER2_COUNTER) & 0xffff;
 
         assert_ne!(mode & MODE_REACHED_TARGET, 0);
         assert!(
@@ -4916,15 +4916,15 @@ mod tests {
     #[test]
     fn reads_first_bios_word_via_kseg1_reset_vector() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
-        assert_eq!(bus.read32(memory::bios::RESET_VECTOR), 0xDEAD_BEEF);
+        assert_eq!(bus.read32(memory::bios::RESET_VECTOR), 0xdead_beef);
     }
 
     #[test]
     fn reads_first_bios_word_via_kseg0_and_kuseg() {
         // BIOS physical base mapped into KSEG0 (cached) and KUSEG.
         let mut bus = Bus::new(synthetic_bios()).unwrap();
-        assert_eq!(bus.read32(0x9FC0_0000), 0xDEAD_BEEF); // KSEG0
-        assert_eq!(bus.read32(0x1FC0_0000), 0xDEAD_BEEF); // KUSEG physical alias
+        assert_eq!(bus.read32(0x9fc0_0000), 0xdead_beef); // KSEG0
+        assert_eq!(bus.read32(0x1fc0_0000), 0xdead_beef); // KUSEG physical alias
     }
 
     #[test]
@@ -4953,10 +4953,10 @@ mod tests {
         // 0x8000_0000 (KSEG0) or 0xA000_0000 (KSEG1) to encode wall vs
         // ground. All three segment views must resolve to the same word.
         let mut bus = Bus::new(synthetic_bios()).unwrap();
-        bus.write32(0x8012_0000, 0xCAFE_F00D); // write through KSEG0
-        assert_eq!(bus.read32(0x0012_0000), 0xCAFE_F00D); // KUSEG
-        assert_eq!(bus.read32(0x8012_0000), 0xCAFE_F00D); // KSEG0
-        assert_eq!(bus.read32(0xA012_0000), 0xCAFE_F00D); // KSEG1
+        bus.write32(0x8012_0000, 0xcafe_f00d); // write through KSEG0
+        assert_eq!(bus.read32(0x0012_0000), 0xcafe_f00d); // KUSEG
+        assert_eq!(bus.read32(0x8012_0000), 0xcafe_f00d); // KSEG0
+        assert_eq!(bus.read32(0xa012_0000), 0xcafe_f00d); // KSEG1
     }
 
     #[test]
@@ -4965,21 +4965,21 @@ mod tests {
         // A KSEG1 (uncached) view bypasses the cache, so it must not reach
         // the scratchpad -- reads see open bus, writes are dropped.
         let mut bus = Bus::new(synthetic_bios()).unwrap();
-        bus.write32(0x1F80_0010, 0x1234_5678); // KUSEG scratchpad
-        assert_eq!(bus.read32(0x1F80_0010), 0x1234_5678); // KUSEG sees it
-        assert_eq!(bus.read32(0x9F80_0010), 0x1234_5678); // KSEG0 sees it
-        assert_eq!(bus.read32(0xBF80_0010), 0xFFFF_FFFF); // KSEG1: unmapped
-        bus.write32(0xBF80_0010, 0xDEAD_BEEF); // KSEG1 write dropped
-        assert_eq!(bus.read32(0x1F80_0010), 0x1234_5678); // scratchpad intact
+        bus.write32(0x1f80_0010, 0x1234_5678); // KUSEG scratchpad
+        assert_eq!(bus.read32(0x1f80_0010), 0x1234_5678); // KUSEG sees it
+        assert_eq!(bus.read32(0x9f80_0010), 0x1234_5678); // KSEG0 sees it
+        assert_eq!(bus.read32(0xbf80_0010), 0xffff_ffff); // KSEG1: unmapped
+        bus.write32(0xbf80_0010, 0xdead_beef); // KSEG1 write dropped
+        assert_eq!(bus.read32(0x1f80_0010), 0x1234_5678); // scratchpad intact
     }
 
     #[test]
     fn expansion_open_bus_reads_cover_every_access_width() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
         for base in [memory::expansion2::BASE, memory::expansion3::BASE] {
-            assert_eq!(bus.read8(base), 0xFF);
-            assert_eq!(bus.read16(base), 0xFFFF);
-            assert_eq!(bus.read32(base), 0xFFFF_FFFF);
+            assert_eq!(bus.read8(base), 0xff);
+            assert_eq!(bus.read16(base), 0xffff);
+            assert_eq!(bus.read32(base), 0xffff_ffff);
         }
     }
 
@@ -5005,7 +5005,7 @@ mod tests {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
         let dicr = Dma::BASE + Dma::DICR_OFFSET;
         bus.cpu_write8(dicr + 2, 0x0000_0088);
-        assert_eq!(bus.read32(dicr) & 0x00FF_00FF, 0x0088_0000);
+        assert_eq!(bus.read32(dicr) & 0x00ff_00ff, 0x0088_0000);
 
         bus.cpu_write16(Dma::BASE + Dma::DPCR_OFFSET + 2, 0x0000_1234);
         assert_eq!(bus.read32(Dma::BASE + Dma::DPCR_OFFSET), 0x1234_0000);
@@ -5033,7 +5033,7 @@ mod tests {
         // I_STAT + 1: the zero low lanes acknowledge IRQ 0..7 too.
         bus.irq.raise(IrqSource::VBlank);
         bus.irq.raise(IrqSource::Sio);
-        bus.cpu_write8(IRQ_STAT_ADDR + 1, 0x0000_00FF);
+        bus.cpu_write8(IRQ_STAT_ADDR + 1, 0x0000_00ff);
         assert_eq!(bus.irq.stat(), 1 << 8);
 
         // GP1 + 3 = 03h: display enable, not GP1(00h) reset.
@@ -5047,7 +5047,7 @@ mod tests {
         assert!(bus.mdec.dma_out_enabled());
 
         // COM_DELAY + 1 replaces the whole register with the shifted word.
-        let com_delay = 0x1F80_1020;
+        let com_delay = 0x1f80_1020;
         bus.write32(com_delay, 0x0000_1325);
         bus.cpu_write8(com_delay + 1, 0x0000_0022);
         assert_eq!(bus.read32(com_delay), 0x0000_2200);
@@ -5066,17 +5066,17 @@ mod tests {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
 
         // SIO0 baud + 1, SIO1 control + 1.
-        bus.cpu_write8(Sio0::BASE + 0xF, 0x0000_0001);
-        assert_eq!(bus.read16(Sio0::BASE + 0xE), 0x0100);
-        bus.cpu_write8(Sio1::BASE + 0xB, 0x0000_0005);
-        assert_eq!(bus.sio1.read32(Sio1::BASE + 0xA), 0x0500);
+        bus.cpu_write8(Sio0::BASE + 0xf, 0x0000_0001);
+        assert_eq!(bus.read16(Sio0::BASE + 0xe), 0x0100);
+        bus.cpu_write8(Sio1::BASE + 0xb, 0x0000_0005);
+        assert_eq!(bus.sio1.read32(Sio1::BASE + 0xa), 0x0500);
 
         // SPU voice 0 ADSR low: even byte store writes the low halfword,
         // odd byte store is dropped.
         let adsr = Spu::BASE + 0x08;
         bus.cpu_write8(adsr, 0x1234_5678);
         assert_eq!(bus.read16(adsr), 0x5678);
-        bus.cpu_write8(adsr + 1, 0x0000_00AB);
+        bus.cpu_write8(adsr + 1, 0x0000_00ab);
         assert_eq!(bus.read16(adsr), 0x5678);
     }
 
@@ -5087,13 +5087,13 @@ mod tests {
     #[test]
     fn narrow_sio1_reads_select_the_addressed_halfword_register() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
-        bus.cpu_write16(Sio1::BASE + 0xE, 0x0000_1234);
-        bus.cpu_write16(Sio1::BASE + 0xA, 0x0000_0300);
-        assert_eq!(bus.read16(Sio1::BASE + 0xE), 0x1234);
-        assert_eq!(bus.read8(Sio1::BASE + 0xE), 0x34);
-        assert_eq!(bus.read8(Sio1::BASE + 0xF), 0x12);
-        assert_eq!(bus.read16(Sio1::BASE + 0xA), 0x0300);
-        assert_eq!(bus.read8(Sio1::BASE + 0xB), 0x03);
+        bus.cpu_write16(Sio1::BASE + 0xe, 0x0000_1234);
+        bus.cpu_write16(Sio1::BASE + 0xa, 0x0000_0300);
+        assert_eq!(bus.read16(Sio1::BASE + 0xe), 0x1234);
+        assert_eq!(bus.read8(Sio1::BASE + 0xe), 0x34);
+        assert_eq!(bus.read8(Sio1::BASE + 0xf), 0x12);
+        assert_eq!(bus.read16(Sio1::BASE + 0xa), 0x0300);
+        assert_eq!(bus.read8(Sio1::BASE + 0xb), 0x03);
     }
 
     /// Byte and halfword loads from the upper lanes of I_STAT / I_MASK read
@@ -5125,7 +5125,7 @@ mod tests {
         assert_eq!(bus.read16(crate::cdrom::BASE), 0x1818);
         assert_eq!(bus.read32(crate::cdrom::BASE), 0x1818_1818);
         bus.cpu_write16(crate::cdrom::BASE, 0x1234_5678);
-        assert_eq!(bus.read16(crate::cdrom::BASE), 0x1A1A);
+        assert_eq!(bus.read16(crate::cdrom::BASE), 0x1a1a);
         assert_eq!(bus.read32(crate::mdec::MDEC_CTRL_STAT), 0x8004_0000);
         assert_eq!(bus.read16(crate::mdec::MDEC_CTRL_STAT), 0);
         assert_eq!(bus.read8(crate::mdec::MDEC_CTRL_STAT), 0);
@@ -5200,8 +5200,8 @@ mod tests {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
         bus.sio0
             .attach_port1(crate::pad::PortDevice::empty().with_pad(crate::pad::DigitalPad::new()));
-        bus.write16(Sio0::BASE + 0x0A, 0x1002); // JOYN_OUTPUT | ACK_IRQ_ENABLE
-        bus.write16(Sio0::BASE + 0x0E, 0x0001); // a bit time is one cycle
+        bus.write16(Sio0::BASE + 0x0a, 0x1002); // JOYN_OUTPUT | ACK_IRQ_ENABLE
+        bus.write16(Sio0::BASE + 0x0e, 0x0001); // a bit time is one cycle
         bus.write8(Sio0::BASE, 0x01);
 
         // The byte arrives after ten bit times; /ACK rises behind it.
@@ -5277,12 +5277,12 @@ mod tests {
     fn dma_does_not_lose_byte_writes_to_dicr() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
 
-        bus.write8(0x1F80_10F6, 0x80);
-        assert_eq!(bus.read8(0x1F80_10F6) & 0x08, 0);
+        bus.write8(0x1f80_10f6, 0x80);
+        assert_eq!(bus.read8(0x1f80_10f6) & 0x08, 0);
         assert!(!bus.dma.notify_channel_done(3));
 
-        bus.write8(0x1F80_10F6, 0x88);
-        assert_ne!(bus.read8(0x1F80_10F6) & 0x08, 0);
+        bus.write8(0x1f80_10f6, 0x88);
+        assert_ne!(bus.read8(0x1f80_10f6) & 0x08, 0);
         assert!(bus.dma.notify_channel_done(3));
     }
 
@@ -6141,7 +6141,7 @@ mod tests {
                     .collect()
             })
             .collect();
-        nodes.push(vec![0x1F00_0000]);
+        nodes.push(vec![0x1f00_0000]);
         let mut address = 0x1000;
         for (i, words) in nodes.iter().enumerate() {
             let next = address + (words.len() as u32 + 1) * 4;
@@ -6192,7 +6192,7 @@ mod tests {
             0x40_0000,
             xy(0, 127),
         ];
-        let nodes = [&tri[..], &tri[..], &[0x1F00_0000][..]];
+        let nodes = [&tri[..], &tri[..], &[0x1f00_0000][..]];
         let mut address = 0x1000;
         for (i, words) in nodes.iter().enumerate() {
             let next = address + (words.len() as u32 + 1) * 4;
@@ -6243,33 +6243,33 @@ mod tests {
     fn gp0_data_words_with_1f_top_byte() -> Vec<u32> {
         vec![
             // A0h: 4x1 upload, two payload words.
-            0xA000_0000,
+            0xa000_0000,
             0x0010_0020,
             0x0001_0004,
-            0x1F00_1F00,
-            0x1FFF_1F1F,
+            0x1f00_1f00,
+            0x1fff_1f1f,
             // Monochrome triangle with 1Fh-topped vertices.
-            0x2000_00FF,
-            0x1F00_0010,
-            0x1F10_0020,
-            0x1F20_0010,
+            0x2000_00ff,
+            0x1f00_0010,
+            0x1f10_0020,
+            0x1f20_0010,
             // Variable monochrome rectangle.
-            0x6000_00FF,
-            0x1F00_0000,
-            0x1F00_0001,
+            0x6000_00ff,
+            0x1f00_0000,
+            0x1f00_0001,
             // Monochrome polyline, then the terminator.
-            0x4800_00FF,
-            0x1F00_0000,
-            0x1F10_0010,
-            0x1F20_0020,
+            0x4800_00ff,
+            0x1f00_0000,
+            0x1f10_0010,
+            0x1f20_0020,
             0x5555_5555,
             // Gouraud polyline: 1Fh in a colour and a vertex word.
-            0x5800_00FF,
+            0x5800_00ff,
             0x0000_0000,
-            0x1F00_FF00,
+            0x1f00_ff00,
             0x0010_0010,
-            0x1F00_00FF,
-            0x1F20_0020,
+            0x1f00_00ff,
+            0x1f20_0020,
             0x5000_5000,
         ]
     }
@@ -6284,10 +6284,10 @@ mod tests {
                 bus.tick(64);
             }
             assert!(!gpu_irq_seen(&mut bus), "fifo={fifo}");
-            assert_eq!(bus.gpu.vram.get_pixel(0x20, 0x10), 0x1F00);
-            assert_eq!(bus.gpu.vram.get_pixel(0x23, 0x10), 0x1FFF);
+            assert_eq!(bus.gpu.vram.get_pixel(0x20, 0x10), 0x1f00);
+            assert_eq!(bus.gpu.vram.get_pixel(0x23, 0x10), 0x1fff);
             // The parser is back in command position: a real GP0(1Fh) acts.
-            bus.write32(crate::gpu::GP0_ADDR, 0x1F00_0000);
+            bus.write32(crate::gpu::GP0_ADDR, 0x1f00_0000);
             assert!(gpu_irq_seen(&mut bus), "fifo={fifo}");
         }
     }
@@ -6304,21 +6304,21 @@ mod tests {
             bus.write32(crate::gpu::GP0_ADDR, word);
         }
         for word in [
-            0x2000_00FF,
-            0x1F00_0010,
-            0x1F10_0020,
-            0x1F20_0010,
-            0xA000_0000,
+            0x2000_00ff,
+            0x1f00_0010,
+            0x1f10_0020,
+            0x1f20_0010,
+            0xa000_0000,
             0x0010_0020,
             0x0001_0002,
-            0x1F00_1F00,
+            0x1f00_1f00,
         ] {
             bus.write32(crate::gpu::GP0_ADDR, word);
             bus.add_cycles(1);
         }
         assert!(!gpu_irq_seen(&mut bus));
-        assert_eq!(bus.gpu.vram.get_pixel(0x21, 0x10), 0x1F00);
-        bus.write32(crate::gpu::GP0_ADDR, 0x1F00_0000);
+        assert_eq!(bus.gpu.vram.get_pixel(0x21, 0x10), 0x1f00);
+        bus.write32(crate::gpu::GP0_ADDR, 0x1f00_0000);
         assert!(gpu_irq_seen(&mut bus));
     }
 
@@ -6367,8 +6367,8 @@ mod tests {
             bus.run_dma_channel(2);
             assert!(!gpu_irq_seen(&mut bus), "fifo={fifo}");
             assert_eq!(bus.dma.channels[2].channel_control & (1 << 24), 0);
-            assert_eq!(bus.gpu.vram.get_pixel(0x20, 0x10), 0x1F00);
-            assert_eq!(bus.gpu.vram.get_pixel(0x23, 0x10), 0x1FFF);
+            assert_eq!(bus.gpu.vram.get_pixel(0x20, 0x10), 0x1f00);
+            assert_eq!(bus.gpu.vram.get_pixel(0x23, 0x10), 0x1fff);
         }
     }
 
@@ -6376,7 +6376,7 @@ mod tests {
     fn gp0_linked_list_final_1f_command_raises_irq1() {
         for fifo in [true, false] {
             let mut nodes = gp0_data_word_nodes();
-            nodes.push(vec![0x1F00_0000]);
+            nodes.push(vec![0x1f00_0000]);
             let mut bus = gpu_list_bus(fifo, &nodes);
             bus.run_dma_channel(2);
             assert!(gpu_irq_seen(&mut bus), "fifo={fifo}");
@@ -6388,22 +6388,22 @@ mod tests {
         for fifo in [true, false] {
             let mut bus = linked_list_upload_fixture(false, true, 0);
             bus.gpu.set_dma_fifo_model(fifo);
-            for word in [0xA000_0000, 0x0010_0020, 0x0001_0008] {
+            for word in [0xa000_0000, 0x0010_0020, 0x0001_0008] {
                 bus.write32(crate::gpu::GP0_ADDR, word);
             }
             for i in 0..4u32 {
-                write_ram_u32(&mut bus.ram[..], 0x2000 + i * 4, 0x1F00_1F00 | i);
+                write_ram_u32(&mut bus.ram[..], 0x2000 + i * 4, 0x1f00_1f00 | i);
             }
             bus.dma.channels[2].base = 0x2000;
             bus.dma.channels[2].block_control = (2 << 16) | 2;
             bus.dma.channels[2].channel_control = 0x0100_0201;
             bus.run_dma_channel(2);
             assert!(!gpu_irq_seen(&mut bus), "fifo={fifo}");
-            assert_eq!(bus.gpu.vram.get_pixel(0x20, 0x10), 0x1F00);
-            assert_eq!(bus.gpu.vram.get_pixel(0x27, 0x10), 0x1F00);
-            assert_eq!(bus.gpu.vram.get_pixel(0x26, 0x10), 0x1F03);
+            assert_eq!(bus.gpu.vram.get_pixel(0x20, 0x10), 0x1f00);
+            assert_eq!(bus.gpu.vram.get_pixel(0x27, 0x10), 0x1f00);
+            assert_eq!(bus.gpu.vram.get_pixel(0x26, 0x10), 0x1f03);
             // Block DMA of a command stream: the 1Fh here is a command.
-            write_ram_u32(&mut bus.ram[..], 0x2000, 0x1F00_0000);
+            write_ram_u32(&mut bus.ram[..], 0x2000, 0x1f00_0000);
             bus.dma.channels[2].base = 0x2000;
             bus.dma.channels[2].block_control = (1 << 16) | 1;
             bus.dma.channels[2].channel_control = 0x0100_0201;
@@ -6537,23 +6537,23 @@ mod tests {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
         bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0003);
         bus.dma.dpcr = 1 << (2 * 4 + 3);
-        bus.gpu.vram.set_pixel(4, 5, 0xCAFE);
-        bus.gpu.vram.set_pixel(5, 5, 0xBEEF);
+        bus.gpu.vram.set_pixel(4, 5, 0xcafe);
+        bus.gpu.vram.set_pixel(5, 5, 0xbeef);
 
-        bus.gpu.gp0_push(0xC0_00_00_00);
+        bus.gpu.gp0_push(0xc0_00_00_00);
         bus.gpu.gp0_push(0x0005_0004);
         bus.gpu.gp0_push(0x0001_0002);
         let hist_before = bus.gpu.gp0_opcode_histogram();
 
         // If the DMA path ignores direction, this word is pushed to GP0
         // as a fill command. Correct direction reads GPUREAD into RAM.
-        write_ram_u32(&mut bus.ram[..], 0x300, 0x0200_FF00);
+        write_ram_u32(&mut bus.ram[..], 0x300, 0x0200_ff00);
         bus.dma.channels[2].base = 0x300;
         bus.dma.channels[2].block_control = (1 << 16) | 1;
         bus.dma.channels[2].channel_control = 0x0100_0200;
 
         assert_eq!(bus.run_dma_gpu(), Some(3));
-        assert_eq!(read_ram_u32(&bus.ram[..], 0x300), 0xBEEF_CAFE);
+        assert_eq!(read_ram_u32(&bus.ram[..], 0x300), 0xbeef_cafe);
         assert_eq!(bus.gpu.gp0_opcode_histogram(), hist_before);
     }
 
@@ -6562,7 +6562,7 @@ mod tests {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
         bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
         bus.dma.dpcr = 1 << (2 * 4 + 3);
-        bus.gpu.gp0_push(0xA000_0000);
+        bus.gpu.gp0_push(0xa000_0000);
         bus.gpu.gp0_push(0);
         bus.gpu.gp0_push((64 << 16) | 64); // 4096 pixels / 2 = 2048 words
         bus.dma.channels[2].base = 0x400;
@@ -6585,9 +6585,9 @@ mod tests {
         bus
     }
 
-    const GPU_MADR: u32 = 0x1F80_10A0;
-    const GPU_BCR: u32 = 0x1F80_10A4;
-    const GPU_CHCR: u32 = 0x1F80_10A8;
+    const GPU_MADR: u32 = 0x1f80_10a0;
+    const GPU_BCR: u32 = 0x1f80_10a4;
+    const GPU_CHCR: u32 = 0x1f80_10a8;
 
     #[test]
     fn a_block_dma_counts_its_blocks_down_in_bcr_and_advances_madr() {
@@ -6597,7 +6597,7 @@ mod tests {
         bus.add_cycles((whole / 2) as u32);
         let count = bus.read32(GPU_BCR) >> 16;
         assert!((1..16).contains(&count), "count {count} mid-transfer");
-        assert_eq!(bus.read32(GPU_BCR) & 0xFFFF, 16);
+        assert_eq!(bus.read32(GPU_BCR) & 0xffff, 16);
         assert!(bus.read32(GPU_MADR) > 0x1000);
         assert_ne!(bus.read32(GPU_CHCR) & (1 << 24), 0);
 
@@ -6633,7 +6633,7 @@ mod tests {
         bus.drain_scheduler_events_post_op();
         assert_ne!(bus.read32(GPU_CHCR) & (1 << 24), 0, "still running");
         let count = bus.read32(GPU_BCR) >> 16;
-        assert!(count > 0xF000, "count {count:#x} counts down through zero");
+        assert!(count > 0xf000, "count {count:#x} counts down through zero");
         // Software stopping it freezes the registers where they are.
         bus.write32(GPU_CHCR, 0);
         let frozen = (bus.read32(GPU_MADR), bus.read32(GPU_BCR));
@@ -6662,17 +6662,17 @@ mod tests {
     fn gpu_manual_dma_moves_upload_data_without_trigger_bit() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
         bus.dma.dpcr = 1 << (2 * 4 + 3);
-        bus.gpu.gp0_push(0xA000_0000);
+        bus.gpu.gp0_push(0xa000_0000);
         bus.gpu.gp0_push((5 << 16) | 4);
         bus.gpu.gp0_push((1 << 16) | 2);
-        write_ram_u32(&mut bus.ram[..], 0x400, 0xBEEF_CAFE);
+        write_ram_u32(&mut bus.ram[..], 0x400, 0xbeef_cafe);
         bus.dma.channels[2].base = 0x400;
         bus.dma.channels[2].block_control = 1;
         bus.dma.channels[2].channel_control = 0x0100_0001;
 
         assert_eq!(bus.run_dma_gpu(), Some(124));
-        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0xCAFE);
-        assert_eq!(bus.gpu.vram.get_pixel(5, 5), 0xBEEF);
+        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0xcafe);
+        assert_eq!(bus.gpu.vram.get_pixel(5, 5), 0xbeef);
     }
 
     #[test]
@@ -6710,8 +6710,8 @@ mod tests {
         let mut copied = [0u16; 64];
         bus.spu.dma_read(&mut copied);
         assert_eq!(copied[0], 0x2000);
-        assert_eq!(copied[31], 0x201F);
-        assert_eq!(copied[63], 0x203F);
+        assert_eq!(copied[31], 0x201f);
+        assert_eq!(copied[63], 0x203f);
     }
 
     #[test]
@@ -6781,7 +6781,7 @@ mod tests {
         bus.spu.write16(crate::spu::IRQ_ADDR, 0);
         bus.spu.write16(crate::spu::SPUCNT, (2 << 4) | (1 << 6));
         bus.dma.dpcr = 1 << (4 * 4 + 3);
-        write_ram_u16(&mut bus.ram[..], 0x100, 0xCAFE);
+        write_ram_u16(&mut bus.ram[..], 0x100, 0xcafe);
 
         bus.dma.channels[4].base = 0x100;
         bus.dma.channels[4].block_control = (1 << 16) | 1;
@@ -6807,9 +6807,9 @@ mod tests {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
         // Non-zero SPU delay bits make SPU->RAM DMA reads stable.
         bus.memory_control.write(
-            0x1F80_1014,
+            0x1f80_1014,
             crate::bus::memory_timing::AccessWidth::Word,
-            0x2209_31E1,
+            0x2209_31e1,
         );
         bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
         bus.spu.write16(crate::spu::SPUCNT, 3 << 4);
@@ -6926,7 +6926,7 @@ mod tests {
         bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x4000_0001);
         bus.mdec.dma_write_in(&[0x0101_0101; 32]);
         bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x2000_0001);
-        bus.mdec.dma_write_in(&[0xFE00_0000]);
+        bus.mdec.dma_write_in(&[0xfe00_0000]);
 
         bus.dma.channels[1].base = 0x200;
         // The build-158 test binary uses BS=0x20 even though its 4-bit
@@ -7018,7 +7018,7 @@ mod tests {
         bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x3000_0006);
         for i in 0..6 {
             let offset = 0x100 + i * 4;
-            bus.ram[offset..offset + 4].copy_from_slice(&0xFE00_0010u32.to_le_bytes());
+            bus.ram[offset..offset + 4].copy_from_slice(&0xfe00_0010u32.to_le_bytes());
         }
     }
 }

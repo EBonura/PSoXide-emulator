@@ -194,11 +194,11 @@ pub fn side_load_and_hash(exe_path: &Path, vblanks: u64) -> Option<SdkExampleSta
     // Full-VRAM FNV-1a-64 + visible-display hash. Same hash function
     // the A/B/D milestones use so a regression in either renders as a
     // visually-correlatable diff.
-    let mut vh = 0xCBF2_9CE4_8422_2325u64;
+    let mut vh = 0xcbf2_9ce4_8422_2325u64;
     for &w in bus.gpu.vram.words() {
         for b in w.to_le_bytes() {
             vh ^= b as u64;
-            vh = vh.wrapping_mul(0x0100_0000_01B3);
+            vh = vh.wrapping_mul(0x0100_0000_01b3);
         }
     }
     let (dh, dw, dhi, _dlen) = bus.gpu.display_hash();

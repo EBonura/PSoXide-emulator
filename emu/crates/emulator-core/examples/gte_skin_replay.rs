@@ -28,7 +28,7 @@
 
 use psx_gte_core::Gte;
 
-const MVMVA_RT_V0_TR_SF1: u32 = 0x4A08_0012;
+const MVMVA_RT_V0_TR_SF1: u32 = 0x4a08_0012;
 
 #[derive(Default, Clone, Copy)]
 struct Capture {

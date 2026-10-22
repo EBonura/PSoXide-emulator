@@ -213,7 +213,7 @@ fn run_fixture(
         total_delta_b += db as u64;
         // Diff image: amplify so any non-zero delta is visible.
         let amp = (max_ch as u16 * 4).min(255) as u8;
-        diff.extend_from_slice(&[amp, amp, amp, 0xFF]);
+        diff.extend_from_slice(&[amp, amp, amp, 0xff]);
     }
 
     let mismatch_pct = (mismatched as f64) / (total_px as f64) * 100.0;

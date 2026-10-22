@@ -29,7 +29,7 @@ fn parse_cmd(line: &str) -> Option<u32> {
         field("vx"),
         field("mx"),
     );
-    Some(0x4A00_0000 | op | (sf << 19) | (mx << 17) | (vx << 15) | (tx << 13) | (lm << 10))
+    Some(0x4a00_0000 | op | (sf << 19) | (mx << 17) | (vx << 15) | (tx << 13) | (lm << 10))
 }
 
 fn main() {

@@ -27,11 +27,11 @@ pub(crate) fn store_reg(a: &mut Asm, host: u8, guest: u32) {
 /// A register-only op: reads its operands from the register file and
 /// writes the result back (through w9..w13).
 pub(crate) fn emit_alu(a: &mut Asm, alu: Alu, word: u32) {
-    let rs = (word >> 21) & 0x1F;
-    let rt = (word >> 16) & 0x1F;
-    let rd = (word >> 11) & 0x1F;
-    let sa = (word >> 6) & 0x1F;
-    let imm = word & 0xFFFF;
+    let rs = (word >> 21) & 0x1f;
+    let rt = (word >> 16) & 0x1f;
+    let rd = (word >> 11) & 0x1f;
+    let sa = (word >> 6) & 0x1f;
+    let imm = word & 0xffff;
     let simm = (word as i16) as i32 as u32;
     let dest = match alu {
         Alu::Addiu | Alu::Slti | Alu::Sltiu | Alu::Andi | Alu::Ori | Alu::Xori | Alu::Lui => rt,
@@ -126,10 +126,10 @@ pub(crate) fn emit_alu(a: &mut Asm, alu: Alu, word: u32) {
 /// A branch's decision: writes the link register (through the squashing
 /// path, like `set_gpr`), and leaves w11 = taken (0/1), w12 = target.
 pub(crate) fn emit_branch_decision(a: &mut Asm, branch: Branch, word: u32, pc: u32) {
-    let rs = (word >> 21) & 0x1F;
-    let rt = (word >> 16) & 0x1F;
-    let rd = (word >> 11) & 0x1F;
-    let jump_target = (pc.wrapping_add(4) & 0xF000_0000) | ((word & 0x03FF_FFFF) << 2);
+    let rs = (word >> 21) & 0x1f;
+    let rt = (word >> 16) & 0x1f;
+    let rd = (word >> 11) & 0x1f;
+    let jump_target = (pc.wrapping_add(4) & 0xf000_0000) | ((word & 0x03ff_ffff) << 2);
     let branch_target = pc
         .wrapping_add(4)
         .wrapping_add((((word as i16) as i32) << 2) as u32);

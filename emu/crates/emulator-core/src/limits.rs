@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn parses_oracle_names_and_rejects_unknown_ones() {
         assert_eq!(parse_oracles("gte, muldiv").unwrap(), GTE | MULDIV);
-        assert_eq!(parse_oracles("all").unwrap(), 0x7F);
+        assert_eq!(parse_oracles("all").unwrap(), 0x7f);
         assert!(parse_oracles("gtee").is_err());
     }
 
@@ -478,7 +478,7 @@ mod tests {
         .unwrap();
         assert_eq!(set.ranges().len(), 2);
         assert_eq!(set.find(0x8001_0000), Some(0));
-        assert_eq!(set.find(0x8001_000C), Some(0));
+        assert_eq!(set.find(0x8001_000c), Some(0));
         assert_eq!(set.find(0x8001_0010), None);
         assert_eq!(set.find(0x8001_0024), Some(1));
         assert_eq!(set.ranges()[1].name, "0x80010020");

@@ -22,7 +22,7 @@ fn step_n(cpu: &mut Cpu, bus: &mut Bus, n: usize) {
 fn save_state_round_trips_cpu_and_bus_state() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new_without_bios();
-    for (index, word) in [0x3C08_1234u32, 0x3508_5678, 0xAC08_0000]
+    for (index, word) in [0x3c08_1234u32, 0x3508_5678, 0xac08_0000]
         .into_iter()
         .enumerate()
     {
@@ -52,8 +52,8 @@ fn save_state_round_trips_cpu_and_bus_state() {
     // Touch a bit of VRAM directly too, so the round-trip covers the
     // big-array (de)serialize path (`Vram::data`), not just plain
     // integer fields.
-    bus.gpu.vram.words_mut()[0] = 0xBEEF;
-    bus.gpu.vram.words_mut()[1024 * 511 + 1023] = 0xCAFE; // last pixel
+    bus.gpu.vram.words_mut()[0] = 0xbeef;
+    bus.gpu.vram.words_mut()[1024 * 511 + 1023] = 0xcafe; // last pixel
 
     // Pending CD samples are still emulator input: once consumed they
     // update capture buffers in SPU RAM. Losing the queue would make a
@@ -87,8 +87,8 @@ fn save_state_round_trips_cpu_and_bus_state() {
         );
     }
     assert_eq!(restored_bus.read32(0), 0x1234_5678);
-    assert_eq!(restored_bus.gpu.vram.words()[0], 0xBEEF);
-    assert_eq!(restored_bus.gpu.vram.words()[1024 * 511 + 1023], 0xCAFE);
+    assert_eq!(restored_bus.gpu.vram.words()[0], 0xbeef);
+    assert_eq!(restored_bus.gpu.vram.words()[1024 * 511 + 1023], 0xcafe);
     assert_eq!(restored_bus.spu.cd_audio_queue_len(), 2);
 
     // The restored state must also keep running: step both the
@@ -106,7 +106,7 @@ fn save_state_round_trips_cpu_and_bus_state() {
 fn save_state_preserves_stale_instruction_cache_contents() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new_without_bios();
-    for (index, word) in [0x3C08_1234u32, 0x3508_5678, 0xAC08_0000]
+    for (index, word) in [0x3c08_1234u32, 0x3508_5678, 0xac08_0000]
         .into_iter()
         .enumerate()
     {
@@ -115,10 +115,10 @@ fn save_state_preserves_stale_instruction_cache_contents() {
     cpu.seed_from_exe(0x8000_1000, 0, None);
     let base = 0x0000_1000;
     let program = [
-        0x3C08_FFFE, // lui   $t0, 0xFFFE
+        0x3c08_fffe, // lui   $t0, 0xFFFE
         0x3409_0800, // ori   $t1, $zero, IS1
-        0xAD09_0130, // sw    $t1, 0x130($t0) -- enable I-cache
-        0x254A_0001, // addiu $t2, $t2, 1
+        0xad09_0130, // sw    $t1, 0x130($t0) -- enable I-cache
+        0x254a_0001, // addiu $t2, $t2, 1
         0x0800_0403, // j     0x8000100C
         0x0000_0000, // nop (delay slot)
     ];
@@ -129,12 +129,12 @@ fn save_state_preserves_stale_instruction_cache_contents() {
 
     // Enable the cache, execute the increment once, and loop back to it.
     step_n(&mut cpu, &mut bus, 6);
-    assert_eq!(cpu.pc(), 0x8000_100C);
+    assert_eq!(cpu.pc(), 0x8000_100c);
     assert_eq!(cpu.gpr(10), 1);
 
     // Change backing RAM through KSEG1. Real hardware keeps executing the
     // stale cached +1 instruction until software flushes the I-cache.
-    bus.write32(0xA000_100C, 0x254A_0002); // addiu $t2, $t2, 2
+    bus.write32(0xa000_100c, 0x254a_0002); // addiu $t2, $t2, 2
 
     let snapshot = EmulatorStateRef {
         cpu: &cpu,

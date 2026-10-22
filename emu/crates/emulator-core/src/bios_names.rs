@@ -21,7 +21,7 @@ pub fn function_name(table: u8, func: u32) -> &'static str {
 }
 
 /// Table A, indexed by function number.
-const A_NAMES: [&str; 0xB5] = [
+const A_NAMES: [&str; 0xb5] = [
     "open",                           // A(00h)
     "lseek",                          // A(01h)
     "read",                           // A(02h)
@@ -206,7 +206,7 @@ const A_NAMES: [&str; 0xB5] = [
 ];
 
 /// Table B, indexed by function number.
-const B_NAMES: [&str; 0x5E] = [
+const B_NAMES: [&str; 0x5e] = [
     "alloc_kernel_memory",   // B(00h)
     "free_kernel_memory",    // B(01h)
     "init_timer",            // B(02h)
@@ -304,7 +304,7 @@ const B_NAMES: [&str; 0x5E] = [
 ];
 
 /// Table C, indexed by function number.
-const C_NAMES: [&str; 0x1E] = [
+const C_NAMES: [&str; 0x1e] = [
     "EnqueueTimerAndVblankIrqs", // C(00h)
     "EnqueueSyscallHandler",     // C(01h)
     "SysEnqIntRP",               // C(02h)
@@ -344,18 +344,18 @@ mod tests {
     #[test]
     fn names_follow_the_psx_spx_summary() {
         assert_eq!(function_name(0, 0x00), "open");
-        assert_eq!(function_name(0, 0x3A), "_exit");
+        assert_eq!(function_name(0, 0x3a), "_exit");
         assert_eq!(function_name(0, 0x70), "_bu_init");
         assert_eq!(function_name(0, 0x71), "_96_init");
         assert_eq!(function_name(0, 0x57), "return_zero");
-        assert_eq!(function_name(0, 0xB4), "GetSystemInfo");
-        assert_eq!(function_name(0, 0xB5), "?");
+        assert_eq!(function_name(0, 0xb4), "GetSystemInfo");
+        assert_eq!(function_name(0, 0xb5), "?");
         assert_eq!(function_name(1, 0x32), "open");
-        assert_eq!(function_name(1, 0x5B), "ChangeClearPAD");
-        assert_eq!(function_name(1, 0x5E), "?");
+        assert_eq!(function_name(1, 0x5b), "ChangeClearPAD");
+        assert_eq!(function_name(1, 0x5e), "?");
         assert_eq!(function_name(2, 0x00), "EnqueueTimerAndVblankIrqs");
-        assert_eq!(function_name(2, 0x1D), "get_card_find_mode");
-        assert_eq!(function_name(2, 0x1E), "?");
+        assert_eq!(function_name(2, 0x1d), "get_card_find_mode");
+        assert_eq!(function_name(2, 0x1e), "?");
         assert_eq!(function_name(3, 0x00), "?");
     }
 }

@@ -73,57 +73,57 @@ use envelope::{
 
 /// Base of the SPU MMIO window. 512 bytes total spanning voice bank,
 /// global control regs, and reverb coefficient registers.
-pub const SPU_BASE: u32 = 0x1F80_1C00;
+pub const SPU_BASE: u32 = 0x1f80_1c00;
 /// One past the end of the SPU MMIO window.
-pub const SPU_END: u32 = 0x1F80_1E00;
+pub const SPU_END: u32 = 0x1f80_1e00;
 
 /// Base of the 24-voice register bank (16 bytes per voice).
-pub const VOICE_BASE: u32 = 0x1F80_1C00;
+pub const VOICE_BASE: u32 = 0x1f80_1c00;
 /// One past the end of the voice bank (24 * 16 = 0x180 bytes → 0x1F80_1D80).
-pub const VOICE_END: u32 = 0x1F80_1D80;
+pub const VOICE_END: u32 = 0x1f80_1d80;
 
 /// Main Volume Left (fixed level is bits 14..0 doubled; bit 15 set = sweep).
-pub const MAIN_VOL_L: u32 = 0x1F80_1D80;
+pub const MAIN_VOL_L: u32 = 0x1f80_1d80;
 /// Main Volume Right (same encoding as the left one).
-pub const MAIN_VOL_R: u32 = 0x1F80_1D82;
+pub const MAIN_VOL_R: u32 = 0x1f80_1d82;
 /// Reverb output volume Left.
-pub const REVERB_VOL_L: u32 = 0x1F80_1D84;
+pub const REVERB_VOL_L: u32 = 0x1f80_1d84;
 /// Reverb output volume Right.
-pub const REVERB_VOL_R: u32 = 0x1F80_1D86;
+pub const REVERB_VOL_R: u32 = 0x1f80_1d86;
 /// Key-On low (voices 0..15).
-pub const KON_LO: u32 = 0x1F80_1D88;
+pub const KON_LO: u32 = 0x1f80_1d88;
 /// Key-On high (voices 16..23).
-pub const KON_HI: u32 = 0x1F80_1D8A;
+pub const KON_HI: u32 = 0x1f80_1d8a;
 /// Key-Off low (voices 0..15).
-pub const KOFF_LO: u32 = 0x1F80_1D8C;
+pub const KOFF_LO: u32 = 0x1f80_1d8c;
 /// Key-Off high (voices 16..23).
-pub const KOFF_HI: u32 = 0x1F80_1D8E;
+pub const KOFF_HI: u32 = 0x1f80_1d8e;
 /// Pitch modulation enable low.
-pub const PMON_LO: u32 = 0x1F80_1D90;
+pub const PMON_LO: u32 = 0x1f80_1d90;
 /// Pitch modulation enable high.
-pub const PMON_HI: u32 = 0x1F80_1D92;
+pub const PMON_HI: u32 = 0x1f80_1d92;
 /// Noise mode enable low.
-pub const NON_LO: u32 = 0x1F80_1D94;
+pub const NON_LO: u32 = 0x1f80_1d94;
 /// Noise mode enable high.
-pub const NON_HI: u32 = 0x1F80_1D96;
+pub const NON_HI: u32 = 0x1f80_1d96;
 /// Reverb enable low.
-pub const EON_LO: u32 = 0x1F80_1D98;
+pub const EON_LO: u32 = 0x1f80_1d98;
 /// Reverb enable high.
-pub const EON_HI: u32 = 0x1F80_1D9A;
+pub const EON_HI: u32 = 0x1f80_1d9a;
 /// ENDX low (per-voice "reached loop-end block" latch, write-1-to-clear).
-pub const ENDX_LO: u32 = 0x1F80_1D9C;
+pub const ENDX_LO: u32 = 0x1f80_1d9c;
 /// ENDX high.
-pub const ENDX_HI: u32 = 0x1F80_1D9E;
+pub const ENDX_HI: u32 = 0x1f80_1d9e;
 /// Reverb work-area start address (halfword, scaled by 8 → byte addr).
-pub const REVERB_BASE: u32 = 0x1F80_1DA2;
+pub const REVERB_BASE: u32 = 0x1f80_1da2;
 /// IRQ address (halfword * 8 = byte addr into SPU RAM).
-pub const IRQ_ADDR: u32 = 0x1F80_1DA4;
+pub const IRQ_ADDR: u32 = 0x1f80_1da4;
 /// Data transfer address (halfword * 8 = byte addr into SPU RAM).
-pub const TRANSFER_ADDR: u32 = 0x1F80_1DA6;
+pub const TRANSFER_ADDR: u32 = 0x1f80_1da6;
 /// Data transfer FIFO (reads pop, writes push at TRANSFER_ADDR, which advances).
-pub const TRANSFER_FIFO: u32 = 0x1F80_1DA8;
+pub const TRANSFER_FIFO: u32 = 0x1f80_1da8;
 /// SPU control register.
-pub const SPUCNT: u32 = 0x1F80_1DAA;
+pub const SPUCNT: u32 = 0x1f80_1daa;
 /// SPUCNT bit 0: route CD-DA / XA-ADPCM input through the SPU mixer.
 const SPUCNT_CD_AUDIO_ENABLE: u16 = 1 << 0;
 /// SPUCNT bit 2: route CD-DA / XA-ADPCM input into the reverb engine.
@@ -133,24 +133,24 @@ const SPUCNT_REVERB_MASTER_ENABLE: u16 = 1 << 7;
 /// SPUCNT bit 14: 0 = muted, 1 = unmuted.
 const SPUCNT_UNMUTE: u16 = 1 << 14;
 /// Data transfer control (typically 0x0004 -- 4-bit transfer step).
-pub const TRANSFER_CTRL: u32 = 0x1F80_1DAC;
+pub const TRANSFER_CTRL: u32 = 0x1f80_1dac;
 /// SPU status register.
-pub const SPUSTAT: u32 = 0x1F80_1DAE;
+pub const SPUSTAT: u32 = 0x1f80_1dae;
 /// CD audio input volume Left.
-pub const CD_VOL_L: u32 = 0x1F80_1DB0;
+pub const CD_VOL_L: u32 = 0x1f80_1db0;
 /// CD audio input volume Right.
-pub const CD_VOL_R: u32 = 0x1F80_1DB2;
+pub const CD_VOL_R: u32 = 0x1f80_1db2;
 /// External audio input volume Left.
-pub const EXT_VOL_L: u32 = 0x1F80_1DB4;
+pub const EXT_VOL_L: u32 = 0x1f80_1db4;
 /// External audio input volume Right.
-pub const EXT_VOL_R: u32 = 0x1F80_1DB6;
+pub const EXT_VOL_R: u32 = 0x1f80_1db6;
 /// Current Main Volume Left backing register.
-pub const CURRENT_MAIN_VOL_L: u32 = 0x1F80_1DB8;
+pub const CURRENT_MAIN_VOL_L: u32 = 0x1f80_1db8;
 /// Current Main Volume Right backing register.
-pub const CURRENT_MAIN_VOL_R: u32 = 0x1F80_1DBA;
+pub const CURRENT_MAIN_VOL_R: u32 = 0x1f80_1dba;
 
 /// Start of reverb configuration area (32 × 16-bit coefficient regs).
-pub const REVERB_CFG_BASE: u32 = 0x1F80_1DC0;
+pub const REVERB_CFG_BASE: u32 = 0x1f80_1dc0;
 
 /// Per-voice offsets within the 16-byte voice block.
 #[allow(dead_code)]
@@ -167,11 +167,11 @@ mod voice_offset {
     /// +8..9 ADSR config low -- attack mode + rate + decay rate + sustain level.
     pub const ADSR_LO: u32 = 0x8;
     /// +A..B ADSR config high -- sustain mode + sustain rate + release mode + release rate.
-    pub const ADSR_HI: u32 = 0xA;
+    pub const ADSR_HI: u32 = 0xa;
     /// +C..D Current ADSR volume (read-only; returns current envelope level).
-    pub const ADSR_CURRENT: u32 = 0xC;
+    pub const ADSR_CURRENT: u32 = 0xc;
     /// +E..F Repeat (loop) address (in 8-byte units).
-    pub const REPEAT_ADDR: u32 = 0xE;
+    pub const REPEAT_ADDR: u32 = 0xe;
 }
 
 // ===============================================================
@@ -421,8 +421,8 @@ impl Voice {
         if let Some(delta) = self.pacer.tick(attack_slope(self.adsr_lo), self.envelope) {
             self.envelope += delta;
         }
-        if self.envelope >= 0x7FFF {
-            self.envelope = 0x7FFF;
+        if self.envelope >= 0x7fff {
+            self.envelope = 0x7fff;
             self.phase = AdsrPhase::Decay;
             self.pacer.reset();
         }
@@ -444,7 +444,7 @@ impl Voice {
 
     fn step_sustain(&mut self) -> i32 {
         if let Some(delta) = self.pacer.tick(sustain_slope(self.adsr_hi), self.envelope) {
-            self.envelope = (self.envelope + delta).clamp(0, 0x7FFF);
+            self.envelope = (self.envelope + delta).clamp(0, 0x7fff);
         }
         self.envelope
     }
@@ -911,16 +911,16 @@ impl Spu {
     /// the SPU before loading their own banks.
     pub fn apply_retail_bios_shell_audio_profile(&mut self) {
         const BIOS_REVERB_CFG: [u16; 32] = [
-            0x033D, 0x0231, 0x7E00, 0x5000, 0xB400, 0xB000, 0x4C00, 0xB000, 0x6000, 0x5400, 0x1ED6,
-            0x1A31, 0x1D14, 0x183B, 0x1BC2, 0x16B2, 0x1A32, 0x15EF, 0x15EE, 0x1055, 0x1334, 0x0F2D,
-            0x11F6, 0x0C5D, 0x1056, 0x0AE1, 0x0AE0, 0x07A2, 0x0464, 0x0232, 0x8000, 0x8000,
+            0x033d, 0x0231, 0x7e00, 0x5000, 0xb400, 0xb000, 0x4c00, 0xb000, 0x6000, 0x5400, 0x1ed6,
+            0x1a31, 0x1d14, 0x183b, 0x1bc2, 0x16b2, 0x1a32, 0x15ef, 0x15ee, 0x1055, 0x1334, 0x0f2d,
+            0x11f6, 0x0c5d, 0x1056, 0x0ae1, 0x0ae0, 0x07a2, 0x0464, 0x0232, 0x8000, 0x8000,
         ];
 
-        self.write16(REVERB_VOL_L, 0x5EBC);
-        self.write16(REVERB_VOL_R, 0x5EBC);
-        self.write16(REVERB_BASE, 0xE128);
-        self.write16(EON_LO, 0xFFFF);
-        self.write16(EON_HI, 0x00FF);
+        self.write16(REVERB_VOL_L, 0x5ebc);
+        self.write16(REVERB_VOL_R, 0x5ebc);
+        self.write16(REVERB_BASE, 0xe128);
+        self.write16(EON_LO, 0xffff);
+        self.write16(EON_HI, 0x00ff);
         self.write16(EXT_VOL_L, 0);
         self.write16(EXT_VOL_R, 0);
         for (index, value) in BIOS_REVERB_CFG.into_iter().enumerate() {
@@ -930,10 +930,10 @@ impl Spu {
         // PA5 sampled SPUCNT/SPUSTAT as C085/0805 before the SDK touched the
         // device. Apply the already-settled control mirror rather than leaving
         // a synthetic one-sample pending transition at the EXE entry point.
-        self.spucnt = 0xC085;
+        self.spucnt = 0xc085;
         self.spustat_control = 0x0005;
         self.spustat_control_pending = None;
-        self.spustat = (self.spustat & !0x083F) | 0x0800 | self.spustat_control;
+        self.spustat = (self.spustat & !0x083f) | 0x0800 | self.spustat_control;
         self.reverb.reset_output();
     }
 
@@ -943,8 +943,8 @@ impl Spu {
     /// retail BIOS on every census disc.
     pub fn apply_hle_entry_audio_profile(&mut self) {
         self.apply_retail_bios_shell_audio_profile();
-        self.write16(MAIN_VOL_L, 0x3FFF);
-        self.write16(MAIN_VOL_R, 0x37EF);
+        self.write16(MAIN_VOL_L, 0x3fff);
+        self.write16(MAIN_VOL_R, 0x37ef);
         self.write16(CD_VOL_L, 0);
         self.write16(CD_VOL_R, 0);
         self.write16(TRANSFER_CTRL, 0x0004);
@@ -957,7 +957,7 @@ impl Spu {
     /// its bits 15, 12, 11 and 10, and the timer is topped up by
     /// `0x20000 >> shift` (twice if one top-up is not enough).
     fn noise_tick(&mut self) {
-        let shift = (self.spucnt >> 10) & 0xF;
+        let shift = (self.spucnt >> 10) & 0xf;
         let step = 4 + i32::from((self.spucnt >> 8) & 3);
         self.noise_timer -= step;
         if self.noise_timer >= 0 {
@@ -1032,7 +1032,7 @@ impl Spu {
             Some((value, deadline)) if deadline <= now => value,
             _ => self.spustat_control,
         };
-        let mut s = (self.spustat & !0x3F) | control;
+        let mut s = (self.spustat & !0x3f) | control;
         // DMA-request status bits (PSX-SPX SPUSTAT): bit 7 = DMA
         // read/write request (mirrors SPUCNT bit 5, i.e. set for both
         // DMA transfer modes), bit 8 = DMA write request (transfer
@@ -1056,7 +1056,7 @@ impl Spu {
                 .saturating_div(SAMPLE_CYCLES)
                 .saturating_add(1)
                 .saturating_mul(SAMPLE_CYCLES);
-            self.spustat_control_pending = Some((self.spucnt & 0x3F, next_sample));
+            self.spustat_control_pending = Some((self.spucnt & 0x3f, next_sample));
         }
     }
 
@@ -1122,7 +1122,7 @@ impl Spu {
             if voice.phase == AdsrPhase::Off {
                 0
             } else {
-                voice.envelope.clamp(0, 0x7FFF) as u16
+                voice.envelope.clamp(0, 0x7fff) as u16
             }
         })
     }
@@ -1203,9 +1203,9 @@ impl Spu {
         let aligned = phys & !1;
         let word = self.read16_at(aligned, 0);
         let merged = if phys & 1 == 0 {
-            (word & 0xFF00) | value as u16
+            (word & 0xff00) | value as u16
         } else {
-            (word & 0x00FF) | ((value as u16) << 8)
+            (word & 0x00ff) | ((value as u16) << 8)
         };
         self.write16_at(aligned, merged, 0);
     }
@@ -1296,12 +1296,12 @@ impl Spu {
             KON_HI => self.queue_kon(value, 16),
             KOFF_LO => self.queue_koff(value, 0),
             KOFF_HI => self.queue_koff(value, 16),
-            PMON_LO => self.pmon = (self.pmon & 0xFFFF_0000) | value as u32,
-            PMON_HI => self.pmon = (self.pmon & 0x0000_FFFF) | ((value as u32) << 16),
-            NON_LO => self.noise_on = (self.noise_on & 0xFFFF_0000) | value as u32,
-            NON_HI => self.noise_on = (self.noise_on & 0x0000_FFFF) | ((value as u32) << 16),
-            EON_LO => self.reverb_on = (self.reverb_on & 0xFFFF_0000) | value as u32,
-            EON_HI => self.reverb_on = (self.reverb_on & 0x0000_FFFF) | ((value as u32) << 16),
+            PMON_LO => self.pmon = (self.pmon & 0xffff_0000) | value as u32,
+            PMON_HI => self.pmon = (self.pmon & 0x0000_ffff) | ((value as u32) << 16),
+            NON_LO => self.noise_on = (self.noise_on & 0xffff_0000) | value as u32,
+            NON_HI => self.noise_on = (self.noise_on & 0x0000_ffff) | ((value as u32) << 16),
+            EON_LO => self.reverb_on = (self.reverb_on & 0xffff_0000) | value as u32,
+            EON_HI => self.reverb_on = (self.reverb_on & 0x0000_ffff) | ((value as u32) << 16),
             ENDX_LO => self.endx_latched &= !(value as u32),
             ENDX_HI => self.endx_latched &= !((value as u32) << 16),
             REVERB_BASE => self.write_reverb_base(value),
@@ -1344,7 +1344,7 @@ impl Spu {
         // register readable, but disable the effective work area so games
         // don't smear over low SPU RAM when they are just clearing the
         // mixer. Hardware has no such rule; this is an unmeasured guard.
-        if value == 0xFFFF || value <= 0x0200 {
+        if value == 0xffff || value <= 0x0200 {
             self.reverb_base = 0;
             self.reverb.curr_addr = 0;
             self.reverb.reset_output();
@@ -1389,13 +1389,13 @@ impl Spu {
                     .saturating_add(1)
                     .saturating_mul(SAMPLE_CYCLES)
             };
-            self.spustat_control_pending = Some((value & 0x3F, next_sample));
+            self.spustat_control_pending = Some((value & 0x3f, next_sample));
         } else {
             let next_sample = now
                 .saturating_div(SAMPLE_CYCLES)
                 .saturating_add(1)
                 .saturating_mul(SAMPLE_CYCLES);
-            self.spustat_control_pending = Some((value & 0x3F, next_sample));
+            self.spustat_control_pending = Some((value & 0x3f, next_sample));
             if transfer_mode == 1 {
                 self.drain_transfer_fifo_to_ram();
             }
@@ -1443,7 +1443,7 @@ impl Spu {
                 // Echo the full 16-bit register on read; the decoder uses
                 // the <<3, 16-byte-aligned byte address.
                 voice.start_addr_raw = value;
-                voice.start_addr = ((value as u32) << 3) & (SPU_RAM_BYTES as u32 - 1) & !0xF;
+                voice.start_addr = ((value as u32) << 3) & (SPU_RAM_BYTES as u32 - 1) & !0xf;
             }
             voice_offset::ADSR_LO => {
                 voice.adsr_lo = value;
@@ -1468,7 +1468,7 @@ impl Spu {
                 // `decoded_block_count <= 1` is that first-block window
                 // (0 = before the first decode, 1 = within the first block).
                 voice.loop_addr_raw = value;
-                voice.loop_addr = ((value as u32) << 3) & (SPU_RAM_BYTES as u32 - 1) & !0xF;
+                voice.loop_addr = ((value as u32) << 3) & (SPU_RAM_BYTES as u32 - 1) & !0xf;
                 let ignore = voice.phase == AdsrPhase::Off || voice.decoded_block_count > 1;
                 voice.loop_addr_locked |= ignore;
             }
@@ -1481,7 +1481,7 @@ impl Spu {
         // Raw register -- reads echo this back verbatim. Whole-half
         // overwrite semantics: writing KON_LO replaces the low 16 bits,
         // KON_HI replaces the high 16 bits.
-        let clear_mask = !(0xFFFFu32 << shift);
+        let clear_mask = !(0xffffu32 << shift);
         self.kon_raw = (self.kon_raw & clear_mask) | bits;
         // Pending bitmap -- OR-accumulates so multiple writes before a
         // sample tick all fire.
@@ -1492,7 +1492,7 @@ impl Spu {
 
     fn queue_koff(&mut self, mask: u16, shift: u32) {
         let bits = (mask as u32) << shift;
-        let clear_mask = !(0xFFFFu32 << shift);
+        let clear_mask = !(0xffffu32 << shift);
         self.koff_raw = (self.koff_raw & clear_mask) | bits;
         self.koff_pending |= bits;
     }
@@ -1626,7 +1626,7 @@ impl Spu {
             if block.is_empty() {
                 continue;
             }
-            block[0] = 0xFFFF;
+            block[0] = 0xffff;
             for output in &mut block[1..] {
                 let idx = (self.transfer_addr >> 1) as usize % SPU_RAM_HALFWORDS;
                 *output = self.ram[idx];
@@ -1919,7 +1919,7 @@ impl Spu {
         self.write_to_capture(1, saturate_i16(cd_cap_r) as u16);
         self.write_to_capture(2, self.voices[1].last_sample as u16);
         self.write_to_capture(3, self.voices[3].last_sample as u16);
-        self.capture_buffer_pos = (self.capture_buffer_pos + 2) & 0x3FF;
+        self.capture_buffer_pos = (self.capture_buffer_pos + 2) & 0x3ff;
         // SB4 silicon 2026-08-07: bit 11 = 1 while the second half is being
         // written, on SCPH-9902 too (edge-keyed measurement with both
         // phases exercised). The previous 9902 inversion came from a single
@@ -2022,7 +2022,7 @@ impl Spu {
         if env > self.dbg_acc_emax[v] {
             self.dbg_acc_emax[v] = env;
         }
-        if self.dbg_sample_idx & 0x3FF == 0 && self.dbg_trace[v].len() < 2600 {
+        if self.dbg_sample_idx & 0x3ff == 0 && self.dbg_trace[v].len() < 2600 {
             let ph = self.voices[v].phase as u8;
             self.dbg_trace[v].push((self.dbg_acc_smax[v] as i16, self.dbg_acc_emax[v], ph));
             self.dbg_acc_smax[v] = 0;
@@ -2057,7 +2057,7 @@ impl Spu {
         if env > self.dbg_acc_emax[v] {
             self.dbg_acc_emax[v] = env;
         }
-        if self.dbg_sample_idx & 0x3FF == 0 && self.dbg_trace[v].len() < 2600 {
+        if self.dbg_sample_idx & 0x3ff == 0 && self.dbg_trace[v].len() < 2600 {
             let ph = self.voices[v].phase as u8;
             self.dbg_trace[v].push((self.dbg_acc_smax[v] as i16, self.dbg_acc_emax[v], ph));
             self.dbg_acc_smax[v] = 0;
@@ -2090,7 +2090,7 @@ impl Spu {
             // 0..=0xFFFF scales the pitch, read as a signed 16-bit number.
             let factor = i32::from(self.voices[v - 1].last_sample) + 0x8000;
             let signed_pitch = i32::from(pitch as u16 as i16);
-            (((signed_pitch * factor) >> 15) as u32) & 0xFFFF
+            (((signed_pitch * factor) >> 15) as u32) & 0xffff
         } else {
             pitch
         };
@@ -2134,7 +2134,7 @@ impl Spu {
             let sample = if mute_voice_sample {
                 0
             } else {
-                voice.sample_buf[voice.sample_index].clamp(-0x8000, 0x7FFF) as i16
+                voice.sample_buf[voice.sample_index].clamp(-0x8000, 0x7fff) as i16
             };
             voice.sample_index += 1;
             voice.push_tap(sample);
@@ -2167,14 +2167,14 @@ impl Spu {
         let current = self.voices[v].current_addr;
 
         // An enabled IRQ address inside the block being read raises the IRQ.
-        if self.irq_triggerable() && (current & !0xF) == (self.irq_addr & !0xF) {
+        if self.irq_triggerable() && (current & !0xf) == (self.irq_addr & !0xf) {
             self.spustat |= 1 << 6;
             self.irq_pending = true;
         }
 
         let block = read_adpcm_block(&self.ram[..], current);
         let filter = usize::from(block[0] >> 4).min(ADPCM_FILTERS.len() - 1);
-        let raw_shift = block[0] & 0x0F;
+        let raw_shift = block[0] & 0x0f;
         let shift = u32::from(if raw_shift > 12 { 9 } else { raw_shift });
         let flags = block[1];
 
@@ -2182,10 +2182,10 @@ impl Spu {
         let (weight1, weight2) = ADPCM_FILTERS[filter];
         for i in 0..ADPCM_SAMPLES_PER_BLOCK {
             let byte = i32::from(block[2 + (i >> 1)]);
-            let nibble = if i & 1 == 0 { byte & 0xF } else { byte >> 4 };
+            let nibble = if i & 1 == 0 { byte & 0xf } else { byte >> 4 };
             let scaled = (((nibble << 28) >> 28) << 12) >> shift;
             let predicted = ((voice.s_1 * weight1) >> 6) + ((voice.s_2 * weight2) >> 6);
-            let sample = (scaled + predicted).clamp(-0x8000, 0x7FFF);
+            let sample = (scaled + predicted).clamp(-0x8000, 0x7fff);
             voice.sample_buf[i] = sample;
             voice.s_2 = voice.s_1;
             voice.s_1 = sample;
@@ -2232,46 +2232,46 @@ const GAUSS_TABLE: [i32; 0x200] = [
     -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001,
     -0x001, -0x001, -0x001, -0x001, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0001,
     0x0001, 0x0001, 0x0001, 0x0002, 0x0002, 0x0002, 0x0003, 0x0003, 0x0003, 0x0004, 0x0004, 0x0005,
-    0x0005, 0x0006, 0x0007, 0x0007, 0x0008, 0x0009, 0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x000E,
-    0x000F, 0x0010, 0x0011, 0x0012, 0x0013, 0x0015, 0x0016, 0x0018, 0x0019, 0x001B, 0x001C, 0x001E,
-    0x0020, 0x0021, 0x0023, 0x0025, 0x0027, 0x0029, 0x002C, 0x002E, 0x0030, 0x0033, 0x0035, 0x0038,
-    0x003A, 0x003D, 0x0040, 0x0043, 0x0046, 0x0049, 0x004D, 0x0050, 0x0054, 0x0057, 0x005B, 0x005F,
-    0x0063, 0x0067, 0x006B, 0x006F, 0x0074, 0x0078, 0x007D, 0x0082, 0x0087, 0x008C, 0x0091, 0x0096,
-    0x009C, 0x00A1, 0x00A7, 0x00AD, 0x00B3, 0x00BA, 0x00C0, 0x00C7, 0x00CD, 0x00D4, 0x00DB, 0x00E3,
-    0x00EA, 0x00F2, 0x00FA, 0x0101, 0x010A, 0x0112, 0x011B, 0x0123, 0x012C, 0x0135, 0x013F, 0x0148,
-    0x0152, 0x015C, 0x0166, 0x0171, 0x017B, 0x0186, 0x0191, 0x019C, 0x01A8, 0x01B4, 0x01C0, 0x01CC,
-    0x01D9, 0x01E5, 0x01F2, 0x0200, 0x020D, 0x021B, 0x0229, 0x0237, 0x0246, 0x0255, 0x0264, 0x0273,
-    0x0283, 0x0293, 0x02A3, 0x02B4, 0x02C4, 0x02D6, 0x02E7, 0x02F9, 0x030B, 0x031D, 0x0330, 0x0343,
-    0x0356, 0x036A, 0x037E, 0x0392, 0x03A7, 0x03BC, 0x03D1, 0x03E7, 0x03FC, 0x0413, 0x042A, 0x0441,
-    0x0458, 0x0470, 0x0488, 0x04A0, 0x04B9, 0x04D2, 0x04EC, 0x0506, 0x0520, 0x053B, 0x0556, 0x0572,
-    0x058E, 0x05AA, 0x05C7, 0x05E4, 0x0601, 0x061F, 0x063E, 0x065C, 0x067C, 0x069B, 0x06BB, 0x06DC,
-    0x06FD, 0x071E, 0x0740, 0x0762, 0x0784, 0x07A7, 0x07CB, 0x07EF, 0x0813, 0x0838, 0x085D, 0x0883,
-    0x08A9, 0x08D0, 0x08F7, 0x091E, 0x0946, 0x096F, 0x0998, 0x09C1, 0x09EB, 0x0A16, 0x0A40, 0x0A6C,
-    0x0A98, 0x0AC4, 0x0AF1, 0x0B1E, 0x0B4C, 0x0B7A, 0x0BA9, 0x0BD8, 0x0C07, 0x0C38, 0x0C68, 0x0C99,
-    0x0CCB, 0x0CFD, 0x0D30, 0x0D63, 0x0D97, 0x0DCB, 0x0E00, 0x0E35, 0x0E6B, 0x0EA1, 0x0ED7, 0x0F0F,
-    0x0F46, 0x0F7F, 0x0FB7, 0x0FF1, 0x102A, 0x1065, 0x109F, 0x10DB, 0x1116, 0x1153, 0x118F, 0x11CD,
-    0x120B, 0x1249, 0x1288, 0x12C7, 0x1307, 0x1347, 0x1388, 0x13C9, 0x140B, 0x144D, 0x1490, 0x14D4,
-    0x1517, 0x155C, 0x15A0, 0x15E6, 0x162C, 0x1672, 0x16B9, 0x1700, 0x1747, 0x1790, 0x17D8, 0x1821,
-    0x186B, 0x18B5, 0x1900, 0x194B, 0x1996, 0x19E2, 0x1A2E, 0x1A7B, 0x1AC8, 0x1B16, 0x1B64, 0x1BB3,
-    0x1C02, 0x1C51, 0x1CA1, 0x1CF1, 0x1D42, 0x1D93, 0x1DE5, 0x1E37, 0x1E89, 0x1EDC, 0x1F2F, 0x1F82,
-    0x1FD6, 0x202A, 0x207F, 0x20D4, 0x2129, 0x217F, 0x21D5, 0x222C, 0x2282, 0x22DA, 0x2331, 0x2389,
-    0x23E1, 0x2439, 0x2492, 0x24EB, 0x2545, 0x259E, 0x25F8, 0x2653, 0x26AD, 0x2708, 0x2763, 0x27BE,
-    0x281A, 0x2876, 0x28D2, 0x292E, 0x298B, 0x29E7, 0x2A44, 0x2AA1, 0x2AFF, 0x2B5C, 0x2BBA, 0x2C18,
-    0x2C76, 0x2CD4, 0x2D33, 0x2D91, 0x2DF0, 0x2E4F, 0x2EAE, 0x2F0D, 0x2F6C, 0x2FCC, 0x302B, 0x308B,
-    0x30EA, 0x314A, 0x31AA, 0x3209, 0x3269, 0x32C9, 0x3329, 0x3389, 0x33E9, 0x3449, 0x34A9, 0x3509,
-    0x3569, 0x35C9, 0x3629, 0x3689, 0x36E8, 0x3748, 0x37A8, 0x3807, 0x3867, 0x38C6, 0x3926, 0x3985,
-    0x39E4, 0x3A43, 0x3AA2, 0x3B00, 0x3B5F, 0x3BBD, 0x3C1B, 0x3C79, 0x3CD7, 0x3D35, 0x3D92, 0x3DEF,
-    0x3E4C, 0x3EA9, 0x3F05, 0x3F62, 0x3FBD, 0x4019, 0x4074, 0x40D0, 0x412A, 0x4185, 0x41DF, 0x4239,
-    0x4292, 0x42EB, 0x4344, 0x439C, 0x43F4, 0x444C, 0x44A3, 0x44FA, 0x4550, 0x45A6, 0x45FC, 0x4651,
-    0x46A6, 0x46FA, 0x474E, 0x47A1, 0x47F4, 0x4846, 0x4898, 0x48E9, 0x493A, 0x498A, 0x49D9, 0x4A29,
-    0x4A77, 0x4AC5, 0x4B13, 0x4B5F, 0x4BAC, 0x4BF7, 0x4C42, 0x4C8D, 0x4CD7, 0x4D20, 0x4D68, 0x4DB0,
-    0x4DF7, 0x4E3E, 0x4E84, 0x4EC9, 0x4F0E, 0x4F52, 0x4F95, 0x4FD7, 0x5019, 0x505A, 0x509A, 0x50DA,
-    0x5118, 0x5156, 0x5194, 0x51D0, 0x520C, 0x5247, 0x5281, 0x52BA, 0x52F3, 0x532A, 0x5361, 0x5397,
-    0x53CC, 0x5401, 0x5434, 0x5467, 0x5499, 0x54CA, 0x54FA, 0x5529, 0x5558, 0x5585, 0x55B2, 0x55DE,
-    0x5609, 0x5632, 0x565B, 0x5684, 0x56AB, 0x56D1, 0x56F6, 0x571B, 0x573E, 0x5761, 0x5782, 0x57A3,
-    0x57C3, 0x57E2, 0x57FF, 0x581C, 0x5838, 0x5853, 0x586D, 0x5886, 0x589E, 0x58B5, 0x58CB, 0x58E0,
-    0x58F4, 0x5907, 0x5919, 0x592A, 0x593A, 0x5949, 0x5958, 0x5965, 0x5971, 0x597C, 0x5986, 0x598F,
-    0x5997, 0x599E, 0x59A4, 0x59A9, 0x59AD, 0x59B0, 0x59B2, 0x59B3,
+    0x0005, 0x0006, 0x0007, 0x0007, 0x0008, 0x0009, 0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x000e,
+    0x000f, 0x0010, 0x0011, 0x0012, 0x0013, 0x0015, 0x0016, 0x0018, 0x0019, 0x001b, 0x001c, 0x001e,
+    0x0020, 0x0021, 0x0023, 0x0025, 0x0027, 0x0029, 0x002c, 0x002e, 0x0030, 0x0033, 0x0035, 0x0038,
+    0x003a, 0x003d, 0x0040, 0x0043, 0x0046, 0x0049, 0x004d, 0x0050, 0x0054, 0x0057, 0x005b, 0x005f,
+    0x0063, 0x0067, 0x006b, 0x006f, 0x0074, 0x0078, 0x007d, 0x0082, 0x0087, 0x008c, 0x0091, 0x0096,
+    0x009c, 0x00a1, 0x00a7, 0x00ad, 0x00b3, 0x00ba, 0x00c0, 0x00c7, 0x00cd, 0x00d4, 0x00db, 0x00e3,
+    0x00ea, 0x00f2, 0x00fa, 0x0101, 0x010a, 0x0112, 0x011b, 0x0123, 0x012c, 0x0135, 0x013f, 0x0148,
+    0x0152, 0x015c, 0x0166, 0x0171, 0x017b, 0x0186, 0x0191, 0x019c, 0x01a8, 0x01b4, 0x01c0, 0x01cc,
+    0x01d9, 0x01e5, 0x01f2, 0x0200, 0x020d, 0x021b, 0x0229, 0x0237, 0x0246, 0x0255, 0x0264, 0x0273,
+    0x0283, 0x0293, 0x02a3, 0x02b4, 0x02c4, 0x02d6, 0x02e7, 0x02f9, 0x030b, 0x031d, 0x0330, 0x0343,
+    0x0356, 0x036a, 0x037e, 0x0392, 0x03a7, 0x03bc, 0x03d1, 0x03e7, 0x03fc, 0x0413, 0x042a, 0x0441,
+    0x0458, 0x0470, 0x0488, 0x04a0, 0x04b9, 0x04d2, 0x04ec, 0x0506, 0x0520, 0x053b, 0x0556, 0x0572,
+    0x058e, 0x05aa, 0x05c7, 0x05e4, 0x0601, 0x061f, 0x063e, 0x065c, 0x067c, 0x069b, 0x06bb, 0x06dc,
+    0x06fd, 0x071e, 0x0740, 0x0762, 0x0784, 0x07a7, 0x07cb, 0x07ef, 0x0813, 0x0838, 0x085d, 0x0883,
+    0x08a9, 0x08d0, 0x08f7, 0x091e, 0x0946, 0x096f, 0x0998, 0x09c1, 0x09eb, 0x0a16, 0x0a40, 0x0a6c,
+    0x0a98, 0x0ac4, 0x0af1, 0x0b1e, 0x0b4c, 0x0b7a, 0x0ba9, 0x0bd8, 0x0c07, 0x0c38, 0x0c68, 0x0c99,
+    0x0ccb, 0x0cfd, 0x0d30, 0x0d63, 0x0d97, 0x0dcb, 0x0e00, 0x0e35, 0x0e6b, 0x0ea1, 0x0ed7, 0x0f0f,
+    0x0f46, 0x0f7f, 0x0fb7, 0x0ff1, 0x102a, 0x1065, 0x109f, 0x10db, 0x1116, 0x1153, 0x118f, 0x11cd,
+    0x120b, 0x1249, 0x1288, 0x12c7, 0x1307, 0x1347, 0x1388, 0x13c9, 0x140b, 0x144d, 0x1490, 0x14d4,
+    0x1517, 0x155c, 0x15a0, 0x15e6, 0x162c, 0x1672, 0x16b9, 0x1700, 0x1747, 0x1790, 0x17d8, 0x1821,
+    0x186b, 0x18b5, 0x1900, 0x194b, 0x1996, 0x19e2, 0x1a2e, 0x1a7b, 0x1ac8, 0x1b16, 0x1b64, 0x1bb3,
+    0x1c02, 0x1c51, 0x1ca1, 0x1cf1, 0x1d42, 0x1d93, 0x1de5, 0x1e37, 0x1e89, 0x1edc, 0x1f2f, 0x1f82,
+    0x1fd6, 0x202a, 0x207f, 0x20d4, 0x2129, 0x217f, 0x21d5, 0x222c, 0x2282, 0x22da, 0x2331, 0x2389,
+    0x23e1, 0x2439, 0x2492, 0x24eb, 0x2545, 0x259e, 0x25f8, 0x2653, 0x26ad, 0x2708, 0x2763, 0x27be,
+    0x281a, 0x2876, 0x28d2, 0x292e, 0x298b, 0x29e7, 0x2a44, 0x2aa1, 0x2aff, 0x2b5c, 0x2bba, 0x2c18,
+    0x2c76, 0x2cd4, 0x2d33, 0x2d91, 0x2df0, 0x2e4f, 0x2eae, 0x2f0d, 0x2f6c, 0x2fcc, 0x302b, 0x308b,
+    0x30ea, 0x314a, 0x31aa, 0x3209, 0x3269, 0x32c9, 0x3329, 0x3389, 0x33e9, 0x3449, 0x34a9, 0x3509,
+    0x3569, 0x35c9, 0x3629, 0x3689, 0x36e8, 0x3748, 0x37a8, 0x3807, 0x3867, 0x38c6, 0x3926, 0x3985,
+    0x39e4, 0x3a43, 0x3aa2, 0x3b00, 0x3b5f, 0x3bbd, 0x3c1b, 0x3c79, 0x3cd7, 0x3d35, 0x3d92, 0x3def,
+    0x3e4c, 0x3ea9, 0x3f05, 0x3f62, 0x3fbd, 0x4019, 0x4074, 0x40d0, 0x412a, 0x4185, 0x41df, 0x4239,
+    0x4292, 0x42eb, 0x4344, 0x439c, 0x43f4, 0x444c, 0x44a3, 0x44fa, 0x4550, 0x45a6, 0x45fc, 0x4651,
+    0x46a6, 0x46fa, 0x474e, 0x47a1, 0x47f4, 0x4846, 0x4898, 0x48e9, 0x493a, 0x498a, 0x49d9, 0x4a29,
+    0x4a77, 0x4ac5, 0x4b13, 0x4b5f, 0x4bac, 0x4bf7, 0x4c42, 0x4c8d, 0x4cd7, 0x4d20, 0x4d68, 0x4db0,
+    0x4df7, 0x4e3e, 0x4e84, 0x4ec9, 0x4f0e, 0x4f52, 0x4f95, 0x4fd7, 0x5019, 0x505a, 0x509a, 0x50da,
+    0x5118, 0x5156, 0x5194, 0x51d0, 0x520c, 0x5247, 0x5281, 0x52ba, 0x52f3, 0x532a, 0x5361, 0x5397,
+    0x53cc, 0x5401, 0x5434, 0x5467, 0x5499, 0x54ca, 0x54fa, 0x5529, 0x5558, 0x5585, 0x55b2, 0x55de,
+    0x5609, 0x5632, 0x565b, 0x5684, 0x56ab, 0x56d1, 0x56f6, 0x571b, 0x573e, 0x5761, 0x5782, 0x57a3,
+    0x57c3, 0x57e2, 0x57ff, 0x581c, 0x5838, 0x5853, 0x586d, 0x5886, 0x589e, 0x58b5, 0x58cb, 0x58e0,
+    0x58f4, 0x5907, 0x5919, 0x592a, 0x593a, 0x5949, 0x5958, 0x5965, 0x5971, 0x597c, 0x5986, 0x598f,
+    0x5997, 0x599e, 0x59a4, 0x59a9, 0x59ad, 0x59b0, 0x59b2, 0x59b3,
 ];
 
 /// Interpolate between the four most recent samples (oldest first) at the
@@ -2279,9 +2279,9 @@ const GAUSS_TABLE: [i32; 0x200] = [
 /// 4..11 of the counter. The four weighted samples are summed and the sum
 /// shifted down 15 places.
 fn gauss_interpolate(taps: [i16; 4], counter: u32) -> i16 {
-    let i = ((counter >> 4) & 0xFF) as usize;
-    let sum = GAUSS_TABLE[0xFF - i] * i32::from(taps[0])
-        + GAUSS_TABLE[0x1FF - i] * i32::from(taps[1])
+    let i = ((counter >> 4) & 0xff) as usize;
+    let sum = GAUSS_TABLE[0xff - i] * i32::from(taps[0])
+        + GAUSS_TABLE[0x1ff - i] * i32::from(taps[1])
         + GAUSS_TABLE[0x100 + i] * i32::from(taps[2])
         + GAUSS_TABLE[i] * i32::from(taps[3]);
     saturate_i16(sum >> 15)
@@ -2335,7 +2335,7 @@ fn apply_adsr_volume(sample: i16, envelope: i32) -> i16 {
     // LSB on five of them. No saturation needed: |result| <= 32767, and
     // Rust's >> on i32 is arithmetic, matching the floor behavior the
     // 0x3FFF decay sample confirms.
-    let env = envelope.clamp(0, 0x7FFF);
+    let env = envelope.clamp(0, 0x7fff);
     (((sample as i32) * env) >> 15) as i16
 }
 

@@ -154,6 +154,6 @@ impl XaResampler {
             let at = (self.pos as usize).wrapping_sub(back + 1) % RING;
             sum += i32::from(ring[at]) * weights[phase];
         }
-        (sum >> 15).clamp(-0x8000, 0x7FFF) as i16
+        (sum >> 15).clamp(-0x8000, 0x7fff) as i16
     }
 }

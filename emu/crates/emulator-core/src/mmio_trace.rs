@@ -164,8 +164,8 @@ mod tests {
     #[test]
     fn records_and_returns_in_order() {
         let mut t = MmioTrace::new();
-        t.record(1, MmioKind::R32, 0x1F80_1070, 0xDEAD);
-        t.record(2, MmioKind::W32, 0x1F80_1074, 0xBEEF);
+        t.record(1, MmioKind::R32, 0x1f80_1070, 0xdead);
+        t.record(2, MmioKind::W32, 0x1f80_1074, 0xbeef);
         let v: Vec<_> = t.iter_chronological().collect();
         assert_eq!(v.len(), 2);
         assert_eq!(v[0].cycle, 1);
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn no_op_without_feature() {
         let mut t = MmioTrace::new();
-        t.record(1, MmioKind::R32, 0x1F80_1070, 0xDEAD);
+        t.record(1, MmioKind::R32, 0x1f80_1070, 0xdead);
         assert_eq!(t.len(), 0);
         assert!(t.is_empty());
     }

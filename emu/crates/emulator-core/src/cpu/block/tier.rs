@@ -333,8 +333,8 @@ impl Cpu {
         st: &mut BatchState,
     ) -> bool {
         let phys = memory::to_physical(addr);
-        if !(0x1F80_1000..0x1F80_2000).contains(&phys)
-            || (0x1F80_1040..0x1F80_1060).contains(&phys)
+        if !(0x1f80_1000..0x1f80_2000).contains(&phys)
+            || (0x1f80_1040..0x1f80_1060).contains(&phys)
             || irq_raise_total(bus) != raised
         {
             return false;
@@ -379,7 +379,7 @@ impl Cpu {
             || self.cop0[12] & (1 << 16) != 0
             || self.cache_control & CACHE_CONTROL_IS1 == 0
             || pc & 3 != 0
-            || pc >= 0xA000_0000
+            || pc >= 0xa000_0000
         {
             return false;
         }
@@ -401,7 +401,7 @@ impl Cpu {
             Some(OpClass::GteCommand) => !self.irq_enabled(),
             Some(OpClass::Load | OpClass::Store) => {
                 let addr = self
-                    .gpr(((word >> 21) & 0x1F) as u8)
+                    .gpr(((word >> 21) & 0x1f) as u8)
                     .wrapping_add((word as i16) as i32 as u32);
                 matches!(tier_access_kind(word, addr), Access::Quiet)
             }
@@ -606,8 +606,8 @@ impl Cpu {
             }
             // The kernel-call vectors (A0/B0/C0) are never entered by the
             // block tier: the HLE hooks and BIOS trampolines run there.
-            let base = (run.target >> 20) & 0x0FFC;
-            if matches!(base, 0x000 | 0x800 | 0xA00) && run.target & (RAM_BYTES - 1) < 0x100 {
+            let base = (run.target >> 20) & 0x0ffc;
+            if matches!(base, 0x000 | 0x800 | 0xa00) && run.target & (RAM_BYTES - 1) < 0x100 {
                 return None;
             }
             run.last_boundary = now;
@@ -618,7 +618,7 @@ impl Cpu {
         if run.ran >= run.budget_left
             || self.gte_irq_watch.is_some()
             || pc & 3 != 0
-            || pc >= 0xA000_0000
+            || pc >= 0xa000_0000
         {
             return None;
         }
@@ -946,7 +946,7 @@ pub(in crate::cpu) fn device_access(word: u32, addr: u32) -> bool {
 
 #[inline(always)]
 fn tier_access_kind(word: u32, addr: u32) -> Access {
-    if matches!(word >> 26, 0x32 | 0x3A) && addr & 3 != 0 {
+    if matches!(word >> 26, 0x32 | 0x3a) && addr & 3 != 0 {
         return Access::Unsafe;
     }
     access_kind(word, addr)

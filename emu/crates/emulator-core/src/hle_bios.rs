@@ -33,13 +33,13 @@ use psx_hw::memory::to_physical;
 pub(crate) const UNRESOLVED_HANDLER_PTR: u32 = crate::hle_kernel::A0_TABLE + 4 * 0x40;
 /// Return address given to a guest unresolved-exception handler; reaching
 /// it restores the saved thread frame.
-pub(crate) const EXCEPTION_RETURN_STUB: u32 = 0x8000_00D0;
+pub(crate) const EXCEPTION_RETURN_STUB: u32 = 0x8000_00d0;
 
 /// Offsets inside a TCB (psx-spx "Thread Control Blocks"): registers r0..r31
 /// from +08h, then return PC, HI, LO, SR and CAUSE.
 pub(crate) const TCB_REGISTERS: u32 = 0x08;
 pub(crate) const TCB_RETURN_PC: u32 = 0x88;
-pub(crate) const TCB_HI: u32 = 0x8C;
+pub(crate) const TCB_HI: u32 = 0x8c;
 pub(crate) const TCB_LO: u32 = 0x90;
 pub(crate) const TCB_SR: u32 = 0x94;
 pub(crate) const TCB_CAUSE: u32 = 0x98;
@@ -89,9 +89,9 @@ impl Table {
 
     fn from_phys(phys: u32) -> Option<Self> {
         match phys {
-            0xA0 => Some(Table::A),
-            0xB0 => Some(Table::B),
-            0xC0 => Some(Table::C),
+            0xa0 => Some(Table::A),
+            0xb0 => Some(Table::B),
+            0xc0 => Some(Table::C),
             _ => None,
         }
     }
@@ -107,7 +107,7 @@ pub fn function_name(table: Table, func: u8) -> &'static str {
             crate::hle_exceptions::internal::SYSCALL_VERIFIER => "kernel_syscall_check",
             0x04..=0x07 => "kernel_timer_irq",
             0x10 => "kernel_file_continue",
-            0x1F => "kernel_nop",
+            0x1f => "kernel_nop",
             0x20 => "kernel_tty_io",
             0x28 => "kernel_cd_open",
             0x29 => "kernel_cd_read",
@@ -229,10 +229,10 @@ pub fn call_cycles(table: Table, func: u8, v0: Option<u32>, args: [u32; 4]) -> u
     // Lengths beyond RAM are refused or wrap; cap the charge there.
     let len = |n: u32| u64::from(n.min(psx_hw::memory::ram::SIZE as u32));
     let cycles = match (table, func, v0) {
-        (Table::B, 0x0B, Some(1)) => 48,
-        (Table::B, 0x0B, Some(_)) => 43,
-        (Table::A, 0x2A, Some(_)) if args[2] as i32 > 0 => 243 + len(args[2]) * 405 / 2,
-        (Table::A, 0x2B, Some(_)) if args[2] as i32 > 0 => 314 + len(args[2]) * 132,
+        (Table::B, 0x0b, Some(1)) => 48,
+        (Table::B, 0x0b, Some(_)) => 43,
+        (Table::A, 0x2a, Some(_)) if args[2] as i32 > 0 => 243 + len(args[2]) * 405 / 2,
+        (Table::A, 0x2b, Some(_)) if args[2] as i32 > 0 => 314 + len(args[2]) * 132,
         (Table::A, 0x28, Some(_)) if args[1] as i32 > 0 => 322 + len(args[1]) * 132,
         _ => 2,
     };
@@ -364,9 +364,7 @@ enum Ret {
 }
 
 fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut bool) -> Ret {
-    use crate::hle_card as card;
-    use crate::hle_exceptions as ex;
-    use crate::hle_files as files;
+    use crate::{hle_card as card, hle_exceptions as ex, hle_files as files};
     let file_call = |call: files::FileCall| match call {
         files::FileCall::Return(v) => Done(v),
         files::FileCall::Jump(target) => Jump(target),
@@ -389,17 +387,17 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // arm.
 
         // A(0Eh) abs / A(0Fh) labs.
-        (Table::A, 0x0E) | (Table::A, 0x0F) => Done((args[0] as i32).wrapping_abs() as u32),
+        (Table::A, 0x0e) | (Table::A, 0x0f) => Done((args[0] as i32).wrapping_abs() as u32),
 
         // A(0Ch) strtoul / A(0Dh) strtol(src, &end, base), A(10h) atoi /
         // A(11h) atol(src), A(12h) atob(src, &value): psx-spx "Number/
         // String/Character Conversion", quirks included.
-        (Table::A, 0x0C) | (Table::A, 0x0D) => {
+        (Table::A, 0x0c) | (Table::A, 0x0d) => {
             let (src, end_dst, base) = (args[0], args[1], args[2]);
             if src == 0 {
                 return Done(0);
             }
-            let (value, end) = libc::strtol(bus, src, base, func == 0x0D, false);
+            let (value, end) = libc::strtol(bus, src, base, func == 0x0d, false);
             if end_dst != 0 {
                 k::poke32(bus, end_dst, end);
             }
@@ -445,14 +443,14 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         (Table::A, 0x18) => Done(libc::strncmp(bus, args[0], args[1], Some(args[2]))),
         // A(19h) strcpy(dst, src) / A(1Ah) strncpy(dst, src, maxlen).
         (Table::A, 0x19) => Done(libc::strcpy(bus, args[0], args[1])),
-        (Table::A, 0x1A) => Done(libc::strncpy(bus, args[0], args[1], args[2])),
+        (Table::A, 0x1a) => Done(libc::strncpy(bus, args[0], args[1], args[2])),
         // A(1Bh) strlen(s).
-        (Table::A, 0x1B) => Done(libc::strlen(bus, args[0])),
+        (Table::A, 0x1b) => Done(libc::strlen(bus, args[0])),
         // A(1Ch) index / A(1Eh) strchr, A(1Dh) rindex / A(1Fh) strrchr.
-        (Table::A, 0x1C) | (Table::A, 0x1E) => {
+        (Table::A, 0x1c) | (Table::A, 0x1e) => {
             Done(libc::strchr(bus, args[0], args[1] as u8, false))
         }
-        (Table::A, 0x1D) | (Table::A, 0x1F) => {
+        (Table::A, 0x1d) | (Table::A, 0x1f) => {
             Done(libc::strchr(bus, args[0], args[1] as u8, true))
         }
         // A(25h) toupper / A(26h) tolower. psx-spx documents 00h..7Fh only;
@@ -465,31 +463,31 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             libc::memcpy(bus, args[1], args[0], args[2], args[0]);
             Done(args[0])
         }
-        (Table::A, 0x2A) => {
+        (Table::A, 0x2a) => {
             libc::memcpy(bus, args[0], args[1], args[2], args[0]);
             Done(args[0])
         }
         // A(28h) bzero(dst, len) / A(2Bh) memset(dst, fill, len).
         (Table::A, 0x28) => Done(libc::memset(bus, args[0], 0, args[1])),
-        (Table::A, 0x2B) => Done(libc::memset(bus, args[0], args[1] as u8, args[2])),
+        (Table::A, 0x2b) => Done(libc::memset(bus, args[0], args[1] as u8, args[2])),
         // A(2Ch) memmove(dst, src, len), A(29h) bcmp / A(2Dh) memcmp:
         // with the retail bugs psx-spx documents.
-        (Table::A, 0x2C) => {
+        (Table::A, 0x2c) => {
             libc::memmove(bus, args[0], args[1], args[2]);
             Done(args[0])
         }
-        (Table::A, 0x29) | (Table::A, 0x2D) => Done(libc::memcmp(bus, args[0], args[1], args[2])),
+        (Table::A, 0x29) | (Table::A, 0x2d) => Done(libc::memcmp(bus, args[0], args[1], args[2])),
         // A(2Eh) memchr(src, byte, len).
-        (Table::A, 0x2E) => Done(libc::memchr(bus, args[0], args[1] as u8, args[2])),
+        (Table::A, 0x2e) => Done(libc::memchr(bus, args[0], args[1] as u8, args[2])),
 
         // A(2Fh) rand / A(30h) srand(seed): x = x*41C64E6Dh + 3039h,
         // result (x >> 16) & 7FFFh (psx-spx). The seed lives in kernel RAM.
-        (Table::A, 0x2F) => {
+        (Table::A, 0x2f) => {
             let x = k::peek32(bus, k::kvar::RAND_SEED)
-                .wrapping_mul(0x41C6_4E6D)
+                .wrapping_mul(0x41c6_4e6d)
                 .wrapping_add(0x3039);
             k::poke32(bus, k::kvar::RAND_SEED, x);
-            Done((x >> 16) & 0x7FFF)
+            Done((x >> 16) & 0x7fff)
         }
         (Table::A, 0x30) => {
             k::poke32(bus, k::kvar::RAND_SEED, args[0]);
@@ -511,16 +509,16 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         }
 
         // A(3Ch) putchar.
-        (Table::A, 0x3C) => {
+        (Table::A, 0x3c) => {
             write_byte_to_stdout(args[0] as u8);
             Done(0)
         }
         // A(3Eh) puts(s) / A(3Fh) printf.
-        (Table::A, 0x3E) => {
+        (Table::A, 0x3e) => {
             write_puts_to_stdout(bus, args[0]);
             Done(0)
         }
-        (Table::A, 0x3F) => {
+        (Table::A, 0x3f) => {
             // printf varargs follow the MIPS o32 ABI: a1-a3 first, then the
             // caller's reserved argument area beginning at sp+16. Reading
             // both sources lets public hardware suites print complete rows
@@ -537,13 +535,13 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             bus.write32(crate::gpu::GP1_ADDR, args[0]);
             Done(gprs[2])
         }
-        (Table::A, 0x49) | (Table::A, 0x4A) | (Table::A, 0x4E) => {
+        (Table::A, 0x49) | (Table::A, 0x4a) | (Table::A, 0x4e) => {
             if !gpu_sync(bus) {
                 return Retry;
             }
             match func {
                 0x49 => bus.write32(crate::gpu::GP0_ADDR, args[0]),
-                0x4A => {
+                0x4a => {
                     for i in 0..args[1].min(0x10_0000) {
                         let word = k::peek32(bus, args[0].wrapping_add(4 * i));
                         bus.write32(crate::gpu::GP0_ADDR, word);
@@ -553,7 +551,7 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             }
             Done(0)
         }
-        (Table::A, 0x4D) => Done(bus.read32(crate::gpu::GP1_ADDR)),
+        (Table::A, 0x4d) => Done(bus.read32(crate::gpu::GP1_ADDR)),
 
         // A(41h) LoadTest(name, header), A(42h) Load(name, header) and
         // A(51h) LoadExec(name, stackbase, stackoffset) (psx-spx "BIOS File
@@ -618,22 +616,22 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // _card_info, A(ACh) _card_load, A(ADh) _card_auto, and the
         // bufs_cb completion callbacks A(A7h)-A(AAh), which deliver
         // SwCARD events.
-        (Table::A, 0xAB) => Done(crate::hle_bu::card_info(bus, args[0])),
-        (Table::A, 0xAC) => Done(crate::hle_bu::card_load(bus, args[0])),
-        (Table::A, 0xAD) => Done(card::set_auto_format(bus, args[0])),
-        (Table::A, 0xA7)
-        | (Table::A, 0xA8)
-        | (Table::A, 0xA9)
-        | (Table::A, 0xAA)
-        | (Table::A, 0xAE) => {
-            if func == 0xA7 {
+        (Table::A, 0xab) => Done(crate::hle_bu::card_info(bus, args[0])),
+        (Table::A, 0xac) => Done(crate::hle_bu::card_load(bus, args[0])),
+        (Table::A, 0xad) => Done(card::set_auto_format(bus, args[0])),
+        (Table::A, 0xa7)
+        | (Table::A, 0xa8)
+        | (Table::A, 0xa9)
+        | (Table::A, 0xaa)
+        | (Table::A, 0xae) => {
+            if func == 0xa7 {
                 crate::hle_bu::low_level_completed(bus);
             } else {
                 // A8..AA are 0..2, AE is 3.
-                let which = if func == 0xAE {
+                let which = if func == 0xae {
                     3
                 } else {
-                    u32::from(func - 0xA8)
+                    u32::from(func - 0xa8)
                 };
                 crate::hle_bu::low_level_error(bus, which);
             }
@@ -650,11 +648,11 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
 
         // A(9Ch) SetConf(events, threads, stacktop): reallocate the
         // control blocks. A(9Dh) GetConf(&events, &threads, &stacktop).
-        (Table::A, 0x9C) => {
+        (Table::A, 0x9c) => {
             k::set_conf(bus, args[0], args[1], args[2]);
             Done(0)
         }
-        (Table::A, 0x9D) => {
+        (Table::A, 0x9d) => {
             let (event, tcb, stack) = k::get_conf(bus);
             k::poke32(bus, args[0], event);
             k::poke32(bus, args[1], tcb);
@@ -665,7 +663,7 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // A(9Fh) SetMem(megabytes): 2 clears RAM_SIZE bits 8-9, 8 sets them,
         // and the size is recorded at [0x60] (psx-spx: the retail variant
         // only knows 2 and 8). Other values change nothing.
-        (Table::A, 0x9F) => {
+        (Table::A, 0x9f) => {
             set_mem_size(bus, args[0]);
             Done(0)
         }
@@ -702,13 +700,13 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             ex::close_event(bus, args[0]);
             Done(1)
         }
-        (Table::B, 0x0A) => match ex::wait_event(bus, args[0]) {
+        (Table::B, 0x0a) => match ex::wait_event(bus, args[0]) {
             Some(v) => Done(v),
             None => Retry,
         },
-        (Table::B, 0x0B) => Done(u32::from(ex::test_event(bus, args[0]))),
-        (Table::B, 0x0C) | (Table::B, 0x0D) => {
-            ex::set_event_enabled(bus, args[0], func == 0x0C);
+        (Table::B, 0x0b) => Done(u32::from(ex::test_event(bus, args[0]))),
+        (Table::B, 0x0c) | (Table::B, 0x0d) => {
+            ex::set_event_enabled(bus, args[0], func == 0x0c);
             Done(1)
         }
         (Table::B, 0x20) => {
@@ -718,8 +716,8 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
 
         // Threads (psx-spx "BIOS Thread Functions"): OpenTh, CloseTh, and
         // ChangeTh, which is SYSCALL(3) with the new TCB in a1.
-        (Table::B, 0x0E) => Done(ex::open_thread(bus, args[0], args[1], args[2])),
-        (Table::B, 0x0F) => {
+        (Table::B, 0x0e) => Done(ex::open_thread(bus, args[0], args[1], args[2])),
+        (Table::B, 0x0f) => {
             ex::close_thread(bus, args[0]);
             Done(1)
         }
@@ -828,12 +826,12 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         (Table::B, 0x55) => Done(files::file_error(bus, args[0])),
 
         // B(3Dh) putchar -- same as A(3Ch).
-        (Table::B, 0x3D) => {
+        (Table::B, 0x3d) => {
             write_byte_to_stdout(args[0] as u8);
             Done(0)
         }
         // B(3Fh) puts -- same as A(3Eh).
-        (Table::B, 0x3F) => {
+        (Table::B, 0x3f) => {
             write_puts_to_stdout(bus, args[0]);
             Done(0)
         }
@@ -860,7 +858,7 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // auto-acknowledge, which psx-spx's "Patches" notes say this call
         // can disable. psx-spx gives no return value, so v0 is left as it
         // was.
-        (Table::B, 0x5B) => {
+        (Table::B, 0x5b) => {
             k::poke32(bus, k::kvar::SIO0_AUTO_ACK, args[0]);
             Done(gprs[2])
         }
@@ -869,28 +867,28 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         // _card_info_subfunc, B(4Eh) _card_write, B(4Fh) _card_read,
         // B(50h) _new_card, B(58h) _card_chan, B(5Ch) _card_status,
         // B(5Dh) _card_wait. The bytes move on IRQ7 (hle_card).
-        (Table::B, 0x4A) => {
+        (Table::B, 0x4a) => {
             *flush = true;
             Done(card::init_card(bus, args[0]))
         }
-        (Table::B, 0x4B) => {
+        (Table::B, 0x4b) => {
             gprs[2] = card::start_card(bus);
             leave_critical_section(gprs)
         }
-        (Table::B, 0x4C) => {
+        (Table::B, 0x4c) => {
             gprs[2] = card::stop_card(bus);
             leave_critical_section(gprs)
         }
-        (Table::B, 0x4D) => Done(card::card_info_internal(bus, args[0])),
-        (Table::B, 0x4E) => Done(card::card_write(bus, args[0], args[1], args[2])),
-        (Table::B, 0x4F) => Done(card::card_read(bus, args[0], args[1], args[2])),
+        (Table::B, 0x4d) => Done(card::card_info_internal(bus, args[0])),
+        (Table::B, 0x4e) => Done(card::card_write(bus, args[0], args[1], args[2])),
+        (Table::B, 0x4f) => Done(card::card_read(bus, args[0], args[1], args[2])),
         (Table::B, 0x50) => {
             card::new_card(bus);
             Done(gprs[2])
         }
         (Table::B, 0x58) => Done(card::card_chan(bus)),
-        (Table::B, 0x5C) => Done(card::card_status(bus, args[0])),
-        (Table::B, 0x5D) => match card::card_wait(bus, args[0]) {
+        (Table::B, 0x5c) => Done(card::card_status(bus, args[0])),
+        (Table::B, 0x5d) => match card::card_wait(bus, args[0]) {
             Some(v) => Done(v),
             None => Retry,
         },
@@ -922,11 +920,11 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             *flush = true;
             Done(0)
         }
-        (Table::C, 0x0C) => {
+        (Table::C, 0x0c) => {
             ex::enqueue_defint(bus, args[0]);
             Done(0)
         }
-        (Table::C, 0x0D) => {
+        (Table::C, 0x0d) => {
             ex::set_irq_autoack(bus, args[0], args[1]);
             Done(0)
         }
@@ -959,7 +957,7 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
             Done(files::continue_call(bus, gprs, v0))
         }
         (Table::Kernel, files::internal::NOP) => Done(0),
-        (Table::Kernel, n) if (0x21..=0x2C).contains(&n) && n != 0x28 && n != 0x29 => {
+        (Table::Kernel, n) if (0x21..=0x2c).contains(&n) && n != 0x28 && n != 0x29 => {
             use crate::hle_bu as bu;
             let result = match n {
                 bu::internal::OPEN => bu::open(bus, args[0], args[1], args[2]),
@@ -1018,7 +1016,7 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
         }
         (Table::Kernel, files::internal::CD_IO_IRQ) => match files::cd_io_irq(bus) {
             Some(spec) => {
-                gprs[4] = 0xF000_0003;
+                gprs[4] = 0xf000_0003;
                 gprs[5] = spec;
                 gprs[31] = ex::code().return_from_exception;
                 Jump(ex::code().deliver_event)
@@ -1035,15 +1033,15 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
 
         // C(0Ah) ChangeClearRCnt(t, flag): root-counter auto-ack; returns
         // the previous flag.
-        (Table::C, 0x0A) => Done(ex::change_clear_rcnt(bus, args[0], args[1])),
+        (Table::C, 0x0a) => Done(ex::change_clear_rcnt(bus, args[0], args[1])),
 
         // C(1Ah) set_card_find_mode / C(1Dh) get_card_find_mode: whether
         // firstfile/nextfile list files (0) or deleted files (1).
-        (Table::C, 0x1A) => {
+        (Table::C, 0x1a) => {
             k::poke32(bus, crate::hle_bu::kvar::FIND_MODE, args[0]);
             Done(0)
         }
-        (Table::C, 0x1D) => Done(k::peek32(bus, crate::hle_bu::kvar::FIND_MODE)),
+        (Table::C, 0x1d) => Done(k::peek32(bus, crate::hle_bu::kvar::FIND_MODE)),
 
         // Default SYSCALL/exception verifier and root-counter handlers,
         // reached from the exception handler's chains.
@@ -1075,7 +1073,7 @@ fn run(table: Table, func: u8, bus: &mut Bus, gprs: &mut [u32; 32], flush: &mut 
 }
 
 /// DMA channel 2 (GPU) control register.
-const D2_CHCR: u32 = 0x1F80_10A8;
+const D2_CHCR: u32 = 0x1f80_10a8;
 
 /// One pass of gpu_sync. With GPU DMA off: ready once GPUSTAT bit 28 is set.
 /// With DMA on: wait for D2_CHCR bit 24 to clear, then bit 28, then turn
@@ -1099,7 +1097,7 @@ fn gpu_sync(bus: &mut Bus) -> bool {
 const JMPBUF_REGS: [usize; 12] = [31, 29, 30, 16, 17, 18, 19, 20, 21, 22, 23, 28];
 
 /// RAM_SIZE memory-control register.
-const RAM_SIZE_PORT: u32 = 0x1F80_1060;
+const RAM_SIZE_PORT: u32 = 0x1f80_1060;
 /// Kernel variable holding the effective RAM size in megabytes.
 pub(crate) const RAM_SIZE_MB_VAR: u32 = 0x0000_0060;
 
@@ -1123,7 +1121,7 @@ mod libc {
     /// Largest transfer or scan one call performs (2 MiB, the RAM size).
     const MAX_BYTES: u32 = 0x20_0000;
     /// Lengths above this are refused by the BIOS memory functions.
-    const MAX_LEN: u32 = 0x7FFF_FFFF;
+    const MAX_LEN: u32 = 0x7fff_ffff;
 
     fn rd(bus: &Bus, addr: u32) -> u8 {
         bus.try_read8(addr).unwrap_or(0)
@@ -1294,7 +1292,7 @@ mod libc {
     ) -> (u32, u32) {
         let mut p = src;
         let at = |p: u32| rd(bus, p).to_ascii_lowercase();
-        while matches!(at(p), 0x09..=0x0D | b' ') {
+        while matches!(at(p), 0x09..=0x0d | b' ') {
             p = p.wrapping_add(1);
         }
         let negative = signed && at(p) == b'-';
@@ -1602,8 +1600,8 @@ pub(crate) fn idle_wait(pc: u32, bus: &Bus, gprs: &[u32; 32]) -> bool {
     };
     match (table, func) {
         (Table::A, 0x55) | (Table::A, 0x70) => crate::hle_bu::bu_init_waiting(bus),
-        (Table::B, 0x0A) => crate::hle_exceptions::wait_event_waiting(bus, gprs[4]),
-        (Table::B, 0x5D) => crate::hle_card::card_wait(bus, gprs[4]).is_none(),
+        (Table::B, 0x0a) => crate::hle_exceptions::wait_event_waiting(bus, gprs[4]),
+        (Table::B, 0x5d) => crate::hle_card::card_wait(bus, gprs[4]).is_none(),
         _ => false,
     }
 }
@@ -1625,7 +1623,7 @@ mod tests {
         let mut gprs = [0u32; 32];
         gprs[4..8].copy_from_slice(&args);
         gprs[9] = func;
-        gprs[29] = 0x801F_FF00;
+        gprs[29] = 0x801f_ff00;
         gprs[31] = RA;
         dispatch(vector, bus, &mut gprs)
             .expect("BIOS vector dispatch")
@@ -1647,12 +1645,12 @@ mod tests {
     fn krom2rawadd_points_into_the_hle_font_in_rom() {
         let mut bus = hle_bus();
         // Full-width 'A' (JIS row 3, cell 33) is bank-1 cell 157.
-        let addr = call(&mut bus, 0xB0, 0x51, [0x8260, 0, 0, 0]);
-        assert_eq!(addr, 0xBFC6_6000 + 157 * 30);
+        let addr = call(&mut bus, 0xb0, 0x51, [0x8260, 0, 0, 0]);
+        assert_eq!(addr, 0xbfc6_6000 + 157 * 30);
         let cell = get_bytes(&bus, addr, 30);
         assert_eq!(cell, crate::hle_font::glyphs()[&0x8260].to_vec());
-        assert_eq!(call(&mut bus, 0xB0, 0x53, [0x8260, 0, 0, 0]), 157);
-        assert_eq!(call(&mut bus, 0xB0, 0x51, [0x0041, 0, 0, 0]), u32::MAX);
+        assert_eq!(call(&mut bus, 0xb0, 0x53, [0x8260, 0, 0, 0]), 157);
+        assert_eq!(call(&mut bus, 0xb0, 0x51, [0x0041, 0, 0, 0]), u32::MAX);
         assert!(bus.hle_font_requests().contains(&0x8260));
     }
 
@@ -1661,17 +1659,17 @@ mod tests {
         let mut bus = hle_bus();
         put_str(&mut bus, 0x8002_0000, b"ABCDEFGH");
         // Non-overlapping, src < dst: backwards, one byte too many.
-        call(&mut bus, 0xA0, 0x2C, [0x8002_0100, 0x8002_0000, 2, 0]);
+        call(&mut bus, 0xa0, 0x2c, [0x8002_0100, 0x8002_0000, 2, 0]);
         assert_eq!(get_bytes(&bus, 0x8002_0100, 4), b"ABC\0");
         // Overlapping forward move works like memcpy.
-        call(&mut bus, 0xA0, 0x2C, [0x8002_0000, 0x8002_0001, 3, 0]);
+        call(&mut bus, 0xa0, 0x2c, [0x8002_0000, 0x8002_0001, 3, 0]);
         assert_eq!(get_bytes(&bus, 0x8002_0000, 4), b"BCDD");
         put_str(&mut bus, 0x8002_0200, b"AXC\0");
         put_str(&mut bus, 0x8002_0300, b"AYE\0");
         // Mismatch at 1 reports the bytes after it: 'C' - 'E' = -2.
-        let v = call(&mut bus, 0xA0, 0x2D, [0x8002_0200, 0x8002_0300, 3, 0]);
+        let v = call(&mut bus, 0xa0, 0x2d, [0x8002_0200, 0x8002_0300, 3, 0]);
         assert_eq!(v as i32, -2);
-        assert_eq!(call(&mut bus, 0xA0, 0x29, [0, 0x8002_0300, 3, 0]), 0);
+        assert_eq!(call(&mut bus, 0xa0, 0x29, [0, 0x8002_0300, 3, 0]), 0);
     }
 
     #[test]
@@ -1679,23 +1677,23 @@ mod tests {
         let mut bus = hle_bus();
         put_str(&mut bus, 0x8002_0000, b"abcd");
         assert_eq!(
-            call(&mut bus, 0xA0, 0x2A, [0x8003_0000, 0x8002_0000, 4, 0]),
+            call(&mut bus, 0xa0, 0x2a, [0x8003_0000, 0x8002_0000, 4, 0]),
             0x8003_0000
         );
         assert_eq!(get_bytes(&bus, 0x8003_0000, 4), b"abcd");
         // bcopy swaps the operands and returns src.
         assert_eq!(
-            call(&mut bus, 0xA0, 0x27, [0x8002_0000, 0x8003_1000, 3, 0]),
+            call(&mut bus, 0xa0, 0x27, [0x8002_0000, 0x8003_1000, 3, 0]),
             0x8002_0000
         );
         assert_eq!(get_bytes(&bus, 0x8003_1000, 3), b"abc");
         // memcpy refuses dst=0 and huge lengths but still returns dst.
-        assert_eq!(call(&mut bus, 0xA0, 0x2A, [0, 0x8002_0000, 4, 0]), 0);
+        assert_eq!(call(&mut bus, 0xa0, 0x2a, [0, 0x8002_0000, 4, 0]), 0);
         assert_eq!(
             call(
                 &mut bus,
-                0xA0,
-                0x2A,
+                0xa0,
+                0x2a,
                 [0x8003_2000, 0x8002_0000, 0x8000_0000, 0]
             ),
             0x8003_2000
@@ -1707,16 +1705,16 @@ mod tests {
     fn memset_and_bzero_follow_the_documented_return_values() {
         let mut bus = hle_bus();
         assert_eq!(
-            call(&mut bus, 0xA0, 0x2B, [0x8002_0000, 0x5A, 3, 0]),
+            call(&mut bus, 0xa0, 0x2b, [0x8002_0000, 0x5a, 3, 0]),
             0x8002_0000
         );
-        assert_eq!(get_bytes(&bus, 0x8002_0000, 4), [0x5A, 0x5A, 0x5A, 0]);
-        assert_eq!(call(&mut bus, 0xA0, 0x2B, [0x8002_0000, 0x11, 0, 0]), 0);
+        assert_eq!(get_bytes(&bus, 0x8002_0000, 4), [0x5a, 0x5a, 0x5a, 0]);
+        assert_eq!(call(&mut bus, 0xa0, 0x2b, [0x8002_0000, 0x11, 0, 0]), 0);
         assert_eq!(
-            call(&mut bus, 0xA0, 0x28, [0x8002_0000, 2, 0, 0]),
+            call(&mut bus, 0xa0, 0x28, [0x8002_0000, 2, 0, 0]),
             0x8002_0000
         );
-        assert_eq!(get_bytes(&bus, 0x8002_0000, 3), [0, 0, 0x5A]);
+        assert_eq!(get_bytes(&bus, 0x8002_0000, 3), [0, 0, 0x5a]);
     }
 
     #[test]
@@ -1724,7 +1722,7 @@ mod tests {
         let mut bus = hle_bus();
         put_str(&mut bus, 0x8002_0000, b"keep");
         // A(33h) is malloc; it used to run memset over its arguments.
-        call(&mut bus, 0xA0, 0x33, [0x8002_0000, 0, 4, 0]);
+        call(&mut bus, 0xa0, 0x33, [0x8002_0000, 0, 4, 0]);
         assert_eq!(get_bytes(&bus, 0x8002_0000, 4), b"keep");
     }
 
@@ -1735,77 +1733,77 @@ mod tests {
         put_str(&mut bus, 0x8002_0100, b"abd\0");
         put_str(&mut bus, 0x8002_0200, &[0x80, 0]);
         assert_eq!(
-            call(&mut bus, 0xA0, 0x17, [0x8002_0000, 0x8002_0000, 0, 0]),
+            call(&mut bus, 0xa0, 0x17, [0x8002_0000, 0x8002_0000, 0, 0]),
             0
         );
         assert_eq!(
-            call(&mut bus, 0xA0, 0x17, [0x8002_0000, 0x8002_0100, 0, 0]) as i32,
+            call(&mut bus, 0xa0, 0x17, [0x8002_0000, 0x8002_0100, 0, 0]) as i32,
             -1
         );
         assert_eq!(
-            call(&mut bus, 0xA0, 0x18, [0x8002_0000, 0x8002_0100, 2, 0]),
+            call(&mut bus, 0xa0, 0x18, [0x8002_0000, 0x8002_0100, 2, 0]),
             0
         );
         // 0x80 sign-extends to -128, so it sorts below 'a'.
         assert_eq!(
-            call(&mut bus, 0xA0, 0x17, [0x8002_0200, 0x8002_0000, 0, 0]) as i32,
+            call(&mut bus, 0xa0, 0x17, [0x8002_0200, 0x8002_0000, 0, 0]) as i32,
             -128 - 0x61
         );
-        assert_eq!(call(&mut bus, 0xA0, 0x17, [0, 0, 0, 0]), 0);
+        assert_eq!(call(&mut bus, 0xa0, 0x17, [0, 0, 0, 0]), 0);
         assert_eq!(
-            call(&mut bus, 0xA0, 0x17, [0, 0x8002_0000, 0, 0]) as i32,
+            call(&mut bus, 0xa0, 0x17, [0, 0x8002_0000, 0, 0]) as i32,
             -1
         );
-        assert_eq!(call(&mut bus, 0xA0, 0x17, [0x8002_0000, 0, 0, 0]), 1);
+        assert_eq!(call(&mut bus, 0xa0, 0x17, [0x8002_0000, 0, 0, 0]), 1);
     }
 
     #[test]
     fn string_copy_length_and_search() {
         let mut bus = hle_bus();
         put_str(&mut bus, 0x8002_0000, b"hello\0");
-        assert_eq!(call(&mut bus, 0xA0, 0x1B, [0x8002_0000, 0, 0, 0]), 5);
-        assert_eq!(call(&mut bus, 0xA0, 0x1B, [0, 0, 0, 0]), 0);
+        assert_eq!(call(&mut bus, 0xa0, 0x1b, [0x8002_0000, 0, 0, 0]), 5);
+        assert_eq!(call(&mut bus, 0xa0, 0x1b, [0, 0, 0, 0]), 0);
         assert_eq!(
-            call(&mut bus, 0xA0, 0x19, [0x8003_0000, 0x8002_0000, 0, 0]),
+            call(&mut bus, 0xa0, 0x19, [0x8003_0000, 0x8002_0000, 0, 0]),
             0x8003_0000
         );
         assert_eq!(get_bytes(&bus, 0x8003_0000, 6), b"hello\0");
-        assert_eq!(call(&mut bus, 0xA0, 0x19, [0, 0x8002_0000, 0, 0]), 0);
+        assert_eq!(call(&mut bus, 0xa0, 0x19, [0, 0x8002_0000, 0, 0]), 0);
 
         // strncpy: short source is zero padded, long source gets no terminator.
-        put_str(&mut bus, 0x8003_1000, &[0xEE; 8]);
-        call(&mut bus, 0xA0, 0x1A, [0x8003_1000, 0x8002_0000, 7, 0]);
+        put_str(&mut bus, 0x8003_1000, &[0xee; 8]);
+        call(&mut bus, 0xa0, 0x1a, [0x8003_1000, 0x8002_0000, 7, 0]);
         assert_eq!(get_bytes(&bus, 0x8003_1000, 8), b"hello\0\0\xEE");
-        put_str(&mut bus, 0x8003_2000, &[0xEE; 4]);
-        call(&mut bus, 0xA0, 0x1A, [0x8003_2000, 0x8002_0000, 3, 0]);
+        put_str(&mut bus, 0x8003_2000, &[0xee; 4]);
+        call(&mut bus, 0xa0, 0x1a, [0x8003_2000, 0x8002_0000, 3, 0]);
         assert_eq!(get_bytes(&bus, 0x8003_2000, 4), b"hel\xEE");
 
         put_str(&mut bus, 0x8003_3000, b"ab\0");
-        call(&mut bus, 0xA0, 0x15, [0x8003_3000, 0x8002_0000, 0, 0]);
+        call(&mut bus, 0xa0, 0x15, [0x8003_3000, 0x8002_0000, 0, 0]);
         assert_eq!(get_bytes(&bus, 0x8003_3000, 8), b"abhello\0");
 
         assert_eq!(
-            call(&mut bus, 0xA0, 0x1E, [0x8002_0000, u32::from(b'l'), 0, 0]),
+            call(&mut bus, 0xa0, 0x1e, [0x8002_0000, u32::from(b'l'), 0, 0]),
             0x8002_0002
         );
         assert_eq!(
-            call(&mut bus, 0xA0, 0x1F, [0x8002_0000, u32::from(b'l'), 0, 0]),
+            call(&mut bus, 0xa0, 0x1f, [0x8002_0000, u32::from(b'l'), 0, 0]),
             0x8002_0003
         );
         assert_eq!(
-            call(&mut bus, 0xA0, 0x1C, [0x8002_0000, 0, 0, 0]),
+            call(&mut bus, 0xa0, 0x1c, [0x8002_0000, 0, 0, 0]),
             0x8002_0005
         );
         assert_eq!(
-            call(&mut bus, 0xA0, 0x1C, [0x8002_0000, u32::from(b'z'), 0, 0]),
+            call(&mut bus, 0xa0, 0x1c, [0x8002_0000, u32::from(b'z'), 0, 0]),
             0
         );
         assert_eq!(
-            call(&mut bus, 0xA0, 0x2E, [0x8002_0000, u32::from(b'o'), 5, 0]),
+            call(&mut bus, 0xa0, 0x2e, [0x8002_0000, u32::from(b'o'), 5, 0]),
             0x8002_0004
         );
         assert_eq!(
-            call(&mut bus, 0xA0, 0x2E, [0x8002_0000, u32::from(b'o'), 4, 0]),
+            call(&mut bus, 0xa0, 0x2e, [0x8002_0000, u32::from(b'o'), 4, 0]),
             0
         );
     }
@@ -1813,28 +1811,28 @@ mod tests {
     #[test]
     fn set_mem_updates_ram_size_port_and_kernel_variable() {
         let mut bus = hle_bus();
-        call(&mut bus, 0xA0, 0x9F, [8, 0, 0, 0]);
-        assert_eq!(bus.read32(0x1F80_1060) & 0x300, 0x300);
+        call(&mut bus, 0xa0, 0x9f, [8, 0, 0, 0]);
+        assert_eq!(bus.read32(0x1f80_1060) & 0x300, 0x300);
         assert_eq!(bus.read32(0x60), 8);
-        call(&mut bus, 0xA0, 0x9F, [2, 0, 0, 0]);
-        assert_eq!(bus.read32(0x1F80_1060) & 0x300, 0);
+        call(&mut bus, 0xa0, 0x9f, [2, 0, 0, 0]);
+        assert_eq!(bus.read32(0x1f80_1060) & 0x300, 0);
         assert_eq!(bus.read32(0x60), 2);
         // Anything else is ignored.
-        call(&mut bus, 0xA0, 0x9F, [4, 0, 0, 0]);
+        call(&mut bus, 0xa0, 0x9f, [4, 0, 0, 0]);
         assert_eq!(bus.read32(0x60), 2);
     }
 
     #[test]
     fn abs_and_case_conversion() {
         let mut bus = hle_bus();
-        assert_eq!(call(&mut bus, 0xA0, 0x0E, [(-5i32) as u32, 0, 0, 0]), 5);
-        assert_eq!(call(&mut bus, 0xA0, 0x0F, [7, 0, 0, 0]), 7);
+        assert_eq!(call(&mut bus, 0xa0, 0x0e, [(-5i32) as u32, 0, 0, 0]), 5);
+        assert_eq!(call(&mut bus, 0xa0, 0x0f, [7, 0, 0, 0]), 7);
         assert_eq!(
-            call(&mut bus, 0xA0, 0x25, [u32::from(b'q'), 0, 0, 0]),
+            call(&mut bus, 0xa0, 0x25, [u32::from(b'q'), 0, 0, 0]),
             u32::from(b'Q')
         );
         assert_eq!(
-            call(&mut bus, 0xA0, 0x26, [0x141, 0, 0, 0]),
+            call(&mut bus, 0xa0, 0x26, [0x141, 0, 0, 0]),
             u32::from(b'a')
         );
     }
@@ -1857,16 +1855,16 @@ mod tests {
         let mut bus = hle_bus();
         assert!(bus.hle_bios_first_unimplemented().is_none());
         // A(3Ah) abort is unimplemented.
-        assert_eq!(call(&mut bus, 0xA0, 0x3A, [0x40, 0, 0, 0]), 0);
-        assert_eq!(call(&mut bus, 0xA0, 0x3A, [0x80, 0, 0, 0]), 0);
+        assert_eq!(call(&mut bus, 0xa0, 0x3a, [0x40, 0, 0, 0]), 0);
+        assert_eq!(call(&mut bus, 0xa0, 0x3a, [0x80, 0, 0, 0]), 0);
         // Implemented calls leave no record.
-        call(&mut bus, 0xA0, 0x1B, [0, 0, 0, 0]);
+        call(&mut bus, 0xa0, 0x1b, [0, 0, 0, 0]);
 
         let records = bus.hle_bios_records();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].outcome, Outcome::Unimplemented);
         let first = bus.hle_bios_first_unimplemented().unwrap();
-        assert_eq!((first.table, first.func), (Table::A, 0x3A));
+        assert_eq!((first.table, first.func), (Table::A, 0x3a));
         assert_eq!(first.args[0], 0x40);
         assert_eq!(first.ra, RA);
         assert_eq!(first.count, 2);
@@ -1880,33 +1878,33 @@ mod tests {
     fn number_conversion_follows_the_documented_quirks() {
         let mut bus = hle_bus();
         put_str(&mut bus, 0x8002_0000, b" \t-0x1Fz\0");
-        let v = call(&mut bus, 0xA0, 0x0D, [0x8002_0000, 0x8002_0100, 10, 0]);
+        let v = call(&mut bus, 0xa0, 0x0d, [0x8002_0000, 0x8002_0100, 10, 0]);
         assert_eq!(v as i32, -31);
         assert_eq!(crate::hle_kernel::peek32(&bus, 0x8002_0100), 0x8002_0007);
         // strtoul has no sign: it stops at the "-".
-        assert_eq!(call(&mut bus, 0xA0, 0x0C, [0x8002_0000, 0, 10, 0]), 0);
+        assert_eq!(call(&mut bus, 0xa0, 0x0c, [0x8002_0000, 0, 10, 0]), 0);
         // strtol's "o" prefix is octal; atoi treats a leading 0 as octal.
         put_str(&mut bus, 0x8002_0200, b"o17\0");
-        assert_eq!(call(&mut bus, 0xA0, 0x0D, [0x8002_0200, 0, 10, 0]), 15);
+        assert_eq!(call(&mut bus, 0xa0, 0x0d, [0x8002_0200, 0, 10, 0]), 15);
         put_str(&mut bus, 0x8002_0300, b"010\0");
-        assert_eq!(call(&mut bus, 0xA0, 0x10, [0x8002_0300, 0, 0, 0]), 8);
-        assert_eq!(call(&mut bus, 0xA0, 0x0D, [0x8002_0300, 0, 10, 0]), 10);
+        assert_eq!(call(&mut bus, 0xa0, 0x10, [0x8002_0300, 0, 0, 0]), 8);
+        assert_eq!(call(&mut bus, 0xa0, 0x0d, [0x8002_0300, 0, 10, 0]), 10);
         // atob swaps the results.
-        let end = call(&mut bus, 0xA0, 0x12, [0x8002_0300, 0x8002_0400, 0, 0]);
+        let end = call(&mut bus, 0xa0, 0x12, [0x8002_0300, 0x8002_0400, 0, 0]);
         assert_eq!(end, 0x8002_0303);
         assert_eq!(crate::hle_kernel::peek32(&bus, 0x8002_0400), 10);
-        assert_eq!(call(&mut bus, 0xA0, 0x10, [0, 0, 0, 0]), 0);
+        assert_eq!(call(&mut bus, 0xa0, 0x10, [0, 0, 0, 0]), 0);
     }
 
     #[test]
     fn rand_uses_the_documented_generator_with_state_in_ram() {
         let mut bus = hle_bus();
-        call(&mut bus, 0xA0, 0x30, [1, 0, 0, 0]);
-        assert_eq!(call(&mut bus, 0xA0, 0x2F, [0; 4]), 0x41C6);
-        let x = 0x41C6_7EA6u32
-            .wrapping_mul(0x41C6_4E6D)
+        call(&mut bus, 0xa0, 0x30, [1, 0, 0, 0]);
+        assert_eq!(call(&mut bus, 0xa0, 0x2f, [0; 4]), 0x41c6);
+        let x = 0x41c6_7ea6u32
+            .wrapping_mul(0x41c6_4e6d)
             .wrapping_add(0x3039);
-        assert_eq!(call(&mut bus, 0xA0, 0x2F, [0; 4]), (x >> 16) & 0x7FFF);
+        assert_eq!(call(&mut bus, 0xa0, 0x2f, [0; 4]), (x >> 16) & 0x7fff);
         assert_eq!(
             crate::hle_kernel::peek32(&bus, crate::hle_kernel::kvar::RAND_SEED),
             x
@@ -1917,9 +1915,9 @@ mod tests {
     fn hook_entry_int_tracks_and_resets_guest_jump_buffer() {
         let mut bus = hle_bus();
         let hook = 0x8001_4000;
-        call(&mut bus, 0xB0, 0x19, [hook, 0, 0, 0]);
+        call(&mut bus, 0xb0, 0x19, [hook, 0, 0, 0]);
         assert_eq!(crate::hle_exceptions::exit_jmpbuf(&bus), hook);
-        let default = call(&mut bus, 0xB0, 0x18, [0; 4]);
+        let default = call(&mut bus, 0xb0, 0x18, [0; 4]);
         assert_eq!(default, crate::hle_exceptions::DEFAULT_JMPBUF);
         assert_eq!(crate::hle_exceptions::exit_jmpbuf(&bus), default);
     }
@@ -1931,18 +1929,18 @@ mod tests {
         for i in 0..16u32 {
             crate::hle_kernel::poke32(&mut bus, RA + 4 * i, 0x2400_0000 | i);
         }
-        assert_eq!(call(&mut bus, 0xB0, 0x56, [0; 4]), 0x674);
+        assert_eq!(call(&mut bus, 0xb0, 0x56, [0; 4]), 0x674);
         // A routine that clears the pad handler's VBlank acknowledge.
         let mut a = crate::hle_asm::Asm::new(RA);
-        a.lw(crate::hle_asm::V0, 0x16C, crate::hle_asm::V0);
+        a.lw(crate::hle_asm::V0, 0x16c, crate::hle_asm::V0);
         a.nop();
-        a.sw(crate::hle_asm::ZERO, 0x62C, crate::hle_asm::V0);
+        a.sw(crate::hle_asm::ZERO, 0x62c, crate::hle_asm::V0);
         a.jal_abs(0x8001_2340);
         a.nop();
         for (i, word) in a.finish().into_iter().enumerate() {
             crate::hle_kernel::poke32(&mut bus, RA + 4 * i as u32, word);
         }
-        assert_eq!(call(&mut bus, 0xB0, 0x57, [0; 4]), 0x874);
+        assert_eq!(call(&mut bus, 0xb0, 0x57, [0; 4]), 0x874);
         let names: Vec<&str> = bus
             .hle_bios_patches()
             .iter()
@@ -1957,24 +1955,24 @@ mod tests {
     #[test]
     fn user_heap_calls_and_conf() {
         let mut bus = hle_bus();
-        assert_eq!(call(&mut bus, 0xA0, 0x33, [16, 0, 0, 0]), 0, "no heap yet");
-        call(&mut bus, 0xA0, 0x39, [0x8010_0000, 0x1000, 0, 0]);
-        let p = call(&mut bus, 0xA0, 0x33, [16, 0, 0, 0]);
+        assert_eq!(call(&mut bus, 0xa0, 0x33, [16, 0, 0, 0]), 0, "no heap yet");
+        call(&mut bus, 0xa0, 0x39, [0x8010_0000, 0x1000, 0, 0]);
+        let p = call(&mut bus, 0xa0, 0x33, [16, 0, 0, 0]);
         assert_eq!(p, 0x8010_0004);
         // A(9Dh) GetConf is guest code (see hle_kernel's tests); the
         // words it reads hold the SYSTEM.CNF defaults.
-        assert_eq!(crate::hle_kernel::get_conf(&bus), (0x10, 4, 0x801F_FF00));
+        assert_eq!(crate::hle_kernel::get_conf(&bus), (0x10, 4, 0x801f_ff00));
         // B(5Bh) sets the pad/card handler's auto-ack flag, which is on at
         // boot (psx-spx's patch notes call turning it off an option).
         let auto_ack =
             |bus: &Bus| crate::hle_kernel::peek32(bus, crate::hle_kernel::kvar::SIO0_AUTO_ACK);
         assert_eq!(auto_ack(&bus), 1);
-        call(&mut bus, 0xB0, 0x5B, [0, 0, 0, 0]);
+        call(&mut bus, 0xb0, 0x5b, [0, 0, 0, 0]);
         assert_eq!(auto_ack(&bus), 0);
-        call(&mut bus, 0xB0, 0x5B, [1, 0, 0, 0]);
+        call(&mut bus, 0xb0, 0x5b, [1, 0, 0, 0]);
         assert_eq!(auto_ack(&bus), 1);
         // B(00h) allocates from the kernel heap set up at boot.
-        let k = call(&mut bus, 0xB0, 0x00, [8, 0, 0, 0]);
-        assert!((0xA000_E000..0xA001_0000).contains(&k), "{k:#x}");
+        let k = call(&mut bus, 0xb0, 0x00, [8, 0, 0, 0]);
+        assert!((0xa000_e000..0xa001_0000).contains(&k), "{k:#x}");
     }
 }

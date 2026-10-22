@@ -89,7 +89,7 @@ pub struct Irq {
 
 impl Irq {
     /// Mask of valid source bits (0..=10).
-    pub const VALID_BITS: u32 = 0x7FF;
+    pub const VALID_BITS: u32 = 0x7ff;
 
     /// All bits cleared -- matches post-reset hardware.
     pub fn new() -> Self {
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn write_mask_is_direct_overwrite() {
         let mut irq = Irq::new();
-        irq.write_mask(0xFFFF_FFFF);
+        irq.write_mask(0xffff_ffff);
         // Only valid bits survive.
         assert_eq!(irq.mask(), Irq::VALID_BITS);
     }

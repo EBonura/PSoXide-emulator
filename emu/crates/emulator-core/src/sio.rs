@@ -74,14 +74,14 @@ mod offset {
     /// when software does two half-reads. Returns zero on hardware.
     pub const STAT_HI: u32 = 0x6;
     pub const MODE: u32 = 0x8;
-    pub const CTRL: u32 = 0xA;
-    pub const BAUD: u32 = 0xE;
+    pub const CTRL: u32 = 0xa;
+    pub const BAUD: u32 = 0xe;
 }
 
 /// SIO0 MODE exposes only its framing/baud configuration bits. Reserved bits
 /// read back zero; this is visible even when software uses byte stores because
 /// the R3000A still drives the complete source register on the peripheral bus.
-const MODE_WRITE_MASK: u16 = 0x013F;
+const MODE_WRITE_MASK: u16 = 0x013f;
 
 /// Bit times one byte takes on the wire (hwtest v2.1 on a console: the byte
 /// is in RX 1326 to 1438 clocks after the write with BAUD 0x88, a 136-clock
@@ -246,7 +246,7 @@ pub struct Sio0 {
 
 impl Sio0 {
     /// Physical base address of SIO0.
-    pub const BASE: u32 = 0x1F80_1040;
+    pub const BASE: u32 = 0x1f80_1040;
     /// Size of the register window (`DATA..=BAUD` plus padding).
     pub const SIZE: u32 = 0x10;
 
@@ -264,7 +264,7 @@ impl Sio0 {
             pending_irq: false,
             ack_input: false,
             irq_latched: false,
-            pending_rx: 0xFF,
+            pending_rx: 0xff,
             pending_rx_valid: false,
             queued_tx: None,
             pending_ack: false,
@@ -461,7 +461,7 @@ impl Sio0 {
     /// Pop the RX slot, returning 0xFF when empty. Used by all three
     /// widths of DATA read -- the real chip zero-extends on the bus.
     fn pop_rx(&mut self) -> u8 {
-        self.rx.take().unwrap_or(0xFF)
+        self.rx.take().unwrap_or(0xff)
     }
 
     /// Transfer time for one byte: [`BYTE_BIT_TIMES`] bit times of `BAUD`
@@ -617,7 +617,7 @@ impl Sio0 {
             if self.slow_pad && self.slow_desynced {
                 // The device missed the clock; it returns idle and does not
                 // advance its state machine.
-                (0xFF, false, true, PAD_ACK_DELAY_TICKS, PAD_ACK_PULSE_TICKS)
+                (0xff, false, true, PAD_ACK_DELAY_TICKS, PAD_ACK_PULSE_TICKS)
             } else {
                 let slot = usize::from(self.ctrl & ctrl_bit::SLOT != 0);
                 let port = self.active_port();
@@ -640,7 +640,7 @@ impl Sio0 {
                 )
             }
         } else {
-            (0xFF, false, true, PAD_ACK_DELAY_TICKS, PAD_ACK_PULSE_TICKS)
+            (0xff, false, true, PAD_ACK_DELAY_TICKS, PAD_ACK_PULSE_TICKS)
         };
         // A missing device returns 0xFF with no ACK/DSR IRQ for that byte.
         // One commercial title polls port 2 during the BIOS pad handler;
@@ -683,7 +683,7 @@ impl Sio0 {
             self.pending_irq = false;
             self.ack_input = false;
             self.irq_latched = false;
-            self.pending_rx = 0xFF;
+            self.pending_rx = 0xff;
             self.pending_rx_valid = false;
             self.byte_index = 0;
             self.queued_tx = None;
@@ -807,8 +807,8 @@ mod tests {
         // stays correct (TX ignored, DATA reads 0xFF).
         let mut sio = Sio0::new();
         sio.attach_port1(crate::pad::PortDevice::empty());
-        assert_eq!(sio.read8(Sio0::BASE).unwrap(), 0xFF);
-        assert_eq!(sio.read16(Sio0::BASE).unwrap(), 0x00FF);
+        assert_eq!(sio.read8(Sio0::BASE).unwrap(), 0xff);
+        assert_eq!(sio.read16(Sio0::BASE).unwrap(), 0x00ff);
     }
 
     #[test]
@@ -822,12 +822,12 @@ mod tests {
         // With /CS high, CTRL.2 force-arms exactly one received byte.
         let mut sio = Sio0::new();
         sio.attach_port1(crate::pad::PortDevice::empty());
-        sio.write16(Sio0::BASE + 0xA, ctrl_bit::FORCE_RX_ONCE);
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::FORCE_RX_ONCE);
         sio.write8(Sio0::BASE, 0x01);
         sio.tick(DEFAULT_TRANSFER_TICKS);
         let s = sio.read32(Sio0::BASE + 0x4).unwrap();
         assert_eq!(s & 0x2, 0x2, "RX_NOT_EMPTY must be set after TX");
-        assert_eq!(sio.read8(Sio0::BASE).unwrap(), 0xFF);
+        assert_eq!(sio.read8(Sio0::BASE).unwrap(), 0xff);
         // Reading DATA consumes the RX slot.
         let s = sio.read32(Sio0::BASE + 0x4).unwrap();
         assert_eq!(s & 0x2, 0, "RX_NOT_EMPTY must be clear after DATA read");
@@ -839,10 +839,10 @@ mod tests {
         sio.attach_port1(crate::pad::PortDevice::empty());
         let t = DEFAULT_TRANSFER_TICKS;
 
-        sio.write16(Sio0::BASE + 0xA, ctrl_bit::FORCE_RX_ONCE);
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::FORCE_RX_ONCE);
         sio.write8_at(Sio0::BASE, 0x00, 0);
         sio.tick(t);
-        assert_eq!(sio.read8(Sio0::BASE).unwrap(), 0xFF);
+        assert_eq!(sio.read8(Sio0::BASE).unwrap(), 0xff);
         assert_eq!(
             sio.debug_ctrl() & ctrl_bit::FORCE_RX_ONCE,
             0,
@@ -857,7 +857,7 @@ mod tests {
             "a second byte is not received while /CS stays high"
         );
 
-        sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT);
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT);
         sio.write8_at(Sio0::BASE, 0x00, 2 * t + 2);
         sio.tick(3 * t + 2);
         assert_ne!(
@@ -871,19 +871,19 @@ mod tests {
     fn write_then_read_roundtrips_mode_baud() {
         let mut sio = Sio0::new();
         sio.write16(Sio0::BASE + 0x8, 0x1234);
-        sio.write16(Sio0::BASE + 0xE, 0x5678);
+        sio.write16(Sio0::BASE + 0xe, 0x5678);
         assert_eq!(sio.read16(Sio0::BASE + 0x8).unwrap(), 0x0034);
-        assert_eq!(sio.read16(Sio0::BASE + 0xE).unwrap(), 0x5678);
+        assert_eq!(sio.read16(Sio0::BASE + 0xe).unwrap(), 0x5678);
     }
 
     #[test]
     fn ctrl_reset_bit_zeroes_everything() {
         let mut sio = Sio0::new();
-        sio.write16(Sio0::BASE + 0x8, 0xFFFF);
-        sio.write16(Sio0::BASE + 0xE, 0xFFFF);
+        sio.write16(Sio0::BASE + 0x8, 0xffff);
+        sio.write16(Sio0::BASE + 0xe, 0xffff);
         sio.ack_input = true;
         sio.irq_latched = true;
-        sio.write16(Sio0::BASE + 0xA, ctrl_bit::RESET);
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::RESET);
         assert_eq!(sio.mode, 0);
         assert_eq!(sio.baud, 0);
         assert_eq!(sio.ctrl, 0);
@@ -895,10 +895,10 @@ mod tests {
     fn ctrl_ack_bit_is_stripped() {
         let mut sio = Sio0::new();
         // Every bit except RESET (0x40); ACK must not be kept.
-        sio.write16(Sio0::BASE + 0xA, 0x001F);
+        sio.write16(Sio0::BASE + 0xa, 0x001f);
         assert_eq!(sio.ctrl & ctrl_bit::ACK, 0);
         // Other low bits pass through (including SIO0's one-shot CTRL.2).
-        assert_eq!(sio.ctrl & 0x000F, 0x000F);
+        assert_eq!(sio.ctrl & 0x000f, 0x000f);
     }
 
     #[test]
@@ -920,12 +920,12 @@ mod tests {
         sio.set_port1_buttons(ButtonState::from_bits(button::START | button::CROSS));
 
         // Simulate the BIOS pad-poll sequence on port 1 (SLOT bit clear).
-        sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT); // assert JOYN
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT); // assert JOYN
 
         // TX 0x01 → RX 0xFF (dummy select-byte response)
         sio.write8(Sio0::BASE, 0x01);
         sio.tick(DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS);
-        assert_eq!(sio.pop_rx(), 0xFF);
+        assert_eq!(sio.pop_rx(), 0xff);
 
         // TX 0x42 → RX 0x41
         sio.write8(Sio0::BASE, 0x42);
@@ -935,17 +935,17 @@ mod tests {
         // TX 0x00 → RX 0x5A
         sio.write8(Sio0::BASE, 0x00);
         sio.tick(3 * (DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS));
-        assert_eq!(sio.pop_rx(), 0x5A);
+        assert_eq!(sio.pop_rx(), 0x5a);
 
         // TX 0x00 → RX buttons1 (START = bit 3 pressed → wire 0xF7)
         sio.write8(Sio0::BASE, 0x00);
         sio.tick(4 * (DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS));
-        assert_eq!(sio.pop_rx(), 0xF7);
+        assert_eq!(sio.pop_rx(), 0xf7);
 
         // TX 0x00 → RX buttons2 (CROSS = bit 14 pressed → wire 0xBF)
         sio.write8(Sio0::BASE, 0x00);
         sio.tick(4 * (DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS) + DEFAULT_TRANSFER_TICKS);
-        assert_eq!(sio.pop_rx(), 0xBF);
+        assert_eq!(sio.pop_rx(), 0xbf);
     }
 
     #[test]
@@ -957,18 +957,18 @@ mod tests {
         // Port 2 stays empty.
 
         // CTRL.SLOT = 1 → port 2 (empty).
-        sio.write16(Sio0::BASE + 0xA, ctrl_bit::SLOT | ctrl_bit::JOYN_OUTPUT);
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::SLOT | ctrl_bit::JOYN_OUTPUT);
         sio.write8(Sio0::BASE, 0x01);
         sio.tick(DEFAULT_TRANSFER_TICKS);
-        assert_eq!(sio.pop_rx(), 0xFF, "empty port 2 returns 0xFF");
+        assert_eq!(sio.pop_rx(), 0xff, "empty port 2 returns 0xFF");
 
         // CTRL.SLOT = 0 → port 1 (has pad).
-        sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT);
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT);
         sio.write8(Sio0::BASE, 0x01);
         sio.tick(DEFAULT_TRANSFER_TICKS);
         assert_eq!(
             sio.pop_rx(),
-            0xFF,
+            0xff,
             "port 1 select byte gets the dummy response"
         );
         sio.write8(Sio0::BASE, 0x42);
@@ -987,7 +987,7 @@ mod tests {
         let mut sio = Sio0::new();
         sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
         sio.write16(
-            Sio0::BASE + 0xA,
+            Sio0::BASE + 0xa,
             ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE,
         );
 
@@ -1036,7 +1036,7 @@ mod tests {
         assert!(sio.take_pending_irq(), "bus should see one IRQ edge");
         assert!(!sio.take_pending_irq(), "IRQ edge should be single-shot");
 
-        sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK);
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK);
         let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
         assert_eq!(stat & stat_bit::IRQ, 0, "CTRL.ACK should clear STAT IRQ");
     }
@@ -1047,7 +1047,7 @@ mod tests {
 
         let mut sio = Sio0::new();
         sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
-        sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT);
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT);
 
         sio.write8(Sio0::BASE, 0x01);
         sio.tick(DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS);
@@ -1076,13 +1076,13 @@ mod tests {
         let mut sio = Sio0::new();
         sio.attach_port1(PortDevice::empty());
         sio.write16(
-            Sio0::BASE + 0xA,
+            Sio0::BASE + 0xa,
             ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE,
         );
-        sio.write16(Sio0::BASE + 0xE, 0x0088);
+        sio.write16(Sio0::BASE + 0xe, 0x0088);
 
         sio.write8_at(Sio0::BASE, 0x01, 10);
-        assert_eq!(sio.pop_rx(), 0xFF);
+        assert_eq!(sio.pop_rx(), 0xff);
         assert_eq!(sio.debug_ack_deadline(), None);
         assert_eq!(
             sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::ACK_INPUT,
@@ -1106,10 +1106,10 @@ mod tests {
         let mut sio = Sio0::new();
         sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
         sio.write16(
-            Sio0::BASE + 0xA,
+            Sio0::BASE + 0xa,
             ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE,
         );
-        sio.write16(Sio0::BASE + 0xE, 0x0088);
+        sio.write16(Sio0::BASE + 0xe, 0x0088);
 
         let mut now = 10u64;
         for tx in [0x01, 0x42, 0x00, 0x00] {
@@ -1117,7 +1117,7 @@ mod tests {
             sio.tick(now + 0x88 * BYTE_BIT_TIMES + PAD_ACK_DELAY_TICKS);
             assert!(sio.take_pending_irq(), "byte 0x{tx:02x} should ACK");
             sio.write16(
-                Sio0::BASE + 0xA,
+                Sio0::BASE + 0xa,
                 ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE | ctrl_bit::ACK,
             );
             let _ = sio.read8(Sio0::BASE);
@@ -1142,7 +1142,7 @@ mod tests {
         let mut sio = Sio0::new();
         sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
         sio.write16(
-            Sio0::BASE + 0xA,
+            Sio0::BASE + 0xa,
             ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE,
         );
 
@@ -1159,7 +1159,7 @@ mod tests {
         );
 
         sio.write16(
-            Sio0::BASE + 0xA,
+            Sio0::BASE + 0xa,
             ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE | ctrl_bit::ACK,
         );
         sio.write8_at(Sio0::BASE, 0x00, second_start + DEFAULT_TRANSFER_TICKS + 1);
@@ -1201,17 +1201,17 @@ mod tests {
         let mut now = 0u64;
         // Match psx-pad's init sequence: ACK any stale IRQ, then
         // assert JOYN with TX enabled; selected-port RX is implicit.
-        sio.write16(Sio0::BASE + 0xA, ctrl_bit::ACK);
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::ACK);
         sio.write16(
-            Sio0::BASE + 0xA,
+            Sio0::BASE + 0xa,
             (1 << 0) | ctrl_bit::JOYN_OUTPUT | (1 << 2),
         );
 
-        assert_eq!(exchange_sdk_style(&mut sio, &mut now, 0x01), 0xFF);
+        assert_eq!(exchange_sdk_style(&mut sio, &mut now, 0x01), 0xff);
         assert_eq!(exchange_sdk_style(&mut sio, &mut now, 0x42), 0x41);
-        assert_eq!(exchange_sdk_style(&mut sio, &mut now, 0x00), 0x5A);
-        assert_eq!(exchange_sdk_style(&mut sio, &mut now, 0x00), 0xF7);
-        assert_eq!(exchange_sdk_style(&mut sio, &mut now, 0x00), 0xBF);
+        assert_eq!(exchange_sdk_style(&mut sio, &mut now, 0x00), 0x5a);
+        assert_eq!(exchange_sdk_style(&mut sio, &mut now, 0x00), 0xf7);
+        assert_eq!(exchange_sdk_style(&mut sio, &mut now, 0x00), 0xbf);
     }
 
     #[test]
@@ -1221,10 +1221,10 @@ mod tests {
         let mut sio = Sio0::new();
         sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
         sio.write16(
-            Sio0::BASE + 0xA,
+            Sio0::BASE + 0xa,
             ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE,
         );
-        sio.write16(Sio0::BASE + 0xE, 0x0088);
+        sio.write16(Sio0::BASE + 0xe, 0x0088);
 
         sio.write8_at(Sio0::BASE, 0x01, 10);
         let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
@@ -1255,7 +1255,7 @@ mod tests {
 
         let mut sio = Sio0::new();
         sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
-        sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT);
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT);
         let t = DEFAULT_TRANSFER_TICKS;
 
         sio.write8_at(Sio0::BASE, 0x01, 10);
@@ -1272,7 +1272,7 @@ mod tests {
         );
 
         sio.tick(10 + t);
-        assert_eq!(sio.pop_rx(), 0xFF, "the select byte's answer");
+        assert_eq!(sio.pop_rx(), 0xff, "the select byte's answer");
         assert_ne!(
             sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::TX_READY_1,
             0,
@@ -1289,12 +1289,12 @@ mod tests {
         let mut sio = Sio0::new();
         sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
         sio.write16(
-            Sio0::BASE + 0xA,
+            Sio0::BASE + 0xa,
             ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE,
         );
 
         sio.write8_at(Sio0::BASE, 0x01, 10);
-        assert_eq!(sio.pop_rx(), 0xFF, "nothing has arrived: DATA reads idle");
+        assert_eq!(sio.pop_rx(), 0xff, "nothing has arrived: DATA reads idle");
         assert_eq!(
             sio.debug_transfer_deadline(),
             Some(10 + DEFAULT_TRANSFER_TICKS),
@@ -1306,7 +1306,7 @@ mod tests {
             Some(10 + DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAYS[0]),
             "and /ACK rises the pad's delay behind it"
         );
-        assert_eq!(sio.pop_rx(), 0xFF, "select byte answer");
+        assert_eq!(sio.pop_rx(), 0xff, "select byte answer");
 
         sio.write8_at(Sio0::BASE, 0x42, 10 + DEFAULT_TRANSFER_TICKS + 1);
         sio.tick(10 + 2 * DEFAULT_TRANSFER_TICKS + 1);
@@ -1321,13 +1321,13 @@ mod tests {
         sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
         sio.set_port1_buttons(ButtonState::from_bits(button::START));
         sio.set_slow_pad(true);
-        sio.write16(Sio0::BASE + 0xE, 0x0088); // baud -> transfer_ticks = 1360
-        sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT); // select port 1
+        sio.write16(Sio0::BASE + 0xe, 0x0088); // baud -> transfer_ticks = 1360
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT); // select port 1
 
         let mut now = 100u64;
         // The select byte is always fine (no prior /ACK deadline to beat).
         sio.write8_at(Sio0::BASE, 0x01, now);
-        assert_eq!(sio.pop_rx(), 0xFF);
+        assert_eq!(sio.pop_rx(), 0xff);
 
         // The command byte is clocked only a few cycles later -- long before the
         // slow pad's /ACK deadline (now + 1360) -- so the device misses it.
@@ -1335,7 +1335,7 @@ mod tests {
         sio.write8_at(Sio0::BASE, 0x42, now);
         assert_eq!(
             sio.pop_rx(),
-            0xFF,
+            0xff,
             "a slow pad must not return its 0x41 id when the host skips the /ACK wait"
         );
 
@@ -1344,7 +1344,7 @@ mod tests {
         sio.write8_at(Sio0::BASE, 0x00, now);
         assert_eq!(
             sio.pop_rx(),
-            0xFF,
+            0xff,
             "packet remains desynced after a missed byte"
         );
     }
@@ -1357,8 +1357,8 @@ mod tests {
         sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
         sio.set_port1_buttons(ButtonState::from_bits(button::START | button::CROSS));
         sio.set_slow_pad(true);
-        sio.write16(Sio0::BASE + 0xE, 0x0088);
-        sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT);
+        sio.write16(Sio0::BASE + 0xe, 0x0088);
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT);
 
         // Mirror the ACK-paced driver: wait past each byte's /ACK deadline
         // (ten bit times plus the pad's delay) before clocking the next byte.
@@ -1372,11 +1372,11 @@ mod tests {
             rx
         };
 
-        assert_eq!(ex(&mut sio, &mut now, 0x01), 0xFF);
+        assert_eq!(ex(&mut sio, &mut now, 0x01), 0xff);
         assert_eq!(ex(&mut sio, &mut now, 0x42), 0x41, "id after /ACK wait");
-        assert_eq!(ex(&mut sio, &mut now, 0x00), 0x5A, "magic after /ACK wait");
-        assert_eq!(ex(&mut sio, &mut now, 0x00), 0xF7, "buttons1 (START)");
-        assert_eq!(ex(&mut sio, &mut now, 0x00), 0xBF, "buttons2 (CROSS)");
+        assert_eq!(ex(&mut sio, &mut now, 0x00), 0x5a, "magic after /ACK wait");
+        assert_eq!(ex(&mut sio, &mut now, 0x00), 0xf7, "buttons1 (START)");
+        assert_eq!(ex(&mut sio, &mut now, 0x00), 0xbf, "buttons2 (CROSS)");
     }
 
     #[test]
@@ -1386,7 +1386,7 @@ mod tests {
         let mut sio = Sio0::new();
         sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
         sio.write16(
-            Sio0::BASE + 0xA,
+            Sio0::BASE + 0xa,
             ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE,
         );
 
@@ -1415,7 +1415,7 @@ mod tests {
 
         let mut sio = Sio0::new();
         sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
-        sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT);
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT);
         let t = DEFAULT_TRANSFER_TICKS;
         let mut now = 100u64;
         for (index, tx) in [0x01u8, 0x42, 0x00, 0x00].into_iter().enumerate() {
@@ -1430,8 +1430,8 @@ mod tests {
             sio.tick(now);
         }
         // Deselecting starts the next transaction at its first byte again.
-        sio.write16(Sio0::BASE + 0xA, 0);
-        sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT);
+        sio.write16(Sio0::BASE + 0xa, 0);
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT);
         sio.write8_at(Sio0::BASE, 0x01, now);
         sio.tick(now + t);
         assert_eq!(
@@ -1460,7 +1460,7 @@ mod tests {
             } else {
                 sio.attach_port2(card);
             }
-            sio.write16(Sio0::BASE + 0xA, ctrl);
+            sio.write16(Sio0::BASE + 0xa, ctrl);
             let t = DEFAULT_TRANSFER_TICKS;
             let mut now = 100u64;
             // Select, read command, two ID bytes, then address and data.

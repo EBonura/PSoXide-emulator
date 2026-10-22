@@ -171,27 +171,27 @@ impl Interpreter {
         let fifo = &entry.fifo[..];
         match entry.opcode {
             // ---------- State setters ----------
-            0xE1 => {
+            0xe1 => {
                 self.handle_e1(fifo);
                 None
             }
-            0xE2 => {
+            0xe2 => {
                 self.handle_e2(fifo);
                 None
             }
-            0xE3 => {
+            0xe3 => {
                 self.handle_e3(fifo);
                 None
             }
-            0xE4 => {
+            0xe4 => {
                 self.handle_e4(fifo);
                 None
             }
-            0xE5 => {
+            0xe5 => {
                 self.handle_e5(fifo);
                 None
             }
-            0xE6 => {
+            0xe6 => {
                 self.handle_e6(fifo);
                 None
             }
@@ -201,35 +201,35 @@ impl Interpreter {
 
             // ---------- Triangles / quads ----------
             0x20..=0x23 => self.decode_mono_tri(fifo),
-            0x28..=0x2B => self.decode_mono_quad(fifo),
+            0x28..=0x2b => self.decode_mono_quad(fifo),
             0x24..=0x27 => self.decode_tex_tri(fifo),
-            0x2C..=0x2F => self.decode_tex_quad(fifo),
+            0x2c..=0x2f => self.decode_tex_quad(fifo),
             0x30..=0x33 => self.decode_shaded_tri(fifo),
-            0x38..=0x3B => self.decode_shaded_quad(fifo),
+            0x38..=0x3b => self.decode_shaded_quad(fifo),
             0x34..=0x37 => self.decode_shaded_tex_tri(fifo),
-            0x3C..=0x3F => self.decode_shaded_tex_quad(fifo),
+            0x3c..=0x3f => self.decode_shaded_tex_quad(fifo),
 
             // ---------- Lines / polylines ----------
-            0x40..=0x4F => self.decode_mono_line(fifo),
-            0x50..=0x5F => self.decode_shaded_line(fifo),
+            0x40..=0x4f => self.decode_mono_line(fifo),
+            0x50..=0x5f => self.decode_shaded_line(fifo),
 
             // ---------- Rectangles ----------
             0x60..=0x63 => self.decode_mono_rect_variable(fifo),
-            0x68..=0x6B => self.decode_mono_rect_fixed(fifo, 1, 1),
+            0x68..=0x6b => self.decode_mono_rect_fixed(fifo, 1, 1),
             0x70..=0x73 => self.decode_mono_rect_fixed(fifo, 8, 8),
-            0x78..=0x7B => self.decode_mono_rect_fixed(fifo, 16, 16),
+            0x78..=0x7b => self.decode_mono_rect_fixed(fifo, 16, 16),
             0x64..=0x67 => self.decode_tex_rect_variable(fifo),
-            0x6C..=0x6F => self.decode_tex_rect_fixed(fifo, 1, 1),
+            0x6c..=0x6f => self.decode_tex_rect_fixed(fifo, 1, 1),
             0x74..=0x77 => self.decode_tex_rect_fixed(fifo, 8, 8),
-            0x7C..=0x7F => self.decode_tex_rect_fixed(fifo, 16, 16),
+            0x7c..=0x7f => self.decode_tex_rect_fixed(fifo, 16, 16),
 
             // ---------- VRAM-to-VRAM copy ----------
-            0x80..=0x9F => decode_vram_copy(fifo),
+            0x80..=0x9f => decode_vram_copy(fifo),
 
             // CPU-to-VRAM upload: pixel data streams outside the
             // cmd_log; backends pick it up via VRAM sync. VRAM-to-CPU
             // readback mutates nothing. NOPs / clear-cache likewise.
-            0xA0..=0xBF | 0xC0..=0xDF | 0x00 | 0x01 | 0x03..=0x1E => None,
+            0xa0..=0xbf | 0xc0..=0xdf | 0x00 | 0x01 | 0x03..=0x1e => None,
 
             other => Some(GpuEvent::Unhandled { opcode: other }),
         }
@@ -253,31 +253,31 @@ impl Interpreter {
     /// the rasterizers, mirroring the CPU.
     fn handle_e2(&mut self, fifo: &[u32]) {
         let Some(&word) = fifo.first() else { return };
-        self.state.tpage.tex_window_mask_x = (word & 0x1F) * 8;
-        self.state.tpage.tex_window_mask_y = ((word >> 5) & 0x1F) * 8;
-        self.state.tpage.tex_window_off_x = ((word >> 10) & 0x1F) * 8;
-        self.state.tpage.tex_window_off_y = ((word >> 15) & 0x1F) * 8;
+        self.state.tpage.tex_window_mask_x = (word & 0x1f) * 8;
+        self.state.tpage.tex_window_mask_y = ((word >> 5) & 0x1f) * 8;
+        self.state.tpage.tex_window_off_x = ((word >> 10) & 0x1f) * 8;
+        self.state.tpage.tex_window_off_y = ((word >> 15) & 0x1f) * 8;
     }
 
     /// GP0 0xE3 -- drawing area top-left.
     fn handle_e3(&mut self, fifo: &[u32]) {
         let Some(&word) = fifo.first() else { return };
-        self.state.draw_area.left = (word & 0x3FF) as i32;
-        self.state.draw_area.top = ((word >> 10) & 0x1FF) as i32;
+        self.state.draw_area.left = (word & 0x3ff) as i32;
+        self.state.draw_area.top = ((word >> 10) & 0x1ff) as i32;
     }
 
     /// GP0 0xE4 -- drawing area bottom-right.
     fn handle_e4(&mut self, fifo: &[u32]) {
         let Some(&word) = fifo.first() else { return };
-        self.state.draw_area.right = (word & 0x3FF) as i32;
-        self.state.draw_area.bottom = ((word >> 10) & 0x1FF) as i32;
+        self.state.draw_area.right = (word & 0x3ff) as i32;
+        self.state.draw_area.bottom = ((word >> 10) & 0x1ff) as i32;
     }
 
     /// GP0 0xE5 -- drawing offset (11-bit signed).
     fn handle_e5(&mut self, fifo: &[u32]) {
         let Some(&word) = fifo.first() else { return };
-        self.state.draw_offset_x = sign_extend_11((word & 0x7FF) as i32);
-        self.state.draw_offset_y = sign_extend_11(((word >> 11) & 0x7FF) as i32);
+        self.state.draw_offset_x = sign_extend_11((word & 0x7ff) as i32);
+        self.state.draw_offset_y = sign_extend_11(((word >> 11) & 0x7ff) as i32);
     }
 
     /// GP0 0xE6 -- mask bit control.
@@ -300,10 +300,10 @@ impl Interpreter {
             // raw fields instead fills a narrower rect and leaves bands
             // of stale pixels at the edges (alttp gameplay, replay_bisect
             // owner=QuickFill).
-            x: fifo[1] & 0x3F0,
-            y: (fifo[1] >> 16) & 0x1FF,
-            w: ((fifo[2] & 0x3FF) + 0xF) & !0xF,
-            h: (fifo[2] >> 16) & 0x1FF,
+            x: fifo[1] & 0x3f0,
+            y: (fifo[1] >> 16) & 0x1ff,
+            w: ((fifo[2] & 0x3ff) + 0xf) & !0xf,
+            h: (fifo[2] >> 16) & 0x1ff,
         })
     }
 
@@ -523,8 +523,8 @@ impl Interpreter {
         Some(GpuEvent::MonoRect {
             cmd: fifo[0],
             xy: decode_vertex(&self.state, fifo[1]),
-            w: fifo[2] & 0xFFFF,
-            h: (fifo[2] >> 16) & 0xFFFF,
+            w: fifo[2] & 0xffff,
+            h: (fifo[2] >> 16) & 0xffff,
         })
     }
 
@@ -549,8 +549,8 @@ impl Interpreter {
             xy: decode_vertex(&self.state, fifo[1]),
             uv: decode_uv(fifo[2]),
             clut: decode_clut(fifo[2]),
-            w: fifo[3] & 0xFFFF,
-            h: (fifo[3] >> 16) & 0xFFFF,
+            w: fifo[3] & 0xffff,
+            h: (fifo[3] >> 16) & 0xffff,
         })
     }
 
@@ -580,7 +580,7 @@ impl Default for Interpreter {
 /// `(word & 0xF000F000) == 0x50005000`.
 #[inline]
 fn is_polyline_terminator(word: u32) -> bool {
-    (word & 0xF000_F000) == 0x5000_5000
+    (word & 0xf000_f000) == 0x5000_5000
 }
 
 /// Decode a GP0 0x80..=0x9F packet: `[cmd, src_xy, dst_xy, wh]`,
@@ -643,8 +643,8 @@ mod tests {
         let mut it = Interpreter::new();
         // GP0(E2): mask 8px / offset 16px on both axes.
         it.interpret(&entry(
-            0xE2,
-            vec![0xE200_0000 | 1 | (1 << 5) | (2 << 10) | (2 << 15)],
+            0xe2,
+            vec![0xe200_0000 | 1 | (1 << 5) | (2 << 10) | (2 << 15)],
         ));
         assert_eq!(it.state.tpage.tex_window_mask_x, 8);
         assert_eq!(it.state.tpage.tex_window_off_x, 16);
@@ -673,7 +673,7 @@ mod tests {
     #[test]
     fn e1_applies_dither_and_flips() {
         let mut it = Interpreter::new();
-        it.interpret(&entry(0xE1, vec![(1 << 9) | (1 << 12) | (1 << 13) | 0x2]));
+        it.interpret(&entry(0xe1, vec![(1 << 9) | (1 << 12) | (1 << 13) | 0x2]));
         assert!(it.state.dither);
         assert!(it.state.flip_x);
         assert!(it.state.flip_y);
@@ -683,7 +683,7 @@ mod tests {
     #[test]
     fn state_setters_yield_no_event_and_short_fifos_drop() {
         let mut it = Interpreter::new();
-        assert!(it.interpret(&entry(0xE5, vec![0])).is_none());
+        assert!(it.interpret(&entry(0xe5, vec![0])).is_none());
         // Truncated mono tri: dropped, no panic.
         assert!(it.interpret(&entry(0x20, vec![0x2000_0000, 0])).is_none());
     }
@@ -692,14 +692,14 @@ mod tests {
     fn mono_line_single_decodes_two_points_with_offset() {
         let mut it = Interpreter::new();
         // Draw offset (16, 32) must apply to line vertices too.
-        it.interpret(&entry(0xE5, vec![0xE500_0000 | 16 | (32 << 11)]));
+        it.interpret(&entry(0xe5, vec![0xe500_0000 | 16 | (32 << 11)]));
         let ev = it
-            .interpret(&entry(0x40, vec![0x40FF_FFFF, 0x0005_000A, 0x0014_001E]))
+            .interpret(&entry(0x40, vec![0x40ff_ffff, 0x0005_000a, 0x0014_001e]))
             .unwrap();
         assert_eq!(
             ev,
             GpuEvent::MonoLine {
-                cmd: 0x40FF_FFFF,
+                cmd: 0x40ff_ffff,
                 points: vec![(26, 37), (46, 52)],
             }
         );
@@ -712,10 +712,10 @@ mod tests {
             .interpret(&entry(
                 0x48,
                 vec![
-                    0x48FF_FFFF,
+                    0x48ff_ffff,
                     0x0000_0000,
                     0x0000_0005,
-                    0x0000_000A,
+                    0x0000_000a,
                     // Hand-built logs may still carry the sentinel;
                     // parsing must stop exactly like the CPU receive
                     // mode does.
@@ -727,7 +727,7 @@ mod tests {
         assert_eq!(
             ev,
             GpuEvent::MonoLine {
-                cmd: 0x48FF_FFFF,
+                cmd: 0x48ff_ffff,
                 points: vec![(0, 0), (5, 0), (10, 0)],
             }
         );
@@ -740,11 +740,11 @@ mod tests {
             .interpret(&entry(
                 0x58,
                 vec![
-                    0x5800_00FF, // cmd + c0
+                    0x5800_00ff, // cmd + c0
                     0x0000_0000, // v0
-                    0x0000_FF00, // c1
+                    0x0000_ff00, // c1
                     0x0000_0008, // v1
-                    0x00FF_0000, // c2
+                    0x00ff_0000, // c2
                     0x0008_0008, // v2
                     0x0012_3456, // trailing colour without a vertex
                 ],
@@ -753,9 +753,9 @@ mod tests {
         assert_eq!(
             ev,
             GpuEvent::ShadedLine {
-                cmd: 0x5800_00FF,
+                cmd: 0x5800_00ff,
                 points: vec![(0, 0), (8, 0), (8, 8)],
-                colors: vec![0x5800_00FF, 0x0000_FF00, 0x00FF_0000],
+                colors: vec![0x5800_00ff, 0x0000_ff00, 0x00ff_0000],
             }
         );
     }
@@ -767,9 +767,9 @@ mod tests {
             .interpret(&entry(
                 0x58,
                 vec![
-                    0x5800_00FF,
+                    0x5800_00ff,
                     0x0000_0000,
-                    0x0000_FF00,
+                    0x0000_ff00,
                     0x0000_0008,
                     0x5000_5000, // terminator where a colour would go
                     0x0008_0008,
@@ -779,9 +779,9 @@ mod tests {
         assert_eq!(
             ev,
             GpuEvent::ShadedLine {
-                cmd: 0x5800_00FF,
+                cmd: 0x5800_00ff,
                 points: vec![(0, 0), (8, 0)],
-                colors: vec![0x5800_00FF, 0x0000_FF00],
+                colors: vec![0x5800_00ff, 0x0000_ff00],
             }
         );
     }
@@ -789,13 +789,13 @@ mod tests {
     #[test]
     fn line_alias_opcodes_decode_like_their_base_families() {
         let mut it = Interpreter::new();
-        for op in [0x44u8, 0x4C] {
+        for op in [0x44u8, 0x4c] {
             assert!(matches!(
                 it.interpret(&entry(op, vec![(op as u32) << 24, 0, 1])),
                 Some(GpuEvent::MonoLine { .. })
             ));
         }
-        for op in [0x54u8, 0x5C] {
+        for op in [0x54u8, 0x5c] {
             assert!(matches!(
                 it.interpret(&entry(op, vec![(op as u32) << 24, 0, 0, 1])),
                 Some(GpuEvent::ShadedLine { .. })

@@ -13,8 +13,7 @@ use psoxide_settings::LibraryEntry;
 
 use super::debug_ui_png::{input, paint};
 use crate::app::{AppState, TextureFilter};
-use crate::theme;
-use crate::ui;
+use crate::{theme, ui};
 
 /// What to draw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]

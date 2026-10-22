@@ -86,7 +86,7 @@ fn contains_covers_4_bytes() {
 #[test]
 fn index_write_is_masked() {
     let mut cd = CdRom::new();
-    cd.write8(BASE, 0xFF);
+    cd.write8(BASE, 0xff);
     // The status byte readback has index in low 2 bits.
     assert_eq!(cd.read8(BASE) & 0x3, 3);
 }
@@ -94,8 +94,8 @@ fn index_write_is_masked() {
 #[test]
 fn parameter_fifo_roundtrips() {
     let mut cd = CdRom::new();
-    cd.write8(BASE + 2, 0xAB);
-    cd.write8(BASE + 2, 0xCD);
+    cd.write8(BASE + 2, 0xab);
+    cd.write8(BASE + 2, 0xcd);
     assert_eq!(cd.params.len(), 2);
     // FIFO not-empty bit cleared, not-full bit still set.
     let s = cd.read8(BASE);
@@ -180,13 +180,13 @@ fn delivered_irq_packet_replaces_stale_bytes_and_clears_busy_bit() {
         command: 0x01,
         deadline: 100,
         irq: IrqType::Acknowledge,
-        bytes: vec![0xAA, 0xBB],
+        bytes: vec![0xaa, 0xbb],
         followup: None,
     });
 
     assert!(cd.tick(101));
-    assert_eq!(cd.read8(BASE + 1), 0xAA);
-    assert_eq!(cd.read8(BASE + 1), 0xBB);
+    assert_eq!(cd.read8(BASE + 1), 0xaa);
+    assert_eq!(cd.read8(BASE + 1), 0xbb);
     assert_eq!(cd.read8(BASE + 1), 0);
     assert_eq!(cd.read8(BASE) & status_bit::TRANSMISSION_BUSY, 0);
 }
@@ -194,11 +194,11 @@ fn delivered_irq_packet_replaces_stale_bytes_and_clears_busy_bit() {
 #[test]
 fn irq_ack_clears_only_written_bits() {
     let mut cd = CdRom::new();
-    cd.irq_flag = 0x1F;
+    cd.irq_flag = 0x1f;
     // Select index 1 then write-1-to-clear bit 2.
     cd.write8(BASE, 1);
     cd.write8(BASE + 3, 0x04);
-    assert_eq!(cd.irq_flag, 0x1B);
+    assert_eq!(cd.irq_flag, 0x1b);
 }
 
 #[test]
@@ -406,12 +406,12 @@ fn getlocl_reports_the_seekl_target_once_the_seek_is_over() {
 fn getlocl_returns_last_sector_header_and_subheader() {
     let mut cd = CdRom::new();
     let header = [0x12, 0x34, 0x56, 0x02];
-    let subheader = [0xAA, 0xBB, 0xCC, 0xDD];
-    cd.insert_disc(Some(Disc::from_bin(raw_sector(header, subheader, 0x6C))));
+    let subheader = [0xaa, 0xbb, 0xcc, 0xdd];
+    cd.insert_disc(Some(Disc::from_bin(raw_sector(header, subheader, 0x6c))));
 
     cd.load_next_sector();
     assert_eq!(cd.data_fifo_len(), 2048);
-    assert_eq!(cd.data_fifo.front().copied(), Some(0x6C));
+    assert_eq!(cd.data_fifo.front().copied(), Some(0x6c));
 
     cd.cmd_get_loc_l();
     cd.tick(0);
@@ -427,7 +427,7 @@ fn load_next_sector_whole_sector_mode_returns_2340_bytes() {
     let mut cd = CdRom::new();
     let header = [0x01, 0x02, 0x03, 0x02];
     let subheader = [0x10, 0x20, 0x30, 0x40];
-    let raw = raw_sector(header, subheader, 0xAB);
+    let raw = raw_sector(header, subheader, 0xab);
     cd.mode = 0x20;
     cd.insert_disc(Some(Disc::from_bin(raw.clone())));
 
@@ -441,8 +441,8 @@ fn load_next_sector_whole_sector_mode_returns_2340_bytes() {
 #[test]
 fn load_next_sector_whole_sector_mode1_keeps_full_raw_payload() {
     let mut cd = CdRom::new();
-    let mut raw = raw_sector([0x00, 0x02, 0x00, 0x01], [0; 4], 0x5D);
-    raw[2064..2352].fill(0xE7);
+    let mut raw = raw_sector([0x00, 0x02, 0x00, 0x01], [0; 4], 0x5d);
+    raw[2064..2352].fill(0xe7);
     cd.mode = 0x20;
     cd.insert_disc(Some(Disc::from_bin(raw.clone())));
 
@@ -457,14 +457,14 @@ fn load_next_sector_whole_sector_mode1_keeps_full_raw_payload() {
 fn load_next_sector_mode1_uses_payload_after_header() {
     let mut cd = CdRom::new();
     let mut raw = raw_sector([0x00, 0x02, 0x00, 0x01], [0; 4], 0x00);
-    raw[16..16 + 2048].fill(0x5D);
-    raw[24..24 + 2048].fill(0xA7);
+    raw[16..16 + 2048].fill(0x5d);
+    raw[24..24 + 2048].fill(0xa7);
     cd.insert_disc(Some(Disc::from_bin(raw)));
 
     cd.load_next_sector();
 
     assert_eq!(cd.data_fifo_len(), 2048);
-    assert_eq!(cd.data_fifo.front().copied(), Some(0x5D));
+    assert_eq!(cd.data_fifo.front().copied(), Some(0x5d));
 }
 
 #[test]
@@ -489,7 +489,7 @@ fn load_next_sector_skips_audio_track_during_data_read() {
 #[test]
 fn load_next_sector_sets_ready_latch_but_leaves_transfer_disarmed() {
     let mut cd = CdRom::new();
-    let raw = raw_sector([0x00, 0x02, 0x00, 0x02], [0; 4], 0x6C);
+    let raw = raw_sector([0x00, 0x02, 0x00, 0x02], [0; 4], 0x6c);
     cd.insert_disc(Some(Disc::from_bin(raw)));
 
     cd.load_next_sector();
@@ -499,7 +499,7 @@ fn load_next_sector_sets_ready_latch_but_leaves_transfer_disarmed() {
     assert_ne!(cd.read8(BASE) & status_bit::DATA_FIFO_NOT_EMPTY, 0);
     assert_eq!(cd.pop_data_byte(), 0);
     assert_eq!(cd.data_fifo_len(), 2048);
-    assert_eq!(cd.data_fifo.front().copied(), Some(0x6C));
+    assert_eq!(cd.data_fifo.front().copied(), Some(0x6c));
 }
 
 #[test]
@@ -619,7 +619,7 @@ fn a_sector_landing_during_an_unacked_int1_is_announced_after_the_ack() {
     // Software acknowledges shortly after.
     let ack = second_due + 2_000;
     cd.write8_at(BASE, 1, ack);
-    cd.write8_at(BASE + 3, 0x1F, ack);
+    cd.write8_at(BASE + 3, 0x1f, ack);
     assert_eq!(cd.irq_flag, 0);
     assert!(
         cd.tick(ack + 1_000),
@@ -669,11 +669,11 @@ fn a_handler_that_never_runs_loses_sectors_rather_than_stalling_the_drive() {
 fn xa_audio_sector_suppresses_dataready_irq_but_keeps_streaming() {
     let mut cd = CdRom::new();
     let xa_sector = raw_sector([0x00, 0x02, 0x00, 0x02], [0x07, 0x02, 0x64, 0x01], 0);
-    let data_sector = raw_sector([0x00, 0x02, 0x01, 0x02], [0x07, 0x02, 0x00, 0x00], 0x5A);
+    let data_sector = raw_sector([0x00, 0x02, 0x01, 0x02], [0x07, 0x02, 0x00, 0x00], 0x5a);
     let mut disc = xa_sector;
     disc.extend(data_sector);
     cd.insert_disc(Some(Disc::from_bin(disc)));
-    cd.mode = 0xC0; // double-speed + STRSND/XA enable
+    cd.mode = 0xc0; // double-speed + STRSND/XA enable
     cd.setloc_msf = (0x00, 0x02, 0x00); // LBA 0
     cd.scheduling_cycle = 1_000;
 
@@ -712,12 +712,12 @@ fn xa_audio_sector_suppresses_dataready_irq_but_keeps_streaming() {
 #[test]
 fn xa_audio_sector_leaves_the_pending_data_sector_intact() {
     let mut cd = CdRom::new();
-    let data_sector = raw_sector([0x00, 0x02, 0x00, 0x02], [0x01, 0x00, 0x48, 0x00], 0x5A);
+    let data_sector = raw_sector([0x00, 0x02, 0x00, 0x02], [0x01, 0x00, 0x48, 0x00], 0x5a);
     let xa_sector = raw_sector([0x00, 0x02, 0x01, 0x02], [0x01, 0x01, 0x64, 0x01], 0);
     let mut disc = data_sector;
     disc.extend(xa_sector);
     cd.insert_disc(Some(Disc::from_bin(disc)));
-    cd.mode = 0xC0; // double speed + XA-ADPCM, filter off
+    cd.mode = 0xc0; // double speed + XA-ADPCM, filter off
     cd.setloc_msf = (0x00, 0x02, 0x00);
     cd.scheduling_cycle = 1_000;
 
@@ -737,7 +737,7 @@ fn xa_audio_sector_leaves_the_pending_data_sector_intact() {
     assert!(cd.cd_audio_queue_len() > 0, "the audio sector was decoded");
     assert!(cd.data_fifo_ready, "the unread data sector is still there");
     assert_eq!(cd.data_fifo_len(), 2048);
-    assert_eq!(cd.data_fifo.front().copied(), Some(0x5A));
+    assert_eq!(cd.data_fifo.front().copied(), Some(0x5a));
     assert!(
         cd.waiting_sectors.is_empty(),
         "audio never enters the sector ring"
@@ -760,7 +760,7 @@ fn filtered_out_xa_audio_sectors_are_not_queued_as_data() {
         ));
     }
     cd.insert_disc(Some(Disc::from_bin(disc)));
-    cd.mode = 0xC8; // double speed + XA-ADPCM + filter
+    cd.mode = 0xc8; // double speed + XA-ADPCM + filter
     cd.xa_filter_file = 1;
     cd.xa_filter_channel = 2;
     cd.setloc_msf = (0x00, 0x02, 0x00);
@@ -1298,7 +1298,7 @@ fn getstat_after_cdda_track_end_is_prompt_and_reports_stopped() {
 #[test]
 fn setfilter_and_getparam_roundtrip_filter_state() {
     let mut cd = CdRom::new();
-    cd.mode = 0xE8;
+    cd.mode = 0xe8;
 
     cd.cmd_set_filter(&[0x12, 0x34]);
     assert_eq!(cd.xa_filter_file, 0x12);
@@ -1310,7 +1310,7 @@ fn setfilter_and_getparam_roundtrip_filter_state() {
     cd.cmd_get_param();
     cd.tick(10_000_000);
     assert_eq!(cd.read8(BASE + 1), cd.stat_byte());
-    assert_eq!(cd.read8(BASE + 1), 0xE8);
+    assert_eq!(cd.read8(BASE + 1), 0xe8);
     assert_eq!(cd.read8(BASE + 1), 0x00);
     assert_eq!(cd.read8(BASE + 1), 0x12);
     assert_eq!(cd.read8(BASE + 1), 0x34);
@@ -1386,9 +1386,9 @@ fn xa_decode_4bit_stereo_blocks_follow_the_documented_layout() {
     // byte 0 of each word), block 1 the right (high nibble). Headers for
     // blocks 0 and 1 sit at portion offsets 4 and 5: range 12, filter 0.
     let mut raw = vec![0u8; psx_iso::SECTOR_BYTES];
-    raw[24 + 4] = 0x0C;
-    raw[24 + 5] = 0x0C;
-    raw[24 + 16] = 0xF1; // left +1, right -1 (first sample of both)
+    raw[24 + 4] = 0x0c;
+    raw[24 + 5] = 0x0c;
+    raw[24 + 16] = 0xf1; // left +1, right -1 (first sample of both)
     raw[24 + 16 + 4] = 0x72; // second word: left +2, right +7
     let mut left = crate::spu::XaDecoderState::new();
     let mut right = crate::spu::XaDecoderState::new();
@@ -1410,7 +1410,7 @@ fn xa_decode_8bit_stereo_blocks_use_one_byte_per_block() {
     raw[24 + 4] = 0x08;
     raw[24 + 5] = 0x08;
     raw[24 + 16] = 0x05;
-    raw[24 + 16 + 1] = 0xFB; // -5
+    raw[24 + 16 + 1] = 0xfb; // -5
     let mut left = crate::spu::XaDecoderState::new();
     let mut right = crate::spu::XaDecoderState::new();
     let coding = XaCoding {
@@ -1469,7 +1469,7 @@ fn reset_cancels_read_and_completes_with_motor_on() {
     let mut cd = CdRom::new();
     cd.motor_on = true;
     cd.reading = true;
-    cd.data_fifo.push_back(0xAB);
+    cd.data_fifo.push_back(0xab);
     cd.pending.push_back(PendingEvent {
         command: 0x06,
         deadline: 123,
@@ -1482,7 +1482,7 @@ fn reset_cancels_read_and_completes_with_motor_on() {
     assert!(cd.tick(FIRST_RESPONSE_CYCLES + 1));
     assert_eq!(cd.irq_flag, IrqType::Acknowledge as u8);
     cd.write8(BASE, 1);
-    cd.write8(BASE + 3, 0x1F);
+    cd.write8(BASE + 3, 0x1f);
     assert_eq!(cd.irq_flag, 0);
     assert!(cd.tick(FIRST_RESPONSE_CYCLES + RESET_SECOND_RESPONSE_CYCLES + 2));
     assert_eq!(cd.irq_flag, IrqType::Complete as u8);
@@ -1504,39 +1504,39 @@ fn reset_cancels_read_and_completes_with_motor_on() {
 #[test]
 fn repeated_reset_before_ack_reschedules_one_long_completion() {
     let mut cd = CdRom::new();
-    cd.last_command = 0x0A;
+    cd.last_command = 0x0a;
     cd.scheduling_cycle = 100;
     cd.cmd_reset();
 
     cd.scheduling_cycle = 1_000;
     cd.cmd_reset();
     assert_eq!(
-        count_pending_command_irq(&cd, 0x0A, IrqType::Acknowledge),
+        count_pending_command_irq(&cd, 0x0a, IrqType::Acknowledge),
         1
     );
-    assert_eq!(count_pending_command_irq(&cd, 0x0A, IrqType::Complete), 1);
+    assert_eq!(count_pending_command_irq(&cd, 0x0a, IrqType::Complete), 1);
     let ack = cd
         .pending
         .iter()
-        .find(|event| event.command == 0x0A && event.irq == IrqType::Acknowledge)
+        .find(|event| event.command == 0x0a && event.irq == IrqType::Acknowledge)
         .expect("reset ACK");
     assert_eq!(ack.deadline, 1_000 + FIRST_RESPONSE_CYCLES);
     assert_eq!(
         ack.followup.as_ref().map(|f| (f.command, f.irq, f.delay)),
-        Some((0x0A, IrqType::Complete, RESET_SECOND_RESPONSE_CYCLES))
+        Some((0x0a, IrqType::Complete, RESET_SECOND_RESPONSE_CYCLES))
     );
 
     assert!(!cd.tick(100 + FIRST_RESPONSE_CYCLES + 1));
     assert!(cd.tick(1_000 + FIRST_RESPONSE_CYCLES + 1));
     cd.irq_flag = 0;
     cd.responses.clear();
-    assert_eq!(count_pending_command_irq(&cd, 0x0A, IrqType::Complete), 1);
+    assert_eq!(count_pending_command_irq(&cd, 0x0a, IrqType::Complete), 1);
 }
 
 #[test]
 fn repeated_reset_while_completion_pending_publishes_completion() {
     let mut cd = CdRom::new();
-    cd.last_command = 0x0A;
+    cd.last_command = 0x0a;
     cd.scheduling_cycle = 100;
     cd.cmd_reset();
 
@@ -1547,14 +1547,14 @@ fn repeated_reset_while_completion_pending_publishes_completion() {
     cd.scheduling_cycle = 2_000_000;
     cd.cmd_reset();
     assert_eq!(
-        count_pending_command_irq(&cd, 0x0A, IrqType::Acknowledge),
+        count_pending_command_irq(&cd, 0x0a, IrqType::Acknowledge),
         0
     );
-    assert_eq!(count_pending_command_irq(&cd, 0x0A, IrqType::Complete), 1);
+    assert_eq!(count_pending_command_irq(&cd, 0x0a, IrqType::Complete), 1);
     let complete = cd
         .pending
         .iter()
-        .find(|event| event.command == 0x0A && event.irq == IrqType::Complete)
+        .find(|event| event.command == 0x0a && event.irq == IrqType::Complete)
         .expect("reset completion after pending completion");
     assert_eq!(complete.deadline, 2_000_000 + FIRST_RESPONSE_CYCLES);
     assert!(complete.followup.is_none());
@@ -1737,7 +1737,7 @@ impl psx_iso::TrackSource for GatedSource {
 #[test]
 fn a_delivery_waits_for_a_sector_the_image_has_not_supplied() {
     let open = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let raw = raw_sector([0x00, 0x02, 0x00, 0x02], [0, 0, 0x08, 0], 0x5A);
+    let raw = raw_sector([0x00, 0x02, 0x00, 0x02], [0, 0, 0x08, 0], 0x5a);
     let mut cd = CdRom::new();
     cd.insert_disc(Some(Disc::from_source(Box::new(GatedSource {
         bytes: raw.repeat(4),
@@ -1762,7 +1762,7 @@ fn a_delivery_waits_for_a_sector_the_image_has_not_supplied() {
     open.store(true, std::sync::atomic::Ordering::Relaxed);
     assert!(cd.tick(first_due + 200));
     assert_eq!(cd.irq_flag, IrqType::DataReady as u8);
-    assert_eq!(cd.data_fifo.front().copied(), Some(0x5A));
+    assert_eq!(cd.data_fifo.front().copied(), Some(0x5a));
 }
 
 /// Cycle at which the first event of `irq` for `command` is due, once the
@@ -1943,15 +1943,15 @@ fn spec_decode_4bit_stereo(raw: &[u8]) -> Vec<(i16, i16)> {
         for blk in 0..4 {
             for nibble in 0..2 {
                 let header = src[4 + blk * 2 + nibble];
-                let shift = 12 - i32::from(header & 0x0F);
+                let shift = 12 - i32::from(header & 0x0f);
                 let filter = usize::from((header & 0x30) >> 4);
                 let ch = nibble;
                 for j in 0..28 {
-                    let raw4 = i32::from((src[16 + blk + j * 4] >> (nibble * 4)) & 0x0F);
+                    let raw4 = i32::from((src[16 + blk + j * 4] >> (nibble * 4)) & 0x0f);
                     let t = if raw4 >= 8 { raw4 - 16 } else { raw4 };
                     let predicted =
                         (hist[ch][0] * POS[filter] + hist[ch][1] * NEG[filter] + 32) >> 6;
-                    let s = ((t << shift) + predicted).clamp(-0x8000, 0x7FFF);
+                    let s = ((t << shift) + predicted).clamp(-0x8000, 0x7fff);
                     hist[ch][1] = hist[ch][0];
                     hist[ch][0] = s;
                     if ch == 0 {
@@ -2041,7 +2041,7 @@ fn long_data_disc() -> Disc {
 fn read_and_deliver(cd: &mut CdRom, mode: u8, lba: u32, sectors: u32) -> u64 {
     let mut now = 1_000;
     cd.push_param(mode);
-    cd.queue_command(0x0E, now);
+    cd.queue_command(0x0e, now);
     now += 100_000;
     cd.tick(now);
     cd.irq_flag = 0;
@@ -2186,7 +2186,7 @@ fn a_getstat_soon_after_a_pause_still_reads_reading_and_a_later_one_does_not() {
 
 #[test]
 fn a_command_between_the_two_responses_cancels_the_second() {
-    for command in [0x01u8, 0x0E, 0x19] {
+    for command in [0x01u8, 0x0e, 0x19] {
         let mut cd = CdRom::new();
         cd.insert_disc(Some(long_data_disc()));
         let now = read_and_deliver(&mut cd, 0x00, 100, 12) + 4_000;
@@ -2244,7 +2244,7 @@ fn a_pause_during_the_seek_of_a_read_is_refused_and_the_read_goes_on() {
         cd.insert_disc(Some(long_data_disc()));
         let mut now = 1_000;
         cd.push_param(mode);
-        cd.queue_command(0x0E, now);
+        cd.queue_command(0x0e, now);
         now += 100_000;
         cd.tick(now);
         cd.irq_flag = 0;
@@ -2314,8 +2314,8 @@ fn commands_that_move_the_drive_end_the_reading_window() {
     type Action = fn(&mut CdRom);
     let actions: [(&str, Action); 5] = [
         ("Stop", |cd| cd.queue_command(0x08, 1_000_000)),
-        ("Init", |cd| cd.queue_command(0x1C, 1_000_000)),
-        ("Reset", |cd| cd.queue_command(0x0A, 1_000_000)),
+        ("Init", |cd| cd.queue_command(0x1c, 1_000_000)),
+        ("Reset", |cd| cd.queue_command(0x0a, 1_000_000)),
         ("SeekL", |cd| cd.queue_command(0x15, 1_000_000)),
         ("eject", |cd| cd.insert_disc(None)),
     ];

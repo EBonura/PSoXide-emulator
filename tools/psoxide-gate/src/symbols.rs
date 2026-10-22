@@ -81,7 +81,7 @@ impl Symbols {
             return Err("only 32-bit little-endian ELF is supported".into());
         }
         let shoff = u32at(0x20)? as usize;
-        let shentsize = u16at(0x2E)? as usize;
+        let shentsize = u16at(0x2e)? as usize;
         let shnum = u16at(0x30)? as usize;
         for i in 0..shnum {
             let sh = shoff + i * shentsize;
@@ -100,7 +100,7 @@ impl Symbols {
                 let value = u32at(e + 4)?;
                 let info = *b.get(e + 12).ok_or("truncated ELF")?;
                 // STT_OBJECT (1), STT_FUNC (2), STT_NOTYPE (0) with a name.
-                let kind = info & 0xF;
+                let kind = info & 0xf;
                 if name_off == 0 || kind > 2 {
                     continue;
                 }

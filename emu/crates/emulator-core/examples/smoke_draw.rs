@@ -75,17 +75,17 @@ fn main() {
     // Need a safe peek at IRQ controller state -- reading through the bus
     // would need &mut. Read raw IRQ register via the MMIO path.
     let i_stat = {
-        let b0 = bus.try_read8(0xBF80_1070).unwrap_or(0) as u32;
-        let b1 = bus.try_read8(0xBF80_1071).unwrap_or(0) as u32;
-        let b2 = bus.try_read8(0xBF80_1072).unwrap_or(0) as u32;
-        let b3 = bus.try_read8(0xBF80_1073).unwrap_or(0) as u32;
+        let b0 = bus.try_read8(0xbf80_1070).unwrap_or(0) as u32;
+        let b1 = bus.try_read8(0xbf80_1071).unwrap_or(0) as u32;
+        let b2 = bus.try_read8(0xbf80_1072).unwrap_or(0) as u32;
+        let b3 = bus.try_read8(0xbf80_1073).unwrap_or(0) as u32;
         b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
     };
     let i_mask = {
-        let b0 = bus.try_read8(0xBF80_1074).unwrap_or(0) as u32;
-        let b1 = bus.try_read8(0xBF80_1075).unwrap_or(0) as u32;
-        let b2 = bus.try_read8(0xBF80_1076).unwrap_or(0) as u32;
-        let b3 = bus.try_read8(0xBF80_1077).unwrap_or(0) as u32;
+        let b0 = bus.try_read8(0xbf80_1074).unwrap_or(0) as u32;
+        let b1 = bus.try_read8(0xbf80_1075).unwrap_or(0) as u32;
+        let b2 = bus.try_read8(0xbf80_1076).unwrap_or(0) as u32;
+        let b3 = bus.try_read8(0xbf80_1077).unwrap_or(0) as u32;
         b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
     };
     println!("I_STAT           = 0x{i_stat:08x}");
@@ -151,20 +151,20 @@ fn main() {
                 0x02 => "fill-rect",
                 0x20..=0x23 => "mono-tri",
                 0x24..=0x27 => "textured-tri",
-                0x28..=0x2B => "mono-quad",
-                0x2C..=0x2F => "textured-quad",
+                0x28..=0x2b => "mono-quad",
+                0x2c..=0x2f => "textured-quad",
                 0x30..=0x33 => "shaded-tri",
-                0x38..=0x3B => "shaded-quad",
-                0x60..=0x7F => "rect",
-                0x80..=0x9F => "vram-blit",
-                0xA0..=0xBF => "cpu->vram",
-                0xC0..=0xDF => "vram->cpu",
-                0xE1 => "draw-mode",
-                0xE2 => "tex-window",
-                0xE3 => "draw-area-tl",
-                0xE4 => "draw-area-br",
-                0xE5 => "draw-offset",
-                0xE6 => "mask-bit",
+                0x38..=0x3b => "shaded-quad",
+                0x60..=0x7f => "rect",
+                0x80..=0x9f => "vram-blit",
+                0xa0..=0xbf => "cpu->vram",
+                0xc0..=0xdf => "vram->cpu",
+                0xe1 => "draw-mode",
+                0xe2 => "tex-window",
+                0xe3 => "draw-area-tl",
+                0xe4 => "draw-area-br",
+                0xe5 => "draw-offset",
+                0xe6 => "mask-bit",
                 _ => "?",
             };
             println!("  0x{op:02X} {name:<14} {c}");
@@ -284,7 +284,7 @@ fn main() {
     // The loop waits for *(0x80079D9C) to reach $a1; both should be
     // visible here so we can tell whether the counter is being
     // incremented by IRQs.
-    if let Some(counter) = read32(&bus, 0x80079D9C) {
+    if let Some(counter) = read32(&bus, 0x80079d9c) {
         println!(
             "wait counter     = *(0x80079D9C) = 0x{counter:08x} ({counter})  threshold $a1 = 0x{:08x} ({})",
             cpu.gprs()[5],
@@ -472,9 +472,9 @@ fn dump_vram_ppm(vram: &emulator_core::Vram, path: &str) -> std::io::Result<()> 
     writeln!(file, "P6\n{w} {h}\n255")?;
     let mut rgb = Vec::with_capacity(w * h * 3);
     for &pix in vram.words() {
-        let r5 = (pix & 0x1F) as u8;
-        let g5 = ((pix >> 5) & 0x1F) as u8;
-        let b5 = ((pix >> 10) & 0x1F) as u8;
+        let r5 = (pix & 0x1f) as u8;
+        let g5 = ((pix >> 5) & 0x1f) as u8;
+        let b5 = ((pix >> 10) & 0x1f) as u8;
         rgb.push((r5 << 3) | (r5 >> 2));
         rgb.push((g5 << 3) | (g5 >> 2));
         rgb.push((b5 << 3) | (b5 >> 2));

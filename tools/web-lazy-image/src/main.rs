@@ -24,7 +24,7 @@ use flate2::Compression;
 use psx_iso::SECTOR_BYTES;
 
 fn fnv1a32(data: &[u8]) -> u32 {
-    let mut h: u32 = 0x811C_9DC5;
+    let mut h: u32 = 0x811c_9dc5;
     for &b in data {
         h = (h ^ b as u32).wrapping_mul(0x0100_0193);
     }

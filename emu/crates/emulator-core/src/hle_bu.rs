@@ -26,45 +26,44 @@
 use crate::hle_card::{
     self as card, outcome, BROKEN, BU_BUFFER, DIRECTORY, DIR_ENTRY_SIZE, EVENT_BU,
 };
-use crate::hle_exceptions as ex;
 use crate::hle_files::fcb;
 use crate::hle_kernel::{peek32, poke32};
-use crate::Bus;
+use crate::{hle_exceptions as ex, Bus};
 
 /// Kernel variables of the backup unit. Per-slot ones are two words.
 pub mod kvar {
     /// The slot's directory cache is valid (2 words).
-    pub const LOADED: u32 = 0x3B80;
+    pub const LOADED: u32 = 0x3b80;
     /// A sector request of this module is with the card driver, per slot.
-    pub const IO_PENDING: u32 = 0x3B88;
+    pub const IO_PENDING: u32 = 0x3b88;
     /// Phase of the directory load, per slot.
-    pub const LOAD_PHASE: u32 = 0x3B90;
+    pub const LOAD_PHASE: u32 = 0x3b90;
     /// Counter of the directory load, per slot.
-    pub const LOAD_INDEX: u32 = 0x3B98;
+    pub const LOAD_INDEX: u32 = 0x3b98;
     /// Counter of a format, per slot.
-    pub const TOC_INDEX: u32 = 0x3BA0;
+    pub const TOC_INDEX: u32 = 0x3ba0;
     /// Phase of the file function in progress, 0 when none.
-    pub const PHASE: u32 = 0x3BA8;
+    pub const PHASE: u32 = 0x3ba8;
     /// Counter within that phase.
-    pub const INDEX: u32 = 0x3BAC;
+    pub const INDEX: u32 = 0x3bac;
     /// Two values the function in progress keeps (sector count, first
     /// block).
-    pub const AUX: u32 = 0x3BB0;
+    pub const AUX: u32 = 0x3bb0;
     /// Directory frames still to write: bit `i` is entry `i`.
-    pub const DIRTY: u32 = 0x3BB8;
+    pub const DIRTY: u32 = 0x3bb8;
     /// Entry whose frame is written after the others, or FFh.
-    pub const LAST_ENTRY: u32 = 0x3BBC;
+    pub const LAST_ENTRY: u32 = 0x3bbc;
     /// Slot `_bu_init` is loading.
-    pub const INIT_SLOT: u32 = 0x3BC0;
+    pub const INIT_SLOT: u32 = 0x3bc0;
     /// C(1Ah) find mode: 0 lists files, 1 deleted files.
-    pub const FIND_MODE: u32 = 0x3BC4;
+    pub const FIND_MODE: u32 = 0x3bc4;
     /// Entry `nextfile` continues from.
-    pub const FIND_INDEX: u32 = 0x3BC8;
+    pub const FIND_INDEX: u32 = 0x3bc8;
     /// High-level operation under way per slot ([`super::bu_op`]), 2 words.
-    pub const BU_OP: u32 = 0x3BCC;
+    pub const BU_OP: u32 = 0x3bcc;
     /// Asynchronous transfer: FCB, sectors done, sectors in all, buffer,
     /// and whether a sector is out.
-    pub const ASYNC: u32 = 0x3BD4;
+    pub const ASYNC: u32 = 0x3bd4;
 }
 
 /// Name pattern of the search `firstfile` started: 15h bytes.
@@ -105,11 +104,11 @@ pub mod internal {
     /// nextfile(fcb, direntry).
     pub const NEXTFILE: u8 = 0x27;
     /// format(fcb).
-    pub const FORMAT: u8 = 0x2A;
+    pub const FORMAT: u8 = 0x2a;
     /// rename(fcb1, name1, fcb2, name2).
-    pub const RENAME: u8 = 0x2B;
+    pub const RENAME: u8 = 0x2b;
     /// undelete(fcb, name).
-    pub const UNDELETE: u8 = 0x2C;
+    pub const UNDELETE: u8 = 0x2c;
 }
 
 /// File error numbers (psx-spx "BIOS File Functions").
@@ -118,7 +117,7 @@ mod err {
     pub const IO: u32 = 0x10;
     pub const EXIST: u32 = 0x11;
     pub const INVAL: u32 = 0x16;
-    pub const NOSPC: u32 = 0x1C;
+    pub const NOSPC: u32 = 0x1c;
 }
 
 /// Open mode bit: create a new file, its block count in bits 16..31.
@@ -137,14 +136,14 @@ const BLOCK: u32 = 0x2000;
 const FIRST: u32 = 0x51;
 const MIDDLE: u32 = 0x52;
 const LAST: u32 = 0x53;
-const FREE: u32 = 0xA0;
-const DELETED_FIRST: u32 = 0xA1;
+const FREE: u32 = 0xa0;
+const DELETED_FIRST: u32 = 0xa1;
 /// "No next block".
-const NO_NEXT: u32 = 0xFFFF;
+const NO_NEXT: u32 = 0xffff;
 /// Phase constants shared by the file functions.
 const IDLE: u32 = 0;
 /// First sector of the write test frame.
-const WRITE_TEST_FRAME: u32 = 0x3F;
+const WRITE_TEST_FRAME: u32 = 0x3f;
 
 // ------------------------------------------------------- directory cache
 
@@ -179,8 +178,8 @@ fn entry_size(bus: &Bus, slot: u32, i: u32) -> u32 {
 /// [`NO_NEXT`].
 fn entry_next(bus: &Bus, slot: u32, i: u32) -> u32 {
     let at = dir_entry(slot, i) + 8;
-    u32::from(bus.try_read8(at).unwrap_or(0xFF))
-        | u32::from(bus.try_read8(at + 1).unwrap_or(0xFF)) << 8
+    u32::from(bus.try_read8(at).unwrap_or(0xff))
+        | u32::from(bus.try_read8(at + 1).unwrap_or(0xff)) << 8
 }
 
 fn set_next(bus: &mut Bus, slot: u32, i: u32, next: u32) {
@@ -191,12 +190,12 @@ fn set_next(bus: &mut Bus, slot: u32, i: u32, next: u32) {
 
 /// The 15h name bytes of entry `i`: up to 20 characters and a zero.
 fn entry_name(bus: &Bus, slot: u32, i: u32) -> [u8; 21] {
-    let at = dir_entry(slot, i) + 0x0A;
+    let at = dir_entry(slot, i) + 0x0a;
     std::array::from_fn(|k| bus.try_read8(at + k as u32).unwrap_or(0))
 }
 
 fn set_name(bus: &mut Bus, slot: u32, i: u32, name: &[u8]) {
-    let at = dir_entry(slot, i) + 0x0A;
+    let at = dir_entry(slot, i) + 0x0a;
     for k in 0..21 {
         let byte = if k < 20 {
             name.get(k).copied().unwrap_or(0)
@@ -245,18 +244,18 @@ pub fn install(bus: &mut Bus) {
 
 /// XOR of the first 7Fh bytes of a frame in the buffer.
 fn frame_checksum(bus: &Bus, buf: u32) -> u8 {
-    (0..0x7F).fold(0, |sum, k| sum ^ bus.try_read8(buf + k).unwrap_or(0))
+    (0..0x7f).fold(0, |sum, k| sum ^ bus.try_read8(buf + k).unwrap_or(0))
 }
 
 /// Whether the frame in the buffer carries its own checksum.
 fn frame_ok(bus: &Bus, buf: u32) -> bool {
-    bus.try_read8(buf + 0x7F) == Some(frame_checksum(bus, buf))
+    bus.try_read8(buf + 0x7f) == Some(frame_checksum(bus, buf))
 }
 
 /// Set the checksum byte of the frame in the buffer.
 fn seal_frame(bus: &mut Bus, buf: u32) {
     let sum = frame_checksum(bus, buf);
-    bus.write8_safe(buf + 0x7F, sum);
+    bus.write8_safe(buf + 0x7f, sum);
 }
 
 fn clear_buffer(bus: &mut Bus, buf: u32, fill: u8) {
@@ -485,7 +484,7 @@ fn load_directory(bus: &mut Bus, slot: u32, write_test: bool) -> Option<u32> {
 fn directory_frame_ok(bus: &mut Bus, slot: u32, index: u32) -> bool {
     let buf = buffer(slot);
     let state = peek32(bus, buf);
-    let valid = matches!(state, FIRST | MIDDLE | LAST | 0xA0..=0xA3);
+    let valid = matches!(state, FIRST | MIDDLE | LAST | 0xa0..=0xa3);
     if !valid || !frame_ok(bus, buf) {
         return false;
     }
@@ -513,7 +512,7 @@ fn write_toc(bus: &mut Bus, slot: u32) -> Option<u32> {
             .find(|&i| pending(i) && i != last)
             .or((last < ENTRIES && pending(last)).then_some(last));
         let Some(entry) = next else {
-            poke32(bus, kvar::LAST_ENTRY, 0xFF);
+            poke32(bus, kvar::LAST_ENTRY, 0xff);
             return Some(outcome::OK);
         };
         frame_from_entry(bus, slot, entry);
@@ -541,8 +540,8 @@ fn format_frame(bus: &mut Bus, slot: u32, frame: u32) {
         }
         1..=15 => {
             bus.write8_safe(buf, FREE as u8);
-            bus.write8_safe(buf + 8, 0xFF);
-            bus.write8_safe(buf + 9, 0xFF);
+            bus.write8_safe(buf + 8, 0xff);
+            bus.write8_safe(buf + 9, 0xff);
         }
         _ => poke32(bus, buf, u32::MAX),
     }
@@ -717,7 +716,7 @@ fn reset(bus: &mut Bus) {
     ] {
         poke32(bus, addr, 0);
     }
-    poke32(bus, kvar::LAST_ENTRY, 0xFF);
+    poke32(bus, kvar::LAST_ENTRY, 0xff);
 }
 
 /// Fail with `e` in the FCB: -1.
@@ -889,7 +888,7 @@ fn create_file(bus: &mut Bus, slot: u32, name: &[u8], blocks: u32) -> Result<u32
         return Err(err::EXIST);
     }
     let free: Vec<u32> = (0..ENTRIES)
-        .filter(|&i| matches!(entry_state(bus, slot, i), 0xA0..=0xA3))
+        .filter(|&i| matches!(entry_state(bus, slot, i), 0xa0..=0xa3))
         .take(blocks as usize)
         .collect();
     if (free.len() as u32) < blocks {
@@ -1145,7 +1144,7 @@ pub fn undelete(bus: &mut Bus, f: u32, name: u32) -> Option<u32> {
         let blocks = chain(bus, slot, first);
         if blocks
             .iter()
-            .any(|&entry| !matches!(entry_state(bus, slot, entry), 0xA1..=0xA3))
+            .any(|&entry| !matches!(entry_state(bus, slot, entry), 0xa1..=0xa3))
         {
             return Err(err::EXIST);
         }
@@ -1204,11 +1203,11 @@ fn fill_direntry(bus: &mut Bus, slot: u32, i: u32, dst: u32) {
     let attribute = if entry_state(bus, slot, i) == FIRST {
         0x50
     } else {
-        0xA0
+        0xa0
     };
     poke32(bus, dst + 0x14, attribute);
     poke32(bus, dst + 0x18, entry_size(bus, slot, i));
-    poke32(bus, dst + 0x1C, 0);
+    poke32(bus, dst + 0x1c, 0);
     poke32(bus, dst + 0x20, (i + 1) * 64);
     poke32(bus, dst + 0x24, 0);
 }
@@ -1308,7 +1307,7 @@ mod tests {
 
     /// InitCARD2(1), StartCARD2, _bu_init: calls 0..2.
     fn start() -> Vec<Step> {
-        vec![b(0x4A, [1, 0, 0, 0]), b(0x4B, [0; 4]), a(0x55, [0; 4])]
+        vec![b(0x4a, [1, 0, 0, 0]), b(0x4b, [0; 4]), a(0x55, [0; 4])]
     }
 
     fn setup() -> Bus {
@@ -1332,7 +1331,7 @@ mod tests {
 
     /// psx-spx: a frame's last byte is the XOR of the 7Fh before it.
     fn checksum_holds(frame: &[u8]) -> bool {
-        frame[..0x7F].iter().fold(0, |x, b| x ^ b) == frame[0x7F]
+        frame[..0x7f].iter().fold(0, |x, b| x ^ b) == frame[0x7f]
     }
 
     #[test]
@@ -1340,10 +1339,10 @@ mod tests {
         let mut bus = setup();
         let mut steps = vec![
             b(0x08, [EVENT_BU, 4, 0x2000, 0]),
-            b(0x0C, [res(0), 0, 0, 0]),
+            b(0x0c, [res(0), 0, 0, 0]),
         ];
         steps.extend(start());
-        steps.extend([a(0xAB, [0, 0, 0, 0]), b(0x0A, [res(0), 0, 0, 0])]);
+        steps.extend([a(0xab, [0, 0, 0, 0]), b(0x0a, [res(0), 0, 0, 0])]);
         run(&mut bus, &program(&steps), 1);
         assert_eq!(result(&mut bus, 5), 1, "_card_info started");
         assert_eq!(result(&mut bus, 6), 1, "SwCARD 4 arrived");
@@ -1358,15 +1357,15 @@ mod tests {
     #[test]
     fn a_card_without_the_mc_id_is_formatted_only_with_auto_format_on() {
         let mut blank = vec![0u8; crate::pad::MEMCARD_SIZE];
-        blank[0] = 0xFF;
+        blank[0] = 0xff;
         let mut bus = setup();
         bus.attach_memcard_port1(blank.clone());
         let mut steps = vec![
             b(0x08, [EVENT_BU, 0x2000, 0x2000, 0]),
-            b(0x0C, [res(0), 0, 0, 0]),
+            b(0x0c, [res(0), 0, 0, 0]),
         ];
         steps.extend(start());
-        steps.extend([a(0xAC, [0, 0, 0, 0]), b(0x0A, [res(0), 0, 0, 0])]);
+        steps.extend([a(0xac, [0, 0, 0, 0]), b(0x0a, [res(0), 0, 0, 0])]);
         run(&mut bus, &program(&steps), 1);
         assert_eq!(result(&mut bus, 6), 1, "SwCARD 2000h: unformatted");
         assert_eq!(peek32(&bus, var(kvar::LOADED, 0)), 0);
@@ -1375,21 +1374,21 @@ mod tests {
         bus.attach_memcard_port1(blank);
         let mut steps = vec![
             b(0x08, [EVENT_BU, 4, 0x2000, 0]),
-            b(0x0C, [res(0), 0, 0, 0]),
+            b(0x0c, [res(0), 0, 0, 0]),
         ];
         steps.extend([
-            b(0x4A, [1, 0, 0, 0]),
-            b(0x4B, [0; 4]),
-            a(0xAD, [1, 0, 0, 0]),
+            b(0x4a, [1, 0, 0, 0]),
+            b(0x4b, [0; 4]),
+            a(0xad, [1, 0, 0, 0]),
         ]);
-        steps.extend([a(0xAC, [0, 0, 0, 0]), b(0x0A, [res(0), 0, 0, 0])]);
+        steps.extend([a(0xac, [0, 0, 0, 0]), b(0x0a, [res(0), 0, 0, 0])]);
         run(&mut bus, &program(&steps), 1);
         assert_eq!(result(&mut bus, 6), 1, "SwCARD 4: formatted and loaded");
         let image = card_image(&mut bus);
         assert_eq!(&frame(&image, 0)[..2], b"MC");
         assert!(checksum_holds(frame(&image, 0)));
         for n in 1..=15 {
-            assert_eq!(frame(&image, n)[0], 0xA0, "frame {n} is free");
+            assert_eq!(frame(&image, n)[0], 0xa0, "frame {n} is free");
             assert!(checksum_holds(frame(&image, n)));
         }
     }
@@ -1434,9 +1433,9 @@ mod tests {
         // sectors (64 on).
         let image = card_image(&mut bus);
         let dir = frame(&image, 1);
-        assert_eq!(dir[0], 0xA1, "deleted first block");
+        assert_eq!(dir[0], 0xa1, "deleted first block");
         assert_eq!(u32::from_le_bytes(dir[4..8].try_into().unwrap()), 0x2000);
-        assert_eq!(u16::from_le_bytes(dir[8..10].try_into().unwrap()), 0xFFFF);
+        assert_eq!(u16::from_le_bytes(dir[8..10].try_into().unwrap()), 0xffff);
         assert_eq!(&dir[10..16], b"FILE1\0");
         assert!(checksum_holds(dir));
         assert_eq!(
@@ -1476,7 +1475,7 @@ mod tests {
         assert_eq!(frame(&image, 2)[0], 0x53);
         assert_eq!(
             u16::from_le_bytes(frame(&image, 2)[8..10].try_into().unwrap()),
-            0xFFFF
+            0xffff
         );
         assert!(checksum_holds(frame(&image, 1)) && checksum_holds(frame(&image, 2)));
     }
@@ -1499,7 +1498,7 @@ mod tests {
         assert_eq!(result(&mut bus, 5), u32::MAX);
         assert_eq!(result(&mut bus, 6), 0x11, "file already exists");
         assert_eq!(result(&mut bus, 7), u32::MAX);
-        assert_eq!(result(&mut bus, 8), 0x1C, "not enough free blocks");
+        assert_eq!(result(&mut bus, 8), 0x1c, "not enough free blocks");
         assert_eq!(result(&mut bus, 9), 1);
         assert_eq!(result(&mut bus, 10), u32::MAX, "format erased everything");
     }
@@ -1531,13 +1530,13 @@ mod tests {
     fn an_asynchronous_write_returns_at_once_and_finishes_by_event() {
         let mut bus = setup();
         // The file handle is the event class: handle 2 done okay.
-        let mut steps = vec![b(0x08, [2, 4, 0x2000, 0]), b(0x0C, [res(0), 0, 0, 0])];
+        let mut steps = vec![b(0x08, [2, 4, 0x2000, 0]), b(0x0c, [res(0), 0, 0, 0])];
         steps.extend(start());
         steps.extend([
             open(NAME, 0x0002 | 0x0200 | 1 << 16 | 0x8000), // 5
             b(0x35, [res(5), SRC, 0x200, 0]),               // 6 returns at once
-            b(0x0B, [res(0), 0, 0, 0]),                     // 7 not done yet
-            b(0x0A, [res(0), 0, 0, 0]),                     // 8 wait for it
+            b(0x0b, [res(0), 0, 0, 0]),                     // 7 not done yet
+            b(0x0a, [res(0), 0, 0, 0]),                     // 8 wait for it
         ]);
         run(&mut bus, &program(&steps), 1);
         assert_eq!(result(&mut bus, 5), 2);
@@ -1565,11 +1564,11 @@ mod tests {
         let mut bus = setup();
         let steps = [
             b(0x08, [EVENT_BU, 0x2000, 0x2000, 0]), // 0
-            b(0x0C, [res(0), 0, 0, 0]),             // 1
-            b(0x4A, [1, 0, 0, 0]),                  // 2
-            b(0x4B, [0; 4]),                        // 3
-            a(0xAC, [0; 4]),                        // 4 _card_load
-            b(0x0A, [res(0), 0, 0, 0]),             // 5 "changed" arrives
+            b(0x0c, [res(0), 0, 0, 0]),             // 1
+            b(0x4a, [1, 0, 0, 0]),                  // 2
+            b(0x4b, [0; 4]),                        // 3
+            a(0xac, [0; 4]),                        // 4 _card_load
+            b(0x0a, [res(0), 0, 0, 0]),             // 5 "changed" arrives
         ];
         run(&mut bus, &program(&steps), 1);
         assert_eq!(result(&mut bus, 5), 1);
@@ -1581,7 +1580,7 @@ mod tests {
 
         let mut bus = setup();
         let mut steps = start();
-        steps.push(a(0xAC, [0; 4]));
+        steps.push(a(0xac, [0; 4]));
         run(&mut bus, &program(&steps), 1);
         assert_eq!(peek32(&bus, var(kvar::LOADED, 0)), 1);
         assert!(

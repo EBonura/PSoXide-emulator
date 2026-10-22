@@ -62,7 +62,7 @@ pub unsafe fn build_cmd_log_into<const N: usize>(
             // each word is u32-aligned because OT primitives are u32
             // aligned by `repr(C, align(4))`.
             let first = unsafe { ptr::read_volatile(packet_ptr.add(offset + 1)) };
-            let opcode = ((first >> 24) & 0xFF) as u8;
+            let opcode = ((first >> 24) & 0xff) as u8;
             let command_words = gp0_command_word_count(opcode).max(1).min(words - offset);
             let mut inline_words = [0; emulator_core::gpu::GPU_CMD_FIFO_INLINE_WORDS];
             let fifo = if command_words <= inline_words.len() {
@@ -134,8 +134,8 @@ mod tests {
         let mut ot: OrderingTable<4> = OrderingTable::new();
         ot.clear();
 
-        let mut a: [u32; 2] = [0, 0xAA00_0000];
-        let mut b: [u32; 2] = [0, 0xBB00_0000];
+        let mut a: [u32; 2] = [0, 0xaa00_0000];
+        let mut b: [u32; 2] = [0, 0xbb00_0000];
         {
             // SAFETY: the table was cleared above and both packets outlive it.
             let mut frame = unsafe { ot.resume_frame() };
@@ -148,8 +148,8 @@ mod tests {
         let log = unsafe { build_cmd_log(&ot) };
         assert_eq!(log.len(), 2);
         // `b` was inserted last and prepends to the chain head.
-        assert_eq!(log[0].opcode, 0xBB);
-        assert_eq!(log[1].opcode, 0xAA);
+        assert_eq!(log[0].opcode, 0xbb);
+        assert_eq!(log[1].opcode, 0xaa);
     }
 
     /// A single DMA packet can legally contain multiple GP0 commands.
@@ -162,7 +162,7 @@ mod tests {
 
         let mut packet: [u32; 9] = [
             0,
-            0xE204_2318,
+            0xe204_2318,
             0x2480_8080,
             0x0001_0002,
             0x0000_0000,
@@ -179,8 +179,8 @@ mod tests {
 
         let log = unsafe { build_cmd_log(&ot) };
         assert_eq!(log.len(), 2);
-        assert_eq!(log[0].opcode, 0xE2);
-        assert_eq!(log[0].fifo, vec![0xE204_2318]);
+        assert_eq!(log[0].opcode, 0xe2);
+        assert_eq!(log[0].fifo, vec![0xe204_2318]);
         assert_eq!(log[1].opcode, 0x24);
         assert_eq!(log[1].fifo.len(), 7);
         assert_eq!(log[1].index, 1);
@@ -190,7 +190,7 @@ mod tests {
     fn build_cmd_log_into_reuses_the_output_allocation() {
         let mut ot: OrderingTable<4> = OrderingTable::new();
         ot.clear();
-        let mut packet: [u32; 2] = [0, 0xE100_0000];
+        let mut packet: [u32; 2] = [0, 0xe100_0000];
         {
             // SAFETY: the table was cleared above and the packet outlives it.
             let mut frame = unsafe { ot.resume_frame() };
@@ -200,8 +200,8 @@ mod tests {
         let mut log = Vec::with_capacity(32);
         log.push(GpuCmdLogEntry {
             index: 99,
-            opcode: 0xFF,
-            fifo: vec![0xFFFF_FFFF].into(),
+            opcode: 0xff,
+            fifo: vec![0xffff_ffff].into(),
         });
         let allocation = log.as_ptr();
         unsafe { build_cmd_log_into(&ot, &mut log) };
@@ -209,7 +209,7 @@ mod tests {
         assert_eq!(log.len(), 1);
         assert_eq!(log.as_ptr(), allocation);
         assert_eq!(log[0].index, 0);
-        assert_eq!(log[0].opcode, 0xE1);
-        assert_eq!(log[0].fifo.as_slice(), &[0xE100_0000]);
+        assert_eq!(log[0].opcode, 0xe1);
+        assert_eq!(log[0].fifo.as_slice(), &[0xe100_0000]);
     }
 }

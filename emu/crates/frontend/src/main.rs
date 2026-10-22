@@ -85,8 +85,9 @@ use crate::cli::Cli;
 use crate::gfx::Graphics;
 use crate::pacing::{FramePacing, HostPace};
 use crate::playtest_input::Port1PadSample;
+use crate::ui::menu::MenuInput;
 use crate::ui::profiler::FrameProfileSample;
-use crate::ui::{menu::MenuInput, MenuOutcome};
+use crate::ui::MenuOutcome;
 
 use emulator_core::button;
 // `counter` / `task` telemetry IDs feed the editor's Play metrics overlay only.
@@ -2255,8 +2256,8 @@ fn gpu_log_counters(log: &[emulator_core::gpu::GpuCmdLogEntry]) -> (usize, usize
     for entry in log {
         words = words.saturating_add(entry.fifo.len());
         match entry.opcode {
-            0x20..=0x7F => draw_cmds += 1,
-            0x80..=0xBF => image_cmds += 1,
+            0x20..=0x7f => draw_cmds += 1,
+            0x80..=0xbf => image_cmds += 1,
             _ => {}
         }
     }
@@ -2264,7 +2265,7 @@ fn gpu_log_counters(log: &[emulator_core::gpu::GpuCmdLogEntry]) -> (usize, usize
 }
 
 fn gpu_log_has_draw(log: &[emulator_core::gpu::GpuCmdLogEntry]) -> bool {
-    log.iter().any(|entry| matches!(entry.opcode, 0x20..=0x7F))
+    log.iter().any(|entry| matches!(entry.opcode, 0x20..=0x7f))
 }
 
 fn hw_target_needs_resync(

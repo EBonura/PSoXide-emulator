@@ -11,11 +11,11 @@ use crate::{Bus, Cpu};
 /// Where the guest program is put.
 pub const PROGRAM: u32 = 0x8001_0000;
 /// Result `i` (the v0 of call `i`) is stored at `RESULTS + 4 * i`.
-pub const RESULTS: u32 = 0x8002_0F00;
+pub const RESULTS: u32 = 0x8002_0f00;
 
 /// An argument standing for "the v0 of call `k`".
 pub const fn res(k: u32) -> u32 {
-    0xD000_0000 | k
+    0xd000_0000 | k
 }
 
 /// One step of a guest program.
@@ -28,12 +28,12 @@ pub enum Step {
 
 /// A(func).
 pub fn a(func: u32, args: [u32; 4]) -> Step {
-    Step::Call(0xA0, func, args)
+    Step::Call(0xa0, func, args)
 }
 
 /// B(func).
 pub fn b(func: u32, args: [u32; 4]) -> Step {
-    Step::Call(0xB0, func, args)
+    Step::Call(0xb0, func, args)
 }
 
 /// The program: interrupts on (IEc, IM2), then the steps. Ends in a loop on
@@ -49,8 +49,8 @@ pub fn program(steps: &[Step]) -> Vec<u32> {
             Step::Code(code) => code(&mut a),
             Step::Call(vector, func, args) => {
                 for (i, v) in args.iter().enumerate() {
-                    if *v >> 24 == 0xD0 {
-                        a.lw(A0 + i as u32, (4 * (*v & 0xFFFF)) as i16, S1);
+                    if *v >> 24 == 0xd0 {
+                        a.lw(A0 + i as u32, (4 * (*v & 0xffff)) as i16, S1);
                     } else {
                         a.li(A0 + i as u32, *v);
                     }
@@ -86,7 +86,7 @@ pub fn run(bus: &mut Bus, words: &[u32], extra: u64) -> Cpu {
     for (i, w) in words.iter().enumerate() {
         bus.write32(PROGRAM + 4 * i as u32, *w);
     }
-    cpu.gprs_mut_for_test()[29] = 0x801F_FF00;
+    cpu.gprs_mut_for_test()[29] = 0x801f_ff00;
     cpu.set_pc_for_test(PROGRAM);
     let end = PROGRAM + 4 * (words.len() as u32 - 2);
     let mut target = None;

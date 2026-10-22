@@ -48,13 +48,13 @@ const CHCR_TRIGGER: u32 = 1 << 28;
 /// DICR bits that software can write directly: the unused-but-stored low
 /// bits 0..=5, the bus-error flag at 15 is excluded, and the per-channel
 /// enables plus master enable at 16..=23.
-const DICR_WRITABLE: u32 = 0x003F | 0x00FF_0000;
+const DICR_WRITABLE: u32 = 0x003f | 0x00ff_0000;
 /// DICR bit 15, the bus error flag. Forces the master flag.
 const DICR_BUS_ERROR: u32 = 1 << 15;
 /// DICR bit 23, the master enable.
 const DICR_MASTER_ENABLE: u32 = 1 << 23;
 /// DICR bits 24..=30, the per-channel flags (write 1 to clear).
-const DICR_FLAGS: u32 = 0x7F00_0000;
+const DICR_FLAGS: u32 = 0x7f00_0000;
 /// DICR bit 31, the master flag (read only, computed).
 const DICR_MASTER_FLAG: u32 = 1 << 31;
 
@@ -94,11 +94,11 @@ pub struct Dma {
 
 impl Dma {
     /// Low edge of the controller's MMIO range.
-    pub const BASE: u32 = 0x1F80_1080;
+    pub const BASE: u32 = 0x1f80_1080;
     /// High edge (exclusive): DPCR is at `BASE + 0x70` and DICR at
     /// `BASE + 0x74`; the range is rounded up so the dispatch check is a
     /// single comparison.
-    pub const END: u32 = 0x1F80_10F8;
+    pub const END: u32 = 0x1f80_10f8;
     /// Channel stride within the DMA window.
     pub const STRIDE: u32 = 0x10;
     /// Offset of DPCR from [`Dma::BASE`].
@@ -200,7 +200,7 @@ impl Dma {
     pub fn write8(&mut self, phys: u32, value: u8) -> bool {
         let shift = (phys & 3) * 8;
         let word = self.read_stored(phys & !3);
-        let patched = word & !(0xFF << shift) | (value as u32) << shift;
+        let patched = word & !(0xff << shift) | (value as u32) << shift;
         self.write_raw32(phys & !3, patched);
         false
     }
@@ -231,7 +231,7 @@ impl Dma {
                     return;
                 };
                 match field {
-                    0x0 => c.base = value & 0x00FF_FFFF,
+                    0x0 => c.base = value & 0x00ff_ffff,
                     0x4 => c.block_control = value,
                     0x8 if ch == 6 => {
                         c.channel_control = (value & OTC_CHCR_WRITABLE) | OTC_CHCR_FIXED;
@@ -306,21 +306,21 @@ impl Dma {
         if otc.channel_control & (CHCR_START | CHCR_TRIGGER) != (CHCR_START | CHCR_TRIGGER) {
             return 0;
         }
-        let count = match otc.block_control & 0xFFFF {
+        let count = match otc.block_control & 0xffff {
             0 => 0x1_0000,
             n => n,
         };
         let mask = ram.len() as u32 - 1;
-        let mut addr = otc.base & 0x00FF_FFFC;
+        let mut addr = otc.base & 0x00ff_fffc;
         for i in 0..count {
             let next = if i + 1 == count {
-                0x00FF_FFFF
+                0x00ff_ffff
             } else {
-                addr.wrapping_sub(4) & 0x00FF_FFFF
+                addr.wrapping_sub(4) & 0x00ff_ffff
             };
             let at = (addr & mask) as usize;
             ram[at..at + 4].copy_from_slice(&next.to_le_bytes());
-            addr = addr.wrapping_sub(4) & 0x00FF_FFFC;
+            addr = addr.wrapping_sub(4) & 0x00ff_fffc;
         }
         count
     }
@@ -339,56 +339,56 @@ mod tests {
 
     #[test]
     fn contains_matches_mmio_range() {
-        assert!(Dma::contains(0x1F80_1080));
-        assert!(Dma::contains(0x1F80_10F4));
-        assert!(!Dma::contains(0x1F80_107F));
-        assert!(!Dma::contains(0x1F80_10F8));
+        assert!(Dma::contains(0x1f80_1080));
+        assert!(Dma::contains(0x1f80_10f4));
+        assert!(!Dma::contains(0x1f80_107f));
+        assert!(!Dma::contains(0x1f80_10f8));
     }
 
     #[test]
     fn channel_roundtrips_all_three_regs() {
         let mut dma = Dma::new();
-        dma.write32(0x1F80_1080, 0x0012_3456); // ch0 base
-        dma.write32(0x1F80_1084, 0xCAFEBABE); // ch0 bcr
-        dma.write32(0x1F80_1088, 0xDEADBEEF); // ch0 chcr
-        assert_eq!(dma.read32(0x1F80_1080), 0x0012_3456);
-        assert_eq!(dma.read32(0x1F80_1084), 0xCAFEBABE);
-        assert_eq!(dma.read32(0x1F80_1088), 0xDEADBEEF);
+        dma.write32(0x1f80_1080, 0x0012_3456); // ch0 base
+        dma.write32(0x1f80_1084, 0xcafebabe); // ch0 bcr
+        dma.write32(0x1f80_1088, 0xdeadbeef); // ch0 chcr
+        assert_eq!(dma.read32(0x1f80_1080), 0x0012_3456);
+        assert_eq!(dma.read32(0x1f80_1084), 0xcafebabe);
+        assert_eq!(dma.read32(0x1f80_1088), 0xdeadbeef);
     }
 
     #[test]
     fn base_address_is_masked_to_24_bits() {
         let mut dma = Dma::new();
-        dma.write32(0x1F80_1080, 0xDEAD_BEEF);
-        assert_eq!(dma.read32(0x1F80_1080), 0x00AD_BEEF);
+        dma.write32(0x1f80_1080, 0xdead_beef);
+        assert_eq!(dma.read32(0x1f80_1080), 0x00ad_beef);
     }
 
     #[test]
     fn dpcr_roundtrips_verbatim() {
         let mut dma = Dma::new();
-        dma.write32(0x1F80_10F0, 0x0765_4321);
-        assert_eq!(dma.read32(0x1F80_10F0), 0x0765_4321);
+        dma.write32(0x1f80_10f0, 0x0765_4321);
+        assert_eq!(dma.read32(0x1f80_10f0), 0x0765_4321);
     }
 
     #[test]
     fn partial_reads_see_live_register_bytes() {
         let mut dma = Dma::new();
-        dma.write32(0x1F80_10F0, 0x0765_4321);
-        assert_eq!(dma.read8(0x1F80_10F0), 0x21);
-        assert_eq!(dma.read8(0x1F80_10F2), 0x65);
-        assert_eq!(dma.read16(0x1F80_10F1), 0x6543);
+        dma.write32(0x1f80_10f0, 0x0765_4321);
+        assert_eq!(dma.read8(0x1f80_10f0), 0x21);
+        assert_eq!(dma.read8(0x1f80_10f2), 0x65);
+        assert_eq!(dma.read16(0x1f80_10f1), 0x6543);
     }
 
     #[test]
     fn dicr_byte_write_toggles_channel_irq_enable() {
         let mut disabled = Dma::new();
-        disabled.write8(0x1F80_10F6, 0x80); // master enable, channel 3 IRQ disabled
-        assert_eq!(disabled.read8(0x1F80_10F6) & 0x08, 0);
+        disabled.write8(0x1f80_10f6, 0x80); // master enable, channel 3 IRQ disabled
+        assert_eq!(disabled.read8(0x1f80_10f6) & 0x08, 0);
         assert!(!disabled.notify_channel_done(3));
 
         let mut enabled = Dma::new();
-        enabled.write8(0x1F80_10F6, 0x88); // master enable + channel 3 IRQ enable
-        assert_ne!(enabled.read8(0x1F80_10F6) & 0x08, 0);
+        enabled.write8(0x1f80_10f6, 0x88); // master enable + channel 3 IRQ enable
+        assert_ne!(enabled.read8(0x1f80_10f6) & 0x08, 0);
         assert!(enabled.notify_channel_done(3));
     }
 
@@ -397,20 +397,20 @@ mod tests {
         // Configure all enables + master, leave flags clear. R/W bits
         // round-trip; W1C bits (15, 24..30) ignore writes-of-zero.
         let mut dma = Dma::new();
-        dma.write32(0x1F80_10F4, 0x00FF_0000); // enables 16..23
+        dma.write32(0x1f80_10f4, 0x00ff_0000); // enables 16..23
                                                // Read-back includes the computed master flag in bit 31 -- clear
                                                // here because no per-channel flag is set.
-        assert_eq!(dma.read32(0x1F80_10F4), 0x00FF_0000);
+        assert_eq!(dma.read32(0x1f80_10f4), 0x00ff_0000);
     }
 
     #[test]
     fn dicr_channel_done_sets_pending_when_enabled() {
         let mut dma = Dma::new();
         // Enable channel 6 + master.
-        dma.write32(0x1F80_10F4, (1 << (16 + 6)) | (1 << 23));
+        dma.write32(0x1f80_10f4, (1 << (16 + 6)) | (1 << 23));
         let edge = dma.notify_channel_done(6);
         assert!(edge, "0->1 master flag transition expected");
-        let dicr = dma.read32(0x1F80_10F4);
+        let dicr = dma.read32(0x1f80_10f4);
         assert!(dicr & (1 << (24 + 6)) != 0, "channel-6 flag set");
         assert!(dicr & (1 << 31) != 0, "master flag set");
     }
@@ -419,22 +419,22 @@ mod tests {
     fn dicr_channel_done_ignored_when_disabled() {
         let mut dma = Dma::new();
         // Master enable on but channel 2 enable off.
-        dma.write32(0x1F80_10F4, 1 << 23);
+        dma.write32(0x1f80_10f4, 1 << 23);
         let edge = dma.notify_channel_done(2);
         assert!(!edge);
-        assert_eq!(dma.read32(0x1F80_10F4) & (1 << (24 + 2)), 0);
+        assert_eq!(dma.read32(0x1f80_10f4) & (1 << (24 + 2)), 0);
     }
 
     #[test]
     fn dicr_w1c_clears_pending_flag() {
         let mut dma = Dma::new();
-        dma.write32(0x1F80_10F4, (1 << 16) | (1 << 23));
+        dma.write32(0x1f80_10f4, (1 << 16) | (1 << 23));
         dma.notify_channel_done(0);
-        assert!(dma.read32(0x1F80_10F4) & (1 << 24) != 0);
+        assert!(dma.read32(0x1f80_10f4) & (1 << 24) != 0);
         // BIOS acks by writing 1 to the flag bit (along with re-asserting
         // the R/W enables, which the BIOS has been managing all along).
-        dma.write32(0x1F80_10F4, (1 << 16) | (1 << 23) | (1 << 24));
-        let dicr = dma.read32(0x1F80_10F4);
+        dma.write32(0x1f80_10f4, (1 << 16) | (1 << 23) | (1 << 24));
+        let dicr = dma.read32(0x1f80_10f4);
         assert_eq!(dicr & (1 << 24), 0, "flag cleared by W1C");
         assert_eq!(dicr & (1 << 31), 0, "master flag follows");
     }
@@ -446,16 +446,16 @@ mod tests {
         // but the master flag still clear. Writing DICR with the master
         // enable on in this state is a 0 to 1 edge on the master flag.
         dma.dicr = (1 << (16 + 2)) | (1 << (24 + 2));
-        let edge = dma.write32(0x1F80_10F4, (1 << (16 + 2)) | (1 << 23));
+        let edge = dma.write32(0x1f80_10f4, (1 << (16 + 2)) | (1 << 23));
         assert!(edge, "DICR write should create a master IRQ edge");
-        assert!(dma.read32(0x1F80_10F4) & (1 << 31) != 0);
+        assert!(dma.read32(0x1f80_10f4) & (1 << 31) != 0);
     }
 
     #[test]
     fn all_seven_channels_are_addressable() {
         let mut dma = Dma::new();
         for ch in 0..NUM_CHANNELS as u32 {
-            let addr = 0x1F80_1080 + ch * 0x10;
+            let addr = 0x1f80_1080 + ch * 0x10;
             dma.write32(addr, ch * 0x1000);
             assert_eq!(dma.read32(addr), ch * 0x1000);
         }
@@ -464,19 +464,19 @@ mod tests {
     #[test]
     fn otc_chcr_masks_unused_bits_and_hardwires_decrement() {
         let mut dma = Dma::new();
-        dma.write32(0x1F80_10E8, 0x7077_0703);
-        assert_eq!(dma.read32(0x1F80_10E8), 0x5000_0002);
-        dma.write32(0x1F80_10E8, 0);
-        assert_eq!(dma.read32(0x1F80_10E8), 0x0000_0002);
-        dma.write32(0x1F80_10E8, 0x8E88_F8FC);
-        assert_eq!(dma.read32(0x1F80_10E8), 0x0000_0002);
+        dma.write32(0x1f80_10e8, 0x7077_0703);
+        assert_eq!(dma.read32(0x1f80_10e8), 0x5000_0002);
+        dma.write32(0x1f80_10e8, 0);
+        assert_eq!(dma.read32(0x1f80_10e8), 0x0000_0002);
+        dma.write32(0x1f80_10e8, 0x8e88_f8fc);
+        assert_eq!(dma.read32(0x1f80_10e8), 0x0000_0002);
     }
 
     fn set_otc(dma: &mut Dma, base: u32, count: u32) {
         // CH6: base, block count, start (bit 24) + busy (bit 28)
-        dma.write32(0x1F80_10E0, base);
-        dma.write32(0x1F80_10E4, count);
-        dma.write32(0x1F80_10E8, (1 << 24) | (1 << 28));
+        dma.write32(0x1f80_10e0, base);
+        dma.write32(0x1f80_10e4, count);
+        dma.write32(0x1f80_10e8, (1 << 24) | (1 << 28));
     }
 
     #[test]
@@ -486,7 +486,7 @@ mod tests {
         // Sentinel just below the OT range -- must remain untouched
         // (validates that the loop's last chain-write to 0x3F4 is
         // overwritten by the terminator, not extended into 0x3F0).
-        write_u32(&mut ram, 0x3F0, 0xDEAD_BEEF);
+        write_u32(&mut ram, 0x3f0, 0xdead_beef);
 
         // 4-entry OT with MADR (head) at 0x400; terminator lands at
         // 0x3F4 (= 0x400 - (4-1)*4).
@@ -494,13 +494,13 @@ mod tests {
         assert_eq!(dma.run_otc(&mut ram), 4);
 
         // Head: MADR points to next-step-down.
-        assert_eq!(read_u32(&ram, 0x400), 0x0000_03FC);
-        assert_eq!(read_u32(&ram, 0x3FC), 0x0000_03F8);
-        assert_eq!(read_u32(&ram, 0x3F8), 0x0000_03F4);
+        assert_eq!(read_u32(&ram, 0x400), 0x0000_03fc);
+        assert_eq!(read_u32(&ram, 0x3fc), 0x0000_03f8);
+        assert_eq!(read_u32(&ram, 0x3f8), 0x0000_03f4);
         // Tail: lowest address holds the terminator.
-        assert_eq!(read_u32(&ram, 0x3F4), 0x00FF_FFFF);
+        assert_eq!(read_u32(&ram, 0x3f4), 0x00ff_ffff);
         // Sentinel below the tail is untouched.
-        assert_eq!(read_u32(&ram, 0x3F0), 0xDEAD_BEEF);
+        assert_eq!(read_u32(&ram, 0x3f0), 0xdead_beef);
     }
 
     #[test]
@@ -530,8 +530,8 @@ mod tests {
         let mut dma = Dma::new();
         let mut ram = vec![0u8; 2 * 1024 * 1024];
         // Write base/count but not start bit.
-        dma.write32(0x1F80_10E0, 0x0000_0100);
-        dma.write32(0x1F80_10E4, 1);
+        dma.write32(0x1f80_10e0, 0x0000_0100);
+        dma.write32(0x1f80_10e4, 1);
         assert_eq!(dma.run_otc(&mut ram), 0);
         assert_eq!(read_u32(&ram, 0x100), 0);
     }
@@ -540,9 +540,9 @@ mod tests {
     fn otc_is_noop_without_manual_trigger_bit() {
         let mut dma = Dma::new();
         let mut ram = vec![0u8; 2 * 1024 * 1024];
-        dma.write32(0x1F80_10E0, 0x0000_0100);
-        dma.write32(0x1F80_10E4, 1);
-        dma.write32(0x1F80_10E8, 1 << 24);
+        dma.write32(0x1f80_10e0, 0x0000_0100);
+        dma.write32(0x1f80_10e4, 1);
+        dma.write32(0x1f80_10e8, 1 << 24);
         assert_eq!(dma.run_otc(&mut ram), 0);
         assert_eq!(read_u32(&ram, 0x100), 0);
     }
@@ -560,34 +560,34 @@ mod tests {
     #[test]
     fn dicr_flag_needs_both_the_channel_enable_and_the_master_enable() {
         let mut dma = Dma::new();
-        dma.write32(0x1F80_10F4, 1 << (16 + 3)); // channel 3 enable only
+        dma.write32(0x1f80_10f4, 1 << (16 + 3)); // channel 3 enable only
         assert!(!dma.notify_channel_done(3));
-        assert_eq!(dma.read32(0x1F80_10F4) & (1 << 27), 0);
+        assert_eq!(dma.read32(0x1f80_10f4) & (1 << 27), 0);
     }
 
     #[test]
     fn dicr_master_flag_is_computed_and_ignores_the_written_bit_31() {
         let mut dma = Dma::new();
         // Writing bit 31 with nothing pending does not set it.
-        dma.write32(0x1F80_10F4, 0x8000_0000);
-        assert_eq!(dma.read32(0x1F80_10F4), 0);
+        dma.write32(0x1f80_10f4, 0x8000_0000);
+        assert_eq!(dma.read32(0x1f80_10f4), 0);
         // A flag raises it only while the master enable is on.
-        dma.write32(0x1F80_10F4, (1 << 17) | (1 << 23));
+        dma.write32(0x1f80_10f4, (1 << 17) | (1 << 23));
         assert!(dma.notify_channel_done(1));
-        assert_ne!(dma.read32(0x1F80_10F4) & (1 << 31), 0);
-        dma.write32(0x1F80_10F4, 1 << 17); // master enable off, flag kept
-        assert_eq!(dma.read32(0x1F80_10F4) & (1 << 31), 0);
+        assert_ne!(dma.read32(0x1f80_10f4) & (1 << 31), 0);
+        dma.write32(0x1f80_10f4, 1 << 17); // master enable off, flag kept
+        assert_eq!(dma.read32(0x1f80_10f4) & (1 << 31), 0);
         // Turning the master enable back on is a 0 to 1 edge.
-        assert!(dma.write32(0x1F80_10F4, (1 << 17) | (1 << 23)));
+        assert!(dma.write32(0x1f80_10f4, (1 << 17) | (1 << 23)));
     }
 
     #[test]
     fn dicr_partial_writes_do_not_acknowledge_flags() {
         let mut dma = Dma::new();
-        dma.write32(0x1F80_10F4, (1 << 17) | (1 << 23));
+        dma.write32(0x1f80_10f4, (1 << 17) | (1 << 23));
         dma.notify_channel_done(1);
         // A byte write of 1 to the flag does not clear it, unlike a word write.
-        dma.write8(0x1F80_10F7, 0x02);
-        assert_ne!(dma.read32(0x1F80_10F4) & (1 << 25), 0);
+        dma.write8(0x1f80_10f7, 0x02);
+        assert_ne!(dma.read32(0x1f80_10f4) & (1 << 25), 0);
     }
 }

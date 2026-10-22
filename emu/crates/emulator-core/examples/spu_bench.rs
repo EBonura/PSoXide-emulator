@@ -38,11 +38,11 @@ fn main() {
                 ram.push((state >> 16) as u16);
             }
         }
-        spu.write16(0x1F80_1DA6, 0x1000 >> 3); // transfer address
-        spu.write16(SPUCNT, 0xC000 | 0x0080); // enabled, unmuted, reverb master
+        spu.write16(0x1f80_1da6, 0x1000 >> 3); // transfer address
+        spu.write16(SPUCNT, 0xc000 | 0x0080); // enabled, unmuted, reverb master
         spu.dma_write(&ram);
 
-        spu.write16(REVERB_BASE, 0xE000);
+        spu.write16(REVERB_BASE, 0xe000);
         spu.write16(REVERB_VOL_L, 0x3000);
         spu.write16(REVERB_VOL_R, 0x3000);
         for i in 0..32u32 {
@@ -54,16 +54,16 @@ fn main() {
             spu.write16(base + 2, 0x2000); // volume R
             spu.write16(base + 4, 0x0800 + (v as u16) * 0x40); // pitch
             spu.write16(base + 6, 0x1000 >> 3); // start address
-            spu.write16(base + 8, 0x00FF); // ADSR low: fast attack, sustain level 15
-            spu.write16(base + 10, 0x5FC0); // ADSR high: sustain decrease, slow
+            spu.write16(base + 8, 0x00ff); // ADSR low: fast attack, sustain level 15
+            spu.write16(base + 10, 0x5fc0); // ADSR high: sustain decrease, slow
             spu.write16(base + 14, 0x1000 >> 3); // repeat address
         }
-        spu.write16(EON_LO, 0xFFFF);
-        spu.write16(EON_HI, 0x00FF);
+        spu.write16(EON_LO, 0xffff);
+        spu.write16(EON_HI, 0x00ff);
         spu.write16(NON_LO, 0x0030); // voices 4 and 5 play noise
         spu.write16(PMON_LO, 0x0004); // voice 2 is modulated by voice 1
-        spu.write16(KON_LO, 0xFFFF);
-        spu.write16(KON_HI, 0x00FF);
+        spu.write16(KON_LO, 0xffff);
+        spu.write16(KON_HI, 0x00ff);
 
         let start = Instant::now();
         let mut now = 0u64;

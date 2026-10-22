@@ -33,26 +33,26 @@ use crate::Bus;
 pub mod site {
     /// Start of the pad output byte handling; overwritten by
     /// "patch_optional_pad_output" to stop the 00h/01h clipping.
-    pub const PAD_OUTPUT_CLIP: u32 = 0x3D8;
+    pub const PAD_OUTPUT_CLIP: u32 = 0x3d8;
     /// Second copy of the pad output handling, also overwritten by that
     /// patch.
-    pub const PAD_OUTPUT_CLIP_2: u32 = 0x4DC;
+    pub const PAD_OUTPUT_CLIP_2: u32 = 0x4dc;
     /// Pad error handling (select the other slot, then delay); zeroed by
     /// "patch_pad_error_handling_and_get_pad_enable_functions".
     pub const PAD_ERROR_RESELECT: u32 = 0x594;
     /// VBlank acknowledge in the pad/card handler; zeroed by
     /// "patch_no_pad_card_auto_ack".
-    pub const PAD_VBLANK_ACK: u32 = 0x62C;
+    pub const PAD_VBLANK_ACK: u32 = 0x62c;
     /// SetPadOutput(src1, blah1, src2, blah2), taken by
     /// "patch_optional_pad_output".
-    pub const PAD_OUTPUT_FN: u32 = 0x7A0;
+    pub const PAD_OUTPUT_FN: u32 = 0x7a0;
     /// SetPadEnableFlag(), taken by the pad error handling patch.
     pub const PAD_ENABLE_FN: u32 = 0x884;
     /// ClearPadEnableFlag(), taken by the pad error handling patch.
     pub const PAD_DISABLE_FN: u32 = 0x894;
     /// Card command/status byte handling; overwritten by
     /// "patch_card_specific_delay" with a call to the game's delay loop.
-    pub const CARD_IRQ_DELAY: u32 = 0x9C8;
+    pub const CARD_IRQ_DELAY: u32 = 0x9c8;
     /// The opcode that sends one byte too many in card_info; zeroed by
     /// "patch_card_info_step4".
     pub const CARD_INFO_EXTRA_BYTE: u32 = 0x1988;
@@ -182,7 +182,7 @@ impl Routine {
 
 /// C(06h) and B(5Bh) table indices.
 const C0_EXCEPTION: u32 = 0x06;
-const B0_CLEAR_PAD: u32 = 0x5B;
+const B0_CLEAR_PAD: u32 = 0x5b;
 
 /// What decoding knows about a register.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -257,22 +257,22 @@ pub fn identify(got: Got, words: &[u32]) -> Vec<Routine> {
 fn classify(got: Got, index: u32, offset: u32, access: Access) -> Option<Routine> {
     match (got, index) {
         (Got::C0, C0_EXCEPTION) => match (access, offset) {
-            (Access::Store, 0x00..=0x6F) => Some(Routine::ExceptionPrologue),
+            (Access::Store, 0x00..=0x6f) => Some(Routine::ExceptionPrologue),
             (Access::Load, 0x70..=0x77) => Some(Routine::EarlyCardWait),
-            (Access::Store, 0x70..=0x7F) => Some(Routine::EarlyCardUninstall),
-            (Access::Store, 0x80..=0x8F) => Some(Routine::LightgunHandler),
+            (Access::Store, 0x70..=0x7f) => Some(Routine::EarlyCardUninstall),
+            (Access::Store, 0x80..=0x8f) => Some(Routine::LightgunHandler),
             _ => None,
         },
         (Got::B0, B0_CLEAR_PAD) => match (access, offset) {
-            (Access::Store, 0x9C0..=0x9DF) => Some(Routine::CardDelay),
+            (Access::Store, 0x9c0..=0x9df) => Some(Routine::CardDelay),
             (Access::Store, site::CARD_INFO_EXTRA_BYTE) => Some(Routine::CardInfoStep4),
-            (Access::Store, 0x594..=0x5BF) => Some(Routine::PadErrorHandling),
+            (Access::Store, 0x594..=0x5bf) => Some(Routine::PadErrorHandling),
             (Access::Take, site::PAD_ENABLE_FN | site::PAD_DISABLE_FN) => {
                 Some(Routine::PadErrorHandling)
             }
-            (Access::Store, 0x3D8..=0x3E7 | 0x4DC..=0x4EF) => Some(Routine::PadOutput),
+            (Access::Store, 0x3d8..=0x3e7 | 0x4dc..=0x4ef) => Some(Routine::PadOutput),
             (Access::Take, site::PAD_OUTPUT_FN) => Some(Routine::PadOutput),
-            (Access::Store, 0x62C..=0x64F) => Some(Routine::PadNoAutoAck),
+            (Access::Store, 0x62c..=0x64f) => Some(Routine::PadNoAutoAck),
             _ => None,
         },
         _ => None,
@@ -291,9 +291,9 @@ fn step(
     let rt = ((w >> 16) & 31) as usize;
     let rd = ((w >> 11) & 31) as usize;
     let simm = w as u16 as i16 as i32 as u32;
-    let zimm = w & 0xFFFF;
+    let zimm = w & 0xffff;
     match op {
-        0x00 => match w & 0x3F {
+        0x00 => match w & 0x3f {
             // addu/add: register plus a known constant keeps the tracking.
             0x20 | 0x21 => {
                 regs[rd] = match (regs[rs], regs[rt]) {
@@ -310,13 +310,13 @@ fn step(
             }
             // jr/jalr end the routine after the delay slot.
             0x08 | 0x09 => {
-                if w & 0x3F == 0x09 {
+                if w & 0x3f == 0x09 {
                     regs[rd] = Val::Unknown;
                 }
                 *end_after = Some(n + 1);
             }
             // Shifts, logic, multiply results: no longer an address.
-            0x00..=0x07 | 0x10 | 0x12 | 0x22..=0x2B => regs[rd] = Val::Unknown,
+            0x00..=0x07 | 0x10 | 0x12 | 0x22..=0x2b => regs[rd] = Val::Unknown,
             _ => {}
         },
         // j/jal.
@@ -329,16 +329,16 @@ fn step(
         // addi/addiu.
         0x08 | 0x09 => regs[rt] = regs[rs].add(simm),
         // ori on a constant (lui/ori pairs).
-        0x0D => {
+        0x0d => {
             regs[rt] = match regs[rs] {
                 Val::Const(c) => Val::Const(c | zimm),
                 _ => Val::Unknown,
             }
         }
         // lui.
-        0x0F => regs[rt] = Val::Const(zimm << 16),
+        0x0f => regs[rt] = Val::Const(zimm << 16),
         // Other immediate ALU ops.
-        0x0A..=0x0C | 0x0E => regs[rt] = Val::Unknown,
+        0x0a..=0x0c | 0x0e => regs[rt] = Val::Unknown,
         // Loads.
         0x20..=0x26 => {
             let value = match regs[rs].add(simm) {
@@ -352,7 +352,7 @@ fn step(
             regs[rt] = value;
         }
         // Stores.
-        0x28 | 0x29 | 0x2B => match regs[rs].add(simm) {
+        0x28 | 0x29 | 0x2b => match regs[rs].add(simm) {
             Val::Entry(index, offset) => seen.push((index, offset, Access::Store)),
             _ => {
                 if let Val::Entry(index, offset) = regs[rt] {
@@ -361,7 +361,7 @@ fn step(
             }
         },
         // COP0/COP2 moves to a GPR.
-        0x10 | 0x12 if (w >> 21) & 0x1F == 0 => regs[rt] = Val::Unknown,
+        0x10 | 0x12 if (w >> 21) & 0x1f == 0 => regs[rt] = Val::Unknown,
         _ => {}
     }
 }
@@ -427,9 +427,9 @@ mod tests {
         a.nop();
         a.lw(V1, 0x70, V0);
         a.lw(A1, 0x74, V0);
-        a.andi(V1, V1, 0xFFFF);
+        a.andi(V1, V1, 0xffff);
         a.sll(V1, V1, 16);
-        a.andi(A1, A1, 0xFFFF);
+        a.andi(A1, A1, 0xffff);
         a.addu(V1, V1, A1);
         a.addiu(V0, V1, 0x28);
         ends_with_call(&mut a);
@@ -458,15 +458,15 @@ mod tests {
     #[test]
     fn b5bh_sites_name_their_routines() {
         let cases: [(i16, Routine); 5] = [
-            (0x9C8, Routine::CardDelay),
+            (0x9c8, Routine::CardDelay),
             (0x594, Routine::PadErrorHandling),
-            (0x3D8, Routine::PadOutput),
-            (0x62C, Routine::PadNoAutoAck),
+            (0x3d8, Routine::PadOutput),
+            (0x62c, Routine::PadNoAutoAck),
             (0x1988, Routine::CardInfoStep4),
         ];
         for (offset, want) in cases {
             let mut a = Asm::new(0x8003_0000);
-            a.lw(V0, 0x16C, V0); // B(5Bh)
+            a.lw(V0, 0x16c, V0); // B(5Bh)
             a.nop();
             a.addiu(A3, V0, offset);
             a.jal_abs(0x8001_2340);
@@ -478,15 +478,15 @@ mod tests {
     #[test]
     fn taking_kernel_function_addresses_is_recognised() {
         let mut a = Asm::new(0x8003_0000);
-        a.lw(V0, 0x16C, V0);
+        a.lw(V0, 0x16c, V0);
         a.lui(AT, 0x8005);
-        a.addiu(V1, V0, 0x7A0);
+        a.addiu(V1, V0, 0x7a0);
         a.sw(V1, 0x10, AT);
         ends_with_call(&mut a);
         assert_eq!(identify(Got::B0, &a.finish()), vec![Routine::PadOutput]);
 
         let mut a = Asm::new(0x8003_0000);
-        a.lw(V0, 0x16C, V0);
+        a.lw(V0, 0x16c, V0);
         a.addiu(T0, V0, 0x884);
         a.lui(AT, 0x8005);
         a.sw(T0, 0x20, AT);
@@ -502,7 +502,7 @@ mod tests {
         let words: Vec<u32> = (0..16).map(|i| 0x2400_0000 | i).collect();
         assert!(identify(Got::B0, &words).is_empty());
         let mut a = Asm::new(0x8003_0000);
-        a.lw(V0, 0x16C, V0);
+        a.lw(V0, 0x16c, V0);
         a.sw(ZERO, 0x594, V0);
         ends_with_call(&mut a);
         assert!(identify(Got::C0, &a.finish()).is_empty());
@@ -511,10 +511,10 @@ mod tests {
     #[test]
     fn decoding_stops_at_the_first_call() {
         let mut a = Asm::new(0x8003_0000);
-        a.lw(V0, 0x16C, V0);
+        a.lw(V0, 0x16c, V0);
         a.jal_abs(0x8001_2340);
         a.nop();
-        a.sw(ZERO, 0x62C, V0);
+        a.sw(ZERO, 0x62c, V0);
         assert!(identify(Got::B0, &a.finish()).is_empty());
     }
 
@@ -526,7 +526,7 @@ mod tests {
         assert!(pad_vblank_ack(&bus));
         assert!(pad_output_clipped(&bus));
         assert!(card_info_extra_byte(&bus));
-        let entry = peek32(&bus, crate::hle_kernel::B0_TABLE + 4 * 0x5B);
+        let entry = peek32(&bus, crate::hle_kernel::B0_TABLE + 4 * 0x5b);
         assert_eq!(entry, PAD_CARD_ENTRY);
         assert_eq!(
             crate::hle_kernel::decode_trap(peek32(&bus, entry + site::PAD_ENABLE_FN)),

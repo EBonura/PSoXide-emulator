@@ -14,7 +14,7 @@ use super::*;
 #[doc(hidden)]
 #[inline]
 pub fn is_gte_command(word: u32) -> bool {
-    word & 0xFE00_0000 == 0x4A00_0000
+    word & 0xfe00_0000 == 0x4a00_0000
 }
 
 /// Interpreter state that lockstep checkers compare and that has no public
@@ -720,7 +720,7 @@ pub unsafe extern "C" fn jit_ram_load(run: *mut NativeRun, addr: u32, word: u32)
     if bus.take_ram_load_from_cached_code() {
         run.shadow = 1;
         run.shadow_pos = 0;
-        run.shadow_reg = (word >> 16) & 0x1F;
+        run.shadow_reg = (word >> 16) & 0x1f;
     }
     let _ = cpu;
     value
@@ -749,7 +749,7 @@ pub unsafe extern "C" fn jit_ram_store32(run: *mut NativeRun, addr: u32, value: 
     if bus.take_ram_load_from_cached_code() {
         run.shadow = 1;
         run.shadow_pos = 0;
-        run.shadow_reg = (word >> 16) & 0x1F;
+        run.shadow_reg = (word >> 16) & 0x1f;
     }
     let _ = cpu;
 }

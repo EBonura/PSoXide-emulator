@@ -112,11 +112,11 @@ impl TexFetch {
         match D {
             DEPTH_4 => {
                 let word = at(self.page_x + (u >> 2));
-                clut[((word >> ((u & 3) * 4)) & 0xF) as usize]
+                clut[((word >> ((u & 3) * 4)) & 0xf) as usize]
             }
             DEPTH_8 => {
                 let word = at(self.page_x + (u >> 1));
-                clut[((word >> ((u & 1) * 8)) & 0xFF) as usize]
+                clut[((word >> ((u & 1) * 8)) & 0xff) as usize]
             }
             _ => at(self.page_x + u),
         }
@@ -226,13 +226,13 @@ fn shade_lanes<const SHADE: u8, const DITHER: bool>(
         let t = texel[i];
         let ch = |c: usize, t5: u16| -> u16 {
             if DITHER {
-                let m = ((k[c][i] * (t5 << 3)) >> 7).min(0xFF) as i16;
+                let m = ((k[c][i] * (t5 << 3)) >> 7).min(0xff) as i16;
                 ((m + doff[i] as i16).clamp(0, 255) >> 3) as u16
             } else {
-                ((k[c][i] * t5) >> 7).min(0x1F)
+                ((k[c][i] * t5) >> 7).min(0x1f)
             }
         };
-        let c = ch(0, t & 0x1F) | (ch(1, (t >> 5) & 0x1F) << 5) | (ch(2, (t >> 10) & 0x1F) << 10);
+        let c = ch(0, t & 0x1f) | (ch(1, (t >> 5) & 0x1f) << 5) | (ch(2, (t >> 10) & 0x1f) << 10);
         out[i] = c | (t & 0x8000);
     }
     out
@@ -242,7 +242,7 @@ fn shade_lanes<const SHADE: u8, const DITHER: bool>(
 #[inline(always)]
 fn blend_lanes(bg: &[u16; LANES], fg: &[u16; LANES], mode: BlendMode) -> [u16; LANES] {
     let mut out = *fg;
-    let ch = |v: u16, shift: u16| (v >> shift) & 0x1F;
+    let ch = |v: u16, shift: u16| (v >> shift) & 0x1f;
     macro_rules! each {
         ($op:expr) => {
             for i in 0..LANES {

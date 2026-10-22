@@ -30,60 +30,59 @@
 //! (a retried trap, like the pad reader). All state is in kernel RAM
 //! ([`kvar`]).
 
-use crate::hle_exceptions as ex;
 use crate::hle_kernel::{peek32, poke32, stub_addr};
-use crate::Bus;
+use crate::{hle_exceptions as ex, Bus};
 
 /// Kernel variables of the card driver, each per slot ones as two words.
 pub mod kvar {
     /// StartCARD2 is in effect: the VBlank step runs.
-    pub const STARTED: u32 = 0x3B00;
+    pub const STARTED: u32 = 0x3b00;
     /// InitCARD2 has run.
-    pub const INITIALISED: u32 = 0x3B04;
+    pub const INITIALISED: u32 = 0x3b04;
     /// Slot whose turn the next VBlank step is.
-    pub const TURN: u32 = 0x3B08;
+    pub const TURN: u32 = 0x3b08;
     /// Auto format flag (A(ADh)).
-    pub const AUTO_FORMAT: u32 = 0x3B0C;
+    pub const AUTO_FORMAT: u32 = 0x3b0c;
     /// Status per slot (psx-spx values).
-    pub const STATUS: u32 = 0x3B10;
+    pub const STATUS: u32 = 0x3b10;
     /// Requested operation per slot ([`super::op`]), 0 when idle.
-    pub const OP: u32 = 0x3B18;
+    pub const OP: u32 = 0x3b18;
     /// Sector per slot.
-    pub const SECTOR: u32 = 0x3B20;
+    pub const SECTOR: u32 = 0x3b20;
     /// Buffer address per slot.
-    pub const BUFFER: u32 = 0x3B28;
+    pub const BUFFER: u32 = 0x3b28;
     /// Device (port) number per slot as the caller gave it.
-    pub const DEVICE: u32 = 0x3B30;
+    pub const DEVICE: u32 = 0x3b30;
     /// Outcome of the last finished command per slot ([`super::outcome`]).
-    pub const RESULT: u32 = 0x3B38;
+    pub const RESULT: u32 = 0x3b38;
     /// Slot + 1 of the command whose bytes are being exchanged, else 0.
-    pub const ACTIVE: u32 = 0x3B40;
+    pub const ACTIVE: u32 = 0x3b40;
     /// Index of the byte last sent in that command.
-    pub const STEP: u32 = 0x3B44;
+    pub const STEP: u32 = 0x3b44;
     /// Running XOR over the sector address and data.
-    pub const CHECKSUM: u32 = 0x3B48;
+    pub const CHECKSUM: u32 = 0x3b48;
     /// Nonzero while the early routine may take the data bytes.
-    pub const DATA_PHASE: u32 = 0x3B4C;
+    pub const DATA_PHASE: u32 = 0x3b4c;
     /// Data bytes exchanged so far in this sector.
-    pub const DATA_COUNT: u32 = 0x3B50;
+    pub const DATA_COUNT: u32 = 0x3b50;
     /// FLAG byte the card answered.
-    pub const FLAG_BYTE: u32 = 0x3B54;
+    pub const FLAG_BYTE: u32 = 0x3b54;
     /// `_new_card` was called: the next command ignores the card changed
     /// flag.
-    pub const NEW_CARD: u32 = 0x3B58;
+    pub const NEW_CARD: u32 = 0x3b58;
     /// Device of the last finished command.
-    pub const LAST_DEVICE: u32 = 0x3B5C;
+    pub const LAST_DEVICE: u32 = 0x3b5c;
 }
 
 /// Sector buffers of the backup unit, 80h bytes per slot.
-pub const BU_BUFFER: u32 = 0x3C00;
+pub const BU_BUFFER: u32 = 0x3c00;
 /// Directory cache of the backup unit: 15 entries of [`DIR_ENTRY_SIZE`]
 /// bytes per slot.
-pub const DIRECTORY: u32 = 0x3D00;
+pub const DIRECTORY: u32 = 0x3d00;
 /// Bytes of a cached directory entry (the first 20h bytes of its frame).
 pub const DIR_ENTRY_SIZE: u32 = 0x20;
 /// Broken sector lists: 20 words per slot.
-pub const BROKEN: u32 = 0x40C0;
+pub const BROKEN: u32 = 0x40c0;
 
 /// The CardSpecificIrq chain element (priority chain 1).
 pub const HI_CARD: u32 = 0x0000_3170;
@@ -99,9 +98,9 @@ pub mod internal {
 }
 
 /// HwCARD, the low-level card events (class F0000011h).
-pub const EVENT_CARD: u32 = 0xF000_0011;
+pub const EVENT_CARD: u32 = 0xf000_0011;
 /// SwCARD, the backup unit's events (class F4000001h).
-pub const EVENT_BU: u32 = 0xF400_0001;
+pub const EVENT_BU: u32 = 0xf400_0001;
 
 /// Operations a slot can be asked for.
 pub mod op {
@@ -147,13 +146,13 @@ mod spec {
     pub const ERR_WRITE: u32 = 0x8001;
 }
 
-const I_STAT: u32 = 0x1F80_1070;
-const I_MASK: u32 = 0x1F80_1074;
-const SIO_DATA: u32 = 0x1F80_1040;
-const SIO_STAT: u32 = 0x1F80_1044;
-const SIO_MODE: u32 = 0x1F80_1048;
-const SIO_CTRL: u32 = 0x1F80_104A;
-const SIO_BAUD: u32 = 0x1F80_104E;
+const I_STAT: u32 = 0x1f80_1070;
+const I_MASK: u32 = 0x1f80_1074;
+const SIO_DATA: u32 = 0x1f80_1040;
+const SIO_STAT: u32 = 0x1f80_1044;
+const SIO_MODE: u32 = 0x1f80_1048;
+const SIO_CTRL: u32 = 0x1f80_104a;
+const SIO_BAUD: u32 = 0x1f80_104e;
 const IRQ_SIO0: u32 = 1 << 7;
 const STAT_RX_READY: u16 = 1 << 1;
 const CTRL_TXEN: u16 = 1 << 0;
@@ -165,7 +164,7 @@ const CTRL_PORT2: u16 = 1 << 13;
 /// Reload 88h and the 8-bit, no parity, MUL1 format the cards expect
 /// (psx-spx "Serial Interfaces").
 const BAUD: u16 = 0x88;
-const MODE: u16 = 0x000D;
+const MODE: u16 = 0x000d;
 
 /// Cycles between selecting a card and the first byte.
 const SELECT_SETTLE: u32 = 2 * BAUD as u32;
@@ -422,7 +421,7 @@ fn start_command(bus: &mut Bus, slot: u32) {
     // times. psx-spx gives no figure.
     bus.tick(SELECT_SETTLE);
     let device = get(bus, kvar::DEVICE, slot);
-    send(bus, 0, 0x81u8.wrapping_add((device & 0x0F) as u8));
+    send(bus, 0, 0x81u8.wrapping_add((device & 0x0f) as u8));
 }
 
 /// The VBlank step, run by the pad handler after the pads were read: end a
@@ -609,12 +608,12 @@ fn advance(bus: &mut Bus, slot: u32, operation: u32, step: u32, rx: u8) {
             }
             finish(bus, outcome::OK);
         }
-        (_, 2) => check(bus, rx == 0x5A, 3, 0),
-        (_, 3) => check(bus, rx == 0x5D, 4, msb),
+        (_, 2) => check(bus, rx == 0x5a, 3, 0),
+        (_, 3) => check(bus, rx == 0x5d, 4, msb),
         (_, 4) => send(bus, 5, lsb),
         (op::READ, 5) => send(bus, 6, 0),
-        (op::READ, 6) => check(bus, rx == 0x5C, 7, 0),
-        (op::READ, 7) => check(bus, rx == 0x5D, 8, 0),
+        (op::READ, 6) => check(bus, rx == 0x5c, 7, 0),
+        (op::READ, 7) => check(bus, rx == 0x5d, 8, 0),
         // The card repeats the address; a sector it does not have comes
         // back as FFFFh.
         (op::READ, 8) => check(bus, rx == msb, 9, 0),
@@ -654,8 +653,8 @@ fn advance(bus: &mut Bus, slot: u32, operation: u32, step: u32, rx: u8) {
             send(bus, 134, sum);
         }
         (op::WRITE, 134) => send(bus, 135, 0),
-        (op::WRITE, 135) => check(bus, rx == 0x5C, 136, 0),
-        (op::WRITE, 136) => check(bus, rx == 0x5D, 137, 0),
+        (op::WRITE, 135) => check(bus, rx == 0x5c, 136, 0),
+        (op::WRITE, 136) => check(bus, rx == 0x5d, 137, 0),
         _ => finish(bus, outcome::ERROR),
     }
 }
@@ -679,14 +678,14 @@ mod tests {
 
     /// InitCARD2(1), StartCARD2, _new_card: calls 0..2.
     fn init() -> Vec<Step> {
-        vec![b(0x4A, [1, 0, 0, 0]), b(0x4B, [0; 4]), b(0x50, [0; 4])]
+        vec![b(0x4a, [1, 0, 0, 0]), b(0x4b, [0; 4]), b(0x50, [0; 4])]
     }
 
     /// OpenEvent(HwCARD, spec, 0x2000, 0) and EnableEvent: calls 0 and 1.
     fn watch(spec: u32) -> Vec<Step> {
         vec![
             b(0x08, [EVENT_CARD, spec, 0x2000, 0]),
-            b(0x0C, [res(0), 0, 0, 0]),
+            b(0x0c, [res(0), 0, 0, 0]),
         ]
     }
 
@@ -727,16 +726,16 @@ mod tests {
         let mut steps = watch(4);
         steps.extend(init());
         steps.extend([
-            b(0x4E, [0x00, 0x40, src, 0]),        // 5 write sector 40h
-            b(0x5D, [0; 4]),                      // 6 wait
-            b(0x0B, [res(0), 0, 0, 0]),           // 7 TestEvent: HwCARD 4 arrived
-            b(0x4F, [0x00, 0x40, dst, 0]),        // 8 read it back
-            b(0x5D, [0; 4]),                      // 9
-            b(0x4F, [0x00, 0x00, dst + 0x80, 0]), // 10 sector 0
-            b(0x5D, [0; 4]),                      // 11
+            b(0x4e, [0x00, 0x40, src, 0]),        // 5 write sector 40h
+            b(0x5d, [0; 4]),                      // 6 wait
+            b(0x0b, [res(0), 0, 0, 0]),           // 7 TestEvent: HwCARD 4 arrived
+            b(0x4f, [0x00, 0x40, dst, 0]),        // 8 read it back
+            b(0x5d, [0; 4]),                      // 9
+            b(0x4f, [0x00, 0x00, dst + 0x80, 0]), // 10 sector 0
+            b(0x5d, [0; 4]),                      // 11
         ]);
         run(&mut bus, &program(&steps), 1);
-        assert_eq!(result(&mut bus, 0) >> 24, 0xF1, "an event handle");
+        assert_eq!(result(&mut bus, 0) >> 24, 0xf1, "an event handle");
         assert_eq!([result(&mut bus, 5), result(&mut bus, 8)], [1, 1], "queued");
         assert_eq!([result(&mut bus, 6), result(&mut bus, 9)], [1, 1], "ready");
         assert_eq!(result(&mut bus, 7), 1, "HwCARD 4 delivered");
@@ -755,11 +754,11 @@ mod tests {
         let dst = 0x8003_0000;
         let mut steps = watch(0x2000);
         steps.extend([
-            b(0x4A, [1, 0, 0, 0]),
-            b(0x4B, [0; 4]),
-            b(0x4F, [0x00, 0x00, dst, 0]),
-            b(0x5D, [0; 4]),
-            b(0x0B, [res(0), 0, 0, 0]),
+            b(0x4a, [1, 0, 0, 0]),
+            b(0x4b, [0; 4]),
+            b(0x4f, [0x00, 0x00, dst, 0]),
+            b(0x5d, [0; 4]),
+            b(0x0b, [res(0), 0, 0, 0]),
         ]);
         run(&mut bus, &program(&steps), 1);
         // The fresh card says it was changed: the read fails with HwCARD
@@ -776,9 +775,9 @@ mod tests {
         let mut steps = watch(0x100);
         steps.extend(init());
         steps.extend([
-            b(0x4F, [0x10, 0x00, 0x8003_0000, 0]),
-            b(0x5D, [1, 0, 0, 0]),
-            b(0x0B, [res(0), 0, 0, 0]),
+            b(0x4f, [0x10, 0x00, 0x8003_0000, 0]),
+            b(0x5d, [1, 0, 0, 0]),
+            b(0x0b, [res(0), 0, 0, 0]),
         ]);
         run(&mut bus, &program(&steps), 1);
         assert_eq!(result(&mut bus, 6), 0x11);
@@ -791,12 +790,12 @@ mod tests {
         let dst = 0x8003_0000;
         let mut steps = init();
         steps.extend([
-            b(0x4F, [0, 0x401, dst, 0]), // 3 out of range
-            b(0x4F, [0, 0x400, dst, 0]), // 4 psx-spx: 400h is accepted
-            b(0x4F, [0, 0x01, dst, 0]),  // 5 slot busy
-            b(0x5C, [0; 4]),             // 6 busy/read
-            b(0x5D, [0; 4]),             // 7
-            b(0x4F, [0, 0x01, dst, 0]),  // 8 free again
+            b(0x4f, [0, 0x401, dst, 0]), // 3 out of range
+            b(0x4f, [0, 0x400, dst, 0]), // 4 psx-spx: 400h is accepted
+            b(0x4f, [0, 0x01, dst, 0]),  // 5 slot busy
+            b(0x5c, [0; 4]),             // 6 busy/read
+            b(0x5d, [0; 4]),             // 7
+            b(0x4f, [0, 0x01, dst, 0]),  // 8 free again
         ]);
         run(&mut bus, &program(&steps), 1);
         assert_eq!(result(&mut bus, 3), 0);
@@ -810,12 +809,12 @@ mod tests {
     fn requests_wait_while_the_driver_is_stopped() {
         let mut bus = bus_with_card();
         let steps = [
-            b(0x4A, [1, 0, 0, 0]),
-            b(0x4B, [0; 4]),
-            b(0x4C, [0; 4]),
+            b(0x4a, [1, 0, 0, 0]),
+            b(0x4b, [0; 4]),
+            b(0x4c, [0; 4]),
             b(0x50, [0; 4]),
-            b(0x4F, [0, 0x01, 0x8003_0000, 0]),
-            b(0x5C, [0; 4]),
+            b(0x4f, [0, 0x01, 0x8003_0000, 0]),
+            b(0x5c, [0; 4]),
         ];
         run(&mut bus, &program(&steps), 6);
         assert_eq!(result(&mut bus, 4), 1);
@@ -827,7 +826,7 @@ mod tests {
         let mut bus = bus_with_card();
         let (src, dst) = (0x8003_0000, 0x8003_0100);
         for k in 0..0x80 {
-            bus.write8_safe(src + k, (k ^ 0x5A) as u8);
+            bus.write8_safe(src + k, (k ^ 0x5a) as u8);
         }
         let mut steps = init();
         // The write goes through the early routine. A game then removes the
@@ -836,12 +835,12 @@ mod tests {
         // exception path that does not fit in a frame, so the read ends in
         // the VBlank timeout, but the bytes that did arrive are in the
         // buffer.
-        steps.extend([b(0x4E, [0, 0x41, src, 0]), b(0x5D, [0; 4]), nop_early()]);
-        steps.extend([b(0x4F, [0, 0x41, dst, 0]), b(0x5D, [0; 4])]);
+        steps.extend([b(0x4e, [0, 0x41, src, 0]), b(0x5d, [0; 4]), nop_early()]);
+        steps.extend([b(0x4f, [0, 0x41, dst, 0]), b(0x5d, [0; 4])]);
         run(&mut bus, &program(&steps), 1);
         assert_eq!(result(&mut bus, 4), 1, "the write finished");
         assert_eq!(result(&mut bus, 6), 0x11, "the read ran out of its frame");
-        let want: Vec<u8> = (0..16u32).map(|k| (k ^ 0x5A) as u8).collect();
+        let want: Vec<u8> = (0..16u32).map(|k| (k ^ 0x5a) as u8).collect();
         assert_eq!(
             get_bytes(&bus, dst, 16),
             want,

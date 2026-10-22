@@ -33,7 +33,7 @@ use crate::Bus;
 /// File control blocks.
 pub const FCB_BASE: u32 = crate::hle_kernel::FCB_BASE;
 /// Bytes per FCB.
-pub const FCB_SIZE: u32 = 0x2C;
+pub const FCB_SIZE: u32 = 0x2c;
 /// FCB count.
 pub const FCB_COUNT: u32 = 16;
 /// Device control blocks.
@@ -52,7 +52,7 @@ pub mod fcb {
     /// Transfer address for `in_out`.
     pub const TADDR: u32 = 0x08;
     /// Transfer length for `in_out`.
-    pub const TLEN: u32 = 0x0C;
+    pub const TLEN: u32 = 0x0c;
     /// File position.
     pub const FPOS: u32 = 0x10;
     /// Copy of the DCB flags.
@@ -60,7 +60,7 @@ pub mod fcb {
     /// Error code.
     pub const ERROR: u32 = 0x18;
     /// DCB of the file.
-    pub const DCB: u32 = 0x1C;
+    pub const DCB: u32 = 0x1c;
     /// File size.
     pub const SIZE: u32 = 0x20;
     /// First sector.
@@ -78,7 +78,7 @@ pub mod dcb {
     /// Sector size.
     pub const BLOCK: u32 = 0x08;
     /// Long name pointer.
-    pub const DESC: u32 = 0x0C;
+    pub const DESC: u32 = 0x0c;
     /// init().
     pub const INIT: u32 = 0x10;
     /// open(fcb, name, mode).
@@ -86,7 +86,7 @@ pub mod dcb {
     /// in_out(fcb, cmd).
     pub const INOUT: u32 = 0x18;
     /// close(fcb).
-    pub const CLOSE: u32 = 0x1C;
+    pub const CLOSE: u32 = 0x1c;
     /// ioctl(fcb, cmd, arg).
     pub const IOCTL: u32 = 0x20;
     /// read(fcb, dst, len).
@@ -94,7 +94,7 @@ pub mod dcb {
     /// write(fcb, src, len).
     pub const WRITE: u32 = 0x28;
     /// erase(fcb, name).
-    pub const ERASE: u32 = 0x2C;
+    pub const ERASE: u32 = 0x2c;
     /// undelete(fcb, name).
     pub const UNDELETE: u32 = 0x30;
     /// firstfile(fcb, name, direntry).
@@ -102,7 +102,7 @@ pub mod dcb {
     /// nextfile(fcb, direntry).
     pub const NEXTFILE: u32 = 0x38;
     /// format(fcb).
-    pub const FORMAT: u32 = 0x3C;
+    pub const FORMAT: u32 = 0x3c;
     /// cd(fcb, path).
     pub const CHDIR: u32 = 0x40;
     /// rename(fcb1, name1, fcb2, name2).
@@ -110,7 +110,7 @@ pub mod dcb {
     /// remove().
     pub const DEINIT: u32 = 0x48;
     /// testdevice(fcb, name).
-    pub const CHECK: u32 = 0x4C;
+    pub const CHECK: u32 = 0x4c;
 }
 
 /// Device flag: filesystem device (psx-spx: cdrom and bu are 14h).
@@ -140,51 +140,51 @@ pub mod errno {
 /// Kernel variables of the file layer and CD driver.
 pub mod kvar {
     /// Last file error (B(54h)).
-    pub const ERRNO: u32 = 0x0A90;
+    pub const ERRNO: u32 = 0x0a90;
     /// CD events opened at boot (5 handles: 10h, 20h, 40h, 80h, 8000h).
-    pub const CD_EVENTS: u32 = 0x0AA0;
+    pub const CD_EVENTS: u32 = 0x0aa0;
     /// CD driver phase.
-    pub const CD_PHASE: u32 = 0x0B00;
+    pub const CD_PHASE: u32 = 0x0b00;
     /// Next LBA to read.
-    pub const CD_LBA: u32 = 0x0B04;
+    pub const CD_LBA: u32 = 0x0b04;
     /// Sectors left.
-    pub const CD_COUNT: u32 = 0x0B08;
+    pub const CD_COUNT: u32 = 0x0b08;
     /// Destination of the next sector.
-    pub const CD_DST: u32 = 0x0B0C;
+    pub const CD_DST: u32 = 0x0b0c;
     /// Drive interrupt enable to restore afterwards.
-    pub const CD_SAVED_MASK: u32 = 0x0B10;
+    pub const CD_SAVED_MASK: u32 = 0x0b10;
     /// Last drive interrupt type seen by the kernel IRQ handler.
-    pub const CD_LAST_INT: u32 = 0x0B14;
+    pub const CD_LAST_INT: u32 = 0x0b14;
     /// Response bytes captured by the kernel IRQ handler (16 bytes).
-    pub const CD_RESPONSE: u32 = 0x0B18;
+    pub const CD_RESPONSE: u32 = 0x0b18;
     /// Filesystem lookup phase.
-    pub const FS_PHASE: u32 = 0x0B40;
+    pub const FS_PHASE: u32 = 0x0b40;
     /// Path component being searched.
-    pub const FS_COMP: u32 = 0x0B44;
+    pub const FS_COMP: u32 = 0x0b44;
     /// Directory sector being searched.
-    pub const FS_DIR_LBA: u32 = 0x0B48;
+    pub const FS_DIR_LBA: u32 = 0x0b48;
     /// Directory bytes left from that sector on.
-    pub const FS_DIR_LEFT: u32 = 0x0B4C;
+    pub const FS_DIR_LEFT: u32 = 0x0b4c;
     /// Root directory extent (0 = not read yet).
-    pub const FS_ROOT_LBA: u32 = 0x0B50;
+    pub const FS_ROOT_LBA: u32 = 0x0b50;
     /// Root directory size.
-    pub const FS_ROOT_SIZE: u32 = 0x0B54;
+    pub const FS_ROOT_SIZE: u32 = 0x0b54;
     /// Lookup result: extent and size.
-    pub const FS_FOUND_LBA: u32 = 0x0B58;
+    pub const FS_FOUND_LBA: u32 = 0x0b58;
     /// Lookup result size.
-    pub const FS_FOUND_SIZE: u32 = 0x0B5C;
+    pub const FS_FOUND_SIZE: u32 = 0x0b5c;
     /// read() stage.
-    pub const RD_STAGE: u32 = 0x0B60;
+    pub const RD_STAGE: u32 = 0x0b60;
     /// read() byte count.
-    pub const RD_LEN: u32 = 0x0B64;
+    pub const RD_LEN: u32 = 0x0b64;
     /// Executable loader stage.
-    pub const LD_STAGE: u32 = 0x0B70;
+    pub const LD_STAGE: u32 = 0x0b70;
     /// Executable extent.
-    pub const LD_LBA: u32 = 0x0B74;
+    pub const LD_LBA: u32 = 0x0b74;
     /// Executable file size.
-    pub const LD_SIZE: u32 = 0x0B78;
+    pub const LD_SIZE: u32 = 0x0b78;
     /// firstfile/nextfile search FCB (0 = none yet).
-    pub const FIND_FCB: u32 = 0x0B7C;
+    pub const FIND_FCB: u32 = 0x0b7c;
 }
 
 /// Sector buffer for directory reads and partial sectors (2 KiB).
@@ -192,7 +192,7 @@ pub const SECTOR_BUF: u32 = 0x0000_3200;
 /// Device name strings.
 const STRINGS: u32 = 0x0000_3180;
 /// Header buffer for A(42h)/A(51h) into Exec.
-pub const EXEC_HEADER: u32 = 0x0000_3A00;
+pub const EXEC_HEADER: u32 = 0x0000_3a00;
 
 /// Kernel-internal trap functions of the file layer and devices.
 pub mod internal {
@@ -200,7 +200,7 @@ pub mod internal {
     /// returned ([`super::continue_call`]).
     pub const CONTINUE: u8 = 0x10;
     /// Driver entry that does nothing and returns 0.
-    pub const NOP: u8 = 0x1F;
+    pub const NOP: u8 = 0x1f;
     /// TTY in_out(fcb, cmd).
     pub const TTY_INOUT: u8 = 0x20;
     /// CD-ROM open(fcb, name, mode).
@@ -329,7 +329,7 @@ pub fn install(bus: &mut Bus) {
 }
 
 /// Class of the kernel's CD-ROM events (psx-spx "BIOS Event Summary").
-const CD_EVENT_CLASS: u32 = 0xF000_0003;
+const CD_EVENT_CLASS: u32 = 0xf000_0003;
 /// Specs of the five events the kernel opens for the drive.
 const CD_EVENT_SPECS: [u32; 5] = [0x10, 0x20, 0x40, 0x80, 0x8000];
 
@@ -844,15 +844,15 @@ pub fn tty_inout(bus: &mut Bus, f: u32, cmd: u32, out: &mut dyn FnMut(u8)) -> u3
 
 // ----------------------------------------------------------- CD-ROM driver
 
-const CD_INDEX: u32 = 0x1F80_1800;
-const CD_REG1: u32 = 0x1F80_1801;
-const CD_REG2: u32 = 0x1F80_1802;
-const CD_REG3: u32 = 0x1F80_1803;
-const D3_MADR: u32 = 0x1F80_10B0;
-const D3_BCR: u32 = 0x1F80_10B4;
-const D3_CHCR: u32 = 0x1F80_10B8;
-const DPCR: u32 = 0x1F80_10F0;
-const DICR: u32 = 0x1F80_10F4;
+const CD_INDEX: u32 = 0x1f80_1800;
+const CD_REG1: u32 = 0x1f80_1801;
+const CD_REG2: u32 = 0x1f80_1802;
+const CD_REG3: u32 = 0x1f80_1803;
+const D3_MADR: u32 = 0x1f80_10b0;
+const D3_BCR: u32 = 0x1f80_10b4;
+const D3_CHCR: u32 = 0x1f80_10b8;
+const DPCR: u32 = 0x1f80_10f0;
+const DICR: u32 = 0x1f80_10f4;
 
 mod phase {
     pub const IDLE: u32 = 0;
@@ -911,15 +911,15 @@ pub fn cd_read_step(bus: &mut Bus, lba: u32, count: u32, dst: u32) -> Option<boo
             return Some(true);
         }
         bus.write8(CD_INDEX, 0);
-        let mask = bus.read8(CD_REG3) & 0x1F;
+        let mask = bus.read8(CD_REG3) & 0x1f;
         poke32(bus, kvar::CD_SAVED_MASK, u32::from(mask));
         bus.write8(CD_INDEX, 1);
         bus.write8(CD_REG2, 0);
-        bus.write8(CD_REG3, 0x1F);
+        bus.write8(CD_REG3, 0x1f);
         poke32(bus, kvar::CD_LBA, lba);
         poke32(bus, kvar::CD_COUNT, count);
         poke32(bus, kvar::CD_DST, dst);
-        cd_command(bus, 0x0E, &[0x80]);
+        cd_command(bus, 0x0e, &[0x80]);
         poke32(bus, kvar::CD_PHASE, phase::SETMODE);
         return None;
     }
@@ -932,9 +932,9 @@ pub fn cd_read_step(bus: &mut Bus, lba: u32, count: u32, dst: u32) -> Option<boo
         // Acknowledge the channel 3 completion flag (write-1-to-clear),
         // keeping the enables.
         let dicr = bus.read32(DICR);
-        bus.write32(DICR, (dicr & 0x00FF_FFFF) | (1 << 27));
-        if bus.read32(DICR) & 0x7F00_0000 == 0 {
-            bus.write32(0x1F80_1070, !(1 << 3));
+        bus.write32(DICR, (dicr & 0x00ff_ffff) | (1 << 27));
+        if bus.read32(DICR) & 0x7f00_0000 == 0 {
+            bus.write32(0x1f80_1070, !(1 << 3));
         }
         let left = peek32(bus, kvar::CD_COUNT) - 1;
         poke32(bus, kvar::CD_COUNT, left);
@@ -971,7 +971,7 @@ pub fn cd_read_step(bus: &mut Bus, lba: u32, count: u32, dst: u32) -> Option<boo
             bus.write8(CD_REG3, 0x80);
             let dpcr = bus.read32(DPCR);
             bus.write32(DPCR, dpcr | 0x8000);
-            bus.write32(D3_MADR, peek32(bus, kvar::CD_DST) & 0x00FF_FFFC);
+            bus.write32(D3_MADR, peek32(bus, kvar::CD_DST) & 0x00ff_fffc);
             bus.write32(D3_BCR, 0x0001_0200);
             bus.write32(D3_CHCR, 0x1100_0000);
             poke32(bus, kvar::CD_PHASE, phase::DMA);
@@ -1208,7 +1208,7 @@ pub fn load_step(bus: &mut Bus, path: u32, header: u32, body: bool) -> LoadStep 
                     if magic != b"PS-X EXE" {
                         return fail(bus);
                     }
-                    for off in (0..0x3C).step_by(4) {
+                    for off in (0..0x3c).step_by(4) {
                         let w = buf32(bus, 0x10 + off);
                         poke32(bus, header + off, w);
                     }
@@ -1243,7 +1243,7 @@ pub fn load_step(bus: &mut Bus, path: u32, header: u32, body: bool) -> LoadStep 
 /// F0000003h event delivered (10h ack, 20h complete, 40h data ready, 80h
 /// end, 8000h error). Returns the event spec, or `None` when not ours.
 pub fn cd_io_irq(bus: &mut Bus) -> Option<u32> {
-    let pending = bus.read32(0x1F80_1070) & bus.read32(0x1F80_1074);
+    let pending = bus.read32(0x1f80_1070) & bus.read32(0x1f80_1074);
     if pending & 4 == 0 {
         return None;
     }
@@ -1257,7 +1257,7 @@ pub fn cd_io_irq(bus: &mut Bus) -> Option<u32> {
     }
     bus.write8(CD_INDEX, 1);
     bus.write8(CD_REG3, 0x07);
-    bus.write32(0x1F80_1070, !4);
+    bus.write32(0x1f80_1070, !4);
     poke32(bus, kvar::CD_LAST_INT, u32::from(int));
     Some(match int {
         1 => 0x40,
@@ -1271,14 +1271,14 @@ pub fn cd_io_irq(bus: &mut Bus) -> Option<u32> {
 /// Kernel CdromDmaIrq verifier: acknowledges a channel 3 completion that
 /// reached the CPU. Returns whether it handled one.
 pub fn cd_dma_irq(bus: &mut Bus) -> bool {
-    let pending = bus.read32(0x1F80_1070) & bus.read32(0x1F80_1074);
+    let pending = bus.read32(0x1f80_1070) & bus.read32(0x1f80_1074);
     let dicr = bus.read32(DICR);
     if pending & 8 == 0 || dicr & (1 << 27) == 0 {
         return false;
     }
-    bus.write32(DICR, (dicr & 0x00FF_FFFF) | (1 << 27));
-    if bus.read32(DICR) & 0x7F00_0000 == 0 {
-        bus.write32(0x1F80_1070, !8);
+    bus.write32(DICR, (dicr & 0x00ff_ffff) | (1 << 27));
+    if bus.read32(DICR) & 0x7f00_0000 == 0 {
+        bus.write32(0x1f80_1070, !8);
     }
     true
 }
@@ -1291,7 +1291,7 @@ mod tests {
 
     /// Assemble a guest program calling B-table functions in sequence.
     fn program(calls: &[(u32, [Option<u32>; 3])]) -> Vec<u32> {
-        program_on(0xB0, calls)
+        program_on(0xb0, calls)
     }
 
     fn program_on(vector: i16, calls: &[(u32, [Option<u32>; 3])]) -> Vec<u32> {
@@ -1307,7 +1307,7 @@ mod tests {
             a.addiu(T2, ZERO, vector);
             a.jalr(T2);
             a.addiu(T1, ZERO, *func as i16);
-            a.sw(V0, (4 * (*func & 0xF)) as i16, S0);
+            a.sw(V0, (4 * (*func & 0xf)) as i16, S0);
         }
         a.label("end");
         a.b("end");
@@ -1321,7 +1321,7 @@ mod tests {
             bus.write32(0x8001_0000 + 4 * i as u32, *w);
         }
         cpu.gprs_mut_for_test()[16] = results;
-        cpu.gprs_mut_for_test()[29] = 0x801F_FF00;
+        cpu.gprs_mut_for_test()[29] = 0x801f_ff00;
         cpu.set_pc_for_test(0x8001_0000);
         let end = 0x8001_0000 + 4 * (words.len() as u32 - 2);
         for _ in 0..40_000_000u32 {
@@ -1381,7 +1381,7 @@ mod tests {
         bus.cdrom.insert_disc(Some(Disc::from_bin(iso.build_bin())));
         let results = 0x8004_0000;
         let init = program_on(
-            0xA0,
+            0xa0,
             &[
                 (0x72, [Some(0), Some(0), Some(0)]),
                 (0x71, [Some(0), Some(0), Some(0)]),
@@ -1444,10 +1444,10 @@ mod tests {
         let mut child = vec![0u8; psx_iso::EXE_HEADER_BYTES];
         child[..8].copy_from_slice(b"PS-X EXE");
         child[0x10..0x14].copy_from_slice(&0x8006_0000u32.to_le_bytes());
-        child[0x18..0x1C].copy_from_slice(&0x8006_0000u32.to_le_bytes());
-        child[0x1C..0x20].copy_from_slice(&0x800u32.to_le_bytes());
+        child[0x18..0x1c].copy_from_slice(&0x8006_0000u32.to_le_bytes());
+        child[0x1c..0x20].copy_from_slice(&0x800u32.to_le_bytes());
         let mut body = vec![0u8; 0x800];
-        for (i, w) in [0x3C08_8005u32, 0x0085_4821, 0xAD09_0000, 0x03E0_0008, 0]
+        for (i, w) in [0x3c08_8005u32, 0x0085_4821, 0xad09_0000, 0x03e0_0008, 0]
             .iter()
             .enumerate()
         {
@@ -1464,7 +1464,7 @@ mod tests {
         }
         let header = 0x8002_0100;
         let words = program_on(
-            0xA0,
+            0xa0,
             &[
                 (0x42, [Some(0x8002_0000), Some(header), Some(0)]),
                 (0x43, [Some(header), Some(5), Some(6)]),
@@ -1474,7 +1474,7 @@ mod tests {
         assert_eq!(bus.read32(0x8004_0008), 1, "Load");
         assert_eq!(bus.read32(header), 0x8006_0000, "header copied from 10h");
         assert_eq!(bus.read32(0x8005_0000), 11, "child ran with a0=5, a1=6");
-        assert_eq!(bus.read32(0x8004_000C), 1, "Exec returned 1");
+        assert_eq!(bus.read32(0x8004_000c), 1, "Exec returned 1");
     }
 
     #[test]
@@ -1485,16 +1485,16 @@ mod tests {
         let mut child = vec![0u8; psx_iso::EXE_HEADER_BYTES];
         child[..8].copy_from_slice(b"PS-X EXE");
         child[0x10..0x14].copy_from_slice(&0x8006_0000u32.to_le_bytes());
-        child[0x18..0x1C].copy_from_slice(&0x8006_0000u32.to_le_bytes());
-        child[0x1C..0x20].copy_from_slice(&0x1000u32.to_le_bytes());
+        child[0x18..0x1c].copy_from_slice(&0x8006_0000u32.to_le_bytes());
+        child[0x1c..0x20].copy_from_slice(&0x1000u32.to_le_bytes());
         let mut body = vec![0u8; 0x900];
-        for (i, w) in [0x3C08_8005u32, 0x0085_4821, 0xAD09_0000, 0x03E0_0008, 0]
+        for (i, w) in [0x3c08_8005u32, 0x0085_4821, 0xad09_0000, 0x03e0_0008, 0]
             .iter()
             .enumerate()
         {
             body[4 * i..4 * i + 4].copy_from_slice(&w.to_le_bytes());
         }
-        body[0x8FC..0x900].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        body[0x8fc..0x900].copy_from_slice(&0x1234_5678u32.to_le_bytes());
         child.extend_from_slice(&body);
         let mut iso = IsoBuilder::new();
         iso.add_file("CHILD.EXE", child);
@@ -1506,11 +1506,11 @@ mod tests {
         }
         // Stale words where the zero tail lands.
         for at in (0x8006_0900u32..0x8006_1000).step_by(4) {
-            bus.write32(at, 0xDEAD_BEEF);
+            bus.write32(at, 0xdead_beef);
         }
         let header = 0x8002_0100;
         let words = program_on(
-            0xA0,
+            0xa0,
             &[
                 (0x42, [Some(0x8002_0000), Some(header), Some(0)]),
                 (0x43, [Some(header), Some(5), Some(6)]),
@@ -1519,7 +1519,7 @@ mod tests {
         run(&mut bus, &words, 0x8004_0000);
         assert_eq!(bus.read32(0x8004_0008), 1, "Load");
         assert_eq!(bus.read32(0x8005_0000), 11, "child ran");
-        assert_eq!(bus.read32(0x8006_08FC), 0x1234_5678, "last stored word");
+        assert_eq!(bus.read32(0x8006_08fc), 0x1234_5678, "last stored word");
         for at in (0x8006_0900u32..0x8006_1000).step_by(4) {
             assert_eq!(bus.read32(at), 0, "tail word at {at:#x}");
         }
@@ -1629,16 +1629,16 @@ mod tests {
         let (dirent, buf) = (0x8003_0000, 0x8003_1000);
         let words = sequence(
             &[
-                (0xB0, 0x47, [Some(info), Some(0), Some(0)]), // 0 AddDrv
-                (0xB0, 0x32, [Some(0x8002_0000), Some(3), Some(0)]), // 1 open
-                (0xB0, 0x35, [None, Some(buf), Some(4)]),     // 2 write
-                (0xB0, 0x42, [Some(0x8002_0020), Some(dirent), Some(0)]), // 3
-                (0xB0, 0x32, [Some(0x8002_0000), Some(3), Some(0)]), // 4 open
-                (0xB0, 0x43, [Some(dirent + 0x40), Some(0), Some(0)]), // 5
-                (0xB0, 0x36, [Some(2), Some(0), Some(0)]),    // 6 close
-                (0xB0, 0x48, [Some(0x8002_0040), Some(0), Some(0)]), // 7 DelDrv
-                (0xB0, 0x32, [Some(0x8002_0000), Some(3), Some(0)]), // 8 open
-                (0xB0, 0x54, [Some(0), Some(0), Some(0)]),    // 9 errno
+                (0xb0, 0x47, [Some(info), Some(0), Some(0)]), // 0 AddDrv
+                (0xb0, 0x32, [Some(0x8002_0000), Some(3), Some(0)]), // 1 open
+                (0xb0, 0x35, [None, Some(buf), Some(4)]),     // 2 write
+                (0xb0, 0x42, [Some(0x8002_0020), Some(dirent), Some(0)]), // 3
+                (0xb0, 0x32, [Some(0x8002_0000), Some(3), Some(0)]), // 4 open
+                (0xb0, 0x43, [Some(dirent + 0x40), Some(0), Some(0)]), // 5
+                (0xb0, 0x36, [Some(2), Some(0), Some(0)]),    // 6 close
+                (0xb0, 0x48, [Some(0x8002_0040), Some(0), Some(0)]), // 7 DelDrv
+                (0xb0, 0x32, [Some(0x8002_0000), Some(3), Some(0)]), // 8 open
+                (0xb0, 0x54, [Some(0), Some(0), Some(0)]),    // 9 errno
             ],
             0x8004_0000,
         );
@@ -1670,18 +1670,18 @@ mod tests {
         put_str(&mut bus, 0x8002_0000, "cdrom:\\DATA.BIN;1");
         let words = sequence(
             &[
-                (0xB0, 0x32, [Some(0x8002_0000), Some(1), Some(0)]), // 0 open
-                (0xB0, 0x33, [None, Some(0x800), Some(0)]),          // 1 set
-                (0xB0, 0x33, [Some(2), Some(0x10), Some(1)]),        // 2 move
-                (0xB0, 0x33, [Some(2), Some(0x99), Some(2)]),        // 3 from end
-                (0xB0, 0x33, [Some(2), Some(0), Some(7)]),           // 4 bad type
-                (0xB0, 0x54, [Some(0), Some(0), Some(0)]),           // 5 errno
-                (0xB0, 0x33, [Some(7), Some(0), Some(0)]),           // 6 closed
-                (0xB0, 0x54, [Some(0), Some(0), Some(0)]),           // 7 errno
-                (0xB0, 0x34, [Some(2), Some(0x8003_0000), Some(0)]), // 8 no length
-                (0xB0, 0x36, [Some(2), Some(0), Some(0)]),           // 9 close
-                (0xB0, 0x36, [Some(2), Some(0), Some(0)]),           // 10 again
-                (0xB0, 0x54, [Some(0), Some(0), Some(0)]),           // 11 errno
+                (0xb0, 0x32, [Some(0x8002_0000), Some(1), Some(0)]), // 0 open
+                (0xb0, 0x33, [None, Some(0x800), Some(0)]),          // 1 set
+                (0xb0, 0x33, [Some(2), Some(0x10), Some(1)]),        // 2 move
+                (0xb0, 0x33, [Some(2), Some(0x99), Some(2)]),        // 3 from end
+                (0xb0, 0x33, [Some(2), Some(0), Some(7)]),           // 4 bad type
+                (0xb0, 0x54, [Some(0), Some(0), Some(0)]),           // 5 errno
+                (0xb0, 0x33, [Some(7), Some(0), Some(0)]),           // 6 closed
+                (0xb0, 0x54, [Some(0), Some(0), Some(0)]),           // 7 errno
+                (0xb0, 0x34, [Some(2), Some(0x8003_0000), Some(0)]), // 8 no length
+                (0xb0, 0x36, [Some(2), Some(0), Some(0)]),           // 9 close
+                (0xb0, 0x36, [Some(2), Some(0), Some(0)]),           // 10 again
+                (0xb0, 0x54, [Some(0), Some(0), Some(0)]),           // 11 errno
             ],
             0x8004_0000,
         );
@@ -1710,18 +1710,18 @@ mod tests {
         put_str(&mut bus, 0x8002_0000, "cdrom:\\A.BIN;1");
         put_str(&mut bus, 0x8002_0020, "bu00:B");
         let mut calls = vec![(
-            0xB0i16,
+            0xb0i16,
             0x44u32,
             [Some(0x8002_0000), Some(0x8002_0020), Some(0)],
         )]; // 0 rename across devices
-        calls.push((0xB0, 0x54, [Some(0), Some(0), Some(0)])); // 1 errno
+        calls.push((0xb0, 0x54, [Some(0), Some(0), Some(0)])); // 1 errno
         for _ in 0..14 {
-            calls.push((0xB0, 0x32, [Some(0x8002_0000), Some(1), Some(0)]));
+            calls.push((0xb0, 0x32, [Some(0x8002_0000), Some(1), Some(0)]));
         } // 2..15 take every handle
-        calls.push((0xB0, 0x32, [Some(0x8002_0000), Some(1), Some(0)])); // 16
-        calls.push((0xB0, 0x54, [Some(0), Some(0), Some(0)])); // 17 errno
-        calls.push((0xB0, 0x45, [Some(0x8002_0000), Some(0), Some(0)])); // 18
-        calls.push((0xB0, 0x54, [Some(0), Some(0), Some(0)])); // 19 errno
+        calls.push((0xb0, 0x32, [Some(0x8002_0000), Some(1), Some(0)])); // 16
+        calls.push((0xb0, 0x54, [Some(0), Some(0), Some(0)])); // 17 errno
+        calls.push((0xb0, 0x45, [Some(0x8002_0000), Some(0), Some(0)])); // 18
+        calls.push((0xb0, 0x54, [Some(0), Some(0), Some(0)])); // 19 errno
         let words = sequence(&calls, 0x8004_0000);
         run(&mut bus, &words, 0x8004_0000);
         let r = |bus: &mut Bus, i: u32| bus.read32(0x8004_0000 + 4 * i);

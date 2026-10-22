@@ -118,8 +118,8 @@ pub fn is_semi_trans(cmd: u32) -> bool {
 /// screen-space integers).
 #[inline]
 pub fn decode_vertex(state: &ReplayState, word: u32) -> (i32, i32) {
-    let x = sign_extend_11((word & 0x7FF) as i32) + state.draw_offset_x;
-    let y = sign_extend_11(((word >> 16) & 0x7FF) as i32) + state.draw_offset_y;
+    let x = sign_extend_11((word & 0x7ff) as i32) + state.draw_offset_x;
+    let y = sign_extend_11(((word >> 16) & 0x7ff) as i32) + state.draw_offset_y;
     (x, y)
 }
 
@@ -128,16 +128,16 @@ pub fn decode_vertex(state: &ReplayState, word: u32) -> (i32, i32) {
 #[inline]
 pub fn sign_extend_11(v: i32) -> i32 {
     if v & 0x400 != 0 {
-        v | !0x7FF
+        v | !0x7ff
     } else {
-        v & 0x7FF
+        v & 0x7ff
     }
 }
 
 /// Decode a UV word's low half: `(u, v)` as 8-bit unsigned.
 #[inline]
 pub fn decode_uv(word: u32) -> (u8, u8) {
-    ((word & 0xFF) as u8, ((word >> 8) & 0xFF) as u8)
+    ((word & 0xff) as u8, ((word >> 8) & 0xff) as u8)
 }
 
 /// Decode the `RGB` tint that's packed into the low 24 bits of an
@@ -145,9 +145,9 @@ pub fn decode_uv(word: u32) -> (u8, u8) {
 #[inline]
 pub fn decode_tint(cmd: u32) -> (u8, u8, u8) {
     (
-        (cmd & 0xFF) as u8,
-        ((cmd >> 8) & 0xFF) as u8,
-        ((cmd >> 16) & 0xFF) as u8,
+        (cmd & 0xff) as u8,
+        ((cmd >> 8) & 0xff) as u8,
+        ((cmd >> 16) & 0xff) as u8,
     )
 }
 
@@ -155,9 +155,9 @@ pub fn decode_tint(cmd: u32) -> (u8, u8, u8) {
 /// primitives. Returns `(clut_x, clut_y)` in VRAM pixel coordinates.
 #[inline]
 pub fn decode_clut(word: u32) -> (u32, u32) {
-    let clut_word = (word >> 16) & 0xFFFF;
-    let cx = (clut_word & 0x3F) * 16;
-    let cy = (clut_word >> 6) & 0x1FF;
+    let clut_word = (word >> 16) & 0xffff;
+    let cx = (clut_word & 0x3f) * 16;
+    let cy = (clut_word >> 6) & 0x1ff;
     (cx, cy)
 }
 
@@ -165,9 +165,9 @@ pub fn decode_clut(word: u32) -> (u32, u32) {
 /// the BGR15 representation stored in VRAM.
 #[inline]
 pub fn rgb24_to_bgr15(rgb: u32) -> u16 {
-    let r = ((rgb >> 3) & 0x1F) as u16;
-    let g = (((rgb >> 8) >> 3) & 0x1F) as u16;
-    let b = (((rgb >> 16) >> 3) & 0x1F) as u16;
+    let r = ((rgb >> 3) & 0x1f) as u16;
+    let g = (((rgb >> 8) >> 3) & 0x1f) as u16;
+    let b = (((rgb >> 16) >> 3) & 0x1f) as u16;
     r | (g << 5) | (b << 10)
 }
 
@@ -180,8 +180,8 @@ pub fn rgb24_to_bgr15(rgb: u32) -> u16 {
 /// for the shader uniform, so it is explicitly carried across the
 /// `Tpage::new` reset here.
 pub fn apply_primitive_tpage(state: &mut ReplayState, uv_word: u32) {
-    let tpage = (uv_word >> 16) & 0xFFFF;
-    let tpage_x = (tpage & 0x0F) * 64;
+    let tpage = (uv_word >> 16) & 0xffff;
+    let tpage_x = (tpage & 0x0f) * 64;
     let tpage_y: u32 = if (tpage >> 4) & 1 != 0 { 256 } else { 0 };
     let tex_depth = (tpage >> 7) & 0x3;
     let tw = (

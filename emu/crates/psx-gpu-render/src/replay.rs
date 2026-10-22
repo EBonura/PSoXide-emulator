@@ -241,13 +241,13 @@ impl ComputeBackend {
     // ========== Lowering ==========
 
     fn lower_fill(&mut self, cmd: u32, x: u32, y: u32, w: u32, h: u32) {
-        let color = rgb24_to_bgr15(cmd & 0x00FF_FFFF);
+        let color = rgb24_to_bgr15(cmd & 0x00ff_ffff);
         let fill = Fill::new((x, y), (w, h), color);
         self.rasterizer.dispatch_fill(&self.vram, &fill);
     }
 
     fn lower_mono_tri(&mut self, cmd: u32, v: [(i32, i32); 3]) {
-        let color = rgb24_to_bgr15(cmd & 0x00FF_FFFF);
+        let color = rgb24_to_bgr15(cmd & 0x00ff_ffff);
         let (flags, mode) = self.mono_blend_mode_and_flags(cmd);
         let tri = MonoTri::new(v[0], v[1], v[2], color, flags, mode);
         self.rasterizer
@@ -255,7 +255,7 @@ impl ComputeBackend {
     }
 
     fn lower_mono_quad(&mut self, cmd: u32, v: [(i32, i32); 4]) {
-        let color = rgb24_to_bgr15(cmd & 0x00FF_FFFF);
+        let color = rgb24_to_bgr15(cmd & 0x00ff_ffff);
         let (flags, mode) = self.mono_blend_mode_and_flags(cmd);
         // Quad → 2 triangles in the CPU rasterizer's order: (v1, v3, v2) then
         // (v0, v1, v2). Flat color makes the order invisible today,
@@ -269,7 +269,7 @@ impl ComputeBackend {
     }
 
     fn lower_tex_tri(&mut self, cmd: u32, v: [(i32, i32); 3], uv: [(u8, u8); 3], clut: (u32, u32)) {
-        let tint = decode_tint(cmd & 0x00FF_FFFF);
+        let tint = decode_tint(cmd & 0x00ff_ffff);
         let (flags, mode) = self.tex_flags_and_mode(cmd);
         let tri = TexTri::new(
             v[0], v[1], v[2], uv[0], uv[1], uv[2], clut.0, clut.1, tint, flags, mode,
@@ -289,7 +289,7 @@ impl ComputeBackend {
         uv: [(u8, u8); 4],
         clut: (u32, u32),
     ) {
-        let tint = decode_tint(cmd & 0x00FF_FFFF);
+        let tint = decode_tint(cmd & 0x00ff_ffff);
         let (flags, mode) = self.tex_flags_and_mode(cmd);
 
         // Phase C bug fix: when the quad is axis-aligned the CPU
@@ -335,9 +335,9 @@ impl ComputeBackend {
     }
 
     fn lower_shaded_tri(&mut self, cmd: u32, v: [(i32, i32); 3], colors: [u32; 3]) {
-        let c0 = decode_tint(colors[0] & 0x00FF_FFFF);
-        let c1 = decode_tint(colors[1] & 0x00FF_FFFF);
-        let c2 = decode_tint(colors[2] & 0x00FF_FFFF);
+        let c0 = decode_tint(colors[0] & 0x00ff_ffff);
+        let c1 = decode_tint(colors[1] & 0x00ff_ffff);
+        let c2 = decode_tint(colors[2] & 0x00ff_ffff);
         let (flags, mode) = self.mono_blend_mode_and_flags(cmd);
         let tri = ShadedTri::new(v[0], v[1], v[2], c0, c1, c2, flags, mode);
         self.rasterizer.dispatch_shaded_tri_scanline(
@@ -348,10 +348,10 @@ impl ComputeBackend {
     }
 
     fn lower_shaded_quad(&mut self, cmd: u32, v: [(i32, i32); 4], colors: [u32; 4]) {
-        let c0 = decode_tint(colors[0] & 0x00FF_FFFF);
-        let c1 = decode_tint(colors[1] & 0x00FF_FFFF);
-        let c2 = decode_tint(colors[2] & 0x00FF_FFFF);
-        let c3 = decode_tint(colors[3] & 0x00FF_FFFF);
+        let c0 = decode_tint(colors[0] & 0x00ff_ffff);
+        let c1 = decode_tint(colors[1] & 0x00ff_ffff);
+        let c2 = decode_tint(colors[2] & 0x00ff_ffff);
+        let c3 = decode_tint(colors[3] & 0x00ff_ffff);
         let (flags, mode) = self.mono_blend_mode_and_flags(cmd);
         // CPU split order: (v1, v3, v2) first, then (v0, v1, v2)
         // so the first half wins the shared diagonal. Gouraud colors
@@ -374,9 +374,9 @@ impl ComputeBackend {
         colors: [u32; 3],
         clut: (u32, u32),
     ) {
-        let c0 = decode_tint(colors[0] & 0x00FF_FFFF);
-        let c1 = decode_tint(colors[1] & 0x00FF_FFFF);
-        let c2 = decode_tint(colors[2] & 0x00FF_FFFF);
+        let c0 = decode_tint(colors[0] & 0x00ff_ffff);
+        let c1 = decode_tint(colors[1] & 0x00ff_ffff);
+        let c2 = decode_tint(colors[2] & 0x00ff_ffff);
         let (flags, mode) = self.tex_flags_and_mode(cmd);
         let tri = ShadedTexTri::new(
             v[0], v[1], v[2], c0, c1, c2, uv[0], uv[1], uv[2], clut.0, clut.1, flags, mode,
@@ -397,10 +397,10 @@ impl ComputeBackend {
         colors: [u32; 4],
         clut: (u32, u32),
     ) {
-        let c0 = decode_tint(colors[0] & 0x00FF_FFFF);
-        let c1 = decode_tint(colors[1] & 0x00FF_FFFF);
-        let c2 = decode_tint(colors[2] & 0x00FF_FFFF);
-        let c3 = decode_tint(colors[3] & 0x00FF_FFFF);
+        let c0 = decode_tint(colors[0] & 0x00ff_ffff);
+        let c1 = decode_tint(colors[1] & 0x00ff_ffff);
+        let c2 = decode_tint(colors[2] & 0x00ff_ffff);
+        let c3 = decode_tint(colors[3] & 0x00ff_ffff);
         let (flags, mode) = self.tex_flags_and_mode(cmd);
         let t1 = ShadedTexTri::new(
             v[1], v[3], v[2], c1, c3, c2, uv[1], uv[3], uv[2], clut.0, clut.1, flags, mode,
@@ -423,7 +423,7 @@ impl ComputeBackend {
     }
 
     fn lower_mono_rect(&mut self, cmd: u32, xy: (i32, i32), w: u32, h: u32) {
-        let color = rgb24_to_bgr15(cmd & 0x00FF_FFFF);
+        let color = rgb24_to_bgr15(cmd & 0x00ff_ffff);
         let (flags, mode) = self.rect_flags_and_mode(cmd);
         let rect = MonoRect::new(xy, (w, h), color, flags, mode);
         self.rasterizer
@@ -439,7 +439,7 @@ impl ComputeBackend {
         w: u32,
         h: u32,
     ) {
-        let tint = decode_tint(cmd & 0x00FF_FFFF);
+        let tint = decode_tint(cmd & 0x00ff_ffff);
         let (flags, mode) = self.tex_rect_flags_and_mode(cmd);
         let rect = TexRect::new(xy, (w, h), uv, clut.0, clut.1, tint, flags, mode);
         self.rasterizer.dispatch_tex_rect(

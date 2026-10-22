@@ -396,8 +396,8 @@ impl HwRenderer {
 
     fn mirror_vram_image_op(&mut self, entry: &GpuCmdLogEntry, vram_words: &[u16]) {
         match entry.opcode {
-            0x80..=0x9F => self.mirror_vram_copy(entry),
-            0xA0..=0xBF => self.mirror_vram_upload(entry, vram_words),
+            0x80..=0x9f => self.mirror_vram_copy(entry),
+            0xa0..=0xbf => self.mirror_vram_upload(entry, vram_words),
             _ => {}
         }
     }
@@ -528,10 +528,10 @@ impl HwRenderer {
         }
         let xy = entry.fifo[1];
         let wh = entry.fifo[2];
-        let x = xy & 0x3FF;
-        let y = (xy >> 16) & 0x1FF;
-        let raw_w = wh & 0x3FF;
-        let raw_h = (wh >> 16) & 0x1FF;
+        let x = xy & 0x3ff;
+        let y = (xy >> 16) & 0x1ff;
+        let raw_w = wh & 0x3ff;
+        let raw_h = (wh >> 16) & 0x1ff;
         let w = if raw_w == 0 { VRAM_WIDTH } else { raw_w };
         let h = if raw_h == 0 { VRAM_HEIGHT } else { raw_h };
         let payload = entry.fifo.get(3..).unwrap_or(&[]);
@@ -825,7 +825,7 @@ impl HwRenderer {
 }
 
 fn is_vram_image_op(entry: &GpuCmdLogEntry) -> bool {
-    matches!(entry.opcode, 0x80..=0xBF)
+    matches!(entry.opcode, 0x80..=0xbf)
 }
 
 fn decode_vram_copy_packet(fifo: &[u32]) -> Option<VramCopyRect> {
@@ -848,14 +848,14 @@ fn decode_vram_copy_packet(fifo: &[u32]) -> Option<VramCopyRect> {
 }
 
 fn bgr15_to_rgba8(pixel: u16) -> [u8; 4] {
-    let r5 = (pixel & 0x1F) as u8;
-    let g5 = ((pixel >> 5) & 0x1F) as u8;
-    let b5 = ((pixel >> 10) & 0x1F) as u8;
+    let r5 = (pixel & 0x1f) as u8;
+    let g5 = ((pixel >> 5) & 0x1f) as u8;
+    let b5 = ((pixel >> 10) & 0x1f) as u8;
     [
         (r5 << 3) | (r5 >> 2),
         (g5 << 3) | (g5 >> 2),
         (b5 << 3) | (b5 >> 2),
-        0xFF,
+        0xff,
     ]
 }
 
@@ -1008,7 +1008,7 @@ mod tests {
 
         let psx_x = 37;
         let psx_y = 29;
-        let color = 0x001F;
+        let color = 0x001f;
         let mut vram_words = vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize];
         vram_words[(psx_y * VRAM_WIDTH + psx_x) as usize] = color;
 
@@ -1063,12 +1063,12 @@ mod tests {
         };
         let mut words = line_env();
         words.extend_from_slice(&[
-            0x0200_FF00,
+            0x0200_ff00,
             0,
             xyw(320, 240),
             // A black 4bpp foreground quad whose height exceeds the GPU's
             // 511-pixel triangle limit must not erase the valid background.
-            0x2E80_8080,
+            0x2e80_8080,
             pack_xy((-209, -1023)),
             (480 * 64) << 16,
             pack_xy((431, -1023)),
@@ -1090,7 +1090,7 @@ mod tests {
     }
 
     fn pack_xy(p: (i32, i32)) -> u32 {
-        ((p.0 as u32) & 0xFFFF) | (((p.1 as u32) & 0xFFFF) << 16)
+        ((p.0 as u32) & 0xffff) | (((p.1 as u32) & 0xffff) << 16)
     }
 
     /// GP0 word stream for one axis-aligned Gouraud quad over
@@ -1099,10 +1099,10 @@ mod tests {
     /// which would drown out the colour comparison this exists to make.
     fn gouraud_quad(colors: [u32; 4], dither: bool) -> Vec<u32> {
         vec![
-            0xE300_0000,                                  // draw area top-left (0,0)
-            0xE400_0000 | 1023 | (511 << 10),             // draw area bottom-right
-            0xE500_0000,                                  // draw offset (0,0)
-            0xE100_0000 | if dither { 0x200 } else { 0 }, // draw mode
+            0xe300_0000,                                  // draw area top-left (0,0)
+            0xe400_0000 | 1023 | (511 << 10),             // draw area bottom-right
+            0xe500_0000,                                  // draw offset (0,0)
+            0xe100_0000 | if dither { 0x200 } else { 0 }, // draw mode
             0x3800_0000 | colors[0],                      // Gouraud quad + vertex 0 colour
             pack_xy((8, 8)),
             colors[1],
@@ -1156,9 +1156,9 @@ mod tests {
         // 0x00C08040 = R 0x40, G 0x80, B 0xC0 -- each channel sits off a
         // 5-bit boundary, so every channel has dithering to do.
         let cases = [
-            (0x00C0_8040u32, true),
+            (0x00c0_8040u32, true),
             (0x0008_0808, true),  // near black, still straddling a 5-bit step
-            (0x00FF_FFFF, false), // white: +3 clamps back to 255
+            (0x00ff_ffff, false), // white: +3 clamps back to 255
             (0x0000_0000, false), // black: -4 clamps back to 0
         ];
         for (color, expect_pattern) in cases {
@@ -1191,7 +1191,7 @@ mod tests {
             return;
         };
 
-        let color = 0x00C0_8040;
+        let color = 0x00c0_8040;
         let cpu_vram = run_both_backends(&gouraud_quad([color; 4], false), &mut renderer, &[]);
         let pixels = quad_interior(&cpu_vram, &renderer);
         let hw: std::collections::HashSet<_> = pixels.iter().map(|(_, g)| *g).collect();
@@ -1217,7 +1217,7 @@ mod tests {
         };
         assert!(renderer.set_internal_scale(2, None));
 
-        let cpu_vram = run_both_backends(&gouraud_quad([0x00C0_8040; 4], true), &mut renderer, &[]);
+        let cpu_vram = run_both_backends(&gouraud_quad([0x00c0_8040; 4], true), &mut renderer, &[]);
         let (_, _, rgba) = renderer.read_subrect_rgba8(16, 16, 64, 64);
         for y in 1..32usize {
             for x in 1..32usize {
@@ -1248,7 +1248,7 @@ mod tests {
             return;
         };
 
-        let colors = [0x00C0_8040, 0x0080_40C0, 0x0040_C080, 0x00A0_60E0];
+        let colors = [0x00c0_8040, 0x0080_40c0, 0x0040_c080, 0x00a0_60e0];
         let cpu_vram = run_both_backends(&gouraud_quad(colors, true), &mut renderer, &[]);
         let pixels = quad_interior(&cpu_vram, &renderer);
 
@@ -1276,16 +1276,16 @@ mod tests {
             .map(|(k, &(texel, _))| (TEX_X + k as u16, 0, texel))
             .collect();
         let mut words = vec![
-            0xE300_0000,                      // draw area top-left (0,0)
-            0xE400_0000 | 1023 | (511 << 10), // draw area bottom-right
-            0xE500_0000,                      // draw offset (0,0)
-            0xE100_0200,                      // draw mode: dither on
+            0xe300_0000,                      // draw area top-left (0,0)
+            0xe400_0000 | 1023 | (511 << 10), // draw area bottom-right
+            0xe500_0000,                      // draw offset (0,0)
+            0xe100_0200,                      // draw mode: dither on
         ];
         for (k, &(_, tint)) in combos.iter().enumerate() {
             let x0 = 8 + k as i32 * 8;
             let uv = k as u32; // u = k, v = 0
             words.extend_from_slice(&[
-                0x2C00_0000 | tint,
+                0x2c00_0000 | tint,
                 pack_xy((x0, 8)),
                 uv, // clut (unused at 15bpp) in the high half
                 pack_xy((x0 + 8, 8)),
@@ -1322,14 +1322,14 @@ mod tests {
         // 0x808080 identity tint: the CPU treats it as the raw-texture
         // sentinel and stops dithering.
         let combos = [
-            (bgr15(31, 17, 9), 0x00C0_8040),
-            (bgr15(16, 16, 16), 0x00E3_9137),
-            (bgr15(5, 21, 30), 0x007F_01FF),
-            (bgr15(31, 31, 31), 0x00FF_FFFF), // clamps at 255 pre-dither
-            (bgr15(1, 2, 3), 0x0080_817F),
+            (bgr15(31, 17, 9), 0x00c0_8040),
+            (bgr15(16, 16, 16), 0x00e3_9137),
+            (bgr15(5, 21, 30), 0x007f_01ff),
+            (bgr15(31, 31, 31), 0x00ff_ffff), // clamps at 255 pre-dither
+            (bgr15(1, 2, 3), 0x0080_817f),
             (bgr15(24, 12, 6), 0x0033_2211),
-            (bgr15(9, 18, 27), 0x00A5_5AC3),
-            (bgr15(30, 15, 7), 0x0040_7E81),
+            (bgr15(9, 18, 27), 0x00a5_5ac3),
+            (bgr15(30, 15, 7), 0x0040_7e81),
         ];
 
         let (seed, words) = tinted_textured_quads(&combos);
@@ -1425,18 +1425,18 @@ mod tests {
             let env_and_quad = [
                 GpuCmdLogEntry {
                     index: 0,
-                    opcode: 0xE3,
-                    fifo: vec![0xE300_0000].into(),
+                    opcode: 0xe3,
+                    fifo: vec![0xe300_0000].into(),
                 },
                 GpuCmdLogEntry {
                     index: 1,
-                    opcode: 0xE4,
-                    fifo: vec![0xE400_0000 | (239 << 10) | 319].into(),
+                    opcode: 0xe4,
+                    fifo: vec![0xe400_0000 | (239 << 10) | 319].into(),
                 },
                 GpuCmdLogEntry {
                     index: 2,
-                    opcode: 0xE5,
-                    fifo: vec![0xE500_0000].into(),
+                    opcode: 0xe5,
+                    fifo: vec![0xe500_0000].into(),
                 },
                 GpuCmdLogEntry {
                     index: 3,
@@ -1614,24 +1614,24 @@ mod tests {
         let vram_words = vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize];
         let gpu = Gpu::new();
         for (e5, base_y, probe_y) in [
-            (0xE500_0000u32, 0u32, 5u32),
-            (0xE500_0000 | (240 << 11), 240, 245),
+            (0xe500_0000u32, 0u32, 5u32),
+            (0xe500_0000 | (240 << 11), 240, 245),
         ] {
-            let neg40 = 0x7FFu32 & (-40i32 as u32 & 0x7FF);
+            let neg40 = 0x7ffu32 & (-40i32 as u32 & 0x7ff);
             let log = [
                 GpuCmdLogEntry {
                     index: 0,
-                    opcode: 0xE3,
-                    fifo: vec![0xE300_0000 | (base_y << 10)].into(),
+                    opcode: 0xe3,
+                    fifo: vec![0xe300_0000 | (base_y << 10)].into(),
                 },
                 GpuCmdLogEntry {
                     index: 1,
-                    opcode: 0xE4,
-                    fifo: vec![0xE400_0000 | ((base_y + 239) << 10) | 319].into(),
+                    opcode: 0xe4,
+                    fifo: vec![0xe400_0000 | ((base_y + 239) << 10) | 319].into(),
                 },
                 GpuCmdLogEntry {
                     index: 2,
-                    opcode: 0xE5,
+                    opcode: 0xe5,
                     fifo: vec![e5].into(),
                 },
                 // Quad spanning y=-40..60, x=0..100: top edge off-screen.
@@ -1779,18 +1779,18 @@ mod tests {
         let log = [
             GpuCmdLogEntry {
                 index: 0,
-                opcode: 0xE3,
-                fifo: vec![0xE300_0000].into(),
+                opcode: 0xe3,
+                fifo: vec![0xe300_0000].into(),
             },
             GpuCmdLogEntry {
                 index: 1,
-                opcode: 0xE4,
-                fifo: vec![0xE400_0000 | (239 << 10) | 319].into(),
+                opcode: 0xe4,
+                fifo: vec![0xe400_0000 | (239 << 10) | 319].into(),
             },
             GpuCmdLogEntry {
                 index: 2,
-                opcode: 0xE5,
-                fifo: vec![0xE500_0000].into(),
+                opcode: 0xe5,
+                fifo: vec![0xe500_0000].into(),
             },
             GpuCmdLogEntry {
                 index: 3,
@@ -1808,7 +1808,7 @@ mod tests {
         renderer.render_frame(&gpu, &log, &vram_words);
         assert_eq!(
             pixel_block(&renderer, 10, 10),
-            vec![[0x50, 0x30, 0x00, 0xFF]; 4],
+            vec![[0x50, 0x30, 0x00, 0xff]; 4],
             "same-batch draw missing"
         );
     }
@@ -1838,7 +1838,7 @@ mod tests {
         renderer.render_frame(&gpu, &quad, &vram_words);
         assert_eq!(
             pixel_block(&renderer, 10, 10),
-            vec![[0x50, 0x30, 0x00, 0xFF]; 4],
+            vec![[0x50, 0x30, 0x00, 0xff]; 4],
             "draw-only batch missing"
         );
     }
@@ -1861,18 +1861,18 @@ mod tests {
             let env = [
                 GpuCmdLogEntry {
                     index: 0,
-                    opcode: 0xE3,
-                    fifo: vec![0xE300_0000 | (page_y << 10)].into(),
+                    opcode: 0xe3,
+                    fifo: vec![0xe300_0000 | (page_y << 10)].into(),
                 },
                 GpuCmdLogEntry {
                     index: 1,
-                    opcode: 0xE4,
-                    fifo: vec![0xE400_0000 | ((page_y + 239) << 10) | 319].into(),
+                    opcode: 0xe4,
+                    fifo: vec![0xe400_0000 | ((page_y + 239) << 10) | 319].into(),
                 },
                 GpuCmdLogEntry {
                     index: 2,
-                    opcode: 0xE5,
-                    fifo: vec![0xE500_0000 | (page_y << 11)].into(),
+                    opcode: 0xe5,
+                    fifo: vec![0xe500_0000 | (page_y << 11)].into(),
                 },
             ];
             renderer.render_frame(&gpu, &env, &vram_words);
@@ -1893,7 +1893,7 @@ mod tests {
             let px = pixel_block(&renderer, 10, page_y + 10);
             assert_eq!(
                 px,
-                vec![[0x50, 0x30, 0x00, 0xFF]; 4],
+                vec![[0x50, 0x30, 0x00, 0xff]; 4],
                 "split-batch draw missing on page y={page_y}"
             );
         }
@@ -1916,7 +1916,7 @@ mod tests {
 
         assert_eq!(
             pixel_block(&renderer, 4, 4),
-            vec![[0x30, 0x20, 0x10, 0xFF]; 4]
+            vec![[0x30, 0x20, 0x10, 0xff]; 4]
         );
     }
 
@@ -1934,7 +1934,7 @@ mod tests {
     /// Draw env used by the line tests: draw area (0,0)-(319,239),
     /// zero draw offset.
     fn line_env() -> Vec<u32> {
-        vec![0xE300_0000, 0xE400_0000 | (239 << 10) | 319, 0xE500_0000]
+        vec![0xe300_0000, 0xe400_0000 | (239 << 10) | 319, 0xe500_0000]
     }
 
     fn xyw(x: u16, y: u16) -> u32 {
@@ -2024,7 +2024,7 @@ mod tests {
         ];
         for (name, v0, v1) in cases {
             let mut words = line_env();
-            words.extend([0x40FF_FFFF, v0, v1]);
+            words.extend([0x40ff_ffff, v0, v1]);
             let Some((_gpu, cpu, hw, renderer)) = line_case(&words, 0) else {
                 eprintln!("skipping: no headless wgpu adapter");
                 return;
@@ -2034,7 +2034,7 @@ mod tests {
             let &(px, py) = cpu.iter().next().unwrap();
             assert_eq!(
                 pixel_block(&renderer, px as u32, py as u32),
-                vec![[0xFF, 0xFF, 0xFF, 0xFF]],
+                vec![[0xff, 0xff, 0xff, 0xff]],
                 "{name}: flat white must land exactly"
             );
         }
@@ -2048,7 +2048,7 @@ mod tests {
     #[test]
     fn gp0_arbitrary_slope_line_stays_within_one_pixel_of_cpu() {
         let mut words = line_env();
-        words.extend([0x40FF_FFFF, xyw(10, 20), xyw(50, 35)]);
+        words.extend([0x40ff_ffff, xyw(10, 20), xyw(50, 35)]);
         let Some((_gpu, cpu, hw, _renderer)) = line_case(&words, 0) else {
             eprintln!("skipping: no headless wgpu adapter");
             return;
@@ -2081,7 +2081,7 @@ mod tests {
     #[test]
     fn gp0_gouraud_line_matches_cpu_coverage_and_colors() {
         let mut words = line_env();
-        words.extend([0x5000_00FF, xyw(10, 10), 0x0000_FF00, xyw(60, 10)]);
+        words.extend([0x5000_00ff, xyw(10, 10), 0x0000_ff00, xyw(60, 10)]);
         let Some((gpu, cpu, hw, renderer)) = line_case(&words, 0) else {
             eprintln!("skipping: no headless wgpu adapter");
             return;
@@ -2111,7 +2111,7 @@ mod tests {
     fn gp0_mono_polyline_draws_every_segment() {
         let mut words = line_env();
         words.extend([
-            0x48FF_FFFF, // polyline start
+            0x48ff_ffff, // polyline start
             xyw(20, 20),
             xyw(80, 20),
             xyw(80, 60), // continuation vertex
@@ -2133,11 +2133,11 @@ mod tests {
     fn gp0_shaded_polyline_draws_every_segment() {
         let mut words = line_env();
         words.extend([
-            0x5800_00FF, // polyline start, c0 red
+            0x5800_00ff, // polyline start, c0 red
             xyw(20, 100),
-            0x0000_FF00, // c1 green
+            0x0000_ff00, // c1 green
             xyw(80, 100),
-            0x00FF_0000,  // continuation colour (blue)
+            0x00ff_0000,  // continuation colour (blue)
             xyw(80, 140), // continuation vertex
             0x5000_5000,  // terminator
         ]);
@@ -2157,8 +2157,8 @@ mod tests {
     fn gp0_semi_trans_line_blends_with_background_coverage_parity() {
         let prefill = 0x4210; // mid grey (r=g=b=16 in 5-bit)
         let mut words = line_env();
-        words.push(0xE100_0000); // blend mode 0 (Average)
-        words.extend([0x42FF_FFFF, xyw(10, 50), xyw(60, 50)]);
+        words.push(0xe100_0000); // blend mode 0 (Average)
+        words.extend([0x42ff_ffff, xyw(10, 50), xyw(60, 50)]);
         let Some((_gpu, cpu, hw, renderer)) = line_case(&words, prefill) else {
             eprintln!("skipping: no headless wgpu adapter");
             return;
@@ -2169,7 +2169,7 @@ mod tests {
         assert_ne!(blended, bgr15_to_rgba8(prefill), "pixel not touched");
         assert_ne!(
             blended,
-            [0xFF, 0xFF, 0xFF, 0xFF],
+            [0xff, 0xff, 0xff, 0xff],
             "pixel replaced instead of blended"
         );
     }
@@ -2184,14 +2184,14 @@ mod tests {
         let prefill = 0x4210; // r=g=b=16 in 5-bit, 132 in display codes
                               // (E1 blend-mode bits, source grey, name)
         let cases = [
-            (0x0000u32, 0xF8u32, "average (B+F)/2"),
+            (0x0000u32, 0xf8u32, "average (B+F)/2"),
             (0x0020, 0x18, "add B+F"),
             (0x0040, 0x40, "subtract B-F"),
             (0x0060, 0x80, "add quarter B+F/4"),
         ];
         for (mode, grey, name) in cases {
             let mut words = line_env();
-            words.push(0xE100_0000 | mode);
+            words.push(0xe100_0000 | mode);
             let src = grey * 0x0001_0101;
             words.extend([0x6200_0000 | src, xyw(40, 40), (8 << 16) | 8]);
             let Some((gpu, _, _, renderer)) = line_case(&words, prefill) else {
@@ -2230,7 +2230,7 @@ mod tests {
             return;
         };
         assert_eq!(renderer.internal_scale(), 1, "compares PSX-native pixels");
-        let mut state = 0x2545_F491u32;
+        let mut state = 0x2545_f491u32;
         let mut next = move |n: u32| {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             (state >> 8) % n
@@ -2239,12 +2239,12 @@ mod tests {
         let mut seed = Vec::new();
         for y in 0..64u16 {
             for x in 0..64u16 {
-                let c = 1 + ((x * 7 + y * 13 + (x ^ y) * 3) % 0x7FFE);
+                let c = 1 + ((x * 7 + y * 13 + (x ^ y) * 3) % 0x7ffe);
                 seed.push((512 + x, y, c));
             }
         }
         let mut words = line_env();
-        words.push(0xE100_0000 | 8 | (2 << 7)); // tpage x 512, 15bpp
+        words.push(0xe100_0000 | 8 | (2 << 7)); // tpage x 512, 15bpp
         for _ in 0..300 {
             let v: Vec<(i32, i32)> = (0..3)
                 .map(|_| (8 + next(48) as i32, 8 + next(48) as i32))
@@ -2306,7 +2306,7 @@ mod tests {
                 eprintln!("skipping: no headless wgpu adapter");
                 return;
             };
-            let mut state = 0x9E37_79B9u32 ^ (u32::from(textured) << 3) ^ u32::from(dither);
+            let mut state = 0x9e37_79b9u32 ^ (u32::from(textured) << 3) ^ u32::from(dither);
             let mut next = move |n: u32| {
                 state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 (state >> 8) % n
@@ -2314,13 +2314,13 @@ mod tests {
             let mut seed = Vec::new();
             for y in 0..64u16 {
                 for x in 0..64u16 {
-                    let c = 1 + ((x * 7 + y * 13 + (x ^ y) * 3) % 0x7FFE);
+                    let c = 1 + ((x * 7 + y * 13 + (x ^ y) * 3) % 0x7ffe);
                     seed.push((512 + x, y, c));
                 }
             }
             let mut words = line_env();
             let tpage = 8 | (2 << 7);
-            words.push(0xE100_0000 | tpage | if dither { 0x200 } else { 0 });
+            words.push(0xe100_0000 | tpage | if dither { 0x200 } else { 0 });
             for _ in 0..200 {
                 let v: Vec<(i32, i32)> = (0..3)
                     .map(|_| (8 + next(48) as i32, 8 + next(48) as i32))
@@ -2397,13 +2397,13 @@ mod tests {
         let mut seed = Vec::new();
         for y in 0..64u16 {
             for x in 0..64u16 {
-                let c = 1 + ((x * 7 + y * 13 + (x ^ y) * 3) % 0x7FFE);
+                let c = 1 + ((x * 7 + y * 13 + (x ^ y) * 3) % 0x7ffe);
                 seed.push((512 + x, y, c));
             }
         }
         let tpage = 8 | (2 << 7);
         let mut words = line_env();
-        words.push(0xE100_0000 | tpage);
+        words.push(0xe100_0000 | tpage);
         for _ in 0..150 {
             let (x, y) = (8 + next(24) as i32, 8 + next(24) as i32);
             let (w, h) = (1 + next(30) as i32, 1 + next(30) as i32);
@@ -2414,7 +2414,7 @@ mod tests {
             let (v0, v1) = (next(64), next(64));
             let uv = |u: u32, v: u32| u | (v << 8);
             words.extend([
-                0x2D00_0000,
+                0x2d00_0000,
                 pack_xy((xl, yt)),
                 uv(u0, v0),
                 pack_xy((xr, yt)),
@@ -2458,7 +2458,7 @@ mod tests {
             eprintln!("skipping: no headless wgpu adapter");
             return;
         };
-        let mut state = 0x9E37_79B9u32;
+        let mut state = 0x9e37_79b9u32;
         let mut next = move |n: u32| {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             (state >> 8) % n
@@ -2466,13 +2466,13 @@ mod tests {
         let mut seed = Vec::new();
         for y in 0..64u16 {
             for x in 0..64u16 {
-                let c = 1 + ((x * 7 + y * 13 + (x ^ y) * 3) % 0x7FFE);
+                let c = 1 + ((x * 7 + y * 13 + (x ^ y) * 3) % 0x7ffe);
                 seed.push((512 + x, y, c));
             }
         }
         let tpage = 8 | (2 << 7);
         let mut words = line_env();
-        words.push(0xE100_0000 | tpage);
+        words.push(0xe100_0000 | tpage);
         for i in 0..90 {
             let (x, y) = (4 + next(36) as i32, 4 + next(36) as i32);
             let (w, h) = (1 + next(20) as i32, 1 + next(20) as i32);
@@ -2487,7 +2487,7 @@ mod tests {
             let uv = |u: u32, v: u32| u | (v << 8);
             match i % 3 {
                 0 => words.extend([
-                    0x3C80_8080,
+                    0x3c80_8080,
                     pack_xy((xl, yt)),
                     uv(u0, v0),
                     0x0080_8080,
@@ -2501,7 +2501,7 @@ mod tests {
                     uv(u1, v1),
                 ]),
                 1 => words.extend([
-                    0x2C80_8080,
+                    0x2c80_8080,
                     pack_xy((xl, yt)),
                     uv(u0, v0),
                     pack_xy((xr, yt)),
@@ -2512,7 +2512,7 @@ mod tests {
                     uv(u1, v1),
                 ]),
                 _ => words.extend([
-                    0x2800_0000 | (next(0x00FF_FFFF) | 0x0001_0101),
+                    0x2800_0000 | (next(0x00ff_ffff) | 0x0001_0101),
                     pack_xy((xl, yt)),
                     pack_xy((xr, yt)),
                     pack_xy((xl, yb)),
@@ -2558,7 +2558,7 @@ mod tests {
     #[test]
     fn gp0_zero_length_lines_match_cpu_walkers() {
         let mut words = line_env();
-        words.extend([0x40FF_FFFF, xyw(15, 15), xyw(15, 15)]);
+        words.extend([0x40ff_ffff, xyw(15, 15), xyw(15, 15)]);
         let Some((_gpu, cpu, hw, _renderer)) = line_case(&words, 0) else {
             eprintln!("skipping: no headless wgpu adapter");
             return;
@@ -2568,7 +2568,7 @@ mod tests {
         assert_eq!(hw, expected, "HW mono zero-length plots one pixel");
 
         let mut words = line_env();
-        words.extend([0x5000_00FF, xyw(15, 15), 0x0000_FF00, xyw(15, 15)]);
+        words.extend([0x5000_00ff, xyw(15, 15), 0x0000_ff00, xyw(15, 15)]);
         let Some((_gpu, cpu, hw, _renderer)) = line_case(&words, 0) else {
             return;
         };
@@ -2587,14 +2587,14 @@ mod tests {
         };
         assert!(renderer.set_internal_scale(2, None));
         let mut words = line_env();
-        words.extend([0x40FF_FFFF, xyw(10, 10), xyw(20, 10)]);
+        words.extend([0x40ff_ffff, xyw(10, 10), xyw(20, 10)]);
         let (gpu, log, vram_before) = cpu_run_gp0(&words, 0);
         renderer.render_frame(&gpu, &log, &vram_before);
 
         // HW flat colours keep full 8-bit precision (the 5-bit
         // clamp is a CPU-side property).
-        let white = [0xFF, 0xFF, 0xFF, 0xFF];
-        let black = [0x00, 0x00, 0x00, 0xFF];
+        let white = [0xff, 0xff, 0xff, 0xff];
+        let black = [0x00, 0x00, 0x00, 0xff];
         for x in [10u32, 15, 20] {
             assert_eq!(
                 pixel_block(&renderer, x, 10),
@@ -2643,28 +2643,28 @@ mod tests {
             (-30, -55),
         ] {
             words.extend([
-                0x40FF_FFFF,
+                0x40ff_ffff,
                 xyw(cx as u16, cy as u16),
                 xyw((cx + dx) as u16, (cy + dy) as u16),
             ]);
         }
         // Gouraud polyline zigzag across the top.
         words.extend([
-            0x5800_00FF, // red
+            0x5800_00ff, // red
             xyw(10, 20),
-            0x0000_FF00, // green
+            0x0000_ff00, // green
             xyw(60, 50),
-            0x00FF_0000, // blue
+            0x00ff_0000, // blue
             xyw(110, 20),
-            0x0000_FFFF, // yellow
+            0x0000_ffff, // yellow
             xyw(160, 50),
-            0x00FF_00FF, // magenta
+            0x00ff_00ff, // magenta
             xyw(210, 20),
             0x5555_5555,
         ]);
         // Mono polyline outline (closed rectangle).
         words.extend([
-            0x4800_FFFF, // yellow
+            0x4800_ffff, // yellow
             xyw(20, 200),
             xyw(170, 200),
             xyw(170, 230),
@@ -2673,10 +2673,10 @@ mod tests {
             0x5555_5555,
         ]);
         // Semi-trans (Average) white lines crossing the grey patch.
-        words.push(0xE100_0000);
-        words.extend([0x42FF_FFFF, xyw(190, 80), xyw(310, 200)]);
-        words.extend([0x42FF_FFFF, xyw(310, 80), xyw(190, 200)]);
-        words.extend([0x42FF_FFFF, xyw(190, 140), xyw(310, 140)]);
+        words.push(0xe100_0000);
+        words.extend([0x42ff_ffff, xyw(190, 80), xyw(310, 200)]);
+        words.extend([0x42ff_ffff, xyw(310, 80), xyw(190, 200)]);
+        words.extend([0x42ff_ffff, xyw(190, 140), xyw(310, 140)]);
 
         let Some((gpu, _cpu, _hw, renderer)) = line_case(&words, 0) else {
             eprintln!("skipping: no headless wgpu adapter");
@@ -2745,7 +2745,7 @@ mod tests {
         let (x0, y0) = (8i32, 8i32);
         let (x1, y1) = (x0 + (tw * mag) as i32, y0 + (th * mag) as i32);
         words.extend_from_slice(&[
-            0x2D00_0000,
+            0x2d00_0000,
             pack_xy((x0, y0)),
             0,
             pack_xy((x1, y0)),
@@ -2776,7 +2776,7 @@ mod tests {
         let Some(mut r) = filter_renderer() else {
             return;
         };
-        let texel = 0x3DEF;
+        let texel = 0x3def;
         let want = bgr15_to_rgba8(texel);
         {
             let mode = FILTER_EDGE;
@@ -2790,7 +2790,7 @@ mod tests {
         let Some(mut r) = filter_renderer() else {
             return;
         };
-        let red = 0x001F;
+        let red = 0x001f;
         let texels: Vec<u16> = (0..64).map(|i| if i % 8 < 4 { 0 } else { red }).collect();
         // The nearest-texel render decides the silhouette; the filter must not
         // move it or tint the transparent side.
@@ -2816,7 +2816,7 @@ mod tests {
         let Some(mut r) = filter_renderer() else {
             return;
         };
-        let (a, b) = (0x0C63, 0x7E10);
+        let (a, b) = (0x0c63, 0x7e10);
         let texels: Vec<u16> = (0..16 * 8)
             .map(|i| if i % 16 < 8 { a } else { b })
             .collect();
@@ -2857,7 +2857,7 @@ mod tests {
         let Some(mut r) = filter_renderer() else {
             return;
         };
-        let (light, dark) = (0x7FFF, 0x0421);
+        let (light, dark) = (0x7fff, 0x0421);
         let n = 16u32;
         let texels: Vec<u16> = (0..n * n)
             .map(|i| if i % n + i / n < n { light } else { dark })
@@ -2885,7 +2885,7 @@ mod tests {
             return;
         };
         let mut texels = vec![0x0421u16; 64];
-        texels[3 * 8 + 3] = 0x7FFF;
+        texels[3 * 8 + 3] = 0x7fff;
         let bright = |out: &[[u8; 4]]| out.iter().filter(|p| p[0] >= 128).count();
         let near = bright(&render_texture(&mut r, &texels, 8, 8, 4, FILTER_NONE, &[]));
         let edge = bright(&render_texture(&mut r, &texels, 8, 8, 4, FILTER_EDGE, &[]));
@@ -2912,7 +2912,7 @@ mod tests {
         for row in nibbles.iter_mut() {
             for n in row.iter_mut() {
                 state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                *n = ((state >> 24) & 0xF) as u16;
+                *n = ((state >> 24) & 0xf) as u16;
             }
         }
         for (y, row) in nibbles.iter().enumerate() {
@@ -2928,7 +2928,7 @@ mod tests {
         let clut = (480u32 << 6) << 16;
         let mut words = line_env();
         words.extend_from_slice(&[
-            0x2D00_0000,
+            0x2d00_0000,
             pack_xy((8, 8)),
             clut,
             pack_xy((24, 8)),
@@ -2973,13 +2973,13 @@ mod tests {
                 if x < 8 {
                     5 + x * 3
                 } else {
-                    0x7C1F
+                    0x7c1f
                 }
             })
             .collect();
         {
             let mode = FILTER_EDGE;
-            let out = render_texture(&mut r, &texels, 16, 8, 4, mode, &[0xE200_0001]);
+            let out = render_texture(&mut r, &texels, 16, 8, 4, mode, &[0xe200_0001]);
             assert!(
                 out.iter().all(|p| p[2] == 0),
                 "mode {mode} read outside the texture window"
@@ -3015,7 +3015,7 @@ mod tests {
         let mut words = line_env();
         for _ in 0..4 {
             words.extend_from_slice(&[
-                0x2D00_0000,
+                0x2d00_0000,
                 pack_xy((0, 0)),
                 (480 << 6) << 16,
                 pack_xy((320, 0)),

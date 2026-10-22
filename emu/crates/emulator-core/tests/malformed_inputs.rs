@@ -18,7 +18,7 @@ impl Rng {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
-        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
     }
     fn below(&mut self, n: usize) -> usize {
         (self.next() % n as u64) as usize
@@ -28,7 +28,7 @@ impl Rng {
         match self.below(6) {
             0 => 0,
             1 => u32::MAX,
-            2 => 0x801F_FFF0 + self.below(32) as u32,
+            2 => 0x801f_fff0 + self.below(32) as u32,
             3 => 0x8000_0000 + self.below(0x0020_0000) as u32,
             4 => self.below(0x0040_0000) as u32,
             _ => self.next() as u32,
@@ -46,7 +46,7 @@ fn exe_with_header(rng: &mut Rng) -> Vec<u8> {
     let payload = rng.below(64) * 4;
     let mut exe = vec![0u8; EXE_HEADER_BYTES + payload];
     exe[..8].copy_from_slice(b"PS-X EXE");
-    for offset in [0x10, 0x14, 0x18, 0x28, 0x2C, 0x30, 0x34] {
+    for offset in [0x10, 0x14, 0x18, 0x28, 0x2c, 0x30, 0x34] {
         exe[offset..offset + 4].copy_from_slice(&rng.field().to_le_bytes());
     }
     // Usually honest about the payload size, sometimes not.
@@ -55,7 +55,7 @@ fn exe_with_header(rng: &mut Rng) -> Vec<u8> {
     } else {
         payload as u32
     };
-    exe[0x1C..0x20].copy_from_slice(&t_size.to_le_bytes());
+    exe[0x1c..0x20].copy_from_slice(&t_size.to_le_bytes());
     exe
 }
 
@@ -111,7 +111,7 @@ fn side_loaded_exe_headers_never_panic() {
 fn mutated_save_states_never_panic() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new_without_bios();
-    bus.write32(0x1000, 0x3C08_1234);
+    bus.write32(0x1000, 0x3c08_1234);
     cpu.seed_from_exe(0x8000_1000, 0, None);
     for _ in 0..4 {
         let _ = cpu.step(&mut bus);
@@ -140,11 +140,11 @@ fn mutated_save_states_never_panic() {
             2 => {
                 // Corrupt the header region, where the length-prefixed strings live.
                 let at = 8 + rng.below(64.min(mutated.len() - 8));
-                mutated[at] = 0xFF;
+                mutated[at] = 0xff;
             }
             _ => {
                 let at = rng.below(mutated.len());
-                mutated.splice(at..at, [0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
+                mutated.splice(at..at, [0xff, 0xff, 0xff, 0xff, 0x0f]);
             }
         }
         no_panic("SaveStateV1::from_bytes", &mutated.len(), || {

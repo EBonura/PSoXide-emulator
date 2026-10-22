@@ -16,8 +16,7 @@ use std::path::{Path, PathBuf};
 
 use egui::{Align2, FontId, Pos2, Rect, Vec2};
 
-use crate::icons;
-use crate::theme;
+use crate::{icons, theme};
 
 const CATEGORY_SPACING: f32 = 100.0;
 const ICON_SIZE_ACTIVE: f32 = 32.0;

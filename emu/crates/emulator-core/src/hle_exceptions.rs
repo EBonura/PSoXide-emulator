@@ -43,32 +43,32 @@ const HI_RCNT: u32 = KERNEL_DATA + 0x50;
 const HI_DEFINT: u32 = KERNEL_DATA + 0x90;
 /// Default IRQ handler table: (I_STAT bit, event class, auto-ack variable)
 /// per entry, terminated by a zero bit.
-const DEFINT_TABLE: u32 = KERNEL_DATA + 0xA0;
+const DEFINT_TABLE: u32 = KERNEL_DATA + 0xa0;
 /// Exec nesting depth, then [`EXEC_SLOTS`] header addresses.
 const EXEC_DEPTH: u32 = KERNEL_DATA + 0x128;
-const EXEC_STACK: u32 = KERNEL_DATA + 0x12C;
+const EXEC_STACK: u32 = KERNEL_DATA + 0x12c;
 const EXEC_SLOTS: u32 = 5;
 
 /// Kernel variables used by the exception core.
 pub mod kvar {
     /// Exit buffer the handler longjmps to after the chains
     /// (HookEntryInt / ResetEntryInt).
-    pub const EXIT_JMPBUF: u32 = 0x0A44;
+    pub const EXIT_JMPBUF: u32 = 0x0a44;
     /// Exception stack pointer loaded on entry.
-    pub const EXCEPTION_SP: u32 = 0x0A48;
+    pub const EXCEPTION_SP: u32 = 0x0a48;
     /// ChangeClearRCnt flags for timers 0..2 and VBlank (4 words).
-    pub const RCNT_AUTOACK: u32 = 0x0A50;
+    pub const RCNT_AUTOACK: u32 = 0x0a50;
     /// SetIrqAutoAck flags for IRQ 0..10 (11 words).
-    pub const IRQ_AUTOACK: u32 = 0x0A60;
+    pub const IRQ_AUTOACK: u32 = 0x0a60;
     /// Events queued by HLE handlers for the guest DeliverEvent: count,
     /// then the address to continue at when the queue is empty.
-    pub const DQ_COUNT: u32 = 0x0C00;
+    pub const DQ_COUNT: u32 = 0x0c00;
     /// Continuation after the last queued delivery.
-    pub const DQ_RETURN: u32 = 0x0C04;
+    pub const DQ_RETURN: u32 = 0x0c04;
     /// `v0` handed to that continuation.
-    pub const DQ_V0: u32 = 0x0C48;
+    pub const DQ_V0: u32 = 0x0c48;
     /// Queued (class, spec) pairs, [`super::DQ_MAX`] of them.
-    pub const DQ_ITEMS: u32 = 0x0C08;
+    pub const DQ_ITEMS: u32 = 0x0c08;
 }
 
 /// Capacity of the delivery queue.
@@ -81,12 +81,12 @@ pub mod internal {
     /// Root-counter handlers for timers 0..2 and VBlank (4 entries).
     pub const RCNT_HANDLER: u8 = 0x04;
     /// Delivers the next queued event, or continues after the queue.
-    pub const DELIVER_NEXT: u8 = 0x3E;
+    pub const DELIVER_NEXT: u8 = 0x3e;
 }
 
 const I_STAT: i16 = 0x1070;
 const I_MASK: i16 = 0x1074;
-const IO_HI: u16 = 0x1F80;
+const IO_HI: u16 = 0x1f80;
 
 /// Addresses inside the assembled kernel code.
 #[derive(Clone, Debug)]
@@ -139,7 +139,7 @@ mod tcb {
     pub const REGS: u32 = 0x08;
     /// Return PC.
     pub const EPC: u32 = 0x88;
-    pub const HI: u32 = 0x8C;
+    pub const HI: u32 = 0x8c;
     pub const LO: u32 = 0x90;
     pub const SR: u32 = 0x94;
     pub const CAUSE: u32 = 0x98;
@@ -179,7 +179,7 @@ fn current_tcb_into(a: &mut Asm, reg: u32) {
 /// already run, so the return address moves past it. `cause` and `epc`
 /// hold the COP0 values; `epc` is adjusted in place, `tmp` is clobbered.
 fn skip_interrupted_gte_command(a: &mut Asm, cause: u32, epc: u32, tmp: u32, done: &'static str) {
-    a.andi(tmp, cause, 0x7C);
+    a.andi(tmp, cause, 0x7c);
     a.bnez(tmp, done);
     a.nop();
     a.lw(tmp, 0, epc);
@@ -315,9 +315,9 @@ fn longjmp_through(a: &mut Asm, buf: u32) {
     a.lw(SP, 0x04, buf);
     a.lw(FP, 0x08, buf);
     for (k, r) in (S0..=S7).enumerate() {
-        a.lw(r, 0x0C + 4 * k as i16, buf);
+        a.lw(r, 0x0c + 4 * k as i16, buf);
     }
-    a.lw(GP, 0x2C, buf);
+    a.lw(GP, 0x2c, buf);
     a.jr(RA);
     a.addiu(V0, ZERO, 1);
 }
@@ -370,7 +370,7 @@ fn deliver_event(a: &mut Asm) {
     a.lw(T0, 0x08, S0);
     a.nop();
     a.bne(T0, S3, "de_next");
-    a.lw(T0, 0x0C, S0);
+    a.lw(T0, 0x0c, S0);
     a.addiu(T1, ZERO, EV_MODE_READY as i16);
     a.bne(T0, T1, "de_callback");
     a.addiu(T1, ZERO, EV_MODE_CALLBACK as i16);
@@ -411,7 +411,7 @@ fn rcnt_verifier(a: &mut Asm, n: u32, skip: &'static str) {
     a.mov(V0, ZERO);
     a.addiu(SP, SP, -8);
     a.sw(RA, 4, SP);
-    a.li(A0, 0xF200_0000 + n);
+    a.li(A0, 0xf200_0000 + n);
     a.jal("deliver_event");
     a.addiu(A1, ZERO, 2);
     a.lw(RA, 4, SP);
@@ -493,7 +493,7 @@ fn defint_verifier(a: &mut Asm) {
 /// a register; nested Execs push and pop it.
 fn exec(a: &mut Asm) {
     a.sw(SP, 0x28, A0);
-    a.sw(FP, 0x2C, A0);
+    a.sw(FP, 0x2c, A0);
     a.sw(GP, 0x30, A0);
     a.sw(RA, 0x34, A0);
     a.sw(S0, 0x38, A0);
@@ -511,7 +511,7 @@ fn exec(a: &mut Asm) {
     a.sw(T0, EXEC_DEPTH as i16, ZERO);
     a.mov(S0, A0);
     a.lw(T0, 0x18, S0);
-    a.lw(T1, 0x1C, S0);
+    a.lw(T1, 0x1c, S0);
     a.nop();
     a.beqz(T1, "ex_stack");
     a.addu(T1, T0, T1);
@@ -545,7 +545,7 @@ fn exec(a: &mut Asm) {
     a.nop();
     a.lw(RA, 0x34, T2);
     a.lw(SP, 0x28, T2);
-    a.lw(FP, 0x2C, T2);
+    a.lw(FP, 0x2c, T2);
     a.lw(GP, 0x30, T2);
     a.lw(S0, 0x38, T2);
     a.jr(RA);
@@ -572,7 +572,7 @@ fn get_conf(a: &mut Asm) {
 /// Offset in the early card routine of the words games replace.
 pub const CARD_EARLY_PATCHED: u32 = 0x28;
 /// Offset in the early card routine where those replacements continue.
-pub const CARD_EARLY_RESUME: u32 = 0x3C;
+pub const CARD_EARLY_RESUME: u32 = 0x3c;
 
 /// The early card IRQ routine that InitCARD2 calls from handler slot 1
 /// (psx-spx "early_card_irq_patch"). It runs with only at, v0, v1 and ra
@@ -652,7 +652,7 @@ fn assemble() -> KernelCode {
     a.li(RA, 0);
     let ra_fix = a.here() - 8;
     a.addiu(T1, ZERO, 0x40);
-    a.addiu(T0, ZERO, 0xA0);
+    a.addiu(T0, ZERO, 0xa0);
     a.jr(T0);
     a.nop();
 
@@ -698,7 +698,7 @@ fn assemble() -> KernelCode {
     // `li ra, ReturnFromException` in the glue, now that it is known.
     let at = ((ra_fix - KERNEL_CODE) / 4) as usize;
     words[at] |= rfe >> 16;
-    words[at + 1] |= rfe & 0xFFFF;
+    words[at + 1] |= rfe & 0xffff;
     assert!(KERNEL_CODE + 4 * words.len() as u32 <= KERNEL_CODE_END);
     assert!(
         crate::hle_kernel::EXCEPTION_HANDLER + 4 * layout.handler.len() as u32
@@ -713,17 +713,17 @@ fn assemble() -> KernelCode {
 /// psx-spx lists them: (I_STAT bit, event class). IRQ6 shares timer 1's
 /// class, as psx-spx records.
 const DEFINT: [(u32, u32); 11] = [
-    (0, 0xF000_0001),
-    (1, 0xF000_0002),
-    (2, 0xF000_0003),
-    (3, 0xF000_0004),
-    (4, 0xF000_0005),
-    (5, 0xF000_0006),
-    (6, 0xF000_0006),
-    (7, 0xF000_0008),
-    (9, 0xF000_0009),
-    (10, 0xF000_000A),
-    (8, 0xF000_000B),
+    (0, 0xf000_0001),
+    (1, 0xf000_0002),
+    (2, 0xf000_0003),
+    (3, 0xf000_0004),
+    (4, 0xf000_0005),
+    (5, 0xf000_0006),
+    (6, 0xf000_0006),
+    (7, 0xf000_0008),
+    (9, 0xf000_0009),
+    (10, 0xf000_000a),
+    (8, 0xf000_000b),
 ];
 
 fn write_words(bus: &mut Bus, base: u32, words: &[u32]) {
@@ -761,7 +761,7 @@ pub fn install(bus: &mut Bus) {
         (B0_TABLE + 4 * 0x07, code.deliver_event),
         (B0_TABLE + 4 * 0x17, code.return_from_exception),
         (A0_TABLE + 4 * 0x43, code.exec),
-        (A0_TABLE + 4 * 0x9D, code.get_conf),
+        (A0_TABLE + 4 * 0x9d, code.get_conf),
     ] {
         poke32(bus, entry, target);
     }
@@ -883,8 +883,8 @@ pub fn enqueue_syscall_handler(bus: &mut Bus, prio: u32) {
 /// four IRQs and stops and clears the three timers.
 pub fn enqueue_rcnt(bus: &mut Bus, prio: u32, touch_hw: bool) {
     if touch_hw {
-        let mask = bus.read32(0x1F80_1074);
-        bus.write32(0x1F80_1074, mask & !0x71);
+        let mask = bus.read32(0x1f80_1074);
+        bus.write32(0x1f80_1074, mask & !0x71);
         for t in 0..3 {
             for reg in [4, 8, 0] {
                 bus.write16(timer_reg(t, reg), 0);
@@ -925,7 +925,7 @@ pub const EV_MODE_CALLBACK: u32 = 0x1000;
 /// Bytes per EvCB.
 const EVCB_SIZE: u32 = crate::hle_kernel::EVCB_SIZE;
 /// Event handles are F1000000h + index (psx-spx "BIOS Memory Map").
-const EVENT_HANDLE: u32 = 0xF100_0000;
+const EVENT_HANDLE: u32 = 0xf100_0000;
 
 fn evcb_count(bus: &Bus) -> u32 {
     peek32(bus, TOT + 0x24) / EVCB_SIZE
@@ -937,7 +937,7 @@ fn evcb(bus: &Bus, index: u32) -> u32 {
 
 /// The EvCB of `event`, if the handle names one.
 fn evcb_of(bus: &Bus, event: u32) -> Option<u32> {
-    let index = event & 0xFFFF;
+    let index = event & 0xffff;
     (index < evcb_count(bus)).then(|| evcb(bus, index))
 }
 
@@ -1032,7 +1032,7 @@ pub fn undeliver_event(bus: &mut Bus, class: u32, spec: u32) {
 // ---------------------------------------------------------------- threads
 
 /// Thread handles are FF000000h + index (psx-spx "BIOS Thread Functions").
-const THREAD_HANDLE: u32 = 0xFF00_0000;
+const THREAD_HANDLE: u32 = 0xff00_0000;
 
 fn tcb_count(bus: &Bus) -> u32 {
     peek32(bus, TOT + 0x14) / crate::hle_kernel::TCB_SIZE
@@ -1067,7 +1067,7 @@ pub fn open_thread(bus: &mut Bus, pc: u32, sp: u32, gp: u32) -> u32 {
 
 /// B(0Fh) CloseTh: the TCB becomes free.
 pub fn close_thread(bus: &mut Bus, thread: u32) {
-    let index = thread & 0xFFFF;
+    let index = thread & 0xffff;
     if index < tcb_count(bus) {
         let t = tcb_at(bus, index);
         poke32(bus, t + tcb::STATUS, crate::hle_kernel::TCB_FREE);
@@ -1076,7 +1076,7 @@ pub fn close_thread(bus: &mut Bus, thread: u32) {
 
 /// TCB address of a thread handle, for ChangeTh's SYSCALL(3).
 pub fn thread_tcb(bus: &Bus, thread: u32) -> u32 {
-    tcb_at(bus, thread & 0xFFFF)
+    tcb_at(bus, thread & 0xffff)
 }
 
 // ------------------------------------------------------------ syscall path
@@ -1108,7 +1108,7 @@ const CRITICAL_BITS: u32 = 0x0404;
 /// * any other exception delivers F0000010h/1000h and goes on to A(40h).
 pub fn syscall_verifier(bus: &mut Bus) -> SyscallAction {
     let t = crate::hle_kernel::current_tcb(bus);
-    let excode = (peek32(bus, t + tcb::CAUSE) >> 2) & 0x1F;
+    let excode = (peek32(bus, t + tcb::CAUSE) >> 2) & 0x1f;
     match excode {
         0 => SyscallAction::Pass,
         8 => {
@@ -1132,7 +1132,7 @@ pub fn syscall_verifier(bus: &mut Bus) -> SyscallAction {
                 }
                 _ => {
                     return SyscallAction::Deliver(
-                        0xF000_0010,
+                        0xf000_0010,
                         0x4000,
                         code().return_from_exception,
                     )
@@ -1140,7 +1140,7 @@ pub fn syscall_verifier(bus: &mut Bus) -> SyscallAction {
             }
             SyscallAction::Return
         }
-        _ => SyscallAction::Deliver(0xF000_0010, 0x1000, code().unresolved_glue),
+        _ => SyscallAction::Deliver(0xf000_0010, 0x1000, code().unresolved_glue),
     }
 }
 
@@ -1152,7 +1152,7 @@ pub fn rcnt_handler(bus: &mut Bus, n: u8) -> bool {
     if n > 3 || peek32(bus, kvar::RCNT_AUTOACK + 4 * n) == 0 {
         return false;
     }
-    bus.write32(0x1F80_1070, !rcnt_irq_bit(n));
+    bus.write32(0x1f80_1070, !rcnt_irq_bit(n));
     true
 }
 
@@ -1227,7 +1227,7 @@ pub fn deliver_next(bus: &mut Bus, gprs: &mut [u32; 32]) -> u32 {
 // ------------------------------------------------------------------ timers
 
 fn timer_reg(t: u32, reg: u32) -> u32 {
-    0x1F80_1100 + 0x10 * t + reg
+    0x1f80_1100 + 0x10 * t + reg
 }
 
 /// B(02h) init_timer(t, reload, flags), psx-spx: for t = 0..2, mode 0,
@@ -1235,7 +1235,7 @@ fn timer_reg(t: u32, reg: u32) -> u32 {
 /// flags bit 0 is clear, OR 10h when flags bit 12 is set. Returns 1, or
 /// 0 for t > 2.
 pub fn init_timer(bus: &mut Bus, t: u32, reload: u32, flags: u32) -> u32 {
-    let t = t & 0xFFFF;
+    let t = t & 0xffff;
     if t > 2 {
         return 0;
     }
@@ -1270,8 +1270,8 @@ pub fn set_timer_irq(bus: &mut Bus, t: u32, enable: bool) -> u32 {
         3 => 1,
         _ => 0,
     };
-    let mask = bus.read32(0x1F80_1074);
-    bus.write32(0x1F80_1074, if enable { mask | bit } else { mask & !bit });
+    let mask = bus.read32(0x1f80_1074);
+    bus.write32(0x1f80_1074, if enable { mask | bit } else { mask & !bit });
     if enable {
         u32::from(t <= 2)
     } else {
@@ -1324,11 +1324,11 @@ mod tests {
         let entry = 0x8004_0000;
         // Entry: store sp to [0x80050000], a0/a1 after it, then return.
         for (i, w) in [
-            0x3C08_8005u32,
-            0xAD1D_0000,
-            0xAD04_0004,
-            0xAD05_0008,
-            0x03E0_0008,
+            0x3c08_8005u32,
+            0xad1d_0000,
+            0xad04_0004,
+            0xad05_0008,
+            0x03e0_0008,
             0,
         ]
         .iter()
@@ -1340,24 +1340,24 @@ mod tests {
             (0x00, entry),
             (0x04, 0x1234),
             (0x18, 0x8006_0000),
-            (0x1C, 8),
-            (0x20, 0x801F_0000),
+            (0x1c, 8),
+            (0x20, 0x801f_0000),
             (0x24, 0x10),
         ] {
             bus.write32(header + off, v);
         }
-        bus.write32(0x8006_0000, 0xFFFF_FFFF);
-        bus.write32(0x8006_0004, 0xFFFF_FFFF);
-        bus.write32(0x8006_0008, 0xFFFF_FFFF);
+        bus.write32(0x8006_0000, 0xffff_ffff);
+        bus.write32(0x8006_0004, 0xffff_ffff);
+        bus.write32(0x8006_0008, 0xffff_ffff);
         // Call A(43h) through the vector, returning to a spin loop.
-        bus.write32(0x8001_0000, 0x1000_FFFF);
+        bus.write32(0x8001_0000, 0x1000_ffff);
         cpu.gprs_mut_for_test()[4] = header;
         cpu.gprs_mut_for_test()[5] = 7;
         cpu.gprs_mut_for_test()[6] = 9;
         cpu.gprs_mut_for_test()[9] = 0x43;
-        cpu.gprs_mut_for_test()[29] = 0x801F_FF00;
+        cpu.gprs_mut_for_test()[29] = 0x801f_ff00;
         cpu.gprs_mut_for_test()[31] = 0x8001_0000;
-        cpu.set_pc_for_test(0xA0);
+        cpu.set_pc_for_test(0xa0);
         for _ in 0..500 {
             if cpu.pc() == 0x8001_0000 {
                 break;
@@ -1366,10 +1366,10 @@ mod tests {
         }
         assert_eq!(cpu.pc(), 0x8001_0000);
         assert_eq!(cpu.gpr(2), 1);
-        assert_eq!(cpu.gpr(29), 0x801F_FF00, "caller's sp restored");
+        assert_eq!(cpu.gpr(29), 0x801f_ff00, "caller's sp restored");
         assert_eq!(
             bus.read32(0x8005_0000),
-            0x801F_0010,
+            0x801f_0010,
             "entry ran on base+offset"
         );
         assert_eq!((bus.read32(0x8005_0004), bus.read32(0x8005_0008)), (7, 9));
@@ -1377,7 +1377,7 @@ mod tests {
         assert_eq!(bus.read32(0x8006_0004), 0);
         assert_eq!(
             bus.read32(0x8006_0008),
-            0xFFFF_FFFF,
+            0xffff_ffff,
             "only b_size bytes cleared"
         );
     }
@@ -1392,15 +1392,15 @@ mod tests {
     fn test_event_costs_the_measured_retail_cycles() {
         use crate::Cpu;
         let mut bus = hle_bus();
-        let handle = open_event(&mut bus, 0xF400_0001, 4, 0x2000, 0);
+        let handle = open_event(&mut bus, 0xf400_0001, 4, 0x2000, 0);
         set_event_enabled(&mut bus, handle, true);
         let mut cpu = Cpu::new();
-        bus.write32(0x8001_0000, 0x1000_FFFF);
+        bus.write32(0x8001_0000, 0x1000_ffff);
         let mut call = |bus: &mut Bus| {
             cpu.gprs_mut_for_test()[4] = handle;
-            cpu.gprs_mut_for_test()[9] = 0x0B;
+            cpu.gprs_mut_for_test()[9] = 0x0b;
             cpu.gprs_mut_for_test()[31] = 0x8001_0000;
-            cpu.set_pc_for_test(0xB0);
+            cpu.set_pc_for_test(0xb0);
             let before = bus.cycles();
             cpu.step(bus).unwrap();
             assert_eq!(cpu.pc(), 0x8001_0000);
@@ -1420,14 +1420,14 @@ mod tests {
         use crate::Cpu;
         let mut bus = hle_bus();
         let mut cpu = Cpu::new();
-        bus.write32(0x8001_0000, 0x1000_FFFF);
+        bus.write32(0x8001_0000, 0x1000_ffff);
         let mut call = |bus: &mut Bus, func: u32, a: [u32; 3]| {
             cpu.gprs_mut_for_test()[4] = a[0];
             cpu.gprs_mut_for_test()[5] = a[1];
             cpu.gprs_mut_for_test()[6] = a[2];
             cpu.gprs_mut_for_test()[9] = func;
             cpu.gprs_mut_for_test()[31] = 0x8001_0000;
-            cpu.set_pc_for_test(0xA0);
+            cpu.set_pc_for_test(0xa0);
             let before = bus.cycles();
             cpu.step(bus).unwrap();
             assert_eq!(cpu.pc(), 0x8001_0000);
@@ -1435,26 +1435,26 @@ mod tests {
         };
         // Measured: memcpy 20 bytes 4299, 92 bytes 18875; memset 80 bytes
         // 10887; bzero 480 bytes 63786.
-        assert_eq!(call(&mut bus, 0x2A, [0x8002_0000, 0x8003_0000, 20]), 4293);
-        assert_eq!(call(&mut bus, 0x2A, [0x8002_0000, 0x8003_0000, 92]), 18873);
-        assert_eq!(call(&mut bus, 0x2B, [0x8002_0000, 0, 80]), 10874);
+        assert_eq!(call(&mut bus, 0x2a, [0x8002_0000, 0x8003_0000, 20]), 4293);
+        assert_eq!(call(&mut bus, 0x2a, [0x8002_0000, 0x8003_0000, 92]), 18873);
+        assert_eq!(call(&mut bus, 0x2b, [0x8002_0000, 0, 80]), 10874);
         assert_eq!(call(&mut bus, 0x28, [0x8002_0000, 480, 0]), 63682);
         // Nothing to copy: the dispatch only.
-        assert_eq!(call(&mut bus, 0x2A, [0x8002_0000, 0x8003_0000, 0]), 2);
+        assert_eq!(call(&mut bus, 0x2a, [0x8002_0000, 0x8003_0000, 0]), 2);
     }
 
     #[test]
     fn timer_helpers_program_the_documented_registers() {
         let mut bus = hle_bus();
         assert_eq!(init_timer(&mut bus, 1, 0x1234, 0x1000), 1);
-        assert_eq!(bus.read16(0x1F80_1118), 0x1234);
-        assert_eq!(bus.read16(0x1F80_1114) & 0x3FF, 0x158);
+        assert_eq!(bus.read16(0x1f80_1118), 0x1234);
+        assert_eq!(bus.read16(0x1f80_1114) & 0x3ff, 0x158);
         assert_eq!(init_timer(&mut bus, 3, 1, 0), 0);
         assert_eq!(set_timer_irq(&mut bus, 2, true), 1);
         assert_eq!(set_timer_irq(&mut bus, 3, true), 0);
-        assert_eq!(bus.read32(0x1F80_1074) & 0x41, 0x41);
+        assert_eq!(bus.read32(0x1f80_1074) & 0x41, 0x41);
         assert_eq!(set_timer_irq(&mut bus, 2, false), 1);
-        assert_eq!(bus.read32(0x1F80_1074) & 0x40, 0);
+        assert_eq!(bus.read32(0x1f80_1074) & 0x40, 0);
         assert_eq!(restart_timer(&mut bus, 0), 1);
         assert_eq!(get_timer(&mut bus, 7), 0);
     }

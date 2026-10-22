@@ -31,10 +31,9 @@
 //! doesn't derail the whole scan.
 
 use std::collections::HashMap;
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
+use std::{fs, io};
 
 use psx_iso::TrackSource;
 use serde::{Deserialize, Serialize};
@@ -952,7 +951,7 @@ fn pvd_volume_identifier(user_data: &[u8]) -> Option<String> {
     let cleaned: String = raw
         .iter()
         .map(|&b| {
-            if (0x20..=0x7E).contains(&b) {
+            if (0x20..=0x7e).contains(&b) {
                 b as char
             } else {
                 ' '
@@ -1058,7 +1057,7 @@ fn parse_ccd_toc(ccd_path: &Path) -> Result<CcdToc, String> {
         |entry: CcdEntry, tracks: &mut Vec<CcdTrackSpec>, leadout_lba: &mut Option<u32>| {
             let Some(point) = entry.point else { return };
             let Some(plba) = entry.plba else { return };
-            if point == 0xA2 {
+            if point == 0xa2 {
                 if plba >= 0 {
                     *leadout_lba = Some(plba as u32);
                 }
@@ -1067,9 +1066,9 @@ fn parse_ccd_toc(ccd_path: &Path) -> Result<CcdToc, String> {
             let track_number = if (0x01..=0x99).contains(&point) {
                 psx_iso::bcd_to_bin(point as u8)
             } else {
-                0xFF
+                0xff
             };
-            if track_number == 0xFF || track_number == 0 || plba < 0 {
+            if track_number == 0xff || track_number == 0 || plba < 0 {
                 return;
             }
             let control = entry.control.unwrap_or(0);
@@ -1150,13 +1149,13 @@ fn detect_track1_embedded_pregap(bytes: &[u8]) -> u32 {
         return 0;
     }
     let sector = &bytes[..psx_iso::SECTOR_BYTES];
-    if sector[0] != 0x00 || sector[11] != 0x00 || sector[1..11] != [0xFF; 10] {
+    if sector[0] != 0x00 || sector[11] != 0x00 || sector[1..11] != [0xff; 10] {
         return 0;
     }
     let m = psx_iso::bcd_to_bin(sector[12]);
     let s = psx_iso::bcd_to_bin(sector[13]);
     let f = psx_iso::bcd_to_bin(sector[14]);
-    if [m, s, f].contains(&0xFF) {
+    if [m, s, f].contains(&0xff) {
         return 0;
     }
     let abs_frame = (m as u32) * 60 * 75 + (s as u32) * 75 + (f as u32);
@@ -1540,7 +1539,7 @@ pub fn parse_sbi(bytes: &[u8]) -> Result<Vec<u32>, String> {
         return Err("not an SBI file (missing SBI header)".into());
     }
     let bcd = |b: u8| -> Result<u32, String> {
-        let (hi, lo) = (u32::from(b >> 4), u32::from(b & 0x0F));
+        let (hi, lo) = (u32::from(b >> 4), u32::from(b & 0x0f));
         if hi > 9 || lo > 9 {
             return Err(format!("SBI position byte {b:#04x} is not BCD"));
         }
@@ -2224,7 +2223,7 @@ mod tests {
         track1[14] = 0x00;
         std::fs::write(&track1_path, track1).unwrap();
         let mut track2 = vec![0u8; psx_iso::SECTOR_BYTES * 4];
-        track2[0] = 0xAB;
+        track2[0] = 0xab;
         std::fs::write(&track2_path, track2).unwrap();
         std::fs::write(
             &cue_path,
@@ -2246,7 +2245,7 @@ mod tests {
         assert_eq!(pos.index_number, 0);
         assert_eq!(pos.relative_msf, (0, 0, 1));
         assert!(disc.read_sector_raw(10).is_none());
-        assert_eq!(disc.read_sector_raw(12).unwrap()[0], 0xAB);
+        assert_eq!(disc.read_sector_raw(12).unwrap()[0], 0xab);
     }
 
     #[test]
@@ -2257,7 +2256,7 @@ mod tests {
         let track2_path = tmp.path().join("track2.bin");
         std::fs::write(&track1_path, vec![0u8; psx_iso::SECTOR_BYTES * 10]).unwrap();
         let mut track2 = vec![0u8; psx_iso::SECTOR_BYTES * (150 + 4)];
-        track2[150 * psx_iso::SECTOR_BYTES] = 0xAB;
+        track2[150 * psx_iso::SECTOR_BYTES] = 0xab;
         std::fs::write(&track2_path, track2).unwrap();
         std::fs::write(
             &cue_path,
@@ -2276,7 +2275,7 @@ mod tests {
         assert_eq!(disc.track(2).unwrap().start_lba, 160);
         assert_eq!(disc.track(2).unwrap().sector_count, 4);
         assert!(disc.read_cdda_sector(10).is_none());
-        assert_eq!(disc.read_cdda_sector(160).unwrap()[0], 0xAB);
+        assert_eq!(disc.read_cdda_sector(160).unwrap()[0], 0xab);
     }
 
     #[test]
@@ -2286,7 +2285,7 @@ mod tests {
         let bin_path = tmp.path().join("disc.bin");
         let mut image = vec![0u8; psx_iso::SECTOR_BYTES * (10 + 150 + 4)];
         image[9 * psx_iso::SECTOR_BYTES] = 0x11;
-        image[160 * psx_iso::SECTOR_BYTES] = 0xAB;
+        image[160 * psx_iso::SECTOR_BYTES] = 0xab;
         std::fs::write(&bin_path, image).unwrap();
         std::fs::write(
             &cue_path,
@@ -2308,7 +2307,7 @@ mod tests {
         assert_eq!(disc.track(2).unwrap().sector_count, 4);
         assert_eq!(disc.read_sector_raw(9).unwrap()[0], 0x11);
         assert!(disc.read_cdda_sector(10).is_none());
-        assert_eq!(disc.read_cdda_sector(160).unwrap()[0], 0xAB);
+        assert_eq!(disc.read_cdda_sector(160).unwrap()[0], 0xab);
     }
 
     // The streaming path: the same sheet with the image pre-cut at track
@@ -2317,7 +2316,7 @@ mod tests {
     fn disc_from_cue_pieces_matches_the_single_bin_loader() {
         let mut image = vec![0u8; psx_iso::SECTOR_BYTES * (10 + 150 + 4)];
         image[9 * psx_iso::SECTOR_BYTES] = 0x11;
-        image[160 * psx_iso::SECTOR_BYTES] = 0xAB;
+        image[160 * psx_iso::SECTOR_BYTES] = 0xab;
         let cue = concat!(
             "FILE \"disc.bin\" BINARY\n",
             "  TRACK 01 MODE2/2352\n",
@@ -2370,7 +2369,7 @@ mod tests {
     fn disc_from_cue_str_matches_the_fs_loader_on_a_single_bin() {
         let mut image = vec![0u8; psx_iso::SECTOR_BYTES * (10 + 150 + 4)];
         image[9 * psx_iso::SECTOR_BYTES] = 0x11;
-        image[160 * psx_iso::SECTOR_BYTES] = 0xAB;
+        image[160 * psx_iso::SECTOR_BYTES] = 0xab;
         let cue = concat!(
             "FILE \"disc.bin\" BINARY\n",
             "  TRACK 01 MODE2/2352\n",
@@ -2391,7 +2390,7 @@ mod tests {
         assert_eq!(disc.track(2).unwrap().sector_count, 4);
         assert_eq!(disc.read_sector_raw(9).unwrap()[0], 0x11);
         assert!(disc.read_cdda_sector(10).is_none());
-        assert_eq!(disc.read_cdda_sector(160).unwrap()[0], 0xAB);
+        assert_eq!(disc.read_cdda_sector(160).unwrap()[0], 0xab);
     }
 
     #[test]
@@ -2401,7 +2400,7 @@ mod tests {
         let img_path = tmp.path().join("disc.img");
         let mut image = vec![0u8; psx_iso::SECTOR_BYTES * 14];
         image[9 * psx_iso::SECTOR_BYTES] = 0x11;
-        image[10 * psx_iso::SECTOR_BYTES] = 0xAB;
+        image[10 * psx_iso::SECTOR_BYTES] = 0xab;
         std::fs::write(&img_path, image).unwrap();
         std::fs::write(
             &ccd_path,
@@ -2427,7 +2426,7 @@ mod tests {
         assert_eq!(disc.track(1).unwrap().track_type, psx_iso::TrackType::Data);
         assert_eq!(disc.track(2).unwrap().track_type, psx_iso::TrackType::Audio);
         assert_eq!(disc.read_sector_raw(9).unwrap()[0], 0x11);
-        assert_eq!(disc.read_sector_raw(10).unwrap()[0], 0xAB);
+        assert_eq!(disc.read_sector_raw(10).unwrap()[0], 0xab);
         let pos = disc.track_position_for_lba(10).unwrap();
         assert_eq!(pos.track_number, 2);
         assert_eq!(pos.index_number, 1);
@@ -2442,7 +2441,7 @@ mod tests {
         let ccd_path = tmp.path().join("disc.ccd");
         let mut image = vec![0u8; psx_iso::SECTOR_BYTES * 14];
         image[7 * psx_iso::SECTOR_BYTES] = 0x77;
-        image[10 * psx_iso::SECTOR_BYTES] = 0xAB;
+        image[10 * psx_iso::SECTOR_BYTES] = 0xab;
         std::fs::write(tmp.path().join("disc.img"), image).unwrap();
         std::fs::write(
             &ccd_path,
@@ -2468,8 +2467,8 @@ mod tests {
         assert_eq!(pos.relative_msf, (0, 0, 1));
         let pos = disc.track_position_for_lba(6).unwrap();
         assert_eq!((pos.track_number, pos.index_number), (1, 1));
-        assert_eq!(disc.read_sector_raw(10).unwrap()[0], 0xAB);
-        assert_eq!(disc.read_cdda_sector(10).unwrap()[0], 0xAB);
+        assert_eq!(disc.read_sector_raw(10).unwrap()[0], 0xab);
+        assert_eq!(disc.read_cdda_sector(10).unwrap()[0], 0xab);
     }
 
     #[test]
@@ -2488,20 +2487,20 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let ccd_path = tmp.path().join("disc.ccd");
         let mut image = vec![0u8; psx_iso::SECTOR_BYTES * 2];
-        image[0] = 0xCD;
+        image[0] = 0xcd;
         // A literal-only ECM stream: header, one type-0 record, end
         // marker, checksum of the decoded bytes.
         let mut ecm = b"ECM\0".to_vec();
         let mut n = image.len() as u32 - 1;
-        ecm.push(((n & 0x1F) as u8) << 2);
+        ecm.push(((n & 0x1f) as u8) << 2);
         n >>= 5;
         while n != 0 {
             *ecm.last_mut().unwrap() |= 0x80;
-            ecm.push((n & 0x7F) as u8);
+            ecm.push((n & 0x7f) as u8);
             n >>= 7;
         }
         ecm.extend_from_slice(&image);
-        ecm.extend_from_slice(&[0xFC, 0xFF, 0xFF, 0xFF, 0x3F]);
+        ecm.extend_from_slice(&[0xfc, 0xff, 0xff, 0xff, 0x3f]);
         ecm.extend_from_slice(&crate::ecm::edc_update(0, &image).to_le_bytes());
         std::fs::write(tmp.path().join("disc.img.ecm"), ecm).unwrap();
         std::fs::write(
@@ -2511,7 +2510,7 @@ mod tests {
         .unwrap();
 
         let disc = load_disc_from_ccd(&ccd_path).unwrap();
-        assert_eq!(disc.read_sector_raw(0).unwrap()[0], 0xCD);
+        assert_eq!(disc.read_sector_raw(0).unwrap()[0], 0xcd);
         assert!(!tmp.path().join("disc.img").exists());
     }
 

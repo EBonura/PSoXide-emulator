@@ -38,11 +38,9 @@ use psx_hw::memory;
 // `Gpu` is only constructed for the editor 3D preview dump.
 #[cfg(feature = "editor")]
 use emulator_core::Gpu;
-use psoxide_settings::{
-    library::{GameKind, LibraryEntry},
-    savestate::SaveStateV1,
-    ConfigPaths, Library, Settings,
-};
+use psoxide_settings::library::{GameKind, LibraryEntry};
+use psoxide_settings::savestate::SaveStateV1;
+use psoxide_settings::{ConfigPaths, Library, Settings};
 use psoxide_validation::{
     format_hash, ActualHashes, PixelHash, ValidationArtifact, ValidationRunner, ValidationSuite,
 };
@@ -1569,7 +1567,7 @@ fn run_headless_launch(
         // would feed the burst a stale sample and desynchronise the route.
         // Consecutive polls are a whole simulation tick apart, so this coarse
         // stride is exact and stays off the per-instruction path.
-        if tape_poll_bound && i & 0x3F == 0 {
+        if tape_poll_bound && i & 0x3f == 0 {
             if let Some(samples) = tape_samples.as_ref() {
                 let polls = bus.port1_completed_polls();
                 if polls >= tape_start_poll {
@@ -1596,7 +1594,7 @@ fn run_headless_launch(
         } else {
             let mut n = (args.steps - i).min(ROUTE_RUN_STEPS_PER_FRAME - route_tick_steps);
             if tape_poll_bound {
-                n = n.min(64 - (i & 0x3F));
+                n = n.min(64 - (i & 0x3f));
             }
             n.max(1)
         };
@@ -1989,13 +1987,13 @@ fn run_headless_launch(
                             gpu_run_draw_words = gpu_run_draw_words.saturating_add(1);
                         }
                     }
-                    if matches!(command.opcode, 0x20..=0x7F) {
+                    if matches!(command.opcode, 0x20..=0x7f) {
                         draws += 1;
                     }
                     match command.opcode {
                         0x02 => fills += 1,
                         0x24..=0x27 | 0x34..=0x37 => textured_tris += 1,
-                        0x2C..=0x2F | 0x3C..=0x3F => {
+                        0x2c..=0x2f | 0x3c..=0x3f => {
                             textured_quads += 1;
                             if command.fifo.len() >= 9
                                 && command.fifo[1] == 0
@@ -2006,10 +2004,10 @@ fn run_headless_launch(
                                 sky_quads += 1;
                             }
                         }
-                        0x64..=0x7F => textured_rects += 1,
-                        0xE2 => {
+                        0x64..=0x7f => textured_rects += 1,
+                        0xe2 => {
                             texture_windows += 1;
-                            let value = command.fifo[0] & 0x000F_FFFF;
+                            let value = command.fifo[0] & 0x000f_ffff;
                             texture_window_zero += u64::from(value == 0);
                             if gpu_prev_texture_window == Some(value) {
                                 texture_window_redundant += 1;
@@ -2034,8 +2032,8 @@ fn run_headless_launch(
                 let dma_gpu_cycles: u64 = dma_timing_delta.iter().sum();
                 let fill_cycles = timing_delta[0x02];
                 let textured_tri_cycles = sum_cycles(&[(0x24, 0x27), (0x34, 0x37)]);
-                let textured_quad_cycles = sum_cycles(&[(0x2C, 0x2F), (0x3C, 0x3F)]);
-                let textured_rect_cycles = sum_cycles(&[(0x64, 0x7F)]);
+                let textured_quad_cycles = sum_cycles(&[(0x2c, 0x2f), (0x3c, 0x3f)]);
+                let textured_rect_cycles = sum_cycles(&[(0x64, 0x7f)]);
                 let classified_cycles = fill_cycles
                     .saturating_add(textured_tri_cycles)
                     .saturating_add(textured_quad_cycles)
@@ -2481,7 +2479,7 @@ fn run_headless_launch(
                 for entry in bus.gpu.cmd_log.iter() {
                     // Everything, so frame boundaries (fills, draw-area sets)
                     // are visible to the analysis.
-                    if matches!(entry.opcode, 0xA0..=0xBF) {
+                    if matches!(entry.opcode, 0xa0..=0xbf) {
                         continue;
                     }
                     let words: Vec<String> =
@@ -2500,9 +2498,9 @@ fn run_headless_launch(
             let (mut draws, mut fills, mut uploads) = (0u64, 0u64, 0u64);
             for e in bus.gpu.cmd_log.iter() {
                 match e.opcode {
-                    0x20..=0x7F => draws += 1,
+                    0x20..=0x7f => draws += 1,
                     0x02 => fills += 1,
-                    0xA0..=0xBF => uploads += 1,
+                    0xa0..=0xbf => uploads += 1,
                     _ => {}
                 }
             }
@@ -2531,8 +2529,8 @@ fn run_headless_launch(
                 .gpu
                 .gp1_write_history()
                 .iter()
-                .filter(|w| (**w >> 24) & 0x3F == 0x05)
-                .map(|w| format!("({},{})", w & 0x3FF, (w >> 10) & 0x1FF))
+                .filter(|w| (**w >> 24) & 0x3f == 0x05)
+                .map(|w| format!("({},{})", w & 0x3ff, (w >> 10) & 0x1ff))
                 .collect();
             let tail: Vec<&String> = starts.iter().rev().take(24).collect();
             eprintln!(
@@ -4454,7 +4452,7 @@ fn canonical_stack_address(address: u32) -> Option<u32> {
     if let Some(ram) = canonical_ram_address(address) {
         return Some(ram);
     }
-    if (0xA000_0000..0xC000_0000).contains(&address) {
+    if (0xa000_0000..0xc000_0000).contains(&address) {
         return None;
     }
     let physical = memory::to_physical(address);
@@ -4601,9 +4599,9 @@ fn write_vram_words_ppm(path: &std::path::Path, words: &[u16]) -> Result<(), Str
     writeln!(f, "P6\n{w} {h}\n255").map_err(|e| e.to_string())?;
     let mut rgb = Vec::with_capacity(w * h * 3);
     for &pix in words {
-        let r5 = (pix & 0x1F) as u8;
-        let g5 = ((pix >> 5) & 0x1F) as u8;
-        let b5 = ((pix >> 10) & 0x1F) as u8;
+        let r5 = (pix & 0x1f) as u8;
+        let g5 = ((pix >> 5) & 0x1f) as u8;
+        let b5 = ((pix >> 10) & 0x1f) as u8;
         rgb.push((r5 << 3) | (r5 >> 2));
         rgb.push((g5 << 3) | (g5 >> 2));
         rgb.push((b5 << 3) | (b5 >> 2));

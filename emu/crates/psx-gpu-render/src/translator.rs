@@ -579,7 +579,7 @@ impl Translator {
         flags |= fbits::pack_clut(clut.0, clut.1);
         if is_raw_texture(cmd) {
             flags |= fbits::RAW_TEXTURE;
-        } else if !(flat_tint && cmd & 0x00FF_FFFF == IDENTITY_TINT) {
+        } else if !(flat_tint && cmd & 0x00ff_ffff == IDENTITY_TINT) {
             // Flat-tint prims: the CPU gates on
             // `tint != RAW_TEXTURE_TINT`, and that sentinel is literally
             // (0x80, 0x80, 0x80) -- so an identity-tinted non-raw prim
@@ -601,10 +601,10 @@ impl Translator {
 
     fn tex_window_word(&self) -> u32 {
         let tp = &self.interp.state.tpage;
-        (tp.tex_window_mask_x & 0xFF)
-            | ((tp.tex_window_mask_y & 0xFF) << 8)
-            | ((tp.tex_window_off_x & 0xFF) << 16)
-            | ((tp.tex_window_off_y & 0xFF) << 24)
+        (tp.tex_window_mask_x & 0xff)
+            | ((tp.tex_window_mask_y & 0xff) << 8)
+            | ((tp.tex_window_off_x & 0xff) << 16)
+            | ((tp.tex_window_off_y & 0xff) << 24)
     }
 
     fn push_tex_tri_psx(
@@ -1030,7 +1030,7 @@ impl Translator {
         let mut dy = 0;
         while dy < h {
             let src_y = if flip_y { v0 - dy } else { v0 + dy };
-            let y_phase = src_y & 0xFF;
+            let y_phase = src_y & 0xff;
             let chunk_h = (h - dy).min(if flip_y { y_phase + 1 } else { 256 - y_phase });
             let (uv_top_v, uv_bottom_v) = if flip_y {
                 ((y_phase + 1) as u16, (y_phase + 1 - chunk_h) as u16)
@@ -1041,7 +1041,7 @@ impl Translator {
             let mut dx = 0;
             while dx < w {
                 let src_x = if flip_x { u0 + 1 - dx } else { u0 + dx };
-                let x_phase = src_x & 0xFF;
+                let x_phase = src_x & 0xff;
                 let chunk_w = (w - dx).min(if flip_x { x_phase + 1 } else { 256 - x_phase });
                 let (uv_left_u, uv_right_u) = if flip_x {
                     ((x_phase + 1) as u16, (x_phase + 1 - chunk_w) as u16)
@@ -1194,9 +1194,9 @@ impl Default for Translator {
 /// RGB. Phase 7 may add a knob to clamp to PSX 5-bit precision for
 /// strict-look games.
 fn mono_color_rgba8(cmd: u32) -> [u8; 4] {
-    let (r, g, b) = decode_tint(cmd & 0x00FF_FFFF);
+    let (r, g, b) = decode_tint(cmd & 0x00ff_ffff);
     let _ = rgb24_to_bgr15; // imported for future BGR15 round-trip
-    [r, g, b, 0xFF]
+    [r, g, b, 0xff]
 }
 
 /// Tint colour for a textured primitive. Same layout as the mono
@@ -1207,8 +1207,8 @@ fn mono_color_rgba8(cmd: u32) -> [u8; 4] {
 /// based on the `RAW_TEXTURE` flag bit. Keeps the vertex format
 /// uniform across raw / non-raw primitives.
 fn tex_tint(cmd: u32) -> [u8; 4] {
-    let (r, g, b) = decode_tint(cmd & 0x00FF_FFFF);
-    [r, g, b, 0xFF]
+    let (r, g, b) = decode_tint(cmd & 0x00ff_ffff);
+    [r, g, b, 0xff]
 }
 
 fn uv16(uv: (u8, u8)) -> (u16, u16) {
@@ -1237,9 +1237,9 @@ mod tests {
         // Only the second half (v0,v1,v2) fits. Rejecting the complete quad
         // would incorrectly lose these three valid vertices.
         let log = [entry(
-            0x2C,
+            0x2c,
             vec![
-                0x2C80_8080,
+                0x2c80_8080,
                 xy(0, 0),
                 0,
                 xy(32, 0),
@@ -1260,7 +1260,7 @@ mod tests {
 
     #[test]
     fn flat_and_gouraud_textured_polygons_reject_oversized_halves() {
-        for opcode in (0x24u8..=0x3F).filter(|opcode| opcode & 4 != 0) {
+        for opcode in (0x24u8..=0x3f).filter(|opcode| opcode & 4 != 0) {
             let vertices = [(0, 0), (32, 0), (0, 512), (32, 600)];
             let count = if opcode & 8 != 0 { 4 } else { 3 };
             let mut words = vec![(u32::from(opcode) << 24) | 0x808080];
@@ -1287,7 +1287,7 @@ mod tests {
     /// GP0(E1) with dither on, then one primitive. Returns the flag
     /// word every emitted vertex carries.
     fn dithered_prim_flags(opcode: u8, fifo: Vec<u32>) -> u32 {
-        let log = [entry(0xE1, vec![0xE100_0200]), entry(opcode, fifo)];
+        let log = [entry(0xe1, vec![0xe100_0200]), entry(opcode, fifo)];
         let mut translator = Translator::new();
         let frame = translator.translate(&log);
         assert!(frame.total() > 0, "primitive emitted nothing");
@@ -1329,9 +1329,9 @@ mod tests {
                 vec![
                     0x3040_8040,
                     xy(10, 10),
-                    0x00C0_40C0,
+                    0x00c0_40c0,
                     xy(20, 10),
-                    0x0080_C080,
+                    0x0080_c080,
                     xy(10, 20)
                 ]
             ) & fbits::DITHER,
@@ -1393,15 +1393,15 @@ mod tests {
     #[test]
     fn no_dither_flag_when_e1_bit_9_is_clear() {
         let log = [
-            entry(0xE1, vec![0xE100_0000]),
+            entry(0xe1, vec![0xe100_0000]),
             entry(
                 0x30,
                 vec![
                     0x3040_8040,
                     xy(10, 10),
-                    0x00C0_40C0,
+                    0x00c0_40c0,
                     xy(20, 10),
-                    0x0080_C080,
+                    0x0080_c080,
                     xy(10, 20),
                 ],
             ),
@@ -1436,11 +1436,11 @@ mod tests {
             entry(
                 0x30,
                 vec![
-                    0x3000_00FF,
+                    0x3000_00ff,
                     xy(10, 10),
-                    0x0000_FF00,
+                    0x0000_ff00,
                     xy(20, 10),
-                    0x00FF_0000,
+                    0x00ff_0000,
                     xy(10, 20),
                 ],
             ),
@@ -1459,10 +1459,10 @@ mod tests {
             }
         }
         let exact = [
-            entry(0x60, vec![0x6000_00FF, xy(10, 10), 0x0004_0004]),
+            entry(0x60, vec![0x6000_00ff, xy(10, 10), 0x0004_0004]),
             entry(0x65, vec![0x6580_8080, xy(10, 20), uv(0, 0, 0), xy(4, 4)]),
-            entry(0x02, vec![0x0200_00FF, xy(0, 0), 0x0004_0004]),
-            entry(0x40, vec![0x4000_00FF, xy(10, 10), xy(30, 40)]),
+            entry(0x02, vec![0x0200_00ff, xy(0, 0), 0x0004_0004]),
+            entry(0x40, vec![0x4000_00ff, xy(10, 10), xy(30, 40)]),
         ];
         for log in exact {
             let mut translator = Translator::new();
@@ -1513,9 +1513,9 @@ mod tests {
     #[test]
     fn textured_quad_uses_cpu_split_order() {
         let log = [entry(
-            0x2C,
+            0x2c,
             vec![
-                0x2C80_8080,
+                0x2c80_8080,
                 xy(10, 10),
                 uv(1, 2, 0),
                 xy(20, 10),
@@ -1548,7 +1548,7 @@ mod tests {
     #[test]
     fn textured_tri_carries_active_texture_window_to_vertices() {
         let log = [
-            entry(0xE2, vec![0xE204_2318]),
+            entry(0xe2, vec![0xe204_2318]),
             entry(
                 0x24,
                 vec![
@@ -1567,7 +1567,7 @@ mod tests {
 
         assert_eq!(frame.total(), 3);
         for v in frame.vertices {
-            assert_eq!(v.tex_window, 0x4040_C0C0);
+            assert_eq!(v.tex_window, 0x4040_c0c0);
         }
     }
 
@@ -1610,7 +1610,7 @@ mod tests {
     #[test]
     fn textured_rect_honors_draw_mode_x_flip() {
         let log = [
-            entry(0xE1, vec![0xE100_1000]),
+            entry(0xe1, vec![0xe100_1000]),
             entry(0x65, vec![0x6580_8080, xy(10, 20), uv(0, 0, 0), xy(20, 1)]),
         ];
         let mut translator = Translator::new();
@@ -1643,8 +1643,8 @@ mod tests {
     #[test]
     fn draw_mode_preserves_active_texture_window() {
         let log = [
-            entry(0xE2, vec![0xE204_2318]),
-            entry(0xE1, vec![0xE100_0020]),
+            entry(0xe2, vec![0xe204_2318]),
+            entry(0xe1, vec![0xe100_0020]),
             entry(
                 0x24,
                 vec![
@@ -1663,7 +1663,7 @@ mod tests {
 
         assert_eq!(frame.total(), 3);
         for v in frame.vertices {
-            assert_eq!(v.tex_window, 0x4040_C0C0);
+            assert_eq!(v.tex_window, 0x4040_c0c0);
         }
     }
 
@@ -1709,7 +1709,7 @@ mod tests {
     fn wireframe_mono_tri_emits_edge_strips() {
         let log = [entry(
             0x20,
-            vec![0x20FF_FFFF, xy(10, 10), xy(20, 10), xy(10, 20)],
+            vec![0x20ff_ffff, xy(10, 10), xy(20, 10), xy(10, 20)],
         )];
         let mut translator = Translator::new();
         let frame = translator.translate_with_wireframe(&log, true);
@@ -1754,7 +1754,7 @@ mod tests {
 
     #[test]
     fn wireframe_leaves_rectangles_filled() {
-        let log = [entry(0x60, vec![0x60FF_FFFF, xy(10, 10), xy(16, 16)])];
+        let log = [entry(0x60, vec![0x60ff_ffff, xy(10, 10), xy(16, 16)])];
         let mut translator = Translator::new();
         let frame = translator.translate_with_wireframe(&log, true);
 
@@ -1769,7 +1769,7 @@ mod tests {
         // Horizontal line (10,20)->(30,20): x-major, the max-x end
         // extends by 1 so pixel-center sampling covers column 30
         // (the CPU walk plots x0..=x1 inclusive).
-        let log = [entry(0x40, vec![0x40FF_FFFF, xy(10, 20), xy(30, 20)])];
+        let log = [entry(0x40, vec![0x40ff_ffff, xy(10, 20), xy(30, 20)])];
         let mut translator = Translator::new();
         let frame = translator.translate(&log);
 
@@ -1782,7 +1782,7 @@ mod tests {
             vec![[10, 20], [31, 20], [10, 21], [31, 20], [31, 21], [10, 21],]
         );
         for v in frame.vertices {
-            assert_eq!(v.color, [0xFF, 0xFF, 0xFF, 0xFF]);
+            assert_eq!(v.color, [0xff, 0xff, 0xff, 0xff]);
             assert_eq!(v.flags, 0);
         }
     }
@@ -1791,7 +1791,7 @@ mod tests {
     fn mono_line_reversed_extends_the_max_end_not_the_start() {
         // Same segment drawn right-to-left: the +1 lands on the
         // max-x endpoint (the START here), producing the same band.
-        let log = [entry(0x40, vec![0x40FF_FFFF, xy(30, 20), xy(10, 20)])];
+        let log = [entry(0x40, vec![0x40ff_ffff, xy(30, 20), xy(10, 20)])];
         let mut translator = Translator::new();
         let frame = translator.translate(&log);
 
@@ -1804,7 +1804,7 @@ mod tests {
 
     #[test]
     fn vertical_line_band_is_one_pixel_wide() {
-        let log = [entry(0x40, vec![0x40FF_FFFF, xy(5, 10), xy(5, 20)])];
+        let log = [entry(0x40, vec![0x40ff_ffff, xy(5, 10), xy(5, 20)])];
         let mut translator = Translator::new();
         let frame = translator.translate(&log);
 
@@ -1817,7 +1817,7 @@ mod tests {
 
     #[test]
     fn zero_length_mono_line_plots_one_pixel() {
-        let log = [entry(0x40, vec![0x40FF_FFFF, xy(10, 10), xy(10, 10)])];
+        let log = [entry(0x40, vec![0x40ff_ffff, xy(10, 10), xy(10, 10)])];
         let mut translator = Translator::new();
         let frame = translator.translate(&log);
 
@@ -1834,7 +1834,7 @@ mod tests {
         // CPU shaded walker plots one pixel then breaks.
         let log = [entry(
             0x50,
-            vec![0x5000_00FF, xy(10, 10), 0x0000_FF00, xy(10, 10)],
+            vec![0x5000_00ff, xy(10, 10), 0x0000_ff00, xy(10, 10)],
         )];
         let mut translator = Translator::new();
         let frame = translator.translate(&log);
@@ -1846,7 +1846,7 @@ mod tests {
             vec![[10, 10], [11, 10], [10, 11], [11, 10], [11, 11], [10, 11]]
         );
         for v in frame.vertices {
-            assert_eq!(v.color, [0xFF, 0x00, 0x00, 0xFF]);
+            assert_eq!(v.color, [0xff, 0x00, 0x00, 0xff]);
         }
     }
 
@@ -1854,7 +1854,7 @@ mod tests {
     fn shaded_line_carries_endpoint_colors() {
         let log = [entry(
             0x50,
-            vec![0x5000_00FF, xy(0, 0), 0x0000_FF00, xy(0, 10)],
+            vec![0x5000_00ff, xy(0, 0), 0x0000_ff00, xy(0, 10)],
         )];
         let mut translator = Translator::new();
         let frame = translator.translate(&log);
@@ -1866,12 +1866,12 @@ mod tests {
         assert_eq!(
             cv,
             vec![
-                ([0, 0], [0xFF, 0x00, 0x00, 0xFF]),
-                ([0, 11], [0x00, 0xFF, 0x00, 0xFF]),
-                ([1, 0], [0xFF, 0x00, 0x00, 0xFF]),
-                ([0, 11], [0x00, 0xFF, 0x00, 0xFF]),
-                ([1, 11], [0x00, 0xFF, 0x00, 0xFF]),
-                ([1, 0], [0xFF, 0x00, 0x00, 0xFF]),
+                ([0, 0], [0xff, 0x00, 0x00, 0xff]),
+                ([0, 11], [0x00, 0xff, 0x00, 0xff]),
+                ([1, 0], [0xff, 0x00, 0x00, 0xff]),
+                ([0, 11], [0x00, 0xff, 0x00, 0xff]),
+                ([1, 11], [0x00, 0xff, 0x00, 0xff]),
+                ([1, 0], [0xff, 0x00, 0x00, 0xff]),
             ]
         );
     }
@@ -1880,8 +1880,8 @@ mod tests {
     fn semi_trans_line_routes_through_tpage_blend_kind() {
         // E1 selects Add (bits 5-6 = 1); cmd bit 25 arms semi-trans.
         let log = [
-            entry(0xE1, vec![0xE100_0020]),
-            entry(0x42, vec![0x42FF_FFFF, xy(0, 0), xy(10, 0)]),
+            entry(0xe1, vec![0xe100_0020]),
+            entry(0x42, vec![0x42ff_ffff, xy(0, 0), xy(10, 0)]),
         ];
         let mut translator = Translator::new();
         let frame = translator.translate(&log);
@@ -1895,7 +1895,7 @@ mod tests {
         let log = [entry(
             0x48,
             vec![
-                0x48FF_FFFF,
+                0x48ff_ffff,
                 xy(0, 0),
                 xy(10, 0),
                 xy(10, 10), // continuation vertex from the cmd_log capture

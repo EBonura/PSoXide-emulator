@@ -29,9 +29,8 @@
 //!   runtime state, say).
 //! - Serde-native: no build-script or schema duplication.
 
-use std::fs;
-use std::io;
 use std::path::Path;
+use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -469,7 +468,7 @@ mod tests {
         let path = tmp.path().join("slot0.psx");
         let state = SaveStateV1::new(
             FakePayload {
-                cpu_pc: 0xAABB_CCDD,
+                cpu_pc: 0xaabb_ccdd,
                 ram_hash: 0,
             },
             "my_game_id",

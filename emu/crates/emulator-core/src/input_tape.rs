@@ -477,7 +477,7 @@ mod tests {
 
     #[test]
     fn from_buttons_centers_sticks() {
-        let s = PadSample::from_buttons(0x00FF);
+        let s = PadSample::from_buttons(0x00ff);
         assert_eq!(
             (s.right_x, s.right_y, s.left_x, s.left_y),
             (0x80, 0x80, 0x80, 0x80)

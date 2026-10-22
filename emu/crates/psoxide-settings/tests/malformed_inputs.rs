@@ -19,7 +19,7 @@ impl Rng {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
-        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
     }
     fn below(&mut self, n: usize) -> usize {
         (self.next() % n as u64) as usize
@@ -113,7 +113,7 @@ fn random_bin(rng: &mut Rng) -> Vec<u8> {
     };
     let mut bytes = vec![0u8; sectors * SECTOR + extra];
     if bytes.len() >= 16 && rng.below(2) == 0 {
-        bytes[1..11].fill(0xFF);
+        bytes[1..11].fill(0xff);
         bytes[12] = rng.next() as u8;
         bytes[13] = rng.next() as u8;
         bytes[14] = rng.next() as u8;
@@ -237,12 +237,12 @@ fn ecm_containers_never_panic() {
                 stream.push(header | 0x80);
                 header = rng.next() as u8;
             }
-            stream.push(header & 0x7F);
+            stream.push(header & 0x7f);
             let len = rng.below(3000);
             stream.extend(rng.bytes(len));
         }
         if rng.below(3) == 0 {
-            stream.extend([0xFC, 0xFF, 0xFF, 0xFF, 0x3F]);
+            stream.extend([0xfc, 0xff, 0xff, 0xff, 0x3f]);
             let len = rng.below(6);
             stream.extend(rng.bytes(len));
         }

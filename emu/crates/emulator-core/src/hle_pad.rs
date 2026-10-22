@@ -23,27 +23,27 @@ use crate::Bus;
 /// Kernel variables of the pad driver.
 pub mod kvar {
     /// InitPAD2 buffers for port 1 and 2 (2 words).
-    pub const BUF: u32 = 0x0B80;
+    pub const BUF: u32 = 0x0b80;
     /// InitPAD2 buffer sizes (2 words).
-    pub const SIZE: u32 = 0x0B88;
+    pub const SIZE: u32 = 0x0b88;
     /// PAD_init2's button_dest (0 = PAD_dr is not called by the handler).
-    pub const USER_BUTTONS: u32 = 0x0B90;
+    pub const USER_BUTTONS: u32 = 0x0b90;
     /// Reader phase ([`super::phase`]).
-    pub const PHASE: u32 = 0x0B94;
+    pub const PHASE: u32 = 0x0b94;
     /// Port being read (0 or 1).
-    pub const PORT: u32 = 0x0B98;
+    pub const PORT: u32 = 0x0b98;
     /// Byte index within the current port's transfer.
-    pub const STEP: u32 = 0x0B9C;
+    pub const STEP: u32 = 0x0b9c;
     /// Bytes still to exchange after the current one.
-    pub const LEFT: u32 = 0x0BA0;
+    pub const LEFT: u32 = 0x0ba0;
     /// Cycle count the current wait ends at.
-    pub const DEADLINE: u32 = 0x0BA4;
+    pub const DEADLINE: u32 = 0x0ba4;
 }
 
 /// PAD_init2's own buffers (psx-spx: "hidden" in the kernel variables).
-pub const INTERNAL_BUF1: u32 = 0x0BB0;
+pub const INTERNAL_BUF1: u32 = 0x0bb0;
 /// Second PAD_init2 buffer.
-pub const INTERNAL_BUF2: u32 = 0x0BD4;
+pub const INTERNAL_BUF2: u32 = 0x0bd4;
 /// Bytes the handler stores per port (psx-spx: up to 22h).
 pub const BUF_LEN: u32 = 0x22;
 
@@ -58,13 +58,13 @@ pub mod internal {
     pub const HANDLER: u8 = 0x31;
 }
 
-const I_STAT: u32 = 0x1F80_1070;
-const I_MASK: u32 = 0x1F80_1074;
-const SIO_DATA: u32 = 0x1F80_1040;
-const SIO_STAT: u32 = 0x1F80_1044;
-const SIO_MODE: u32 = 0x1F80_1048;
-const SIO_CTRL: u32 = 0x1F80_104A;
-const SIO_BAUD: u32 = 0x1F80_104E;
+const I_STAT: u32 = 0x1f80_1070;
+const I_MASK: u32 = 0x1f80_1074;
+const SIO_DATA: u32 = 0x1f80_1040;
+const SIO_STAT: u32 = 0x1f80_1044;
+const SIO_MODE: u32 = 0x1f80_1048;
+const SIO_CTRL: u32 = 0x1f80_104a;
+const SIO_BAUD: u32 = 0x1f80_104e;
 
 const IRQ_VBLANK: u32 = 1 << 0;
 const IRQ_SIO0: u32 = 1 << 7;
@@ -82,7 +82,7 @@ const CTRL_PORT2: u16 = 1 << 13;
 /// (psx-spx "Serial Interfaces").
 const BAUD: u16 = 0x88;
 /// MUL1, 8-bit characters, no parity, clock high when idle.
-const MODE: u16 = 0x000D;
+const MODE: u16 = 0x000d;
 
 /// Cycles one byte takes on the wire: eight bits of 88h cycles.
 const BYTE_CYCLES: u32 = 8 * BAUD as u32;
@@ -203,7 +203,7 @@ pub fn pad_init2(bus: &mut Bus, ty: u32, button_dest: u32, a2: u32, a3: u32, sp:
     }
     for buf in [INTERNAL_BUF1, INTERNAL_BUF2] {
         for k in 0..BUF_LEN {
-            bus.write8_safe(buf + k, 0xFF);
+            bus.write8_safe(buf + k, 0xff);
         }
     }
     init_pad(bus, INTERNAL_BUF1, BUF_LEN, INTERNAL_BUF2, BUF_LEN);
@@ -221,15 +221,15 @@ pub fn pad_init2(bus: &mut Bus, ty: u32, button_dest: u32, a2: u32, a3: u32, sp:
 /// bits they sit beside (bit 6 and bit 7 of the swapped halfword). Any
 /// other device, or none, reads FFFFh.
 fn pad_dr_half(bus: &Bus, buf: u32) -> u32 {
-    let byte = |k: u32| u32::from(bus.try_read8(buf.wrapping_add(k)).unwrap_or(0xFF));
+    let byte = |k: u32| u32::from(bus.try_read8(buf.wrapping_add(k)).unwrap_or(0xff));
     if byte(0) != 0 {
-        return 0xFFFF;
+        return 0xffff;
     }
     let buttons = (byte(2) << 8) | byte(3);
     match byte(1) {
         0x41 => buttons,
         0x23 => {
-            let mut v = buttons | 0x07C7;
+            let mut v = buttons | 0x07c7;
             if byte(5) > 0x10 {
                 v &= !0x40;
             }
@@ -238,7 +238,7 @@ fn pad_dr_half(bus: &Bus, buf: u32) -> u32 {
             }
             v
         }
-        _ => 0xFFFF,
+        _ => 0xffff,
     }
 }
 
@@ -345,7 +345,7 @@ fn next_port(bus: &mut Bus) -> bool {
 fn fail(bus: &mut Bus, port: u32) -> bool {
     let buf = buffer(bus, port);
     if buf != 0 {
-        bus.write8_safe(buf, 0xFF);
+        bus.write8_safe(buf, 0xff);
     }
     if !crate::hle_patch::pad_error_reselect(bus) {
         return false;
@@ -365,14 +365,14 @@ fn receive(bus: &mut Bus, port: u32, step: u32, rx: u8) -> bool {
         // ID: its low nibble counts the halfwords after the 5Ah byte.
         1 => {
             bus.write8_safe(buf + 1, rx);
-            let halfwords = match u32::from(rx & 0x0F) {
+            let halfwords = match u32::from(rx & 0x0f) {
                 0 => 16,
                 n => n,
             };
             poke32(bus, kvar::LEFT, 1 + 2 * halfwords);
             true
         }
-        2 => rx == 0x5A,
+        2 => rx == 0x5a,
         n => {
             let at = 2 + (n - 3);
             if at < BUF_LEN {
@@ -490,7 +490,7 @@ mod tests {
             for (i, v) in args.iter().enumerate() {
                 a.li(A0 + i as u32, *v);
             }
-            a.addiu(T2, ZERO, 0xB0);
+            a.addiu(T2, ZERO, 0xb0);
             a.jalr(T2);
             a.addiu(T1, ZERO, *func as i16);
         }
@@ -516,7 +516,7 @@ mod tests {
         for (i, w) in words.iter().enumerate() {
             bus.write32(PROGRAM + 4 * i as u32, *w);
         }
-        cpu.gprs_mut_for_test()[29] = 0x801F_FF00;
+        cpu.gprs_mut_for_test()[29] = 0x801f_ff00;
         cpu.set_pc_for_test(PROGRAM);
         let target = bus.irq().raise_counts()[0] + vblanks;
         for _ in 0..200_000_000u32 {
@@ -538,12 +538,12 @@ mod tests {
     /// loop for a card event that only an interrupt can deliver.
     #[test]
     fn pad_and_card_start_stop_leave_the_critical_section() {
-        for (func, want) in [(0x13i16, 1), (0x14, 1), (0x4B, 1), (0x4C, 1), (0x15, 2)] {
+        for (func, want) in [(0x13i16, 1), (0x14, 1), (0x4b, 1), (0x4c, 1), (0x15, 2)] {
             let mut bus = bus_with_pad(0);
             let mut a = Asm::new(PROGRAM);
             a.li(A0, 0x2000_0000);
             a.li(A1, 0);
-            a.addiu(T2, ZERO, 0xB0);
+            a.addiu(T2, ZERO, 0xb0);
             a.jalr(T2);
             a.addiu(T1, ZERO, func);
             a.label("end");
@@ -555,7 +555,7 @@ mod tests {
             }
             let end = PROGRAM + 4 * (words.len() as u32 - 2);
             let mut cpu = Cpu::new();
-            cpu.gprs_mut_for_test()[29] = 0x801F_FF00;
+            cpu.gprs_mut_for_test()[29] = 0x801f_ff00;
             cpu.set_pc_for_test(PROGRAM);
             assert_eq!(cpu.cop0()[12] & 0x401, 0);
             for _ in 0..10_000 {
@@ -575,16 +575,16 @@ mod tests {
         let (buf1, buf2) = (0x8002_0000, 0x8002_0040);
         let mut bus = bus_with_pad(button::START | button::CROSS);
         for k in 0..0x22 {
-            bus.write8_safe(buf1 + k, 0xAA);
-            bus.write8_safe(buf2 + k, 0xAA);
+            bus.write8_safe(buf1 + k, 0xaa);
+            bus.write8_safe(buf2 + k, 0xaa);
         }
         let words = program(&[(0x12, [buf1, 0x22, buf2, 0x22]), (0x13, [0; 4])]);
         run_for_vblanks(&mut bus, &words, 3);
         // Status 00h, ID 41h, then the buttons active low (psx-spx:
         // Start is bit 3 of the first byte, Cross bit 6 of the second).
-        assert_eq!(bytes(&bus, buf1, 4), vec![0x00, 0x41, 0xF7, 0xBF]);
+        assert_eq!(bytes(&bus, buf1, 4), vec![0x00, 0x41, 0xf7, 0xbf]);
         // No device on port 2: status FFh, the rest as InitPAD2 left it.
-        assert_eq!(bytes(&bus, buf2, 4), vec![0xFF, 0x00, 0x00, 0x00]);
+        assert_eq!(bytes(&bus, buf2, 4), vec![0xff, 0x00, 0x00, 0x00]);
         assert_eq!(
             peek32(&bus, crate::hle_exceptions::kvar::RCNT_AUTOACK + 12),
             0,
@@ -625,14 +625,14 @@ mod tests {
         run_for_vblanks(&mut bus, &words, 3);
         // Pad 1: first button byte FFh in the upper half, second BFh
         // (Cross) in the lower; pad 2 absent: FFFFh.
-        assert_eq!(bus.read32(dest), 0xFFFF_FFBF);
+        assert_eq!(bus.read32(dest), 0xffff_ffbf);
     }
 
     #[test]
     fn pad_init2_writes_its_unused_arguments_to_the_callers_stack() {
         let mut bus = Bus::new_without_bios();
         bus.enable_hle_bios();
-        let sp = 0x801F_FE00;
+        let sp = 0x801f_fe00;
         assert_eq!(pad_init2(&mut bus, 0x2000_0000, 0, 0x11, 0x22, sp), 2);
         assert_eq!((bus.read32(sp + 8), bus.read32(sp + 12)), (0x11, 0x22));
         assert_eq!(bus.read32(sp + 4), 0, "button_dest is not written back");
@@ -655,8 +655,8 @@ mod tests {
             bus.write8_safe(INTERNAL_BUF2 + k as u32, *b);
         }
         // 1234h | 07C7h = 17F7h; analog I past 10h clears bit 6.
-        assert_eq!(pad_dr(&mut bus), 0xFFFF_17B7);
-        assert_eq!(bus.read32(0x8002_0000), 0xFFFF_17B7);
+        assert_eq!(pad_dr(&mut bus), 0xffff_17b7);
+        assert_eq!(bus.read32(0x8002_0000), 0xffff_17b7);
     }
 
     #[test]
@@ -664,7 +664,7 @@ mod tests {
         let mut bus = Bus::new_without_bios();
         bus.enable_hle_bios();
         let out = 0x8002_0200;
-        for (k, b) in [0x00, 0x40, 0xFF].iter().enumerate() {
+        for (k, b) in [0x00, 0x40, 0xff].iter().enumerate() {
             bus.write8_safe(out + k as u32, *b);
         }
         poke32(&mut bus, crate::hle_kernel::kvar::PAD_OUTPUT, out);
@@ -683,6 +683,6 @@ mod tests {
             crate::hle_kernel::PAD_CARD_ENTRY + crate::hle_patch::site::PAD_OUTPUT_CLIP,
             0,
         );
-        assert_eq!([tx_byte(&bus, 0, 4), tx_byte(&bus, 0, 5)], [0x40, 0xFF]);
+        assert_eq!([tx_byte(&bus, 0, 4), tx_byte(&bus, 0, 5)], [0x40, 0xff]);
     }
 }

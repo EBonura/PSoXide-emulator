@@ -184,7 +184,7 @@ fn main() {
                 && bi.jit_fetch_state() == bj.jit_fetch_state();
             if !same {
                 let word = {
-                    let off = (prev.0 & 0x1F_FFFF) as usize;
+                    let off = (prev.0 & 0x1f_ffff) as usize;
                     u32::from_le_bytes(bi.ram()[off..off + 4].try_into().unwrap())
                 };
                 outcome = format!(

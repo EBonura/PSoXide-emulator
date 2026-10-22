@@ -23,7 +23,7 @@ use super::*;
 
 /// `cache_control` bits whose change reconfigures the bus: 13..16 (the
 /// bus-grant, read-priority and no-wait-state group), bit 7 and bit 3.
-pub const CC_BUS_BITS: u32 = (0xF << 13) | (1 << 7) | (1 << 3);
+pub const CC_BUS_BITS: u32 = (0xf << 13) | (1 << 7) | (1 << 3);
 
 /// COP0 Status bit 16, isolate cache.
 const SR_ISC: u32 = 1 << 16;
@@ -191,7 +191,7 @@ impl Bus {
         } else {
             busy.trailing_zeros() as usize
         };
-        let word = read_ram_u32(&self.ram[..], self.dma.channels[ch].base & 0x001F_FFFC);
+        let word = read_ram_u32(&self.ram[..], self.dma.channels[ch].base & 0x001f_fffc);
         if self.cc_dma_hits <= WARN_PRINT_LIMIT {
             eprintln!("[cc-dma] injecting DMA{ch} word {word:#010x} as the next bus fetch");
         }

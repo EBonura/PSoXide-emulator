@@ -99,15 +99,15 @@ pub struct DecodedOp {
 /// the block stops before it and the interpreter reports the error.
 pub fn classify(word: u32) -> Option<OpClass> {
     let op = word >> 26;
-    let rs = (word >> 21) & 0x1F;
-    let rt = (word >> 16) & 0x1F;
+    let rs = (word >> 21) & 0x1f;
+    let rt = (word >> 16) & 0x1f;
     Some(match op {
-        0x00 => match word & 0x3F {
+        0x00 => match word & 0x3f {
             0x00 | 0x02 | 0x03 | 0x04 | 0x06 | 0x07 => OpClass::Alu,
             0x08 | 0x09 => OpClass::Branch,
-            0x0C | 0x0D => OpClass::Terminator,
-            0x10..=0x13 | 0x18..=0x1B | 0x20 | 0x22 => OpClass::Other,
-            0x21 | 0x23..=0x27 | 0x2A | 0x2B => OpClass::Alu,
+            0x0c | 0x0d => OpClass::Terminator,
+            0x10..=0x13 | 0x18..=0x1b | 0x20 | 0x22 => OpClass::Other,
+            0x21 | 0x23..=0x27 | 0x2a | 0x2b => OpClass::Alu,
             _ => return None,
         },
         0x01 => match rt {
@@ -116,15 +116,15 @@ pub fn classify(word: u32) -> Option<OpClass> {
         },
         0x02..=0x07 => OpClass::Branch,
         0x08 => OpClass::Other,
-        0x09..=0x0F => OpClass::Alu,
+        0x09..=0x0f => OpClass::Alu,
         0x10 if rs == 0 => OpClass::Other,
         0x10 => OpClass::Terminator,
-        0x12 if word & 0xFE00_0000 == 0x4A00_0000 => OpClass::GteCommand,
+        0x12 if word & 0xfe00_0000 == 0x4a00_0000 => OpClass::GteCommand,
         0x12 => OpClass::Other,
         0x11 | 0x13 => OpClass::Terminator,
         0x20..=0x26 | 0x32 => OpClass::Load,
-        0x28..=0x2B | 0x2E | 0x3A => OpClass::Store,
-        0x30 | 0x31 | 0x33 | 0x38 | 0x39 | 0x3B => OpClass::Terminator,
+        0x28..=0x2b | 0x2e | 0x3a => OpClass::Store,
+        0x30 | 0x31 | 0x33 | 0x38 | 0x39 | 0x3b => OpClass::Terminator,
         _ => return None,
     })
 }
@@ -400,7 +400,7 @@ impl Cpu {
     /// the cursor at its first op. `false` when no block can start there.
     #[inline(never)]
     pub(super) fn enter_block(&mut self, bus: &Bus, pc: u32) -> bool {
-        if pc & 3 != 0 || pc >= 0xA000_0000 {
+        if pc & 3 != 0 || pc >= 0xa000_0000 {
             return false;
         }
         let phys = memory::to_physical(pc);
@@ -607,8 +607,8 @@ impl Cpu {
                 block.ops[i - 1].flags |= op_flags::NEXT_GTE;
             }
         }
-        let first_line = base & !0xF;
-        let last_line = base.wrapping_add(4 * (block.ops.len() as u32 - 1)) & !0xF;
+        let first_line = base & !0xf;
+        let last_line = base.wrapping_add(4 * (block.ops.len() as u32 - 1)) & !0xf;
         let mut line = first_line;
         loop {
             block.lines[block.line_count as usize] =
@@ -659,7 +659,7 @@ impl Cpu {
                 }
                 return;
             }
-            if instr >> 26 == 0x2B {
+            if instr >> 26 == 0x2b {
                 bus.cpu_ram_store32(addr, self.gpr(op.rt));
                 return;
             }
@@ -674,9 +674,9 @@ impl Cpu {
             0x26 => self.op_lwr(instr, bus),
             0x28 => self.op_sb(instr, bus),
             0x29 => self.op_sh(instr, bus),
-            0x2A => self.op_swl(instr, bus),
-            0x2B => self.op_sw(instr, bus),
-            0x2E => self.op_swr(instr, bus),
+            0x2a => self.op_swl(instr, bus),
+            0x2b => self.op_sw(instr, bus),
+            0x2e => self.op_swr(instr, bus),
             _ => unreachable!("not a CPU load or store: {instr:08x}"),
         };
     }
@@ -703,8 +703,8 @@ impl Cpu {
             0x65 => self.op_or(instr),
             0x66 => self.op_xor(instr),
             0x67 => self.op_nor(instr),
-            0x6A => self.op_slt(instr),
-            0x6B => self.op_sltu(instr),
+            0x6a => self.op_slt(instr),
+            0x6b => self.op_sltu(instr),
             0x01 => self.dispatch_regimm(instr, pc),
             0x02 => self.op_j(instr, pc),
             0x03 => self.op_jal(instr, pc),
@@ -713,12 +713,12 @@ impl Cpu {
             0x06 => self.op_blez(instr, pc),
             0x07 => self.op_bgtz(instr, pc),
             0x09 => self.op_addiu(instr),
-            0x0A => self.op_slti(instr),
-            0x0B => self.op_sltiu(instr),
-            0x0C => self.op_andi(instr),
-            0x0D => self.op_ori(instr),
-            0x0E => self.op_xori(instr),
-            0x0F => self.op_lui(instr),
+            0x0a => self.op_slti(instr),
+            0x0b => self.op_sltiu(instr),
+            0x0c => self.op_andi(instr),
+            0x0d => self.op_ori(instr),
+            0x0e => self.op_xori(instr),
+            0x0f => self.op_lui(instr),
             _ => unreachable!("not a register-only op: {instr:08x}"),
         };
     }
@@ -730,9 +730,24 @@ impl Cpu {
 /// address), the shadow a RAM load starts. `$pc` is the op's PC; the caller
 /// moves it on.
 macro_rules! batch_step {
-    ($cpu:ident, $bus:ident, $op:ident, $addr:expr, $now:expr, $pend_reg:expr, $pend_value:expr,
-     $shadow:expr, $taken:expr, $ram_ok:expr, $block_ram:expr, $fetch_hit:expr,
-     $after_branch:expr, $done:expr, $pc:expr, $with_memory:expr) => {{
+    (
+        $cpu:ident,
+        $bus:ident,
+        $op:ident,
+        $addr:expr,
+        $now:expr,
+        $pend_reg:expr,
+        $pend_value:expr,
+        $shadow:expr,
+        $taken:expr,
+        $ram_ok:expr,
+        $block_ram:expr,
+        $fetch_hit:expr,
+        $after_branch:expr,
+        $done:expr,
+        $pc:expr,
+        $with_memory:expr
+    ) => {{
         let op: DecodedOp = $op;
         let memory = op.flags & op_flags::TOUCHES_BUS != 0;
         // `hides_in_load_shadow`, on the state here.
@@ -754,16 +769,16 @@ macro_rules! batch_step {
         $pend_reg = 0;
         let word = op.word;
         let pc: u32 = $pc;
-        let rs_index = (op.rs & 0x1F) as usize;
+        let rs_index = (op.rs & 0x1f) as usize;
         let rs = $cpu.gprs[rs_index];
-        let rt = $cpu.gprs[(op.rt & 0x1F) as usize];
-        let rd = (word >> 11) & 0x1F;
+        let rt = $cpu.gprs[(op.rt & 0x1f) as usize];
+        let rd = (word >> 11) & 0x1f;
         let imm = (word as i16) as i32 as u32;
         // `set_gpr`: a write squashes the commit of a load to the same
         // register.
         macro_rules! set {
-            ($reg:expr, $value:expr) => {{
-                let reg = $reg as u8 & 0x1F;
+            ($reg: expr,$value: expr) => {{
+                let reg = $reg as u8 & 0x1f;
                 let value: u32 = $value;
                 $cpu.gprs[reg as usize] = value;
                 $cpu.gprs[0] = 0;
@@ -773,12 +788,12 @@ macro_rules! batch_step {
             }};
         }
         match op.handler {
-            0x40 => set!(rd, rt << ((word >> 6) & 0x1F)),
-            0x42 => set!(rd, rt >> ((word >> 6) & 0x1F)),
-            0x43 => set!(rd, ((rt as i32) >> ((word >> 6) & 0x1F)) as u32),
-            0x44 => set!(rd, rt << (rs & 0x1F)),
-            0x46 => set!(rd, rt >> (rs & 0x1F)),
-            0x47 => set!(rd, ((rt as i32) >> (rs & 0x1F)) as u32),
+            0x40 => set!(rd, rt << ((word >> 6) & 0x1f)),
+            0x42 => set!(rd, rt >> ((word >> 6) & 0x1f)),
+            0x43 => set!(rd, ((rt as i32) >> ((word >> 6) & 0x1f)) as u32),
+            0x44 => set!(rd, rt << (rs & 0x1f)),
+            0x46 => set!(rd, rt >> (rs & 0x1f)),
+            0x47 => set!(rd, ((rt as i32) >> (rs & 0x1f)) as u32),
             0x48 => $taken = Some(rs),
             0x49 => {
                 set!(rd, pc.wrapping_add(8));
@@ -790,8 +805,8 @@ macro_rules! batch_step {
             0x65 => set!(rd, rs | rt),
             0x66 => set!(rd, rs ^ rt),
             0x67 => set!(rd, !(rs | rt)),
-            0x6A => set!(rd, ((rs as i32) < (rt as i32)) as u32),
-            0x6B => set!(rd, (rs < rt) as u32),
+            0x6a => set!(rd, ((rs as i32) < (rt as i32)) as u32),
+            0x6b => set!(rd, (rs < rt) as u32),
             0x01 => {
                 // BLTZAL/BGEZAL link before reading `rs`.
                 if op.rt & 0x10 != 0 {
@@ -807,10 +822,10 @@ macro_rules! batch_step {
                     $taken = Some(branch_target(pc, word));
                 }
             }
-            0x02 => $taken = Some((pc.wrapping_add(4) & 0xF000_0000) | ((word & 0x03FF_FFFF) << 2)),
+            0x02 => $taken = Some((pc.wrapping_add(4) & 0xf000_0000) | ((word & 0x03ff_ffff) << 2)),
             0x03 => {
                 set!(31, pc.wrapping_add(8));
-                $taken = Some((pc.wrapping_add(4) & 0xF000_0000) | ((word & 0x03FF_FFFF) << 2));
+                $taken = Some((pc.wrapping_add(4) & 0xf000_0000) | ((word & 0x03ff_ffff) << 2));
             }
             0x04 => {
                 if rs == rt {
@@ -833,12 +848,12 @@ macro_rules! batch_step {
                 }
             }
             0x09 => set!(op.rt, rs.wrapping_add(imm)),
-            0x0A => set!(op.rt, ((rs as i32) < (imm as i32)) as u32),
-            0x0B => set!(op.rt, (rs < imm) as u32),
-            0x0C => set!(op.rt, rs & (word & 0xFFFF)),
-            0x0D => set!(op.rt, rs | (word & 0xFFFF)),
-            0x0E => set!(op.rt, rs ^ (word & 0xFFFF)),
-            0x0F => set!(op.rt, word << 16),
+            0x0a => set!(op.rt, ((rs as i32) < (imm as i32)) as u32),
+            0x0b => set!(op.rt, (rs < imm) as u32),
+            0x0c => set!(op.rt, rs & (word & 0xffff)),
+            0x0d => set!(op.rt, rs | (word & 0xffff)),
+            0x0e => set!(op.rt, rs ^ (word & 0xffff)),
+            0x0f => set!(op.rt, word << 16),
             // Plain loads from main RAM (`Bus::batch_ram_load`).
             0x20 | 0x21 | 0x23 | 0x24 | 0x25 if $with_memory => {
                 let (value, stalls, shadowed) = $bus.batch_load_op($now, $addr, op.handler);
@@ -864,7 +879,7 @@ macro_rules! batch_step {
             _ => unreachable!("not a simple op"),
         }
         if commit_reg != 0 {
-            $cpu.gprs[commit_reg as usize & 0x1F] = commit_value;
+            $cpu.gprs[commit_reg as usize & 0x1f] = commit_value;
         }
         $done += 1;
         $after_branch = op.class == OpClass::Branch;
@@ -998,7 +1013,7 @@ impl Cpu {
                 let mut addr = 0;
                 let mut access = BatchAccess::Ram;
                 if memory {
-                    addr = self.gprs[(op.rs & 0x1F) as usize]
+                    addr = self.gprs[(op.rs & 0x1f) as usize]
                         .wrapping_add((op.word as i16) as i32 as u32);
                     access = batch_access_kind(op.word, addr);
                     if access == BatchAccess::Unsafe {
@@ -1069,7 +1084,7 @@ impl Cpu {
                         && b.now < b.post_op_until
                         && b.now < b.limit
                         && !b.irq_line
-                        && target & 0x001F_0000 != 0
+                        && target & 0x001f_0000 != 0
                     {
                         bus.record_post_op(b.now);
                         b.counted = b.done;
@@ -1163,7 +1178,7 @@ impl Cpu {
             let mut access = BatchAccess::Ram;
             if op.flags & op_flags::TOUCHES_BUS != 0 {
                 addr =
-                    self.gprs[(op.rs & 0x1F) as usize].wrapping_add((op.word as i16) as i32 as u32);
+                    self.gprs[(op.rs & 0x1f) as usize].wrapping_add((op.word as i16) as i32 as u32);
                 access = batch_access_kind(op.word, addr);
             }
             if !Self::batch_simple(op, access)
@@ -1217,7 +1232,7 @@ impl Cpu {
                 access == BatchAccess::Ram
                     && matches!(
                         op.handler,
-                        0x20 | 0x21 | 0x23 | 0x24 | 0x25 | 0x28 | 0x29 | 0x2B
+                        0x20 | 0x21 | 0x23 | 0x24 | 0x25 | 0x28 | 0x29 | 0x2b
                     )
             }
             _ => false,
@@ -1328,9 +1343,9 @@ impl Cpu {
                 0x26 => self.op_lwr(word, bus),
                 0x28 => self.op_sb(word, bus),
                 0x29 => self.op_sh(word, bus),
-                0x2A => self.op_swl(word, bus),
-                0x2B => self.op_sw(word, bus),
-                0x2E => self.op_swr(word, bus),
+                0x2a => self.op_swl(word, bus),
+                0x2b => self.op_sw(word, bus),
+                0x2e => self.op_swr(word, bus),
                 // LWC2/SWC2, through the GTE.
                 _ => self.execute(word, b.pc, delay, bus),
             };
@@ -1348,7 +1363,7 @@ impl Cpu {
         b.synced = b.now;
         b.pend = self.pending_load.take().unwrap_or((0, 0));
         if let Some((reg, value)) = self.committing_load.take() {
-            self.gprs[reg as usize & 0x1F] = value;
+            self.gprs[reg as usize & 0x1f] = value;
             self.gprs[0] = 0;
         }
         b.done += 1;
@@ -1472,16 +1487,16 @@ enum Access {
 #[inline(always)]
 fn access_kind(word: u32, addr: u32) -> Access {
     let aligned = match word >> 26 {
-        0x23 | 0x2B => addr & 3 == 0,
+        0x23 | 0x2b => addr & 3 == 0,
         0x21 | 0x25 | 0x29 => addr & 1 == 0,
         _ => true,
     };
-    if !aligned || addr >= 0xC000_0000 {
+    if !aligned || addr >= 0xc000_0000 {
         return Access::Unsafe;
     }
     let phys = memory::to_physical(addr);
     if phys < memory::ram::MIRROR_END
-        || (addr < 0xA000_0000
+        || (addr < 0xa000_0000
             && (memory::scratchpad::BASE
                 ..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
                 .contains(&phys))
@@ -1511,17 +1526,17 @@ enum BatchAccess {
 #[inline(always)]
 fn batch_access_kind(word: u32, addr: u32) -> BatchAccess {
     let aligned = match word >> 26 {
-        0x23 | 0x2B | 0x32 | 0x3A => addr & 3 == 0,
+        0x23 | 0x2b | 0x32 | 0x3a => addr & 3 == 0,
         0x21 | 0x25 | 0x29 => addr & 1 == 0,
         _ => true,
     };
-    if !aligned || addr >= 0xC000_0000 {
+    if !aligned || addr >= 0xc000_0000 {
         return BatchAccess::Unsafe;
     }
     let phys = memory::to_physical(addr);
     if phys < memory::ram::MIRROR_END {
         BatchAccess::Ram
-    } else if addr < 0xA000_0000
+    } else if addr < 0xa000_0000
         && (memory::scratchpad::BASE..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
             .contains(&phys)
     {
@@ -1540,7 +1555,7 @@ fn decoded(word: u32, class: OpClass, flags: u8) -> DecodedOp {
     let batch = match class {
         OpClass::Alu | OpClass::Branch => true,
         // CPU loads and stores; not LWC2/SWC2, which go through the GTE.
-        OpClass::Load | OpClass::Store => word >> 26 <= 0x2E,
+        OpClass::Load | OpClass::Store => word >> 26 <= 0x2e,
         OpClass::Other => flags & op_flags::DELAY_SLOT == 0,
         OpClass::GteCommand | OpClass::Terminator => false,
     };
@@ -1549,10 +1564,10 @@ fn decoded(word: u32, class: OpClass, flags: u8) -> DecodedOp {
         word,
         class,
         flags: flags | bus_flag,
-        rs: ((word >> 21) & 0x1F) as u8,
-        rt: ((word >> 16) & 0x1F) as u8,
+        rs: ((word >> 21) & 0x1f) as u8,
+        rt: ((word >> 16) & 0x1f) as u8,
         handler: if word >> 26 == 0 {
-            0x40 | (word & 0x3F) as u8
+            0x40 | (word & 0x3f) as u8
         } else {
             (word >> 26) as u8
         },
@@ -1562,7 +1577,7 @@ fn decoded(word: u32, class: OpClass, flags: u8) -> DecodedOp {
 /// Whether `phys` is where the HLE BIOS takes over from the interpreter
 /// before a fetch: the A0/B0/C0 vectors and the exception-return stub.
 fn hle_hook(phys: u32) -> bool {
-    matches!(phys, 0xA0 | 0xB0 | 0xC0)
+    matches!(phys, 0xa0 | 0xb0 | 0xc0)
         || phys == memory::to_physical(crate::hle_bios::EXCEPTION_RETURN_STUB)
 }
 
@@ -1575,7 +1590,7 @@ mod tests {
     }
 
     fn i(op: u32, rs: u32, rt: u32, imm: i32) -> u32 {
-        (op << 26) | (rs << 21) | (rt << 16) | (imm as u32 & 0xFFFF)
+        (op << 26) | (rs << 21) | (rt << 16) | (imm as u32 & 0xffff)
     }
 
     fn digest<T: serde::Serialize>(value: &T) -> Vec<u8> {
@@ -1595,11 +1610,11 @@ mod tests {
         const K0: u32 = 26;
         const RA: u32 = 31;
         let program = [
-            i(0x0F, 0, T0, 0x8002),            // 00 lui t0, 0x8002
+            i(0x0f, 0, T0, 0x8002),            // 00 lui t0, 0x8002
             i(0x09, 0, T1, 300),               // 04 addiu t1, zero, 300
             i(0x23, T0, T2, 0),                // 08 loop: lw t2, 0(t0)
             r(0, T2, T1, T3, 0, 0x21),         // 0c addu t3, t2, t1
-            i(0x2B, T0, T3, 4),                // 10 sw t3, 4(t0)
+            i(0x2b, T0, T3, 4),                // 10 sw t3, 4(t0)
             i(0x20, T0, T4, 5),                // 14 lb t4, 5(t0)
             i(0x29, T0, T4, 8),                // 18 sh t4, 8(t0)
             r(0, T1, T3, 0, 0, 0x19),          // 1c multu t1, t3
@@ -1609,8 +1624,8 @@ mod tests {
             i(0x09, T1, T1, -1),               // 2c addiu t1, t1, -1
             i(0x05, T1, 0, -10),               // 30 bne t1, zero, loop
             i(0x09, T0, T0, 12),               // 34 addiu t0, t0, 12 (delay)
-            i(0x0F, 0, T4, 0x7FFF),            // 38 lui t4, 0x7fff
-            i(0x0D, T4, T4, 0xFFFF),           // 3c ori t4, t4, 0xffff
+            i(0x0f, 0, T4, 0x7fff),            // 38 lui t4, 0x7fff
+            i(0x0d, T4, T4, 0xffff),           // 3c ori t4, t4, 0xffff
             i(0x08, T4, T5, 1),                // 40 addi t5, t4, 1 (overflow)
             (0x02 << 26) | (0x0001_0000 >> 2), // 44 j start
             0,                                 // 48 nop
@@ -1641,7 +1656,7 @@ mod tests {
         bus.load_exe_payload(0x8000_0080, &bytes(&handler));
         let mut cpu = Cpu::new();
         cpu.set_block_cache_enabled(blocks);
-        cpu.seed_from_exe(0x8001_0000, 0, Some(0x801F_FF00));
+        cpu.seed_from_exe(0x8001_0000, 0, Some(0x801f_ff00));
         (cpu, bus)
     }
 
@@ -1699,10 +1714,10 @@ mod tests {
 
     #[test]
     fn disabled_cop2_memory_traps_match_single_steps() {
-        for opcode in [0x32, 0x3A] {
+        for opcode in [0x32, 0x3a] {
             for branch in [None, Some(0x04), Some(0x05)] {
                 let make = |blocks| {
-                    let mut words = vec![i(0x0F, 0, 8, 0x8002)];
+                    let mut words = vec![i(0x0f, 0, 8, 0x8002)];
                     if let Some(branch) = branch {
                         words.push(i(branch, 0, 0, 2));
                     }
@@ -1717,7 +1732,7 @@ mod tests {
                     bus.load_exe_payload(0x8001_0000, &bytes);
                     let mut cpu = Cpu::new();
                     cpu.set_block_cache_enabled(false);
-                    cpu.seed_from_exe(0x8001_0000, 0, Some(0x801F_FF00));
+                    cpu.seed_from_exe(0x8001_0000, 0, Some(0x801f_ff00));
                     // Warm the instruction cache while COP2 is usable, then
                     // disable it at the loop entry to exercise decoded ops.
                     loop {
@@ -1765,18 +1780,18 @@ mod tests {
     #[test]
     fn classes_of_common_encodings() {
         assert_eq!(classify(0x0000_0000), Some(OpClass::Alu)); // nop
-        assert_eq!(classify(0x27BD_FFE8), Some(OpClass::Alu)); // addiu sp, sp, -24
+        assert_eq!(classify(0x27bd_ffe8), Some(OpClass::Alu)); // addiu sp, sp, -24
         assert_eq!(classify(0x2021_0001), Some(OpClass::Other)); // addi at, at, 1
-        assert_eq!(classify(0x8FBF_0010), Some(OpClass::Load)); // lw ra, 16(sp)
-        assert_eq!(classify(0xAFBF_0010), Some(OpClass::Store)); // sw ra, 16(sp)
-        assert_eq!(classify(0x03E0_0008), Some(OpClass::Branch)); // jr ra
-        assert_eq!(classify(0x0C00_0000), Some(OpClass::Branch)); // jal
-        assert_eq!(classify(0x4A18_0001), Some(OpClass::GteCommand)); // rtps
+        assert_eq!(classify(0x8fbf_0010), Some(OpClass::Load)); // lw ra, 16(sp)
+        assert_eq!(classify(0xafbf_0010), Some(OpClass::Store)); // sw ra, 16(sp)
+        assert_eq!(classify(0x03e0_0008), Some(OpClass::Branch)); // jr ra
+        assert_eq!(classify(0x0c00_0000), Some(OpClass::Branch)); // jal
+        assert_eq!(classify(0x4a18_0001), Some(OpClass::GteCommand)); // rtps
         assert_eq!(classify(0x4808_0000), Some(OpClass::Other)); // mfc2
         assert_eq!(classify(0x4000_6000), Some(OpClass::Other)); // mfc0
         assert_eq!(classify(0x4084_6000), Some(OpClass::Terminator)); // mtc0 a0, sr
         assert_eq!(classify(0x4200_0010), Some(OpClass::Terminator)); // rfe
-        assert_eq!(classify(0x0000_000C), Some(OpClass::Terminator)); // syscall
-        assert_eq!(classify(0xFC00_0000), None);
+        assert_eq!(classify(0x0000_000c), Some(OpClass::Terminator)); // syscall
+        assert_eq!(classify(0xfc00_0000), None);
     }
 }

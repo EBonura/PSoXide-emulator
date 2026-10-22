@@ -11,7 +11,8 @@
 //! budget metrics are tracked separately so PS1 workload does not get hidden
 //! behind fast host wall-clock timings.
 
-use std::{collections::VecDeque, fmt::Write as _};
+use std::collections::VecDeque;
+use std::fmt::Write as _;
 
 use emulator_core::telemetry::{
     counter, counter_name, stage, stage_name, task_name, GuestTelemetryEvent, COUNTER_COUNT,

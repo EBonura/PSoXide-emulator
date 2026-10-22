@@ -26,9 +26,8 @@
 //! target and rename on success. A crash mid-write leaves the old
 //! settings intact.
 
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

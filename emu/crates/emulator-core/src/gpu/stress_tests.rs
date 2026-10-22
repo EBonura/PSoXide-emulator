@@ -35,7 +35,7 @@ impl Rng {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
-        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
     }
 
     fn word(&mut self) -> u32 {
@@ -56,11 +56,11 @@ impl Rng {
 }
 
 fn fnv_fold(h: u64, v: u64) -> u64 {
-    (h ^ v).wrapping_mul(0x0000_0100_0000_01B3)
+    (h ^ v).wrapping_mul(0x0000_0100_0000_01b3)
 }
 
 fn words_digest(words: &[u16]) -> u64 {
-    let mut h = 0xCBF2_9CE4_8422_2325u64;
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
     for chunk in words.chunks_exact(4) {
         let v = u64::from(chunk[0])
             | (u64::from(chunk[1]) << 16)
@@ -94,8 +94,8 @@ impl Stress {
         Self {
             gpu,
             rng,
-            digest: 0xCBF2_9CE4_8422_2325,
-            pixel_digest: 0xCBF2_9CE4_8422_2325,
+            digest: 0xcbf2_9ce4_8422_2325,
+            pixel_digest: 0xcbf2_9ce4_8422_2325,
             trace: Vec::new(),
         }
     }
@@ -121,7 +121,7 @@ impl Stress {
         h = fnv_fold(h, words_digest(&self.gpu.clut_cache));
         let mut px = h;
         if let Some(owner) = &self.gpu.pixel_owner {
-            let mut o = 0xCBF2_9CE4_8422_2325u64;
+            let mut o = 0xcbf2_9ce4_8422_2325u64;
             for &v in owner {
                 o = fnv_fold(o, u64::from(v));
             }
@@ -145,7 +145,7 @@ impl Stress {
         h = fnv_fold(h, self.gpu.busy_credit);
         h = fnv_fold(h, u64::from(self.gpu.status.raw));
         if let Some(owner) = &self.gpu.pixel_owner {
-            let mut o = 0xCBF2_9CE4_8422_2325u64;
+            let mut o = 0xcbf2_9ce4_8422_2325u64;
             for &v in owner {
                 o = fnv_fold(o, u64::from(v));
             }
@@ -158,23 +158,23 @@ impl Stress {
     /// A vertex word with random junk in the ignored bits 11..15 / 27..31.
     fn vertex(&mut self, x: i32, y: i32) -> u32 {
         let junk = if self.rng.chance(20) {
-            self.rng.word() & 0xF800_F800
+            self.rng.word() & 0xf800_f800
         } else {
             0
         };
-        (x as u32 & 0x7FF) | ((y as u32 & 0x7FF) << 16) | junk
+        (x as u32 & 0x7ff) | ((y as u32 & 0x7ff) << 16) | junk
     }
 
     fn colour(&mut self) -> u32 {
         match self.rng.below(8) {
             0 => 0x80_8080,
-            1 => 0xFF_FFFF,
+            1 => 0xff_ffff,
             2 => 0,
             3 => {
                 let c = self.rng.below(256);
                 c | (c << 8) | (c << 16)
             }
-            _ => self.rng.word() & 0xFF_FFFF,
+            _ => self.rng.word() & 0xff_ffff,
         }
     }
 
@@ -281,19 +281,19 @@ impl Stress {
     }
 
     fn uv_word(&mut self, u: u32, v: u32, high: u32) -> u32 {
-        (u & 0xFF) | ((v & 0xFF) << 8) | (high << 16)
+        (u & 0xff) | ((v & 0xff) << 8) | (high << 16)
     }
 
     fn clut_word(&mut self) -> u32 {
         match self.rng.below(4) {
             // A small palette of CLUT addresses so the cache hits often.
-            0 | 1 => [0x7FC0, 0x7F80, 0x4000, 0x0010][self.rng.below(4) as usize],
-            _ => self.rng.word() & 0xFFFF,
+            0 | 1 => [0x7fc0, 0x7f80, 0x4000, 0x0010][self.rng.below(4) as usize],
+            _ => self.rng.word() & 0xffff,
         }
     }
 
     fn tpage_word(&mut self) -> u32 {
-        let mut t = self.rng.word() & 0xFFFF;
+        let mut t = self.rng.word() & 0xffff;
         if self.rng.chance(50) {
             // Keep the upper-bank bit (11) rare.
             t &= !0x0800;
@@ -326,7 +326,7 @@ impl Stress {
             if i > 0 && gouraud {
                 // The top byte of a colour word is ignored; sometimes fill it.
                 let junk = if self.rng.chance(10) {
-                    self.rng.word() & 0xFF00_0000
+                    self.rng.word() & 0xff00_0000
                 } else {
                     0
                 };
@@ -339,7 +339,7 @@ impl Stress {
                 let high = match i {
                     0 => clut,
                     1 => tpage,
-                    _ => self.rng.word() & 0xFFFF,
+                    _ => self.rng.word() & 0xffff,
                 };
                 let w = self.uv_word(uvs[i].0, uvs[i].1, high);
                 words.push(w);
@@ -367,7 +367,7 @@ impl Stress {
         if (op >> 3) & 3 == 0 {
             let (w, h) = match self.rng.below(10) {
                 0 => (self.rng.below(1100), self.rng.below(600)),
-                1 => (self.rng.word() & 0xFFFF, self.rng.word() & 0xFFFF),
+                1 => (self.rng.word() & 0xffff, self.rng.word() & 0xffff),
                 2 => (0, self.rng.below(20)),
                 _ => (self.rng.below(70), self.rng.below(70)),
             };
@@ -410,10 +410,10 @@ impl Stress {
     fn fill(&mut self) {
         let c = self.colour();
         self.gp0(0x0200_0000 | c);
-        let xy = self.rng.word() & 0x01FF_03FF;
+        let xy = self.rng.word() & 0x01ff_03ff;
         self.gp0(xy);
         let wh = if self.rng.chance(20) {
-            self.rng.word() & 0x01FF_03FF
+            self.rng.word() & 0x01ff_03ff
         } else {
             self.rng.below(96) | (self.rng.below(96) << 16)
         };
@@ -421,20 +421,20 @@ impl Stress {
     }
 
     fn copy(&mut self) {
-        let low = self.rng.word() & 0x1F_FFFF;
+        let low = self.rng.word() & 0x1f_ffff;
         self.gp0(0x8000_0000 | low);
-        let (a, b) = (self.rng.word() & 0x01FF_03FF, self.rng.word() & 0x01FF_03FF);
+        let (a, b) = (self.rng.word() & 0x01ff_03ff, self.rng.word() & 0x01ff_03ff);
         // Overlapping copies are common in scrolling code.
         let b = if self.rng.chance(30) {
-            (a & 0x01FF_03FF).wrapping_add(self.rng.below(8) | (self.rng.below(8) << 16))
-                & 0x01FF_03FF
+            (a & 0x01ff_03ff).wrapping_add(self.rng.below(8) | (self.rng.below(8) << 16))
+                & 0x01ff_03ff
         } else {
             b
         };
         self.gp0(a);
         self.gp0(b);
         let wh = if self.rng.chance(5) {
-            self.rng.word() & 0x01FF_03FF
+            self.rng.word() & 0x01ff_03ff
         } else {
             (1 + self.rng.below(64)) | ((1 + self.rng.below(64)) << 16)
         };
@@ -442,13 +442,13 @@ impl Stress {
     }
 
     fn upload(&mut self) {
-        let low = self.rng.word() & 0x1F_FFFF;
-        self.gp0(0xA000_0000 | low);
+        let low = self.rng.word() & 0x1f_ffff;
+        self.gp0(0xa000_0000 | low);
         let xy = if self.rng.chance(20) {
             // Near the right/bottom edge so the payload wraps.
             (1000 + self.rng.below(24)) | ((490 + self.rng.below(22)) << 16)
         } else {
-            self.rng.word() & 0x01FF_03FF
+            self.rng.word() & 0x01ff_03ff
         };
         let (w, h) = (1 + self.rng.below(40), 1 + self.rng.below(40));
         self.gp0(xy);
@@ -460,12 +460,12 @@ impl Stress {
     }
 
     fn download(&mut self) {
-        let low = self.rng.word() & 0x1F_FFFF;
-        self.gp0(0xC000_0000 | low);
+        let low = self.rng.word() & 0x1f_ffff;
+        self.gp0(0xc000_0000 | low);
         let xy = if self.rng.chance(20) {
             (1000 + self.rng.below(24)) | ((490 + self.rng.below(22)) << 16)
         } else {
-            self.rng.word() & 0x01FF_03FF
+            self.rng.word() & 0x01ff_03ff
         };
         let (w, h) = (1 + self.rng.below(40), 1 + self.rng.below(40));
         self.gp0(xy);
@@ -480,16 +480,16 @@ impl Stress {
     fn state(&mut self) {
         match self.rng.below(12) {
             0..=2 => {
-                let w = self.rng.word() & 0x3FFF;
-                self.gp0(0xE100_0000 | w);
+                let w = self.rng.word() & 0x3fff;
+                self.gp0(0xe100_0000 | w);
             }
             3 => {
                 let w = if self.rng.chance(50) {
                     0
                 } else {
-                    self.rng.word() & 0xF_FFFF
+                    self.rng.word() & 0xf_ffff
                 };
-                self.gp0(0xE200_0000 | w);
+                self.gp0(0xe200_0000 | w);
             }
             4 | 5 => {
                 let (l, t, r, b) = if self.rng.chance(60) {
@@ -509,8 +509,8 @@ impl Stress {
                     };
                     (l, t, r, b)
                 };
-                self.gp0(0xE300_0000 | l | (t << 10));
-                self.gp0(0xE400_0000 | r | (b << 10));
+                self.gp0(0xe300_0000 | l | (t << 10));
+                self.gp0(0xe400_0000 | r | (b << 10));
             }
             6 => {
                 let (x, y) = if self.rng.chance(70) {
@@ -518,7 +518,7 @@ impl Stress {
                 } else {
                     (self.rng.range(-1024, 1023), self.rng.range(-1024, 1023))
                 };
-                self.gp0(0xE500_0000 | (x as u32 & 0x7FF) | ((y as u32 & 0x7FF) << 11));
+                self.gp0(0xe500_0000 | (x as u32 & 0x7ff) | ((y as u32 & 0x7ff) << 11));
             }
             7 | 8 => {
                 // Mask bits: mostly off so blending paths dominate.
@@ -527,7 +527,7 @@ impl Stress {
                 } else {
                     self.rng.below(4)
                 };
-                self.gp0(0xE600_0000 | m);
+                self.gp0(0xe600_0000 | m);
             }
             9 => self.gp0(0x0100_0000),
             10 => {
@@ -536,8 +536,8 @@ impl Stress {
             }
             _ => {
                 // E1 with dither and a common tpage, to weight dithered draws.
-                let w = (self.rng.word() & 0x1FF) | 0x200;
-                self.gp0(0xE100_0000 | w);
+                let w = (self.rng.word() & 0x1ff) | 0x200;
+                self.gp0(0xe100_0000 | w);
             }
         }
     }
@@ -594,21 +594,21 @@ fn run_case(name: &str, seed: u64, commands: usize, setup: impl FnOnce(&mut Gpu)
 
 #[test]
 fn raster_stress_random_primitives_a() {
-    let (d, px) = run_case("a", 0x5EED_0001, 150_000, |_| {});
+    let (d, px) = run_case("a", 0x5eed_0001, 150_000, |_| {});
     assert_eq!(px, 0xaf04_9ca1_4f64_1b2f, "raster stress a pixels changed");
     assert_eq!(d, 0x022c_84be_3ec6_b2cd, "raster stress a digest changed");
 }
 
 #[test]
 fn raster_stress_random_primitives_b() {
-    let (d, px) = run_case("b", 0x5EED_0002, 150_000, |_| {});
+    let (d, px) = run_case("b", 0x5eed_0002, 150_000, |_| {});
     assert_eq!(px, 0x9e15_e646_d06c_cfaf, "raster stress b pixels changed");
     assert_eq!(d, 0xa2e0_f735_81c6_ee55, "raster stress b digest changed");
 }
 
 #[test]
 fn raster_stress_pixel_tracer() {
-    let (d, px) = run_case("tracer", 0x5EED_0003, 6_000, |gpu| {
+    let (d, px) = run_case("tracer", 0x5eed_0003, 6_000, |gpu| {
         gpu.enable_pixel_tracer()
     });
     assert_eq!(
@@ -623,7 +623,7 @@ fn raster_stress_pixel_tracer() {
 
 #[test]
 fn raster_stress_wireframe() {
-    let (d, px) = run_case("wire", 0x5EED_0004, 4_000, |gpu| {
+    let (d, px) = run_case("wire", 0x5eed_0004, 4_000, |gpu| {
         gpu.wireframe_enabled = true
     });
     assert_eq!(
@@ -645,9 +645,9 @@ fn reference_rgb24(gpu: &Gpu, start_x: u16, px: u16, y: u16) -> (u8, u8, u8) {
     let w0 = gpu.vram.get_pixel(word_x, y);
     let w1 = gpu.vram.get_pixel(word_x.wrapping_add(1), y);
     if byte_x & 1 == 0 {
-        ((w0 & 0xFF) as u8, (w0 >> 8) as u8, (w1 & 0xFF) as u8)
+        ((w0 & 0xff) as u8, (w0 >> 8) as u8, (w1 & 0xff) as u8)
     } else {
-        ((w0 >> 8) as u8, (w1 & 0xFF) as u8, (w1 >> 8) as u8)
+        ((w0 >> 8) as u8, (w1 & 0xff) as u8, (w1 >> 8) as u8)
     }
 }
 
@@ -704,19 +704,19 @@ fn reference_display(gpu: &Gpu) -> (DisplayHash, DisplayRgba) {
         for dx in 0..eff_w {
             let src_x = dx as i32 - off_x;
             if src_x < 0 || src_x >= eff_w as i32 || src_y < 0 || src_y >= eff_h as i32 {
-                out.extend_from_slice(&[0, 0, 0, 0xFF]);
+                out.extend_from_slice(&[0, 0, 0, 0xff]);
                 continue;
             }
             let sy = da.y + src_y as u16;
             if da.bpp24 {
                 let (r, g, b) = reference_rgb24(gpu, da.x, src_x as u16, sy);
-                out.extend_from_slice(&[r, g, b, 0xFF]);
+                out.extend_from_slice(&[r, g, b, 0xff]);
             } else {
                 let pixel = gpu.vram.get_pixel(da.x + src_x as u16, sy);
-                let r = ((pixel & 0x1F) as u8) << 3;
-                let g = (((pixel >> 5) & 0x1F) as u8) << 3;
-                let b = (((pixel >> 10) & 0x1F) as u8) << 3;
-                out.extend_from_slice(&[r | (r >> 5), g | (g >> 5), b | (b >> 5), 0xFF]);
+                let r = ((pixel & 0x1f) as u8) << 3;
+                let g = (((pixel >> 5) & 0x1f) as u8) << 3;
+                let b = (((pixel >> 10) & 0x1f) as u8) << 3;
+                out.extend_from_slice(&[r | (r >> 5), g | (g >> 5), b | (b >> 5), 0xff]);
             }
         }
     }
@@ -725,27 +725,27 @@ fn reference_display(gpu: &Gpu) -> (DisplayHash, DisplayRgba) {
 
 #[test]
 fn display_hash_and_rgba_match_the_per_pixel_reference() {
-    let mut s = Stress::new(0x5EED_0005);
+    let mut s = Stress::new(0x5eed_0005);
     // Unconfigured display first.
     assert_eq!(s.gpu.display_hash(), reference_display(&s.gpu).0);
     for _ in 0..600 {
         let rng = &mut s.rng;
         let start = if rng.chance(30) {
             // Near the right / bottom edges.
-            (1024 - rng.below(700)) & 0x3FF | ((512 - rng.below(300)) & 0x1FF) << 10
+            (1024 - rng.below(700)) & 0x3ff | ((512 - rng.below(300)) & 0x1ff) << 10
         } else {
-            rng.word() & 0x7FFFF
+            rng.word() & 0x7ffff
         };
         let x1 = (0x260 + rng.range(-400, 400)) as u32;
-        let hrange = (x1 & 0xFFF) | ((x1 + 2560) & 0xFFF) << 12;
+        let hrange = (x1 & 0xfff) | ((x1 + 2560) & 0xfff) << 12;
         let y1 = if rng.chance(50) {
             0x10
         } else {
             rng.below(0x40)
         };
         let y2 = y1 + rng.below(520);
-        let vrange = (y1 & 0x3FF) | (y2 & 0x3FF) << 10;
-        let mode = rng.word() & 0x7F;
+        let vrange = (y1 & 0x3ff) | (y2 & 0x3ff) << 10;
+        let mode = rng.word() & 0x7f;
         s.gp1(0x0500_0000 | start);
         s.gp1(0x0600_0000 | hrange);
         s.gp1(0x0700_0000 | vrange);

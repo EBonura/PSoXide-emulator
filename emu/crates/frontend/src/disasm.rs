@@ -22,13 +22,13 @@ pub fn disasm(pc: u32, instr: u32) -> String {
         return "nop".to_string();
     }
 
-    let op = (instr >> 26) & 0x3F;
-    let rs = ((instr >> 21) & 0x1F) as usize;
-    let rt = ((instr >> 16) & 0x1F) as usize;
-    let rd = ((instr >> 11) & 0x1F) as usize;
-    let sa = (instr >> 6) & 0x1F;
-    let funct = instr & 0x3F;
-    let imm = instr & 0xFFFF;
+    let op = (instr >> 26) & 0x3f;
+    let rs = ((instr >> 21) & 0x1f) as usize;
+    let rt = ((instr >> 16) & 0x1f) as usize;
+    let rd = ((instr >> 11) & 0x1f) as usize;
+    let sa = (instr >> 6) & 0x1f;
+    let funct = instr & 0x3f;
+    let imm = instr & 0xffff;
     let simm = (instr as i16) as i32;
 
     match op {
@@ -42,12 +42,12 @@ pub fn disasm(pc: u32, instr: u32) -> String {
         0x07 => format!("bgtz {}, {}", GPR[rs], branch_target(pc, simm)),
         0x08 => format!("addi {}, {}, {}", GPR[rt], GPR[rs], simm),
         0x09 => format!("addiu {}, {}, {}", GPR[rt], GPR[rs], simm),
-        0x0A => format!("slti {}, {}, {}", GPR[rt], GPR[rs], simm),
-        0x0B => format!("sltiu {}, {}, {}", GPR[rt], GPR[rs], simm),
-        0x0C => format!("andi {}, {}, 0x{:04X}", GPR[rt], GPR[rs], imm),
-        0x0D => format!("ori {}, {}, 0x{:04X}", GPR[rt], GPR[rs], imm),
-        0x0E => format!("xori {}, {}, 0x{:04X}", GPR[rt], GPR[rs], imm),
-        0x0F => format!("lui {}, 0x{:04X}", GPR[rt], imm),
+        0x0a => format!("slti {}, {}, {}", GPR[rt], GPR[rs], simm),
+        0x0b => format!("sltiu {}, {}, {}", GPR[rt], GPR[rs], simm),
+        0x0c => format!("andi {}, {}, 0x{:04X}", GPR[rt], GPR[rs], imm),
+        0x0d => format!("ori {}, {}, 0x{:04X}", GPR[rt], GPR[rs], imm),
+        0x0e => format!("xori {}, {}, 0x{:04X}", GPR[rt], GPR[rs], imm),
+        0x0f => format!("lui {}, 0x{:04X}", GPR[rt], imm),
         0x10 => cop0(rs, rt, rd),
         0x12 => format!("cop2 0x{instr:08X}"), // GTE -- detail later
         0x20 => format!("lb {}, {}({})", GPR[rt], simm, GPR[rs]),
@@ -59,11 +59,11 @@ pub fn disasm(pc: u32, instr: u32) -> String {
         0x26 => format!("lwr {}, {}({})", GPR[rt], simm, GPR[rs]),
         0x28 => format!("sb {}, {}({})", GPR[rt], simm, GPR[rs]),
         0x29 => format!("sh {}, {}({})", GPR[rt], simm, GPR[rs]),
-        0x2A => format!("swl {}, {}({})", GPR[rt], simm, GPR[rs]),
-        0x2B => format!("sw {}, {}({})", GPR[rt], simm, GPR[rs]),
-        0x2E => format!("swr {}, {}({})", GPR[rt], simm, GPR[rs]),
+        0x2a => format!("swl {}, {}({})", GPR[rt], simm, GPR[rs]),
+        0x2b => format!("sw {}, {}({})", GPR[rt], simm, GPR[rs]),
+        0x2e => format!("swr {}, {}({})", GPR[rt], simm, GPR[rs]),
         0x32 => format!("lwc2 {}, {}({})", rt, simm, GPR[rs]),
-        0x3A => format!("swc2 {}, {}({})", rt, simm, GPR[rs]),
+        0x3a => format!("swc2 {}, {}({})", rt, simm, GPR[rs]),
         _ => format!("<??? op=0x{op:02X} word=0x{instr:08X}>"),
     }
 }
@@ -90,16 +90,16 @@ fn special(rs: usize, rt: usize, rd: usize, sa: u32, funct: u32) -> String {
                 format!("jalr {}, {}", GPR[rd], GPR[rs])
             }
         }
-        0x0C => "syscall".to_string(),
-        0x0D => "break".to_string(),
+        0x0c => "syscall".to_string(),
+        0x0d => "break".to_string(),
         0x10 => format!("mfhi {}", GPR[rd]),
         0x11 => format!("mthi {}", GPR[rs]),
         0x12 => format!("mflo {}", GPR[rd]),
         0x13 => format!("mtlo {}", GPR[rs]),
         0x18 => format!("mult {}, {}", GPR[rs], GPR[rt]),
         0x19 => format!("multu {}, {}", GPR[rs], GPR[rt]),
-        0x1A => format!("div {}, {}", GPR[rs], GPR[rt]),
-        0x1B => format!("divu {}, {}", GPR[rs], GPR[rt]),
+        0x1a => format!("div {}, {}", GPR[rs], GPR[rt]),
+        0x1b => format!("divu {}, {}", GPR[rs], GPR[rt]),
         0x20 => format!("add {}, {}, {}", GPR[rd], GPR[rs], GPR[rt]),
         0x21 => format!("addu {}, {}, {}", GPR[rd], GPR[rs], GPR[rt]),
         0x22 => format!("sub {}, {}, {}", GPR[rd], GPR[rs], GPR[rt]),
@@ -108,8 +108,8 @@ fn special(rs: usize, rt: usize, rd: usize, sa: u32, funct: u32) -> String {
         0x25 => format!("or {}, {}, {}", GPR[rd], GPR[rs], GPR[rt]),
         0x26 => format!("xor {}, {}, {}", GPR[rd], GPR[rs], GPR[rt]),
         0x27 => format!("nor {}, {}, {}", GPR[rd], GPR[rs], GPR[rt]),
-        0x2A => format!("slt {}, {}, {}", GPR[rd], GPR[rs], GPR[rt]),
-        0x2B => format!("sltu {}, {}, {}", GPR[rd], GPR[rs], GPR[rt]),
+        0x2a => format!("slt {}, {}, {}", GPR[rd], GPR[rs], GPR[rt]),
+        0x2b => format!("sltu {}, {}, {}", GPR[rd], GPR[rs], GPR[rt]),
         _ => format!("<??? special funct=0x{funct:02X}>"),
     }
 }
@@ -141,9 +141,9 @@ fn branch_target(pc: u32, simm: i32) -> String {
 
 /// Target for J / JAL: (pc + 4)[31..=28] | (imm26 << 2).
 fn jump_target(pc: u32, instr: u32) -> String {
-    let target_field = instr & 0x03FF_FFFF;
+    let target_field = instr & 0x03ff_ffff;
     let delay_slot_pc = pc.wrapping_add(4);
-    let target = (delay_slot_pc & 0xF000_0000) | (target_field << 2);
+    let target = (delay_slot_pc & 0xf000_0000) | (target_field << 2);
     format!("0x{target:08X}")
 }
 
@@ -159,20 +159,20 @@ mod tests {
     #[test]
     fn lui_formats_immediate_as_hex() {
         // lui $t0, 0x0013 -- the first real BIOS instruction
-        assert_eq!(disasm(0xBFC0_0000, 0x3C08_0013), "lui t0, 0x0013");
+        assert_eq!(disasm(0xbfc0_0000, 0x3c08_0013), "lui t0, 0x0013");
     }
 
     #[test]
     fn ori_uses_gpr_names() {
         // ori $t0, $t1, 0xABCD
-        let instr = (0x0D << 26) | (9 << 21) | (8 << 16) | 0xABCD;
+        let instr = (0x0d << 26) | (9 << 21) | (8 << 16) | 0xabcd;
         assert_eq!(disasm(0, instr), "ori t0, t1, 0xABCD");
     }
 
     #[test]
     fn sw_formats_offset_base_syntax() {
         // sw $t0, -4($sp) -- very common BIOS pattern
-        let instr = (0x2B << 26) | (29 << 21) | (8 << 16) | ((-4i32 as u32) & 0xFFFF);
+        let instr = (0x2b << 26) | (29 << 21) | (8 << 16) | ((-4i32 as u32) & 0xffff);
         assert_eq!(disasm(0, instr), "sw t0, -4(sp)");
     }
 
@@ -184,22 +184,22 @@ mod tests {
 
     #[test]
     fn syscall_decodes() {
-        assert_eq!(disasm(0, 0x0000_000C), "syscall");
+        assert_eq!(disasm(0, 0x0000_000c), "syscall");
     }
 
     #[test]
     fn branch_target_uses_delay_slot() {
         // bne $t0, $zero, +8 (target = pc + 4 + 8 = pc + 12)
         let instr: u32 = (0x05 << 26) | (8 << 21) | 0x0002;
-        assert_eq!(disasm(0xBFC0_0100, instr), "bne t0, zero, 0xBFC0010C");
+        assert_eq!(disasm(0xbfc0_0100, instr), "bne t0, zero, 0xBFC0010C");
     }
 
     #[test]
     fn jump_target_uses_upper_pc_bits() {
         // j 0xBFC00100 (from pc in BFC region)
-        let target_field = (0xBFC0_0100 >> 2) & 0x03FF_FFFF;
+        let target_field = (0xbfc0_0100 >> 2) & 0x03ff_ffff;
         let instr = (0x02 << 26) | target_field;
-        assert_eq!(disasm(0xBFC0_0000, instr), "j 0xBFC00100");
+        assert_eq!(disasm(0xbfc0_0000, instr), "j 0xBFC00100");
     }
 
     #[test]

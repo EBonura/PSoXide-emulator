@@ -2,9 +2,9 @@
 /// into the 15-bit BGR word VRAM stores, as on PS1 hardware: the 3 high
 /// bits of each channel are discarded.
 pub(super) fn rgb24_to_bgr15(rgb24: u32) -> u16 {
-    let r = ((rgb24 >> 3) & 0x1F) as u16;
-    let g = (((rgb24 >> 8) >> 3) & 0x1F) as u16;
-    let b = (((rgb24 >> 16) >> 3) & 0x1F) as u16;
+    let r = ((rgb24 >> 3) & 0x1f) as u16;
+    let g = (((rgb24 >> 8) >> 3) & 0x1f) as u16;
+    let b = (((rgb24 >> 16) >> 3) & 0x1f) as u16;
     r | (g << 5) | (b << 10)
 }
 
@@ -109,12 +109,12 @@ pub(super) fn prim_blend_mode(cmd_word: u32, tpage_mode: BlendMode) -> BlendMode
 /// The texel's mask bit (bit 15) is preserved so downstream
 /// semi-transparency detection still sees it.
 pub(super) fn modulate_tint(texel: u16, tint_r: u32, tint_g: u32, tint_b: u32) -> u16 {
-    let tr = (texel & 0x1F) as u32;
-    let tg = ((texel >> 5) & 0x1F) as u32;
-    let tb = ((texel >> 10) & 0x1F) as u32;
-    let r = (tint_r * tr / 0x80).min(0x1F) as u16;
-    let g = (tint_g * tg / 0x80).min(0x1F) as u16;
-    let b = (tint_b * tb / 0x80).min(0x1F) as u16;
+    let tr = (texel & 0x1f) as u32;
+    let tg = ((texel >> 5) & 0x1f) as u32;
+    let tb = ((texel >> 10) & 0x1f) as u32;
+    let r = (tint_r * tr / 0x80).min(0x1f) as u16;
+    let g = (tint_g * tg / 0x80).min(0x1f) as u16;
+    let b = (tint_b * tb / 0x80).min(0x1f) as u16;
     r | (g << 5) | (b << 10) | (texel & 0x8000)
 }
 
@@ -132,12 +132,12 @@ pub(super) fn modulate_tint_dithered(
 ) -> u16 {
     // Scale 5-bit texel channels to 8-bit, apply the tint (which
     // is 0x80 = identity at 8-bit scale), then dither + truncate.
-    let tr = ((texel & 0x1F) as u32) << 3;
-    let tg = (((texel >> 5) & 0x1F) as u32) << 3;
-    let tb = (((texel >> 10) & 0x1F) as u32) << 3;
-    let r = (tint_r * tr / 0x80).min(0xFF) as i32;
-    let g = (tint_g * tg / 0x80).min(0xFF) as i32;
-    let b = (tint_b * tb / 0x80).min(0xFF) as i32;
+    let tr = ((texel & 0x1f) as u32) << 3;
+    let tg = (((texel >> 5) & 0x1f) as u32) << 3;
+    let tb = (((texel >> 10) & 0x1f) as u32) << 3;
+    let r = (tint_r * tr / 0x80).min(0xff) as i32;
+    let g = (tint_g * tg / 0x80).min(0xff) as i32;
+    let b = (tint_b * tb / 0x80).min(0xff) as i32;
     dither_rgb(r, g, b, x, y) | (texel & 0x8000)
 }
 
@@ -148,7 +148,7 @@ pub(super) fn modulate_tint_dithered(
 /// 128)` directly -- one code path through [`modulate_tint`].
 #[inline]
 pub(super) fn split_tint(tint24: u32) -> (u32, u32, u32) {
-    (tint24 & 0xFF, (tint24 >> 8) & 0xFF, (tint24 >> 16) & 0xFF)
+    (tint24 & 0xff, (tint24 >> 8) & 0xff, (tint24 >> 16) & 0xff)
 }
 
 /// Identity tint -- pass-through for raw-texture primitives. Each
@@ -171,12 +171,12 @@ pub(super) fn blend_pixel(bg: u16, fg: u16, mode: BlendMode) -> u16 {
     if mode == BlendMode::Opaque {
         return fg;
     }
-    let br = (bg & 0x1F) as i16;
-    let bgg = ((bg >> 5) & 0x1F) as i16;
-    let bb = ((bg >> 10) & 0x1F) as i16;
-    let fr = (fg & 0x1F) as i16;
-    let fgg = ((fg >> 5) & 0x1F) as i16;
-    let fb = ((fg >> 10) & 0x1F) as i16;
+    let br = (bg & 0x1f) as i16;
+    let bgg = ((bg >> 5) & 0x1f) as i16;
+    let bb = ((bg >> 10) & 0x1f) as i16;
+    let fr = (fg & 0x1f) as i16;
+    let fgg = ((fg >> 5) & 0x1f) as i16;
+    let fb = ((fg >> 10) & 0x1f) as i16;
     let (r, g, b) = match mode {
         BlendMode::Opaque => unreachable!(),
         // Half-back + half-front -- sum the operands THEN halve, per the

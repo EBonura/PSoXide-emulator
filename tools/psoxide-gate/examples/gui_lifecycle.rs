@@ -18,7 +18,10 @@ use clap::Parser;
 use machine::{Boot, Machine};
 use psx_gpu_render::{HwRenderer, ScaleMode};
 use serde::Deserialize;
-use std::{collections::BTreeMap, fs, io::Write, path::PathBuf};
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 struct Args {

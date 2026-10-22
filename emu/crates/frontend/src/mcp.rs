@@ -19,9 +19,8 @@
 use base64::Engine as _;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock};
-use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpService,
-};
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::{ErrorData, ServerHandler};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -340,9 +339,9 @@ fn status(state: &AppState) -> String {
 // --- small helpers ---------------------------------------------------------
 
 fn bgr555_to_rgb8(px: u16) -> (u8, u8, u8) {
-    let r5 = (px & 0x1F) as u8;
-    let g5 = ((px >> 5) & 0x1F) as u8;
-    let b5 = ((px >> 10) & 0x1F) as u8;
+    let r5 = (px & 0x1f) as u8;
+    let g5 = ((px >> 5) & 0x1f) as u8;
+    let b5 = ((px >> 10) & 0x1f) as u8;
     let ex = |c: u8| (c << 3) | (c >> 2);
     (ex(r5), ex(g5), ex(b5))
 }

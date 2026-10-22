@@ -38,7 +38,7 @@ pub const BANK2_ROM_OFFSET: usize = BANK1_ROM_OFFSET + BANK1_CELLS * CELL_BYTES;
 /// Cells of charset 3: the level 1 kanji, JIS X 0208 rows 16 to 47.
 pub const BANK2_CELLS: usize = 31 * 94 + 51;
 /// Where the BIOS ROM is mapped.
-const ROM_BASE: u32 = 0xBFC0_0000;
+const ROM_BASE: u32 = 0xbfc0_0000;
 
 /// The assigned cells of JIS X 0208 rows 1 to 8, as inclusive runs of cell
 /// numbers (1 to 94) per row: symbols; more symbols with gaps; digits and
@@ -58,11 +58,11 @@ const BANK1_ASSIGNED: [&[(u8, u8)]; 8] = [
 /// two rows share a lead byte, odd rows take trail bytes 40h..7Eh and
 /// 80h..9Eh, even rows 9Fh..FCh.
 fn sjis(row: u8, cell: u8) -> u16 {
-    let lead = u16::from(row.div_ceil(2)) + if row <= 62 { 0x80 } else { 0xC0 };
+    let lead = u16::from(row.div_ceil(2)) + if row <= 62 { 0x80 } else { 0xc0 };
     let trail = if row % 2 == 1 {
-        u16::from(cell) + if cell <= 63 { 0x3F } else { 0x40 }
+        u16::from(cell) + if cell <= 63 { 0x3f } else { 0x40 }
     } else {
-        u16::from(cell) + 0x9E
+        u16::from(cell) + 0x9e
     };
     lead << 8 | trail
 }
@@ -71,14 +71,14 @@ fn sjis(row: u8, cell: u8) -> u16 {
 /// or `None` for a code that is not a character position.
 fn jis(code: u16) -> Option<(u8, u8)> {
     let (lead, trail) = ((code >> 8) as u8, code as u8);
-    if !(0x81..=0x9F).contains(&lead) {
+    if !(0x81..=0x9f).contains(&lead) {
         return None;
     }
     let first_row = (lead - 0x81) * 2 + 1;
     match trail {
-        0x40..=0x7E => Some((first_row, trail - 0x3F)),
-        0x80..=0x9E => Some((first_row, trail - 0x40)),
-        0x9F..=0xFC => Some((first_row + 1, trail - 0x9E)),
+        0x40..=0x7e => Some((first_row, trail - 0x3f)),
+        0x80..=0x9e => Some((first_row, trail - 0x40)),
+        0x9f..=0xfc => Some((first_row + 1, trail - 0x9e)),
         _ => None,
     }
 }
@@ -185,7 +185,7 @@ fn missing_glyph() -> [u8; CELL_BYTES] {
     let mut cell = [0u8; CELL_BYTES];
     for row in 1..14 {
         let word: u16 = if row == 1 || row == 13 {
-            0x7FFE
+            0x7ffe
         } else {
             0x4002
         };
@@ -233,17 +233,17 @@ mod tests {
     #[test]
     fn codes_map_to_jis_rows_and_back() {
         assert_eq!(sjis(1, 1), 0x8140);
-        assert_eq!(sjis(2, 1), 0x819F);
+        assert_eq!(sjis(2, 1), 0x819f);
         assert_eq!(sjis(1, 64), 0x8180);
-        assert_eq!(sjis(3, 16), 0x824F);
-        assert_eq!(sjis(16, 1), 0x889F);
+        assert_eq!(sjis(3, 16), 0x824f);
+        assert_eq!(sjis(16, 1), 0x889f);
         assert_eq!(sjis(47, 51), 0x9872);
         for row in 1..=47u8 {
             for cell in 1..=94u8 {
                 assert_eq!(jis(sjis(row, cell)), Some((row, cell)), "{row}-{cell}");
             }
         }
-        assert_eq!(jis(0x817F), None);
+        assert_eq!(jis(0x817f), None);
         assert_eq!(jis(0x0041), None);
     }
 
@@ -251,17 +251,17 @@ mod tests {
     fn bank1_holds_the_assigned_cells_of_rows_1_to_8() {
         // Space, full-width 0 and A, hiragana a, the last box-drawing cell.
         assert_eq!(krom2_offset(0x8140), 0);
-        assert_eq!(krom2_offset(0x824F), 147);
+        assert_eq!(krom2_offset(0x824f), 147);
         assert_eq!(krom2_offset(0x8260), 157);
-        assert_eq!(krom2_offset(0x829F), 209);
-        assert_eq!(krom2_offset(0x84BE), 523);
+        assert_eq!(krom2_offset(0x829f), 209);
+        assert_eq!(krom2_offset(0x84be), 523);
         let assigned: usize = BANK1_ASSIGNED
             .iter()
             .flat_map(|runs| runs.iter())
             .map(|&(first, last)| usize::from(last - first) + 1)
             .sum();
         assert_eq!(assigned, BANK1_CELLS);
-        assert_eq!(BANK2_ROM_OFFSET, BANK1_ROM_OFFSET + 0x3D68);
+        assert_eq!(BANK2_ROM_OFFSET, BANK1_ROM_OFFSET + 0x3d68);
         // Gaps in the chart have no cell: row 2 has cells 1 to 14, then 26 to 33.
         assert_eq!(krom2_offset(u32::from(sjis(2, 14))), 94 + 13);
         assert_eq!(krom2_offset(u32::from(sjis(2, 15))), u16::MAX);
@@ -271,10 +271,10 @@ mod tests {
 
     #[test]
     fn bank2_holds_level_1_kanji_row_by_row() {
-        assert_eq!(bank2_cell(0x889F), Some(0));
+        assert_eq!(bank2_cell(0x889f), Some(0));
         assert_eq!(bank2_cell(0x8940), Some(94));
         assert_eq!(bank2_cell(0x8980), Some(94 + 63));
-        assert_eq!(bank2_cell(0x899F), Some(188));
+        assert_eq!(bank2_cell(0x899f), Some(188));
         assert_eq!(bank2_cell(0x9872), Some(BANK2_CELLS as u16 - 1));
         assert_eq!(bank2_cell(0x9873), None);
         const { assert!(BANK2_ROM_OFFSET + BANK2_CELLS * CELL_BYTES <= 0x8_0000) };
@@ -282,10 +282,10 @@ mod tests {
 
     #[test]
     fn raw_add_answers_minus_one_for_codes_without_a_cell() {
-        assert_eq!(krom2_raw_add(0x8260), 0xBFC6_6000 + 157 * 30);
-        assert_eq!(krom2_raw_add(0x889F), 0xBFC6_6000 + 0x3D68);
+        assert_eq!(krom2_raw_add(0x8260), 0xbfc6_6000 + 157 * 30);
+        assert_eq!(krom2_raw_add(0x889f), 0xbfc6_6000 + 0x3d68);
         assert_eq!(krom2_raw_add(0x0041), u32::MAX);
-        assert_eq!(krom2_raw_add(0x84BF), u32::MAX);
+        assert_eq!(krom2_raw_add(0x84bf), u32::MAX);
         assert_eq!(krom2_raw_add(0x9873), u32::MAX);
         assert_eq!(krom2_raw_add(0x1_8260), u32::MAX);
     }
@@ -295,7 +295,7 @@ mod tests {
         let mut rom = vec![0u8; 0x8_0000];
         install(&mut rom);
         let at = |code: u32| {
-            let offset = (krom2_raw_add(code) - 0xBFC0_0000) as usize;
+            let offset = (krom2_raw_add(code) - 0xbfc0_0000) as usize;
             rom[offset..offset + CELL_BYTES].to_vec()
         };
         for (&code, cell) in glyphs() {

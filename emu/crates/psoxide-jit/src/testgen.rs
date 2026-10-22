@@ -18,7 +18,7 @@ use emulator_core::{Bus, Cpu, EmulatorStateRef};
 pub const CODE_BASE: u32 = 0x8001_0000;
 /// RAM data area the loads and stores use.
 pub const DATA_BASE: u32 = 0x8010_0000;
-const SCRATCH_BASE: u32 = 0x1F80_0000;
+const SCRATCH_BASE: u32 = 0x1f80_0000;
 
 /// xorshift64*.
 pub struct Rng(u64);
@@ -26,14 +26,14 @@ pub struct Rng(u64);
 impl Rng {
     /// Seeded generator (seed 0 is remapped).
     pub fn new(seed: u64) -> Self {
-        Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
+        Self(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1)
     }
     /// Next 64 random bits.
     pub fn next_u64(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
-        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
     }
     /// Uniform in `0..n`.
     pub fn below(&mut self, n: u32) -> u32 {
@@ -49,10 +49,10 @@ fn r(funct: u32, rs: u32, rt: u32, rd: u32, sa: u32) -> u32 {
     rs << 21 | rt << 16 | rd << 11 | sa << 6 | funct
 }
 fn i(op: u32, rs: u32, rt: u32, imm: u32) -> u32 {
-    op << 26 | rs << 21 | rt << 16 | (imm & 0xFFFF)
+    op << 26 | rs << 21 | rt << 16 | (imm & 0xffff)
 }
 fn j(op: u32, target: u32) -> u32 {
-    op << 26 | ((target >> 2) & 0x03FF_FFFF)
+    op << 26 | ((target >> 2) & 0x03ff_ffff)
 }
 const NOP: u32 = 0;
 const BASE_RAM: u32 = 20;
@@ -81,7 +81,7 @@ fn src(rng: &mut Rng) -> u32 {
 
 fn alu(rng: &mut Rng) -> u32 {
     let (rd, rs, rt) = (reg(rng), src(rng), src(rng));
-    let imm = rng.next_u64() as u32 & 0xFFFF;
+    let imm = rng.next_u64() as u32 & 0xffff;
     match rng.below(20) {
         0 => r(0x21, rs, rt, rd, 0),
         1 => r(0x23, rs, rt, rd, 0),
@@ -89,8 +89,8 @@ fn alu(rng: &mut Rng) -> u32 {
         3 => r(0x25, rs, rt, rd, 0),
         4 => r(0x26, rs, rt, rd, 0),
         5 => r(0x27, rs, rt, rd, 0),
-        6 => r(0x2A, rs, rt, rd, 0),
-        7 => r(0x2B, rs, rt, rd, 0),
+        6 => r(0x2a, rs, rt, rd, 0),
+        7 => r(0x2b, rs, rt, rd, 0),
         8 => r(0x00, 0, rt, rd, rng.below(32)),
         9 => r(0x02, 0, rt, rd, rng.below(32)),
         10 => r(0x03, 0, rt, rd, rng.below(32)),
@@ -98,15 +98,15 @@ fn alu(rng: &mut Rng) -> u32 {
         12 => r(0x06, rs, rt, rd, 0),
         13 => r(0x07, rs, rt, rd, 0),
         14 => i(0x09, rs, rd, imm),
-        15 => i(0x0A, rs, rd, imm),
-        16 => i(0x0B, rs, rd, imm),
-        17 => i(0x0C, rs, rd, imm),
-        18 => i(0x0D, rs, rd, imm),
+        15 => i(0x0a, rs, rd, imm),
+        16 => i(0x0b, rs, rd, imm),
+        17 => i(0x0c, rs, rd, imm),
+        18 => i(0x0d, rs, rd, imm),
         _ => {
             if rng.chance(50) {
-                i(0x0E, rs, rd, imm)
+                i(0x0e, rs, rd, imm)
             } else {
-                i(0x0F, 0, rd, imm)
+                i(0x0f, 0, rd, imm)
             }
         }
     }
@@ -130,12 +130,12 @@ fn mem(rng: &mut Rng) -> u32 {
     let aligned = rng.chance(92);
     let mut off = rng.below(256);
     let op = [
-        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x28, 0x29, 0x2A, 0x2B, 0x2E,
+        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x28, 0x29, 0x2a, 0x2b, 0x2e,
     ][rng.below(12) as usize];
     if aligned {
         off &= match op {
             0x21 | 0x25 | 0x29 => !1,
-            0x23 | 0x2B => !3,
+            0x23 | 0x2b => !3,
             _ => !0,
         };
     }
@@ -147,8 +147,8 @@ fn muldiv(rng: &mut Rng) -> u32 {
     match rng.below(8) {
         0 => r(0x18, rs, rt, 0, 0),
         1 => r(0x19, rs, rt, 0, 0),
-        2 => r(0x1A, rs, rt, 0, 0),
-        3 => r(0x1B, rs, rt, 0, 0),
+        2 => r(0x1a, rs, rt, 0, 0),
+        3 => r(0x1b, rs, rt, 0, 0),
         4 => r(0x10, 0, 0, rd, 0),
         5 => r(0x12, 0, 0, rd, 0),
         6 => r(0x11, rs, 0, 0, 0),
@@ -167,14 +167,14 @@ fn trapping(rng: &mut Rng) -> u32 {
 
 fn gte(rng: &mut Rng) -> u32 {
     const COMMANDS: [u32; 8] = [
-        0x4A18_0001, // RTPS
-        0x4A28_0030, // RTPT
-        0x4B40_0006, // NCLIP
-        0x4B58_002D, // AVSZ3
-        0x4B68_002E, // AVSZ4
-        0x4AA0_0428, // SQR
-        0x4B70_000C, // OP
-        0x4B90_003D, // GPF
+        0x4a18_0001, // RTPS
+        0x4a28_0030, // RTPT
+        0x4b40_0006, // NCLIP
+        0x4b58_002d, // AVSZ3
+        0x4b68_002e, // AVSZ4
+        0x4aa0_0428, // SQR
+        0x4b70_000c, // OP
+        0x4b90_003d, // GPF
     ];
     let rt = reg(rng);
     let rd = rng.below(32);
@@ -183,7 +183,7 @@ fn gte(rng: &mut Rng) -> u32 {
         2 => 0x4800_0000 | rt << 16 | rd << 11, // MFC2
         3 => 0x4880_0000 | rt << 16 | rd << 11, // MTC2
         4 => 0x4840_0000 | rt << 16 | rd << 11, // CFC2
-        _ => 0x48C0_0000 | rt << 16 | (rd & 0x1F) << 11, // CTC2
+        _ => 0x48c0_0000 | rt << 16 | (rd & 0x1f) << 11, // CTC2
     }
 }
 
@@ -210,25 +210,25 @@ pub fn program(rng: &mut Rng, body_len: usize, gte_percent: u32) -> (Vec<u32>, V
     // target, repeat); I_MASK = VBlank | Timer 2; SR = IEc | IM2 | CU2.
     let target = 0x100 + rng.below(0x700);
     code.extend([
-        i(0x0F, 0, 1, 0x1F80), // lui r1, 0x1f80
+        i(0x0f, 0, 1, 0x1f80), // lui r1, 0x1f80
         i(0x09, 0, 2, target), // addiu r2, r0, target
         i(0x29, 1, 2, 0x1128), // sh r2, 0x1128(r1)
         i(0x09, 0, 2, 0x0058), // addiu r2, r0, 0x58
         i(0x29, 1, 2, 0x1124), // sh r2, 0x1124(r1)
         i(0x09, 0, 2, 0x41),   // addiu r2, r0, 0x41
-        i(0x2B, 1, 2, 0x1074), // sw r2, 0x1074(r1)
-        i(0x0F, 0, 2, 0x4000), // lui r2, 0x4000
-        i(0x0D, 2, 2, 0x0401), // ori r2, r2, 0x401
+        i(0x2b, 1, 2, 0x1074), // sw r2, 0x1074(r1)
+        i(0x0f, 0, 2, 0x4000), // lui r2, 0x4000
+        i(0x0d, 2, 2, 0x0401), // ori r2, r2, 0x401
         0x4082_6000,           // mtc0 r2, sr
-        i(0x0F, 0, BASE_RAM, DATA_BASE >> 16),
-        i(0x0F, 0, BASE_SCRATCH, SCRATCH_BASE >> 16),
-        i(0x0F, 0, BASE_IO, 0x1F80),
-        i(0x0D, BASE_IO, BASE_IO, 0x1000),
+        i(0x0f, 0, BASE_RAM, DATA_BASE >> 16),
+        i(0x0f, 0, BASE_SCRATCH, SCRATCH_BASE >> 16),
+        i(0x0f, 0, BASE_IO, 0x1f80),
+        i(0x0d, BASE_IO, BASE_IO, 0x1000),
     ]);
     for rd in (1..=19).chain(22..=25) {
         let v = rng.next_u64() as u32;
-        code.push(i(0x0F, 0, rd, v >> 16));
-        code.push(i(0x0D, rd, rd, v));
+        code.push(i(0x0f, 0, rd, v >> 16));
+        code.push(i(0x0d, rd, rd, v));
     }
     // Leaf functions after the loop; calls patched below.
     let body_start = code.len();
@@ -266,11 +266,11 @@ pub fn program(rng: &mut Rng, body_len: usize, gte_percent: u32) -> (Vec<u32>, V
             // whose branch goes back to its own start.
             let count = 1 + rng.below(20);
             let k = 1 + rng.below(5);
-            code.push(i(0x0D, 0, 28, count)); // ori gp, r0, count
+            code.push(i(0x0d, 0, 28, count)); // ori gp, r0, count
             for _ in 0..k {
                 code.push(plain(rng, gte_percent));
             }
-            code.push(i(0x09, 28, 28, 0xFFFF)); // addiu gp, gp, -1
+            code.push(i(0x09, 28, 28, 0xffff)); // addiu gp, gp, -1
             code.push(i(0x05, 28, 0, (-(k as i32 + 2)) as u32)); // bne gp, r0, loop
             code.push(plain(rng, gte_percent));
             n += k as usize + 4;
@@ -300,19 +300,19 @@ pub fn program(rng: &mut Rng, body_len: usize, gte_percent: u32) -> (Vec<u32>, V
     // General exception vector: acknowledge interrupts and return to EPC;
     // step over anything else.
     let handler = vec![
-        0x401A_6800, // mfc0 k0, cause
+        0x401a_6800, // mfc0 k0, cause
         NOP,
-        i(0x0C, 26, 26, 0x7C), // andi k0, k0, 0x7c
+        i(0x0c, 26, 26, 0x7c), // andi k0, k0, 0x7c
         i(0x05, 26, 0, 7),     // bne k0, r0, exc
         NOP,
-        i(0x0F, 0, 27, 0x1F80), // lui k1, 0x1f80
-        i(0x2B, 27, 0, 0x1070), // sw r0, 0x1070(k1)
-        0x401A_7000,            // mfc0 k0, epc
+        i(0x0f, 0, 27, 0x1f80), // lui k1, 0x1f80
+        i(0x2b, 27, 0, 0x1070), // sw r0, 0x1070(k1)
+        0x401a_7000,            // mfc0 k0, epc
         NOP,
         r(0x08, 26, 0, 0, 0), // jr k0
         0x4200_0010,          // rfe
         // exc:
-        0x401A_7000, // mfc0 k0, epc
+        0x401a_7000, // mfc0 k0, epc
         NOP,
         i(0x09, 26, 26, 4),   // addiu k0, k0, 4
         r(0x08, 26, 0, 0, 0), // jr k0
@@ -534,13 +534,13 @@ pub struct Mix {
 /// `body_len` instructions repeats forever.
 pub fn synthetic(rng: &mut Rng, body_len: usize, mix: Mix) -> (Vec<u32>, Vec<u32>) {
     let mut code = vec![
-        i(0x0F, 0, BASE_RAM, DATA_BASE >> 16),
-        i(0x0F, 0, BASE_SCRATCH, SCRATCH_BASE >> 16),
+        i(0x0f, 0, BASE_RAM, DATA_BASE >> 16),
+        i(0x0f, 0, BASE_SCRATCH, SCRATCH_BASE >> 16),
     ];
     for rd in (1..=19).chain(22..=25) {
         let v = rng.next_u64() as u32;
-        code.push(i(0x0F, 0, rd, v >> 16));
-        code.push(i(0x0D, rd, rd, v));
+        code.push(i(0x0f, 0, rd, v >> 16));
+        code.push(i(0x0d, rd, rd, v));
     }
     let body_start = code.len();
     let mut n = 0;
@@ -555,7 +555,7 @@ pub fn synthetic(rng: &mut Rng, body_len: usize, mix: Mix) -> (Vec<u32>, Vec<u32
             let op = word >> 26;
             if matches!(op, 0x21 | 0x25 | 0x29) {
                 word &= !1;
-            } else if matches!(op, 0x23 | 0x2B) {
+            } else if matches!(op, 0x23 | 0x2b) {
                 word &= !3;
             }
             code.push(word);

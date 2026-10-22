@@ -32,7 +32,7 @@ const MODE2_BYTES: usize = 2336;
 const MODE2_FROM: usize = 0x10;
 
 /// (count - 1) of the end marker.
-const END_MARKER: u32 = 0xFFFF_FFFF;
+const END_MARKER: u32 = 0xffff_ffff;
 
 /// EDC of `bytes`, continued from `edc` (0 to start a stream).
 #[cfg_attr(not(test), allow(dead_code))]
@@ -56,14 +56,14 @@ fn unit_sizes(kind: u8) -> (u64, u64) {
 fn parse_header(bytes: &[u8]) -> Result<(Option<(u8, u64)>, usize), String> {
     let first = *bytes.first().ok_or("ECM record header missing")?;
     let kind = first & 3;
-    let mut value = u64::from((first >> 2) & 0x1F);
+    let mut value = u64::from((first >> 2) & 0x1f);
     let mut shift = 5;
     let mut len = 1;
     let mut more = first & 0x80 != 0;
     while more {
         let byte = *bytes.get(len).ok_or("ECM record header truncated")?;
         len += 1;
-        value |= u64::from(byte & 0x7F) << shift;
+        value |= u64::from(byte & 0x7f) << shift;
         shift += 7;
         more = byte & 0x80 != 0;
         if shift > 35 || value > u64::from(u32::MAX) {
@@ -83,24 +83,24 @@ fn parse_header(bytes: &[u8]) -> Result<(Option<(u8, u64)>, usize), String> {
 /// `sector`, returning the part of it the image holds.
 fn decode_unit(kind: u8, input: &[u8], sector: &mut [u8; SECTOR_BYTES]) -> core::ops::Range<usize> {
     sector[0] = 0;
-    sector[1..11].fill(0xFF);
+    sector[1..11].fill(0xff);
     sector[11] = 0;
     if kind == 1 {
-        sector[0x0C..0x0F].copy_from_slice(&input[..3]);
-        sector[0x0F] = 1;
+        sector[0x0c..0x0f].copy_from_slice(&input[..3]);
+        sector[0x0f] = 1;
         sector[0x10..0x810].copy_from_slice(&input[3..3 + 2048]);
         psx_iso::protect_mode1(sector);
         return 0..SECTOR_BYTES;
     }
-    sector[0x0C..0x0F].fill(0);
-    sector[0x0F] = 2;
+    sector[0x0c..0x0f].fill(0);
+    sector[0x0f] = 2;
     sector[0x10..0x14].copy_from_slice(&input[..4]);
     sector[0x14..0x18].copy_from_slice(&input[..4]);
     if kind == 2 {
         sector[0x18..0x818].copy_from_slice(&input[4..4 + 2048]);
         psx_iso::protect_mode2_form1(sector);
     } else {
-        sector[0x18..0x92C].copy_from_slice(&input[4..4 + 2324]);
+        sector[0x18..0x92c].copy_from_slice(&input[4..4 + 2324]);
         psx_iso::protect_mode2_form2(sector);
     }
     MODE2_FROM..SECTOR_BYTES
@@ -424,7 +424,7 @@ mod tests {
             crc ^= u32::from(byte);
             for _ in 0..8 {
                 crc = if crc & 1 != 0 {
-                    (crc >> 1) ^ 0xD801_8001
+                    (crc >> 1) ^ 0xd801_8001
                 } else {
                     crc >> 1
                 };
@@ -437,11 +437,11 @@ mod tests {
     /// marker, whose stored count - 1 is FFFFFFFFh).
     fn header(kind: u8, count: u64) -> Vec<u8> {
         let mut rest = (count as u32).wrapping_sub(1);
-        let mut out = vec![kind | (((rest & 0x1F) as u8) << 2)];
+        let mut out = vec![kind | (((rest & 0x1f) as u8) << 2)];
         rest >>= 5;
         while rest != 0 {
             *out.last_mut().unwrap() |= 0x80;
-            out.push((rest & 0x7F) as u8);
+            out.push((rest & 0x7f) as u8);
             rest >>= 7;
         }
         out
@@ -468,7 +468,7 @@ mod tests {
 
     /// Multiply by alpha in GF(2^8) with the ECMA-130 field polynomial.
     fn times_alpha(a: u8) -> u8 {
-        (a << 1) ^ if a & 0x80 != 0 { 0x1D } else { 0 }
+        (a << 1) ^ if a & 0x80 != 0 { 0x1d } else { 0 }
     }
 
     /// Check both ECMA-130 parity equations over every P column and Q
@@ -499,9 +499,9 @@ mod tests {
 
     #[test]
     fn end_marker_encodes_as_the_documented_bytes() {
-        assert_eq!(header(0, 0), [0xFC, 0xFF, 0xFF, 0xFF, 0x3F]);
+        assert_eq!(header(0, 0), [0xfc, 0xff, 0xff, 0xff, 0x3f]);
         assert_eq!(
-            parse_header(&[0xFC, 0xFF, 0xFF, 0xFF, 0x3F]).unwrap(),
+            parse_header(&[0xfc, 0xff, 0xff, 0xff, 0x3f]).unwrap(),
             (None, 5)
         );
         assert_eq!(parse_header(&[0x05]).unwrap(), (Some((1, 2)), 1));
@@ -527,17 +527,17 @@ mod tests {
         assert_eq!(decode_unit(1, &unit, &mut sector), 0..SECTOR_BYTES);
         assert_eq!(
             sector[..12],
-            [0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0]
+            [0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0]
         );
-        assert_eq!(sector[0x0C..0x10], [1, 2, 3, 1]);
+        assert_eq!(sector[0x0c..0x10], [1, 2, 3, 1]);
         assert_eq!(sector[0x10..0x810], unit[3..]);
         assert_eq!(
             sector[0x810..0x814],
             edc_bitwise(&sector[..0x810]).to_le_bytes()
         );
-        assert!(sector[0x814..0x81C].iter().all(|&b| b == 0));
+        assert!(sector[0x814..0x81c].iter().all(|&b| b == 0));
         assert!(
-            parity_holds(&sector[0x0C..]),
+            parity_holds(&sector[0x0c..]),
             "parity counts the real header"
         );
     }
@@ -546,25 +546,25 @@ mod tests {
     fn mode2_form1_sector_duplicates_the_subheader_and_zeroes_nothing_else() {
         let mut unit = vec![0x11, 0x22, 0x08, 0x44];
         unit.extend(pattern(2048, 9));
-        let mut sector = [0xAAu8; SECTOR_BYTES];
+        let mut sector = [0xaau8; SECTOR_BYTES];
         let range = decode_unit(2, &unit, &mut sector);
         assert_eq!(range, 0x10..SECTOR_BYTES);
         assert_eq!(sector[0x10..0x14], unit[..4]);
         assert_eq!(sector[0x14..0x18], unit[..4]);
         assert_eq!(sector[0x18..0x818], unit[4..]);
         assert_eq!(
-            sector[0x818..0x81C],
+            sector[0x818..0x81c],
             edc_bitwise(&sector[0x10..0x818]).to_le_bytes()
         );
         let mut zero_header = sector;
-        zero_header[0x0C..0x10].fill(0);
+        zero_header[0x0c..0x10].fill(0);
         assert!(
-            parity_holds(&zero_header[0x0C..]),
+            parity_holds(&zero_header[0x0c..]),
             "parity counts the header as zero"
         );
         // Compare with psx-iso run on the same sector with a real header.
         let mut reference = sector;
-        reference[0x0C..0x10].copy_from_slice(&[0x00, 0x02, 0x16, 0x02]);
+        reference[0x0c..0x10].copy_from_slice(&[0x00, 0x02, 0x16, 0x02]);
         reference[0x818..].fill(0);
         psx_iso::protect_mode2_form1(&mut reference);
         assert_eq!(reference[0x10..], sector[0x10..]);
@@ -578,10 +578,10 @@ mod tests {
         decode_unit(2, &[0; 2052], &mut sector);
         let range = decode_unit(3, &unit, &mut sector);
         assert_eq!(range, 0x10..SECTOR_BYTES);
-        assert_eq!(sector[0x18..0x92C], unit[4..]);
+        assert_eq!(sector[0x18..0x92c], unit[4..]);
         assert_eq!(
-            sector[0x92C..0x930],
-            edc_bitwise(&sector[0x10..0x92C]).to_le_bytes()
+            sector[0x92c..0x930],
+            edc_bitwise(&sector[0x10..0x92c]).to_le_bytes()
         );
     }
 
@@ -595,7 +595,7 @@ mod tests {
         reference[0x810..].fill(0);
         psx_iso::protect_mode1(&mut reference);
         assert_eq!(reference, sector);
-        assert!(parity_holds(&sector[0x0C..]));
+        assert!(parity_holds(&sector[0x0c..]));
     }
 
     /// A stream with every record type, and its decoded image.
@@ -678,9 +678,9 @@ mod tests {
         let image = EcmImage::open(Arc::new(wrong)).unwrap();
         assert!(image.verify().is_err());
         // A count of 80000000h or more that is not the end marker.
-        assert!(parse_header(&[0xFC, 0xFF, 0xFF, 0xFF, 0x2F]).is_err());
+        assert!(parse_header(&[0xfc, 0xff, 0xff, 0xff, 0x2f]).is_err());
         // More than 32 bits of count.
-        assert!(parse_header(&[0xFC, 0xFF, 0xFF, 0xFF, 0xFF]).is_err());
+        assert!(parse_header(&[0xfc, 0xff, 0xff, 0xff, 0xff]).is_err());
     }
 
     /// Full decode of a real image: `PSOXIDE_ECM_IMAGE=<file.img.ecm>`;

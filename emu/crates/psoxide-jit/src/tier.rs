@@ -117,7 +117,7 @@ fn plan(block: &Block) -> Vec<Step> {
             (OpClass::Load, _) if matches!(op.word >> 26, 0x20 | 0x21 | 0x23 | 0x24 | 0x25) => {
                 Step::Load
             }
-            (OpClass::Store, _) if op.word >> 26 == 0x2B => Step::StoreWord,
+            (OpClass::Store, _) if op.word >> 26 == 0x2b => Step::StoreWord,
             (OpClass::Load | OpClass::Store, _) => Step::Memory,
             (OpClass::Other | OpClass::GteCommand, _) => Step::Other,
             _ => break,
@@ -242,17 +242,17 @@ fn emit_gte_check(
             a.mov32(12, pc.wrapping_add(4));
             a.bind(taken);
             // Outside main RAM: the helper looks.
-            a.mov32(10, 0x1FFF_FFFF);
+            a.mov32(10, 0x1fff_ffff);
             a.and_w(13, 12, 10);
             a.lsr_w_imm(10, 13, 23);
             let outside = a.cbnz_w(10);
-            a.mov32(10, 0x1F_FFFC);
+            a.mov32(10, 0x1f_fffc);
             a.and_w(13, 13, 10);
             a.ldr_x(11, X_RUN, off::RAM as u32);
             a.add_x(11, 11, 13);
             a.ldr_w(13, 11, 0);
             a.lsr_w_imm(13, 13, 25);
-            a.cmp_w_imm(13, 0x4A00_0000 >> 25);
+            a.cmp_w_imm(13, 0x4a00_0000 >> 25);
             quiet.push(a.b_cond(Cond::Ne));
             a.bind(outside);
         } else {
@@ -278,8 +278,8 @@ fn emit_gte_check(
 /// positions after the load ends it and issues normally; positions three to
 /// six are hidden. Every fetch here is a cache hit.
 fn emit_issue(a: &mut Asm, word: u32) {
-    let rs = (word >> 21) & 0x1F;
-    let rt = (word >> 16) & 0x1F;
+    let rs = (word >> 21) & 0x1f;
+    let rt = (word >> 16) & 0x1f;
     let touches_bus = word >> 26 >= 0x20;
     a.ldr_w(10, X_RUN, off::SHADOW as u32);
     let no_shadow = a.cbz_w(10);
@@ -417,12 +417,12 @@ fn emit(block: &Block, steps: &[Step], cells: [u64; 2]) -> Asm {
                 a.str_x(X_ISSUE, X_RUN, off::ISSUE as u32);
                 // Form the address again for the helper (register values
                 // have not changed since).
-                load_reg(&mut a, 9, (word >> 21) & 0x1F);
+                load_reg(&mut a, 9, (word >> 21) & 0x1f);
                 a.mov32(10, (word as i16) as i32 as u32);
                 a.add_w(1, 9, 10);
                 a.mov_x(0, X_RUN);
                 if store {
-                    load_reg(&mut a, 2, (word >> 16) & 0x1F);
+                    load_reg(&mut a, 2, (word >> 16) & 0x1f);
                     a.mov32(3, word);
                     a.mov64(16, jit_ram_store32 as *const () as usize as u64);
                 } else {
@@ -434,7 +434,7 @@ fn emit(block: &Block, steps: &[Step], cells: [u64; 2]) -> Asm {
                     a.bind(done);
                 }
                 a.mov_x(X_ISSUE, ZR);
-                let rt = (word >> 16) & 0x1F;
+                let rt = (word >> 16) & 0x1f;
                 if !store && rt != 0 {
                     a.str_w(0, X_RUN, off::PEND_VAL as u32);
                     a.mov32(13, rt);
@@ -583,7 +583,7 @@ fn emit_link_exit(a: &mut Asm, block: &Block, cells: [u64; 2]) {
                     // Kernel call vectors (low addresses) the slow way; the
                     // cell holds the target it was linked for.
                     a.ldr_w(12, X_RUN, off::TARGET as u32);
-                    a.mov32(13, 0x1F_FFFF);
+                    a.mov32(13, 0x1f_ffff);
                     a.and_w(13, 12, 13);
                     a.cmp_w_imm(13, 0x100);
                     slow.push(a.b_cond(Cond::Lo));
@@ -593,13 +593,13 @@ fn emit_link_exit(a: &mut Asm, block: &Block, cells: [u64; 2]) {
                 }
                 _ => {
                     let target = if matches!(branch, Branch::J | Branch::Jal) {
-                        (pc.wrapping_add(4) & 0xF000_0000) | ((word & 0x03FF_FFFF) << 2)
+                        (pc.wrapping_add(4) & 0xf000_0000) | ((word & 0x03ff_ffff) << 2)
                     } else {
                         pc.wrapping_add(4)
                             .wrapping_add((((word as i16) as i32) << 2) as u32)
                     };
-                    let base = (target >> 20) & 0x0FFC;
-                    if matches!(base, 0x000 | 0x800 | 0xA00) && target & 0x1F_FFFF < 0x100 {
+                    let base = (target >> 20) & 0x0ffc;
+                    if matches!(base, 0x000 | 0x800 | 0xa00) && target & 0x1f_ffff < 0x100 {
                         slow.push(a.b());
                     }
                 }
@@ -674,7 +674,7 @@ fn emit_epilogue(a: &mut Asm) {
 /// w9 = the effective address of the memory op `word`; branches to the
 /// returned fixup unless it is aligned, below KSEG2 and in main RAM.
 fn emit_ram_address(a: &mut Asm, word: u32) -> Vec<crate::a64::Fixup> {
-    let rs = (word >> 21) & 0x1F;
+    let rs = (word >> 21) & 0x1f;
     let imm = (word as i16) as i32 as u32;
     let mut slow = Vec::new();
     load_reg(a, 9, rs);
@@ -682,7 +682,7 @@ fn emit_ram_address(a: &mut Asm, word: u32) -> Vec<crate::a64::Fixup> {
     a.add_w(9, 9, 10);
     let align = match word >> 26 {
         0x21 | 0x25 => 1,
-        0x23 | 0x2B => 3,
+        0x23 | 0x2b => 3,
         _ => 0,
     };
     if align != 0 {
@@ -695,7 +695,7 @@ fn emit_ram_address(a: &mut Asm, word: u32) -> Vec<crate::a64::Fixup> {
     a.cmp_w_imm(10, 3);
     slow.push(a.b_cond(Cond::Eq));
     // Physical address below the end of the RAM mirrors.
-    a.mov32(10, 0x1FFF_FFFF);
+    a.mov32(10, 0x1fff_ffff);
     a.and_w(10, 9, 10);
     a.lsr_w_imm(10, 10, 23);
     slow.push(a.cbnz_w(10));
@@ -743,7 +743,7 @@ fn emit_fast_load(a: &mut Asm, word: u32) -> Vec<crate::a64::Fixup> {
     a.str_x(13, X_RUN, off::DECAY as u32);
     a.mov_x(X_ISSUE, ZR);
     // x14 = the host address.
-    a.mov32(13, 0x1F_FFFF);
+    a.mov32(13, 0x1f_ffff);
     a.and_w(13, 9, 13);
     a.ldr_x(14, X_RUN, off::RAM as u32);
     a.add_x(14, 14, 13);
@@ -756,10 +756,10 @@ fn emit_fast_load(a: &mut Asm, word: u32) -> Vec<crate::a64::Fixup> {
         // Byte or halfword: merge it into the latch at its lane.
         let (lane_mask, width_mask) = if matches!(op, 0x21 | 0x25) {
             a.ldrh_w(0, 14);
-            (2, 0xFFFF)
+            (2, 0xffff)
         } else {
             a.ldrb_w(0, 14);
-            (3, 0xFF)
+            (3, 0xff)
         };
         a.mov32(12, lane_mask);
         a.and_w(12, 9, 12);
@@ -788,7 +788,7 @@ fn emit_fast_load(a: &mut Asm, word: u32) -> Vec<crate::a64::Fixup> {
     a.movz_w(13, 1, 0);
     a.str_w(13, X_RUN, off::SHADOW as u32);
     a.str_w(ZR, X_RUN, off::SHADOW_POS as u32);
-    a.mov32(13, (word >> 16) & 0x1F);
+    a.mov32(13, (word >> 16) & 0x1f);
     a.str_w(13, X_RUN, off::SHADOW_REG as u32);
     helper
 }

@@ -46,9 +46,9 @@ use crate::vram::{Vram, VRAM_HEIGHT, VRAM_WIDTH};
 use commands::gp0_packet_size;
 
 /// Physical address of the GP0 / GPUREAD port.
-pub const GP0_ADDR: u32 = 0x1F80_1810;
+pub const GP0_ADDR: u32 = 0x1f80_1810;
 /// Physical address of the GP1 / GPUSTAT port.
-pub const GP1_ADDR: u32 = 0x1F80_1814;
+pub const GP1_ADDR: u32 = 0x1f80_1814;
 
 /// GP1 status latches become CPU-visible after the first immediately
 /// following GPUSTAT read but before the second. The captured SCPH-9902
@@ -163,7 +163,7 @@ impl Deinterlace {
 /// Per-channel average of two VRAM words: five-bit channels at 15bpp, bytes
 /// at 24bpp (where each byte is its own channel).
 fn average_words(a: u16, b: u16, bpp24: bool) -> u16 {
-    let low_bits_dropped = if bpp24 { 0xFEFE } else { 0x7BDE };
+    let low_bits_dropped = if bpp24 { 0xfefe } else { 0x7bde };
     (a & b) + (((a ^ b) & low_bits_dropped) >> 1)
 }
 
@@ -976,7 +976,7 @@ impl Gpu {
     /// exactly the bytes `display_hash` covers; the value itself carries no meaning and may
     /// change between versions.
     pub fn display_fingerprint(&self) -> u64 {
-        const K: u64 = 0x9E37_79B9_7F4A_7C15;
+        const K: u64 = 0x9e37_79b9_7f4a_7c15;
         if !self.display_configured {
             return 0;
         }
@@ -1284,7 +1284,7 @@ impl Gpu {
         // pixel `dx` of row `dy` shows source pixel `dx - off_x` of source
         // row `dy - off_y` when that lies inside the display area.
         let (w, h) = (i32::from(eff_w), i32::from(eff_h));
-        let mut out = [0u8, 0, 0, 0xFF].repeat(w as usize * h as usize);
+        let mut out = [0u8, 0, 0, 0xff].repeat(w as usize * h as usize);
         let presented = self.presented_words(deinterlace);
         let words = &*presented;
         for dy in 0..h {
@@ -1322,9 +1322,9 @@ impl Gpu {
                 let start =
                     usize::from(sy) * VRAM_WIDTH + usize::from(da.x) + (x0 - off_x) as usize;
                 for (px, &pixel) in row.chunks_exact_mut(4).zip(&words[start..]) {
-                    let r = ((pixel & 0x1F) as u8) << 3;
-                    let g = (((pixel >> 5) & 0x1F) as u8) << 3;
-                    let b = (((pixel >> 10) & 0x1F) as u8) << 3;
+                    let r = ((pixel & 0x1f) as u8) << 3;
+                    let g = (((pixel >> 5) & 0x1f) as u8) << 3;
+                    let b = (((pixel >> 10) & 0x1f) as u8) << 3;
                     // Replicate high 3 bits into low 3 for fuller range.
                     px[..3].copy_from_slice(&[r | (r >> 5), g | (g >> 5), b | (b >> 5)]);
                 }
@@ -1368,7 +1368,7 @@ impl Gpu {
                 if self
                     .pending_gp1_status
                     .iter()
-                    .any(|(_, command)| command >> 24 == 0x1F)
+                    .any(|(_, command)| command >> 24 == 0x1f)
                 {
                     value |= 1 << 25;
                 }
@@ -1548,7 +1548,7 @@ impl Gpu {
             // then undo the on-transition clear for pixels still black --
             // content the game drew during wireframe stays.
             for (key, (old, written)) in std::mem::take(&mut self.wire_saved) {
-                let (x, y) = ((key & 0xFFFF) as u16, (key >> 16) as u16);
+                let (x, y) = ((key & 0xffff) as u16, (key >> 16) as u16);
                 if self.vram.get_pixel(x, y) == written {
                     self.vram.set_pixel(x, y, old);
                 }
@@ -1701,7 +1701,7 @@ impl Gpu {
         }
         let op = (word >> 24) as u8;
         if self.polyline.is_none()
-            && (matches!(op, 0xe3..=0xe5) || (op == 0x1F && self.deferred_irq_command.is_none()))
+            && (matches!(op, 0xe3..=0xe5) || (op == 0x1f && self.deferred_irq_command.is_none()))
         {
             return 0;
         }
@@ -1939,7 +1939,7 @@ impl Gpu {
             let op = (word >> 24) as u8;
             let superscalar_state =
                 matches!(op, 0xe3..=0xe5) && !transfer && self.polyline.is_none();
-            if op == 0x1F
+            if op == 0x1f
                 && !transfer
                 && self.polyline.is_none()
                 && self.busy_credit > 0
@@ -2016,25 +2016,25 @@ impl Gpu {
             // ready flags reach GPUSTAT. On SCPH-9902 the first immediately
             // following read has bits 26/28 clear and the second has them
             // set, the same edge measured for the IRQ status latch itself.
-            0x1F => GP1_STATUS_LATCH_CYCLES,
+            0x1f => GP1_STATUS_LATCH_CYCLES,
             // GP0(02h) has a dedicated fast fill engine: a little over twelve
             // pixels per CPU cycle, after a fixed start (record 110).
             0x02 => {
                 let size = self.gp0_fifo[2];
-                let w = ((size & 0x3FF) + 0x0F) & !0x0F;
-                let h = (size >> 16) & 0x1FF;
+                let w = ((size & 0x3ff) + 0x0f) & !0x0f;
+                let h = (size >> 16) & 0x1ff;
                 // A fill honours the 480i rule too, over rows that wrap in
                 // VRAM; the rows it skips cost nothing.
-                let rows = self.field_rule_drawn_rows((self.gp0_fifo[1] >> 16) & 0x1FF, h);
+                let rows = self.field_rule_drawn_rows((self.gp0_fifo[1] >> 16) & 0x1ff, h);
                 let pixels = u64::from(w) * u64::from(rows);
                 self.note_timing_pixels(pixels);
                 DRAW_FILL_SETUP + scale_gpu_pixels(pixels, 41, 512)
             }
             // VRAM-to-VRAM uses the slower internal read/modify/write path.
-            0x80..=0x9F => {
+            0x80..=0x9f => {
                 let size = self.gp0_fifo[3];
-                let raw_w = size & 0x3FF;
-                let raw_h = (size >> 16) & 0x1FF;
+                let raw_w = size & 0x3ff;
+                let raw_h = (size >> 16) & 0x1ff;
                 let w = if raw_w == 0 { 1024 } else { raw_w };
                 let h = if raw_h == 0 { 512 } else { raw_h };
                 self.note_timing_pixels(u64::from(w) * u64::from(h));
@@ -2043,14 +2043,14 @@ impl Gpu {
             0x20..=0x23 => {
                 self.timing_triangle_cost(&tri(1, 2, 3), DRAW_FLAT_SETUP, rate(DRAW_FLAT_Q8))
             }
-            0x28..=0x2B => {
+            0x28..=0x2b => {
                 self.timing_triangle_cost(&tri(1, 2, 3), DRAW_FLAT_SETUP, rate(DRAW_FLAT_Q8))
                     + self.timing_triangle_cost(&tri(2, 4, 3), DRAW_FLAT_SETUP, rate(DRAW_FLAT_Q8))
             }
             0x30..=0x33 => {
                 self.timing_triangle_cost(&tri(1, 3, 5), DRAW_GOURAUD_SETUP, rate(DRAW_INTERP_Q8))
             }
-            0x38..=0x3B => {
+            0x38..=0x3b => {
                 self.timing_triangle_cost(&tri(1, 3, 5), DRAW_GOURAUD_SETUP, rate(DRAW_INTERP_Q8))
                     + self.timing_triangle_cost(
                         &tri(3, 7, 5),
@@ -2063,7 +2063,7 @@ impl Gpu {
                 DRAW_TEXTURED_SETUP,
                 tex_rate(DRAW_INTERP_Q8),
             ),
-            0x2C..=0x2F => {
+            0x2c..=0x2f => {
                 self.timing_triangle_cost(
                     &tri(1, 3, 5),
                     DRAW_TEXTURED_SETUP,
@@ -2079,7 +2079,7 @@ impl Gpu {
                 DRAW_GOURAUD_TEXTURED_SETUP,
                 tex_rate(DRAW_INTERP_Q8),
             ),
-            0x3C..=0x3F => {
+            0x3c..=0x3f => {
                 self.timing_triangle_cost(
                     &tri(1, 4, 7),
                     DRAW_GOURAUD_TEXTURED_SETUP,
@@ -2093,12 +2093,12 @@ impl Gpu {
             // Line setup/throughput from the PAL short/long batch pairs.
             // Monochrome is about 0.90 clocks/pixel plus six setup clocks;
             // Gouraud interpolation raises that to 1.03 plus thirteen.
-            0x40..=0x4F => {
+            0x40..=0x4f => {
                 let v0 = self.decode_vertex(self.gp0_fifo[1]);
                 let v1 = self.decode_vertex(self.gp0_fifo[2]);
                 7 + scale_gpu_pixels(timing_line_steps(v0, v1), 29, 32)
             }
-            0x50..=0x5F => {
+            0x50..=0x5f => {
                 let v0 = self.decode_vertex(self.gp0_fifo[1]);
                 let v1 = self.decode_vertex(self.gp0_fifo[3]);
                 16 + scale_gpu_pixels(timing_line_steps(v0, v1), 263, 256)
@@ -2109,19 +2109,19 @@ impl Gpu {
                 let size = self.gp0_fifo[2];
                 self.timing_rect_cost(
                     self.gp0_fifo[1],
-                    (size & 0xFFFF) as i32,
+                    (size & 0xffff) as i32,
                     (size >> 16) as i32,
                     DRAW_FLAT_SETUP,
                     rate(DRAW_FLAT_Q8),
                 )
             }
-            0x68..=0x6B => {
+            0x68..=0x6b => {
                 self.timing_rect_cost(self.gp0_fifo[1], 1, 1, DRAW_FLAT_SETUP, rate(DRAW_FLAT_Q8))
             }
             0x70..=0x73 => {
                 self.timing_rect_cost(self.gp0_fifo[1], 8, 8, DRAW_FLAT_SETUP, rate(DRAW_FLAT_Q8))
             }
-            0x78..=0x7B => self.timing_rect_cost(
+            0x78..=0x7b => self.timing_rect_cost(
                 self.gp0_fifo[1],
                 16,
                 16,
@@ -2132,13 +2132,13 @@ impl Gpu {
                 let size = self.gp0_fifo[3];
                 self.timing_rect_cost(
                     self.gp0_fifo[1],
-                    (size & 0xFFFF) as i32,
+                    (size & 0xffff) as i32,
                     (size >> 16) as i32,
                     DRAW_TEXTURED_SETUP,
                     tex_rate(DRAW_FLAT_Q8),
                 )
             }
-            0x6C..=0x6F => self.timing_rect_cost(
+            0x6c..=0x6f => self.timing_rect_cost(
                 self.gp0_fifo[1],
                 1,
                 1,
@@ -2152,7 +2152,7 @@ impl Gpu {
                 DRAW_TEXTURED_SETUP,
                 tex_rate(DRAW_FLAT_Q8),
             ),
-            0x7C..=0x7F => self.timing_rect_cost(
+            0x7c..=0x7f => self.timing_rect_cost(
                 self.gp0_fifo[1],
                 16,
                 16,
@@ -2183,17 +2183,17 @@ impl Gpu {
     /// not sample a texture.
     fn texture_timing_surcharge(&mut self, op: u8, pixels: u64, area: u64) -> u64 {
         let (clut, key) = match op {
-            0x24..=0x27 | 0x2C..=0x2F => (self.gp0_fifo[2] >> 16, self.gp0_fifo[4] >> 16),
-            0x34..=0x37 | 0x3C..=0x3F => (self.gp0_fifo[2] >> 16, self.gp0_fifo[5] >> 16),
-            0x64..=0x67 | 0x6C..=0x6F | 0x74..=0x77 | 0x7C..=0x7F => (
+            0x24..=0x27 | 0x2c..=0x2f => (self.gp0_fifo[2] >> 16, self.gp0_fifo[4] >> 16),
+            0x34..=0x37 | 0x3c..=0x3f => (self.gp0_fifo[2] >> 16, self.gp0_fifo[5] >> 16),
+            0x64..=0x67 | 0x6c..=0x6f | 0x74..=0x77 | 0x7c..=0x7f => (
                 self.gp0_fifo[2] >> 16,
-                u32::from(self.tex_page_x / 64) & 0xF
+                u32::from(self.tex_page_x / 64) & 0xf
                     | u32::from(self.tex_page_y >= 256) << 4
                     | u32::from(self.tex_depth) << 7,
             ),
             _ => return 0,
         };
-        let key = (key & 0x019F) as u16;
+        let key = (key & 0x019f) as u16;
         let depth = usize::from((key >> 7) & 3).min(2);
         let clut = clut as u16;
         // Q8 clocks a pixel for the per-pixel read, and a pixel past the
@@ -2245,13 +2245,13 @@ impl Gpu {
         }
         let uv = |index: usize| {
             let word = self.gp0_fifo[index];
-            ((word & 0xFF) as i64, ((word >> 8) & 0xFF) as i64)
+            ((word & 0xff) as i64, ((word >> 8) & 0xff) as i64)
         };
         let corners: &[usize] = match op {
             0x24..=0x27 => &[2, 4, 6],
-            0x2C..=0x2F => &[2, 4, 6, 8],
+            0x2c..=0x2f => &[2, 4, 6, 8],
             0x34..=0x37 => &[2, 5, 8],
-            0x3C..=0x3F => &[2, 5, 8, 11],
+            0x3c..=0x3f => &[2, 5, 8, 11],
             _ => return 0,
         };
         let cross = |a: (i64, i64), b: (i64, i64), c: (i64, i64)| {
@@ -2327,8 +2327,8 @@ impl Gpu {
         if w <= 0 || h <= 0 {
             return (0, 0, 0);
         }
-        let x = sign_extend_11((pos & 0x7FF) as i32) + self.draw_offset_x;
-        let y = sign_extend_11(((pos >> 16) & 0x7FF) as i32) + self.draw_offset_y;
+        let x = sign_extend_11((pos & 0x7ff) as i32) + self.draw_offset_x;
+        let y = sign_extend_11(((pos >> 16) & 0x7ff) as i32) + self.draw_offset_y;
         let left = x.max(self.draw_area_left as i32).max(0);
         let top = y.max(self.draw_area_top as i32).max(0);
         let right = (x + w)
@@ -2442,7 +2442,7 @@ impl Gpu {
                 true
             }
             GP1_ADDR => {
-                let op = ((value >> 24) & 0xFF) as usize;
+                let op = ((value >> 24) & 0xff) as usize;
                 self.gp1_opcode_hist[op] = self.gp1_opcode_hist[op].saturating_add(1);
                 if self.gp1_write_history.len() == 512 {
                     self.gp1_write_history.remove(0);
@@ -2456,7 +2456,7 @@ impl Gpu {
                         // request; it must not surface after the clear.
                         let before = self.pending_gp1_status.len();
                         self.pending_gp1_status
-                            .retain(|(_, command)| command >> 24 != 0x1F);
+                            .retain(|(_, command)| command >> 24 != 0x1f);
                         self.irq_after_canceled_set_is_immediate |=
                             self.pending_gp1_status.len() != before;
                     }
@@ -2512,8 +2512,8 @@ impl Gpu {
             packet_words -= 1;
             if packet_words == 0 {
                 match (header >> 24) as u8 {
-                    0xA0..=0xBF => upload_words = vram_transfer_words(word),
-                    0x48..=0x4F | 0x58..=0x5F => polyline = true,
+                    0xa0..=0xbf => upload_words = vram_transfer_words(word),
+                    0x48..=0x4f | 0x58..=0x5f => polyline = true,
                     _ => {}
                 }
             }
@@ -2527,7 +2527,7 @@ impl Gpu {
             self.irq_requested = true;
             return;
         }
-        if matches!((value >> 24) & 0xFF, 0x00 | 0x02) {
+        if matches!((value >> 24) & 0xff, 0x00 | 0x02) {
             self.irq_acknowledged = true;
         }
         self.status.gp1_write(value);
@@ -2553,10 +2553,10 @@ impl Gpu {
     fn begin_vram_download(&mut self) {
         let xy = self.gp0_fifo[1];
         let wh = self.gp0_fifo[2];
-        let x = (xy & 0x3FF) as u16;
-        let y = ((xy >> 16) & 0x1FF) as u16;
+        let x = (xy & 0x3ff) as u16;
+        let y = ((xy >> 16) & 0x1ff) as u16;
         let w = {
-            let raw = (wh & 0x3FF) as u16;
+            let raw = (wh & 0x3ff) as u16;
             if raw == 0 {
                 1024
             } else {
@@ -2564,7 +2564,7 @@ impl Gpu {
             }
         };
         let h = {
-            let raw = ((wh >> 16) & 0x1FF) as u16;
+            let raw = ((wh >> 16) & 0x1ff) as u16;
             if raw == 0 {
                 512
             } else {
@@ -2626,7 +2626,7 @@ impl Gpu {
     /// The status-bit updates stay in `GpuStatus::gp1_write`; this
     /// function captures the geometry + latch the frontend + CPU need.
     fn apply_gp1_display(&mut self, value: u32) {
-        let cmd = (value >> 24) & 0xFF;
+        let cmd = (value >> 24) & 0xff;
         match cmd {
             // GP1 0x10 -- Get GPU Info. Sub-op selects what latches
             // into GPUREAD. See nocash PSX-SPX "GPU Memory Transfer
@@ -2726,8 +2726,8 @@ impl Gpu {
             //   bits 9:0  = X (pixels)
             //   bits 18:10 = Y (pixels)
             0x05 => {
-                self.display_start_x = (value & 0x3FF) as u16;
-                self.display_start_y = ((value >> 10) & 0x1FF) as u16;
+                self.display_start_x = (value & 0x3ff) as u16;
+                self.display_start_y = ((value >> 10) & 0x1ff) as u16;
                 self.display_start_history
                     .insert((self.display_start_x, self.display_start_y));
             }
@@ -2736,8 +2736,8 @@ impl Gpu {
             // display inside the video signal; doesn't change the
             // VRAM read window's width. Stored for completeness.
             0x06 => {
-                self.h_range_x1 = (value & 0xFFF) as u16;
-                self.h_range_x2 = ((value >> 12) & 0xFFF) as u16;
+                self.h_range_x1 = (value & 0xfff) as u16;
+                self.h_range_x2 = ((value >> 12) & 0xfff) as u16;
             }
             // GP1 0x07 -- Vertical display range. Bits 0..=9 = top
             // scanline, bits 10..=19 = bottom scanline. Effective
@@ -2746,8 +2746,8 @@ impl Gpu {
             // from the GP1(08h) mode bit, which gives 640×478 instead of
             // 640×480 at boot (gate-pinned).
             0x07 => {
-                self.v_range_y1 = (value & 0x3FF) as u16;
-                self.v_range_y2 = ((value >> 10) & 0x3FF) as u16;
+                self.v_range_y1 = (value & 0x3ff) as u16;
+                self.v_range_y2 = ((value >> 10) & 0x3ff) as u16;
                 self.display_configured = true;
             }
             // GP1 0x08 -- display mode. Height is the interlace flag;
@@ -2896,7 +2896,7 @@ impl Gpu {
         }
 
         if self.gp0_expected == 0 {
-            let op = (word >> 24) & 0xFF;
+            let op = (word >> 24) & 0xff;
             self.gp0_expected = gp0_packet_size(op as u8);
             // Single-word commands execute immediately without buffering.
             if self.gp0_expected == 1 {
@@ -2917,7 +2917,7 @@ impl Gpu {
     /// setters (GP0 0xE1..=0xE6) live here; we track drawing-area
     /// and drawing-offset because the rasterizer needs them.
     fn execute_gp0_single(&mut self, word: u32) {
-        let op = (word >> 24) & 0xFF;
+        let op = (word >> 24) & 0xff;
         let timing_cost = self.gp0_packet_timing_cost(op as u8);
         // Pixel tracer also wants to see state-modifying single-word
         // packets (0xE1..=0xE6 draw-mode / tex-window / draw-area /
@@ -2943,27 +2943,27 @@ impl Gpu {
             }
             // GP0 0x1F -- request GPU IRQ1. Rare in games, but BIOS and
             // hardware test suites can observe both GPUSTAT.24 and I_STAT.1.
-            0x1F => {
+            0x1f => {
                 self.status.raw |= 1 << 24;
                 self.irq_requested = true;
             }
             // GP0 0xE3 -- drawing area top-left. X bits 9:0, Y bits 18:10.
-            0xE3 => {
-                self.drawing_start_raw = word & 0x000F_FFFF;
-                self.draw_area_left = (word & 0x3FF) as u16;
-                self.draw_area_top = ((word >> 10) & 0x1FF) as u16;
+            0xe3 => {
+                self.drawing_start_raw = word & 0x000f_ffff;
+                self.draw_area_left = (word & 0x3ff) as u16;
+                self.draw_area_top = ((word >> 10) & 0x1ff) as u16;
             }
             // GP0 0xE4 -- drawing area bottom-right.
-            0xE4 => {
-                self.drawing_end_raw = word & 0x000F_FFFF;
-                self.draw_area_right = (word & 0x3FF) as u16;
-                self.draw_area_bottom = ((word >> 10) & 0x1FF) as u16;
+            0xe4 => {
+                self.drawing_end_raw = word & 0x000f_ffff;
+                self.draw_area_right = (word & 0x3ff) as u16;
+                self.draw_area_bottom = ((word >> 10) & 0x1ff) as u16;
             }
             // GP0 0xE5 -- drawing offset. X / Y are both signed 11-bit.
-            0xE5 => {
-                self.drawing_offset_raw = word & 0x003F_FFFF;
-                self.draw_offset_x = sign_extend_11((word & 0x7FF) as i32);
-                self.draw_offset_y = sign_extend_11(((word >> 11) & 0x7FF) as i32);
+            0xe5 => {
+                self.drawing_offset_raw = word & 0x003f_ffff;
+                self.draw_offset_x = sign_extend_11((word & 0x7ff) as i32);
+                self.draw_offset_y = sign_extend_11(((word >> 11) & 0x7ff) as i32);
             }
             // GP0 0xE1 -- draw mode: texture page base + colour depth
             // + dither/display/transparency flags. We extract the
@@ -2987,8 +2987,8 @@ impl Gpu {
             //   bit  13:  textured rectangle Y flip
             // These map 1:1 to GPUSTAT bits 0..=10 (plus rect-flip
             // bits that aren't visible in GPUSTAT).
-            0xE1 => {
-                self.tex_page_x = ((word & 0x0F) as u16) * 64;
+            0xe1 => {
+                self.tex_page_x = ((word & 0x0f) as u16) * 64;
                 self.tex_page_y = if (word >> 4) & 1 != 0 { 256 } else { 0 };
                 let upper_y = self.vram_2mb_addressing_enabled && (word >> 11) & 1 != 0;
                 if upper_y {
@@ -3001,8 +3001,8 @@ impl Gpu {
                 self.tex_rect_flip_y = (word >> 13) & 1 != 0;
                 // GPUSTAT bits 0..=10 come from E1h bits 0..=10. E1 bit 11
                 // is exposed at GPUSTAT.15 only when GP1(09h) allows it.
-                let stat_bits = word & 0x07FF;
-                self.status.raw = (self.status.raw & !(0x07FF | 0x8000))
+                let stat_bits = word & 0x07ff;
+                self.status.raw = (self.status.raw & !(0x07ff | 0x8000))
                     | stat_bits
                     | if upper_y { 0x8000 } else { 0 };
             }
@@ -3014,7 +3014,7 @@ impl Gpu {
             //           existing VRAM bit 15 is already 1.
             // Both also surface in GPUSTAT at bits 11 / 12 so
             // software polls see the updated setting.
-            0xE6 => {
+            0xe6 => {
                 self.mask_set_on_draw = word & 1 != 0;
                 self.mask_check_before_draw = word & 2 != 0;
                 let stat_bits = (word & 0x3) << 11;
@@ -3036,16 +3036,16 @@ impl Gpu {
             // small sub-rectangles rely on this to save VRAM -- the
             // same 128×128 tile gets reused for many prims with
             // different offsets.
-            0xE2 => {
-                self.texture_window_raw = word & 0x000F_FFFF;
-                self.tex_window_mask_x = ((word & 0x1F) as u8) << 3;
-                self.tex_window_mask_y = (((word >> 5) & 0x1F) as u8) << 3;
-                self.tex_window_offset_x = (((word >> 10) & 0x1F) as u8) << 3;
-                self.tex_window_offset_y = (((word >> 15) & 0x1F) as u8) << 3;
+            0xe2 => {
+                self.texture_window_raw = word & 0x000f_ffff;
+                self.tex_window_mask_x = ((word & 0x1f) as u8) << 3;
+                self.tex_window_mask_y = (((word >> 5) & 0x1f) as u8) << 3;
+                self.tex_window_offset_x = (((word >> 10) & 0x1f) as u8) << 3;
+                self.tex_window_offset_y = (((word >> 15) & 0x1f) as u8) << 3;
             }
             _ => {}
         }
-        if op == 0x1F {
+        if op == 0x1f {
             // IRQ1 occupies the shared GP0 input path, so GPUSTAT.28 drops
             // with command-ready even when the command came from the CPU.
             self.charge_dma_busy(timing_cost);
@@ -3057,7 +3057,7 @@ impl Gpu {
     /// Execute a multi-word packet that has just been fully assembled
     /// in `gp0_fifo`. Dispatches on the opcode in word 0.
     fn execute_gp0_packet(&mut self, from_dma: bool) {
-        let op = (self.gp0_fifo[0] >> 24) & 0xFF;
+        let op = (self.gp0_fifo[0] >> 24) & 0xff;
         // Setup is part of the fitted per-primitive cost.
         let timing_cost = self.gp0_packet_timing_cost(op as u8);
         let pixels = std::mem::take(self.timing_pixels.get_mut());
@@ -3091,53 +3091,53 @@ impl Gpu {
             // vertices; bit 1 is opaque-vs-semi-transparent (we treat
             // both as opaque for now).
             0x20..=0x23 => self.draw_monochrome_tri(),
-            0x28..=0x2B => self.draw_monochrome_quad(),
+            0x28..=0x2b => self.draw_monochrome_quad(),
             // Single monochrome line -- 3 words.
             0x40..=0x47 => self.draw_line_mono_single(),
             // Polyline monochrome start -- 3 words. After this packet
             // the FIFO enters a streaming mode that accepts vertex
             // words until the 0x55555555 / 0x50005000 terminator.
-            0x48..=0x4F => self.draw_line_mono_start_polyline(),
+            0x48..=0x4f => self.draw_line_mono_start_polyline(),
             // Single shaded line -- 4 words.
             0x50..=0x57 => self.draw_line_shaded_single(),
             // Polyline shaded start -- 4 words.
-            0x58..=0x5F => self.draw_line_shaded_start_polyline(),
+            0x58..=0x5f => self.draw_line_shaded_start_polyline(),
             // Gouraud-shaded triangle / quad -- per-vertex colour
             // interpolated across the primitive via barycentrics.
             0x30..=0x33 => self.draw_shaded_tri(),
-            0x38..=0x3B => self.draw_shaded_quad(),
+            0x38..=0x3b => self.draw_shaded_quad(),
             // Textured (flat-shade) triangle / quad -- per-vertex UV,
             // texture-page and CLUT pulled from the UV words.
             0x24..=0x27 => self.draw_textured_tri(),
-            0x2C..=0x2F => self.draw_textured_quad(),
+            0x2c..=0x2f => self.draw_textured_quad(),
             // Textured + Gouraud shaded -- both per-vertex tint colours
             // AND per-vertex UV. The tint modulates every sampled
             // texel (per PSX-SPX tint formula). Triangle = 9 words,
             // quad = 12 words.
             0x34..=0x37 => self.draw_textured_shaded_tri(),
-            0x3C..=0x3F => self.draw_textured_shaded_quad(),
+            0x3c..=0x3f => self.draw_textured_shaded_quad(),
             // Monochrome rectangles -- bit 3 set selects variable size
             // (followed by a W/H word), else 1×1/8×8/16×16 by bits 5:4.
             0x60..=0x63 => self.draw_monochrome_rect_variable(),
-            0x68..=0x6B => self.draw_monochrome_rect_sized(1, 1),
+            0x68..=0x6b => self.draw_monochrome_rect_sized(1, 1),
             0x70..=0x73 => self.draw_monochrome_rect_sized(8, 8),
-            0x78..=0x7B => self.draw_monochrome_rect_sized(16, 16),
+            0x78..=0x7b => self.draw_monochrome_rect_sized(16, 16),
             // Textured rectangles -- same geometry as the monochrome
             // variants plus a UV/CLUT word between pos and size.
             0x64..=0x67 => self.draw_textured_rect_variable(),
-            0x6C..=0x6F => self.draw_textured_rect_sized(1, 1),
+            0x6c..=0x6f => self.draw_textured_rect_sized(1, 1),
             0x74..=0x77 => self.draw_textured_rect_sized(8, 8),
-            0x7C..=0x7F => self.draw_textured_rect_sized(16, 16),
+            0x7c..=0x7f => self.draw_textured_rect_sized(16, 16),
             // CPU→VRAM transfer -- 3 words of setup, then `w*h/2`
             // words of pixel data follow as a separate mode. Hardware
             // ignores the lower 29 bits for transfer commands, so all
             // opcodes in this top-bit group behave as image upload.
-            0xA0..=0xBF => self.begin_vram_upload(),
+            0xa0..=0xbf => self.begin_vram_upload(),
             // VRAM→CPU transfer -- same top-bit-group decoding as upload;
             // pixel words are then pulled by the CPU via GPUREAD.
-            0xC0..=0xDF => self.begin_vram_download(),
+            0xc0..=0xdf => self.begin_vram_download(),
             // VRAM→VRAM copy -- source rect blitted to dest rect.
-            0x80..=0x9F => self.vram_to_vram_copy(),
+            0x80..=0x9f => self.vram_to_vram_copy(),
             _ => {}
         }
         // Textured primitives have latched their page by now.
@@ -3165,12 +3165,12 @@ impl Gpu {
         let src_word = self.gp0_fifo[1];
         let dst_word = self.gp0_fifo[2];
         let wh_word = self.gp0_fifo[3];
-        let sx = (src_word & 0x3FF) as u16;
-        let sy = ((src_word >> 16) & 0x1FF) as u16;
-        let dx = (dst_word & 0x3FF) as u16;
-        let dy = ((dst_word >> 16) & 0x1FF) as u16;
-        let raw_w = (wh_word & 0x3FF) as u16;
-        let raw_h = ((wh_word >> 16) & 0x1FF) as u16;
+        let sx = (src_word & 0x3ff) as u16;
+        let sy = ((src_word >> 16) & 0x1ff) as u16;
+        let dx = (dst_word & 0x3ff) as u16;
+        let dy = ((dst_word >> 16) & 0x1ff) as u16;
+        let raw_w = (wh_word & 0x3ff) as u16;
+        let raw_h = ((wh_word >> 16) & 0x1ff) as u16;
         let w = if raw_w == 0 { 1024 } else { raw_w };
         let h = if raw_h == 0 { 512 } else { raw_h };
         // Per PSX-SPX the GP0(E6h) Set-Mask / Check-Mask bits DO apply to
@@ -3230,8 +3230,8 @@ impl Gpu {
     /// both signed 11-bit. The drawing-offset is added here so callers
     /// get screen-space coordinates ready to rasterize.
     fn decode_vertex(&self, word: u32) -> (i32, i32) {
-        let x = sign_extend_11((word & 0x7FF) as i32) + self.draw_offset_x;
-        let y = sign_extend_11(((word >> 16) & 0x7FF) as i32) + self.draw_offset_y;
+        let x = sign_extend_11((word & 0x7ff) as i32) + self.draw_offset_x;
+        let y = sign_extend_11(((word >> 16) & 0x7ff) as i32) + self.draw_offset_y;
         (x, y)
     }
 
@@ -3239,7 +3239,7 @@ impl Gpu {
     /// Words: `[cmd+color, v0, v1, v2]`.
     fn draw_monochrome_tri(&mut self) {
         let cmd = self.gp0_fifo[0];
-        let color = rgb24_to_bgr15(cmd & 0x00FF_FFFF);
+        let color = rgb24_to_bgr15(cmd & 0x00ff_ffff);
         let mode = prim_blend_mode(cmd, self.tex_blend_mode);
         let v0 = self.decode_vertex(self.gp0_fifo[1]);
         let v1 = self.decode_vertex(self.gp0_fifo[2]);
@@ -3252,7 +3252,7 @@ impl Gpu {
     /// diagonal are owned by `(v0, v1, v2)` (gate-pinned).
     fn draw_monochrome_quad(&mut self) {
         let cmd = self.gp0_fifo[0];
-        let color = rgb24_to_bgr15(cmd & 0x00FF_FFFF);
+        let color = rgb24_to_bgr15(cmd & 0x00ff_ffff);
         let mode = prim_blend_mode(cmd, self.tex_blend_mode);
         let v0 = self.decode_vertex(self.gp0_fifo[1]);
         let v1 = self.decode_vertex(self.gp0_fifo[2]);
@@ -3267,12 +3267,12 @@ impl Gpu {
     /// Words: `[cmd+c0, v0, c1, v1, c2, v2]`.
     fn draw_shaded_tri(&mut self) {
         let cmd = self.gp0_fifo[0];
-        let c0 = cmd & 0x00FF_FFFF;
+        let c0 = cmd & 0x00ff_ffff;
         let mode = prim_blend_mode(cmd, self.tex_blend_mode);
         let v0 = self.decode_vertex(self.gp0_fifo[1]);
-        let c1 = self.gp0_fifo[2] & 0x00FF_FFFF;
+        let c1 = self.gp0_fifo[2] & 0x00ff_ffff;
         let v1 = self.decode_vertex(self.gp0_fifo[3]);
-        let c2 = self.gp0_fifo[4] & 0x00FF_FFFF;
+        let c2 = self.gp0_fifo[4] & 0x00ff_ffff;
         let v2 = self.decode_vertex(self.gp0_fifo[5]);
         self.rasterize_shaded_triangle(v0, v1, v2, c0, c1, c2, mode);
     }
@@ -3282,14 +3282,14 @@ impl Gpu {
     /// half wins the shared diagonal.
     fn draw_shaded_quad(&mut self) {
         let cmd = self.gp0_fifo[0];
-        let c0 = cmd & 0x00FF_FFFF;
+        let c0 = cmd & 0x00ff_ffff;
         let mode = prim_blend_mode(cmd, self.tex_blend_mode);
         let v0 = self.decode_vertex(self.gp0_fifo[1]);
-        let c1 = self.gp0_fifo[2] & 0x00FF_FFFF;
+        let c1 = self.gp0_fifo[2] & 0x00ff_ffff;
         let v1 = self.decode_vertex(self.gp0_fifo[3]);
-        let c2 = self.gp0_fifo[4] & 0x00FF_FFFF;
+        let c2 = self.gp0_fifo[4] & 0x00ff_ffff;
         let v2 = self.decode_vertex(self.gp0_fifo[5]);
-        let c3 = self.gp0_fifo[6] & 0x00FF_FFFF;
+        let c3 = self.gp0_fifo[6] & 0x00ff_ffff;
         let v3 = self.decode_vertex(self.gp0_fifo[7]);
         self.rasterize_shaded_triangle(v1, v3, v2, c1, c3, c2, mode);
         self.rasterize_shaded_triangle(v0, v1, v2, c0, c1, c2, mode);
@@ -3299,14 +3299,14 @@ impl Gpu {
     /// Words: `[cmd+color, xy, wh]`.
     fn draw_monochrome_rect_variable(&mut self) {
         let cmd = self.gp0_fifo[0];
-        let color = rgb24_to_bgr15(cmd & 0x00FF_FFFF);
+        let color = rgb24_to_bgr15(cmd & 0x00ff_ffff);
         let mode = prim_blend_mode(cmd, self.tex_blend_mode);
         let pos = self.gp0_fifo[1];
         let size = self.gp0_fifo[2];
-        let x = sign_extend_11((pos & 0x7FF) as i32) + self.draw_offset_x;
-        let y = sign_extend_11(((pos >> 16) & 0x7FF) as i32) + self.draw_offset_y;
-        let w = (size & 0xFFFF) as i32;
-        let h = ((size >> 16) & 0xFFFF) as i32;
+        let x = sign_extend_11((pos & 0x7ff) as i32) + self.draw_offset_x;
+        let y = sign_extend_11(((pos >> 16) & 0x7ff) as i32) + self.draw_offset_y;
+        let w = (size & 0xffff) as i32;
+        let h = ((size >> 16) & 0xffff) as i32;
         self.maybe_trace_mono_rect("var", cmd, pos, Some(size), x, y, w, h, color, mode);
         self.paint_rect(x, y, w, h, color, mode);
     }
@@ -3314,11 +3314,11 @@ impl Gpu {
     /// GP0 0x68/0x70/0x78 -- fixed-size monochrome rectangles.
     fn draw_monochrome_rect_sized(&mut self, w: i32, h: i32) {
         let cmd = self.gp0_fifo[0];
-        let color = rgb24_to_bgr15(cmd & 0x00FF_FFFF);
+        let color = rgb24_to_bgr15(cmd & 0x00ff_ffff);
         let mode = prim_blend_mode(cmd, self.tex_blend_mode);
         let pos = self.gp0_fifo[1];
-        let x = sign_extend_11((pos & 0x7FF) as i32) + self.draw_offset_x;
-        let y = sign_extend_11(((pos >> 16) & 0x7FF) as i32) + self.draw_offset_y;
+        let x = sign_extend_11((pos & 0x7ff) as i32) + self.draw_offset_x;
+        let y = sign_extend_11(((pos >> 16) & 0x7ff) as i32) + self.draw_offset_y;
         self.maybe_trace_mono_rect("fixed", cmd, pos, None, x, y, w, h, color, mode);
         self.paint_rect(x, y, w, h, color, mode);
     }
@@ -3382,13 +3382,13 @@ impl Gpu {
         let pos = self.gp0_fifo[1];
         let uv_clut = self.gp0_fifo[2];
         let size = self.gp0_fifo[3];
-        let x = sign_extend_11((pos & 0x7FF) as i32) + self.draw_offset_x;
-        let y = sign_extend_11(((pos >> 16) & 0x7FF) as i32) + self.draw_offset_y;
-        let w = (size & 0xFFFF) as i32;
-        let h = ((size >> 16) & 0xFFFF) as i32;
-        let u0 = (uv_clut & 0xFF) as u16;
-        let v0 = ((uv_clut >> 8) & 0xFF) as u16;
-        let clut_word = ((uv_clut >> 16) & 0xFFFF) as u16;
+        let x = sign_extend_11((pos & 0x7ff) as i32) + self.draw_offset_x;
+        let y = sign_extend_11(((pos >> 16) & 0x7ff) as i32) + self.draw_offset_y;
+        let w = (size & 0xffff) as i32;
+        let h = ((size >> 16) & 0xffff) as i32;
+        let u0 = (uv_clut & 0xff) as u16;
+        let v0 = ((uv_clut >> 8) & 0xff) as u16;
+        let clut_word = ((uv_clut >> 16) & 0xffff) as u16;
         // Raw-texture flag is bit 0 of the *opcode byte* (bit 24 of
         // the full cmd word), per PSX-SPX. Testing `cmd & 1` reads
         // bit 0 of the R channel of the embedded colour instead --
@@ -3396,7 +3396,7 @@ impl Gpu {
         let tint = if (cmd >> 24) & 1 != 0 {
             RAW_TEXTURE_TINT
         } else {
-            split_tint(cmd & 0x00FF_FFFF)
+            split_tint(cmd & 0x00ff_ffff)
         };
         self.paint_textured_rect(x, y, w, h, u0, v0, clut_word, prim_is_semi_trans(cmd), tint);
     }
@@ -3407,11 +3407,11 @@ impl Gpu {
         let cmd = self.gp0_fifo[0];
         let pos = self.gp0_fifo[1];
         let uv_clut = self.gp0_fifo[2];
-        let x = sign_extend_11((pos & 0x7FF) as i32) + self.draw_offset_x;
-        let y = sign_extend_11(((pos >> 16) & 0x7FF) as i32) + self.draw_offset_y;
-        let u0 = (uv_clut & 0xFF) as u16;
-        let v0 = ((uv_clut >> 8) & 0xFF) as u16;
-        let clut_word = ((uv_clut >> 16) & 0xFFFF) as u16;
+        let x = sign_extend_11((pos & 0x7ff) as i32) + self.draw_offset_x;
+        let y = sign_extend_11(((pos >> 16) & 0x7ff) as i32) + self.draw_offset_y;
+        let u0 = (uv_clut & 0xff) as u16;
+        let v0 = ((uv_clut >> 8) & 0xff) as u16;
+        let clut_word = ((uv_clut >> 16) & 0xffff) as u16;
         // Raw-texture flag is bit 0 of the *opcode byte* (bit 24 of
         // the full cmd word), per PSX-SPX. Testing `cmd & 1` reads
         // bit 0 of the R channel of the embedded colour instead --
@@ -3419,7 +3419,7 @@ impl Gpu {
         let tint = if (cmd >> 24) & 1 != 0 {
             RAW_TEXTURE_TINT
         } else {
-            split_tint(cmd & 0x00FF_FFFF)
+            split_tint(cmd & 0x00ff_ffff)
         };
         self.paint_textured_rect(x, y, w, h, u0, v0, clut_word, prim_is_semi_trans(cmd), tint);
     }
@@ -3561,8 +3561,8 @@ impl Gpu {
             return;
         }
         let reg = clut_word as u32;
-        let clut_x = (clut_word & 0x3F) * 16;
-        let clut_y = (clut_word >> 6) & 0x1FF;
+        let clut_x = (clut_word & 0x3f) * 16;
+        let clut_y = (clut_word >> 6) & 0x1ff;
         if reg != self.clut_line_a_reg {
             for i in 0..16 {
                 self.clut_cache[i] = self.vram.get_pixel(clut_x + i as u16, clut_y);
@@ -3739,13 +3739,13 @@ impl Gpu {
         let uv1 = self.gp0_fifo[4];
         let v2 = self.decode_vertex(self.gp0_fifo[5]);
         let uv2 = self.gp0_fifo[6];
-        let clut_word = ((uv0 >> 16) & 0xFFFF) as u16;
+        let clut_word = ((uv0 >> 16) & 0xffff) as u16;
         // The tpage word in UV1 overrides the current draw-mode tpage
         // for the duration of this primitive.
         self.apply_primitive_tpage(uv1);
-        let t0 = ((uv0 & 0xFF) as u16, ((uv0 >> 8) & 0xFF) as u16);
-        let t1 = ((uv1 & 0xFF) as u16, ((uv1 >> 8) & 0xFF) as u16);
-        let t2 = ((uv2 & 0xFF) as u16, ((uv2 >> 8) & 0xFF) as u16);
+        let t0 = ((uv0 & 0xff) as u16, ((uv0 >> 8) & 0xff) as u16);
+        let t1 = ((uv1 & 0xff) as u16, ((uv1 >> 8) & 0xff) as u16);
+        let t2 = ((uv2 & 0xff) as u16, ((uv2 >> 8) & 0xff) as u16);
         // Raw-texture flag is bit 0 of the *opcode byte* (bit 24 of
         // the full cmd word), per PSX-SPX. Testing `cmd & 1` reads
         // bit 0 of the R channel of the embedded colour instead --
@@ -3753,7 +3753,7 @@ impl Gpu {
         let tint = if (cmd >> 24) & 1 != 0 {
             RAW_TEXTURE_TINT
         } else {
-            split_tint(cmd & 0x00FF_FFFF)
+            split_tint(cmd & 0x00ff_ffff)
         };
         self.rasterize_textured_triangle(
             v0,
@@ -3780,12 +3780,12 @@ impl Gpu {
         let uv2 = self.gp0_fifo[6];
         let v3 = self.decode_vertex(self.gp0_fifo[7]);
         let uv3 = self.gp0_fifo[8];
-        let clut_word = ((uv0 >> 16) & 0xFFFF) as u16;
+        let clut_word = ((uv0 >> 16) & 0xffff) as u16;
         self.apply_primitive_tpage(uv1);
-        let t0 = ((uv0 & 0xFF) as u16, ((uv0 >> 8) & 0xFF) as u16);
-        let t1 = ((uv1 & 0xFF) as u16, ((uv1 >> 8) & 0xFF) as u16);
-        let t2 = ((uv2 & 0xFF) as u16, ((uv2 >> 8) & 0xFF) as u16);
-        let t3 = ((uv3 & 0xFF) as u16, ((uv3 >> 8) & 0xFF) as u16);
+        let t0 = ((uv0 & 0xff) as u16, ((uv0 >> 8) & 0xff) as u16);
+        let t1 = ((uv1 & 0xff) as u16, ((uv1 >> 8) & 0xff) as u16);
+        let t2 = ((uv2 & 0xff) as u16, ((uv2 >> 8) & 0xff) as u16);
+        let t3 = ((uv3 & 0xff) as u16, ((uv3 >> 8) & 0xff) as u16);
         let semi = prim_is_semi_trans(cmd);
         // Raw-texture flag is bit 0 of the *opcode byte* (bit 24 of
         // the full cmd word), per PSX-SPX. Testing `cmd & 1` reads
@@ -3794,7 +3794,7 @@ impl Gpu {
         let tint = if (cmd >> 24) & 1 != 0 {
             RAW_TEXTURE_TINT
         } else {
-            split_tint(cmd & 0x00FF_FFFF)
+            split_tint(cmd & 0x00ff_ffff)
         };
         if self.rasterize_axis_aligned_textured_quad(
             v0, v1, v2, v3, t0, t1, t2, t3, clut_word, semi, tint,
@@ -3813,20 +3813,20 @@ impl Gpu {
     /// zeros the tint effect per PSX-SPX.
     fn draw_textured_shaded_tri(&mut self) {
         let cmd = self.gp0_fifo[0];
-        let c0 = cmd & 0x00FF_FFFF;
+        let c0 = cmd & 0x00ff_ffff;
         let v0 = self.decode_vertex(self.gp0_fifo[1]);
         let uv0 = self.gp0_fifo[2];
-        let c1 = self.gp0_fifo[3] & 0x00FF_FFFF;
+        let c1 = self.gp0_fifo[3] & 0x00ff_ffff;
         let v1 = self.decode_vertex(self.gp0_fifo[4]);
         let uv1 = self.gp0_fifo[5];
-        let c2 = self.gp0_fifo[6] & 0x00FF_FFFF;
+        let c2 = self.gp0_fifo[6] & 0x00ff_ffff;
         let v2 = self.decode_vertex(self.gp0_fifo[7]);
         let uv2 = self.gp0_fifo[8];
-        let clut_word = ((uv0 >> 16) & 0xFFFF) as u16;
+        let clut_word = ((uv0 >> 16) & 0xffff) as u16;
         self.apply_primitive_tpage(uv1);
-        let t0 = ((uv0 & 0xFF) as u16, ((uv0 >> 8) & 0xFF) as u16);
-        let t1 = ((uv1 & 0xFF) as u16, ((uv1 >> 8) & 0xFF) as u16);
-        let t2 = ((uv2 & 0xFF) as u16, ((uv2 >> 8) & 0xFF) as u16);
+        let t0 = ((uv0 & 0xff) as u16, ((uv0 >> 8) & 0xff) as u16);
+        let t1 = ((uv1 & 0xff) as u16, ((uv1 >> 8) & 0xff) as u16);
+        let t2 = ((uv2 & 0xff) as u16, ((uv2 >> 8) & 0xff) as u16);
         // See comment on the other textured primitives: raw-texture
         // flag is bit 0 of the opcode byte (= bit 24 of the cmd word),
         // not bit 0 of the full cmd word.
@@ -3853,24 +3853,24 @@ impl Gpu {
     ///          c3, v3, uv3]`.
     fn draw_textured_shaded_quad(&mut self) {
         let cmd = self.gp0_fifo[0];
-        let c0 = cmd & 0x00FF_FFFF;
+        let c0 = cmd & 0x00ff_ffff;
         let v0 = self.decode_vertex(self.gp0_fifo[1]);
         let uv0 = self.gp0_fifo[2];
-        let c1 = self.gp0_fifo[3] & 0x00FF_FFFF;
+        let c1 = self.gp0_fifo[3] & 0x00ff_ffff;
         let v1 = self.decode_vertex(self.gp0_fifo[4]);
         let uv1 = self.gp0_fifo[5];
-        let c2 = self.gp0_fifo[6] & 0x00FF_FFFF;
+        let c2 = self.gp0_fifo[6] & 0x00ff_ffff;
         let v2 = self.decode_vertex(self.gp0_fifo[7]);
         let uv2 = self.gp0_fifo[8];
-        let c3 = self.gp0_fifo[9] & 0x00FF_FFFF;
+        let c3 = self.gp0_fifo[9] & 0x00ff_ffff;
         let v3 = self.decode_vertex(self.gp0_fifo[10]);
         let uv3 = self.gp0_fifo[11];
-        let clut_word = ((uv0 >> 16) & 0xFFFF) as u16;
+        let clut_word = ((uv0 >> 16) & 0xffff) as u16;
         self.apply_primitive_tpage(uv1);
-        let t0 = ((uv0 & 0xFF) as u16, ((uv0 >> 8) & 0xFF) as u16);
-        let t1 = ((uv1 & 0xFF) as u16, ((uv1 >> 8) & 0xFF) as u16);
-        let t2 = ((uv2 & 0xFF) as u16, ((uv2 >> 8) & 0xFF) as u16);
-        let t3 = ((uv3 & 0xFF) as u16, ((uv3 >> 8) & 0xFF) as u16);
+        let t0 = ((uv0 & 0xff) as u16, ((uv0 >> 8) & 0xff) as u16);
+        let t1 = ((uv1 & 0xff) as u16, ((uv1 >> 8) & 0xff) as u16);
+        let t2 = ((uv2 & 0xff) as u16, ((uv2 >> 8) & 0xff) as u16);
+        let t3 = ((uv3 & 0xff) as u16, ((uv3 >> 8) & 0xff) as u16);
         let semi = prim_is_semi_trans(cmd);
         // See comment on the other textured primitives: raw-texture
         // flag is bit 0 of the opcode byte (= bit 24 of the cmd word),
@@ -4094,9 +4094,9 @@ impl Gpu {
         self.update_clut_if_needed(clut_word);
         let tpage_mode = self.tex_blend_mode;
 
-        let r = |c: u32| (c & 0xFF) as i32;
-        let g = |c: u32| ((c >> 8) & 0xFF) as i32;
-        let b = |c: u32| ((c >> 16) & 0xFF) as i32;
+        let r = |c: u32| (c & 0xff) as i32;
+        let g = |c: u32| ((c >> 8) & 0xff) as i32;
+        let b = |c: u32| ((c >> 16) & 0xff) as i32;
         let v_rgb = [
             (r(c0), g(c0), b(c0)),
             (r(c1), g(c1), b(c1)),
@@ -4310,9 +4310,9 @@ impl Gpu {
             u32::from(self.tex_window_mask_y),
         );
         TexFetch {
-            and_u: !mx & 0xFF,
+            and_u: !mx & 0xff,
             or_u: u32::from(self.tex_window_offset_x) & mx,
-            and_v: !my & 0xFF,
+            and_v: !my & 0xff,
             or_v: u32::from(self.tex_window_offset_y) & my,
             page_x: u32::from(self.tex_page_x),
             page_y: u32::from(self.tex_page_y),
@@ -4342,8 +4342,8 @@ impl Gpu {
     /// kept reflecting the last E1's tpage-X even after a textured
     /// polygon's embedded tpage re-pointed it.
     fn apply_primitive_tpage(&mut self, uv_word: u32) {
-        let tpage = (uv_word >> 16) & 0xFFFF;
-        self.tex_page_x = ((tpage & 0x0F) as u16) * 64;
+        let tpage = (uv_word >> 16) & 0xffff;
+        self.tex_page_x = ((tpage & 0x0f) as u16) * 64;
         self.tex_page_y = if (tpage >> 4) & 1 != 0 { 256 } else { 0 };
         let upper_y = self.vram_2mb_addressing_enabled && (tpage >> 11) & 1 != 0;
         if upper_y {
@@ -4351,9 +4351,9 @@ impl Gpu {
         }
         self.tex_depth = ((tpage >> 7) & 0x3) as u8;
         self.tex_blend_mode = BlendMode::from_tpage_bits(tpage >> 5);
-        let stat_bits = tpage & 0x01FF;
+        let stat_bits = tpage & 0x01ff;
         self.status.raw =
-            (self.status.raw & !(0x01FF | 0x8000)) | stat_bits | if upper_y { 0x8000 } else { 0 };
+            (self.status.raw & !(0x01ff | 0x8000)) | stat_bits | if upper_y { 0x8000 } else { 0 };
     }
 
     /// Plot a single 15bpp pixel at `(x, y)`. When `mode == Opaque`
@@ -4503,9 +4503,9 @@ impl Gpu {
         }
         // Channel-extract closures -- r/g/b are low/mid/high bytes of the
         // 24-bit word written in the command.
-        let r = |c: u32| (c & 0xFF) as i32;
-        let g = |c: u32| ((c >> 8) & 0xFF) as i32;
-        let b = |c: u32| ((c >> 16) & 0xFF) as i32;
+        let r = |c: u32| (c & 0xff) as i32;
+        let g = |c: u32| ((c >> 8) & 0xff) as i32;
+        let b = |c: u32| ((c >> 16) & 0xff) as i32;
         let v_rgb = [
             (r(c0), g(c0), b(c0)),
             (r(c1), g(c1), b(c1)),
@@ -4531,7 +4531,7 @@ impl Gpu {
     /// GP0 0x40..=0x47 -- single monochrome line. Packet: `[cmd+color, v0, v1]`.
     fn draw_line_mono_single(&mut self) {
         let cmd = self.gp0_fifo[0];
-        let rgb24 = cmd & 0x00FF_FFFF;
+        let rgb24 = cmd & 0x00ff_ffff;
         let color = rgb24_to_bgr15(rgb24);
         let mode = prim_blend_mode(cmd, self.tex_blend_mode);
         let v0 = self.decode_vertex(self.gp0_fifo[1]);
@@ -4553,10 +4553,10 @@ impl Gpu {
     /// word.
     fn draw_line_shaded_single(&mut self) {
         let cmd = self.gp0_fifo[0];
-        let c0 = cmd & 0x00FF_FFFF;
+        let c0 = cmd & 0x00ff_ffff;
         let mode = prim_blend_mode(cmd, self.tex_blend_mode);
         let v0 = self.decode_vertex(self.gp0_fifo[1]);
-        let c1 = self.gp0_fifo[2] & 0x00FF_FFFF;
+        let c1 = self.gp0_fifo[2] & 0x00ff_ffff;
         let v1 = self.decode_vertex(self.gp0_fifo[3]);
         self.rasterize_line_shaded(v0, v1, c0, c1, mode);
     }
@@ -4566,7 +4566,7 @@ impl Gpu {
     /// v1); after executing it we switch to receive mode.
     fn draw_line_mono_start_polyline(&mut self) {
         let cmd = self.gp0_fifo[0];
-        let rgb24 = cmd & 0x00FF_FFFF;
+        let rgb24 = cmd & 0x00ff_ffff;
         let color = rgb24_to_bgr15(rgb24);
         let mode = prim_blend_mode(cmd, self.tex_blend_mode);
         let v0 = self.decode_vertex(self.gp0_fifo[1]);
@@ -4598,10 +4598,10 @@ impl Gpu {
     /// pairs.
     fn draw_line_shaded_start_polyline(&mut self) {
         let cmd = self.gp0_fifo[0];
-        let c0 = cmd & 0x00FF_FFFF;
+        let c0 = cmd & 0x00ff_ffff;
         let mode = prim_blend_mode(cmd, self.tex_blend_mode);
         let v0 = self.decode_vertex(self.gp0_fifo[1]);
-        let c1 = self.gp0_fifo[2] & 0x00FF_FFFF;
+        let c1 = self.gp0_fifo[2] & 0x00ff_ffff;
         let v1 = self.decode_vertex(self.gp0_fifo[3]);
         self.rasterize_line_shaded(v0, v1, c0, c1, mode);
         self.polyline = Some(PolylineState::Shaded {
@@ -4671,7 +4671,7 @@ impl Gpu {
                 pending_color,
             } => {
                 if *awaiting_color {
-                    *pending_color = word & 0x00FF_FFFF;
+                    *pending_color = word & 0x00ff_ffff;
                     *awaiting_color = false;
                 } else {
                     let c0 = *last_color;
@@ -4760,8 +4760,8 @@ impl Gpu {
             if (min_x..=max_x).contains(&x) && (min_y..=max_y).contains(&y) {
                 let (start, end) = if swapped { (c1, c0) } else { (c0, c1) };
                 let channel = |shift: u32| {
-                    let a = ((start >> shift) & 0xFF) as i32;
-                    let b = ((end >> shift) & 0xFF) as i32;
+                    let a = ((start >> shift) & 0xff) as i32;
+                    let b = ((end >> shift) & 0xff) as i32;
                     let value = (a << 12) + (1 << 11) + (((b - a) << 12) / steps) * step;
                     value >> 12
                 };
@@ -4795,8 +4795,8 @@ impl Gpu {
     fn begin_vram_upload(&mut self) {
         let xy = self.gp0_fifo[1];
         let wh = self.gp0_fifo[2];
-        let x = (xy & 0x3FF) as u16;
-        let y = ((xy >> 16) & 0x1FF) as u16;
+        let x = (xy & 0x3ff) as u16;
+        let y = ((xy >> 16) & 0x1ff) as u16;
         // Hardware uses a wrap-around convention: width/height of 0
         // means 1024 / 512 respectively.
         let (w, h) = vram_transfer_size(wh);
@@ -4892,19 +4892,19 @@ impl Gpu {
     ///
     /// Both coordinates and sizes wrap mod VRAM dimensions.
     fn fill_rect(&mut self) {
-        let color24 = self.gp0_fifo[0] & 0x00FF_FFFF;
+        let color24 = self.gp0_fifo[0] & 0x00ff_ffff;
         let (x, y) = {
             let w = self.gp0_fifo[1];
             // X is aligned to 16-pixel boundaries; low 4 bits ignored.
-            let x = (w & 0x3F0) as u16;
-            let y = ((w >> 16) & 0x1FF) as u16;
+            let x = (w & 0x3f0) as u16;
+            let y = ((w >> 16) & 0x1ff) as u16;
             (x, y)
         };
         let (w, h) = {
             let s = self.gp0_fifo[2];
             // Width rounded up to next multiple of 16.
-            let w = (((s & 0x3FF) + 0x0F) & !0x0F) as u16;
-            let h = ((s >> 16) & 0x1FF) as u16;
+            let w = (((s & 0x3ff) + 0x0f) & !0x0f) as u16;
+            let h = ((s >> 16) & 0x1ff) as u16;
             (w, h)
         };
 
@@ -4991,7 +4991,7 @@ fn scale_gpu_pixels(pixels: u64, numerator: u64, denominator: u64) -> u64 {
 /// Dominant-axis steps used by the GPU line engine, after its signed 11-bit
 /// coordinate truncation and oversized-line rejection.
 fn timing_line_steps(v0: (i32, i32), v1: (i32, i32)) -> u64 {
-    let truncate = |v: i32| sign_extend_11(v & 0x7FF);
+    let truncate = |v: i32| sign_extend_11(v & 0x7ff);
     let dx = (truncate(v1.0) - truncate(v0.0)).unsigned_abs();
     let dy = (truncate(v1.1) - truncate(v0.1)).unsigned_abs();
     if dx >= 1024 || dy >= 512 {
@@ -5156,7 +5156,7 @@ fn for_each_line_pixel(
     v1: (i32, i32),
     mut plot: impl FnMut(i32, i32, i32, i32, bool),
 ) {
-    let truncate = |v: i32| sign_extend_11(v & 0x7FF);
+    let truncate = |v: i32| sign_extend_11(v & 0x7ff);
     let mut p0 = (truncate(v0.0), truncate(v0.1));
     let mut p1 = (truncate(v1.0), truncate(v1.1));
     let dx_abs = (p1.0 - p0.0).abs();
@@ -5207,8 +5207,8 @@ fn for_each_line_pixel(
 /// Width and height of an A0h/C0h transfer from its size word. Hardware
 /// uses a wrap-around convention: 0 means 1024 wide or 512 high.
 fn vram_transfer_size(wh: u32) -> (u16, u16) {
-    let w = (wh & 0x3FF) as u16;
-    let h = ((wh >> 16) & 0x1FF) as u16;
+    let w = (wh & 0x3ff) as u16;
+    let h = ((wh >> 16) & 0x1ff) as u16;
     (if w == 0 { 1024 } else { w }, if h == 0 { 512 } else { h })
 }
 
@@ -5221,16 +5221,16 @@ fn vram_transfer_words(wh: u32) -> u32 {
 
 /// The polyline end test, `(word & 0xF000F000) == 0x50005000`.
 fn is_polyline_terminator(word: u32) -> bool {
-    word & 0xF000_F000 == 0x5000_5000
+    word & 0xf000_f000 == 0x5000_5000
 }
 
 /// Sign-extend an 11-bit integer (PS1 vertex coords + drawing offset
 /// are 11-bit signed).
 fn sign_extend_11(v: i32) -> i32 {
     if v & 0x400 != 0 {
-        v | !0x7FF
+        v | !0x7ff
     } else {
-        v & 0x7FF
+        v & 0x7ff
     }
 }
 
@@ -5327,8 +5327,8 @@ impl TexSampler {
     fn sample(&self, vram: &[u16], clut: &[u16; 256], u: u16, v: u16) -> Option<u16> {
         // PSX-SPX: the GPU's U/V counters are 8 bits -- texture pages
         // wrap every 256 texels horizontally and vertically.
-        let u = u & 0xFF;
-        let v = v & 0xFF;
+        let u = u & 0xff;
+        let v = v & 0xff;
         // Texture window: U' = (U AND NOT mask) OR (offset AND mask), with
         // mask and offset stored pre-shifted (x8).
         let u = (u & !self.mask_x) | (self.off_x & self.mask_x);
@@ -5348,12 +5348,12 @@ impl TexSampler {
             0 => {
                 // 4bpp: 4 texels per VRAM word; select by (u & 3).
                 let word = at(self.page_x.wrapping_add(u / 4));
-                clut[((word >> ((u & 3) * 4)) & 0xF) as usize]
+                clut[((word >> ((u & 3) * 4)) & 0xf) as usize]
             }
             1 => {
                 // 8bpp: 2 texels per VRAM word.
                 let word = at(self.page_x.wrapping_add(u / 2));
-                clut[((word >> ((u & 1) * 8)) & 0xFF) as usize]
+                clut[((word >> ((u & 1) * 8)) & 0xff) as usize]
             }
             // 15bpp: direct colour, 1 texel per word.
             _ => at(self.page_x.wrapping_add(u)),

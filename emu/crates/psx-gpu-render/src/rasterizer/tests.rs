@@ -41,13 +41,13 @@ fn cpu_rasterize_mono_tri_full(
             }
         }
     }
-    gpu.gp0_push(0xE3000000); // E3 -- top-left at (0, 0)
-    gpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    gpu.gp0_push(0xe3000000); // E3 -- top-left at (0, 0)
+    gpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     // Tpage: only bits 5-6 (semi-trans mode) matter for mono prims.
-    let e1 = 0xE100_0000_u32 | ((tpage_blend_bits as u32) & 0x3) << 5;
+    let e1 = 0xe100_0000_u32 | ((tpage_blend_bits as u32) & 0x3) << 5;
     gpu.gp0_push(e1);
     // Mask config (E6).
-    gpu.gp0_push(0xE600_0000_u32 | (mask_e6 as u32) & 0x3);
+    gpu.gp0_push(0xe600_0000_u32 | (mask_e6 as u32) & 0x3);
     // Triangle command word.
     let cmd = ((cmd_byte as u32) << 24) | bgr15_to_rgb24(color);
     gpu.gp0_push(cmd);
@@ -73,15 +73,15 @@ fn gpu_prefill(vg: &VramGpu, value: u16) {
 }
 
 fn pack_xy(p: (i32, i32)) -> u32 {
-    let x = (p.0 as u32) & 0x07FF;
-    let y = (p.1 as u32) & 0x07FF;
+    let x = (p.0 as u32) & 0x07ff;
+    let y = (p.1 as u32) & 0x07ff;
     x | (y << 16)
 }
 
 fn bgr15_to_rgb24(bgr15: u16) -> u32 {
-    let r5 = (bgr15 & 0x1F) as u32;
-    let g5 = ((bgr15 >> 5) & 0x1F) as u32;
-    let b5 = ((bgr15 >> 10) & 0x1F) as u32;
+    let r5 = (bgr15 & 0x1f) as u32;
+    let g5 = ((bgr15 >> 5) & 0x1f) as u32;
+    let b5 = ((bgr15 >> 10) & 0x1f) as u32;
     // Inverse of `rgb24_to_bgr15`: lift 5→8 bits by replicate.
     let r = (r5 << 3) | (r5 >> 2);
     let g = (g5 << 3) | (g5 >> 2);
@@ -101,7 +101,7 @@ fn mono_tri_axis_aligned_right_triangle_matches_cpu() {
     let v0 = (10, 10);
     let v1 = (50, 10);
     let v2 = (10, 50);
-    let color = 0x7C00; // pure blue
+    let color = 0x7c00; // pure blue
 
     let cpu_vram = cpu_rasterize_mono_tri(v0, v1, v2, color);
 
@@ -124,7 +124,7 @@ fn mono_tri_skewed_matches_cpu_exactly() {
     let v0 = (50, 20);
     let v1 = (130, 70);
     let v2 = (30, 90);
-    let color = 0x03E0; // pure green
+    let color = 0x03e0; // pure green
 
     let cpu_vram = cpu_rasterize_mono_tri(v0, v1, v2, color);
 
@@ -146,7 +146,7 @@ fn mono_tri_oversized_is_dropped_like_cpu() {
     let v0 = (0, 0);
     let v1 = (2000, 0);
     let v2 = (0, 0);
-    let color = 0x7FFF;
+    let color = 0x7fff;
 
     let cpu_vram = cpu_rasterize_mono_tri(v0, v1, v2, color);
 
@@ -379,7 +379,7 @@ fn mask_check_only_skips_protected_pixels_not_others() {
     let mut gpu_buffer =
         vec![0u16; (super::super::VRAM_WIDTH * super::super::VRAM_HEIGHT) as usize];
     for y in 0..512u16 {
-        let v = if y & 1 == 0 { 0x4567 } else { 0xC567 };
+        let v = if y & 1 == 0 { 0x4567 } else { 0xc567 };
         for x in 0..1024u16 {
             gpu_buffer[y as usize * 1024 + x as usize] = v;
         }
@@ -391,10 +391,10 @@ fn mask_check_only_skips_protected_pixels_not_others() {
         let y = (i / 1024) as u16;
         cpu_gpu.vram.set_pixel(x, y, w);
     }
-    cpu_gpu.gp0_push(0xE3000000);
-    cpu_gpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
-    cpu_gpu.gp0_push(0xE100_0000); // tpage
-    cpu_gpu.gp0_push(0xE600_0002); // E6 -- mask_check_before_draw
+    cpu_gpu.gp0_push(0xe3000000);
+    cpu_gpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
+    cpu_gpu.gp0_push(0xe100_0000); // tpage
+    cpu_gpu.gp0_push(0xe600_0002); // E6 -- mask_check_before_draw
     let cmd = 0x20_000000_u32 | bgr15_to_rgb24(color);
     cpu_gpu.gp0_push(cmd);
     cpu_gpu.gp0_push(pack_xy(v0));
@@ -417,8 +417,8 @@ fn mask_check_only_skips_protected_pixels_not_others() {
     // have been overwritten with the new color.
     for y in [11u16, 13, 15] {
         let i = y as usize * 1024 + 20;
-        assert_eq!(cpu[i], 0xC567, "CPU row {y} (protected) unchanged");
-        assert_eq!(gpu[i], 0xC567, "GPU row {y} (protected) unchanged");
+        assert_eq!(cpu[i], 0xc567, "CPU row {y} (protected) unchanged");
+        assert_eq!(gpu[i], 0xc567, "GPU row {y} (protected) unchanged");
     }
     for y in [12u16, 14, 16] {
         let i = y as usize * 1024 + 20;
@@ -426,13 +426,13 @@ fn mask_check_only_skips_protected_pixels_not_others() {
         // mask-set; it shouldn't have it here. The colour part
         // must be `color`.
         assert_eq!(
-            cpu[i] & 0x7FFF,
-            color & 0x7FFF,
+            cpu[i] & 0x7fff,
+            color & 0x7fff,
             "CPU row {y} (open) overwritten"
         );
         assert_eq!(
-            gpu[i] & 0x7FFF,
-            color & 0x7FFF,
+            gpu[i] & 0x7fff,
+            color & 0x7fff,
             "GPU row {y} (open) overwritten"
         );
     }
@@ -475,12 +475,12 @@ fn mono_tri_drawing_area_clips_correctly() {
     let v0 = (5, 5);
     let v1 = (60, 5);
     let v2 = (5, 60);
-    let color = 0x001F; // pure red
+    let color = 0x001f; // pure red
 
     // CPU path: configure the draw area, then submit the prim.
     let mut gpu = Gpu::new();
-    gpu.gp0_push(0xE3000000 | 20 | (20 << 10));
-    gpu.gp0_push(0xE4000000 | 40 | (40 << 10));
+    gpu.gp0_push(0xe3000000 | 20 | (20 << 10));
+    gpu.gp0_push(0xe4000000 | 40 | (40 << 10));
     let cmd = 0x20000000 | bgr15_to_rgb24(color);
     gpu.gp0_push(cmd);
     gpu.gp0_push(pack_xy(v0));
@@ -529,13 +529,13 @@ fn uv_pack(uv: (u8, u8)) -> u32 {
 fn make_tpage_word(tpage_x: u32, tpage_y: u32, depth: u32, blend_bits: u32) -> u32 {
     let tx = tpage_x / 64; // 0..15
     let ty = if tpage_y == 256 { 1u32 } else { 0 };
-    (tx & 0xF) | (ty << 4) | ((blend_bits & 0x3) << 5) | ((depth & 0x3) << 7)
+    (tx & 0xf) | (ty << 4) | ((blend_bits & 0x3) << 5) | ((depth & 0x3) << 7)
 }
 
 /// Build the 16-bit CLUT word the GPU expects in UV0 high half.
 /// `clut_x` must be a multiple of 16 (PS1 CLUT alignment).
 fn make_clut_word(clut_x: u32, clut_y: u32) -> u32 {
-    ((clut_x / 16) & 0x3F) | ((clut_y & 0x1FF) << 6)
+    ((clut_x / 16) & 0x3f) | ((clut_y & 0x1ff) << 6)
 }
 
 /// Mirror the same VRAM state on a CPU `Gpu` instance and a
@@ -605,8 +605,8 @@ fn tex_tri_15bpp_axis_aligned_matches_cpu() {
     // dispatch below. Easier: just call set_pixel + upload twice.)
     let vg = VramGpu::new_headless();
     vg.upload_full(&vram).unwrap();
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     cpu_push_tex_tri(&mut cpu, 0x25, (0, 0, 0), v, uv, 0, tpage_word);
     let cpu_words = cpu.vram.words().to_vec();
 
@@ -655,8 +655,8 @@ fn tex_tri_15bpp_axis_aligned_matches_cpu() {
                 continue;
             }
             for shift in [0u32, 5, 10] {
-                let ca = ((a >> shift) & 0x1F) as i32;
-                let cb = ((b >> shift) & 0x1F) as i32;
+                let ca = ((a >> shift) & 0x1f) as i32;
+                let cb = ((b >> shift) & 0x1f) as i32;
                 max_chan_delta = max_chan_delta.max((ca - cb).abs());
             }
         }
@@ -706,7 +706,7 @@ fn tex_tri_4bpp_with_clut_matches_cpu() {
             let mut word = 0u16;
             for n in 0..4u16 {
                 let u = u_base + n;
-                let nibble = (u + vy) & 0xF;
+                let nibble = (u + vy) & 0xf;
                 word |= nibble << (n * 4);
             }
             vram[vy as usize * 1024 + (tpage_x as usize + word_x as usize)] = word;
@@ -717,8 +717,8 @@ fn tex_tri_4bpp_with_clut_matches_cpu() {
     for (i, &w) in vram.iter().enumerate() {
         cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
     }
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     cpu_push_tex_tri(&mut cpu, 0x25, (0, 0, 0), v, uv, clut_word, tpage_word);
     let cpu_words = cpu.vram.words().to_vec();
 
@@ -770,7 +770,7 @@ fn tex_tri_8bpp_with_clut_matches_cpu() {
     let mut vram = vec![0u16; 1024 * 512];
     // CLUT: 256 entries, each non-zero, deterministic ramp.
     for i in 0..256u32 {
-        let val = ((i & 0x1F) as u16) | (((i >> 1) & 0x1F) as u16) << 5 | 0x4000;
+        let val = ((i & 0x1f) as u16) | (((i >> 1) & 0x1f) as u16) << 5 | 0x4000;
         vram[clut_y as usize * 1024 + (clut_x as usize + i as usize)] = val;
     }
     // Texture: each word = (u_high << 8) | u_low, giving a
@@ -780,8 +780,8 @@ fn tex_tri_8bpp_with_clut_matches_cpu() {
             let u_low = word_x * 2;
             let u_high = u_low + 1;
             let v_off = vy as u32;
-            let lo = ((u_low as u32 + v_off) & 0xFF) as u16;
-            let hi = ((u_high as u32 + v_off) & 0xFF) as u16;
+            let lo = ((u_low as u32 + v_off) & 0xff) as u16;
+            let hi = ((u_high as u32 + v_off) & 0xff) as u16;
             let word = lo | (hi << 8);
             // Avoid index 0 which would map to CLUT[0]; the
             // texture indices we generate above start at vy ≥ 0
@@ -795,8 +795,8 @@ fn tex_tri_8bpp_with_clut_matches_cpu() {
     for (i, &w) in vram.iter().enumerate() {
         cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
     }
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     cpu_push_tex_tri(&mut cpu, 0x25, (0, 0, 0), v, uv, clut_word, tpage_word);
     let cpu_words = cpu.vram.words().to_vec();
 
@@ -848,8 +848,8 @@ fn tex_tri_modulated_tint_matches_cpu() {
     for (i, &w) in vram.iter().enumerate() {
         cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
     }
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     // 0x24 = textured + modulated (NOT raw -- tint applies).
     cpu_push_tex_tri(&mut cpu, 0x24, tint, v, uv, 0, tpage_word);
     let cpu_words = cpu.vram.words().to_vec();
@@ -889,9 +889,9 @@ fn tex_tri_modulated_tint_matches_cpu() {
             if g_val == 0 {
                 continue;
             }
-            let r = g_val & 0x1F;
-            let g = (g_val >> 5) & 0x1F;
-            let b = (g_val >> 10) & 0x1F;
+            let r = g_val & 0x1f;
+            let g = (g_val >> 5) & 0x1f;
+            let b = (g_val >> 10) & 0x1f;
             assert!(
                 r <= 0x10 && g <= 0x10 && b <= 0x10,
                 "tint modulation looks wrong @ ({x},{y}): \
@@ -934,8 +934,8 @@ fn tex_tri_transparent_texels_skip_writes() {
     for (i, &w) in vram.iter().enumerate() {
         cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
     }
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     cpu_push_tex_tri(&mut cpu, 0x25, (0, 0, 0), v, uv, 0, tpage_word);
     let cpu_words = cpu.vram.words().to_vec();
 
@@ -1016,8 +1016,8 @@ fn tex_tri_scanline_15bpp_axis_aligned_is_bit_exact() {
     for (i, &w) in vram.iter().enumerate() {
         cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
     }
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     cpu_push_tex_tri(&mut cpu, 0x25, (0, 0, 0), v, uv, 0, tpage_word);
     let cpu_words = cpu.vram.words().to_vec();
 
@@ -1066,8 +1066,8 @@ fn tex_tri_scanline_skewed_is_bit_exact() {
     for (i, &w) in vram.iter().enumerate() {
         cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
     }
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     cpu_push_tex_tri(&mut cpu, 0x25, (0, 0, 0), v, uv, 0, tpage_word);
     let cpu_words = cpu.vram.words().to_vec();
 
@@ -1118,7 +1118,7 @@ fn tex_tri_scanline_4bpp_with_clut_is_bit_exact() {
         for word_x in 0..4u16 {
             let mut word = 0u16;
             for n in 0..4u16 {
-                let nibble = ((word_x * 4 + n) + vy) & 0xF;
+                let nibble = ((word_x * 4 + n) + vy) & 0xf;
                 word |= nibble << (n * 4);
             }
             vram[vy as usize * 1024 + (tpage_x as usize + word_x as usize)] = word;
@@ -1128,8 +1128,8 @@ fn tex_tri_scanline_4bpp_with_clut_is_bit_exact() {
     for (i, &w) in vram.iter().enumerate() {
         cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
     }
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     cpu_push_tex_tri(&mut cpu, 0x25, (0, 0, 0), v, uv, clut_word, tpage_word);
     let cpu_words = cpu.vram.words().to_vec();
 
@@ -1169,8 +1169,8 @@ fn shaded_tex_tri_scanline_15bpp_is_bit_exact() {
     let uv = [(0u8, 0u8), (32, 0), (0, 32)];
     let c = [
         (0x80u8, 0x80u8, 0x80u8),
-        (0xC0, 0xC0, 0xC0),
-        (0xFFu8, 0xFFu8, 0xFFu8),
+        (0xc0, 0xc0, 0xc0),
+        (0xffu8, 0xffu8, 0xffu8),
     ];
     let tpage_x = 128u32;
     let tpage_word = make_tpage_word(tpage_x, 0, 2, 0);
@@ -1187,8 +1187,8 @@ fn shaded_tex_tri_scanline_15bpp_is_bit_exact() {
     for (i, &w) in vram.iter().enumerate() {
         cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
     }
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     let pack_rgb = |t: (u8, u8, u8)| (t.0 as u32) | ((t.1 as u32) << 8) | ((t.2 as u32) << 16);
     // 0x34 = textured-shaded triangle.
     cpu.gp0_push((0x34u32 << 24) | pack_rgb(c[0]));
@@ -1266,7 +1266,7 @@ fn tex_quad_bilinear_non_affine_uvs_match_cpu() {
     let mut vram = vec![0u16; 1024 * 512];
     for vy in 0..80u16 {
         for ux in 0..96u16 {
-            let val = ((vy & 0x1F) << 5) | (ux & 0x1F) | 0x0001;
+            let val = ((vy & 0x1f) << 5) | (ux & 0x1f) | 0x0001;
             vram[(tpage_y as usize + vy as usize) * 1024 + (tpage_x as usize + ux as usize)] = val;
         }
     }
@@ -1277,10 +1277,10 @@ fn tex_quad_bilinear_non_affine_uvs_match_cpu() {
     for (i, &w) in vram.iter().enumerate() {
         cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
     }
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     // 0x2D -- textured quad, raw texture, opaque.
-    cpu.gp0_push(0x2D000000);
+    cpu.gp0_push(0x2d000000);
     cpu.gp0_push(pack_xy(v[0]));
     cpu.gp0_push(uv_pack(uv[0])); // clut=0
     cpu.gp0_push(pack_xy(v[1]));
@@ -1362,9 +1362,9 @@ fn assert_tex_quad_bilinear_order_matches_cpu(
     for (i, &w) in vram.iter().enumerate() {
         cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
     }
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
-    cpu.gp0_push(0x2D000000);
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0x2d000000);
     cpu.gp0_push(pack_xy(v[0]));
     cpu.gp0_push(uv_pack(uv[0]));
     cpu.gp0_push(pack_xy(v[1]));
@@ -1460,7 +1460,7 @@ fn mono_tri_scanline_skewed_is_bit_exact() {
     let v0 = (50i32, 20i32);
     let v1 = (130, 70);
     let v2 = (30, 90);
-    let color = 0x03E0u16;
+    let color = 0x03e0u16;
     let cpu = cpu_rasterize_mono_tri(v0, v1, v2, color);
     let vg = VramGpu::new_headless();
     let r = Rasterizer::new(&vg);
@@ -1477,9 +1477,9 @@ fn shaded_tri_scanline_skewed_is_bit_exact() {
     // With scanline-delta RGB walk, strict equality.
     let v = [(50i32, 20i32), (130, 70), (30, 90)];
     let c = [
-        (0xFFu8, 0x00u8, 0x00u8),
-        (0x00, 0xFF, 0x00),
-        (0x00, 0x00, 0xFF),
+        (0xffu8, 0x00u8, 0x00u8),
+        (0x00, 0xff, 0x00),
+        (0x00, 0x00, 0xff),
     ];
     let cpu = cpu_rasterize_shaded_tri(v, c, 0x30, 0, 0, 0);
     let vg = VramGpu::new_headless();
@@ -1525,15 +1525,15 @@ fn cpu_rasterize_mono_rect(
             }
         }
     }
-    gpu.gp0_push(0xE3000000);
-    gpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
-    let e1 = 0xE100_0000_u32 | ((tpage_blend_bits as u32) & 0x3) << 5;
+    gpu.gp0_push(0xe3000000);
+    gpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
+    let e1 = 0xe100_0000_u32 | ((tpage_blend_bits as u32) & 0x3) << 5;
     gpu.gp0_push(e1);
-    gpu.gp0_push(0xE600_0000_u32 | (mask_e6 as u32) & 0x3);
+    gpu.gp0_push(0xe600_0000_u32 | (mask_e6 as u32) & 0x3);
     let cmd = ((cmd_byte as u32) << 24) | bgr15_to_rgb24(color);
     gpu.gp0_push(cmd);
-    gpu.gp0_push(((xy.1 as u32) << 16) | (xy.0 as u32 & 0xFFFF));
-    gpu.gp0_push((wh.1 << 16) | (wh.0 & 0xFFFF));
+    gpu.gp0_push(((xy.1 as u32) << 16) | (xy.0 as u32 & 0xffff));
+    gpu.gp0_push((wh.1 << 16) | (wh.0 & 0xffff));
     gpu.vram.words().to_vec()
 }
 
@@ -1570,16 +1570,16 @@ fn mono_rect_drawing_area_clip_matches_cpu() {
     // Rect spans (5..55, 5..55) but draw area is (20..40,20..40).
     let xy = (5i32, 5i32);
     let wh = (50u32, 50u32);
-    let color = 0x001F; // red
+    let color = 0x001f; // red
     let mut cpu_gpu = Gpu::new();
-    cpu_gpu.gp0_push(0xE3000000 | 20 | (20 << 10));
-    cpu_gpu.gp0_push(0xE4000000 | 40 | (40 << 10));
-    cpu_gpu.gp0_push(0xE100_0000);
-    cpu_gpu.gp0_push(0xE600_0000);
+    cpu_gpu.gp0_push(0xe3000000 | 20 | (20 << 10));
+    cpu_gpu.gp0_push(0xe4000000 | 40 | (40 << 10));
+    cpu_gpu.gp0_push(0xe100_0000);
+    cpu_gpu.gp0_push(0xe600_0000);
     let cmd = 0x60_000000_u32 | bgr15_to_rgb24(color);
     cpu_gpu.gp0_push(cmd);
-    cpu_gpu.gp0_push(((xy.1 as u32) << 16) | (xy.0 as u32 & 0xFFFF));
-    cpu_gpu.gp0_push((wh.1 << 16) | (wh.0 & 0xFFFF));
+    cpu_gpu.gp0_push(((xy.1 as u32) << 16) | (xy.0 as u32 & 0xffff));
+    cpu_gpu.gp0_push((wh.1 << 16) | (wh.0 & 0xffff));
     let cpu = cpu_gpu.vram.words().to_vec();
 
     let vg = VramGpu::new_headless();
@@ -1673,10 +1673,10 @@ fn cpu_push_tex_rect(
         | ((tint.1 as u32) << 8)
         | ((tint.2 as u32) << 16);
     cpu.gp0_push(cmd);
-    cpu.gp0_push(((xy.1 as u32) << 16) | (xy.0 as u32 & 0xFFFF));
-    let uv_clut = ((clut_word & 0xFFFF) << 16) | ((uv.0 as u32) | ((uv.1 as u32) << 8));
+    cpu.gp0_push(((xy.1 as u32) << 16) | (xy.0 as u32 & 0xffff));
+    let uv_clut = ((clut_word & 0xffff) << 16) | ((uv.0 as u32) | ((uv.1 as u32) << 8));
     cpu.gp0_push(uv_clut);
-    cpu.gp0_push((wh.1 << 16) | (wh.0 & 0xFFFF));
+    cpu.gp0_push((wh.1 << 16) | (wh.0 & 0xffff));
 }
 
 /// Build the GP0 0xE1 word that sets the active tpage state on
@@ -1686,7 +1686,7 @@ fn cpu_push_tex_rect(
 fn make_e1_for_tpage(tpage_x: u32, tpage_y: u32, depth: u32) -> u32 {
     let tx = tpage_x / 64;
     let ty = if tpage_y == 256 { 1u32 } else { 0 };
-    0xE100_0000 | (tx & 0xF) | (ty << 4) | ((depth & 0x3) << 7)
+    0xe100_0000 | (tx & 0xf) | (ty << 4) | ((depth & 0x3) << 7)
 }
 
 #[test]
@@ -1711,10 +1711,10 @@ fn tex_rect_15bpp_basic_matches_cpu_byte_for_byte() {
     for (i, &w) in vram.iter().enumerate() {
         cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
     }
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     cpu.gp0_push(make_e1_for_tpage(tpage_x, 0, 2));
-    cpu.gp0_push(0xE600_0000);
+    cpu.gp0_push(0xe600_0000);
     // Cmd 0x65 = textured rect, raw flag set.
     cpu_push_tex_rect(&mut cpu, 0x65, (0, 0, 0), xy, wh, uv, 0);
     let cpu_words = cpu.vram.words().to_vec();
@@ -1761,10 +1761,10 @@ fn tex_rect_x_flip_counts_down_from_biased_origin() {
     for (i, &w) in vram.iter().enumerate() {
         cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
     }
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     cpu.gp0_push(make_e1_for_tpage(tpage_x, 0, 2) | 0x1000);
-    cpu.gp0_push(0xE600_0000);
+    cpu.gp0_push(0xe600_0000);
     cpu_push_tex_rect(&mut cpu, 0x65, (0, 0, 0), xy, wh, uv, 0);
     let cpu_words = cpu.vram.words().to_vec();
 
@@ -1808,10 +1808,10 @@ fn tex_rect_modulated_tint_matches_cpu_byte_for_byte() {
     for (i, &w) in vram.iter().enumerate() {
         cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
     }
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     cpu.gp0_push(make_e1_for_tpage(tpage_x, 0, 2));
-    cpu.gp0_push(0xE600_0000);
+    cpu.gp0_push(0xe600_0000);
     // 0x64 = textured rect, modulated (NOT raw).
     cpu_push_tex_rect(&mut cpu, 0x64, tint, xy, wh, uv, 0);
     let cpu_words = cpu.vram.words().to_vec();
@@ -1859,7 +1859,7 @@ fn tex_rect_4bpp_with_clut_matches_cpu_byte_for_byte() {
         for word_x in 0..4u16 {
             let mut word = 0u16;
             for n in 0..4u16 {
-                let nibble = ((word_x * 4 + n) + vy) & 0xF;
+                let nibble = ((word_x * 4 + n) + vy) & 0xf;
                 word |= nibble << (n * 4);
             }
             vram[vy as usize * 1024 + (tpage_x as usize + word_x as usize)] = word;
@@ -1870,12 +1870,12 @@ fn tex_rect_4bpp_with_clut_matches_cpu_byte_for_byte() {
     for (i, &w) in vram.iter().enumerate() {
         cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
     }
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     cpu.gp0_push(make_e1_for_tpage(tpage_x, 0, 0));
-    cpu.gp0_push(0xE600_0000);
+    cpu.gp0_push(0xe600_0000);
     // CLUT word: clut_x/16 in low 6, clut_y in next 9 bits.
-    let clut_word = ((clut_x / 16) & 0x3F) | ((clut_y & 0x1FF) << 6);
+    let clut_word = ((clut_x / 16) & 0x3f) | ((clut_y & 0x1ff) << 6);
     cpu_push_tex_rect(&mut cpu, 0x65, (0, 0, 0), xy, wh, uv, clut_word);
     let cpu_words = cpu.vram.words().to_vec();
 
@@ -1923,9 +1923,9 @@ fn cpu_rasterize_fill(
             }
         }
     }
-    gpu.gp0_push(0xE300_0000 | e3_clip_tl);
-    gpu.gp0_push(0xE400_0000 | e3_clip_br);
-    gpu.gp0_push(0xE600_0000 | e6_mask as u32);
+    gpu.gp0_push(0xe300_0000 | e3_clip_tl);
+    gpu.gp0_push(0xe400_0000 | e3_clip_br);
+    gpu.gp0_push(0xe600_0000 | e6_mask as u32);
     // 0x02 = quick fill. Color in low 24 bits of cmd.
     let cmd = 0x0200_0000_u32 | bgr15_to_rgb24(color);
     gpu.gp0_push(cmd);
@@ -1966,7 +1966,7 @@ fn fill_ignores_drawing_area_clip() {
     // Sanity: a pixel OUTSIDE the draw area but INSIDE the fill
     // rect should hold the fill colour on both backends.
     let outside_clip = 35usize * 1024 + 35;
-    let expected = ((color & 0x1F) as u8) << 3 | ((color & 0x1F) as u8) >> 2;
+    let expected = ((color & 0x1f) as u8) << 3 | ((color & 0x1f) as u8) >> 2;
     // Check the BGR channels round-trip through fill correctly.
     // Use the exact expected_bgr15 = color, since fill writes 15bpp directly.
     // (RGB24 → BGR15 conversion truncates to 5 bits, so the
@@ -2008,10 +2008,10 @@ fn fill_ignores_mask_check() {
 
 #[test]
 fn fill_zero_size_is_dropped() {
-    let cpu = cpu_rasterize_fill((32, 32), (0, 32), 0xCAFE, 0, 0, 1023 | (511 << 10), 0);
+    let cpu = cpu_rasterize_fill((32, 32), (0, 32), 0xcafe, 0, 0, 1023 | (511 << 10), 0);
     let vg = VramGpu::new_headless();
     let r = Rasterizer::new(&vg);
-    r.dispatch_fill(&vg, &Fill::new((32, 32), (0, 32), 0xCAFE));
+    r.dispatch_fill(&vg, &Fill::new((32, 32), (0, 32), 0xcafe));
     let gpu = vg.download_full().unwrap();
     assert!(cpu.iter().all(|&w| w == 0));
     assert!(gpu.iter().all(|&w| w == 0));
@@ -2105,10 +2105,10 @@ fn cpu_rasterize_shaded_tri(
             }
         }
     }
-    gpu.gp0_push(0xE3000000);
-    gpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
-    gpu.gp0_push(0xE100_0000_u32 | ((tpage_blend_bits as u32) & 0x3) << 5);
-    gpu.gp0_push(0xE600_0000_u32 | (mask_e6 as u32) & 0x3);
+    gpu.gp0_push(0xe3000000);
+    gpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
+    gpu.gp0_push(0xe100_0000_u32 | ((tpage_blend_bits as u32) & 0x3) << 5);
+    gpu.gp0_push(0xe600_0000_u32 | (mask_e6 as u32) & 0x3);
     // GP0 0x30 packet: cmd+c0, v0, c1, v1, c2, v2 (6 words).
     let pack_rgb = |t: (u8, u8, u8)| (t.0 as u32) | ((t.1 as u32) << 8) | ((t.2 as u32) << 16);
     gpu.gp0_push(((cmd_byte as u32) << 24) | pack_rgb(c[0]));
@@ -2127,7 +2127,7 @@ fn shaded_tri_axis_aligned_matches_cpu_within_tolerance() {
     // due to rounding accumulation. Coverage matches; per-channel
     // delta is bounded.
     let v = [(20i32, 20i32), (60, 20), (20, 60)];
-    let c = [(0xFFu8, 0u8, 0u8), (0u8, 0xFFu8, 0u8), (0u8, 0u8, 0xFFu8)];
+    let c = [(0xffu8, 0u8, 0u8), (0u8, 0xffu8, 0u8), (0u8, 0u8, 0xffu8)];
     let cpu = cpu_rasterize_shaded_tri(v, c, 0x30, 0, 0, 0);
     let vg = VramGpu::new_headless();
     let r = Rasterizer::new(&vg);
@@ -2157,8 +2157,8 @@ fn shaded_tri_axis_aligned_matches_cpu_within_tolerance() {
                 continue;
             }
             for shift in [0u32, 5, 10] {
-                let ca = ((cpu[i] >> shift) & 0x1F) as i32;
-                let cb = ((gpu[i] >> shift) & 0x1F) as i32;
+                let ca = ((cpu[i] >> shift) & 0x1f) as i32;
+                let cb = ((gpu[i] >> shift) & 0x1f) as i32;
                 max_chan = max_chan.max((ca - cb).abs());
             }
         }
@@ -2175,13 +2175,13 @@ fn shaded_tri_uniform_color_matches_mono_tri_path() {
     // triangle should produce the SAME output as a monochrome
     // triangle of that colour. Bit-exact within bbox.
     let v = [(15i32, 15i32), (55, 15), (15, 55)];
-    let rgb = (0xC0u8, 0x40u8, 0x80u8);
+    let rgb = (0xc0u8, 0x40u8, 0x80u8);
     // CPU: shaded path with same colour everywhere.
     let cpu_shaded = cpu_rasterize_shaded_tri(v, [rgb; 3], 0x30, 0, 0, 0);
     // CPU: mono path with the BGR15-of-rgb.
-    let bgr15 = (((rgb.0 as u16) >> 3) & 0x1F)
-        | ((((rgb.1 as u16) >> 3) & 0x1F) << 5)
-        | ((((rgb.2 as u16) >> 3) & 0x1F) << 10);
+    let bgr15 = (((rgb.0 as u16) >> 3) & 0x1f)
+        | ((((rgb.1 as u16) >> 3) & 0x1f) << 5)
+        | ((((rgb.2 as u16) >> 3) & 0x1f) << 10);
     let cpu_mono = cpu_rasterize_mono_tri(v[0], v[1], v[2], bgr15);
     // The two CPU paths differ at edges (different fill rules?
     // both use scanline-delta, so should be close). Just verify
@@ -2225,8 +2225,8 @@ fn shaded_tex_tri_axis_aligned_15bpp_matches_cpu_within_tolerance() {
     // Different per-vertex tints so interpolation is exercised.
     let c = [
         (0x80u8, 0x80u8, 0x80u8),
-        (0xC0, 0xC0, 0xC0),
-        (0xFFu8, 0xFFu8, 0xFFu8),
+        (0xc0, 0xc0, 0xc0),
+        (0xffu8, 0xffu8, 0xffu8),
     ];
     let tpage_x = 128u32;
     let tpage_word = make_tpage_word(tpage_x, 0, 2, 0);
@@ -2243,8 +2243,8 @@ fn shaded_tex_tri_axis_aligned_15bpp_matches_cpu_within_tolerance() {
     for (i, &w) in vram.iter().enumerate() {
         cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
     }
-    cpu.gp0_push(0xE3000000);
-    cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+    cpu.gp0_push(0xe3000000);
+    cpu.gp0_push(0xe4000000 | 1023 | (511 << 10));
     let pack_rgb = |t: (u8, u8, u8)| (t.0 as u32) | ((t.1 as u32) << 8) | ((t.2 as u32) << 16);
     // 0x34 = textured-shaded triangle, modulated.
     cpu.gp0_push((0x34u32 << 24) | pack_rgb(c[0]));
@@ -2291,8 +2291,8 @@ fn shaded_tex_tri_axis_aligned_15bpp_matches_cpu_within_tolerance() {
                 continue;
             }
             for shift in [0u32, 5, 10] {
-                let ca = ((cpu_words[i] >> shift) & 0x1F) as i32;
-                let cb = ((gpu_words[i] >> shift) & 0x1F) as i32;
+                let ca = ((cpu_words[i] >> shift) & 0x1f) as i32;
+                let cb = ((gpu_words[i] >> shift) & 0x1f) as i32;
                 max_chan = max_chan.max((ca - cb).abs());
             }
         }
@@ -2310,7 +2310,7 @@ fn shaded_tex_tri_axis_aligned_15bpp_matches_cpu_within_tolerance() {
 #[test]
 fn shaded_tri_oversized_is_dropped_like_cpu() {
     let v = [(0i32, 0i32), (2000, 0), (0, 0)];
-    let c = [(0xFFu8, 0, 0); 3];
+    let c = [(0xffu8, 0, 0); 3];
     let cpu = cpu_rasterize_shaded_tri(v, c, 0x30, 0, 0, 0);
     let vg = VramGpu::new_headless();
     let r = Rasterizer::new(&vg);

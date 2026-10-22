@@ -52,7 +52,7 @@ const CACHE_CONTROL_NOSTR: u32 = 1 << 17;
 const COP0_STATUS_CU2: u32 = 1 << 30;
 /// Retail BIOS state after `FlushCache` returns: scratchpad and I-cache
 /// enabled, four-word I-cache refills, and the normal bus-control bits.
-const CACHE_CONTROL_BIOS_NORMAL: u32 = 0x0001_E988;
+const CACHE_CONTROL_BIOS_NORMAL: u32 = 0x0001_e988;
 
 /// Cycles after `MTC2` to LZCS (data reg 30) before the recomputed LZCR
 /// (data reg 31) is readable. A read inside this window returns the prior
@@ -726,7 +726,7 @@ fn block_cache_default() -> bool {
 fn is_branch_or_jump(instr: u32) -> bool {
     match instr >> 26 {
         0x01..=0x07 => true,
-        0x00 => matches!(instr & 0x3F, 0x08 | 0x09),
+        0x00 => matches!(instr & 0x3f, 0x08 | 0x09),
         _ => false,
     }
 }
@@ -936,7 +936,7 @@ impl Cpu {
         // ps1-tests/amidog) expect the BIOS-default stack; a fresh CPU's
         // reset SP is 0, which wraps the stack into unmapped 0xFFFFFFxx
         // and crashes the side-load instantly.
-        let sp = initial_sp.unwrap_or(0x801F_FF00);
+        let sp = initial_sp.unwrap_or(0x801f_ff00);
         self.set_gpr(29, sp);
         // Frame pointer tracks SP on bare-metal boot so backtraces
         // look sane before main() sets up its own frame.
@@ -1118,7 +1118,7 @@ impl Cpu {
         // KUSEG (0x0000_0000..0x7FFF_FFFF) and KSEG0
         // (0x8000_0000..0x9FFF_FFFF) are cacheable. KSEG1 is the
         // explicit uncached alias and KSEG2 contains CPU control space.
-        addr < 0xA000_0000 && self.cache_control & CACHE_CONTROL_IS1 != 0
+        addr < 0xa000_0000 && self.cache_control & CACHE_CONTROL_IS1 != 0
     }
 
     #[inline(always)]
@@ -1233,7 +1233,7 @@ impl Cpu {
 
     #[inline]
     fn instruction_address_is_executable(addr: u32) -> bool {
-        if addr >= 0xC000_0000 {
+        if addr >= 0xc000_0000 {
             return false;
         }
         let phys = memory::to_physical(addr);
@@ -1278,11 +1278,11 @@ impl Cpu {
     }
 
     fn profile_instruction_class(&mut self, instr: u32, in_delay_slot: bool) {
-        let opcode = ((instr >> 26) & 0x3F) as u8;
-        let funct = (instr & 0x3F) as u8;
-        let base = ((instr >> 21) & 0x1F) as u8;
+        let opcode = ((instr >> 26) & 0x3f) as u8;
+        let funct = (instr & 0x3f) as u8;
+        let base = ((instr >> 21) & 0x1f) as u8;
         let is_load = matches!(opcode, 0x20..=0x26 | 0x32);
-        let is_store = matches!(opcode, 0x28 | 0x29 | 0x2A | 0x2B | 0x2E | 0x3A);
+        let is_store = matches!(opcode, 0x28 | 0x29 | 0x2a | 0x2b | 0x2e | 0x3a);
         let is_control_flow =
             matches!(opcode, 0x01..=0x07) || (opcode == 0 && matches!(funct, 0x08 | 0x09));
         let profile = &mut self.instruction_class_profile;
@@ -1320,8 +1320,8 @@ impl Cpu {
             0x23 | 0x32 => increment!(word_loads),
             0x28 => increment!(byte_stores),
             0x29 => increment!(halfword_stores),
-            0x2A | 0x2E => increment!(unaligned_stores),
-            0x2B | 0x3A => increment!(word_stores),
+            0x2a | 0x2e => increment!(unaligned_stores),
+            0x2b | 0x3a => increment!(word_stores),
             _ => {}
         }
 
@@ -1331,7 +1331,7 @@ impl Cpu {
             let physical = memory::to_physical(address);
             if physical < memory::ram::MIRROR_END {
                 increment!(ram_accesses);
-            } else if !(0xA000_0000..0xC000_0000).contains(&address)
+            } else if !(0xa000_0000..0xc000_0000).contains(&address)
                 && (memory::scratchpad::BASE
                     ..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
                     .contains(&physical)
@@ -1355,7 +1355,7 @@ impl Cpu {
             0x02 => increment!(direct_jumps),
             0x03 => increment!(jal),
             0x01 | 0x04..=0x07 => increment!(conditional_branches),
-            0x0F => increment!(lui),
+            0x0f => increment!(lui),
             0x12 => {
                 if instr & (1 << 25) != 0 {
                     increment!(gte_commands);
@@ -1366,7 +1366,7 @@ impl Cpu {
             0 => match funct {
                 0x09 => increment!(jalr),
                 0x18 | 0x19 => increment!(multiply),
-                0x1A | 0x1B => increment!(divide),
+                0x1a | 0x1b => increment!(divide),
                 _ => {}
             },
             _ => {}
@@ -1593,7 +1593,7 @@ impl Cpu {
     fn write_byte(&mut self, addr: u32, value: u32, bus: &mut Bus) {
         if let Some(offset) = Self::cache_control_lane(addr) {
             let shift = offset * 8;
-            let merged = (self.read_cache_control() & !(0xFF << shift)) | ((value & 0xFF) << shift);
+            let merged = (self.read_cache_control() & !(0xff << shift)) | ((value & 0xff) << shift);
             self.write_cache_control(merged, bus);
             return;
         }
@@ -1607,7 +1607,7 @@ impl Cpu {
         if let Some(offset) = Self::cache_control_lane(addr) {
             let shift = offset * 8;
             let merged =
-                (self.read_cache_control() & !(0xFFFF << shift)) | ((value & 0xFFFF) << shift);
+                (self.read_cache_control() & !(0xffff << shift)) | ((value & 0xffff) << shift);
             self.write_cache_control(merged, bus);
             return;
         }
@@ -1643,9 +1643,9 @@ impl Cpu {
     /// GPUSTAT and the interrupt, DMA and timer registers: what guest wait
     /// loops poll.
     fn polled_status_register(phys: u32) -> bool {
-        (0x1F80_1070..=0x1F80_10FF).contains(&phys)
+        (0x1f80_1070..=0x1f80_10ff).contains(&phys)
             || crate::timers::Timers::contains(phys)
-            || (0x1F80_1814..0x1F80_1818).contains(&phys)
+            || (0x1f80_1814..0x1f80_1818).contains(&phys)
     }
 
     /// SWL/SWR are emulated as read-merge-write, but main RAM does not see a
@@ -2163,7 +2163,7 @@ impl Cpu {
             // Every load opcode names its destination in rt.
             self.load_shadow = Some(LoadShadow {
                 position: 0,
-                register: ((instr >> 16) & 0x1F) as u8,
+                register: ((instr >> 16) & 0x1f) as u8,
             });
         }
         if self.cpu_cycle_profile_enabled {
@@ -2274,7 +2274,7 @@ impl Cpu {
         in_delay_slot: bool,
         bus: &mut Bus,
     ) -> Result<(), ExecutionError> {
-        let opcode = ((instr >> 26) & 0x3F) as u8;
+        let opcode = ((instr >> 26) & 0x3f) as u8;
         match opcode {
             0x00 => self.dispatch_special(instr, pc, in_delay_slot, bus),
             0x01 => self.dispatch_regimm(instr, pc),
@@ -2286,12 +2286,12 @@ impl Cpu {
             0x07 => self.op_bgtz(instr, pc),
             0x08 => self.op_addi(instr),
             0x09 => self.op_addiu(instr),
-            0x0A => self.op_slti(instr),
-            0x0B => self.op_sltiu(instr),
-            0x0C => self.op_andi(instr),
-            0x0D => self.op_ori(instr),
-            0x0E => self.op_xori(instr),
-            0x0F => self.op_lui(instr),
+            0x0a => self.op_slti(instr),
+            0x0b => self.op_sltiu(instr),
+            0x0c => self.op_andi(instr),
+            0x0d => self.op_ori(instr),
+            0x0e => self.op_xori(instr),
+            0x0f => self.op_lui(instr),
             0x10 => {
                 if self.cop_instruction_usable(0) {
                     self.dispatch_cop0(instr, bus)
@@ -2317,9 +2317,9 @@ impl Cpu {
             0x26 => self.op_lwr(instr, bus),
             0x28 => self.op_sb(instr, bus),
             0x29 => self.op_sh(instr, bus),
-            0x2A => self.op_swl(instr, bus),
-            0x2B => self.op_sw(instr, bus),
-            0x2E => self.op_swr(instr, bus),
+            0x2a => self.op_swl(instr, bus),
+            0x2b => self.op_sw(instr, bus),
+            0x2e => self.op_swr(instr, bus),
             0x30 => self.dispatch_absent_cop_memory(0, pc, in_delay_slot, bus),
             0x31 => self.dispatch_absent_cop_memory(1, pc, in_delay_slot, bus),
             0x32 => {
@@ -2332,14 +2332,14 @@ impl Cpu {
             0x33 => self.dispatch_absent_cop_memory(3, pc, in_delay_slot, bus),
             0x38 => self.dispatch_absent_cop_memory(0, pc, in_delay_slot, bus),
             0x39 => self.dispatch_absent_cop_memory(1, pc, in_delay_slot, bus),
-            0x3A => {
+            0x3a => {
                 if self.cop_memory_usable(2) {
                     self.op_swc2(instr, bus)
                 } else {
                     self.raise_coprocessor_unusable(2, pc, in_delay_slot, bus)
                 }
             }
-            0x3B => self.dispatch_absent_cop_memory(3, pc, in_delay_slot, bus),
+            0x3b => self.dispatch_absent_cop_memory(3, pc, in_delay_slot, bus),
             _ => Err(ExecutionError::Unimplemented { opcode, pc, instr }),
         }
     }
@@ -2416,7 +2416,7 @@ impl Cpu {
     /// Dispatch table for COP0 instructions (primary opcode `0x10`).
     /// The sub-operation lives in bits 25..=21.
     fn dispatch_cop0(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        let cop_op = ((instr >> 21) & 0x1F) as u8;
+        let cop_op = ((instr >> 21) & 0x1f) as u8;
         match cop_op {
             0x00 => self.op_mfc0(instr),
             0x04 => self.op_mtc0(instr, bus),
@@ -2447,13 +2447,13 @@ impl Cpu {
             // commit window computes its first row with the previous V0.x.
             // MVMVA is console-confirmed; RTPS is included in this env-gated
             // diagnostic path to reproduce the SDK projection schedule.
-            let opcode = instr & 0x3F;
+            let opcode = instr & 0x3f;
             if self.gte_v0x_hazard
                 && (opcode == 0x01 || (opcode == 0x12 && (instr >> 15) & 3 == 0))
                 && self.tick.wrapping_sub(self.gte_v0xy_write_tick) <= self.gte_v0x_window
             {
                 self.cop2.execute_with_stale_v0x(instr, self.gte_prev_v0x);
-            } else if (instr & 0x3F) == 0x0C && self.tick.wrapping_sub(self.gte_ir3_write_tick) <= 1
+            } else if (instr & 0x3f) == 0x0c && self.tick.wrapping_sub(self.gte_ir3_write_tick) <= 1
             {
                 self.cop2
                     .execute_op_with_stale_ir3(instr, self.gte_prev_ir3 as i16);
@@ -2469,7 +2469,7 @@ impl Cpu {
             // than a deadline ending on the final internal cycle.
             self.gte_busy_until = bus.cycles() + Gte::command_cycles(instr) as u64 + 1;
             let recent_cop2_write = self.tick.wrapping_sub(self.gte_last_write_tick) <= 2;
-            if (instr & 0x3F) == 0x06 && self.tick.wrapping_sub(self.gte_sxy2_write_tick) <= 2 {
+            if (instr & 0x3f) == 0x06 && self.tick.wrapping_sub(self.gte_sxy2_write_tick) <= 2 {
                 // NCLIP's two positive SXY2 products are its early phase.
                 // SXY2.x is not forwarded from the immediately preceding
                 // MTC2. SXY2.y is forwarded only by the packed (two-cycle)
@@ -2515,7 +2515,7 @@ impl Cpu {
                     self.gte_mac0_stale = self.gte_mac_write_value;
                 }
             }
-            match instr & 0x3F {
+            match instr & 0x3f {
                 // KNOWN GAP (conformance 0x8b): silicon computes the full
                 // cross in BOTH phases of the controlled scene-C replica,
                 // while this model's phases classify differently (spaced
@@ -2532,12 +2532,12 @@ impl Cpu {
                 }
                 _ => self.gte_nclip_rtpt_history = false,
             }
-            if matches!(instr & 0x3F, 0x01 | 0x30) {
+            if matches!(instr & 0x3f, 0x01 | 0x30) {
                 self.gte_sxy2_from_transform = true;
             }
             return Ok(());
         }
-        let cop_op = ((instr >> 21) & 0x1F) as u8;
+        let cop_op = ((instr >> 21) & 0x1f) as u8;
         match cop_op {
             // MFC2/CFC2 wait for a running command. hwtest v1.23 records
             // 0x130-0x134 on a launch PAL console: RTPS, a read, then 20 nops
@@ -2578,8 +2578,8 @@ impl Cpu {
         shadow.position += 1;
         let opcode = instr >> 26;
         let touches_bus = opcode >= 0x20;
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         // rt is a destination in the immediate formats, so this errs towards
         // ending the shadow early, never towards hiding a dependent read.
         let reads_loaded = shadow.register != 0 && (rs == shadow.register || rt == shadow.register);
@@ -2607,8 +2607,8 @@ impl Cpu {
     /// `rt`. Like LW, this respects the one-slot load delay so the
     /// next instruction sees the *old* register value.
     fn op_mfc2(&mut self, instr: u32, bus: &Bus) -> Result<(), ExecutionError> {
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         let value = self.gte_read_data_latency(bus, rd);
         if rt != 0 {
             self.pending_load = Some((rt, value));
@@ -2663,8 +2663,8 @@ impl Cpu {
 
     /// `CFC2 rt, rd` -- same as MFC2 but reads a control register.
     fn op_cfc2(&mut self, instr: u32, _bus: &Bus) -> Result<(), ExecutionError> {
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         let value = self.cop2.read_control(rd);
         if rt != 0 {
             self.pending_load = Some((rt, value));
@@ -2678,8 +2678,8 @@ impl Cpu {
     /// result-read latency as MAC0: a back-to-back LZCR read returns the
     /// prior count (the off-by-one seen on real hardware).
     fn op_mtc2(&mut self, instr: u32, _bus: &Bus) -> Result<(), ExecutionError> {
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         self.gte_last_write_tick = self.tick;
         if rd == 30 {
             self.gte_lzcr_stale = self.cop2.read_data(31);
@@ -2726,8 +2726,8 @@ impl Cpu {
     /// CTC2 hazard models that once lived here were refuted on silicon:
     /// every RT settle/drop sweep case passed.
     fn op_ctc2(&mut self, instr: u32, _bus: &Bus) -> Result<(), ExecutionError> {
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         self.gte_last_write_tick = self.tick;
         self.cop2.write_control(rd, self.gpr(rt));
         Ok(())
@@ -2736,8 +2736,8 @@ impl Cpu {
     /// `LWC2 rt, offset(rs)` -- load 32-bit word from memory into COP2
     /// data register `rt`. No GPR is touched, so no load-delay slot.
     fn op_lwc2(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         self.charge_read(bus, addr, AccessWidth::Word);
@@ -2751,8 +2751,8 @@ impl Cpu {
         if self.cache_isolated() {
             return Ok(());
         }
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         // SWC2 stores a GTE register, so it reads a result exactly as MFC2
@@ -2767,7 +2767,7 @@ impl Cpu {
     }
 
     fn dispatch_regimm(&mut self, instr: u32, pc: u32) -> Result<(), ExecutionError> {
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         match rt {
             0x00 => self.op_bltz(instr, pc),
             0x01 => self.op_bgez(instr, pc),
@@ -2798,8 +2798,8 @@ impl Cpu {
             }
         }
 
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as usize;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as usize;
         let value = self.gpr(rt);
         if rd == 12 {
             self.cc_dma_event(
@@ -2823,7 +2823,7 @@ impl Cpu {
         in_delay_slot: bool,
         bus: &mut Bus,
     ) -> Result<(), ExecutionError> {
-        let funct = (instr & 0x3F) as u8;
+        let funct = (instr & 0x3f) as u8;
         match funct {
             0x00 => self.op_sll(instr),
             0x02 => self.op_srl(instr),
@@ -2833,8 +2833,8 @@ impl Cpu {
             0x07 => self.op_srav(instr),
             0x08 => self.op_jr(instr, pc),
             0x09 => self.op_jalr(instr, pc),
-            0x0C => self.op_syscall(pc, in_delay_slot),
-            0x0D => self.op_break(pc, in_delay_slot),
+            0x0c => self.op_syscall(pc, in_delay_slot),
+            0x0d => self.op_break(pc, in_delay_slot),
             // MFHI/MFLO read the multiply/divide unit; stall until an
             // in-flight MULT/DIV has retired (the R3000A HI/LO interlock).
             0x10 => {
@@ -2864,23 +2864,23 @@ impl Cpu {
             // MULT/MULTU/DIV/DIVU run asynchronously: charge their latency so
             // a dependent MFHI/MFLO stalls and interleaved work hides it.
             0x18 => {
-                let cycles = mult_cycles(self.gpr(((instr >> 21) & 0x1F) as u8), true);
+                let cycles = mult_cycles(self.gpr(((instr >> 21) & 0x1f) as u8), true);
                 let r = self.op_mult(instr);
                 self.hilo_busy_until = bus.cycles() + cycles as u64 + 1;
                 r
             }
             0x19 => {
-                let cycles = mult_cycles(self.gpr(((instr >> 21) & 0x1F) as u8), false);
+                let cycles = mult_cycles(self.gpr(((instr >> 21) & 0x1f) as u8), false);
                 let r = self.op_multu(instr);
                 self.hilo_busy_until = bus.cycles() + cycles as u64 + 1;
                 r
             }
-            0x1A => {
+            0x1a => {
                 let r = self.op_div(instr);
                 self.hilo_busy_until = bus.cycles() + DIV_CYCLES as u64 + 1;
                 r
             }
-            0x1B => {
+            0x1b => {
                 let r = self.op_divu(instr);
                 self.hilo_busy_until = bus.cycles() + DIV_CYCLES as u64 + 1;
                 r
@@ -2893,16 +2893,16 @@ impl Cpu {
             0x25 => self.op_or(instr),
             0x26 => self.op_xor(instr),
             0x27 => self.op_nor(instr),
-            0x2A => self.op_slt(instr),
-            0x2B => self.op_sltu(instr),
+            0x2a => self.op_slt(instr),
+            0x2b => self.op_sltu(instr),
             _ => Err(ExecutionError::UnimplementedSpecial { funct, pc, instr }),
         }
     }
 
     /// `LUI rt, imm16` -- load upper immediate: `rt = imm16 << 16`.
     fn op_lui(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let imm = instr & 0xFFFF;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let imm = instr & 0xffff;
         self.set_gpr(rt, imm << 16);
         Ok(())
     }
@@ -2915,8 +2915,8 @@ impl Cpu {
     /// range-check idioms -- treating `ADDI` as `ADDIU` means those
     /// games silently run past what should have been a clamped value.
     fn op_addi(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let imm = (instr as i16) as i32;
         let a = self.gpr(rs) as i32;
         match a.checked_add(imm) {
@@ -2941,8 +2941,8 @@ impl Cpu {
     /// the same bit pattern; the difference from `ADDI` is only that
     /// arithmetic overflow does not raise an exception.
     fn op_addiu(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let imm = (instr as i16) as i32 as u32;
         self.set_gpr(rt, self.gpr(rs).wrapping_add(imm));
         Ok(())
@@ -2951,36 +2951,36 @@ impl Cpu {
     /// `ORI rt, rs, imm16` -- bitwise OR with zero-extended immediate:
     /// `rt = rs | imm16`.
     fn op_ori(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let imm = instr & 0xFFFF;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let imm = instr & 0xffff;
         self.set_gpr(rt, self.gpr(rs) | imm);
         Ok(())
     }
 
     /// `OR rd, rs, rt` -- bitwise OR of two registers: `rd = rs | rt`.
     fn op_or(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         self.set_gpr(rd, self.gpr(rs) | self.gpr(rt));
         Ok(())
     }
 
     /// `ADDU rd, rs, rt` -- add unsigned (no overflow trap): `rd = rs + rt`.
     fn op_addu(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         self.set_gpr(rd, self.gpr(rs).wrapping_add(self.gpr(rt)));
         Ok(())
     }
 
     /// `SLT rd, rs, rt` -- set-less-than, signed: `rd = (rs < rt) ? 1 : 0`.
     fn op_slt(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         let lhs = self.gpr(rs) as i32;
         let rhs = self.gpr(rt) as i32;
         self.set_gpr(rd, (lhs < rhs) as u32);
@@ -2989,9 +2989,9 @@ impl Cpu {
 
     /// `SLTU rd, rs, rt` -- set-less-than, unsigned.
     fn op_sltu(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         self.set_gpr(rd, (self.gpr(rs) < self.gpr(rt)) as u32);
         Ok(())
     }
@@ -3000,9 +3000,9 @@ impl Cpu {
     /// When `rd = rt = sa = 0`, the whole encoding is `0x0000_0000`,
     /// which is the canonical `NOP`.
     fn op_sll(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
-        let sa = (instr >> 6) & 0x1F;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
+        let sa = (instr >> 6) & 0x1f;
         self.set_gpr(rd, self.gpr(rt) << sa);
         Ok(())
     }
@@ -3015,9 +3015,9 @@ impl Cpu {
     /// executes before PC actually lands at the target -- this happens
     /// via [`Cpu::step`]'s `pending_pc` handling.
     fn op_j(&mut self, instr: u32, pc: u32) -> Result<(), ExecutionError> {
-        let target_field = instr & 0x03FF_FFFF;
+        let target_field = instr & 0x03ff_ffff;
         let delay_slot_pc = pc.wrapping_add(4);
-        let target = (delay_slot_pc & 0xF000_0000) | (target_field << 2);
+        let target = (delay_slot_pc & 0xf000_0000) | (target_field << 2);
         self.pending_pc = Some(target);
         Ok(())
     }
@@ -3025,8 +3025,8 @@ impl Cpu {
     /// `BEQ rs, rt, offset` -- branch (delay-slotted) if `rs == rt`.
     /// Target = `(pc + 4) + (sign_extend(offset) << 2)`.
     fn op_beq(&mut self, instr: u32, pc: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         if self.gpr(rs) == self.gpr(rt) {
             self.pending_pc = Some(branch_target(pc, instr));
         }
@@ -3035,8 +3035,8 @@ impl Cpu {
 
     /// `BNE rs, rt, offset` -- branch (delay-slotted) if `rs != rt`.
     fn op_bne(&mut self, instr: u32, pc: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         if self.gpr(rs) != self.gpr(rt) {
             self.pending_pc = Some(branch_target(pc, instr));
         }
@@ -3050,8 +3050,8 @@ impl Cpu {
     /// stage the load in `pending_load`; [`Cpu::step`] commits it
     /// after the following instruction executes.
     fn op_lw(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         // Alignment traps happen before the memory transaction.
@@ -3075,8 +3075,8 @@ impl Cpu {
     /// to BCC.TAG. The BIOS uses word stores in this mode to invalidate all
     /// tags and then clear the cache's code RAM without touching main RAM.
     fn op_sw(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         // Alignment trap before the store reaches memory.
@@ -3089,8 +3089,8 @@ impl Cpu {
     }
 
     fn op_mfc0(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as usize;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as usize;
         if rt != 0 {
             self.pending_load = Some((rt, self.cop0[rd]));
         }
@@ -3117,23 +3117,23 @@ impl Cpu {
     }
 
     fn op_jal(&mut self, instr: u32, pc: u32) -> Result<(), ExecutionError> {
-        let target_field = instr & 0x03FF_FFFF;
+        let target_field = instr & 0x03ff_ffff;
         let delay_slot_pc = pc.wrapping_add(4);
-        let target = (delay_slot_pc & 0xF000_0000) | (target_field << 2);
+        let target = (delay_slot_pc & 0xf000_0000) | (target_field << 2);
         self.set_gpr(31, delay_slot_pc.wrapping_add(4));
         self.pending_pc = Some(target);
         Ok(())
     }
 
     fn op_jr(&mut self, instr: u32, _pc: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
         self.pending_pc = Some(self.gpr(rs));
         Ok(())
     }
 
     fn op_jalr(&mut self, instr: u32, pc: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         let target = self.gpr(rs);
         self.set_gpr(rd, pc.wrapping_add(8));
         self.pending_pc = Some(target);
@@ -3141,7 +3141,7 @@ impl Cpu {
     }
 
     fn op_blez(&mut self, instr: u32, pc: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
         if (self.gpr(rs) as i32) <= 0 {
             self.pending_pc = Some(branch_target(pc, instr));
         }
@@ -3149,7 +3149,7 @@ impl Cpu {
     }
 
     fn op_bgtz(&mut self, instr: u32, pc: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
         if (self.gpr(rs) as i32) > 0 {
             self.pending_pc = Some(branch_target(pc, instr));
         }
@@ -3157,7 +3157,7 @@ impl Cpu {
     }
 
     fn op_bltz(&mut self, instr: u32, pc: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
         if (self.gpr(rs) as i32) < 0 {
             self.pending_pc = Some(branch_target(pc, instr));
         }
@@ -3165,7 +3165,7 @@ impl Cpu {
     }
 
     fn op_bgez(&mut self, instr: u32, pc: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
         if (self.gpr(rs) as i32) >= 0 {
             self.pending_pc = Some(branch_target(pc, instr));
         }
@@ -3173,7 +3173,7 @@ impl Cpu {
     }
 
     fn op_bltzal(&mut self, instr: u32, pc: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
         self.set_gpr(31, pc.wrapping_add(8));
         if (self.gpr(rs) as i32) < 0 {
             self.pending_pc = Some(branch_target(pc, instr));
@@ -3182,7 +3182,7 @@ impl Cpu {
     }
 
     fn op_bgezal(&mut self, instr: u32, pc: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
         self.set_gpr(31, pc.wrapping_add(8));
         if (self.gpr(rs) as i32) >= 0 {
             self.pending_pc = Some(branch_target(pc, instr));
@@ -3191,40 +3191,40 @@ impl Cpu {
     }
 
     fn op_slti(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let imm = (instr as i16) as i32;
         self.set_gpr(rt, ((self.gpr(rs) as i32) < imm) as u32);
         Ok(())
     }
 
     fn op_sltiu(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let imm = (instr as i16) as i32 as u32;
         self.set_gpr(rt, (self.gpr(rs) < imm) as u32);
         Ok(())
     }
 
     fn op_andi(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let imm = instr & 0xFFFF;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let imm = instr & 0xffff;
         self.set_gpr(rt, self.gpr(rs) & imm);
         Ok(())
     }
 
     fn op_xori(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let imm = instr & 0xFFFF;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let imm = instr & 0xffff;
         self.set_gpr(rt, self.gpr(rs) ^ imm);
         Ok(())
     }
 
     fn op_lb(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         self.charge_read(bus, addr, AccessWidth::Byte);
@@ -3236,8 +3236,8 @@ impl Cpu {
     }
 
     fn op_lbu(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         self.charge_read(bus, addr, AccessWidth::Byte);
@@ -3249,8 +3249,8 @@ impl Cpu {
     }
 
     fn op_lh(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         if addr & 1 != 0 {
@@ -3266,8 +3266,8 @@ impl Cpu {
     }
 
     fn op_lhu(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         if addr & 1 != 0 {
@@ -3283,8 +3283,8 @@ impl Cpu {
     }
 
     fn op_sb(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         self.write_byte(addr, self.gpr(rt), bus);
@@ -3292,8 +3292,8 @@ impl Cpu {
     }
 
     fn op_sh(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         if addr & 1 != 0 {
@@ -3318,8 +3318,8 @@ impl Cpu {
     /// squashed (the opposite of non-load writes). The staged `rt` is read
     /// from the pending-load slot.
     fn op_lwl(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         let word = self.read_lwl_lanes(addr, bus);
@@ -3338,7 +3338,7 @@ impl Cpu {
         //   addr=2 → 234d
         //   addr=3 → 1234   (full 4-byte load)
         let shift = (3 - (addr & 3)) * 8;
-        let mask = !(0xFFFF_FFFFu32 << shift);
+        let mask = !(0xffff_ffffu32 << shift);
         let merged = (current & mask) | (word << shift);
         if rt != 0 {
             self.pending_load = Some((rt, merged));
@@ -3349,8 +3349,8 @@ impl Cpu {
     /// `LWR rt, offset(rs)` -- Load Word Right. Mirror of LWL; merges
     /// the low-order bytes of the word containing `addr` into `rt`.
     fn op_lwr(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         // LWL/LWR targeting the same register are architecturally
@@ -3366,8 +3366,8 @@ impl Cpu {
         let word = self.read_lwr_lanes(addr, bus);
         let current = self.staged_gpr(rt);
         let shift = (addr & 3) * 8;
-        let mask = 0xFFFF_FFFFu32 >> (24 - shift);
-        let merged = (current & !(0xFFFF_FFFFu32 >> shift)) | (word >> shift);
+        let mask = 0xffff_ffffu32 >> (24 - shift);
+        let merged = (current & !(0xffff_ffffu32 >> shift)) | (word >> shift);
         let _ = mask; // the mask form above is equivalent to the >> chain used
         if rt != 0 {
             self.pending_load = Some((rt, merged));
@@ -3382,8 +3382,8 @@ impl Cpu {
         if self.cache_isolated() {
             return Ok(());
         }
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         let aligned = addr & !3;
@@ -3391,7 +3391,7 @@ impl Cpu {
         let mem = bus.read32(aligned);
         let reg = self.gpr(rt);
         let shift = (addr & 3) * 8;
-        let merged = (mem & !(0xFFFF_FFFFu32 >> (24 - shift))) | (reg >> (24 - shift));
+        let merged = (mem & !(0xffff_ffffu32 >> (24 - shift))) | (reg >> (24 - shift));
         // Charged as the ordinary store it is on the bus.
         bus.cpu_write32(aligned, merged);
         Ok(())
@@ -3403,8 +3403,8 @@ impl Cpu {
         if self.cache_isolated() {
             return Ok(());
         }
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         let aligned = addr & !3;
@@ -3412,7 +3412,7 @@ impl Cpu {
         let mem = bus.read32(aligned);
         let reg = self.gpr(rt);
         let shift = (addr & 3) * 8;
-        let merged = (mem & !(0xFFFF_FFFFu32 << shift)) | (reg << shift);
+        let merged = (mem & !(0xffff_ffffu32 << shift)) | (reg << shift);
         // Charged as the ordinary store it is on the bus.
         bus.cpu_write32(aligned, merged);
         Ok(())
@@ -3433,42 +3433,42 @@ impl Cpu {
     }
 
     fn op_srl(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
-        let sa = (instr >> 6) & 0x1F;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
+        let sa = (instr >> 6) & 0x1f;
         self.set_gpr(rd, self.gpr(rt) >> sa);
         Ok(())
     }
 
     fn op_sra(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
-        let sa = (instr >> 6) & 0x1F;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
+        let sa = (instr >> 6) & 0x1f;
         self.set_gpr(rd, ((self.gpr(rt) as i32) >> sa) as u32);
         Ok(())
     }
 
     fn op_sllv(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
-        self.set_gpr(rd, self.gpr(rt) << (self.gpr(rs) & 0x1F));
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
+        self.set_gpr(rd, self.gpr(rt) << (self.gpr(rs) & 0x1f));
         Ok(())
     }
 
     fn op_srlv(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
-        self.set_gpr(rd, self.gpr(rt) >> (self.gpr(rs) & 0x1F));
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
+        self.set_gpr(rd, self.gpr(rt) >> (self.gpr(rs) & 0x1f));
         Ok(())
     }
 
     fn op_srav(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
-        self.set_gpr(rd, ((self.gpr(rt) as i32) >> (self.gpr(rs) & 0x1F)) as u32);
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
+        self.set_gpr(rd, ((self.gpr(rt) as i32) >> (self.gpr(rs) & 0x1f)) as u32);
         Ok(())
     }
 
@@ -3476,9 +3476,9 @@ impl Cpu {
     /// signed overflow; destination unchanged. `ADDU` is the wrap-
     /// silently variant.
     fn op_add(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         let a = self.gpr(rs) as i32;
         let b = self.gpr(rt) as i32;
         match a.checked_add(b) {
@@ -3497,9 +3497,9 @@ impl Cpu {
     /// `SUB rd, rs, rt` -- signed subtract. Raises Overflow (code 12)
     /// on signed overflow; destination unchanged. `SUBU` wraps.
     fn op_sub(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         let a = self.gpr(rs) as i32;
         let b = self.gpr(rt) as i32;
         match a.checked_sub(b) {
@@ -3516,66 +3516,66 @@ impl Cpu {
     }
 
     fn op_subu(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         self.set_gpr(rd, self.gpr(rs).wrapping_sub(self.gpr(rt)));
         Ok(())
     }
 
     fn op_and(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         self.set_gpr(rd, self.gpr(rs) & self.gpr(rt));
         Ok(())
     }
 
     fn op_xor(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         self.set_gpr(rd, self.gpr(rs) ^ self.gpr(rt));
         Ok(())
     }
 
     fn op_nor(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         self.set_gpr(rd, !(self.gpr(rs) | self.gpr(rt)));
         Ok(())
     }
 
     fn op_mfhi(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         let hi = self.hi;
         self.set_gpr(rd, hi);
         Ok(())
     }
 
     fn op_mthi(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
         self.hi = self.gpr(rs);
         Ok(())
     }
 
     fn op_mflo(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rd = ((instr >> 11) & 0x1F) as u8;
+        let rd = ((instr >> 11) & 0x1f) as u8;
         let lo = self.lo;
         self.set_gpr(rd, lo);
         Ok(())
     }
 
     fn op_mtlo(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
         self.lo = self.gpr(rs);
         Ok(())
     }
 
     fn op_mult(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let result = (self.gpr(rs) as i32 as i64) * (self.gpr(rt) as i32 as i64);
         self.hi = (result >> 32) as u32;
         self.lo = result as u32;
@@ -3583,8 +3583,8 @@ impl Cpu {
     }
 
     fn op_multu(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let result = (self.gpr(rs) as u64) * (self.gpr(rt) as u64);
         self.hi = (result >> 32) as u32;
         self.lo = result as u32;
@@ -3592,8 +3592,8 @@ impl Cpu {
     }
 
     fn op_div(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let n = self.gpr(rs) as i32;
         let d = self.gpr(rt) as i32;
         if d == 0 {
@@ -3610,8 +3610,8 @@ impl Cpu {
     }
 
     fn op_divu(&mut self, instr: u32) -> Result<(), ExecutionError> {
-        let rs = ((instr >> 21) & 0x1F) as u8;
-        let rt = ((instr >> 16) & 0x1F) as u8;
+        let rs = ((instr >> 21) & 0x1f) as u8;
+        let rt = ((instr >> 16) & 0x1f) as u8;
         let n = self.gpr(rs);
         let d = self.gpr(rt);
         if d == 0 {
@@ -3656,7 +3656,7 @@ impl Cpu {
         let next = self.pending_pc.unwrap_or(pc.wrapping_add(4));
         let next_is_gte = bus
             .peek_instruction(next)
-            .is_some_and(|word| word & 0xFE00_0000 == 0x4A00_0000);
+            .is_some_and(|word| word & 0xfe00_0000 == 0x4a00_0000);
         if !watched && !next_is_gte {
             return false;
         }
@@ -3705,7 +3705,7 @@ impl Cpu {
         // for non-code addresses, which we treat as "not a GTE
         // cofun" (games never execute from MMIO).
         if let Some(next) = bus.peek_instruction(self.pc) {
-            if (next & 0xFE00_0000) == 0x4A00_0000 {
+            if (next & 0xfe00_0000) == 0x4a00_0000 {
                 return false;
             }
         }
@@ -3745,7 +3745,7 @@ impl Cpu {
     ///   post-reset default the BIOS boots in), else `0x8000_0080`.
     fn enter_exception(&mut self, code: ExceptionCode, pc: u32, in_delay_slot: bool) {
         self.cursor = Cursor::default();
-        let code_bits = (code as u32) & 0x1F;
+        let code_bits = (code as u32) & 0x1f;
         self.exception_counts[code_bits as usize] =
             self.exception_counts[code_bits as usize].saturating_add(1);
         // Opt-in fault tracing for guest debugging: every non-IRQ exception
@@ -3782,10 +3782,10 @@ impl Cpu {
         };
 
         let sr = self.cop0[12];
-        self.cop0[12] = (sr & !0x3F) | ((sr & 0x0F) << 2);
+        self.cop0[12] = (sr & !0x3f) | ((sr & 0x0f) << 2);
 
         let vector = if sr & (1 << 22) != 0 {
-            0xBFC0_0180
+            0xbfc0_0180
         } else {
             0x8000_0080
         };
@@ -3850,7 +3850,7 @@ impl Cpu {
         self.lo = peek32(bus, tcb + TCB_LO);
         self.cop0[13] = peek32(bus, tcb + TCB_CAUSE);
         let saved_sr = peek32(bus, tcb + TCB_SR);
-        self.cop0[12] = (saved_sr & !0x0F) | ((saved_sr >> 2) & 0x0F);
+        self.cop0[12] = (saved_sr & !0x0f) | ((saved_sr >> 2) & 0x0f);
         self.pc = peek32(bus, tcb + TCB_RETURN_PC);
         self.pending_pc = None;
         self.branch_delay_next = false;
@@ -3975,7 +3975,7 @@ mod tests {
     #[test]
     fn reset_state_points_at_bios_reset_vector() {
         let cpu = Cpu::new();
-        assert_eq!(cpu.pc(), 0xBFC0_0000);
+        assert_eq!(cpu.pc(), 0xbfc0_0000);
     }
 
     #[test]
@@ -4044,8 +4044,8 @@ mod tests {
             let mut cpu = Cpu::new();
             let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
             cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
-            bus.write32(0x1F80_1124, mode);
-            cpu.gprs[8] = 0x1F80_1120;
+            bus.write32(0x1f80_1124, mode);
+            cpu.gprs[8] = 0x1f80_1120;
             // lw $t1, 0($t0); nop; addu $t3,$t3,$t2; subu $t2,$t1,$t4;
             // andi $t2,$t2,0xFFFF; bne $zero,$zero (never) ; move $t4,$t1; j back
             let program = [
@@ -4089,7 +4089,7 @@ mod tests {
             let mut cpu = Cpu::new();
             let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
             cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
-            cpu.gprs[8] = 0x7FFF_FFFF;
+            cpu.gprs[8] = 0x7fff_ffff;
             cpu.gprs[9] = 3;
             bus.write32(0x8000_1000, 0x0109_0019); // multu $t0,$t1
             bus.write32(0x8000_1004, mt); // mtlo/mthi $t0
@@ -4103,7 +4103,7 @@ mod tests {
                 bus.cycles() - before <= 2,
                 "the read waited for the multiply"
             );
-            assert_eq!(cpu.gpr(10), 0x7FFF_FFFF);
+            assert_eq!(cpu.gpr(10), 0x7fff_ffff);
         }
     }
 
@@ -4111,9 +4111,9 @@ mod tests {
     fn fetch_returns_first_bios_word() {
         // Real stock BIOSes (SCPH1001 / 5500 / 5501 / 5502) all begin with
         // `lui $t0, 0x0013` = 0x3C08_0013 as part of cache-control init.
-        let mut bus = Bus::new(synthetic_bios_with_first_word(0x3C08_0013)).unwrap();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0x3c08_0013)).unwrap();
         let mut cpu = Cpu::new();
-        assert_eq!(cpu.fetch(&mut bus), 0x3C08_0013);
+        assert_eq!(cpu.fetch(&mut bus), 0x3c08_0013);
     }
 
     #[test]
@@ -4125,11 +4125,11 @@ mod tests {
 
         cpu.pc = 0x8000_1000;
         assert_eq!(cpu.fetch(&mut bus), 0x1111_1111);
-        bus.write32(0xA000_1000, 0x2222_2222);
+        bus.write32(0xa000_1000, 0x2222_2222);
 
         cpu.pc = 0x0000_1000;
         assert_eq!(cpu.fetch(&mut bus), 0x1111_1111);
-        cpu.pc = 0xA000_1000;
+        cpu.pc = 0xa000_1000;
         assert_eq!(cpu.fetch(&mut bus), 0x2222_2222);
     }
 
@@ -4142,7 +4142,7 @@ mod tests {
         cpu.pc = 0x8000_2000;
         assert_eq!(cpu.fetch(&mut bus), 0x3333_3333);
 
-        bus.write32(0xA000_2000, 0x4444_4444);
+        bus.write32(0xa000_2000, 0x4444_4444);
         cpu.cop0[12] |= 1 << 16;
         cpu.cache_control |= CACHE_CONTROL_TAG;
         cpu.write_word(0x8000_2000, 0, &mut bus);
@@ -4171,7 +4171,7 @@ mod tests {
         cpu.cache_control = CACHE_CONTROL_IS1 | (3 << CACHE_CONTROL_IBLKSZ_SHIFT);
         cpu.pc = 0x8000_3000;
         assert_eq!(cpu.fetch(&mut bus), 0x5555_5555);
-        bus.write32(0xA000_3000, 0x6666_6666);
+        bus.write32(0xa000_3000, 0x6666_6666);
 
         cpu.seed_from_exe(0x8000_3000, 0, None);
         assert_eq!(cpu.read_cache_control(), CACHE_CONTROL_BIOS_NORMAL);
@@ -4367,9 +4367,9 @@ mod tests {
         cpu.cache_control = CACHE_CONTROL_IS1 | (3 << CACHE_CONTROL_IBLKSZ_SHIFT);
         cpu.pc = 0x8002_4000;
         assert_eq!(cpu.fetch(&mut bus), 0x7777_7777);
-        bus.write32(0xA002_4000, 0x8888_8888);
+        bus.write32(0xa002_4000, 0x8888_8888);
 
-        cpu.pc = 0xA0;
+        cpu.pc = 0xa0;
         cpu.gprs[9] = 0x44;
         cpu.gprs[31] = 0x8002_4000;
         cpu.step(&mut bus).unwrap();
@@ -4379,7 +4379,7 @@ mod tests {
 
     /// DMA2 mid linked-list walk: CHCR busy, linked-list sync, from RAM.
     fn start_fake_dma2_walk(bus: &mut Bus) {
-        bus.fake_busy_dma_channel(2, 0x000A_2B4C, 0x0100_0401);
+        bus.fake_busy_dma_channel(2, 0x000a_2b4c, 0x0100_0401);
     }
 
     /// A CPU as the BIOS leaves it: `cache_control` at its normal value.
@@ -4403,7 +4403,7 @@ mod tests {
         let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
         bus.set_cc_dma_mode(CcDmaMode::Fail);
         start_fake_dma2_walk(&mut bus);
-        cpu.pc = 0xA001_166C;
+        cpu.pc = 0xa001_166c;
         // The SDK flush's first write: 0x1E988 -> 0x804 clears bits 13..16, 7, 3.
         let message = tripwire_message(std::panic::AssertUnwindSafe(|| {
             cpu.write_word(memory::cache_control::ADDR, 0x804, &mut bus)
@@ -4490,7 +4490,7 @@ mod tests {
         let mut bus = Bus::new(synthetic_bios_with_first_word(0x4088_6000)).unwrap();
         bus.set_cc_dma_mode(CcDmaMode::Fail);
         start_fake_dma2_walk(&mut bus);
-        cpu.pc = 0xBFC0_0000;
+        cpu.pc = 0xbfc0_0000;
         cpu.gprs[8] = 1 << 16;
         let message = tripwire_message(std::panic::AssertUnwindSafe(|| {
             let _ = cpu.step(&mut bus);
@@ -4505,7 +4505,7 @@ mod tests {
         let mut bus = Bus::new(synthetic_bios_with_first_word(0x4088_6000)).unwrap();
         bus.set_cc_dma_mode(CcDmaMode::Fail);
         start_fake_dma2_walk(&mut bus);
-        cpu.pc = 0xBFC0_0000;
+        cpu.pc = 0xbfc0_0000;
         cpu.cop0[12] = 1 << 16;
         cpu.gprs[8] = 1 << 16;
         let _ = cpu.step(&mut bus);
@@ -4519,9 +4519,9 @@ mod tests {
         bus.enable_hle_bios();
         bus.set_cc_dma_mode(CcDmaMode::Fail);
         start_fake_dma2_walk(&mut bus);
-        cpu.pc = 0xA0;
+        cpu.pc = 0xa0;
         cpu.gprs[9] = 0x44;
-        cpu.gprs[31] = 0x8007_F3B0;
+        cpu.gprs[31] = 0x8007_f3b0;
         let message = tripwire_message(std::panic::AssertUnwindSafe(|| {
             let _ = cpu.step(&mut bus);
         }))
@@ -4534,9 +4534,9 @@ mod tests {
         let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
         bus.enable_hle_bios();
         bus.set_cc_dma_mode(CcDmaMode::Fail);
-        cpu.pc = 0xA0;
+        cpu.pc = 0xa0;
         cpu.gprs[9] = 0x44;
-        cpu.gprs[31] = 0x8007_F3B0;
+        cpu.gprs[31] = 0x8007_f3b0;
         cpu.step(&mut bus).unwrap();
         assert_eq!(bus.cc_dma_hits(), 0);
     }
@@ -4565,16 +4565,16 @@ mod tests {
         let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
         bus.set_cc_dma_mode(CcDmaMode::Inject);
         // The console's wild fetch: a list header read as a `j`.
-        bus.write32(0x000A_2B4C, 0x090A_2B4D);
+        bus.write32(0x000a_2b4c, 0x090a_2b4d);
         bus.write32(0x0000_2000, 0x1111_1111);
         bus.write32(0x0000_2004, 0x2222_2222);
-        bus.fake_busy_dma_channel(2, 0x000A_2B4C, 0x0100_0401);
+        bus.fake_busy_dma_channel(2, 0x000a_2b4c, 0x0100_0401);
         cpu.write_word(memory::cache_control::ADDR, 0x804, &mut bus);
         assert_eq!(bus.cc_dma_hits(), 1);
-        cpu.pc = 0xA000_2000; // KSEG1: always a bus fetch
-        assert_eq!(cpu.fetch(&mut bus), 0x090A_2B4D);
+        cpu.pc = 0xa000_2000; // KSEG1: always a bus fetch
+        assert_eq!(cpu.fetch(&mut bus), 0x090a_2b4d);
         assert_eq!(cpu.fetch(&mut bus), 0x1111_1111, "one fetch only");
-        cpu.pc = 0xA000_2004;
+        cpu.pc = 0xa000_2004;
         assert_eq!(cpu.fetch(&mut bus), 0x2222_2222);
     }
 
@@ -4583,11 +4583,11 @@ mod tests {
         let mut cpu = booted_cpu();
         let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
         bus.set_cc_dma_mode(CcDmaMode::Warn);
-        bus.write32(0x000A_2B4C, 0x090A_2B4D);
+        bus.write32(0x000a_2b4c, 0x090a_2b4d);
         bus.write32(0x0000_2000, 0x1111_1111);
-        bus.fake_busy_dma_channel(2, 0x000A_2B4C, 0x0100_0401);
+        bus.fake_busy_dma_channel(2, 0x000a_2b4c, 0x0100_0401);
         cpu.write_word(memory::cache_control::ADDR, 0x804, &mut bus);
-        cpu.pc = 0xA000_2000;
+        cpu.pc = 0xa000_2000;
         assert_eq!(cpu.fetch(&mut bus), 0x1111_1111);
     }
 
@@ -4607,9 +4607,9 @@ mod tests {
         let mut bus = Bus::new_without_bios();
         bus.enable_hle_bios();
         bus.set_hle_strict(true);
-        cpu.pc = 0xA0;
+        cpu.pc = 0xa0;
         cpu.gprs[2] = 0x1234_5678;
-        cpu.gprs[9] = 0x3A; // _exit
+        cpu.gprs[9] = 0x3a; // _exit
         cpu.gprs[31] = 0x8001_0000;
         let cycles = bus.cycles();
         let err = cpu.step(&mut bus).unwrap_err();
@@ -4617,12 +4617,12 @@ mod tests {
             err,
             ExecutionError::HleUnimplemented {
                 table: 'A',
-                func: 0x3A,
+                func: 0x3a,
                 name: "_exit",
                 ra: 0x8001_0000,
             }
         );
-        assert_eq!(cpu.pc(), 0xA0);
+        assert_eq!(cpu.pc(), 0xa0);
         assert_eq!(cpu.gprs[2], 0x1234_5678);
         assert_eq!(bus.cycles(), cycles);
 
@@ -4636,24 +4636,24 @@ mod tests {
     #[test]
     fn step_executes_lui_and_advances_pc() {
         // lui $t0, 0x0013 → $t0 = 0x0013_0000, PC += 4
-        let mut bus = Bus::new(synthetic_bios_with_first_word(0x3C08_0013)).unwrap();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0x3c08_0013)).unwrap();
         let mut cpu = Cpu::new();
         let record = cpu.step_traced(&mut bus).expect("lui decodes");
 
-        assert_eq!(record.pc, 0xBFC0_0000);
-        assert_eq!(record.instr, 0x3C08_0013);
+        assert_eq!(record.pc, 0xbfc0_0000);
+        assert_eq!(record.instr, 0x3c08_0013);
         assert_eq!(record.gprs[8], 0x0013_0000); // $t0
                                                  // Reset-vector execution is uncached: 32 BIOS word stalls plus
                                                  // the instruction's one issue cycle.
         assert_eq!(record.tick, 33);
-        assert_eq!(cpu.pc(), 0xBFC0_0004);
+        assert_eq!(cpu.pc(), 0xbfc0_0004);
     }
 
     #[test]
     fn lui_to_r0_is_silently_discarded() {
         // lui $0, 0xDEAD -- writing to $0 must leave it at zero.
         // opcode=0x0F, rt=0, imm=0xDEAD → 0x3C00_DEAD
-        let mut bus = Bus::new(synthetic_bios_with_first_word(0x3C00_DEAD)).unwrap();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0x3c00_dead)).unwrap();
         let mut cpu = Cpu::new();
         let record = cpu.step_traced(&mut bus).expect("lui to r0 decodes");
         assert_eq!(record.gprs[0], 0);
@@ -4666,9 +4666,9 @@ mod tests {
         let mut cpu = Cpu::new();
         cpu.step(&mut bus)
             .expect("CpU is an architectural exception");
-        assert_eq!((cpu.cop0[13] >> 2) & 0x1F, 11);
+        assert_eq!((cpu.cop0[13] >> 2) & 0x1f, 11);
         assert_eq!((cpu.cop0[13] >> 28) & 3, 1);
-        assert_eq!(cpu.cop0[14], 0xBFC0_0000);
+        assert_eq!(cpu.cop0[14], 0xbfc0_0000);
         assert_eq!(cpu.pc(), 0x8000_0080);
     }
 
@@ -4676,47 +4676,47 @@ mod tests {
     fn enabled_absent_coprocessors_and_invalid_fields_are_inert() {
         for (word, cu_bit) in [
             (0x4400_0000, 29), // COP1 valid-looking operation
-            (0x4BE0_0000, 30), // COP2 operation field 0x1f
-            (0x4C00_0000, 31), // COP3 valid-looking operation
+            (0x4be0_0000, 30), // COP2 operation field 0x1f
+            (0x4c00_0000, 31), // COP3 valid-looking operation
         ] {
             let mut bus = Bus::new(synthetic_bios_with_first_word(word)).unwrap();
             let mut cpu = Cpu::new();
             cpu.cop0[12] |= 1 << cu_bit;
             cpu.step(&mut bus).expect("enabled encoding is inert");
-            assert_eq!(cpu.pc(), 0xBFC0_0004);
-            assert_eq!((cpu.cop0[13] >> 2) & 0x1F, 0);
+            assert_eq!(cpu.pc(), 0xbfc0_0004);
+            assert_eq!((cpu.cop0[13] >> 2) & 0x1f, 0);
         }
 
         // COP0 is usable in kernel mode even with CU0 clear, including its
         // otherwise unassigned operation fields.
-        let mut bus = Bus::new(synthetic_bios_with_first_word(0x43E0_0000)).unwrap();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0x43e0_0000)).unwrap();
         let mut cpu = Cpu::new();
         cpu.step(&mut bus)
             .expect("kernel COP0 invalid field is inert");
-        assert_eq!(cpu.pc(), 0xBFC0_0004);
+        assert_eq!(cpu.pc(), 0xbfc0_0004);
     }
 
     #[test]
     fn coprocessor_memory_opcodes_obey_cu_bits() {
         // SWC0 $1,0($zero) traps with CU0 clear even in kernel mode.
-        let mut bus = Bus::new(synthetic_bios_with_first_word(0xE001_0000)).unwrap();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0xe001_0000)).unwrap();
         let mut cpu = Cpu::new();
         cpu.step(&mut bus).expect("disabled SWC0 raises CpU");
-        assert_eq!((cpu.cop0[13] >> 2) & 0x1F, 11);
+        assert_eq!((cpu.cop0[13] >> 2) & 0x1f, 11);
         assert_eq!((cpu.cop0[13] >> 28) & 3, 0);
 
         // Enabling CU0 accepts the same unsupported data-path operation.
-        let mut bus = Bus::new(synthetic_bios_with_first_word(0xE001_0000)).unwrap();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0xe001_0000)).unwrap();
         let mut cpu = Cpu::new();
         cpu.cop0[12] |= 1 << 28;
         cpu.step(&mut bus).expect("enabled SWC0 is inert");
-        assert_eq!(cpu.pc(), 0xBFC0_0004);
+        assert_eq!(cpu.pc(), 0xbfc0_0004);
 
         // SWC3 reports CE=3 when CU3 is clear.
-        let mut bus = Bus::new(synthetic_bios_with_first_word(0xEC01_0000)).unwrap();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0xec01_0000)).unwrap();
         let mut cpu = Cpu::new();
         cpu.step(&mut bus).expect("disabled SWC3 raises CpU");
-        assert_eq!((cpu.cop0[13] >> 2) & 0x1F, 11);
+        assert_eq!((cpu.cop0[13] >> 2) & 0x1f, 11);
         assert_eq!((cpu.cop0[13] >> 28) & 3, 3);
     }
 
@@ -4726,7 +4726,7 @@ mod tests {
         let mut bus = Bus::new(synthetic_bios_with_first_word(0x0000_0000)).unwrap();
         let mut cpu = Cpu::new();
         let record = cpu.step_traced(&mut bus).expect("nop decodes");
-        assert_eq!(cpu.pc(), 0xBFC0_0004);
+        assert_eq!(cpu.pc(), 0xbfc0_0004);
         assert!(record.gprs.iter().all(|&v| v == 0));
     }
 
@@ -4734,11 +4734,11 @@ mod tests {
     fn ori_zero_extends_immediate() {
         // ori $t0, $t1, 0xABCD; opcode=0x0D, rs=9, rt=8, imm=0xABCD
         // Encoding: (0x0D << 26) | (9 << 21) | (8 << 16) | 0xABCD = 0x352 8ABCD
-        let mut bus = Bus::new(synthetic_bios_with_first_word(0x3528_ABCD)).unwrap();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0x3528_abcd)).unwrap();
         let mut cpu = Cpu::new();
-        cpu.gprs[9] = 0xFFFF_0000; // $t1 = 0xFFFF0000
+        cpu.gprs[9] = 0xffff_0000; // $t1 = 0xFFFF0000
         let record = cpu.step_traced(&mut bus).expect("ori decodes");
-        assert_eq!(record.gprs[8], 0xFFFF_ABCD);
+        assert_eq!(record.gprs[8], 0xffff_abcd);
     }
 
     #[test]
@@ -4751,7 +4751,7 @@ mod tests {
         // so after the three instructions $t1 = 1, not the loaded word.
         let mut bios = vec![0u8; memory::bios::SIZE];
         // lw $t1, 0($a0): opcode=0x23, rs=4 ($a0), rt=9 ($t1), offset=0
-        bios[0..4].copy_from_slice(&0x8C89_0000u32.to_le_bytes());
+        bios[0..4].copy_from_slice(&0x8c89_0000u32.to_le_bytes());
         // addiu $t1, $zero, 1: opcode=0x09, rs=0, rt=9, imm=1
         bios[4..8].copy_from_slice(&0x2409_0001u32.to_le_bytes());
         // nop
@@ -4763,7 +4763,7 @@ mod tests {
         // there, which for this test is the BIOS itself / zeroes).
         // Actual loaded value doesn't matter; what matters is that
         // ADDIU's write survives.
-        cpu.gprs[4] = 0xBFC0_0000;
+        cpu.gprs[4] = 0xbfc0_0000;
 
         cpu.step(&mut bus).expect("lw");
         cpu.step(&mut bus).expect("addiu in delay slot");
@@ -4779,9 +4779,9 @@ mod tests {
         // CAUSE.ExcCode should read 12 (Overflow).
         let mut bios = vec![0u8; memory::bios::SIZE];
         // lui $t0, 0x7FFF
-        bios[0..4].copy_from_slice(&0x3C08_7FFFu32.to_le_bytes());
+        bios[0..4].copy_from_slice(&0x3c08_7fffu32.to_le_bytes());
         // ori $t0, $t0, 0xFFFF → $t0 = 0x7FFFFFFF
-        bios[4..8].copy_from_slice(&0x3508_FFFFu32.to_le_bytes());
+        bios[4..8].copy_from_slice(&0x3508_ffffu32.to_le_bytes());
         // addi $t1, $t0, 1 → overflow
         bios[8..12].copy_from_slice(&0x2109_0001u32.to_le_bytes());
 
@@ -4798,7 +4798,7 @@ mod tests {
             "Overflow (12) exception must have fired"
         );
         let cause = cpu.cop0[13];
-        assert_eq!((cause >> 2) & 0x1F, 12, "CAUSE.ExcCode = 12 after trap");
+        assert_eq!((cause >> 2) & 0x1f, 12, "CAUSE.ExcCode = 12 after trap");
     }
 
     #[test]
@@ -4806,9 +4806,9 @@ mod tests {
         // $t0 = 0x80000000 (i32::MIN). ADDI $t1, $t0, -1 overflows.
         let mut bios = vec![0u8; memory::bios::SIZE];
         // lui $t0, 0x8000
-        bios[0..4].copy_from_slice(&0x3C08_8000u32.to_le_bytes());
+        bios[0..4].copy_from_slice(&0x3c08_8000u32.to_le_bytes());
         // addi $t1, $t0, -1 (imm = 0xFFFF)
-        bios[4..8].copy_from_slice(&0x2109_FFFFu32.to_le_bytes());
+        bios[4..8].copy_from_slice(&0x2109_ffffu32.to_le_bytes());
 
         let mut bus = Bus::new(bios).unwrap();
         let mut cpu = Cpu::new();
@@ -4824,9 +4824,9 @@ mod tests {
         // No overflow; $t1 should receive the result.
         let mut bios = vec![0u8; memory::bios::SIZE];
         // lui $t0, 0x7FFF
-        bios[0..4].copy_from_slice(&0x3C08_7FFFu32.to_le_bytes());
+        bios[0..4].copy_from_slice(&0x3c08_7fffu32.to_le_bytes());
         // ori $t0, $t0, 0xFFFE → 0x7FFFFFFE
-        bios[4..8].copy_from_slice(&0x3508_FFFEu32.to_le_bytes());
+        bios[4..8].copy_from_slice(&0x3508_fffeu32.to_le_bytes());
         // addi $t1, $t0, 1 → 0x7FFFFFFF (no overflow)
         bios[8..12].copy_from_slice(&0x2109_0001u32.to_le_bytes());
 
@@ -4835,7 +4835,7 @@ mod tests {
         cpu.step(&mut bus).expect("lui");
         cpu.step(&mut bus).expect("ori");
         cpu.step(&mut bus).expect("addi");
-        assert_eq!(cpu.gprs[9], 0x7FFF_FFFF);
+        assert_eq!(cpu.gprs[9], 0x7fff_ffff);
         assert_eq!(cpu.exception_counts()[12], 0);
     }
 
@@ -4844,9 +4844,9 @@ mod tests {
         // $t0 = 0x7FFFFFFF, $t1 = 1. ADD $t2, $t0, $t1 overflows.
         let mut bios = vec![0u8; memory::bios::SIZE];
         // lui $t0, 0x7FFF
-        bios[0..4].copy_from_slice(&0x3C08_7FFFu32.to_le_bytes());
+        bios[0..4].copy_from_slice(&0x3c08_7fffu32.to_le_bytes());
         // ori $t0, $t0, 0xFFFF
-        bios[4..8].copy_from_slice(&0x3508_FFFFu32.to_le_bytes());
+        bios[4..8].copy_from_slice(&0x3508_ffffu32.to_le_bytes());
         // ori $t1, $zero, 1
         bios[8..12].copy_from_slice(&0x3409_0001u32.to_le_bytes());
         // add $t2, $t0, $t1 -- special=0, rs=8, rt=9, rd=10, funct=0x20
@@ -4869,7 +4869,7 @@ mod tests {
         // i32::MIN - 1, which overflows.
         let mut bios = vec![0u8; memory::bios::SIZE];
         // lui $t0, 0x8000
-        bios[0..4].copy_from_slice(&0x3C08_8000u32.to_le_bytes());
+        bios[0..4].copy_from_slice(&0x3c08_8000u32.to_le_bytes());
         // ori $t1, $zero, 1
         bios[4..8].copy_from_slice(&0x3409_0001u32.to_le_bytes());
         // sub $t2, $t0, $t1 -- funct=0x22
@@ -4890,7 +4890,7 @@ mod tests {
         // 10 - 3 = 7 -- ordinary subtract, no trap.
         let mut bios = vec![0u8; memory::bios::SIZE];
         // ori $t0, $zero, 10
-        bios[0..4].copy_from_slice(&0x3408_000Au32.to_le_bytes());
+        bios[0..4].copy_from_slice(&0x3408_000au32.to_le_bytes());
         // ori $t1, $zero, 3
         bios[4..8].copy_from_slice(&0x3409_0003u32.to_le_bytes());
         // sub $t2, $t0, $t1
@@ -4911,7 +4911,7 @@ mod tests {
         // Arrange a bus where IRQ is pending + enabled, and the next
         // instruction at PC is a GTE cofun (top byte 0x4A). The
         // hardware-bug workaround says: don't fire the IRQ.
-        let mut bus = Bus::new(synthetic_bios_with_first_word(0x4A00_0001)).unwrap();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0x4a00_0001)).unwrap();
         let mut cpu = Cpu::new();
         // Set SR IEc (bit 0) + IM2 (bit 10) so IRQ is unmasked.
         cpu.cop0[12] = 0x401;
@@ -4919,7 +4919,7 @@ mod tests {
         bus.irq_mut().raise(crate::irq::IrqSource::VBlank);
         bus.irq_mut().write_mask(0x1);
         // PC points at the cofun at the BIOS reset vector.
-        assert_eq!(cpu.pc(), 0xBFC0_0000);
+        assert_eq!(cpu.pc(), 0xbfc0_0000);
         // With a GTE cofun at PC, the workaround should refuse to fire.
         assert!(!cpu.should_take_interrupt(&mut bus));
         // Now change the word to something non-cofun -- same opcode
@@ -4936,16 +4936,16 @@ mod tests {
     fn gte_irq_fixture(before_gte: impl FnOnce(&mut Bus)) -> (Cpu, Bus) {
         let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
         bus.write32(0x8000_1000, 0); // nop
-        bus.write32(0x8000_1004, 0x4A18_0001); // RTPS
+        bus.write32(0x8000_1004, 0x4a18_0001); // RTPS
         bus.write32(0x8000_1008, 0);
         let mut cpu = Cpu::new();
         cpu.pc = 0x8000_1000;
         cpu.cop0[12] = 0x4000_0401; // CU2, IM2, IEc; BEV clear
         bus.irq_mut().write_mask(0x1);
         // SXY FIFO sentinels: each RTPS shifts SXY1 into SXY0.
-        cpu.cop2.write_data(12, 0x5A5A_0001);
-        cpu.cop2.write_data(13, 0x5A5A_0002);
-        cpu.cop2.write_data(14, 0x5A5A_0003);
+        cpu.cop2.write_data(12, 0x5a5a_0001);
+        cpu.cop2.write_data(13, 0x5a5a_0002);
+        cpu.cop2.write_data(14, 0x5a5a_0003);
         cpu.step(&mut bus).unwrap(); // the nop, which arms the watch
         before_gte(&mut bus);
         cpu.step(&mut bus).unwrap(); // the RTPS
@@ -4957,14 +4957,14 @@ mod tests {
         let (cpu, _) = gte_irq_fixture(|bus| bus.irq_mut().raise(crate::irq::IrqSource::VBlank));
         assert_eq!(cpu.cop0[14], 0x8000_1004, "EPC stays on the GTE command");
         assert_eq!(cpu.pc(), 0x8000_0080);
-        assert_eq!(cpu.cop2.read_data(12), 0x5A5A_0002, "the command ran once");
+        assert_eq!(cpu.cop2.read_data(12), 0x5a5a_0002, "the command ran once");
     }
 
     #[test]
     fn gte_command_without_a_new_interrupt_runs_normally() {
         let (cpu, _) = gte_irq_fixture(|_| {});
         assert_eq!(cpu.pc(), 0x8000_1008);
-        assert_eq!(cpu.cop2.read_data(12), 0x5A5A_0002);
+        assert_eq!(cpu.cop2.read_data(12), 0x5a5a_0002);
     }
 
     /// Run `code` from `0x8000_1000` for `steps` instructions with `$t0`
@@ -4977,7 +4977,7 @@ mod tests {
         let mut cpu = Cpu::new();
         cpu.pc = 0x8000_1000;
         cpu.cop0[12] = 0;
-        cpu.set_gpr(8, 0x7FFF_FFFF);
+        cpu.set_gpr(8, 0x7fff_ffff);
         cpu.set_gpr(9, 1);
         for _ in 0..steps {
             cpu.step(&mut bus).unwrap();
@@ -4992,7 +4992,7 @@ mod tests {
     #[test]
     fn overflow_outside_a_delay_slot_reports_its_own_address() {
         let (cause, epc) = fault_fixture(&[ADD_OVERFLOW], 1);
-        assert_eq!((cause >> 2) & 0x1F, 12);
+        assert_eq!((cause >> 2) & 0x1f, 12);
         assert_eq!(cause & BD, 0);
         assert_eq!(epc, 0x8000_1000);
     }
@@ -5001,7 +5001,7 @@ mod tests {
     fn overflow_in_a_not_taken_branch_delay_slot_reports_the_branch() {
         // bne $zero, $zero (never taken); add in its delay slot.
         let (cause, epc) = fault_fixture(&[0x1400_0004, ADD_OVERFLOW], 2);
-        assert_eq!((cause >> 2) & 0x1F, 12);
+        assert_eq!((cause >> 2) & 0x1f, 12);
         assert_ne!(cause & BD, 0);
         assert_eq!(epc, 0x8000_1000);
     }
@@ -5009,8 +5009,8 @@ mod tests {
     #[test]
     fn load_address_error_in_a_taken_branch_delay_slot_reports_the_branch() {
         // beq $zero, $zero (always taken); lw $t2, 1($zero) in its slot.
-        let (cause, epc) = fault_fixture(&[0x1000_0004, 0x8C0A_0001], 2);
-        assert_eq!((cause >> 2) & 0x1F, 4);
+        let (cause, epc) = fault_fixture(&[0x1000_0004, 0x8c0a_0001], 2);
+        assert_eq!((cause >> 2) & 0x1f, 4);
         assert_ne!(cause & BD, 0);
         assert_eq!(epc, 0x8000_1000);
     }
@@ -5036,11 +5036,11 @@ mod tests {
         //   addr&3=2 → (rt & 0x000000FF) | (mem << 8)  = 0x345678DD
         //   addr&3=3 → (rt & 0x00000000) | (mem << 0)  = 0x12345678
         let mem = 0x1234_5678u32;
-        let reg = 0xAABB_CCDDu32;
-        let expected = [0x78BB_CCDDu32, 0x5678_CCDD, 0x3456_78DD, 0x1234_5678];
+        let reg = 0xaabb_ccddu32;
+        let expected = [0x78bb_ccddu32, 0x5678_ccdd, 0x3456_78dd, 0x1234_5678];
         for aw in 0..=3u32 {
             let shift = (3 - (aw & 3)) * 8;
-            let mask = !(0xFFFF_FFFFu32 << shift);
+            let mask = !(0xffff_ffffu32 << shift);
             let result = (reg & mask) | (mem << shift);
             assert_eq!(
                 result, expected[aw as usize],
@@ -5060,11 +5060,11 @@ mod tests {
         //   addr&3=2 → 0xAABB1234
         //   addr&3=3 → 0xAABBCC12
         let mem = 0x1234_5678u32;
-        let reg = 0xAABB_CCDDu32;
-        let expected = [0x1234_5678u32, 0xAA12_3456, 0xAABB_1234, 0xAABB_CC12];
+        let reg = 0xaabb_ccddu32;
+        let expected = [0x1234_5678u32, 0xaa12_3456, 0xaabb_1234, 0xaabb_cc12];
         for aw in 0..=3u32 {
             let shift = (aw & 3) * 8;
-            let mask = !(0xFFFF_FFFFu32 >> shift);
+            let mask = !(0xffff_ffffu32 >> shift);
             let result = (reg & mask) | (mem >> shift);
             assert_eq!(
                 result, expected[aw as usize],
@@ -5101,9 +5101,9 @@ mod tests {
         assert_eq!(cpu.read_lwl_lanes(0x1003, &mut bus), 0x1234_5678);
         assert_eq!(bus.cycles() - start, 6);
 
-        assert_eq!(Cpu::unaligned_lane_cycles(0x1F80_1DAA, 2), 2);
+        assert_eq!(Cpu::unaligned_lane_cycles(0x1f80_1daa, 2), 2);
         assert_eq!(Cpu::unaligned_lane_cycles(0x8000_1000, 2), 0);
-        assert_eq!(Cpu::unaligned_lane_cycles(0x1F80_0000, 2), 0);
+        assert_eq!(Cpu::unaligned_lane_cycles(0x1f80_0000, 2), 0);
     }
 
     /// Cycles for `program` run warm from KSEG0, the way the hwtest warm
@@ -5179,8 +5179,8 @@ mod tests {
     #[test]
     fn gte_oracle_removes_the_command_interlock() {
         use crate::limits::GTE;
-        const RTPS: u32 = 0x4A08_0001;
-        const MFC2_T2_SXY2: u32 = 0x480A_7000;
+        const RTPS: u32 = 0x4a08_0001;
+        const MFC2_T2_SXY2: u32 = 0x480a_7000;
         let mut program = std::vec![RTPS, MFC2_T2_SXY2];
         program.extend(std::iter::repeat_n(0, 20));
         assert_eq!(warm_cycles_with(limit_oracles(0, "", ""), &program), 37);
@@ -5194,9 +5194,9 @@ mod tests {
         // MFC2 wait (37 clocks a turn against 22 with the read after the
         // command has finished, `gte_oracle_removes_the_command_interlock`).
         // SWC2 of SXY2 (data register 14) to RAM must show the same wait.
-        const RTPS: u32 = 0x4A08_0001;
-        const MFC2_T2_SXY2: u32 = 0x480A_7000;
-        const SWC2_SXY2: u32 = (0x3A << 26) | (8 << 21) | (14 << 16);
+        const RTPS: u32 = 0x4a08_0001;
+        const MFC2_T2_SXY2: u32 = 0x480a_7000;
+        const SWC2_SXY2: u32 = (0x3a << 26) | (8 << 21) | (14 << 16);
         let turn = |read: u32, gap: usize| {
             let mut program = std::vec![RTPS, read];
             program.extend(std::iter::repeat_n(0, gap));
@@ -5234,7 +5234,7 @@ mod tests {
             let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
             bus.set_limit_oracles(limit_oracles(mask, "", ""));
             let program = [lw_gpustat; 4];
-            cpu.gprs[8] = 0x1F80_1814;
+            cpu.gprs[8] = 0x1f80_1814;
             warm_cycles(&mut cpu, &mut bus, &program)
         };
         assert!(run(0) > 4);
@@ -5301,7 +5301,7 @@ mod tests {
             let mut cpu = Cpu::new();
             let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
             bus.set_limit_oracles(limit_oracles(0, free, ""));
-            cpu.gprs[8] = 0x1F80_1814;
+            cpu.gprs[8] = 0x1f80_1814;
             let cycles = warm_cycles(&mut cpu, &mut bus, &[lw_gpustat; 4]);
             (cycles, bus.limits.thawed_accesses)
         };
@@ -5336,7 +5336,7 @@ mod tests {
         for (gap, clocks) in [(0usize, 8u64), (5, 7), (6, 8), (7, 9)] {
             let mut cpu = Cpu::new();
             let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
-            cpu.gprs[8] = 0x7FF;
+            cpu.gprs[8] = 0x7ff;
             cpu.gprs[9] = 0x0001_0041;
             let program = multu_gap_program(gap);
             let total = warm_cycles(&mut cpu, &mut bus, &program[..gap + 2]);
@@ -5350,10 +5350,10 @@ mod tests {
         let mut cpu = Cpu::new();
         let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
         cpu.gprs[8] = 0x8000_2001;
-        let swl = (0x2A << 26) | (8 << 21) | (9 << 16) | 3;
-        let swr = (0x2E << 26) | (8 << 21) | (9 << 16);
+        let swl = (0x2a << 26) | (8 << 21) | (9 << 16) | 3;
+        let swr = (0x2e << 26) | (8 << 21) | (9 << 16);
         let pair = warm_cycles(&mut cpu, &mut bus, &[swl, swr]);
-        let sw = (0x2B << 26) | (8 << 21) | (9 << 16) | 3;
+        let sw = (0x2b << 26) | (8 << 21) | (9 << 16) | 3;
         let mut cpu = Cpu::new();
         let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
         cpu.gprs[8] = 0x8000_2001;
@@ -5362,7 +5362,7 @@ mod tests {
     }
 
     const ADDIU_T2: u32 = (0x09 << 26) | (10 << 21) | (10 << 16) | 1;
-    const SW_ZERO_T0: u32 = (0x2B << 26) | (8 << 21);
+    const SW_ZERO_T0: u32 = (0x2b << 26) | (8 << 21);
     const LW_T1_T0: u32 = (0x23 << 26) | (8 << 21) | (9 << 16);
 
     /// `turns` x (`access`, then `behind` independent instructions), warm.
@@ -5433,8 +5433,8 @@ mod tests {
     fn a_coprocessor_read_waits_for_the_running_command() {
         // hwtest v1.23 0x130-0x134: RTPS; mfc2; 20 nops is 37 clocks a turn,
         // and 22 (plus the 16 nops) when the read comes after RTPS is done.
-        const RTPS: u32 = 0x4A08_0001;
-        const MFC2_T2_SXY2: u32 = 0x480A_7000;
+        const RTPS: u32 = 0x4a08_0001;
+        const MFC2_T2_SXY2: u32 = 0x480a_7000;
         let turn = |nops_before: usize| {
             let mut program = std::vec![RTPS];
             program.extend(std::iter::repeat_n(0, nops_before));
@@ -5454,10 +5454,10 @@ mod tests {
         // hwtest v1.22 records 0x3C/0x3D: a cold sweep of `lw; nop; lw; nop`
         // lines costs 24 clocks a line with RAM_SIZE bit 7 set and 23 clear
         // (6242 and 5958 for 256 lines, less the refresh slots).
-        for (ram_size, clocks) in [(0x0000_0B88u32, 24u64), (0x0000_0B08, 23)] {
+        for (ram_size, clocks) in [(0x0000_0b88u32, 24u64), (0x0000_0b08, 23)] {
             let mut cpu = Cpu::new();
             let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
-            bus.write32(0x1F80_1060, ram_size);
+            bus.write32(0x1f80_1060, ram_size);
             cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
             cpu.gprs[25] = 0x8000_4000;
             let lw = (0x23 << 26) | (25 << 21) | (3 << 16);
@@ -5480,9 +5480,9 @@ mod tests {
         let mut cpu = Cpu::new();
         let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
         cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
-        cpu.gprs[3] = 0x1F80_0000;
+        cpu.gprs[3] = 0x1f80_0000;
         let lw = (0x23 << 26) | (3 << 21) | (8 << 16) | imm;
-        let bne = (0x05 << 26) | (9 << 21) | 0xFFFD;
+        let bne = (0x05 << 26) | (9 << 21) | 0xfffd;
         for (index, word) in [lw, second, bne, 0].into_iter().enumerate() {
             bus.write32(0x8000_1000 + index as u32 * 4, word);
         }
@@ -5511,7 +5511,7 @@ mod tests {
         let uses = 0x25 | (8 << 21) | (10 << 11); // or $10, $8, $0: funct 0x25 reads $8
         assert_eq!(warm_turn_of_a_register_poll(0x1044, uses), 8);
         // The CD-ROM and SPU buses are not on die: their reads hide nothing.
-        for imm in [0x1800, 0x1C00] {
+        for imm in [0x1800, 0x1c00] {
             assert_eq!(
                 warm_turn_of_a_register_poll(imm, addiu),
                 warm_turn_of_a_register_poll(imm, uses),
@@ -5547,7 +5547,7 @@ mod tests {
         // 1 and 2 of its line. Silicon, both consoles: 8, 7 and 5 clocks
         // (records 0x42-0x44 read 26/25/23 against 0x45's 18), and 8.2 a call
         // in the alias ping-pong (0x8C/0x8D).
-        let j_far = (0x02 << 26) | ((0x8000_3040u32 & 0x0FFF_FFFF) >> 2);
+        let j_far = (0x02 << 26) | ((0x8000_3040u32 & 0x0fff_ffff) >> 2);
         for (entry_word, extra) in [(0u32, 8u64), (1, 7), (2, 5)] {
             let mut cpu = Cpu::new();
             let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
@@ -5585,9 +5585,9 @@ mod tests {
         let mut cpu = Cpu::new();
         let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
         cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
-        cpu.gprs[8] = 0x7FF;
+        cpu.gprs[8] = 0x7ff;
         cpu.gprs[9] = 0x0001_0041;
-        bus.write32(0x8000_100C, MULTU_T0_T1);
+        bus.write32(0x8000_100c, MULTU_T0_T1);
         bus.write32(0x8000_1010, MFLO_T2);
         cpu.pc = 0x8000_1000;
         for _ in 0..3 {
@@ -5607,7 +5607,7 @@ mod tests {
         let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
         cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
         bus.add_cycles(100);
-        cpu.pc = 0xA000_1000;
+        cpu.pc = 0xa000_1000;
         let start = bus.cycles();
         for _ in 0..8 {
             cpu.step(&mut bus).unwrap();
@@ -5624,12 +5624,12 @@ mod tests {
         //   addr&3=1 → (AABBCCDD & FFFF0000) | (12345678 >> 16) = 0xAABB1234
         //   addr&3=2 → (AABBCCDD & FF000000) | (12345678 >> 8)  = 0xAA123456
         //   addr&3=3 → 0x12345678
-        let mem = 0xAABB_CCDDu32;
+        let mem = 0xaabb_ccddu32;
         let reg = 0x1234_5678u32;
-        let expected = [0xAABB_CC12u32, 0xAABB_1234, 0xAA12_3456, 0x1234_5678];
+        let expected = [0xaabb_cc12u32, 0xaabb_1234, 0xaa12_3456, 0x1234_5678];
         for aw in 0..=3u32 {
             let shift = (aw & 3) * 8;
-            let mask = !(0xFFFF_FFFFu32 >> (24 - shift));
+            let mask = !(0xffff_ffffu32 >> (24 - shift));
             let result = (mem & mask) | (reg >> (24 - shift));
             assert_eq!(
                 result, expected[aw as usize],
@@ -5648,12 +5648,12 @@ mod tests {
         //   addr&3=1 → 0x345678DD
         //   addr&3=2 → 0x5678CCDD
         //   addr&3=3 → 0x78BBCCDD
-        let mem = 0xAABB_CCDDu32;
+        let mem = 0xaabb_ccddu32;
         let reg = 0x1234_5678u32;
-        let expected = [0x1234_5678u32, 0x3456_78DD, 0x5678_CCDD, 0x78BB_CCDD];
+        let expected = [0x1234_5678u32, 0x3456_78dd, 0x5678_ccdd, 0x78bb_ccdd];
         for aw in 0..=3u32 {
             let shift = (aw & 3) * 8;
-            let mask = !(0xFFFF_FFFFu32 << shift);
+            let mask = !(0xffff_ffffu32 << shift);
             let result = (mem & mask) | (reg << shift);
             assert_eq!(
                 result, expected[aw as usize],
@@ -5677,7 +5677,7 @@ mod tests {
 
     fn assert_address_error(cpu: &Cpu, expected_code: u32, expected_bad: u32, lw_pc: u32) {
         // CAUSE.ExcCode lives in bits 6..2.
-        let exc_code = (cpu.cop0[13] >> 2) & 0x1F;
+        let exc_code = (cpu.cop0[13] >> 2) & 0x1f;
         assert_eq!(exc_code, expected_code, "ExcCode mismatch");
         assert_eq!(cpu.cop0[8], expected_bad, "BadVaddr mismatch");
         assert_eq!(cpu.cop0[14], lw_pc, "EPC mismatch");
@@ -5690,8 +5690,8 @@ mod tests {
     fn op_lw_misaligned_addr_raises_adel() {
         // LW $t1, 1($a0); base aligned so the +1 offset is what
         // lands the address on a non-word boundary.
-        let (cpu, _bus) = step_one_load_store(0x8C89_0001, 0xBFC0_0000);
-        assert_address_error(&cpu, 4, 0xBFC0_0001, 0xBFC0_0000);
+        let (cpu, _bus) = step_one_load_store(0x8c89_0001, 0xbfc0_0000);
+        assert_address_error(&cpu, 4, 0xbfc0_0001, 0xbfc0_0000);
         // No load delay should have been queued -- the trap fires
         // before the bus access. After one extra step the destination
         // register must still be untouched.
@@ -5701,15 +5701,15 @@ mod tests {
     #[test]
     fn op_lh_misaligned_addr_raises_adel() {
         // LH $t1, 1($a0): odd halfword address.
-        let (cpu, _bus) = step_one_load_store(0x8489_0001, 0xBFC0_0000);
-        assert_address_error(&cpu, 4, 0xBFC0_0001, 0xBFC0_0000);
+        let (cpu, _bus) = step_one_load_store(0x8489_0001, 0xbfc0_0000);
+        assert_address_error(&cpu, 4, 0xbfc0_0001, 0xbfc0_0000);
     }
 
     #[test]
     fn op_lhu_misaligned_addr_raises_adel() {
         // LHU $t1, 1($a0): odd halfword address.
-        let (cpu, _bus) = step_one_load_store(0x9489_0001, 0xBFC0_0000);
-        assert_address_error(&cpu, 4, 0xBFC0_0001, 0xBFC0_0000);
+        let (cpu, _bus) = step_one_load_store(0x9489_0001, 0xbfc0_0000);
+        assert_address_error(&cpu, 4, 0xbfc0_0001, 0xbfc0_0000);
     }
 
     #[test]
@@ -5718,14 +5718,14 @@ mod tests {
         // (0x0000_0000 .. 2 MiB) as the base so a non-trapping SW
         // would actually land somewhere -- proves the trap fired
         // before the bus write rather than just being silently no-op.
-        let (cpu, _bus) = step_one_load_store(0xAC89_0001, 0x0000_0000);
-        assert_address_error(&cpu, 5, 0x0000_0001, 0xBFC0_0000);
+        let (cpu, _bus) = step_one_load_store(0xac89_0001, 0x0000_0000);
+        assert_address_error(&cpu, 5, 0x0000_0001, 0xbfc0_0000);
     }
 
     #[test]
     fn op_sh_misaligned_addr_raises_ades() {
-        let (cpu, _bus) = step_one_load_store(0xA489_0001, 0x0000_0000);
-        assert_address_error(&cpu, 5, 0x0000_0001, 0xBFC0_0000);
+        let (cpu, _bus) = step_one_load_store(0xa489_0001, 0x0000_0000);
+        assert_address_error(&cpu, 5, 0x0000_0001, 0xbfc0_0000);
     }
 
     #[test]
@@ -5735,19 +5735,19 @@ mod tests {
         bus.write32(crate::hle_bios::UNRESOLVED_HANDLER_PTR, 0x8001_2340);
         let mut cpu = Cpu::new();
         cpu.pc = 0x8001_0000;
-        cpu.gprs[5] = 0xCAFE_BABE;
+        cpu.gprs[5] = 0xcafe_babe;
 
-        cpu.raise_address_error(ExceptionCode::AddressErrorStore, 0x1F80_104A, &mut bus);
+        cpu.raise_address_error(ExceptionCode::AddressErrorStore, 0x1f80_104a, &mut bus);
         assert_eq!(cpu.pending_exception_pc, Some(0x8001_2340));
         assert!(cpu.hle_exception_active);
         // The frame lands in the current thread's TCB, found via [[0x108]].
         let tcb = crate::hle_kernel::current_tcb(&bus);
         assert_ne!(tcb, 0);
         use crate::hle_bios::{TCB_CAUSE, TCB_REGISTERS, TCB_RETURN_PC};
-        assert_eq!(bus.read32(tcb + TCB_REGISTERS + 5 * 4), 0xCAFE_BABE);
+        assert_eq!(bus.read32(tcb + TCB_REGISTERS + 5 * 4), 0xcafe_babe);
         assert_eq!(bus.read32(tcb + TCB_RETURN_PC), 0x8001_0000);
         assert_eq!(
-            (bus.read32(tcb + TCB_CAUSE) >> 2) & 0x1F,
+            (bus.read32(tcb + TCB_CAUSE) >> 2) & 0x1f,
             ExceptionCode::AddressErrorStore as u32
         );
 
@@ -5756,7 +5756,7 @@ mod tests {
         cpu.gprs[5] = 0;
         cpu.finish_hle_exception(&mut bus);
         assert_eq!(cpu.pc, 0x8001_0004);
-        assert_eq!(cpu.gprs[5], 0xCAFE_BABE);
+        assert_eq!(cpu.gprs[5], 0xcafe_babe);
         assert!(!cpu.hle_exception_active);
         assert_eq!(cpu.isr_depth, 0);
     }
@@ -5767,7 +5767,7 @@ mod tests {
         bus.enable_hle_bios();
         let mut cpu = Cpu::new();
         cpu.pc = 0x8001_0000;
-        cpu.raise_address_error(ExceptionCode::AddressErrorStore, 0x1F80_104A, &mut bus);
+        cpu.raise_address_error(ExceptionCode::AddressErrorStore, 0x1f80_104a, &mut bus);
         assert!(!cpu.hle_exception_active);
         assert_eq!(cpu.pending_exception_pc, Some(0x8000_0080));
     }
@@ -5779,7 +5779,7 @@ mod tests {
         let mut cpu = Cpu::new();
         // Direct call of the RAM table entry for A(1Bh) strlen.
         bus.write32(0x8002_0000, u32::from_le_bytes(*b"abc\0"));
-        let entry = bus.read32(crate::hle_kernel::A0_TABLE + 4 * 0x1B);
+        let entry = bus.read32(crate::hle_kernel::A0_TABLE + 4 * 0x1b);
         cpu.pc = entry;
         cpu.gprs[4] = 0x8002_0000;
         cpu.gprs[31] = 0x8001_0000;
@@ -5787,9 +5787,9 @@ mod tests {
         assert_eq!((cpu.pc(), cpu.gprs[2]), (0x8001_0000, 3));
 
         // A guest replacement of an entry is jumped to by the vector.
-        bus.write32(crate::hle_kernel::A0_TABLE + 4 * 0x1B, 0x8003_0000);
-        cpu.pc = 0xA0;
-        cpu.gprs[9] = 0x1B;
+        bus.write32(crate::hle_kernel::A0_TABLE + 4 * 0x1b, 0x8003_0000);
+        cpu.pc = 0xa0;
+        cpu.gprs[9] = 0x1b;
         cpu.gprs[2] = 0x55;
         cpu.step(&mut bus).unwrap();
         assert_eq!(
@@ -5806,7 +5806,7 @@ mod tests {
         for r in [16usize, 23, 28, 29, 30] {
             cpu.gprs[r] = 0x1000 + r as u32;
         }
-        cpu.pc = 0xA0;
+        cpu.pc = 0xa0;
         cpu.gprs[9] = 0x13;
         cpu.gprs[4] = 0x8002_0000;
         cpu.gprs[31] = 0x8001_0040;
@@ -5816,7 +5816,7 @@ mod tests {
         for r in [16usize, 23, 28, 29, 30] {
             cpu.gprs[r] = 0;
         }
-        cpu.pc = 0xA0;
+        cpu.pc = 0xa0;
         cpu.gprs[9] = 0x14;
         cpu.gprs[4] = 0x8002_0000;
         cpu.gprs[5] = 0;
@@ -5859,10 +5859,10 @@ mod tests {
         put_code(
             &mut bus,
             0x8001_0000,
-            &[0x2404_0001, 0x0C, 0, 0x2404_0002, 0x0C, 0, 0x1000_FFFF, 0],
+            &[0x2404_0001, 0x0c, 0, 0x2404_0002, 0x0c, 0, 0x1000_ffff, 0],
         );
         cpu.pc = 0x8001_0000;
-        run_until(&mut cpu, &mut bus, 0x8001_000C, 2000);
+        run_until(&mut cpu, &mut bus, 0x8001_000c, 2000);
         assert_eq!(cpu.cop0[12] & 0x401, 0, "EnterCriticalSection");
         assert_eq!(cpu.gprs[2], 1, "IRQs were enabled");
         assert_eq!(cpu.exception_counts()[ExceptionCode::Syscall as usize], 1);
@@ -5877,13 +5877,13 @@ mod tests {
         let mut cpu = Cpu::new();
         let ex = crate::hle_exceptions::code();
         // Open and enable a mark-ready event for F2000003h/2 (VBlank).
-        let ev = crate::hle_exceptions::open_event(&mut bus, 0xF200_0003, 2, 0x2000, 0);
+        let ev = crate::hle_exceptions::open_event(&mut bus, 0xf200_0003, 2, 0x2000, 0);
         crate::hle_exceptions::set_event_enabled(&mut bus, ev, true);
-        bus.write32(0x1F80_1074, 1); // I_MASK: VBlank
+        bus.write32(0x1f80_1074, 1); // I_MASK: VBlank
                                      // Spin with IRQs enabled until the event is ready.
-        put_code(&mut bus, 0x8001_0000, &[0x1000_FFFF, 0]);
+        put_code(&mut bus, 0x8001_0000, &[0x1000_ffff, 0]);
         cpu.pc = 0x8001_0000;
-        cpu.gprs[5] = 0xCAFE_BABE;
+        cpu.gprs[5] = 0xcafe_babe;
         cpu.cop0[12] = 0x401;
         let mut delivered = false;
         for _ in 0..3_000_000 {
@@ -5906,9 +5906,9 @@ mod tests {
         }
         assert!(left_through_rfe);
         assert_eq!(cpu.pc, 0x8001_0000);
-        assert_eq!(cpu.gprs[5], 0xCAFE_BABE);
+        assert_eq!(cpu.gprs[5], 0xcafe_babe);
         assert_eq!(cpu.cop0[12] & 0x401, 0x401);
-        assert_eq!(bus.read32(0x1F80_1070) & 1, 0, "VBlank acknowledged");
+        assert_eq!(bus.read32(0x1f80_1070) & 1, 0, "VBlank acknowledged");
     }
 
     #[test]
@@ -5917,7 +5917,7 @@ mod tests {
         bus.enable_hle_bios();
         // psx-spx "BIOS Memory Map": lui k0,0 / addiu k0,k0,0C80h / jr k0 /
         // nop at 80h, the same at 0 with the first word smashed to 3.
-        let vector = [0x3C1A_0000, 0x275A_0C80, 0x0340_0008, 0];
+        let vector = [0x3c1a_0000, 0x275a_0c80, 0x0340_0008, 0];
         for (i, w) in vector.iter().enumerate() {
             assert_eq!(bus.read32(0x80 + 4 * i as u32), *w);
         }
@@ -5936,8 +5936,8 @@ mod tests {
         let mut a = Asm::new(0);
         a.sw(AT, 4, K0);
         a.sw(V0, 8, K0);
-        a.sw(V1, 0xC, K0);
-        a.sw(RA, 0x7C, K0);
+        a.sw(V1, 0xc, K0);
+        a.sw(RA, 0x7c, K0);
         a.mfc0(V1, 14);
         a.nop();
         for (i, w) in a.finish().iter().enumerate() {
@@ -5957,7 +5957,7 @@ mod tests {
         // A GTE command at 80010000h, as if an interrupt arrived on it, with
         // no IRQ left pending: every chain passes and the default exit
         // buffer leads to ReturnFromException.
-        put_code(&mut bus, 0x8001_0000, &[0x4A00_0001, 0, 0x1000_FFFF, 0]);
+        put_code(&mut bus, 0x8001_0000, &[0x4a00_0001, 0, 0x1000_ffff, 0]);
         cpu.cop0[13] = 0;
         cpu.cop0[14] = 0x8001_0000;
         cpu.cop0[12] = 0x404;
@@ -5978,18 +5978,18 @@ mod tests {
         bus.enable_hle_bios();
         let mut cpu = Cpu::new();
         // First function: v0 = 55h. Second: [80020000h] = a0. Both return.
-        put_code(&mut bus, 0x8003_0000, &[0x03E0_0008, 0x2402_0055]);
+        put_code(&mut bus, 0x8003_0000, &[0x03e0_0008, 0x2402_0055]);
         put_code(
             &mut bus,
             0x8003_0100,
-            &[0x3C08_8002, 0x03E0_0008, 0xAD04_0000],
+            &[0x3c08_8002, 0x03e0_0008, 0xad04_0000],
         );
         let element = 0x8004_0000;
         bus.write32(element + 4, 0x8003_0100);
         bus.write32(element + 8, 0x8003_0000);
         crate::hle_exceptions::enq_int(&mut bus, 0, element);
         // li a0,0; syscall; b .; nop
-        put_code(&mut bus, 0x8001_0000, &[0x2404_0000, 0x0C, 0x1000_FFFF, 0]);
+        put_code(&mut bus, 0x8001_0000, &[0x2404_0000, 0x0c, 0x1000_ffff, 0]);
         cpu.pc = 0x8001_0000;
         run_until(&mut cpu, &mut bus, 0x8001_0008, 3000);
         assert_eq!(bus.read32(0x8002_0000), 0x55);
@@ -6001,20 +6001,20 @@ mod tests {
         bus.enable_hle_bios();
         let mut cpu = Cpu::new();
         let thread = crate::hle_exceptions::open_thread(&mut bus, 0x8003_0000, 0x8004_0000, 0x1234);
-        assert_eq!(thread, 0xFF00_0001);
+        assert_eq!(thread, 0xff00_0001);
         // Main: ChangeTh(thread) through the B0 vector, then spin.
         // li a0,thread (lui/ori); li t1,10h; li t2,B0h; jalr t2; nop; b .; nop
         put_code(
             &mut bus,
             0x8001_0000,
             &[
-                0x3C04_FF00,
+                0x3c04_ff00,
                 0x3484_0001,
                 0x2409_0010,
-                0x240A_00B0,
-                0x0140_F809,
+                0x240a_00b0,
+                0x0140_f809,
                 0,
-                0x1000_FFFF,
+                0x1000_ffff,
                 0,
             ],
         );
@@ -6023,23 +6023,23 @@ mod tests {
             &mut bus,
             0x8003_0000,
             &[
-                0x3C04_FF00,
+                0x3c04_ff00,
                 0x2409_0010,
-                0x240A_00B0,
-                0x0140_F809,
+                0x240a_00b0,
+                0x0140_f809,
                 0,
-                0x1000_FFFF,
+                0x1000_ffff,
                 0,
             ],
         );
-        cpu.gprs[29] = 0x801F_FF00;
+        cpu.gprs[29] = 0x801f_ff00;
         cpu.pc = 0x8001_0000;
         run_until(&mut cpu, &mut bus, 0x8003_0000, 5000);
         assert_eq!(cpu.gprs[29], 0x8004_0000, "sp from OpenTh");
         assert_eq!(cpu.gprs[28], 0x1234, "gp from OpenTh");
         run_until(&mut cpu, &mut bus, 0x8001_0018, 5000);
         assert_eq!(cpu.gprs[2], 1);
-        assert_eq!(cpu.gprs[29], 0x801F_FF00);
+        assert_eq!(cpu.gprs[29], 0x801f_ff00);
     }
 
     #[test]
@@ -6051,22 +6051,22 @@ mod tests {
         put_code(
             &mut bus,
             0x8003_0000,
-            &[0x3C08_8002, 0x2409_0077, 0x03E0_0008, 0xAD09_0000],
+            &[0x3c08_8002, 0x2409_0077, 0x03e0_0008, 0xad09_0000],
         );
         let callback =
-            crate::hle_exceptions::open_event(&mut bus, 0xF300_0001, 4, 0x1000, 0x8003_0000);
-        let ready = crate::hle_exceptions::open_event(&mut bus, 0xF300_0001, 4, 0x2000, 0);
-        let other = crate::hle_exceptions::open_event(&mut bus, 0xF300_0001, 8, 0x2000, 0);
+            crate::hle_exceptions::open_event(&mut bus, 0xf300_0001, 4, 0x1000, 0x8003_0000);
+        let ready = crate::hle_exceptions::open_event(&mut bus, 0xf300_0001, 4, 0x2000, 0);
+        let other = crate::hle_exceptions::open_event(&mut bus, 0xf300_0001, 8, 0x2000, 0);
         for ev in [callback, ready, other] {
             crate::hle_exceptions::set_event_enabled(&mut bus, ev, true);
         }
-        put_code(&mut bus, 0x8001_0000, &[0x1000_FFFF, 0]);
-        cpu.gprs[4] = 0xF300_0001;
+        put_code(&mut bus, 0x8001_0000, &[0x1000_ffff, 0]);
+        cpu.gprs[4] = 0xf300_0001;
         cpu.gprs[5] = 4;
         cpu.gprs[9] = 0x07;
-        cpu.gprs[29] = 0x801F_FF00;
+        cpu.gprs[29] = 0x801f_ff00;
         cpu.gprs[31] = 0x8001_0000;
-        cpu.pc = 0xB0;
+        cpu.pc = 0xb0;
         run_until(&mut cpu, &mut bus, 0x8001_0000, 5000);
         assert_eq!(bus.read32(0x8002_0000), 0x77);
         assert!(
@@ -6101,10 +6101,10 @@ mod tests {
         // IRQ, and the default handler acknowledges IRQ0 itself.
         crate::hle_exceptions::change_clear_rcnt(&mut bus, 3, 0);
         crate::hle_exceptions::set_irq_autoack(&mut bus, 0, 1);
-        let ev = crate::hle_exceptions::open_event(&mut bus, 0xF000_0001, 0x1000, 0x2000, 0);
+        let ev = crate::hle_exceptions::open_event(&mut bus, 0xf000_0001, 0x1000, 0x2000, 0);
         crate::hle_exceptions::set_event_enabled(&mut bus, ev, true);
-        bus.write32(0x1F80_1074, 1);
-        put_code(&mut bus, 0x8001_0000, &[0x1000_FFFF, 0]);
+        bus.write32(0x1f80_1074, 1);
+        put_code(&mut bus, 0x8001_0000, &[0x1000_ffff, 0]);
         cpu.pc = 0x8001_0000;
         cpu.cop0[12] = 0x401;
         let mut delivered = false;
@@ -6117,16 +6117,16 @@ mod tests {
         }
         assert!(delivered);
         run_until(&mut cpu, &mut bus, 0x8001_0000, 5000);
-        assert_eq!(bus.read32(0x1F80_1070) & 1, 0, "IRQ0 acknowledged");
+        assert_eq!(bus.read32(0x1f80_1070) & 1, 0, "IRQ0 acknowledged");
     }
 
     #[test]
     fn aligned_lw_does_not_raise() {
         // Sanity: aligned access leaves COP0 untouched.
-        let (cpu, _bus) = step_one_load_store(0x8C89_0000, 0xBFC0_0000);
+        let (cpu, _bus) = step_one_load_store(0x8c89_0000, 0xbfc0_0000);
         assert_eq!(cpu.cop0[8], 0, "BadVaddr must not be touched");
         assert_eq!(cpu.cop0[13], 0, "Cause must not be touched");
-        assert_eq!(cpu.pc(), 0xBFC0_0004, "should advance, not vector");
+        assert_eq!(cpu.pc(), 0xbfc0_0004, "should advance, not vector");
     }
 
     #[test]
@@ -6134,7 +6134,7 @@ mod tests {
         // A trapping LW bills the uncached BIOS instruction fetch and its
         // issue cycle, but no data-read stalls because alignment is checked
         // before the memory transaction.
-        let (_cpu, bus) = step_one_load_store(0x8C89_0001, 0xBFC0_0000);
+        let (_cpu, bus) = step_one_load_store(0x8c89_0001, 0xbfc0_0000);
         assert_eq!(bus.cycles(), 32 + cycle_cost(0) as u64);
     }
 
@@ -6142,19 +6142,19 @@ mod tests {
     fn scratchpad_instruction_fetch_raises_ibe_before_icache_lookup() {
         let mut bus = Bus::new_without_bios();
         let mut cpu = Cpu::new();
-        cpu.pc = 0x1F80_0000;
+        cpu.pc = 0x1f80_0000;
         cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
 
         // Seed the matching cache line with a valid NOP. The architectural
         // executable-region check must win even over an apparent cache hit.
         cpu.instruction_cache.write_data(cpu.pc, 0);
-        cpu.instruction_cache.write_tag(cpu.pc, 0xF);
+        cpu.instruction_cache.write_tag(cpu.pc, 0xf);
 
         cpu.step(&mut bus).expect("IBE enters the exception vector");
 
-        assert_eq!((cpu.cop0[13] >> 2) & 0x1F, 6);
-        assert_eq!(cpu.cop0[8], 0x1F80_0000);
-        assert_eq!(cpu.cop0[14], 0x1F80_0000);
+        assert_eq!((cpu.cop0[13] >> 2) & 0x1f, 6);
+        assert_eq!(cpu.cop0[8], 0x1f80_0000);
+        assert_eq!(cpu.cop0[14], 0x1f80_0000);
         assert_eq!(cpu.pc(), 0x8000_0080);
         assert_eq!(cpu.exception_counts()[6], 1);
     }
@@ -6165,20 +6165,20 @@ mod tests {
         // Last executable word of the 8 MiB RAM mirror: J 0x80001000.
         // Its sequential delay-slot address is 0x80800000, just outside the
         // mirror and therefore raises IBE before the pending jump commits.
-        let jump = 0x0800_0000 | ((0x8000_1000u32 >> 2) & 0x03FF_FFFF);
-        bus.write32(0x001F_FFFC, jump);
+        let jump = 0x0800_0000 | ((0x8000_1000u32 >> 2) & 0x03ff_ffff);
+        bus.write32(0x001f_fffc, jump);
         let mut cpu = Cpu::new();
-        cpu.pc = 0x807F_FFFC;
+        cpu.pc = 0x807f_fffc;
         cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
 
         cpu.step(&mut bus).expect("jump");
         assert_eq!(cpu.pc(), 0x8080_0000);
         cpu.step(&mut bus).expect("delay-slot IBE");
 
-        assert_eq!((cpu.cop0[13] >> 2) & 0x1F, 6);
+        assert_eq!((cpu.cop0[13] >> 2) & 0x1f, 6);
         assert_ne!(cpu.cop0[13] & (1 << 31), 0, "CAUSE.BD");
         assert_eq!(cpu.cop0[8], 0x8080_0000);
-        assert_eq!(cpu.cop0[14], 0x807F_FFFC);
+        assert_eq!(cpu.cop0[14], 0x807f_fffc);
         assert_eq!(cpu.pc(), 0x8000_0080);
     }
 
@@ -6210,7 +6210,7 @@ mod tests {
             .expect("replacement refill");
         assert_eq!(second.incoming_line, 0x0000_2000);
         assert_eq!(second.victim_line, 0x0000_1000);
-        assert_eq!(second.victim_valid_mask, 0xF);
+        assert_eq!(second.victim_valid_mask, 0xf);
         assert_eq!(second.miss_kind, InstructionCacheMissKind::Tag);
         assert!(second.stall_cycles > 0);
     }
@@ -6225,8 +6225,8 @@ mod tests {
         cpu.profile_instruction_class(lb_sp, false);
         cpu.profile_instruction_class(0, true);
         // One GTE command, one LUI, one JALR and one MULT.
-        cpu.profile_instruction_class(0x4A00_0001, false);
-        cpu.profile_instruction_class(0x3C08_1234, false);
+        cpu.profile_instruction_class(0x4a00_0001, false);
+        cpu.profile_instruction_class(0x3c08_1234, false);
         cpu.profile_instruction_class((8u32 << 21) | (31u32 << 11) | 0x09, false);
         cpu.profile_instruction_class((8u32 << 21) | (9u32 << 16) | 0x18, false);
 

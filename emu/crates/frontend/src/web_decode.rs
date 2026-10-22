@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use web_time::Instant;
 
-const FNV_OFFSET: u32 = 0x811C_9DC5;
+const FNV_OFFSET: u32 = 0x811c_9dc5;
 const FNV_PRIME: u32 = 0x0100_0193;
 
 /// Continue an FNV-1a-32 hash over `data`.
@@ -149,9 +149,9 @@ mod tests {
     #[test]
     fn fnv_known_vectors_and_incremental_agree() {
         // Published FNV-1a-32 test vectors.
-        assert_eq!(fnv1a32(b""), 0x811C_9DC5);
-        assert_eq!(fnv1a32(b"a"), 0xE40C_292C);
-        assert_eq!(fnv1a32(b"foobar"), 0xBF9C_F968);
+        assert_eq!(fnv1a32(b""), 0x811c_9dc5);
+        assert_eq!(fnv1a32(b"a"), 0xe40c_292c);
+        assert_eq!(fnv1a32(b"foobar"), 0xbf9c_f968);
         let split = fnv1a32_update(fnv1a32(b"foo"), b"bar");
         assert_eq!(split, fnv1a32(b"foobar"));
     }
@@ -183,8 +183,8 @@ mod tests {
         // Break the second frame: the decoder stops there, short of the
         // full length, instead of looping or panicking.
         let at = bad.len() * 2 / 3;
-        bad[at] ^= 0xFF;
-        bad[at + 1] ^= 0xFF;
+        bad[at] ^= 0xff;
+        bad[at + 1] ^= 0xff;
         let mut dec = Decode::new(bad, 0).unwrap();
         let done = loop {
             if let Some(done) = dec.pump(Duration::from_secs(60)) {

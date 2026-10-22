@@ -44,7 +44,7 @@ pub const B0_TABLE: u32 = 0x0000_0874;
 /// C0 table base.
 pub const C0_TABLE: u32 = 0x0000_0674;
 /// Entries per table.
-pub const A0_LEN: u32 = 0xC0;
+pub const A0_LEN: u32 = 0xc0;
 /// Entries per table.
 pub const B0_LEN: u32 = 0x60;
 /// Entries per table.
@@ -53,32 +53,32 @@ pub const C0_LEN: u32 = 0x20;
 /// First word of the trap stub array. Stub for `(table, func)` is at
 /// `STUBS + 4 * (table_offset + func)`.
 pub const STUBS: u32 = 0x0000_1000;
-const STUB_OFFSET: [u32; 4] = [0, 0xC0, 0x120, 0x140];
+const STUB_OFFSET: [u32; 4] = [0, 0xc0, 0x120, 0x140];
 /// Number of kernel-internal functions reachable through stubs.
 pub const INTERNAL_LEN: u32 = 0x40;
 
 /// C(06h), the exception handler entry. Games read `C0[6]` and patch at
 /// fixed offsets from it.
-pub const EXCEPTION_HANDLER: u32 = 0x0000_0C80;
+pub const EXCEPTION_HANDLER: u32 = 0x0000_0c80;
 /// End of the region reserved at [`EXCEPTION_HANDLER`].
-pub const EXCEPTION_HANDLER_END: u32 = 0x0000_0F00;
+pub const EXCEPTION_HANDLER_END: u32 = 0x0000_0f00;
 /// B(5Bh), the pad/card auto-ack function. Games read `B0[5Bh]` and
 /// patch at fixed offsets from it (up to +1988h is documented).
-pub const PAD_CARD_ENTRY: u32 = 0x0000_43D0;
+pub const PAD_CARD_ENTRY: u32 = 0x0000_43d0;
 /// End of the region reserved at [`PAD_CARD_ENTRY`].
-pub const PAD_CARD_ENTRY_END: u32 = 0x0000_5E00;
+pub const PAD_CARD_ENTRY_END: u32 = 0x0000_5e00;
 
 /// Device control blocks (fixed; psx-spx 0x150).
-pub const DCB_BASE: u32 = 0x0000_6EE0;
+pub const DCB_BASE: u32 = 0x0000_6ee0;
 /// DCB area size: 10 blocks of 50h.
 pub const DCB_SIZE: u32 = 0x320;
 /// File control blocks (fixed; psx-spx 0x140).
 pub const FCB_BASE: u32 = 0x0000_8648;
 /// FCB area size: 16 blocks of 2Ch.
-pub const FCB_SIZE: u32 = 0x2C0;
+pub const FCB_SIZE: u32 = 0x2c0;
 
 /// Kernel heap managed by SysInitMemory / alloc_kernel_memory.
-pub const KERNEL_HEAP: u32 = 0xA000_E000;
+pub const KERNEL_HEAP: u32 = 0xa000_e000;
 /// Kernel heap size.
 pub const KERNEL_HEAP_SIZE: u32 = 0x2000;
 
@@ -87,9 +87,9 @@ pub const TOT: u32 = 0x0000_0100;
 /// ExCB: 4 priorities of 8 bytes.
 pub const EXCB_SIZE: u32 = 0x20;
 /// Bytes per EvCB.
-pub const EVCB_SIZE: u32 = 0x1C;
+pub const EVCB_SIZE: u32 = 0x1c;
 /// Bytes per TCB.
-pub const TCB_SIZE: u32 = 0xC0;
+pub const TCB_SIZE: u32 = 0xc0;
 /// TCB status: free.
 pub const TCB_FREE: u32 = 0x1000;
 /// TCB status: in use.
@@ -98,35 +98,35 @@ pub const TCB_USED: u32 = 0x4000;
 /// Kernel variables owned by the HLE, at `0x0A00`.
 pub mod kvar {
     /// User heap: first block header address (0 = no InitHeap yet).
-    pub const USER_HEAP_START: u32 = 0x0A00;
+    pub const USER_HEAP_START: u32 = 0x0a00;
     /// User heap: end address (exclusive).
-    pub const USER_HEAP_END: u32 = 0x0A04;
+    pub const USER_HEAP_END: u32 = 0x0a04;
     /// Kernel heap: first block header address.
-    pub const KERNEL_HEAP_START: u32 = 0x0A08;
+    pub const KERNEL_HEAP_START: u32 = 0x0a08;
     /// Kernel heap: end address (exclusive).
-    pub const KERNEL_HEAP_END: u32 = 0x0A0C;
+    pub const KERNEL_HEAP_END: u32 = 0x0a0c;
     /// Number of TCBs (SYSTEM.CNF TCB / SetConf). The three config words
     /// are in the retail order (TCBs, EvCBs, stack): Metal Gear Solid
     /// finds them by decoding the first two instructions of GetConf (its
     /// `lui`/`lw` pair addresses the stack word) and writes all three.
-    pub const CONF_TCB: u32 = 0x0A10;
+    pub const CONF_TCB: u32 = 0x0a10;
     /// Number of EvCBs (SYSTEM.CNF EVENT / SetConf).
-    pub const CONF_EVENT: u32 = 0x0A14;
+    pub const CONF_EVENT: u32 = 0x0a14;
     /// Stack top (SYSTEM.CNF STACK / SetConf).
-    pub const CONF_STACK: u32 = 0x0A18;
+    pub const CONF_STACK: u32 = 0x0a18;
     /// B(5Bh) pad/card VBlank auto-acknowledge flag.
-    pub const SIO0_AUTO_ACK: u32 = 0x0A1C;
+    pub const SIO0_AUTO_ACK: u32 = 0x0a1c;
     /// Nonzero while the kernel's CD-ROM handlers are installed
     /// (A(71h)/A(54h) set it, A(72h)/A(56h) clear it).
-    pub const CD_KERNEL_ACTIVE: u32 = 0x0A20;
+    pub const CD_KERNEL_ACTIVE: u32 = 0x0a20;
     // 0x0A24..0x0A2B unused.
     /// Pad driver enable, set and cleared by the pad enable functions that
     /// games take from the B(5Bh) zone.
-    pub const PAD_STARTED: u32 = 0x0A2C;
+    pub const PAD_STARTED: u32 = 0x0a2c;
     /// SetPadOutput arguments: pad 1 buffer, size, pad 2 buffer, size.
-    pub const PAD_OUTPUT: u32 = 0x0A30;
+    pub const PAD_OUTPUT: u32 = 0x0a30;
     /// A(2Fh)/A(30h) random generator state.
-    pub const RAND_SEED: u32 = 0x0A40;
+    pub const RAND_SEED: u32 = 0x0a40;
 }
 
 /// Kernel-internal functions reachable through stubs in table 3.
@@ -141,21 +141,21 @@ pub mod internal {
 
 /// BREAK code prefix that marks an HLE trap word. Psy-Q only emits small
 /// BREAK codes (6 and 7 for divide checks), so this range is free.
-const TRAP_MAGIC: u32 = 0xB_0000;
+const TRAP_MAGIC: u32 = 0xb_0000;
 
 /// Trap word for `(table, func)`; table 0..=2 = A/B/C, 3 = internal.
 pub fn trap_word(table: u8, func: u8) -> u32 {
     let code = TRAP_MAGIC | (u32::from(table & 3) << 8) | u32::from(func);
-    (code << 6) | 0x0D
+    (code << 6) | 0x0d
 }
 
 /// Decode a trap word into `(table, func)`.
 pub fn decode_trap(word: u32) -> Option<(u8, u8)> {
-    if word & 0xFC00_003F != 0x0D {
+    if word & 0xfc00_003f != 0x0d {
         return None;
     }
-    let code = (word >> 6) & 0xF_FFFF;
-    if code & 0xF_FC00 != TRAP_MAGIC {
+    let code = (word >> 6) & 0xf_ffff;
+    if code & 0xf_fc00 != TRAP_MAGIC {
         return None;
     }
     Some((((code >> 8) & 3) as u8, code as u8))
@@ -225,7 +225,7 @@ pub fn install(bus: &mut Bus, cfg: KernelConfig) {
     fill(bus, 0x200, 0x1_0000, 0);
     poke32(bus, crate::hle_bios::RAM_SIZE_MB_VAR, 2);
     poke32(bus, 0x64, 0);
-    poke32(bus, 0x68, 0xFF);
+    poke32(bus, 0x68, 0xff);
 
     for t in 0..3u8 {
         let (base, len) = table(t);
@@ -239,8 +239,8 @@ pub fn install(bus: &mut Bus, cfg: KernelConfig) {
         poke32(bus, stub_addr(3, func), trap_word(3, func));
     }
     poke32(bus, C0_TABLE + 4 * 0x06, EXCEPTION_HANDLER);
-    poke32(bus, PAD_CARD_ENTRY, trap_word(1, 0x5B));
-    poke32(bus, B0_TABLE + 4 * 0x5B, PAD_CARD_ENTRY);
+    poke32(bus, PAD_CARD_ENTRY, trap_word(1, 0x5b));
+    poke32(bus, B0_TABLE + 4 * 0x5b, PAD_CARD_ENTRY);
     crate::hle_patch::install(bus);
 
     poke32(bus, kvar::SIO0_AUTO_ACK, 1);
@@ -468,12 +468,12 @@ mod tests {
 
     #[test]
     fn trap_words_round_trip_and_ignore_ordinary_breaks() {
-        for (t, f) in [(0u8, 0u8), (1, 0x5B), (2, 0x1F), (3, 0x3F)] {
+        for (t, f) in [(0u8, 0u8), (1, 0x5b), (2, 0x1f), (3, 0x3f)] {
             assert_eq!(decode_trap(trap_word(t, f)), Some((t, f)));
         }
         // break 7 (divide by zero) and break 0.
-        assert_eq!(decode_trap((7 << 16) | 0x0D), None);
-        assert_eq!(decode_trap(0x0D), None);
+        assert_eq!(decode_trap((7 << 16) | 0x0d), None);
+        assert_eq!(decode_trap(0x0d), None);
         assert_eq!(decode_trap(0), None);
     }
 
@@ -485,7 +485,7 @@ mod tests {
             KernelConfig {
                 tcb: 4,
                 event: 0x16,
-                stack: 0x801F_FFF0,
+                stack: 0x801f_fff0,
             },
         );
         // Census (SCPH1001, EVENT = 16h): ExCB A000E004h/20h, PCB A000E294h,
@@ -494,35 +494,35 @@ mod tests {
         assert_eq!(
             tot,
             [
-                0xA000_E004,
+                0xa000_e004,
                 0x20,
-                0xA000_E294,
+                0xa000_e294,
                 4,
-                0xA000_E29C,
+                0xa000_e29c,
                 0x300,
                 0,
                 0,
-                0xA000_E028,
+                0xa000_e028,
                 0x268
             ]
         );
-        assert_eq!(peek32(&bus, 0xE000), 0x20);
-        assert_eq!(current_tcb(&bus), 0xA000_E29C);
-        assert_eq!(peek32(&bus, 0xA000_E29C), TCB_USED);
-        assert_eq!(peek32(&bus, 0xA000_E29C + TCB_SIZE), TCB_FREE);
+        assert_eq!(peek32(&bus, 0xe000), 0x20);
+        assert_eq!(current_tcb(&bus), 0xa000_e29c);
+        assert_eq!(peek32(&bus, 0xa000_e29c), TCB_USED);
+        assert_eq!(peek32(&bus, 0xa000_e29c + TCB_SIZE), TCB_FREE);
         assert_eq!(peek32(&bus, TOT + 0x40), FCB_BASE);
         assert_eq!(peek32(&bus, TOT + 0x50), DCB_BASE);
-        assert_eq!((peek32(&bus, 0x60), peek32(&bus, 0x68)), (2, 0xFF));
+        assert_eq!((peek32(&bus, 0x60), peek32(&bus, 0x68)), (2, 0xff));
         // Table entries point at stubs, except the two patch targets.
-        assert_eq!(peek32(&bus, A0_TABLE + 4 * 0x3C), stub_addr(0, 0x3C));
+        assert_eq!(peek32(&bus, A0_TABLE + 4 * 0x3c), stub_addr(0, 0x3c));
         assert_eq!(
-            decode_trap(peek32(&bus, stub_addr(0, 0x3C))),
-            Some((0, 0x3C))
+            decode_trap(peek32(&bus, stub_addr(0, 0x3c))),
+            Some((0, 0x3c))
         );
         assert_eq!(peek32(&bus, C0_TABLE + 0x18), EXCEPTION_HANDLER);
-        assert_eq!(peek32(&bus, B0_TABLE + 0x16C), PAD_CARD_ENTRY);
-        assert_eq!(decode_trap(peek32(&bus, PAD_CARD_ENTRY)), Some((1, 0x5B)));
-        assert_eq!(get_conf(&bus), (0x16, 4, 0x801F_FFF0));
+        assert_eq!(peek32(&bus, B0_TABLE + 0x16c), PAD_CARD_ENTRY);
+        assert_eq!(decode_trap(peek32(&bus, PAD_CARD_ENTRY)), Some((1, 0x5b)));
+        assert_eq!(get_conf(&bus), (0x16, 4, 0x801f_fff0));
     }
 
     #[test]
@@ -561,14 +561,14 @@ mod tests {
         // Metal Gear Solid: entry = A0[9Dh]; addr = (lhu [entry] << 16) +
         // (lh [entry + 4]) - 8; then [addr] = tcbs, [addr + 4] = events,
         // [addr + 8] = stack.
-        let entry = peek32(&bus, A0_TABLE + 4 * 0x9D);
-        let hi = peek32(&bus, entry) & 0xFFFF;
-        let lo = (peek32(&bus, entry + 4) & 0xFFFF) as u16 as i16 as i32;
+        let entry = peek32(&bus, A0_TABLE + 4 * 0x9d);
+        let hi = peek32(&bus, entry) & 0xffff;
+        let lo = (peek32(&bus, entry + 4) & 0xffff) as u16 as i16 as i32;
         let addr = ((hi << 16) as i32 + lo - 8) as u32;
         assert_eq!(addr, kvar::CONF_TCB);
         poke32(&mut bus, addr, 7);
         poke32(&mut bus, addr + 4, 9);
-        poke32(&mut bus, addr + 8, 0x801F_0000);
-        assert_eq!(get_conf(&bus), (9, 7, 0x801F_0000));
+        poke32(&mut bus, addr + 8, 0x801f_0000);
+        assert_eq!(get_conf(&bus), (9, 7, 0x801f_0000));
     }
 }

@@ -252,7 +252,7 @@ impl Bus {
                 None => return false,
             }
         };
-        word & 0xFE00_0000 == 0x4A00_0000
+        word & 0xfe00_0000 == 0x4a00_0000
     }
 
     /// Settle a batch's clock: the bus clock was last advanced properly at
@@ -289,14 +289,14 @@ impl Bus {
                 let value = u16::from_le_bytes([self.ram[offset], self.ram[offset + 1]]);
                 let shift = (phys & 2) * 8;
                 self.data_bus_latch =
-                    (self.data_bus_latch & !(0xFFFF << shift)) | (u32::from(value) << shift);
+                    (self.data_bus_latch & !(0xffff << shift)) | (u32::from(value) << shift);
                 u32::from(value)
             }
             _ => {
                 let value = self.ram[offset];
                 let shift = (phys & 3) * 8;
                 self.data_bus_latch =
-                    (self.data_bus_latch & !(0xFF << shift)) | (u32::from(value) << shift);
+                    (self.data_bus_latch & !(0xff << shift)) | (u32::from(value) << shift);
                 u32::from(value)
             }
         };
@@ -337,7 +337,7 @@ impl Bus {
         } else {
             0
         };
-        let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
+        let refresh_stall = if (0xa000_0000..0xc000_0000).contains(&virt) {
             memory_timing::DRAM_REFRESH_UNCACHED_STALL_CYCLES
         } else {
             memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES

@@ -680,10 +680,10 @@ impl Fill {
     /// rules as the CPU rasterizer: x's low 4 bits are cleared,
     /// w is rounded UP to 16.
     pub fn new(xy: (u32, u32), wh: (u32, u32), color_bgr15: u16) -> Self {
-        let x = xy.0 & 0x3F0;
-        let y = xy.1 & 0x1FF;
-        let w = (wh.0.saturating_add(0xF)) & 0x3F0;
-        let h = wh.1 & 0x1FF;
+        let x = xy.0 & 0x3f0;
+        let y = xy.1 & 0x1ff;
+        let w = (wh.0.saturating_add(0xf)) & 0x3f0;
+        let h = wh.1 & 0x1ff;
         Self {
             xy: [x, y],
             wh: [w, h],
@@ -713,7 +713,7 @@ mod tests {
 
     #[test]
     fn bounding_box_is_inclusive() {
-        let t = MonoTri::opaque((10, 20), (30, 25), (15, 40), 0x7FFF);
+        let t = MonoTri::opaque((10, 20), (30, 25), (15, 40), 0x7fff);
         assert_eq!(t.bbox_min, [10, 20]);
         assert_eq!(t.bbox_max, [30, 40]);
     }
@@ -842,7 +842,7 @@ mod tests {
             (0, 10),
             (0x12, 0x34),
             (0x56, 0x78),
-            (0x9A, 0xBC),
+            (0x9a, 0xbc),
             0,
             0,
             (0x80, 0x80, 0x80),
@@ -851,6 +851,6 @@ mod tests {
         );
         assert_eq!(t.uv0, 0x3412);
         assert_eq!(t.uv1, 0x7856);
-        assert_eq!(t.uv2, 0xBC9A);
+        assert_eq!(t.uv2, 0xbc9a);
     }
 }

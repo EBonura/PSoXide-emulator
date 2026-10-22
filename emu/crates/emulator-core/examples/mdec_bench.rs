@@ -37,19 +37,19 @@ fn main() {
         mdec.dma_write_in(&table);
 
         // One macroblock = 6 blocks of DC, 12 AC terms, end marker.
-        let mut state = 0xC0FF_EE11u32;
+        let mut state = 0xc0ff_ee11u32;
         let mut halfwords: Vec<u16> = Vec::new();
         for _ in 0..blocks * 6 {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            halfwords.push(0x2000 | ((state >> 20) as u16 & 0x3FF)); // qscale 8, DC
+            halfwords.push(0x2000 | ((state >> 20) as u16 & 0x3ff)); // qscale 8, DC
             for _ in 0..12 {
                 state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                halfwords.push((((state >> 28) & 3) as u16) << 10 | ((state >> 12) as u16 & 0x3FF));
+                halfwords.push((((state >> 28) & 3) as u16) << 10 | ((state >> 12) as u16 & 0x3ff));
             }
-            halfwords.push(0xFE00);
+            halfwords.push(0xfe00);
         }
         if halfwords.len() % 2 == 1 {
-            halfwords.push(0xFE00);
+            halfwords.push(0xfe00);
         }
         let words: Vec<u32> = halfwords
             .chunks(2)
@@ -57,7 +57,7 @@ fn main() {
             .collect();
 
         let start = Instant::now();
-        mdec.write32(MDEC_CMD_DATA, 0x3800_0000 | (words.len() as u32 & 0xFFFF));
+        mdec.write32(MDEC_CMD_DATA, 0x3800_0000 | (words.len() as u32 & 0xffff));
         let mut out = vec![0u32; 192];
         mdec.dma_write_in(&words);
         for _ in 0..blocks {

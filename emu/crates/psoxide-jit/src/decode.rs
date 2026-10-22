@@ -102,9 +102,9 @@ pub enum Class {
 /// Classify one instruction word.
 pub fn classify(word: u32) -> Class {
     let op = word >> 26;
-    let rt = (word >> 16) & 0x1F;
-    let rs = (word >> 21) & 0x1F;
-    let funct = word & 0x3F;
+    let rt = (word >> 16) & 0x1f;
+    let rs = (word >> 21) & 0x1f;
+    let funct = word & 0x3f;
     match op {
         0x00 => match funct {
             0x00 => Class::Alu(Alu::Sll),
@@ -115,16 +115,16 @@ pub fn classify(word: u32) -> Class {
             0x07 => Class::Alu(Alu::Srav),
             0x08 => Class::Branch(Branch::Jr),
             0x09 => Class::Branch(Branch::Jalr),
-            0x0C | 0x0D => Class::Terminator,
-            0x10..=0x13 | 0x18..=0x1B | 0x20 | 0x22 => Class::Helper,
+            0x0c | 0x0d => Class::Terminator,
+            0x10..=0x13 | 0x18..=0x1b | 0x20 | 0x22 => Class::Helper,
             0x21 => Class::Alu(Alu::Addu),
             0x23 => Class::Alu(Alu::Subu),
             0x24 => Class::Alu(Alu::And),
             0x25 => Class::Alu(Alu::Or),
             0x26 => Class::Alu(Alu::Xor),
             0x27 => Class::Alu(Alu::Nor),
-            0x2A => Class::Alu(Alu::Slt),
-            0x2B => Class::Alu(Alu::Sltu),
+            0x2a => Class::Alu(Alu::Slt),
+            0x2b => Class::Alu(Alu::Sltu),
             _ => Class::Reject,
         },
         0x01 => match rt {
@@ -142,34 +142,34 @@ pub fn classify(word: u32) -> Class {
         0x07 => Class::Branch(Branch::Bgtz),
         0x08 => Class::Helper,
         0x09 => Class::Alu(Alu::Addiu),
-        0x0A => Class::Alu(Alu::Slti),
-        0x0B => Class::Alu(Alu::Sltiu),
-        0x0C => Class::Alu(Alu::Andi),
-        0x0D => Class::Alu(Alu::Ori),
-        0x0E => Class::Alu(Alu::Xori),
-        0x0F => Class::Alu(Alu::Lui),
+        0x0a => Class::Alu(Alu::Slti),
+        0x0b => Class::Alu(Alu::Sltiu),
+        0x0c => Class::Alu(Alu::Andi),
+        0x0d => Class::Alu(Alu::Ori),
+        0x0e => Class::Alu(Alu::Xori),
+        0x0f => Class::Alu(Alu::Lui),
         // COP0: MFC0 only reads; everything else may change SR.
         0x10 if rs == 0 => Class::Helper,
         0x10 => Class::Terminator,
         0x12 if is_gte_command(word) => Class::GteCommand,
         0x12 => Class::Helper,
-        0x11 | 0x13 | 0x30 | 0x31 | 0x33 | 0x38 | 0x39 | 0x3B => Class::Terminator,
-        0x20..=0x26 | 0x28..=0x2B | 0x2E | 0x32 | 0x3A => Class::Helper,
+        0x11 | 0x13 | 0x30 | 0x31 | 0x33 | 0x38 | 0x39 | 0x3b => Class::Terminator,
+        0x20..=0x26 | 0x28..=0x2b | 0x2e | 0x32 | 0x3a => Class::Helper,
         _ => Class::Reject,
     }
 }
 
 /// Whether `word` stores to memory (the helper then checks the address).
 pub fn is_store(word: u32) -> bool {
-    matches!(word >> 26, 0x28..=0x2B | 0x2E | 0x3A)
+    matches!(word >> 26, 0x28..=0x2b | 0x2e | 0x3a)
 }
 
 /// The register an instruction writes through `set_gpr`, the path that
 /// cancels a load in flight to the same register. Loads, MFC0/MFC2 and
 /// other delayed writes are not included.
 pub fn alu_dest(class: Class, word: u32) -> Option<u8> {
-    let rt = ((word >> 16) & 0x1F) as u8;
-    let rd = ((word >> 11) & 0x1F) as u8;
+    let rt = ((word >> 16) & 0x1f) as u8;
+    let rd = ((word >> 11) & 0x1f) as u8;
     match class {
         Class::Alu(alu) => Some(match alu {
             Alu::Addiu | Alu::Slti | Alu::Sltiu | Alu::Andi | Alu::Ori | Alu::Xori | Alu::Lui => rt,
@@ -188,15 +188,15 @@ mod tests {
     #[test]
     fn common_encodings_classify() {
         assert_eq!(classify(0x0000_0000), Class::Alu(Alu::Sll)); // nop
-        assert_eq!(classify(0x27BD_FFE8), Class::Alu(Alu::Addiu)); // addiu sp, sp, -24
-        assert_eq!(classify(0x8FBF_0010), Class::Helper); // lw ra, 16(sp)
-        assert_eq!(classify(0x03E0_0008), Class::Branch(Branch::Jr)); // jr ra
-        assert_eq!(classify(0x0C00_0000), Class::Branch(Branch::Jal));
-        assert_eq!(classify(0x4A18_0001), Class::GteCommand); // RTPS
+        assert_eq!(classify(0x27bd_ffe8), Class::Alu(Alu::Addiu)); // addiu sp, sp, -24
+        assert_eq!(classify(0x8fbf_0010), Class::Helper); // lw ra, 16(sp)
+        assert_eq!(classify(0x03e0_0008), Class::Branch(Branch::Jr)); // jr ra
+        assert_eq!(classify(0x0c00_0000), Class::Branch(Branch::Jal));
+        assert_eq!(classify(0x4a18_0001), Class::GteCommand); // RTPS
         assert_eq!(classify(0x4808_0000), Class::Helper); // mfc2
         assert_eq!(classify(0x4084_6000), Class::Terminator); // mtc0 a0, sr
         assert_eq!(classify(0x4000_6000), Class::Helper); // mfc0
-        assert_eq!(classify(0x0000_000C), Class::Terminator); // syscall
-        assert_eq!(classify(0xFC00_0000), Class::Reject);
+        assert_eq!(classify(0x0000_000c), Class::Terminator); // syscall
+        assert_eq!(classify(0xfc00_0000), Class::Reject);
     }
 }

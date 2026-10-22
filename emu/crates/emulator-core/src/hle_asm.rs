@@ -91,7 +91,7 @@ impl Asm {
     }
 
     fn i(&mut self, op: u32, rs: u32, rt: u32, imm: u32) {
-        self.word((op << 26) | (rs << 21) | (rt << 16) | (imm & 0xFFFF));
+        self.word((op << 26) | (rs << 21) | (rt << 16) | (imm & 0xffff));
     }
 
     pub fn nop(&mut self) {
@@ -110,7 +110,7 @@ impl Asm {
         self.r(rs, 0, RA, 0, 0x09);
     }
     pub fn syscall(&mut self) {
-        self.word(0x0C);
+        self.word(0x0c);
     }
     pub fn mfhi(&mut self, rd: u32) {
         self.r(0, 0, rd, 0, 0x10);
@@ -137,7 +137,7 @@ impl Asm {
         self.r(rs, rt, rd, 0, 0x27);
     }
     pub fn sltu(&mut self, rd: u32, rs: u32, rt: u32) {
-        self.r(rs, rt, rd, 0, 0x2B);
+        self.r(rs, rt, rd, 0, 0x2b);
     }
     pub fn mov(&mut self, rd: u32, rs: u32) {
         self.addu(rd, rs, ZERO);
@@ -149,22 +149,22 @@ impl Asm {
         self.i(0x09, rs, rt, imm as u16 as u32);
     }
     pub fn andi(&mut self, rt: u32, rs: u32, imm: u16) {
-        self.i(0x0C, rs, rt, u32::from(imm));
+        self.i(0x0c, rs, rt, u32::from(imm));
     }
     pub fn ori(&mut self, rt: u32, rs: u32, imm: u16) {
-        self.i(0x0D, rs, rt, u32::from(imm));
+        self.i(0x0d, rs, rt, u32::from(imm));
     }
     pub fn xori(&mut self, rt: u32, rs: u32, imm: u16) {
-        self.i(0x0E, rs, rt, u32::from(imm));
+        self.i(0x0e, rs, rt, u32::from(imm));
     }
     pub fn lui(&mut self, rt: u32, imm: u16) {
-        self.i(0x0F, 0, rt, u32::from(imm));
+        self.i(0x0f, 0, rt, u32::from(imm));
     }
     pub fn lw(&mut self, rt: u32, offset: i16, base: u32) {
         self.i(0x23, base, rt, offset as u16 as u32);
     }
     pub fn sw(&mut self, rt: u32, offset: i16, base: u32) {
-        self.i(0x2B, base, rt, offset as u16 as u32);
+        self.i(0x2b, base, rt, offset as u16 as u32);
     }
     /// `lui rt, hi(value); ori rt, rt, lo(value)`.
     pub fn li(&mut self, rt: u32, value: u32) {
@@ -205,11 +205,11 @@ impl Asm {
     }
     /// `j` to an absolute address.
     pub fn j_abs(&mut self, target: u32) {
-        self.word((0x02 << 26) | ((target >> 2) & 0x03FF_FFFF));
+        self.word((0x02 << 26) | ((target >> 2) & 0x03ff_ffff));
     }
     /// `jal` to an absolute address.
     pub fn jal_abs(&mut self, target: u32) {
-        self.word((0x03 << 26) | ((target >> 2) & 0x03FF_FFFF));
+        self.word((0x03 << 26) | ((target >> 2) & 0x03ff_ffff));
     }
     /// `jal` to a label in this block.
     pub fn jal(&mut self, target: &'static str) {
@@ -236,9 +236,9 @@ impl Asm {
                         (-0x8000..0x8000).contains(&offset),
                         "branch to {name} out of range"
                     );
-                    self.words[index] |= offset as u32 & 0xFFFF;
+                    self.words[index] |= offset as u32 & 0xffff;
                 }
-                Fix::Jump => self.words[index] |= (target >> 2) & 0x03FF_FFFF,
+                Fix::Jump => self.words[index] |= (target >> 2) & 0x03ff_ffff,
             }
         }
         self.words
@@ -253,29 +253,29 @@ mod tests {
     fn encodings_match_known_words() {
         let mut a = Asm::new(0x80);
         a.lui(K0, 0);
-        a.addiu(K0, K0, 0x0C80);
+        a.addiu(K0, K0, 0x0c80);
         a.jr(K0);
         a.nop();
         a.rfe();
         a.mfc0(V0, 13);
         a.mtc0(A1, 12);
         a.jalr(S1);
-        a.sw(RA, 0x7C, K0);
+        a.sw(RA, 0x7c, K0);
         a.lw(K0, 8, K0);
         // psx-spx lists the retail exception vector words.
         assert_eq!(
             a.finish(),
             [
-                0x3C1A_0000,
-                0x275A_0C80,
+                0x3c1a_0000,
+                0x275a_0c80,
                 0x0340_0008,
                 0,
                 0x4200_0010,
                 0x4002_6800,
                 0x4085_6000,
-                0x0220_F809,
-                0xAF5F_007C,
-                0x8F5A_0008
+                0x0220_f809,
+                0xaf5f_007c,
+                0x8f5a_0008
             ]
         );
     }
@@ -292,8 +292,8 @@ mod tests {
         a.label("end");
         a.jal("top");
         let w = a.finish();
-        assert_eq!(w[1], 0x1500_FFFE);
+        assert_eq!(w[1], 0x1500_fffe);
         assert_eq!(w[3], 0x1100_0001);
-        assert_eq!(w[5], 0x0C00_0400);
+        assert_eq!(w[5], 0x0c00_0400);
     }
 }

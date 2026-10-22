@@ -79,9 +79,9 @@ pub(super) struct FillShape {
 impl InstructionCache {
     #[inline]
     fn coordinates(phys: u32) -> (usize, usize, u32) {
-        let line = ((phys >> 4) & 0xFF) as usize;
+        let line = ((phys >> 4) & 0xff) as usize;
         let word = ((phys >> 2) & 3) as usize;
-        let tag = phys & 0xFFFF_F000;
+        let tag = phys & 0xffff_f000;
         (line, word, tag)
     }
 
@@ -152,7 +152,7 @@ impl InstructionCache {
             for index in 0..WORDS_PER_LINE {
                 line.words[index] = bus.read_instruction32(line_base + (index as u32 * 4));
             }
-            line.valid = 0xF;
+            line.valid = 0xf;
             filled_words = WORDS_PER_LINE as u32;
             lead_words = word_index as u32;
         }
@@ -199,7 +199,7 @@ impl InstructionCache {
         let (line_index, word_index, tag) = Self::coordinates(addr);
         let line = &self.lines[line_index];
         let tag_match = u32::from(line.tag == tag) << 4;
-        (line.words[word_index] & 0xFFFF_FFE0) | tag_match | u32::from(line.valid & 0xF)
+        (line.words[word_index] & 0xffff_ffe0) | tag_match | u32::from(line.valid & 0xf)
     }
 
     /// Cache-isolated tag-mode write. The address supplies the physical
@@ -207,7 +207,7 @@ impl InstructionCache {
     pub(super) fn write_tag(&mut self, addr: u32, value: u32) {
         let (line, _, tag) = Self::coordinates(addr);
         self.lines[line].tag = tag;
-        self.lines[line].valid = value as u8 & 0xF;
+        self.lines[line].valid = value as u8 & 0xf;
         self.generations[line] = self.generations[line].wrapping_add(1);
         self.epoch += 1;
     }
@@ -236,7 +236,7 @@ impl InstructionCache {
     /// Change count of the line holding physical address `phys`.
     #[inline(always)]
     pub(super) fn generation(&self, phys: u32) -> u32 {
-        self.generations[((phys >> 4) & 0xFF) as usize]
+        self.generations[((phys >> 4) & 0xff) as usize]
     }
 
     #[cfg(test)]
@@ -306,22 +306,22 @@ mod tests {
     #[test]
     fn hit_returns_stale_code_until_same_index_tag_is_replaced() {
         let mut bus = bus();
-        bus.write32(0x3000, 0xAAAA_AAAA);
-        bus.write32(0x4000, 0xBBBB_BBBB);
+        bus.write32(0x3000, 0xaaaa_aaaa);
+        bus.write32(0x4000, 0xbbbb_bbbb);
         let mut cache = InstructionCache::default();
 
-        assert_eq!(cache.fetch(0x3000, 3, &mut bus, true).0, 0xAAAA_AAAA);
-        bus.write32(0x3000, 0xCCCC_CCCC);
+        assert_eq!(cache.fetch(0x3000, 3, &mut bus, true).0, 0xaaaa_aaaa);
+        bus.write32(0x3000, 0xcccc_cccc);
         assert_eq!(
             cache.fetch(0x3000, 3, &mut bus, true),
-            (0xAAAA_AAAA, FillShape::default(), None)
+            (0xaaaa_aaaa, FillShape::default(), None)
         );
 
         // These addresses have the same bits 11:4, so the second tag
         // replaces the first direct-mapped line.
-        assert_eq!(cache.fetch(0x4000, 3, &mut bus, true).0, 0xBBBB_BBBB);
+        assert_eq!(cache.fetch(0x4000, 3, &mut bus, true).0, 0xbbbb_bbbb);
         let (instruction, fill, refill) = cache.fetch(0x3000, 3, &mut bus, true);
-        assert_eq!(instruction, 0xCCCC_CCCC);
+        assert_eq!(instruction, 0xcccc_cccc);
         assert_eq!(fill.words, 4);
         let refill = refill.expect("same-set replacement");
         assert_eq!(refill.victim_line, 0x4000);
@@ -332,13 +332,13 @@ mod tests {
     #[test]
     fn disabled_refill_capture_preserves_fill_width_without_metadata() {
         let mut bus = bus();
-        bus.write32(0x6008, 0xCAFE_BABE);
+        bus.write32(0x6008, 0xcafe_babe);
         bus.write32(0x600c, 0x0123_4567);
         let mut cache = InstructionCache::default();
 
         let (instruction, fill, refill) = cache.fetch(0x6008, 3, &mut bus, false);
 
-        assert_eq!(instruction, 0xCAFE_BABE);
+        assert_eq!(instruction, 0xcafe_babe);
         assert_eq!(fill.words, 2);
         assert_eq!(refill, None);
         assert_eq!(cache.line_state(0x6008).1, 0b1100);
@@ -347,14 +347,14 @@ mod tests {
     #[test]
     fn isolated_tag_write_controls_tag_and_per_word_validity() {
         let mut cache = InstructionCache::default();
-        cache.write_data(0x5010, 0xDEAD_BEE0);
+        cache.write_data(0x5010, 0xdead_bee0);
         cache.write_tag(0x5010, 0b0101);
 
         let (tag, valid, words) = cache.line_state(0x5010);
         assert_eq!(tag, 0x5000);
         assert_eq!(valid, 0b0101);
-        assert_eq!(words[0], 0xDEAD_BEE0);
-        assert_eq!(cache.read_tag(0x5010), 0xDEAD_BEF5);
+        assert_eq!(words[0], 0xdead_bee0);
+        assert_eq!(cache.read_tag(0x5010), 0xdead_bef5);
 
         cache.write_tag(0x5010, 0);
         assert_eq!(cache.line_state(0x5010).1, 0);

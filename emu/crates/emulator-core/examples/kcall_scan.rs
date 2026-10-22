@@ -222,11 +222,11 @@ fn rt(w: u32) -> u32 {
 
 /// `addiu`/`ori reg, $zero, imm`: the constant put in `reg`.
 fn constant_into(w: u32, reg: u32) -> Option<u32> {
-    ((op(w) == 0x09 || op(w) == 0x0D) && rs(w) == 0 && rt(w) == reg).then_some(w & 0xFFFF)
+    ((op(w) == 0x09 || op(w) == 0x0d) && rs(w) == 0 && rt(w) == reg).then_some(w & 0xffff)
 }
 
 fn is_jump_through(w: u32, reg: u32) -> bool {
-    op(w) == 0 && matches!(w & 0x3F, 0x08 | 0x09) && rs(w) == reg
+    op(w) == 0 && matches!(w & 0x3f, 0x08 | 0x09) && rs(w) == reg
 }
 
 /// One BIOS call site.
@@ -243,13 +243,13 @@ struct Site {
 fn call_sites(words: &[u32]) -> Vec<Site> {
     let mut sites = Vec::new();
     for (i, &w) in words.iter().enumerate() {
-        if !((op(w) == 0x09 || op(w) == 0x0D) && rs(w) == 0) {
+        if !((op(w) == 0x09 || op(w) == 0x0d) && rs(w) == 0) {
             continue;
         }
-        let table = match w & 0xFFFF {
-            0xA0 => 0,
-            0xB0 => 1,
-            0xC0 => 2,
+        let table = match w & 0xffff {
+            0xa0 => 0,
+            0xb0 => 1,
+            0xc0 => 2,
             _ => continue,
         };
         let reg = rt(w);
@@ -282,7 +282,7 @@ fn call_sites(words: &[u32]) -> Vec<Site> {
 /// which case the routine follows each of that function's callers. The
 /// callers can only be found in an executable, whose load address is known.
 fn routine_starts(words: &[u32], site: &Site, base: Option<u32>) -> Vec<usize> {
-    if words[site.jump] & 0x3F == 0x09 {
+    if words[site.jump] & 0x3f == 0x09 {
         return vec![(site.jump + 2).min(words.len())];
     }
     let Some(base) = base else {
@@ -292,7 +292,7 @@ fn routine_starts(words: &[u32], site: &Site, base: Option<u32>) -> Vec<usize> {
     words
         .iter()
         .enumerate()
-        .filter(|&(_, &w)| op(w) == 0x03 && (w & 0x03FF_FFFF) << 2 == target & 0x0FFF_FFFF)
+        .filter(|&(_, &w)| op(w) == 0x03 && (w & 0x03ff_ffff) << 2 == target & 0x0fff_ffff)
         .map(|(k, _)| (k + 2).min(words.len()))
         .collect()
 }
@@ -349,7 +349,7 @@ fn scan_words(
         }
     }
     for (i, &w) in words.iter().enumerate() {
-        if op(w) == 0 && w & 0x3F == 0x0C && w >> 6 & 0xF_FFFF == 0 {
+        if op(w) == 0 && w & 0x3f == 0x0c && w >> 6 & 0xf_ffff == 0 {
             let lo = i.saturating_sub(3);
             // A bare SYSCALL word is also the number 12 in data; only one
             // with a constant function number counts.

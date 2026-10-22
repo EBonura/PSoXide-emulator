@@ -220,7 +220,7 @@ fn format_sr_bits(sr: u32) -> String {
         ie_o = (sr >> 4) & 1,
         ku_o = (sr >> 5) & 1,
     );
-    let im = (sr >> 8) & 0xFF;
+    let im = (sr >> 8) & 0xff;
     let flags_str = if flags.is_empty() {
         String::new()
     } else {
@@ -230,8 +230,8 @@ fn format_sr_bits(sr: u32) -> String {
 }
 
 fn format_cause_bits(cause: u32) -> String {
-    let exc_code = (cause >> 2) & 0x1F;
-    let ip = (cause >> 8) & 0xFF;
+    let exc_code = (cause >> 2) & 0x1f;
+    let ip = (cause >> 8) & 0xff;
     let bd = if cause & (1 << 31) != 0 { " BD" } else { "" };
     let exc_name = EXC_CODES
         .iter()

@@ -110,7 +110,7 @@ const MODE_REACHED_WRAP: u32 = 1 << 12;
 /// Standard NTSC/PAL active horizontal display window in GPU clocks. HBlank
 /// is the complement of this range. GPU clock = CPU clock * 11/7.
 const H_ACTIVE_START_GPU: u64 = 0x260;
-const H_ACTIVE_END_GPU: u64 = 0xC60;
+const H_ACTIVE_END_GPU: u64 = 0xc60;
 
 /// The full three-timer bank.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -154,7 +154,7 @@ pub struct Timers {
 
 impl Timers {
     /// Base address of the timer bank.
-    pub const BASE: u32 = 0x1F80_1100;
+    pub const BASE: u32 = 0x1f80_1100;
     /// Size of the bank (3 timers × 16 bytes each; last 4 bytes unused).
     pub const SIZE: u32 = 0x30;
     /// Stride between consecutive timers.
@@ -220,7 +220,7 @@ impl Timers {
         self.quiet_until = 0;
         let (idx, off) = decode(phys);
         let t = &mut self.timers[idx];
-        let v16 = value & 0xFFFF;
+        let v16 = value & 0xffff;
         match off {
             0x0 => {
                 t.counter = v16;
@@ -432,7 +432,7 @@ impl Timers {
             };
             // Source ticks until `advance_counter` would see a crossing.
             let old = u64::from(t.counter);
-            let target = u64::from(t.target & 0xFFFF);
+            let target = u64::from(t.target & 0xffff);
             let ticks = if t.mode & MODE_RESET_AT_TARGET != 0 && target != 0 {
                 let raw_old = if t.target_reset_hold {
                     target + 1
@@ -819,7 +819,7 @@ fn advance_counter(t: &mut Timer, ticks: u64) -> bool {
     }
     // Pre-tick position.
     let old = t.counter;
-    let target = t.target & 0xFFFF;
+    let target = t.target & 0xffff;
     let mut new_val = (old as u64) + ticks;
 
     let mut fired = false;
@@ -848,9 +848,9 @@ fn advance_counter(t: &mut Timer, ticks: u64) -> bool {
         new_val = if t.target_reset_hold { 0 } else { raw_new };
     } else {
         t.target_reset_hold = false;
-        if new_val > 0xFFFF {
+        if new_val > 0xffff {
             reached_wrap = true;
-            new_val &= 0xFFFF;
+            new_val &= 0xffff;
         }
 
         // Detect target pass for non-reset-mode too.
@@ -988,52 +988,52 @@ mod tests {
 
     #[test]
     fn decodes_each_timer_and_field() {
-        assert_eq!(decode(0x1F80_1100), (0, 0x0));
-        assert_eq!(decode(0x1F80_1104), (0, 0x4));
-        assert_eq!(decode(0x1F80_1108), (0, 0x8));
-        assert_eq!(decode(0x1F80_1110), (1, 0x0));
-        assert_eq!(decode(0x1F80_1124), (2, 0x4));
+        assert_eq!(decode(0x1f80_1100), (0, 0x0));
+        assert_eq!(decode(0x1f80_1104), (0, 0x4));
+        assert_eq!(decode(0x1f80_1108), (0, 0x8));
+        assert_eq!(decode(0x1f80_1110), (1, 0x0));
+        assert_eq!(decode(0x1f80_1124), (2, 0x4));
     }
 
     #[test]
     fn write_then_read_roundtrips() {
         let mut t = Timers::new();
-        t.write32(0x1F80_1100, 0x1234, 0);
-        assert_eq!(t.read32(0x1F80_1100), 0x1234);
+        t.write32(0x1f80_1100, 0x1234, 0);
+        assert_eq!(t.read32(0x1f80_1100), 0x1234);
 
-        t.write32(0x1F80_1108, 0xABCD, 0);
-        assert_eq!(t.read32(0x1F80_1108), 0xABCD);
+        t.write32(0x1f80_1108, 0xabcd, 0);
+        assert_eq!(t.read32(0x1f80_1108), 0xabcd);
     }
 
     #[test]
     fn mode_write_resets_counter() {
         let mut t = Timers::new();
-        t.write32(0x1F80_1100, 0xFF, 0);
-        t.write32(0x1F80_1104, 0x0001, 100); // mode write at cycle 100
-        assert_eq!(t.read32(0x1F80_1100), 0);
+        t.write32(0x1f80_1100, 0xff, 0);
+        t.write32(0x1f80_1104, 0x0001, 100); // mode write at cycle 100
+        assert_eq!(t.read32(0x1f80_1100), 0);
         assert_eq!(t.timers[0].last_reset_cycle, 100);
     }
 
     #[test]
     fn upper_bits_masked_to_16() {
         let mut t = Timers::new();
-        t.write32(0x1F80_1100, 0x1234_5678, 0);
-        assert_eq!(t.read32(0x1F80_1100), 0x5678);
+        t.write32(0x1f80_1100, 0x1234_5678, 0);
+        assert_eq!(t.read32(0x1f80_1100), 0x5678);
     }
 
     #[test]
     fn contains_covers_full_bank() {
-        assert!(Timers::contains(0x1F80_1100));
-        assert!(Timers::contains(0x1F80_1128));
-        assert!(!Timers::contains(0x1F80_1130));
-        assert!(!Timers::contains(0x1F80_10FF));
+        assert!(Timers::contains(0x1f80_1100));
+        assert!(Timers::contains(0x1f80_1128));
+        assert!(!Timers::contains(0x1f80_1130));
+        assert!(!Timers::contains(0x1f80_10ff));
     }
 
     #[test]
     fn timer0_dot_clock_source_ticks_at_divisor_rate() {
         let mut t = Timers::new();
         // Set Timer 0 mode with clock source = 1 (dot clock).
-        t.write32(0x1F80_1104, 1 << 8, 0);
+        t.write32(0x1f80_1104, 1 << 8, 0);
         // At 320-wide the GPU pixel divisor is 8, and the GPU clock is
         // CPU * 11/7, so a dot tick is 7*8/11 ≈ 5.09 system cycles.
         // 80 cycles produce 15 dots. The mode write holds the counter for two
@@ -1041,56 +1041,56 @@ mod tests {
         // at this phase.
         let fired = t.tick(80, NTSC_HSYNC, 8);
         assert_eq!(fired, 0);
-        assert_eq!(t.read32(0x1F80_1100) & 0xFFFF, 15);
+        assert_eq!(t.read32(0x1f80_1100) & 0xffff, 15);
         // Another 40 cycles → accum carries the remainder → 8 more ticks.
         t.tick(40, NTSC_HSYNC, 8);
-        assert_eq!(t.read32(0x1F80_1100) & 0xFFFF, 23);
+        assert_eq!(t.read32(0x1f80_1100) & 0xffff, 23);
     }
 
     #[test]
     fn timer0_system_clock_source_unaffected_by_divisor() {
         let mut t = Timers::new();
-        t.write32(0x1F80_1104, 0, 0); // source 0 = system clock
+        t.write32(0x1f80_1104, 0, 0); // source 0 = system clock
                                       // Divisor changes shouldn't matter at system-clock source.
         t.tick(100, NTSC_HSYNC, 8);
-        assert_eq!(t.read32(0x1F80_1100) & 0xFFFF, 98);
+        assert_eq!(t.read32(0x1f80_1100) & 0xffff, 98);
     }
 
     #[test]
     fn timer1_sync_mode_3_waits_for_vblank_then_free_runs() {
         let mut t = Timers::new();
         t.set_vblank_sync_offset_lines(0);
-        t.write32(0x1F80_1114, MODE_SYNC_ENABLE | (3 << 1), 0);
+        t.write32(0x1f80_1114, MODE_SYNC_ENABLE | (3 << 1), 0);
         let period = NTSC_PERIOD;
         t.advance_to_video(500, NTSC_HSYNC, 8, 1000, period);
-        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 0);
+        assert_eq!(t.read32(0x1f80_1110) & 0xffff, 0);
         t.advance_to_video(1000, NTSC_HSYNC, 8, 1000, period);
-        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 0);
+        assert_eq!(t.read32(0x1f80_1110) & 0xffff, 0);
         t.advance_to_video(1500, NTSC_HSYNC, 8, 1000 + period, period);
-        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 500);
+        assert_eq!(t.read32(0x1f80_1110) & 0xffff, 500);
     }
 
     #[test]
     fn timer1_hblank_source_counts_global_edges_across_a_field() {
         let mut t = Timers::new();
-        t.write32(0x1F80_1114, 1 << 8, 0);
+        t.write32(0x1f80_1114, 1 << 8, 0);
         t.advance_to_video(NTSC_PERIOD, NTSC_HSYNC, 8, NTSC_PERIOD, NTSC_PERIOD);
-        assert_eq!(t.read32(0x1F80_1110), 263);
+        assert_eq!(t.read32(0x1f80_1110), 263);
     }
 
     #[test]
     fn counter_read_latch_holds_only_the_selected_timer() {
         let mut t = Timers::new();
-        t.write32(0x1F80_1104, 0, 0);
-        t.write32(0x1F80_1114, 0, 0);
+        t.write32(0x1f80_1104, 0, 0);
+        t.write32(0x1f80_1114, 0, 0);
         t.advance_to(4, NTSC_HSYNC, 8);
-        assert_eq!(t.read32(0x1F80_1100), 2);
-        assert_eq!(t.read32(0x1F80_1110), 2);
+        assert_eq!(t.read32(0x1f80_1100), 2);
+        assert_eq!(t.read32(0x1f80_1110), 2);
 
-        t.hold_counter_for_read(0x1F80_1100, 2);
+        t.hold_counter_for_read(0x1f80_1100, 2);
         t.advance_to(6, NTSC_HSYNC, 8);
-        assert_eq!(t.read32(0x1F80_1100), 2);
-        assert_eq!(t.read32(0x1F80_1110), 4);
+        assert_eq!(t.read32(0x1f80_1100), 2);
+        assert_eq!(t.read32(0x1f80_1110), 4);
     }
 
     #[test]
@@ -1099,20 +1099,20 @@ mod tests {
         // many lines must see one count per line, not one per line plus the
         // clocks the reads would otherwise take away.
         let mut t = Timers::new();
-        t.write32(0x1F80_1114, 1 << 8, 0);
+        t.write32(0x1f80_1114, 1 << 8, 0);
         let mut now = 100u64;
         t.advance_to(now, NTSC_HSYNC, 8);
-        let start = t.read32(0x1F80_1110) & 0xFFFF;
+        let start = t.read32(0x1f80_1110) & 0xffff;
         let end_cycle = now + 606 * 33_868;
         let mut reads = 0u64;
         while now < end_cycle {
-            t.hold_counter_for_read(0x1F80_1110, 2);
+            t.hold_counter_for_read(0x1f80_1110, 2);
             now += 7;
             t.advance_to(now, NTSC_HSYNC, 8);
             reads += 1;
         }
         assert!(reads > 1_000_000);
-        let counted = u64::from((t.read32(0x1F80_1110) & 0xFFFF).wrapping_sub(start) & 0xFFFF);
+        let counted = u64::from((t.read32(0x1f80_1110) & 0xffff).wrapping_sub(start) & 0xffff);
         let due = (now - 100) / NTSC_HSYNC;
         // The 16-bit counter wraps; compare modulo 65536.
         assert_eq!(counted, due % 0x1_0000, "counted {counted}, due {due}");
@@ -1124,38 +1124,38 @@ mod tests {
         // (console-measured), but the clocks are only deferred: polled for a
         // second, hwtest v2.1 lost no ticks.
         let mut t = Timers::new();
-        t.write32(0x1F80_1124, 0, 0);
+        t.write32(0x1f80_1124, 0, 0);
         t.advance_to(100, 2172, 8);
-        let start = t.read32(0x1F80_1120) & 0xFFFF;
-        t.hold_counter_for_read(0x1F80_1120, 2);
+        let start = t.read32(0x1f80_1120) & 0xffff;
+        t.hold_counter_for_read(0x1f80_1120, 2);
         t.advance_to(110, 2172, 8);
-        let counted = (t.read32(0x1F80_1120) & 0xFFFF).wrapping_sub(start) & 0xFFFF;
+        let counted = (t.read32(0x1f80_1120) & 0xffff).wrapping_sub(start) & 0xffff;
         assert_eq!(counted, 8);
         // The next advance gives the two clocks back.
         t.advance_to(111, 2172, 8);
-        let counted = (t.read32(0x1F80_1120) & 0xFFFF).wrapping_sub(start) & 0xFFFF;
+        let counted = (t.read32(0x1f80_1120) & 0xffff).wrapping_sub(start) & 0xffff;
         assert_eq!(counted, 11);
     }
 
     #[test]
     fn a_polled_counter_counts_every_clock_of_a_long_poll() {
         for (idx_base, mode, divisor) in [
-            (0x1F80_1120u32, 0u32, 1u64),
-            (0x1F80_1100, 0, 1),
-            (0x1F80_1120, 0x200, 8),
+            (0x1f80_1120u32, 0u32, 1u64),
+            (0x1f80_1100, 0, 1),
+            (0x1f80_1120, 0x200, 8),
         ] {
             let mut t = Timers::new();
             t.write32(idx_base + 4, mode, 0);
             let mut now = 100u64;
             t.advance_to(now, NTSC_HSYNC, 8);
             let mut total = 0u64;
-            let mut last = t.read32(idx_base) & 0xFFFF;
+            let mut last = t.read32(idx_base) & 0xffff;
             for _ in 0..200_000 {
                 t.hold_counter_for_read(idx_base, 4);
                 now += 10;
                 t.advance_to(now, NTSC_HSYNC, 8);
-                let value = t.read32(idx_base) & 0xFFFF;
-                total += u64::from(value.wrapping_sub(last) & 0xFFFF);
+                let value = t.read32(idx_base) & 0xffff;
+                total += u64::from(value.wrapping_sub(last) & 0xffff);
                 last = value;
             }
             let due = 200_000 * 10 / divisor;
@@ -1170,63 +1170,63 @@ mod tests {
     fn timer1_sync_mode_1_resets_at_vblank() {
         let mut t = Timers::new();
         t.set_vblank_sync_offset_lines(0);
-        t.write32(0x1F80_1114, MODE_SYNC_ENABLE | (1 << 1), 0);
+        t.write32(0x1f80_1114, MODE_SYNC_ENABLE | (1 << 1), 0);
         let period = NTSC_PERIOD;
         t.advance_to_video(900, NTSC_HSYNC, 8, 1000, period);
-        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 898);
+        assert_eq!(t.read32(0x1f80_1110) & 0xffff, 898);
         t.advance_to_video(1000, NTSC_HSYNC, 8, 1000, period);
-        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 0);
+        assert_eq!(t.read32(0x1f80_1110) & 0xffff, 0);
     }
 
     #[test]
     fn timer1_default_profile_reads_line_237_at_the_vblank_interrupt() {
         let mut t = Timers::new();
-        t.write32(0x1F80_1114, MODE_SYNC_ENABLE | (1 << 1) | (1 << 8), 0);
+        t.write32(0x1f80_1114, MODE_SYNC_ENABLE | (1 << 1) | (1 << 8), 0);
         let period = NTSC_PERIOD;
         // Serviced mid-field, then just after the next two VBlank events,
         // each time after the scheduler has already moved the edge on.
         t.advance_to_video(period / 2, NTSC_HSYNC, 8, period, period);
         t.advance_to_video(period + 100, NTSC_HSYNC, 8, 2 * period, period);
         t.advance_to_video(2 * period + 100, NTSC_HSYNC, 8, 3 * period, period);
-        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 237);
+        assert_eq!(t.read32(0x1f80_1110) & 0xffff, 237);
     }
 
     #[test]
     fn timer1_vblank_reset_inside_a_write_hold_still_happens() {
         let mut t = Timers::new();
         t.set_vblank_sync_offset_lines(0);
-        t.write32(0x1F80_1114, MODE_SYNC_ENABLE | (1 << 1), 0);
+        t.write32(0x1f80_1114, MODE_SYNC_ENABLE | (1 << 1), 0);
         t.advance_to_video(996, NTSC_HSYNC, 8, 1000, NTSC_PERIOD);
         // A counter write holds it across the VBlank at 1000.
-        t.write32(0x1F80_1110, 0, 996);
+        t.write32(0x1f80_1110, 0, 996);
         t.advance_to_video(1010, NTSC_HSYNC, 8, 1000 + NTSC_PERIOD, NTSC_PERIOD);
-        assert!(t.read32(0x1F80_1110) & 0xFFFF < 16);
+        assert!(t.read32(0x1f80_1110) & 0xffff < 16);
     }
 
     #[test]
     fn timer1_sync_mode_2_pauses_outside_vblank() {
         let mut t = Timers::new();
-        t.write32(0x1F80_1114, MODE_SYNC_ENABLE | (2 << 1), 0);
+        t.write32(0x1f80_1114, MODE_SYNC_ENABLE | (2 << 1), 0);
         t.advance_to_video(900, NTSC_HSYNC, 8, 1000, NTSC_PERIOD);
-        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 0);
+        assert_eq!(t.read32(0x1f80_1110) & 0xffff, 0);
     }
 
     #[test]
     fn timer2_sync_mode_1_free_runs() {
         let mut t = Timers::new();
         // Sync enable + sync mode 1 on Timer 2 = free-run.
-        t.write32(0x1F80_1124, MODE_SYNC_ENABLE | (1 << 1), 0);
+        t.write32(0x1f80_1124, MODE_SYNC_ENABLE | (1 << 1), 0);
         t.tick(100, NTSC_HSYNC, 8);
-        assert_eq!(t.read32(0x1F80_1120) & 0xFFFF, 98);
+        assert_eq!(t.read32(0x1f80_1120) & 0xffff, 98);
     }
 
     #[test]
     fn timer2_sync_mode_0_stops() {
         let mut t = Timers::new();
         // Sync enable + sync mode 0 on Timer 2 = stop.
-        t.write32(0x1F80_1124, MODE_SYNC_ENABLE, 0);
+        t.write32(0x1f80_1124, MODE_SYNC_ENABLE, 0);
         t.tick(100, NTSC_HSYNC, 8);
-        assert_eq!(t.read32(0x1F80_1120) & 0xFFFF, 0);
+        assert_eq!(t.read32(0x1f80_1120) & 0xffff, 0);
     }
 
     #[test]
@@ -1234,7 +1234,7 @@ mod tests {
         let mut t = Timers::new();
         t.timers[1].mode = MODE_REACHED_TARGET | MODE_REACHED_WRAP | MODE_IRQ_ACTIVE_LOW;
         assert_eq!(
-            t.read32(0x1F80_1114),
+            t.read32(0x1f80_1114),
             MODE_REACHED_TARGET | MODE_REACHED_WRAP | MODE_IRQ_ACTIVE_LOW
         );
         assert_eq!(t.timers[1].mode, MODE_IRQ_ACTIVE_LOW);
@@ -1245,14 +1245,14 @@ mod tests {
         let mut t = Timers::new();
         t.timers[2].mode = MODE_REACHED_TARGET | MODE_REACHED_WRAP;
 
-        t.write32(0x1F80_1124, MODE_IRQ_ON_WRAP, 100);
+        t.write32(0x1f80_1124, MODE_IRQ_ON_WRAP, 100);
 
         assert_eq!(
-            t.read32(0x1F80_1124),
+            t.read32(0x1f80_1124),
             MODE_IRQ_ON_WRAP | MODE_IRQ_ACTIVE_LOW | MODE_REACHED_TARGET | MODE_REACHED_WRAP
         );
         assert_eq!(
-            t.read32(0x1F80_1124),
+            t.read32(0x1f80_1124),
             MODE_IRQ_ON_WRAP | MODE_IRQ_ACTIVE_LOW
         );
     }
@@ -1260,32 +1260,32 @@ mod tests {
     #[test]
     fn reset_at_target_sets_sticky_reached_target() {
         let mut t = Timers::new();
-        t.write32(0x1F80_1128, 10, 0);
-        t.write32(0x1F80_1120, 0, 0);
-        t.write32(0x1F80_1124, MODE_RESET_AT_TARGET, 0);
+        t.write32(0x1f80_1128, 10, 0);
+        t.write32(0x1f80_1120, 0, 0);
+        t.write32(0x1f80_1124, MODE_RESET_AT_TARGET, 0);
 
         t.advance_to(12, NTSC_HSYNC, 8);
 
-        let mode = t.read32(0x1F80_1124);
+        let mode = t.read32(0x1f80_1124);
         assert_ne!(mode & MODE_REACHED_TARGET, 0);
-        assert_eq!(t.read32(0x1F80_1124) & MODE_REACHED_TARGET, 0);
-        assert_eq!(t.read32(0x1F80_1120), 10, "target remains visible");
+        assert_eq!(t.read32(0x1f80_1124) & MODE_REACHED_TARGET, 0);
+        assert_eq!(t.read32(0x1f80_1120), 10, "target remains visible");
         t.advance_to(13, NTSC_HSYNC, 8);
-        assert_eq!(t.read32(0x1F80_1120), 0, "reset phase");
+        assert_eq!(t.read32(0x1f80_1120), 0, "reset phase");
         t.advance_to(14, NTSC_HSYNC, 8);
-        assert_eq!(t.read32(0x1F80_1120), 0, "ordinary zero phase");
+        assert_eq!(t.read32(0x1f80_1120), 0, "ordinary zero phase");
         t.advance_to(15, NTSC_HSYNC, 8);
-        assert_eq!(t.read32(0x1F80_1120), 1);
+        assert_eq!(t.read32(0x1f80_1120), 1);
     }
 
     #[test]
     fn one_shot_pulse_irq_releases_mode_bit_without_rearming() {
         let mut t = Timers::new();
-        t.write32(0x1F80_1128, 10, 0);
-        t.write32(0x1F80_1124, MODE_RESET_AT_TARGET | MODE_IRQ_ON_TARGET, 0);
+        t.write32(0x1f80_1128, 10, 0);
+        t.write32(0x1f80_1124, MODE_RESET_AT_TARGET | MODE_IRQ_ON_TARGET, 0);
 
         assert_eq!(t.advance_to(12, NTSC_HSYNC, 8), 1 << 2);
-        let mode = t.read32(0x1F80_1124);
+        let mode = t.read32(0x1f80_1124);
         assert_ne!(mode & MODE_REACHED_TARGET, 0);
         assert_ne!(
             mode & MODE_IRQ_ACTIVE_LOW,
@@ -1298,7 +1298,7 @@ mod tests {
             0,
             "one-shot mode suppresses later target edges"
         );
-        t.write32(0x1F80_1124, MODE_RESET_AT_TARGET | MODE_IRQ_ON_TARGET, 36);
+        t.write32(0x1f80_1124, MODE_RESET_AT_TARGET | MODE_IRQ_ON_TARGET, 36);
         assert_eq!(t.advance_to(48, NTSC_HSYNC, 8), 1 << 2);
     }
 

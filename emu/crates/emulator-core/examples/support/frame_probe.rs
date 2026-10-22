@@ -111,9 +111,9 @@ pub fn dump_display_ppm(bus: &Bus, stem: &str, frame: u64) -> io::Result<FrameDu
     for dy in 0..da.height {
         for dx in 0..da.width {
             let pix = bus.gpu.vram.get_pixel(da.x + dx, da.y + dy);
-            let r5 = (pix & 0x1F) as u8;
-            let g5 = ((pix >> 5) & 0x1F) as u8;
-            let b5 = ((pix >> 10) & 0x1F) as u8;
+            let r5 = (pix & 0x1f) as u8;
+            let g5 = ((pix >> 5) & 0x1f) as u8;
+            let b5 = ((pix >> 10) & 0x1f) as u8;
             rgb.push((r5 << 3) | (r5 >> 2));
             rgb.push((g5 << 3) | (g5 >> 2));
             rgb.push((b5 << 3) | (b5 >> 2));

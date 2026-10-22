@@ -106,13 +106,13 @@ impl Vram {
         for y in y_start..y_start + height {
             for x in x_start..x_start + width {
                 let pixel = self.get_pixel(x, y);
-                let r5 = pixel & 0x1F;
-                let g5 = (pixel >> 5) & 0x1F;
-                let b5 = (pixel >> 10) & 0x1F;
+                let r5 = pixel & 0x1f;
+                let g5 = (pixel >> 5) & 0x1f;
+                let b5 = (pixel >> 10) & 0x1f;
                 rgba.push(((r5 << 3) | (r5 >> 2)) as u8);
                 rgba.push(((g5 << 3) | (g5 >> 2)) as u8);
                 rgba.push(((b5 << 3) | (b5 >> 2)) as u8);
-                rgba.push(0xFF);
+                rgba.push(0xff);
             }
         }
         rgba
@@ -138,9 +138,9 @@ mod tests {
     #[test]
     fn rgba_expansion_reaches_full_range() {
         let mut vram = Vram::new();
-        vram.set_pixel(0, 0, 0x7FFF); // all 31s -- should be white
+        vram.set_pixel(0, 0, 0x7fff); // all 31s -- should be white
         let rgba = vram.to_rgba8(0, 0, 1, 1);
-        assert_eq!(&rgba[..3], &[0xFF, 0xFF, 0xFF]);
+        assert_eq!(&rgba[..3], &[0xff, 0xff, 0xff]);
     }
 
     #[test]
@@ -154,11 +154,11 @@ mod tests {
     fn fill_rect_unwrapped_fills_only_clipped_span() {
         let mut vram = Vram::new();
 
-        vram.fill_rect_unwrapped(2, 3, 4, 5, 0x55AA);
+        vram.fill_rect_unwrapped(2, 3, 4, 5, 0x55aa);
 
         assert_eq!(vram.get_pixel(1, 3), 0);
-        assert_eq!(vram.get_pixel(2, 3), 0x55AA);
-        assert_eq!(vram.get_pixel(4, 5), 0x55AA);
+        assert_eq!(vram.get_pixel(2, 3), 0x55aa);
+        assert_eq!(vram.get_pixel(4, 5), 0x55aa);
         assert_eq!(vram.get_pixel(5, 5), 0);
         assert_eq!(vram.get_pixel(2, 6), 0);
     }
