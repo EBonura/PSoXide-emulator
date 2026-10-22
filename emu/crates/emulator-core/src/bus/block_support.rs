@@ -91,12 +91,7 @@ impl Bus {
         if self.experimental_gpu_list.is_some() {
             // Advancing the clock up to `gpu_quiet_until` (inclusive) is the
             // list walk's quiet batch; recompute it when not known.
-            let quiet_until = if self.gpu_quiet_until > self.cycles {
-                self.gpu_quiet_until
-            } else {
-                self.cycles
-                    .saturating_add(u64::from(self.gpu_list_quiet_cycles(u32::MAX)))
-            };
+            let quiet_until = self.gpu_quiet_end();
             limit = limit.min(quiet_until.saturating_add(1));
         } else if !self.gpu.decay_is_plain() {
             limit = limit.min(self.cycles.saturating_add(self.gpu.fifo_quiet_cycles()));
@@ -123,12 +118,7 @@ impl Bus {
         }
         let hard = self.scheduler.lowest_target().min(self.spu_sample_deadline);
         let soft = if self.experimental_gpu_list.is_some() {
-            let quiet_until = if self.gpu_quiet_until > self.cycles {
-                self.gpu_quiet_until
-            } else {
-                self.cycles
-                    .saturating_add(u64::from(self.gpu_list_quiet_cycles(u32::MAX)))
-            };
+            let quiet_until = self.gpu_quiet_end();
             quiet_until.saturating_add(1)
         } else if !self.gpu.decay_is_plain() {
             self.cycles.saturating_add(self.gpu.fifo_quiet_cycles())

@@ -1708,6 +1708,61 @@ impl Gpu {
         self.busy_credit - 1
     }
 
+    /// How many consecutive cycles (at most `max`) of the linked-list DMA
+    /// walk's payload phase reduce to "decay one cycle of credit, queue one
+    /// word": the input FIFO holds a head command that waits on a busy GPU
+    /// for all of them (`fifo_quiet_cycles`), and has room for every word, so
+    /// no command runs, no word is dropped and the capacity (set by the head
+    /// command) does not move. 0 when the FIFO model is off, the FIFO is
+    /// empty (the first word changes what the head is), or a transfer or
+    /// polyline is active.
+    pub(crate) fn dma_push_run_len(&self, max: u32) -> u32 {
+        if !self.experimental_dma_fifo
+            || self.vram_upload.is_some()
+            || self.vram_download.is_some()
+            || self.polyline.is_some()
+        {
+            return 0;
+        }
+        let queued = self.dma_input_fifo.len();
+        if queued == 0 {
+            return 0;
+        }
+        let room = self.dma_fifo_capacity().saturating_sub(queued) as u64;
+        // Quiet cycles are 0 when the head command could be taken.
+        let run = self.fifo_quiet_cycles().min(room).min(u64::from(max));
+        run as u32
+    }
+
+    /// The input FIFO's contents (verification mode of the bus-clock batches).
+    pub(crate) fn dma_input_fifo_snapshot(&self) -> Vec<(u32, bool)> {
+        self.dma_input_fifo.iter().copied().collect()
+    }
+
+    /// The three credit counters (verification mode of the bus-clock batches).
+    pub(crate) fn credits(&self) -> (u64, u64, u64) {
+        (
+            self.busy_credit,
+            self.dma_busy_credit,
+            self.cmd_ingest_credit,
+        )
+    }
+
+    /// [`Gpu::credits`] after `cycles` of plain decay.
+    pub(crate) fn credits_after_decay(&self, cycles: u64) -> (u64, u64, u64) {
+        (
+            self.busy_credit.saturating_sub(cycles),
+            self.dma_busy_credit.saturating_sub(cycles),
+            self.cmd_ingest_credit.saturating_sub(cycles),
+        )
+    }
+
+    /// Queue one word of a run that [`Gpu::dma_push_run_len`] allowed.
+    #[inline(always)]
+    pub(crate) fn dma_push_run_word(&mut self, word: u32) {
+        self.dma_input_fifo.push_back((word, true));
+    }
+
     /// Credit decay for cycles that `fifo_quiet_cycles` allowed.
     pub(crate) fn decay_busy_quiet(&mut self, cycles: u64) {
         self.busy_credit = self.busy_credit.saturating_sub(cycles);

@@ -213,6 +213,12 @@ const MDEC_OUT_CYCLES_PER_WORD: u64 = 24;
 /// change GPU or DMA state.
 const IO_SPACE_START: u32 = 0x1f80_1000;
 
+/// Verification mode for the bus-clock caches and batches: recompute the
+/// plain way next to every cached or batched answer and assert they agree.
+/// On in debug builds and with the `verify-busclock` feature; compiled out of
+/// release builds.
+const VERIFY_BUS_CLOCK: bool = cfg!(any(debug_assertions, feature = "verify-busclock"));
+
 /// The PS1 system bus.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Bus {
@@ -482,6 +488,21 @@ pub struct Bus {
     /// Derived, not saved.
     #[serde(skip)]
     gpu_quiet_until: u64,
+    /// The cycle at which the last [`Bus::refresh_gpu_quiet_until`] found the
+    /// walk not quiet at all (a zero-length span). Together with
+    /// `gpu_quiet_until == cycles` it says that state is known to be unchanged
+    /// since then, which lets a zero-cycle advance skip the recomputation.
+    /// Derived, not saved.
+    #[serde(skip)]
+    gpu_quiet_zero_at: u64,
+    /// Cache of [`Bus::gpu_list_walk_is_moving`]: its value for every cycle
+    /// below `gpu_moving_until`, valid only while `gpu_quiet_until` is not 0
+    /// (every state change that clears that clears this) and cleared by each
+    /// refresh. Derived, not saved.
+    #[serde(skip)]
+    gpu_moving_until: u64,
+    #[serde(skip)]
+    gpu_moving: bool,
     #[serde(skip)]
     gpu_linked_list_transfer: u32,
     #[serde(skip)]
@@ -600,6 +621,9 @@ impl Bus {
             gpu_list_ram_next: 0,
             dma_block_runs: [None; 2],
             gpu_quiet_until: 0,
+            gpu_quiet_zero_at: 0,
+            gpu_moving_until: 0,
+            gpu_moving: false,
             gpu_linked_list_transfer: 0,
             gpu_linked_list_log: Vec::new(),
         };
@@ -1803,11 +1827,45 @@ impl Bus {
     /// Only a walk that is making progress competes with the CPU for main
     /// RAM.
     #[inline(always)]
-    fn gpu_list_walk_is_moving(&self) -> bool {
-        let Some(list) = self.experimental_gpu_list.as_ref() else {
+    fn gpu_list_walk_is_moving(&mut self) -> bool {
+        if self.experimental_gpu_list.is_none() {
             return false;
-        };
-        self.gpu_list_walk_is_moving_slow(list)
+        }
+        // Inside a known span the answer cannot change (see
+        // `gpu_moving_until`).
+        if self.cycles < self.gpu_moving_until && self.gpu_quiet_until != 0 {
+            if VERIFY_BUS_CLOCK {
+                let list = self.experimental_gpu_list.as_ref().expect("list");
+                assert_eq!(
+                    self.gpu_moving,
+                    self.gpu_list_walk_is_moving_slow(list),
+                    "cached walk-moving flag differs from the recomputation"
+                );
+            }
+            return self.gpu_moving;
+        }
+        self.gpu_list_walk_is_moving_fill()
+    }
+
+    /// [`Bus::gpu_list_walk_is_moving`] on a cache miss: compute it and, when
+    /// the walk state is known, remember it for the rest of the span.
+    #[inline(never)]
+    fn gpu_list_walk_is_moving_fill(&mut self) -> bool {
+        let list = self.experimental_gpu_list.as_ref().expect("list");
+        let moving = self.gpu_list_walk_is_moving_slow(list);
+        if self.gpu_quiet_until > self.cycles {
+            // A span of unchanged state ends at `gpu_quiet_until`.
+            self.gpu_moving = moving;
+            self.gpu_moving_until = self.gpu_quiet_until;
+        } else if self.gpu_quiet_until != 0
+            && self.gpu_quiet_until == self.cycles
+            && self.gpu_quiet_zero_at == self.cycles
+        {
+            // Known not quiet, so only this cycle is covered.
+            self.gpu_moving = moving;
+            self.gpu_moving_until = self.cycles + 1;
+        }
+        moving
     }
 
     #[inline(never)]
@@ -2011,6 +2069,9 @@ impl Bus {
                 && !self.gpu_dma_waiting_for_request
                 && self.cycles <= self.gpu_quiet_until
             {
+                if VERIFY_BUS_CLOCK && self.gpu_quiet_until == self.cycles {
+                    self.verify_zero_advance_is_a_no_op();
+                }
                 return;
             }
             self.advance_cycles_slow(0);
@@ -2224,6 +2285,9 @@ impl Bus {
         if self.experimental_gpu_list.is_some() && self.limits.on(crate::limits::GPU) {
             self.finish_gpu_list_now();
         }
+        // Quiet span still ahead after the last batch, when the walk loop
+        // ended on one (the refresh at the end would recompute exactly it).
+        let mut quiet_ahead = None;
         // Timers used to be ticked here every instruction (~25M
         // calls/sec, three accumulator-divides each). They're now
         // advanced lazily -- `service_timers()` runs once per
@@ -2239,10 +2303,19 @@ impl Bus {
             // snapshot a whole node and then pretend it arrived over time.
             let mut left = n;
             while left > 0 {
+                quiet_ahead = None;
+                // Host fast path: payload cycles that only queue words into a
+                // FIFO that cannot run anything are applied at once.
+                let run = self.gpu_list_push_run(left);
+                if run > 0 {
+                    left -= run;
+                    continue;
+                }
                 // Host fast path: a run of cycles in which neither the walk
                 // nor the FIFO can change anything but counters is applied
                 // at once. Exactly what the per-cycle loop would do.
-                let quiet = self.gpu_list_quiet_cycles(left);
+                let span = self.gpu_list_quiet_cycles(u32::MAX);
+                let quiet = span.min(left);
                 if quiet > 0 {
                     self.cycles = self.cycles.wrapping_add(u64::from(quiet));
                     self.gpu.decay_busy_quiet(u64::from(quiet));
@@ -2252,11 +2325,12 @@ impl Bus {
                         }
                     }
                     left -= quiet;
+                    // The span is additive: what is left of it is `span`
+                    // less the batch, except when it was unbounded.
+                    quiet_ahead = Some(if span == u32::MAX { span } else { span - quiet });
                     continue;
                 }
-                self.cycles = self.cycles.wrapping_add(1);
-                self.gpu.decay_busy(1);
-                self.advance_experimental_gpu_list();
+                self.step_gpu_list_cycle();
                 left -= 1;
             }
         } else {
@@ -2264,6 +2338,7 @@ impl Bus {
             self.gpu.decay_busy(n as u64);
         }
         if self.gpu_dma_waiting_for_request {
+            quiet_ahead = None;
             // GP1 direction latches and GPU busy credit can change DREQ as
             // time advances. Retry only the waiting channel, never one whose
             // payload already ran and merely awaits its completion event.
@@ -2277,7 +2352,7 @@ impl Bus {
                 self.run_dma_channel(2);
             }
         }
-        self.refresh_gpu_quiet_until();
+        self.refresh_gpu_quiet_until(quiet_ahead);
     }
 
     /// Advance the timer bank to the current bus cycle and forward
@@ -3361,19 +3436,146 @@ impl Bus {
     }
 
     /// Recompute [`Bus::gpu_quiet_until`] from the current walk and FIFO.
-    fn refresh_gpu_quiet_until(&mut self) {
+    ///
+    /// `known` is the span when the caller has it already (see
+    /// `advance_cycles_slow`); verification mode checks it.
+    fn refresh_gpu_quiet_until(&mut self, known: Option<u32>) {
+        self.gpu_moving_until = 0;
         self.gpu_quiet_until = if self.experimental_gpu_list.is_some()
             && !self.limits.frozen()
             && !self.limits.on(crate::limits::GPU)
             && !self.gpu_dma_waiting_for_request
         {
-            match self.gpu_list_quiet_cycles(u32::MAX) {
-                0 => 0,
+            let quiet = match known {
+                Some(quiet) => {
+                    if VERIFY_BUS_CLOCK {
+                        assert_eq!(quiet, self.gpu_list_quiet_cycles(u32::MAX));
+                    }
+                    quiet
+                }
+                None => self.gpu_list_quiet_cycles(u32::MAX),
+            };
+            match quiet {
+                0 => {
+                    // Not quiet now, and known so: until something changes
+                    // the state, a zero-cycle advance only recomputes this.
+                    self.gpu_quiet_zero_at = self.cycles;
+                    self.cycles
+                }
                 quiet => self.cycles.saturating_add(u64::from(quiet)),
             }
         } else {
             0
         };
+    }
+
+    /// End of the quiet span the walk is in at the current cycle: the cached
+    /// [`Bus::gpu_quiet_until`] when it is still ahead, the current cycle
+    /// when the last refresh found no span here, else a recomputation.
+    #[inline(always)]
+    pub(crate) fn gpu_quiet_end(&self) -> u64 {
+        if self.gpu_quiet_until > self.cycles {
+            self.gpu_quiet_until
+        } else if self.gpu_quiet_until != 0
+            && self.gpu_quiet_until == self.cycles
+            && self.gpu_quiet_zero_at == self.cycles
+        {
+            if VERIFY_BUS_CLOCK {
+                assert_eq!(self.gpu_list_quiet_cycles(u32::MAX), 0);
+            }
+            self.cycles
+        } else {
+            self.cycles
+                .saturating_add(u64::from(self.gpu_list_quiet_cycles(u32::MAX)))
+        }
+    }
+
+    /// Verification mode: a zero-cycle advance that was skipped because the
+    /// last refresh found no span at this cycle must indeed change nothing.
+    #[inline(never)]
+    fn verify_zero_advance_is_a_no_op(&self) {
+        if self.gpu_quiet_zero_at == self.cycles && self.gpu_quiet_until != 0 {
+            assert_eq!(self.gpu_list_quiet_cycles(u32::MAX), 0);
+        }
+    }
+
+    /// One bus cycle of an active list walk: the clock, the GPU's credit, the
+    /// walk's own step.
+    #[inline(always)]
+    fn step_gpu_list_cycle(&mut self) {
+        self.cycles = self.cycles.wrapping_add(1);
+        self.gpu.decay_busy(1);
+        self.advance_experimental_gpu_list();
+    }
+
+    /// A run of up to `left` payload cycles of the list walk that the plain
+    /// per-cycle loop would spend queueing one word each into a GPU FIFO that
+    /// cannot run anything meanwhile (see [`Gpu::dma_push_run_len`]), applied
+    /// at once. Returns the cycles it covered, 0 when the state is not such
+    /// a run.
+    fn gpu_list_push_run(&mut self, left: u32) -> u32 {
+        let Some(list) = self.experimental_gpu_list.as_ref() else {
+            return 0;
+        };
+        if list.remaining == 0
+            || list.need_header
+            || list.setup_cycles != 0
+            || self.gpu_dma_overflow_drops
+            || self.dma.channels[2].channel_control & (1 << 24) == 0
+            || !self.dma.is_channel_enabled(2)
+        {
+            return 0;
+        }
+        let run = self.gpu.dma_push_run_len(list.remaining.min(left));
+        if run == 0 {
+            return 0;
+        }
+        if VERIFY_BUS_CLOCK {
+            self.verify_gpu_list_push_run(run);
+            return run;
+        }
+        let list = self.experimental_gpu_list.as_mut().expect("list");
+        let mut addr = list.word;
+        for _ in 0..run {
+            self.gpu
+                .dma_push_run_word(read_ram_u32(&self.ram[..], addr));
+            addr = addr.wrapping_add(4);
+        }
+        list.word = addr;
+        list.remaining -= run;
+        self.cycles = self.cycles.wrapping_add(u64::from(run));
+        self.gpu.decay_busy_quiet(u64::from(run));
+        run
+    }
+
+    /// Verification mode for [`Bus::gpu_list_push_run`]: predict the state
+    /// after `run` cycles, then run the plain per-cycle path and assert the
+    /// two agree (the clock, the three credits, the whole input FIFO, the
+    /// walk position, and that no GP0 command was executed).
+    #[inline(never)]
+    fn verify_gpu_list_push_run(&mut self, run: u32) {
+        let list = self.experimental_gpu_list.as_ref().expect("list");
+        let (word0, remaining0) = (list.word, list.remaining);
+        let mut fifo = self.gpu.dma_input_fifo_snapshot();
+        let mut addr = word0;
+        for _ in 0..run {
+            fifo.push((read_ram_u32(&self.ram[..], addr), true));
+            addr = addr.wrapping_add(4);
+        }
+        let want_cycles = self.cycles.wrapping_add(u64::from(run));
+        let want_credits = self.gpu.credits_after_decay(u64::from(run));
+        let writes = self.gpu.gp0_write_count();
+        for _ in 0..run {
+            assert_eq!(self.gpu_list_quiet_cycles(1), 0, "run cycle was quiet");
+            self.step_gpu_list_cycle();
+        }
+        let list = self.experimental_gpu_list.as_ref().expect("list after run");
+        assert_eq!(list.word, addr);
+        assert_eq!(list.remaining, remaining0 - run);
+        assert_eq!(self.cycles, want_cycles);
+        assert_eq!(self.gpu.credits(), want_credits);
+        assert_eq!(self.gpu.dma_input_fifo_snapshot(), fifo);
+        assert_eq!(self.gpu.gp0_write_count(), writes);
     }
 
     /// Cycles (at most `left`) over which `advance_experimental_gpu_list`
@@ -3405,6 +3607,9 @@ impl Bus {
         } else {
             0
         };
+        if list_quiet == 0 {
+            return 0;
+        }
         let gpu_quiet = self.gpu.fifo_quiet_cycles().min(u64::from(u32::MAX)) as u32;
         list_quiet.min(gpu_quiet)
     }

@@ -47,6 +47,9 @@ trace-mmio = []
 # perf by ~30% -- caught when the frontend got slow after this snapshot
 # work landed.
 trace-cop2 = []
+# Recompute the bus-clock caches and batches the plain way next to every use and
+# assert equal (always on in debug builds; see `VERIFY_BUS_CLOCK` in bus.rs).
+verify-busclock = []
 
 [lints.rust]
 missing_docs = "warn"
