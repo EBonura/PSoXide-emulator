@@ -1800,6 +1800,7 @@ impl Spu {
     /// each time `EventSlot::SpuMix` fires. Returns the number of
     /// samples produced (currently always 1 -- future batching could
     /// amortise voice-state fetches across several samples).
+    #[inline(never)]
     pub fn tick_sample(&mut self, now: u64) -> usize {
         self.last_sample_cycle = now;
         if let Some((pending, deadline)) = self.spustat_control_pending {

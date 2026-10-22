@@ -706,10 +706,15 @@ impl CdRom {
     /// The bus calls this with the same count it is about to run
     /// through the SPU, so Red Book audio stays locked to the SPU's
     /// 44.1 kHz output clock without a second timing source.
-    pub fn pump_cdda_samples(&mut self, mut sample_count: usize) {
-        if self.drive_status & drive_status_bit::PLAYING == 0 {
-            return;
+    #[inline]
+    pub fn pump_cdda_samples(&mut self, sample_count: usize) {
+        if self.drive_status & drive_status_bit::PLAYING != 0 {
+            self.pump_playing_cdda(sample_count);
         }
+    }
+
+    #[inline(never)]
+    fn pump_playing_cdda(&mut self, mut sample_count: usize) {
         while sample_count != 0 {
             let count = sample_count.min(CDDA_SAMPLES_PER_SECTOR - self.cdda_sample_index);
             let Some(mut samples) = self.decode_cdda_chunk(count) else {
@@ -2557,6 +2562,7 @@ impl CdRom {
 
     /// Variant used by the full bus, which also passes whether the CPU
     /// interrupt controller still holds a CDROM interrupt.
+    #[inline(never)]
     pub fn tick_with_irq_pending(&mut self, cycles_now: u64, cdrom_irq_pending: bool) -> bool {
         let mut raised = false;
 

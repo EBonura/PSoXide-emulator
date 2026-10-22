@@ -2424,6 +2424,8 @@ impl Bus {
 
     /// Switch the configured limit oracles on once the guest has completed
     /// the start poll (see `limits.rs`).
+    #[cold]
+    #[inline(never)]
     fn maybe_activate_limits(&mut self) {
         self.gpu_quiet_until = 0;
         let polls = self.port1_completed_polls();
@@ -2548,8 +2550,8 @@ impl Bus {
         self.cdrom.pump_cdda_samples(n);
         // Move any freshly-decoded CDROM audio into the SPU's CD
         // input queue so it participates in this frame's mix.
-        let cd_samples = self.cdrom.drain_cd_audio();
-        if !cd_samples.is_empty() {
+        if self.cdrom.cd_audio_queue_len() != 0 {
+            let cd_samples = self.cdrom.drain_cd_audio();
             self.spu.feed_cd_audio(&cd_samples);
         }
         for _ in 0..n {
