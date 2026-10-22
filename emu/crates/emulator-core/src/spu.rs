@@ -505,6 +505,34 @@ mod reverb_reg {
     pub const V_RIN: usize = 31;
 }
 
+/// Where the reverb work area sits in SPU RAM, in halfwords, for one pass.
+#[derive(Copy, Clone)]
+struct ReverbWindow {
+    /// First halfword of the work area (`mBASE`).
+    start: i32,
+    /// Halfwords from `start` to the end of SPU RAM.
+    span: i32,
+    /// The current buffer address.
+    curr: i32,
+}
+
+impl ReverbWindow {
+    /// The halfword `offset` (in 8-byte units) and `extra` halfwords from
+    /// the current buffer address land on, wrapping inside the work area.
+    #[inline(always)]
+    fn index(self, offset: i32, extra: i32) -> usize {
+        let from_start = self.curr + offset.saturating_mul(4) + extra - self.start;
+        // Almost every access lands inside the buffer; the division is for
+        // the ones that wrap.
+        let within = if (0..self.span).contains(&from_start) {
+            from_start
+        } else {
+            from_start.rem_euclid(self.span)
+        };
+        (self.start + within) as usize
+    }
+}
+
 /// The registers one channel's reverb pass reads.
 struct ReverbChannel {
     /// Same-side reflection: target, and the displaced source it mixes in.
@@ -1640,9 +1668,14 @@ impl Spu {
         self.reverb_base != 0 && self.reverb_base < SPU_RAM_BYTES as u32
     }
 
-    /// A reverb register as a signed 16-bit value.
-    fn reverb_cfg_s(&self, idx: usize) -> i32 {
-        i32::from(self.reverb_cfg[idx] as i16)
+    /// The reverb work area as it stands for the current buffer address.
+    fn reverb_window(&self) -> ReverbWindow {
+        let start = self.reverb_base_halfword() as i32;
+        ReverbWindow {
+            start,
+            span: SPU_RAM_HALFWORDS as i32 - start,
+            curr: self.reverb.curr_addr as i32,
+        }
     }
 
     /// The SPU RAM halfword a reverb access lands on. `offset` is a register
@@ -1650,36 +1683,12 @@ impl Spu {
     /// `extra` a further halfword displacement. The buffer occupies the top
     /// of RAM from `mBASE`; an address past the end wraps to its start and
     /// one before the start wraps to its end.
+    #[cfg(test)]
     fn reverb_ram_index(&self, offset: i32, extra: i32) -> usize {
-        let start = self.reverb_base_halfword() as i32;
-        if start >= SPU_RAM_HALFWORDS as i32 {
+        if self.reverb_base_halfword() >= SPU_RAM_HALFWORDS as u32 {
             return 0;
         }
-        let span = SPU_RAM_HALFWORDS as i32 - start;
-        let from_start = self.reverb.curr_addr as i32 + offset.saturating_mul(4) + extra - start;
-        // Almost every access lands inside the buffer; the division is for
-        // the ones that wrap.
-        let within = if (0..span).contains(&from_start) {
-            from_start
-        } else {
-            from_start.rem_euclid(span)
-        };
-        (start + within) as usize
-    }
-
-    fn reverb_read(&self, offset: i32) -> i32 {
-        i32::from(self.ram[self.reverb_ram_index(offset, 0)] as i16)
-    }
-
-    /// Read the halfword before the one `offset` selects: the previous value
-    /// of the cell the reflection filters are about to overwrite.
-    fn reverb_read_before(&self, offset: i32) -> i32 {
-        i32::from(self.ram[self.reverb_ram_index(offset, -1)] as i16)
-    }
-
-    fn reverb_write(&mut self, offset: i32, value: i32) {
-        let idx = self.reverb_ram_index(offset, 0);
-        self.ram[idx] = saturate_i16(value) as u16;
+        self.reverb_window().index(offset, extra)
     }
 
     /// Multiply by a signed 16-bit volume, dividing the product by 0x8000.
@@ -1722,21 +1731,32 @@ impl Spu {
     fn reverb_channel(&mut self, ch: &ReverbChannel, input: i32, out_volume: i16) -> i32 {
         use reverb_reg::*;
         let writes = self.spucnt & SPUCNT_REVERB_MASTER_ENABLE != 0;
-        let v_iir = self.reverb_cfg_s(V_IIR);
-        let v_wall = self.reverb_cfg_s(V_WALL);
-        let lin = Self::reverb_mul(input, self.reverb_cfg_s(ch.v_in));
+        let window = self.reverb_window();
+        debug_assert!(self.reverb_active());
+        let cfg = &self.reverb_cfg;
+        let ram = &mut self.ram;
+        // A reverb register as a signed 16-bit value, and the signed sample
+        // at a work-area cell.
+        let reg = |idx: usize| i32::from(cfg[idx] as i16);
+        let cell = |ram: &[u16; SPU_RAM_HALFWORDS], offset: i32, extra: i32| {
+            i32::from(ram[window.index(offset, extra)] as i16)
+        };
+        let v_iir = reg(V_IIR);
+        let v_wall = reg(V_WALL);
+        let lin = Self::reverb_mul(input, reg(ch.v_in));
 
         // Reflections: [m] = (in + [d] * vWALL - [m-1]) * vIIR + [m-1],
         // where m-1 is the cell just behind the one being written.
         for (m, d) in [
-            (ch.m_same, self.reverb_cfg_s(ch.d_same)),
-            (ch.m_diff, self.reverb_cfg_s(ch.d_other_diff)),
+            (ch.m_same, reg(ch.d_same)),
+            (ch.m_diff, reg(ch.d_other_diff)),
         ] {
-            let target = self.reverb_cfg_s(m);
-            let behind = self.reverb_read_before(target);
-            let mixed = lin + Self::reverb_mul(self.reverb_read(d), v_wall) - behind;
+            let target = reg(m);
+            let behind = cell(ram, target, -1);
+            let mixed = lin + Self::reverb_mul(cell(ram, d, 0), v_wall) - behind;
             if writes {
-                self.reverb_write(target, Self::reverb_mul(mixed, v_iir) + behind);
+                ram[window.index(target, 0)] =
+                    saturate_i16(Self::reverb_mul(mixed, v_iir) + behind) as u16;
             }
         }
 
@@ -1744,18 +1764,18 @@ impl Spu {
         let combs = [V_COMB1, V_COMB2, V_COMB3, V_COMB4];
         let mut out = 0;
         for (m, v) in ch.m_comb.into_iter().zip(combs) {
-            out += Self::reverb_mul(self.reverb_read(self.reverb_cfg_s(m)), self.reverb_cfg_s(v));
+            out += Self::reverb_mul(cell(ram, reg(m), 0), reg(v));
         }
 
         // Two all-pass filters in series:
         //   out = out - v * [m - d];  [m] = out;  out = out * v + [m - d]
         for (m, d, v) in [(ch.m_apf1, D_APF1, V_APF1), (ch.m_apf2, D_APF2, V_APF2)] {
-            let target = self.reverb_cfg_s(m);
-            let delayed = self.reverb_read(target - self.reverb_cfg_s(d));
-            let v = self.reverb_cfg_s(v);
+            let target = reg(m);
+            let delayed = cell(ram, target - reg(d), 0);
+            let v = reg(v);
             out -= Self::reverb_mul(delayed, v);
             if writes {
-                self.reverb_write(target, out);
+                ram[window.index(target, 0)] = saturate_i16(out) as u16;
             }
             out = Self::reverb_mul(out, v) + delayed;
         }
