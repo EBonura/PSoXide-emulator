@@ -1400,6 +1400,7 @@ impl ApplicationHandler for Shell {
                 // (or Select+Start, now) to swap contexts, not to
                 // press "back" on whatever menu item happened to
                 // be highlighted.
+                let menu_open_at_frame_start = self.state.menu.open;
                 // An embedded player has no menu: Escape and Select+Start
                 // go nowhere rather than opening one over the host's example.
                 if crate::app::embed_mode() {
@@ -1484,6 +1485,11 @@ impl ApplicationHandler for Shell {
                             }
                         }
                     }
+                }
+                // The menu opened or closed (Esc, Select+Start, a launch): buttons
+                // held across the change must not act on the other screen.
+                if self.state.menu.open != menu_open_at_frame_start {
+                    self.input.ignore_held_buttons();
                 }
                 #[cfg(feature = "editor")]
                 self.state.poll_embedded_playtest_build();
