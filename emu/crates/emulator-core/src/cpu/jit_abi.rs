@@ -164,6 +164,10 @@ pub struct NativeRun {
     /// has no such wait. Refreshed wherever a device access or a block
     /// entry could have started or ended a transfer.
     pub ram_contended: u32,
+    /// Where the I-cache keeps each line's change count
+    /// ([`InstructionCache::generations_ptr`](crate::cpu::icache)), for the
+    /// linked exits' check of the target's own lines.
+    pub gens: *const u32,
 }
 
 /// Exit: stopped before op `ran` of the current block (the interpreter
@@ -231,6 +235,7 @@ impl NativeRun {
             slow_boundary: 1,
             last_boundary: 0,
             ram_contended: u32::from(bus.jit_gpu_ram_contention_possible()),
+            gens: cpu.instruction_cache.generations_ptr(),
         }
     }
 }
@@ -348,6 +353,23 @@ pub struct LinkCell {
     pub page2: u32,
     /// Its write count.
     pub count2: u32,
+    /// The block cache's link generation when linked.
+    pub blocks_gen: u64,
+    /// Lines the target's ops were read from, up to two, as recorded when
+    /// linked: how many (zero when it has more or none are recorded), and
+    /// each line's index in the I-cache with the change count it had. While
+    /// the block cache's link generation is `blocks_gen` and those lines'
+    /// change counts are unchanged, the target is as current as `gen` says
+    /// even after other lines changed.
+    pub lines: u32,
+    /// First line's index.
+    pub line1: u32,
+    /// Its change count.
+    pub gen1: u32,
+    /// Second line's index.
+    pub line2: u32,
+    /// Its change count.
+    pub gen2: u32,
 }
 
 /// Offsets of [`LinkCell`] fields, for the emitter.
@@ -376,6 +398,18 @@ pub mod link_cell {
     pub const PAGE2: usize = core::mem::offset_of!(LinkCell, page2);
     /// `count2`
     pub const COUNT2: usize = core::mem::offset_of!(LinkCell, count2);
+    /// `blocks_gen`
+    pub const BLOCKS_GEN: usize = core::mem::offset_of!(LinkCell, blocks_gen);
+    /// `lines`
+    pub const LINES: usize = core::mem::offset_of!(LinkCell, lines);
+    /// `line1`
+    pub const LINE1: usize = core::mem::offset_of!(LinkCell, line1);
+    /// `gen1`
+    pub const GEN1: usize = core::mem::offset_of!(LinkCell, gen1);
+    /// `line2`
+    pub const LINE2: usize = core::mem::offset_of!(LinkCell, line2);
+    /// `gen2`
+    pub const GEN2: usize = core::mem::offset_of!(LinkCell, gen2);
 }
 
 /// Bytes from a block's entry to its first op's code: the frame setup and
@@ -454,6 +488,8 @@ pub mod native_run {
     pub const LAST_BOUNDARY: usize = core::mem::offset_of!(NativeRun, last_boundary);
     /// `ram_contended`
     pub const RAM_CONTENDED: usize = core::mem::offset_of!(NativeRun, ram_contended);
+    /// `gens`
+    pub const GENS: usize = core::mem::offset_of!(NativeRun, gens);
 }
 
 /// Helper result: go on with the next op.

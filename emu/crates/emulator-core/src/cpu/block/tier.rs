@@ -783,10 +783,29 @@ impl Cpu {
         let (pages, _) = bus.jit_ram_pages();
         let page1 = (offset >> 12) & (RAM_BYTES / 4096 - 1);
         let page2 = (last >> 12) & (RAM_BYTES / 4096 - 1);
+        // The lines of the block, when there are two or fewer to check.
+        let lines = &block.lines[..block.line_count as usize];
+        let (count, line1, gen1, line2, gen2) = match *lines {
+            [(a, ga)] => (1, InstructionCache::line_index(a), ga, 0, 0),
+            [(a, ga), (b, gb)] => (
+                2,
+                InstructionCache::line_index(a),
+                ga,
+                InstructionCache::line_index(b),
+                gb,
+            ),
+            _ => (0, 0, 0, 0, 0),
+        };
         // SAFETY: `link` is a cell of the installed compiler's code, and the
         // page indices are below the page count.
         unsafe {
             *link = crate::cpu::jit_abi::LinkCell {
+                blocks_gen: self.blocks.link_gen,
+                lines: count,
+                line1,
+                gen1,
+                line2,
+                gen2,
                 entry: entry + crate::cpu::jit_abi::NATIVE_BODY_OFFSET,
                 gen: self
                     .instruction_cache

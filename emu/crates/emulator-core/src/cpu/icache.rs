@@ -247,6 +247,17 @@ impl InstructionCache {
         &self.epoch
     }
 
+    /// Where the per-line change counts live, for compiled code.
+    pub(super) fn generations_ptr(&self) -> *const u32 {
+        self.generations.as_ptr()
+    }
+
+    /// The line (set) index holding physical address `phys`.
+    #[inline(always)]
+    pub(super) fn line_index(phys: u32) -> u32 {
+        (phys >> 4) & 0xff
+    }
+
     /// Change count of the line holding physical address `phys`.
     #[inline(always)]
     pub(super) fn generation(&self, phys: u32) -> u32 {

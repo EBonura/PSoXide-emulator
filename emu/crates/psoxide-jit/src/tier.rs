@@ -625,9 +625,32 @@ fn emit_link_exit(a: &mut Asm, block: &Block, cells: [u64; 2]) {
     a.ldr_x(14, X_RUN, off::LINK_GEN_PTR as u32);
     a.ldr_x(14, 14, 0);
     a.add_x(13, 13, 14);
-    a.ldr_x(14, 11, cell::GEN as u32);
-    a.cmp_x(13, 14);
+    a.ldr_x(15, 11, cell::GEN as u32);
+    a.cmp_x(13, 15);
+    let current = a.b_cond(Cond::Eq);
+    // Some line of the I-cache changed since the link was made. That says
+    // nothing about the target's own lines: with the block table unchanged
+    // (x14 = its link generation), they are what counts.
+    a.ldr_x(15, 11, cell::BLOCKS_GEN as u32);
+    a.cmp_x(14, 15);
     slow.push(a.b_cond(Cond::Ne));
+    a.ldr_w(10, 11, cell::LINES as u32);
+    slow.push(a.cbz_w(10));
+    a.ldr_x(13, X_RUN, off::GENS as u32);
+    a.ldr_w(14, 11, cell::LINE1 as u32);
+    a.ldr_w_idx4(14, 13, 14);
+    a.ldr_w(15, 11, cell::GEN1 as u32);
+    a.cmp_w(14, 15);
+    slow.push(a.b_cond(Cond::Ne));
+    a.cmp_w_imm(10, 2);
+    let one_line = a.b_cond(Cond::Ne);
+    a.ldr_w(14, 11, cell::LINE2 as u32);
+    a.ldr_w_idx4(14, 13, 14);
+    a.ldr_w(15, 11, cell::GEN2 as u32);
+    a.cmp_w(14, 15);
+    slow.push(a.b_cond(Cond::Ne));
+    a.bind(one_line);
+    a.bind(current);
     // With interrupts enabled, RAM must still hold the target's words.
     let no_irq = a.cbz_w(X_IRQ);
     a.ldr_x(13, X_RUN, off::PAGES as u32);
