@@ -139,11 +139,9 @@ impl Cpu {
         // Set when the native tier handed back control at the start of a
         // block, so it is not asked again there.
         let mut skip_native = false;
-        // The cursor is in the scratch block of a missed line
-        // ([`Cpu::enter_miss_line`]) and the op `miss_op` of it, whose fetch
-        // has not been made, is still to come.
-        let mut miss_pending = false;
-        let mut miss_op = 0;
+        // While the cursor is in the scratch block of a run of missed lines
+        // ([`Cpu::enter_miss_line`]), `self.blocks.miss_op` is the op of it
+        // whose fetch has not been made and is still to come.
         'blocks: loop {
             if self.cursor.block == 0 || self.cursor.pc != self.pc {
                 // Outside any block (an I-cache miss, a delay slot entered
@@ -177,10 +175,6 @@ impl Cpu {
                     }
                     continue 'blocks;
                 }
-                if let Some(op) = miss {
-                    miss_pending = true;
-                    miss_op = op;
-                }
             }
             let irq_enabled = self.irq_enabled();
             let index = (self.cursor.block - 1) as usize;
@@ -188,8 +182,9 @@ impl Cpu {
             // matches it; a store in the batch ends that for this block.
             let mut ram_ok = irq_enabled && self.block_ram_matches(bus, index);
             let after_is_gte = self.blocks.blocks[index].after_is_gte;
+            let op_count = self.blocks.blocks[index].ops.len();
             if !skip_native
-                && !miss_pending
+                && self.blocks.miss_op.is_none()
                 && self.cursor.op == 0
                 && self.blocks.compiler.is_some()
             {
@@ -211,6 +206,17 @@ impl Cpu {
                 // cache until the loop leaves this block.
                 let op = unsafe { *ops.add(self.cursor.op as usize) };
                 let delay = op.flags & op_flags::DELAY_SLOT != 0;
+                // The fetch of this op is a miss still to make.
+                let miss_here = self.blocks.miss_op == Some(self.cursor.op);
+                if miss_here && self.blocks.miss_later && !self.run_current(bus, index) {
+                    // The words of a line after the first were written since
+                    // they were decoded: the run ends here and the line is
+                    // taken up afresh.
+                    self.blocks.miss_op = None;
+                    self.blocks.miss_later = false;
+                    self.cursor.block = 0;
+                    continue 'blocks;
+                }
                 if st.done >= st.budget {
                     break 'blocks;
                 }
@@ -286,8 +292,12 @@ impl Cpu {
                     }
                 }
                 // -- the step, as `execute_one_inner` + `execute_fetched` --
-                let branch_after_this = if miss_pending && self.cursor.op == miss_op {
-                    miss_pending = false;
+                let branch_after_this = if miss_here {
+                    // The next line of the run, if there is one, is the next
+                    // miss: the ops are consecutive words.
+                    let next = self.cursor.op + 4 - ((pc >> 2) & 3);
+                    self.blocks.miss_later = (next as usize) < op_count;
+                    self.blocks.miss_op = self.blocks.miss_later.then_some(next);
                     // The missed word's fetch: the clock settled, the line
                     // filled, its stall charged.
                     bus.advance_quiet(st.issue);
@@ -379,10 +389,11 @@ impl Cpu {
                 }
             }
         }
-        if miss_pending {
+        if self.blocks.miss_op.take().is_some() {
             // The batch ended before the missed word was fetched: the scratch
             // block is not to be resumed (its miss would be taken for a hit).
             self.cursor.block = 0;
+            self.blocks.miss_later = false;
         }
         bus.advance_quiet(st.issue);
         if st.uncounted != 0 && bus.external_interrupt_pending_quiet(st.uncounted) {

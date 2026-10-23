@@ -218,6 +218,11 @@ pub struct Block {
     /// hit when it was decoded: it is decoded again once that word is
     /// cached ([`Cpu::enter_block`]).
     short: bool,
+    /// For the scratch block of a run of missed lines
+    /// ([`Cpu::enter_miss_line`]): the stamp of the RAM pages holding its
+    /// words when it was made. The fetch of a line after the first is a miss
+    /// of the words decoded then only while the pages are still as stamped.
+    run_stamp: RamStamp,
     /// `(line base physical address, generation)` of every I-cache line
     /// the ops were read from.
     lines: [(u32, u32); MAX_LINES],
@@ -227,6 +232,26 @@ pub struct Block {
 }
 
 impl Block {
+    /// An empty block with room for `capacity` ops.
+    fn new(capacity: usize) -> Self {
+        Self {
+            vaddr: 0,
+            ops: Vec::with_capacity(capacity),
+            native: 0,
+            hits: 0,
+            ram_matches: false,
+            after_is_gte: false,
+            ram_stamp: RamStamp::default(),
+            exits: [(0, 0); 2],
+            kernel: false,
+            short: false,
+            run_stamp: RamStamp::default(),
+            lines: [(0, 0); MAX_LINES],
+            line_count: 0,
+            checked_epoch: 0,
+        }
+    }
+
     /// Whether the block lies in the HLE kernel area (see
     /// [`Cpu::enter_block`]): a store while running it must leave it.
     pub(crate) fn in_kernel(&self) -> bool {
@@ -310,26 +335,36 @@ mod tier;
 pub(in crate::cpu) use tier::DeviceMark;
 pub use tier::{tier_batch, BatchState, BlockCompiler, NATIVE_DECLINED};
 
-/// Words a decoded miss line holds: a line's four, and the hit word before
-/// it ([`Cpu::enter_miss_line`]).
-const MEMO_WORDS: usize = 5;
+/// Full lines a run of missed lines can take in after the first.
+const RUN_EXTRA_LINES: usize = 3;
+
+/// Words a decoded run of missed lines holds at most: a hit word before it,
+/// the first line's four, and [`RUN_EXTRA_LINES`] lines of four
+/// ([`Cpu::enter_miss_line`]).
+const RUN_WORDS: usize = 1 + 4 + 4 * RUN_EXTRA_LINES;
 
 /// Entries of the table of decoded miss lines (a power of two).
 const MISS_MEMO_ENTRIES: usize = 16384;
 
-/// The ops of the words a missed fetch fills in, decoded as a block would be
-/// ([`Cpu::enter_miss_line`]): a pure function of `words`, remembered per
-/// RAM offset.
+/// The ops of the words a run of missed fetches fills in, decoded as a block
+/// would be ([`Cpu::enter_miss_line`]): a pure function of `words`,
+/// remembered per RAM offset.
 #[derive(Clone, Copy)]
 struct MissMemo {
     /// RAM offset of the first word; `u32::MAX` for an empty entry.
     offset: u32,
-    /// Words the fill brings in, from the first.
+    /// Words decoded: the hit word before the missed ones when `lead`, then
+    /// the missed ones, as many as a run can take.
     count: u8,
     /// Ops decoded from them; none when the first cannot start a block.
     len: u8,
-    words: [u32; MEMO_WORDS],
-    ops: [DecodedOp; MEMO_WORDS],
+    /// A hit word (the last of its line) comes before the missed ones.
+    lead: u8,
+    /// The RAM pages of the words after the lead when the memo was found to
+    /// hold them: while the pages are as stamped, they have not changed.
+    stamp: RamStamp,
+    words: [u32; RUN_WORDS],
+    ops: [DecodedOp; RUN_WORDS],
 }
 
 impl MissMemo {
@@ -337,7 +372,9 @@ impl MissMemo {
         offset: u32::MAX,
         count: 0,
         len: 0,
-        words: [0; MEMO_WORDS],
+        lead: 0,
+        stamp: RamStamp::EMPTY,
+        words: [0; RUN_WORDS],
         ops: [DecodedOp {
             word: 0,
             class: OpClass::Alu,
@@ -345,16 +382,18 @@ impl MissMemo {
             rs: 0,
             rt: 0,
             handler: 0,
-        }; MEMO_WORDS],
+        }; RUN_WORDS],
     };
 
     /// Decode `words` by the block builder's rules: a branch takes its delay
     /// slot with it and ends the block, a terminator ends it, and a branch
     /// without its slot among the words is left out.
     #[inline(never)]
-    fn decode(offset: u32, words: &[u32]) -> Self {
+    fn decode(offset: u32, lead: usize, stamp: RamStamp, words: &[u32]) -> Self {
         let mut memo = Self::EMPTY;
         memo.offset = offset;
+        memo.lead = lead as u8;
+        memo.stamp = stamp;
         memo.count = words.len() as u8;
         memo.words[..words.len()].copy_from_slice(words);
         let ops = &mut memo.ops;
@@ -411,6 +450,14 @@ pub struct BlockCache {
     /// Block index plus one of the scratch block ([`Cpu::enter_miss_line`]),
     /// zero until it is first needed. It is in no slot, so no PC finds it.
     scratch: u32,
+    /// The op of the scratch block whose fetch is a miss still to make, the
+    /// first of the line (the batch loop makes it, [`Cpu::fetch_miss`]).
+    /// While there is one the scratch block cannot be resumed from the
+    /// cursor: the missed word would be taken for a hit.
+    pub(super) miss_op: Option<u32>,
+    /// `miss_op` is the fetch of a line after the first of a run, not
+    /// vouched for yet ([`Cpu::run_current`]).
+    pub(super) miss_later: bool,
     /// Decoded miss lines ([`Cpu::enter_miss_line`]); allocated on first use.
     miss_memo: Vec<MissMemo>,
     /// The last batch of the native tier's loop ended at the hard clock
@@ -666,6 +713,14 @@ impl Cpu {
     /// only for the stretch from here to its last op: it is never found by a
     /// PC, and its words are the cache's, whatever RAM holds later.
     ///
+    /// Straight-line code that misses line after line is one block: while
+    /// the fill reaches the end of the line, the following lines that are not
+    /// cached either (at most [`RUN_EXTRA_LINES`] of them) join it, each with
+    /// its own miss to make where it starts ([`BlockCache::miss_op`]). Nothing
+    /// before such a miss can change whether it is one, only the words it will
+    /// fill, which the RAM pages' write counts vouch for
+    /// ([`Block::run_stamp`], [`Cpu::run_current`]).
+    ///
     /// With `edge`, the PC is instead a hit on the last word of its line
     /// followed by a line that is not cached: a block there would be one op
     /// (a branch cannot take its delay slot from the other line), so the
@@ -683,44 +738,88 @@ impl Cpu {
         if phys >= memory::ram::MIRROR_END || (bus.hle_bios_enabled && phys < 0x1_0000) {
             return None;
         }
-        let mut words = [0u32; MEMO_WORDS];
-        let (miss_phys, lead) = if edge {
+        let (miss_phys, lead, hit_word) = if edge {
             if phys & 0xc != 0xc {
                 return None;
             }
-            words[0] = self.instruction_cache.hit(phys)?;
+            let word = self.instruction_cache.hit(phys)?;
             let next = phys + 4;
             if next >= memory::ram::MIRROR_END || self.instruction_cache.hit(next).is_some() {
                 return None;
             }
-            (next, 1)
+            (next, 1, word)
         } else {
             if self.instruction_cache.hit(phys).is_some() {
                 return None;
             }
-            (phys, 0)
+            (phys, 0, 0)
         };
         let iblksz =
             ((self.cache_control & CACHE_CONTROL_IBLKSZ_MASK) >> CACHE_CONTROL_IBLKSZ_SHIFT) as u8;
         let first = ((miss_phys >> 2) & 3) as usize;
-        let filled = self.instruction_cache.miss_fill_end(miss_phys, iblksz) - first;
+        let first_end = self.instruction_cache.miss_fill_end(miss_phys, iblksz);
         let miss_offset = (miss_phys % RAM_BYTES) as usize;
-        for (i, word) in words[lead..lead + filled].iter_mut().enumerate() {
-            *word = bus.ram_word(miss_offset + 4 * i);
+        // The words in RAM from the missed one, as far as a run can take, and
+        // how many of them this miss runs: the rest of the line, then the
+        // lines after it that are also missed (when the fill reaches the end
+        // of its line and fills whole lines).
+        let line_end = (miss_offset & !0xf) + 0x10;
+        let room = (RAM_BYTES as usize - miss_offset) / 4;
+        let wanted = (4 - first) + 4 * RUN_EXTRA_LINES;
+        let count = lead + wanted.min(room);
+        let mut usable = lead + (first_end - first);
+        if first_end == 4 && iblksz != 0 {
+            let mut next_line = (miss_phys & !0xf) + 0x10;
+            let mut offset = line_end;
+            while usable + 4 <= count
+                && offset + 0x10 <= RAM_BYTES as usize
+                && self.instruction_cache.hit(next_line).is_none()
+            {
+                usable += 4;
+                next_line += 0x10;
+                offset += 0x10;
+            }
         }
-        let count = lead + filled;
         let offset = phys % RAM_BYTES;
         // The decoding is a function of the words, and the same lines come
-        // round again and again in code that does not fit the cache.
+        // round again and again in code that does not fit the cache. The
+        // words are known to be as decoded while their RAM pages have not
+        // been written since.
         if self.blocks.miss_memo.is_empty() {
             self.blocks.miss_memo = vec![MissMemo::EMPTY; MISS_MEMO_ENTRIES];
         }
-        let slot = (((offset >> 2) ^ (offset >> 16)) as usize) & (MISS_MEMO_ENTRIES - 1);
+        let slot = (((offset >> 2) ^ (offset >> 16)) as usize ^ lead) & (MISS_MEMO_ENTRIES - 1);
         let memo = &mut self.blocks.miss_memo[slot];
-        if memo.offset != offset || memo.count as usize != count || memo.words != words {
-            *memo = MissMemo::decode(offset, &words[..count]);
+        let stamp = bus.ram_stamp(miss_offset, 4 * (count - lead));
+        if memo.offset != offset
+            || memo.count as usize != count
+            || memo.lead as usize != lead
+            || memo.stamp != stamp
+            || (lead != 0 && memo.words[0] != hit_word)
+        {
+            let mut words = [0u32; RUN_WORDS];
+            words[0] = hit_word;
+            for (i, word) in words[lead..count].iter_mut().enumerate() {
+                *word = bus.ram_word(miss_offset + 4 * i);
+            }
+            if memo.offset == offset
+                && memo.count as usize == count
+                && memo.lead as usize == lead
+                && memo.words[..count] == words[..count]
+            {
+                // Some other word of the pages was written.
+                memo.stamp = stamp;
+            } else {
+                *memo = MissMemo::decode(offset, lead, stamp, &words[..count]);
+            }
         }
-        let len = memo.len as usize;
+        // The ops of the words this run takes: a branch whose delay slot
+        // is not among them is left out, and the last op ends the block.
+        let decoded_len = memo.len as usize;
+        let mut len = decoded_len.min(usable);
+        if len < decoded_len && len > 0 && memo.ops[len - 1].class == OpClass::Branch {
+            len -= 1;
+        }
         // The first op must be one the loop can run, and with `edge` the
         // missed word must have made it into the block. A store before the
         // miss could write the words the line is about to be filled with,
@@ -731,24 +830,9 @@ impl Cpu {
         {
             return None;
         }
-        let ops = memo.ops;
         let index = match self.blocks.scratch {
             0 => {
-                self.blocks.blocks.push(Block {
-                    vaddr: 0,
-                    ops: Vec::with_capacity(MEMO_WORDS),
-                    lines: [(0, 0); MAX_LINES],
-                    line_count: 0,
-                    checked_epoch: 0,
-                    native: 0,
-                    hits: 0,
-                    ram_matches: false,
-                    after_is_gte: false,
-                    ram_stamp: RamStamp::default(),
-                    exits: [(0, 0); 2],
-                    kernel: false,
-                    short: false,
-                });
+                self.blocks.blocks.push(Block::new(RUN_WORDS));
                 self.blocks.scratch = self.blocks.blocks.len() as u32;
                 self.blocks.blocks.len() - 1
             }
@@ -757,22 +841,31 @@ impl Cpu {
         let after = pc.wrapping_add(4 * len as u32);
         let block = &mut self.blocks.blocks[index];
         block.vaddr = pc;
-        debug_assert!(block.ops.capacity() >= ops.len());
-        // SAFETY: the scratch block was made with room for `MEMO_WORDS` ops,
-        // and `ptr::copy_nonoverlapping` of that many initialised ops fills
-        // them before the length takes in the first `len`.
+        debug_assert!(block.ops.capacity() >= len);
+        // SAFETY: the scratch block was made with room for `RUN_WORDS` ops,
+        // `len` of them are initialised in the memo, and the copy fills them
+        // before the length takes them in.
         unsafe {
-            std::ptr::copy_nonoverlapping(ops.as_ptr(), block.ops.as_mut_ptr(), ops.len());
+            std::ptr::copy_nonoverlapping(memo.ops.as_ptr(), block.ops.as_mut_ptr(), len);
             block.ops.set_len(len);
+        }
+        if len < decoded_len {
+            // Cut short: the op before the cut is the last, and what follows
+            // it is no longer a block's own.
+            let last = &mut block.ops[len - 1];
+            last.flags = (last.flags | op_flags::LAST) & !op_flags::NEXT_GTE;
         }
         block.native = 0;
         block.hits = 0;
         // The words after a leading hit were read from RAM just now; the
         // hit word is the cache's, which RAM may no longer match.
-        block.ram_matches = lead == 0 || bus.ram_word(offset as usize) == words[0];
+        block.ram_matches = lead == 0 || bus.ram_word(offset as usize) == hit_word;
         block.after_is_gte = bus.peek_is_gte_command(after);
         block.ram_stamp = bus.ram_stamp(offset as usize, 4 * len + 4);
+        block.run_stamp = block.ram_stamp;
         block.kernel = false;
+        self.blocks.miss_op = Some(lead as u32);
+        self.blocks.miss_later = false;
         self.cursor = Cursor {
             block: index as u32 + 1,
             op: 0,
@@ -780,6 +873,16 @@ impl Cpu {
             cache_control: self.cache_control,
         };
         Some(lead as u32)
+    }
+
+    /// Whether the scratch block `index` of a run of missed lines
+    /// ([`Cpu::enter_miss_line`]) still has the words the RAM holds: its
+    /// pages have not been written since it was made.
+    #[inline(always)]
+    pub(super) fn run_current(&self, bus: &Bus, index: usize) -> bool {
+        let block = &self.blocks.blocks[index];
+        let offset = (memory::to_physical(block.vaddr) % RAM_BYTES) as usize;
+        bus.ram_stamp(offset, 4 * block.ops.len() + 4) == block.run_stamp
     }
 
     /// Whether main RAM holds exactly block `index`'s words, from a stamp
@@ -833,24 +936,8 @@ impl Cpu {
         let base = memory::to_physical(pc);
         let mut block = match reuse {
             Some(index) => {
-                let mut old = std::mem::replace(
-                    &mut self.blocks.blocks[index as usize],
-                    Block {
-                        vaddr: 0,
-                        ops: Vec::new(),
-                        lines: [(0, 0); MAX_LINES],
-                        line_count: 0,
-                        checked_epoch: 0,
-                        native: 0,
-                        hits: 0,
-                        ram_matches: false,
-                        after_is_gte: false,
-                        ram_stamp: RamStamp::default(),
-                        exits: [(0, 0); 2],
-                        kernel: false,
-                        short: false,
-                    },
-                );
+                let mut old =
+                    std::mem::replace(&mut self.blocks.blocks[index as usize], Block::new(0));
                 old.ops.clear();
                 old.line_count = 0;
                 old.native = 0;
@@ -859,21 +946,7 @@ impl Cpu {
                 old.exits = [(0, 0); 2];
                 old
             }
-            None => Block {
-                vaddr: 0,
-                ops: Vec::with_capacity(16),
-                lines: [(0, 0); MAX_LINES],
-                line_count: 0,
-                checked_epoch: 0,
-                native: 0,
-                hits: 0,
-                ram_matches: false,
-                after_is_gte: false,
-                ram_stamp: RamStamp::default(),
-                exits: [(0, 0); 2],
-                kernel: false,
-                short: false,
-            },
+            None => Block::new(16),
         };
         block.vaddr = pc;
         block.kernel = hle && base < 0x1_0000;

@@ -269,7 +269,13 @@ impl Cpu {
             self.pc = run.vaddr.wrapping_add(4 * n as u32);
             self.cursor.block = 0;
         }
-        if !self.enter_block(bus, self.pc) {
+        // No block starts at a word that is not a cache hit (the batch loop
+        // takes it from there).
+        let hit = self
+            .instruction_cache
+            .hit(psx_hw::memory::to_physical(self.pc))
+            .is_some();
+        if !(hit && self.enter_block(bus, self.pc)) {
             return BlockDone::NoBlock;
         }
         BlockDone::Entered((self.cursor.block - 1) as usize)

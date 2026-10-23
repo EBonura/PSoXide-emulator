@@ -544,3 +544,12 @@ pub(crate) struct RamStamp {
     first: u32,
     last: u32,
 }
+
+impl RamStamp {
+    /// A stamp no RAM ever gives (ids start at 1).
+    pub(crate) const EMPTY: Self = Self {
+        id: 0,
+        first: 0,
+        last: 0,
+    };
+}
