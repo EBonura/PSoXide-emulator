@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- The hardware renderer now reproduces the CPU rasterizer's 5-bit arithmetic
+  where it showed. The four semi-transparency modes blend on whole colour
+  codes (the source is cut to its code and scaled per mode, so the fixed
+  blender lands on the CPU's result for every pair of codes; HL's HUD,
+  lightning and glows were up to three codes too bright). Lines follow the
+  console's own pixel walk, so they no longer sit a pixel off on rounding ties
+  (on a scaled target they now step in whole native pixels, like the console's,
+  instead of being smoothed). Sprite-shaped Gouraud textured quads keep one
+  colour per native pixel at any scale. A scaled target's centre sub-pixel is
+  now exactly the CPU's pixel for polygons whose attributes differ across the
+  quad diagonal. At 1x the whole frame matches CPU1 on every journey checked.
 - Controllers and the keyboard now share one input path. Every source is an
   adapter that produces a per-device snapshot in the PS1 pad layout, and the
   menu, the hold-to-repeat, the noise guard, port assignment and the guest feed

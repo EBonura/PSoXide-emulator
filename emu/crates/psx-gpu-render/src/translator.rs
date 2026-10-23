@@ -232,6 +232,28 @@ impl Translator {
             | GpuEvent::ShadedTexQuad { v, .. } => self.scale > 1 && is_axis_rect(*v),
             _ => false,
         };
+        // A sprite-shaped quad is drawn unshifted only if the CPU's two
+        // triangles agree on every attribute, so that it does not matter which
+        // of them owns a pixel on the diagonal (see `quad_attributes_coplanar`).
+        if self.sprite_rect && !self.wireframe {
+            self.sprite_rect = match &event {
+                GpuEvent::ShadedQuad { v, colors, .. } => {
+                    quad_attributes_coplanar(*v, Some(colors.map(rgb_of_word)), None)
+                }
+                GpuEvent::ShadedTexQuad { v, uv, colors, .. } => quad_attributes_coplanar(
+                    *v,
+                    Some(colors.map(rgb_of_word)),
+                    Some(uv.map(|t| (i32::from(t.0), i32::from(t.1)))),
+                ),
+                GpuEvent::TexQuad { v, uv, .. } => {
+                    let uv = uv.map(|t| (i32::from(t.0), i32::from(t.1)));
+                    // The CPU draws a flat sprite-ordered quad as one walk.
+                    axis_quad_words(*v, uv).is_some()
+                        || quad_attributes_coplanar(*v, None, Some(uv))
+                }
+                _ => true,
+            };
+        }
         match event {
             GpuEvent::Fill { cmd, x, y, w, h } => self.emit_fill_rect(cmd, x, y, w, h),
             GpuEvent::MonoTri { cmd, v } => self.emit_mono_tri(cmd, v),
@@ -377,113 +399,87 @@ impl Translator {
     /// `[x, x+1] × [y, y+1]`, which lights exactly the `S × S`
     /// target block at any internal scale.
     fn push_pixel_quad(&mut self, v: (i32, i32), c: [u8; 4], kind: BlendKind) {
-        let v2 = (v.0 + 1, v.1);
-        let v3 = (v.0, v.1 + 1);
-        let v4 = (v.0 + 1, v.1 + 1);
+        self.push_flat_rect(v, (v.0 + 1, v.1 + 1), c, kind);
+    }
+
+    /// The whole pixels of `[min, max)` as two flat triangles, dithered like
+    /// every other line primitive when GP0(E1) asks for it.
+    fn push_flat_rect(&mut self, min: (i32, i32), max: (i32, i32), c: [u8; 4], kind: BlendKind) {
+        let v2 = (max.0, min.1);
+        let v3 = (min.0, max.1);
         let dither = self.dither_flag();
-        self.push_shaded_tri(v, c, v2, c, v3, c, dither, kind);
-        self.push_shaded_tri(v2, c, v4, c, v3, c, dither, kind);
+        self.push_shaded_tri(min, c, v2, c, v3, c, dither, kind);
+        self.push_shaded_tri(v2, c, max, c, v3, c, dither, kind);
     }
 
     // ----- GP0 lines (0x40..=0x5F) -----
 
     /// `0x40..=0x47` / `0x48..=0x4F` -- monochrome line / polyline.
-    /// One quad band per consecutive point pair. Zero-length
-    /// segments plot one pixel, matching the silicon-coordinate DDA
-    /// used by the CPU rasterizer.
-    /// The CPU routes dithered mono lines through its shaded walker;
-    /// this backend carries the same dither through `fbits::DITHER`,
-    /// so only the band-vs-Bresenham coverage differs.
+    /// Each consecutive point pair is one segment on the console's own
+    /// pixel walk ([`Translator::push_walked_line`]). The CPU routes dithered
+    /// mono lines through its shaded walker; this backend carries the same
+    /// dither through `fbits::DITHER`.
     fn emit_mono_line(&mut self, cmd: u32, points: &[(i32, i32)]) {
-        let color = mono_color_rgba8(cmd);
+        let color = cmd & 0x00ff_ffff;
         let kind = self.blend_kind(cmd);
         for pair in points.windows(2) {
-            let (v0, v1) = (pair[0], pair[1]);
-            if v0 == v1 {
-                self.push_pixel_quad(v0, color, kind);
-                continue;
-            }
-            self.push_gp0_line_segment(v0, color, v1, color, kind);
+            self.push_walked_line(pair[0], color, pair[1], color, kind);
         }
     }
 
-    /// `0x50..=0x57` / `0x58..=0x5F` -- Gouraud line / polyline.
-    /// Host interpolation replaces the CPU's per-step colour walk;
-    /// endpoint colours land exactly, mid-segment colours carry the
-    /// same f32-vs-integer tolerance as shaded triangles.
+    /// `0x50..=0x57` / `0x58..=0x5F` -- Gouraud line / polyline. The colour of
+    /// every pixel is the CPU walker's own Q12 gradient step.
     fn emit_shaded_line(&mut self, cmd: u32, points: &[(i32, i32)], colors: &[u32]) {
         let kind = self.blend_kind(cmd);
         let n = points.len().min(colors.len());
         for i in 1..n {
-            let (v0, v1) = (points[i - 1], points[i]);
-            let c0 = mono_color_rgba8(colors[i - 1]);
-            let c1 = mono_color_rgba8(colors[i]);
-            if v0 == v1 {
-                // The CPU shaded walker plots exactly one pixel for
-                // a zero-length segment (plot, then break) at the
-                // segment's start colour.
-                self.push_pixel_quad(v0, c0, kind);
-                continue;
-            }
-            self.push_gp0_line_segment(v0, c0, v1, c1, kind);
+            self.push_walked_line(
+                points[i - 1],
+                colors[i - 1] & 0x00ff_ffff,
+                points[i],
+                colors[i] & 0x00ff_ffff,
+                kind,
+            );
         }
     }
 
-    /// One GP0 line segment as a one-PSX-pixel quad band (two
-    /// triangles) -- the wireframe edge strip's construction
-    /// ([`Translator::push_line_strip`]) plus a +1 extension on the
-    /// major-axis max end. GP0 lines are endpoint-inclusive in the
-    /// CPU rasterizer's Bresenham walk, and the host GPU samples
-    /// pixel centers at +0.5: without the extension the far
-    /// column/row's center falls just outside the band and the
-    /// endpoint pixel goes dark. Wireframe edges keep the
-    /// unextended strip: triangle outlines close their loops (the
-    /// next edge covers the shared corner), and extending them
-    /// would double-blend the corners of semi-transparent
-    /// outlines. Polyline joints double-blend HERE by design: the
-    /// CPU walker also plots every segment endpoint-inclusive, so
-    /// shared polyline vertices are written twice on both paths.
+    /// One GP0 line segment, pixel for pixel as the console plots it.
     ///
-    /// At native scale the band lights one pixel per major-axis
-    /// step, connected like Bresenham; individual steps may sit one
-    /// minor-axis pixel off the CPU's walk on rounding ties
-    /// (center-sampled band vs integer-stepped walker). At internal
-    /// scale S the band scales with the target like every other
-    /// primitive.
-    fn push_gp0_line_segment(
+    /// The pixel walk and the colour of each pixel come from
+    /// [`emulator_core::gpu::walk_line`], the CPU rasterizer's own DDA, so the
+    /// hardware path lights exactly the same pixels at the same colours at
+    /// scale 1 and, at the centre of every `S x S` block, at any scale. A
+    /// band of triangles (this path's previous construction) sat one pixel
+    /// off the walk wherever the DDA's half-pixel tie breaks the other way.
+    /// Pixels that are adjacent and the same colour join into one rectangle,
+    /// so a straight run costs one quad, not one per pixel. A walk never
+    /// plots a pixel twice, so a semi-transparent line blends each pixel once,
+    /// as the CPU does (polyline joints, where two segments share their end
+    /// pixel, blend twice on both).
+    ///
+    /// At internal scales above 1 the line steps like the console's, in
+    /// whole native pixels, rather than being smoothed.
+    fn push_walked_line(
         &mut self,
         v0: (i32, i32),
-        c0: [u8; 4],
+        c0: u32,
         v1: (i32, i32),
-        c1: [u8; 4],
+        c1: u32,
         kind: BlendKind,
     ) {
-        debug_assert_ne!(v0, v1, "degenerate segments handled by callers");
-        let dx = v1.0 - v0.0;
-        let dy = v1.1 - v0.1;
-        let (mut e0, mut e1) = (v0, v1);
-        let (ox, oy) = if dx.abs() >= dy.abs() {
-            // x-major: one-pixel-tall band, extend the max-x end.
-            if dx >= 0 {
-                e1.0 += 1;
-            } else {
-                e0.0 += 1;
+        let mut rects: Vec<LineRect> = Vec::new();
+        emulator_core::gpu::walk_line(v0, v1, c0, c1, |x, y, rgb| {
+            if let Some(last) = rects.last_mut() {
+                if last.extend(x, y, rgb) {
+                    return;
+                }
             }
-            (0, 1)
-        } else {
-            // y-major: one-pixel-wide band, extend the max-y end.
-            if dy >= 0 {
-                e1.1 += 1;
-            } else {
-                e0.1 += 1;
-            }
-            (1, 0)
-        };
-        let e0b = (e0.0 + ox, e0.1 + oy);
-        let e1b = (e1.0 + ox, e1.1 + oy);
-        let dither = self.dither_flag();
-        self.push_shaded_tri(e0, c0, e1, c1, e0b, c0, dither, kind);
-        self.push_shaded_tri(e1, c1, e1b, c1, e0b, c0, dither, kind);
+            rects.push(LineRect::new(x, y, rgb));
+        });
+        for r in rects {
+            let c = [r.rgb[0], r.rgb[1], r.rgb[2], 0xff];
+            self.push_flat_rect((r.x0, r.y0), (r.x1 + 1, r.y1 + 1), c, kind);
+        }
     }
 
     // ----- Phase 2: textured tris + quads -----
@@ -589,13 +585,9 @@ impl Translator {
             // such sentinel: the CPU gates on `!raw && dither` alone.
             flags |= self.dither_flag();
         }
-        if is_semi_trans(cmd) {
-            // Textured semi-transparency is split into an opaque
-            // non-STP pass and a blended STP-only pass at emission
-            // time. Keep the primitive bit here so debug dumps can
-            // still identify the original GP0 state.
-            flags |= fbits::SEMI_TRANS;
-        }
+        // Textured semi-transparency is not a flag: it is split into an opaque
+        // non-STP pass and a blended STP-only pass at emission time, each in
+        // the pipeline of its blend kind.
         flags
     }
 
@@ -778,7 +770,13 @@ impl Translator {
         let [v0, v1, v2, v3] = v;
         let [uv0, uv1, uv2, uv3] = uv;
         let [c0, c1, c2, c3] = colors.map(mono_color_rgba8);
-        let prim_flags = self.tex_prim_flags(cmd, clut, false);
+        let mut prim_flags = self.tex_prim_flags(cmd, clut, false);
+        // A sprite-shaped quad is 2D content, and 2D content enlarges as the
+        // console's pixels: its colour gradient (a sheen over text) steps per
+        // native pixel instead of smoothing across the sub-pixels.
+        if self.sprite_rect {
+            prim_flags |= fbits::PIXEL_COLOUR;
+        }
         let kind = self.blend_kind(cmd);
         if self.wireframe {
             self.push_wire_tri(v1, c1, v3, c3, v2, c2, BlendKind::Opaque);
@@ -1182,6 +1180,84 @@ fn full_clip() -> [u16; 4] {
 impl Default for Translator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Whether the CPU's two triangles of a quad, `(v1, v3, v2)` and `(v0, v1, v2)`,
+/// have the same colour and texture planes.
+///
+/// It decides who owns the pixels on the shared diagonal: the second
+/// triangle, by the CPU's corner sampling. The host samples pixel centres, so
+/// on an unshifted (sprite-shaped) quad the ownership band along the diagonal
+/// is not the CPU's and the centre sample would take the wrong triangle's
+/// attributes wherever the planes differ, as they do for four unrelated
+/// corner colours. Such a quad keeps the half-pixel shift that gives the
+/// CPU's ownership at the centre sample, and so is not nearest-neighbour at
+/// its borders; a quad whose planes agree cannot show the difference.
+fn quad_attributes_coplanar(
+    v: [(i32, i32); 4],
+    rgb: Option<[(i32, i32, i32); 4]>,
+    uv: Option<[(i32, i32); 4]>,
+) -> bool {
+    let planes = |i: [usize; 3]| {
+        attribute_planes(
+            i.map(|k| v[k]),
+            i.map(|k| rgb.map_or((0, 0, 0), |c| c[k])),
+            i.map(|k| uv.map_or((0, 0), |t| t[k])),
+        )
+    };
+    match (planes([1, 3, 2]), planes([0, 1, 2])) {
+        (Some(second), Some(first)) => first == second,
+        _ => false,
+    }
+}
+
+fn rgb_of_word(c: u32) -> (i32, i32, i32) {
+    (
+        (c & 0xff) as i32,
+        ((c >> 8) & 0xff) as i32,
+        ((c >> 16) & 0xff) as i32,
+    )
+}
+
+/// A straight run of same-coloured pixels of one line, as inclusive bounds.
+struct LineRect {
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    rgb: [u8; 3],
+}
+
+impl LineRect {
+    fn new(x: i32, y: i32, rgb: [u8; 3]) -> Self {
+        Self {
+            x0: x,
+            y0: y,
+            x1: x,
+            y1: y,
+            rgb,
+        }
+    }
+
+    /// Grow by the pixel `(x, y)` if it continues this run in a straight line
+    /// with the same colour. Returns whether it did.
+    fn extend(&mut self, x: i32, y: i32, rgb: [u8; 3]) -> bool {
+        if rgb != self.rgb {
+            return false;
+        }
+        if self.y0 == self.y1 && y == self.y0 && x == self.x1 + 1 {
+            self.x1 = x;
+            true
+        } else if self.x0 == self.x1 && x == self.x0 && y == self.y1 + 1 {
+            self.y1 = y;
+            true
+        } else if self.x0 == self.x1 && x == self.x0 && y == self.y0 - 1 {
+            self.y0 = y;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -1694,12 +1770,10 @@ mod tests {
         assert_eq!(frame.runs[1].count, 3);
 
         for v in &frame.vertices[0..3] {
-            assert_ne!(v.flags & fbits::SEMI_TRANS, 0);
             assert_ne!(v.flags & fbits::TEX_OPAQUE_PASS, 0);
             assert_eq!(v.flags & fbits::TEX_SEMI_PASS, 0);
         }
         for v in &frame.vertices[3..6] {
-            assert_ne!(v.flags & fbits::SEMI_TRANS, 0);
             assert_eq!(v.flags & fbits::TEX_OPAQUE_PASS, 0);
             assert_ne!(v.flags & fbits::TEX_SEMI_PASS, 0);
         }
@@ -1764,11 +1838,13 @@ mod tests {
         assert_eq!(frame.runs[0].count, 6);
     }
 
+    fn quad_positions(vertices: &[HwVertex]) -> Vec<[i16; 2]> {
+        vertices.iter().map(|v| v.pos).collect()
+    }
+
     #[test]
-    fn mono_line_emits_endpoint_extended_band() {
-        // Horizontal line (10,20)->(30,20): x-major, the max-x end
-        // extends by 1 so pixel-center sampling covers column 30
-        // (the CPU walk plots x0..=x1 inclusive).
+    fn horizontal_mono_line_is_one_rectangle() {
+        // Horizontal line (10,20)->(30,20) plots x 10..=30 inclusive: one run.
         let log = [entry(0x40, vec![0x40ff_ffff, xy(10, 20), xy(30, 20)])];
         let mut translator = Translator::new();
         let frame = translator.translate(&log);
@@ -1776,10 +1852,9 @@ mod tests {
         assert_eq!(frame.total(), 6);
         assert_eq!(frame.runs.len(), 1);
         assert_eq!(frame.runs[0].kind, BlendKind::Opaque);
-        let pos: Vec<[i16; 2]> = frame.vertices.iter().map(|v| v.pos).collect();
         assert_eq!(
-            pos,
-            vec![[10, 20], [31, 20], [10, 21], [31, 20], [31, 21], [10, 21],]
+            quad_positions(frame.vertices),
+            vec![[10, 20], [31, 20], [10, 21], [31, 20], [31, 21], [10, 21]]
         );
         for v in frame.vertices {
             assert_eq!(v.color, [0xff, 0xff, 0xff, 0xff]);
@@ -1788,30 +1863,45 @@ mod tests {
     }
 
     #[test]
-    fn mono_line_reversed_extends_the_max_end_not_the_start() {
-        // Same segment drawn right-to-left: the +1 lands on the
-        // max-x endpoint (the START here), producing the same band.
-        let log = [entry(0x40, vec![0x40ff_ffff, xy(30, 20), xy(10, 20)])];
+    fn reversed_mono_line_plots_the_same_pixels() {
+        let forward = [entry(0x40, vec![0x40ff_ffff, xy(10, 20), xy(30, 20)])];
+        let reversed = [entry(0x40, vec![0x40ff_ffff, xy(30, 20), xy(10, 20)])];
         let mut translator = Translator::new();
-        let frame = translator.translate(&log);
-
-        let pos: Vec<[i16; 2]> = frame.vertices.iter().map(|v| v.pos).collect();
-        assert_eq!(
-            pos,
-            vec![[31, 20], [10, 20], [31, 21], [10, 20], [10, 21], [31, 21],]
-        );
+        let want = quad_positions(translator.translate(&forward).vertices);
+        let got = quad_positions(translator.translate(&reversed).vertices);
+        assert_eq!(got, want);
     }
 
     #[test]
-    fn vertical_line_band_is_one_pixel_wide() {
+    fn vertical_line_is_one_pixel_wide() {
         let log = [entry(0x40, vec![0x40ff_ffff, xy(5, 10), xy(5, 20)])];
         let mut translator = Translator::new();
         let frame = translator.translate(&log);
 
-        let pos: Vec<[i16; 2]> = frame.vertices.iter().map(|v| v.pos).collect();
         assert_eq!(
-            pos,
-            vec![[5, 10], [5, 21], [6, 10], [5, 21], [6, 21], [6, 10]]
+            quad_positions(frame.vertices),
+            vec![[5, 10], [6, 10], [5, 21], [6, 10], [6, 21], [5, 21]]
+        );
+    }
+
+    #[test]
+    fn shallow_line_follows_the_console_tie_break() {
+        // The CPU plots (0,0) (1,1) (2,1) (3,2) (4,2) for (0,0)->(4,2): the
+        // half-pixel tie at the first step rounds down (emulator-core
+        // `mono_line_shallow_diagonal_matches_silicon_half_pixel_tie_break`).
+        // A centre-sampled band lit (1,0) there instead.
+        let log = [entry(0x40, vec![0x40ff_ffff, xy(0, 0), xy(4, 2)])];
+        let mut translator = Translator::new();
+        let frame = translator.translate(&log);
+
+        assert_eq!(frame.total(), 18);
+        let corners: Vec<[i16; 2]> = quad_positions(frame.vertices)
+            .chunks(6)
+            .flat_map(|q| [q[0], q[4]])
+            .collect();
+        assert_eq!(
+            corners,
+            vec![[0, 0], [1, 1], [1, 1], [3, 2], [3, 2], [5, 3]]
         );
     }
 
@@ -1822,9 +1912,8 @@ mod tests {
         let frame = translator.translate(&log);
 
         assert_eq!(frame.total(), 6);
-        let pos: Vec<[i16; 2]> = frame.vertices.iter().map(|v| v.pos).collect();
         assert_eq!(
-            pos,
+            quad_positions(frame.vertices),
             vec![[10, 10], [11, 10], [10, 11], [11, 10], [11, 11], [10, 11]]
         );
     }
@@ -1840,9 +1929,8 @@ mod tests {
         let frame = translator.translate(&log);
 
         assert_eq!(frame.total(), 6);
-        let pos: Vec<[i16; 2]> = frame.vertices.iter().map(|v| v.pos).collect();
         assert_eq!(
-            pos,
+            quad_positions(frame.vertices),
             vec![[10, 10], [11, 10], [10, 11], [11, 10], [11, 11], [10, 11]]
         );
         for v in frame.vertices {
@@ -1851,7 +1939,10 @@ mod tests {
     }
 
     #[test]
-    fn shaded_line_carries_endpoint_colors() {
+    fn shaded_line_steps_its_colour_per_pixel() {
+        // Red at (0,0) to green at (0,10). The walker starts at the
+        // endpoint with the larger y (it orders endpoints by x, ties
+        // swapped), so the first pixel plotted is green.
         let log = [entry(
             0x50,
             vec![0x5000_00ff, xy(0, 0), 0x0000_ff00, xy(0, 10)],
@@ -1859,21 +1950,19 @@ mod tests {
         let mut translator = Translator::new();
         let frame = translator.translate(&log);
 
-        assert_eq!(frame.total(), 6);
-        // y-major band; per-vertex colours follow the endpoints.
-        let cv: Vec<([i16; 2], [u8; 4])> =
-            frame.vertices.iter().map(|v| (v.pos, v.color)).collect();
-        assert_eq!(
-            cv,
-            vec![
-                ([0, 0], [0xff, 0x00, 0x00, 0xff]),
-                ([0, 11], [0x00, 0xff, 0x00, 0xff]),
-                ([1, 0], [0xff, 0x00, 0x00, 0xff]),
-                ([0, 11], [0x00, 0xff, 0x00, 0xff]),
-                ([1, 11], [0x00, 0xff, 0x00, 0xff]),
-                ([1, 0], [0xff, 0x00, 0x00, 0xff]),
-            ]
-        );
+        // Eleven pixels of eleven different colours: one quad each.
+        assert_eq!(frame.total(), 66);
+        let quads: Vec<(i16, [u8; 4])> = frame
+            .vertices
+            .chunks(6)
+            .map(|q| (q[0].pos[1], q[0].color))
+            .collect();
+        assert_eq!(quads.first(), Some(&(10, [0x00, 0xff, 0x00, 0xff])));
+        assert_eq!(quads.last(), Some(&(0, [0xff, 0x00, 0x00, 0xff])));
+        // Red rises and green falls by whole steps all the way along.
+        for pair in quads.windows(2) {
+            assert!(pair[1].1[0] > pair[0].1[0] && pair[1].1[1] < pair[0].1[1]);
+        }
     }
 
     #[test]

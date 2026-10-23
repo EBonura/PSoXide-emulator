@@ -15,7 +15,7 @@
 //   bits 13..=21  clut_y          (pixel y, 0..=511)
 //   bit      22   TEXTURED
 //   bit      23   RAW_TEXTURE     (skip tint modulate)
-//   bit      24   SEMI_TRANS
+//   bit      24   PIXEL_COLOUR
 //   bit      25   TEX_OPAQUE_PASS (discard STP texels)
 //   bit      26   TEX_SEMI_PASS   (keep only STP texels)
 //   bit      27   DITHER          (GP0(E1) bit 9 -- 4x4 ordered dither)
@@ -26,6 +26,10 @@
 //   bits  8..=15  mask_y in pixels
 //   bits 16..=23  offset_x in pixels
 //   bits 24..=31  offset_y in pixels
+
+// Which blend the pipeline applies (`pipeline::BlendKind`): 0 opaque, 1 average,
+// 2 add, 3 subtract, 4 add-quarter. Set per pipeline at creation.
+override BLEND_KIND: u32 = 0u;
 
 const VRAM_W: u32 = 1024u;
 const VRAM_H: u32 =  512u;
@@ -100,6 +104,7 @@ fn fs_blit(in: BlitOut) -> @location(0) vec4<f32> {
 }
 
 const FLAG_TEXTURED:    u32 = 1u << 22u;
+const FLAG_PIXEL_COLOUR: u32 = 1u << 24u;
 const FLAG_RAW_TEXTURE: u32 = 1u << 23u;
 const FLAG_TEX_OPAQUE_PASS: u32 = 1u << 25u;
 const FLAG_TEX_SEMI_PASS:   u32 = 1u << 26u;
@@ -137,6 +142,41 @@ fn dither_to_bgr15(rgb: vec3<f32>, frag: vec2<f32>) -> vec3<f32> {
         out[i] = f32((c5 << 3u) | (c5 >> 2u)) / 255.0;
     }
     return out;
+}
+
+// The source a blended pipeline needs so that its fixed-function blender
+// (see `pipeline.rs`) lands on the CPU's 5-bit result.
+//
+// The CPU blends 5-bit codes. Here the target holds 8-bit values and the top
+// five bits of a value are its code, so the source is cut to its code first and
+// handed over as `8 * code`: the blender then adds or subtracts whole codes and
+// the low three bits of the destination can never carry into the code. The
+// average halves the code (`4 * code`) and the quarter mode keeps `code >> 2`,
+// which are the CPU's `(B + F) >> 1` and `B + F / 4` terms. Without the cut the
+// blender added the uncut 8-bit source, which is up to 7/8 of a code too bright
+// and tipped one code in four across.
+//
+// The edge texture filter exists to leave the PS1's 5-bit look behind, so under
+// it the source keeps all its bits and only the mode's scale is applied.
+fn blend_encode(rgb: vec3<f32>) -> vec3<f32> {
+    if BLEND_KIND == 0u {
+        return rgb;
+    }
+    let c8 = round(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0);
+    var v = c8;
+    if u_texfilter.x == 0u {
+        let code = floor(c8 / 8.0);
+        v = code * 8.0;
+        if BLEND_KIND == 4u {
+            v = floor(code / 4.0) * 8.0;
+        }
+    } else if BLEND_KIND == 4u {
+        v = c8 * 0.25;
+    }
+    if BLEND_KIND == 1u {
+        v = v * 0.5;
+    }
+    return v / 255.0;
 }
 
 @vertex
@@ -424,10 +464,18 @@ fn plane_attr(in: VertexOut, ch: u32, px: vec2<i32>) -> u32 {
 // at higher internal scales). The planes are evaluated exactly at the PSX
 // pixel and this adds the gradient over the sub-pixel, so a scaled target
 // stays smooth while 1x stays bit-exact.
+//
+// The offset is built from the host pixel index in integers, so the centre
+// sub-pixel of an odd scale is exactly zero. Dividing the float fragment
+// position by the scale instead left a rounding residue of a few 1e-5 at
+// x ~ 300, and a sliver triangle's gradient (hundreds of levels per pixel)
+// turned that into a whole level: the centre sample, which must equal the
+// CPU's pixel, came out one code low on a handful of pixels a frame.
 fn plane_subpixel(frag: vec2<f32>) -> vec2<f32> {
-    let s = f32(u_texfilter.y);
-    let p = frag / s;
-    return (p - floor(p)) - vec2<f32>(0.5, 0.5);
+    let s = max(u_texfilter.y, 1u);
+    let r = vec2<i32>(vec2<u32>(floor(frag)) % vec2<u32>(s, s));
+    let twice = vec2<i32>(2 * r.x + 1 - i32(s), 2 * r.y + 1 - i32(s));
+    return vec2<f32>(twice) / f32(2u * s);
 }
 
 fn plane_delta(in: VertexOut, ch: u32, sub: vec2<f32>) -> f32 {
@@ -437,8 +485,8 @@ fn plane_delta(in: VertexOut, ch: u32, sub: vec2<f32>) -> f32 {
 }
 
 fn plane_pixel(frag: vec2<f32>) -> vec2<i32> {
-    let s = f32(u_texfilter.y);
-    return vec2<i32>(floor(frag / s));
+    let s = max(u_texfilter.y, 1u);
+    return vec2<i32>(vec2<u32>(floor(frag)) / vec2<u32>(s, s));
 }
 
 // Output is the gamma-coded display value, written byte-for-byte: the draw
@@ -451,7 +499,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var color = in.color;
     if (in.flags & FLAG_PLANE_RGB) != 0u {
         let px = plane_pixel(in.position.xy);
-        let sub = plane_subpixel(in.position.xy);
+        // 2D quads keep the colour of their native pixel across its sub-pixels.
+        var sub = plane_subpixel(in.position.xy);
+        if (in.flags & FLAG_PIXEL_COLOUR) != 0u {
+            sub = vec2<f32>(0.0, 0.0);
+        }
         let r = f32(plane_attr(in, 0u, px)) + plane_delta(in, 0u, sub);
         let g = f32(plane_attr(in, 1u, px)) + plane_delta(in, 1u, sub);
         let b = f32(plane_attr(in, 2u, px)) + plane_delta(in, 2u, sub);
@@ -462,7 +514,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         if dither {
             rgb = dither_to_bgr15(rgb, in.position.xy);
         }
-        return vec4<f32>(rgb, in.color.a);
+        return vec4<f32>(blend_encode(rgb), in.color.a);
     }
     // A polygon is drawn half a pixel down-right (see `vs_main`), so the
     // interpolant here is the plane at the pixel's top-left corner; the
@@ -541,5 +593,5 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if dither {
         rgb = dither_to_bgr15(rgb, in.position.xy);
     }
-    return vec4<f32>(rgb, 1.0);
+    return vec4<f32>(blend_encode(rgb), 1.0);
 }

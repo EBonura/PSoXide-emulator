@@ -53,7 +53,7 @@ pub struct HwVertex {
 /// bits 13..=21  clut_y         (0..511)
 /// bit      22   TEXTURED                      else flat color
 /// bit      23   RAW_TEXTURE                   skip tint modulate
-/// bit      24   SEMI_TRANS                    routed to a non-Opaque batch
+/// bit      24   PIXEL_COLOUR                  colour planes read at the pixel, not sub-pixel
 /// bit      25   TEX_OPAQUE_PASS               discard STP texels
 /// bit      26   TEX_SEMI_PASS                 keep only STP texels
 /// bit      27   DITHER                        GP0(E1) bit 9 was set
@@ -69,7 +69,13 @@ pub struct HwVertex {
 pub mod flags {
     pub const TEXTURED: u32 = 1 << 22;
     pub const RAW_TEXTURE: u32 = 1 << 23;
-    pub const SEMI_TRANS: u32 = 1 << 24;
+    /// The shader evaluates the colour planes at the native pixel only, with
+    /// no sub-pixel gradient on a scaled target, so every sub-pixel of a
+    /// native pixel is the CPU's colour (nearest-neighbour enlargement).
+    /// Set on axis-aligned textured quads: the sprites, text and panels of 2D
+    /// content, whose upscaled look is the console's pixels made larger.
+    /// Semi-transparency needs no flag of its own: it selects a pipeline.
+    pub const PIXEL_COLOUR: u32 = 1 << 24;
     pub const TEX_OPAQUE_PASS: u32 = 1 << 25;
     pub const TEX_SEMI_PASS: u32 = 1 << 26;
     /// GP0(E1) bit 9 (or the per-primitive tpage word's copy of it)
@@ -134,15 +140,16 @@ const INITIAL_VERTEX_CAPACITY: u64 = 16 * 1024;
 pub enum BlendKind {
     /// `cmd-bit-25` clear → standard opaque draw, `BlendState::REPLACE`.
     Opaque = 0,
-    /// PSX semi-trans mode 0: `(B + F) / 2`. Implemented as
-    /// `Constant * F + Constant * B` with blend_constant = 0.5.
+    /// PSX semi-trans mode 0: `(B + F) / 2`. The shader emits the source
+    /// already halved; the blender adds `Constant * B` (see
+    /// [`AVERAGE_DST_FACTOR`]).
     Average = 1,
     /// PSX semi-trans mode 1: `B + F`. `One * F + One * B`.
     Add = 2,
     /// PSX semi-trans mode 2: `B - F`. `One * B - One * F` (reverse subtract).
     Sub = 3,
-    /// PSX semi-trans mode 3: `B + F/4`. `Constant * F + One * B` with
-    /// blend_constant = 0.25.
+    /// PSX semi-trans mode 3: `B + F/4`. The shader emits the source already
+    /// quartered; the blender adds `One * F + One * B`.
     AddQuarter = 4,
 }
 
@@ -154,12 +161,24 @@ impl BlendKind {
     }
 }
 
+/// Destination weight of the average blend: one half, less 1/1024.
+///
+/// The CPU averages 5-bit codes, `(B + F) >> 1`, which floors. The target
+/// holds 8-bit values whose top five bits are the code and whose low three bits
+/// are anything from 0 to 7 (a code expanded from VRAM carries `code >> 2`
+/// there). Weighting the destination by exactly one half lets that low part
+/// push an odd sum over the next code (`8k + 7.5` rounds to `8k + 8`).
+/// Taking 1/1024 off the weight removes at most a quarter of an 8-bit step
+/// from the result, enough to keep every case below the rounding point and
+/// too little to reach the code below. `semi_trans_blends_equal_the_cpu_for_every_code`
+/// checks all 32 x 32 code pairs in all four modes.
+const AVERAGE_DST_FACTOR: f64 = 0.5 - 1.0 / 1024.0;
+
 /// Blend-constant value to bind before a batch's draw call.
-/// Only Average / AddQuarter use it; the others ignore it.
+/// Only Average uses it; the others ignore it.
 fn blend_constant_for(kind: BlendKind) -> wgpu::Color {
     let v = match kind {
-        BlendKind::Average => 0.5,
-        BlendKind::AddQuarter => 0.25,
+        BlendKind::Average => AVERAGE_DST_FACTOR,
         _ => 0.0,
     };
     wgpu::Color {
@@ -342,7 +361,12 @@ impl HwPipeline {
         // Same shader + same vertex layout; only the color
         // attachment's `BlendState` differs. Translator picks the
         // right pipeline per primitive at draw time.
-        let make_pipeline = |label: &str, blend: wgpu::BlendState| {
+        let make_pipeline = |label: &str, kind: BlendKind, blend: wgpu::BlendState| {
+            // `BLEND_KIND` tells `fs_main` which arithmetic the blender applies.
+            let blend_kind = std::collections::HashMap::from([(
+                "BLEND_KIND".to_string(),
+                f64::from(kind as u8),
+            )]);
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
@@ -374,18 +398,33 @@ impl HwPipeline {
                         blend: Some(blend),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &blend_kind,
+                        ..Default::default()
+                    },
                 }),
                 multiview: None,
                 cache: None,
             })
         };
         let pipelines = [
-            make_pipeline("psx-hw-pipeline-opaque", wgpu::BlendState::REPLACE),
-            make_pipeline("psx-hw-pipeline-average", blend_state_average()),
-            make_pipeline("psx-hw-pipeline-add", blend_state_add()),
-            make_pipeline("psx-hw-pipeline-sub", blend_state_sub()),
-            make_pipeline("psx-hw-pipeline-add-quarter", blend_state_add_quarter()),
+            make_pipeline(
+                "psx-hw-pipeline-opaque",
+                BlendKind::Opaque,
+                wgpu::BlendState::REPLACE,
+            ),
+            make_pipeline(
+                "psx-hw-pipeline-average",
+                BlendKind::Average,
+                blend_state_average(),
+            ),
+            make_pipeline("psx-hw-pipeline-add", BlendKind::Add, blend_state_add()),
+            make_pipeline("psx-hw-pipeline-sub", BlendKind::Sub, blend_state_sub()),
+            make_pipeline(
+                "psx-hw-pipeline-add-quarter",
+                BlendKind::AddQuarter,
+                blend_state_add_quarter(),
+            ),
         ];
 
         // Fullscreen VRAM->target blit (wireframe mode rebuilds the
@@ -596,14 +635,19 @@ fn grown_vertex_capacity_bytes(current: u64, required: u64) -> u64 {
 // All four reuse the same factors for color and alpha (alpha
 // channel of the output is unused by egui's display path; we
 // just keep it consistent). The blend constant is bound per draw
-// call via `RenderPass::set_blend_constant`. PSX doesn't need
-// per-component constants -- same value on R/G/B/A is fine.
+// call via `RenderPass::set_blend_constant`.
+//
+// The shader pre-scales the source for each kind (`blend_encode` in
+// `prim.wgsl`) so these fixed factors reproduce the CPU's 5-bit arithmetic:
+// the source arrives as `8 * code` (halved, quartered or truncated to match
+// the mode), the destination is the 8-bit target value, and the top five bits
+// of the result are the CPU's blended code.
 
-/// PSX mode 0 -- `(B + F) / 2`. With blend_constant = 0.5,
-/// `Constant * F + Constant * B = 0.5*F + 0.5*B`.
+/// PSX mode 0 -- `(B + F) / 2`. The shader emits `F / 2`, so
+/// `One * F/2 + AVERAGE_DST_FACTOR * B`.
 fn blend_state_average() -> wgpu::BlendState {
     let c = wgpu::BlendComponent {
-        src_factor: wgpu::BlendFactor::Constant,
+        src_factor: wgpu::BlendFactor::One,
         dst_factor: wgpu::BlendFactor::Constant,
         operation: wgpu::BlendOperation::Add,
     };
@@ -631,11 +675,11 @@ fn blend_state_sub() -> wgpu::BlendState {
     wgpu::BlendState { color: c, alpha: c }
 }
 
-/// PSX mode 3 -- `B + F/4`. `Constant=0.25`,
-/// `Constant*F + One*B = 0.25*F + B`.
+/// PSX mode 3 -- `B + F/4`. The shader emits `F / 4` (as a whole code),
+/// so this is the plain additive `One*F/4 + One*B`.
 fn blend_state_add_quarter() -> wgpu::BlendState {
     let c = wgpu::BlendComponent {
-        src_factor: wgpu::BlendFactor::Constant,
+        src_factor: wgpu::BlendFactor::One,
         dst_factor: wgpu::BlendFactor::One,
         operation: wgpu::BlendOperation::Add,
     };

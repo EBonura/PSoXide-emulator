@@ -2175,10 +2175,11 @@ mod tests {
     }
 
     /// All four semi-transparency modes combine the destination and the
-    /// source on the gamma-coded 5-bit values, so the HW result must land
-    /// within one 5-bit step of the CPU rasterizer. Blending through the
-    /// sRGB view instead (decode, add in linear light, re-encode) left an
-    /// additive +24/255 rectangle at about +3/255.
+    /// source on the gamma-coded 5-bit values, so the HW result lands on the
+    /// CPU rasterizer's code. Blending through the sRGB view instead (decode,
+    /// add in linear light, re-encode) left an additive +24/255 rectangle at
+    /// about +3/255. `semi_trans_blends_equal_the_cpu_for_every_code` covers
+    /// every pair of codes; this is the single-rectangle smoke test.
     #[test]
     fn semi_trans_modes_match_cpu_blend_values() {
         let prefill = 0x4210; // r=g=b=16 in 5-bit, 132 in display codes
@@ -2206,9 +2207,211 @@ mod tests {
                 "{name}: CPU blend was a no-op"
             );
             for c in 0..3 {
-                assert!(
-                    want[c].abs_diff(got[c]) <= 8,
+                assert_eq!(
+                    want[c] >> 3,
+                    got[c] >> 3,
                     "{name}: channel {c} cpu {want:?} hw {got:?}"
+                );
+            }
+        }
+    }
+
+    /// A sprite-shaped Gouraud textured quad (text with a sheen, a panel) is
+    /// 2D content: at 3x each native pixel is one colour, the CPU's, so the
+    /// frame is the nearest-neighbour enlargement of the CPU frame. A tilted
+    /// quad of the same colours is a 3D surface and keeps its smooth shading
+    /// across the sub-pixels.
+    #[test]
+    fn axis_aligned_gouraud_textured_quads_enlarge_without_smoothing() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        renderer.set_internal_scale(3, None);
+        let mut seed = Vec::new();
+        for y in 0..64u16 {
+            for x in 0..64u16 {
+                seed.push((512 + x, y, 0x7bde)); // opaque light grey texels
+            }
+        }
+        let tpage = 8 | (2 << 7);
+        let quad = |corners: [(i32, i32); 4]| {
+            let mut words = line_env();
+            words.push(0xe100_0000 | tpage);
+            // (cmd+colour, xy, uv) per vertex; the second carries the tpage.
+            let colour = [0x40_40_40u32, 0x40_40_40, 0xc0_c0_c0, 0xc0_c0_c0];
+            let uv = [(0, 0), (63, 0), (0, 63), (63, 63)];
+            for i in 0..4 {
+                let head = if i == 0 { 0x3c00_0000 } else { 0 };
+                words.extend([
+                    head | colour[i],
+                    pack_xy(corners[i]),
+                    uv[i].0 | (uv[i].1 << 8) | if i == 1 { tpage << 16 } else { 0 },
+                ]);
+            }
+            words
+        };
+        let mut blocks_uniform = |corners: [(i32, i32); 4]| -> bool {
+            let words = quad(corners);
+            let mut gpu = Gpu::new();
+            for &(x, y, v) in &seed {
+                gpu.vram.set_pixel(x, y, v);
+            }
+            let start_vram = gpu.vram.words().to_vec();
+            renderer.sync_target_from_vram(&start_vram);
+            gpu.enable_cmd_log();
+            for &w in &words {
+                gpu.gp0_push(w);
+            }
+            renderer.render_frame(&gpu, &gpu.cmd_log, &start_vram);
+            let (_, _, rgba) = renderer.read_subrect_rgba8(0, 0, 3 * 64, 3 * 64);
+            let at = |x: usize, y: usize| rgba[(y * 3 * 64 + x) * 4..][..3].to_vec();
+            (10..38).all(|y| {
+                (10..38)
+                    .all(|x| (0..9).all(|i| at(3 * x + i % 3, 3 * y + i / 3) == at(3 * x, 3 * y)))
+            })
+        };
+        assert!(
+            blocks_uniform([(8, 8), (40, 8), (8, 40), (40, 40)]),
+            "an axis-aligned quad's native pixels must be uniform blocks"
+        );
+        assert!(
+            !blocks_uniform([(8, 12), (40, 8), (8, 44), (40, 40)]),
+            "a tilted quad keeps its smooth shading"
+        );
+    }
+
+    /// Lines at every slope, flat and Gouraud, plain and dithered, plot the
+    /// CPU walker's pixels at its colours exactly. The earlier band of
+    /// triangles was a pixel off wherever the DDA's half-pixel ties break the
+    /// other way (the block outlines of VoXide's TNT, 106 pixels a frame).
+    #[test]
+    fn random_lines_match_the_cpu_pixel_for_pixel() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        assert_eq!(renderer.internal_scale(), 1, "compares PSX-native pixels");
+        let mut state = 0x7f4a_7c15u32;
+        let mut next = move |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n
+        };
+        for (shaded, dither) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut words = line_env();
+            words.push(0xe100_0000 | if dither { 0x200 } else { 0 });
+            for _ in 0..150 {
+                let a = xyw(next(120) as u16, next(120) as u16);
+                let b = xyw(next(120) as u16, next(120) as u16);
+                if shaded {
+                    words.extend([0x5000_0000 | next(0x100_0000), a]);
+                    words.extend([next(0x100_0000), b]);
+                } else {
+                    words.extend([0x4000_0000 | next(0x100_0000), a, b]);
+                }
+            }
+            let mut gpu = Gpu::new();
+            let start_vram = gpu.vram.words().to_vec();
+            renderer.sync_target_from_vram(&start_vram);
+            gpu.enable_cmd_log();
+            for &w in &words {
+                gpu.gp0_push(w);
+            }
+            renderer.render_frame(&gpu, &gpu.cmd_log, &start_vram);
+            let cpu = gpu.vram.words().to_vec();
+            let (_, _, rgba) = renderer.read_subrect_rgba8(0, 0, 128, 128);
+            let mut bad = Vec::new();
+            for y in 0..128usize {
+                for x in 0..128usize {
+                    let want = bgr15_to_rgba8(cpu[y * VRAM_WIDTH as usize + x]);
+                    let got = &rgba[(y * 128 + x) * 4..][..3];
+                    if (0..3).any(|c| want[c] >> 3 != got[c] >> 3) {
+                        bad.push((x, y, [want[0], want[1], want[2]], [got[0], got[1], got[2]]));
+                    }
+                }
+            }
+            assert!(
+                bad.is_empty(),
+                "shaded {shaded} dither {dither}: {} pixels differ, first: {:?}",
+                bad.len(),
+                &bad[..bad.len().min(4)]
+            );
+        }
+    }
+
+    /// Every semi-transparency mode blends to exactly the CPU's 5-bit code, for
+    /// every backdrop code against every source code, with and without the
+    /// dither. The backdrop is a 32-column strip (column `b` holds code `b` in
+    /// red, `31 - b` in green and `5b mod 32` in blue) and each of 32 rows is
+    /// painted with a source whose three codes also walk the full range (and
+    /// whose low three bits are not the replicated ones), so every red, green
+    /// and blue pair of codes appears once. The earlier check allowed one 5-bit
+    /// step; the fixed-function blender added the uncut 8-bit source and ran
+    /// up to three steps bright (HL's HUD, lightning and glows).
+    #[test]
+    fn semi_trans_blends_equal_the_cpu_for_every_code() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        assert_eq!(renderer.internal_scale(), 1, "compares PSX-native pixels");
+        let code = |b: u16| (b & 31, 31 - (b & 31), (b * 5) & 31);
+        let mut seed = Vec::new();
+        for b in 0..32u16 {
+            let (r, g, bl) = code(b);
+            for f in 0..32u16 {
+                seed.push((16 + b, 16 + f, r | (g << 5) | (bl << 10)));
+            }
+        }
+        for dither in [false, true] {
+            for (mode, name) in [
+                (0u32, "average"),
+                (1, "add"),
+                (2, "subtract"),
+                (3, "add quarter"),
+            ] {
+                let mut words = line_env();
+                words.push(0xe100_0000 | (mode << 5) | if dither { 0x200 } else { 0 });
+                for f in 0..32u32 {
+                    let level = |c: u32| (c << 3) | ((c * 5 + 3) & 7);
+                    let tint = level(f) | (level((f * 3) & 31) << 8) | (level(31 - f) << 16);
+                    words.extend([0x6200_0000 | tint, xyw(16, 16 + f as u16), (32 << 16) | 1]);
+                }
+                // Both backends start from the seeded strip.
+                let mut gpu = Gpu::new();
+                for &(x, y, v) in &seed {
+                    gpu.vram.set_pixel(x, y, v);
+                }
+                let start_vram = gpu.vram.words().to_vec();
+                renderer.sync_target_from_vram(&start_vram);
+                gpu.enable_cmd_log();
+                for &w in &words {
+                    gpu.gp0_push(w);
+                }
+                renderer.render_frame(&gpu, &gpu.cmd_log, &start_vram);
+                let cpu = gpu.vram.words().to_vec();
+                let (_, _, rgba) = renderer.read_subrect_rgba8(16, 16, 32, 32);
+                let mut bad = Vec::new();
+                for f in 0..32usize {
+                    for b in 0..32usize {
+                        let want = bgr15_to_rgba8(cpu[(16 + f) * VRAM_WIDTH as usize + 16 + b]);
+                        let got = &rgba[(f * 32 + b) * 4..][..3];
+                        if (0..3).any(|c| want[c] >> 3 != got[c] >> 3) {
+                            bad.push((
+                                b,
+                                f,
+                                [want[0] >> 3, want[1] >> 3, want[2] >> 3],
+                                [got[0] >> 3, got[1] >> 3, got[2] >> 3],
+                            ));
+                        }
+                    }
+                }
+                assert!(
+                    bad.is_empty(),
+                    "{name} dither {dither}: {} of 1024 pixels differ (backdrop column, \
+                     source row, cpu codes, hw codes), first: {:?}",
+                    bad.len(),
+                    &bad[..bad.len().min(6)]
                 );
             }
         }
@@ -2375,6 +2578,142 @@ mod tests {
                 "textured {textured} dither {dither}: {} of 4096 pixels differ, first: {:?}",
                 bad.len(),
                 &bad[..bad.len().min(4)]
+            );
+        }
+    }
+
+    /// The centre sub-pixel of every 3x3 block of a 3x target is the CPU's own
+    /// sample: the same coverage, the same texel, the same colour. This is the
+    /// invariant the gate's HW3 comparison rests on, so it is checked here on
+    /// random polygons, plain and textured, with and without the dither.
+    #[test]
+    fn random_polygons_match_the_cpu_at_the_centre_of_a_scaled_pixel() {
+        for (textured, dither) in [(false, false), (false, true), (true, false), (true, true)] {
+            let Some(mut renderer) = headless_renderer() else {
+                eprintln!("skipping: no headless wgpu adapter");
+                return;
+            };
+            renderer.set_internal_scale(3, None);
+            // Far from the left edge: the sub-pixel offset's rounding residue
+            // grows with the pixel's x.
+            const OX: i32 = 250;
+            let mut state = 0x51ed_270bu32 ^ (u32::from(textured) << 3) ^ u32::from(dither);
+            let mut next = move |n: u32| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 8) % n
+            };
+            let mut seed = Vec::new();
+            for y in 0..64u16 {
+                for x in 0..64u16 {
+                    let c = 1 + ((x * 7 + y * 13 + (x ^ y) * 3) % 0x7ffe);
+                    seed.push((512 + x, y, c));
+                }
+            }
+            let mut words = line_env();
+            let tpage = 8 | (2 << 7);
+            words.push(0xe100_0000 | tpage | if dither { 0x200 } else { 0 });
+            for n in 0..300 {
+                // Every other polygon is a sliver: its colour and texture
+                // gradients are hundreds of levels per pixel, which is what
+                // shows a rounding residue in the sub-pixel offset.
+                let v: Vec<(i32, i32)> = if n % 2 == 0 {
+                    (0..3)
+                        .map(|_| (OX + 8 + next(48) as i32, 8 + next(48) as i32))
+                        .collect()
+                } else {
+                    let (x, y) = (OX + 8 + next(24) as i32, 8 + next(40) as i32);
+                    let (dx, dy) = (8 + next(24) as i32, next(3) as i32);
+                    vec![
+                        (x, y),
+                        (x + dx, y + dy),
+                        (x + 2 * dx, y + 2 * dy + next(2) as i32),
+                    ]
+                };
+                let c: Vec<u32> = (0..3).map(|_| next(0x100_0000)).collect();
+                if textured {
+                    let uv: Vec<u32> = (0..3).map(|_| next(64) | (next(64) << 8)).collect();
+                    words.extend([
+                        0x3400_0000 | c[0],
+                        pack_xy(v[0]),
+                        uv[0],
+                        c[1],
+                        pack_xy(v[1]),
+                        uv[1] | (tpage << 16),
+                        c[2],
+                        pack_xy(v[2]),
+                        uv[2],
+                    ]);
+                } else {
+                    words.extend([
+                        0x3000_0000 | c[0],
+                        pack_xy(v[0]),
+                        c[1],
+                        pack_xy(v[1]),
+                        c[2],
+                        pack_xy(v[2]),
+                    ]);
+                }
+            }
+            if textured {
+                // Sprite-shaped Gouraud quads, magnified or shrunk, like HUD
+                // art and text with a sheen.
+                for _ in 0..60 {
+                    let (x0, y0) = (OX + 4 + next(24) as i32, 4 + next(24) as i32);
+                    let (w, h) = (4 + next(24) as i32, 4 + next(24) as i32);
+                    let (u0, v0) = (next(20), next(20));
+                    let (uw, vh) = (3 + next(30), 3 + next(30));
+                    let c: Vec<u32> = (0..4).map(|_| next(0x100_0000)).collect();
+                    // Mirrored sprites too: the CPU's split does not follow the
+                    // screen, it follows the vertex order.
+                    let (xa, xb) = if next(2) == 0 {
+                        (x0, x0 + w)
+                    } else {
+                        (x0 + w, x0)
+                    };
+                    let (ya, yb) = if next(2) == 0 {
+                        (y0, y0 + h)
+                    } else {
+                        (y0 + h, y0)
+                    };
+                    let corner = [(xa, ya), (xb, ya), (xa, yb), (xb, yb)];
+                    let uv = [(u0, v0), (u0 + uw, v0), (u0, v0 + vh), (u0 + uw, v0 + vh)];
+                    for k in 0..4 {
+                        words.extend([
+                            if k == 0 { 0x3c00_0000 | c[0] } else { c[k] },
+                            pack_xy(corner[k]),
+                            uv[k].0 | (uv[k].1 << 8) | if k == 1 { tpage << 16 } else { 0 },
+                        ]);
+                    }
+                }
+            }
+            let mut gpu = Gpu::new();
+            for &(x, y, v) in &seed {
+                gpu.vram.set_pixel(x, y, v);
+            }
+            let start_vram = gpu.vram.words().to_vec();
+            renderer.sync_target_from_vram(&start_vram);
+            gpu.enable_cmd_log();
+            for &w in &words {
+                gpu.gp0_push(w);
+            }
+            renderer.render_frame(&gpu, &gpu.cmd_log, &start_vram);
+            let cpu = gpu.vram.words().to_vec();
+            let (_, _, rgba) = renderer.read_subrect_rgba8(3 * OX as u32, 0, 3 * 64, 3 * 64);
+            let mut bad = Vec::new();
+            for y in 0..64usize {
+                for x in 0..64usize {
+                    let want = bgr15_to_rgba8(cpu[y * VRAM_WIDTH as usize + OX as usize + x]);
+                    let got = &rgba[((3 * y + 1) * 3 * 64 + 3 * x + 1) * 4..][..3];
+                    if (0..3).any(|c| want[c] >> 3 != got[c] >> 3) {
+                        bad.push((x, y, [want[0], want[1], want[2]], [got[0], got[1], got[2]]));
+                    }
+                }
+            }
+            assert!(
+                bad.is_empty(),
+                "textured {textured} dither {dither}: {} of 4096 centre samples differ, first: {:?}",
+                bad.len(),
+                &bad[..bad.len().min(6)]
             );
         }
     }

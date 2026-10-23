@@ -5332,6 +5332,34 @@ fn for_each_line_pixel(
     }
 }
 
+/// Every pixel the PS1 line engine plots for one segment, with the 8-bit
+/// colour it plots there, in plotting order.
+///
+/// This is the coordinate walk of [`Gpu`]'s own line rasterizers followed by
+/// the Gouraud colour walk of the shaded one (a Q12 gradient with a +0.5 seed;
+/// a flat line is the case where both ends have the same colour), before any
+/// dither or 15bpp truncation. Renderers that draw lines some other way use it
+/// to land on exactly the pixels the console writes. `c0` and `c1` are 24-bit
+/// `BBGGRR` words. Pixels are not clipped to the draw area.
+pub fn walk_line(
+    v0: (i32, i32),
+    v1: (i32, i32),
+    c0: u32,
+    c1: u32,
+    mut plot: impl FnMut(i32, i32, [u8; 3]),
+) {
+    for_each_line_pixel(v0, v1, |x, y, step, steps, swapped| {
+        let (start, end) = if swapped { (c1, c0) } else { (c0, c1) };
+        let channel = |shift: u32| {
+            let a = ((start >> shift) & 0xff) as i32;
+            let b = ((end >> shift) & 0xff) as i32;
+            let value = (a << 12) + (1 << 11) + (((b - a) << 12) / steps) * step;
+            (value >> 12).clamp(0, 255) as u8
+        };
+        plot(x, y, [channel(0), channel(8), channel(16)]);
+    });
+}
+
 /// Width and height of an A0h/C0h transfer from its size word. Hardware
 /// uses a wrap-around convention: 0 means 1024 wide or 512 high.
 fn vram_transfer_size(wh: u32) -> (u16, u16) {
