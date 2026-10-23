@@ -1809,6 +1809,9 @@ impl Cpu {
         mut stop_after: impl FnMut(&Bus) -> bool,
     ) -> (u64, Result<(), ExecutionError>) {
         let mut steps = 0;
+        // The batch that just ran ended at the clock limit: another started
+        // now would run nothing, so the step comes first.
+        let mut after_limit = false;
         while steps < max_steps {
             // A waiting HLE call retried with nothing else happening is
             // charged without re-running the call; same instructions, same
@@ -1823,10 +1826,11 @@ impl Cpu {
             if skipped != 0 {
                 continue;
             }
-            if !bus.limits.configured() {
+            if !bus.limits.configured() && !after_limit {
                 let ran = self.run_fast(bus, max_steps - steps, until_cycle);
                 if ran != 0 {
                     steps += ran;
+                    after_limit = self.blocks.ended_at_limit;
                     // A run's last access can take the clock to the limit.
                     if bus.cycles() >= until_cycle || stop_after(bus) {
                         break;
@@ -1834,6 +1838,7 @@ impl Cpu {
                     continue;
                 }
             }
+            after_limit = false;
             if let Err(error) = self.execute_one::<true>(bus) {
                 return (steps, Err(error));
             }

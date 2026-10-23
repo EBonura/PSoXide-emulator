@@ -116,6 +116,7 @@ impl Cpu {
                 return 0;
             }
         }
+        self.blocks.ended_at_limit = false;
         // The clock limit: `hard` must never be reached inside the batch;
         // `limit` is also below the GPU's quiet span, past which each
         // step's issue cycle is applied at once (`eager`) so the GPU list
@@ -215,6 +216,7 @@ impl Cpu {
                 }
                 if bus.cycles() + st.issue + 1 >= st.limit {
                     if bus.cycles() + st.issue + 1 >= st.hard {
+                        self.blocks.ended_at_limit = true;
                         break 'blocks;
                     }
                     // Past the GPU's quiet span: settle the clock exactly

@@ -413,6 +413,10 @@ pub struct BlockCache {
     scratch: u32,
     /// Decoded miss lines ([`Cpu::enter_miss_line`]); allocated on first use.
     miss_memo: Vec<MissMemo>,
+    /// The last batch of the native tier's loop ended at the hard clock
+    /// limit, so the next one, started at once, would end there too
+    /// ([`Cpu::run`] goes on with a single step instead).
+    pub(super) ended_at_limit: bool,
 }
 
 impl BlockCache {
