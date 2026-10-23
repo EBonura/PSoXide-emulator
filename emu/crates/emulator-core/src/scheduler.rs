@@ -153,9 +153,19 @@ impl Scheduler {
     /// already pending for it (the old deadline is dropped without firing).
     pub fn schedule(&mut self, slot: EventSlot, now: u64, delta: u64) {
         let target = now.saturating_add(delta);
+        // Replacing the earliest event with a later one moves the earliest
+        // deadline later: left cached, it would stay below the clock and
+        // make every "is anything due" look say yes.
+        let moves_earliest_later = self.is_pending(slot)
+            && self.targets[slot as usize] == self.earliest
+            && target > self.earliest;
         self.targets[slot as usize] = target;
         self.pending |= 1 << slot.bit();
-        self.earliest = self.earliest.min(target);
+        if moves_earliest_later {
+            self.refresh_earliest();
+        } else {
+            self.earliest = self.earliest.min(target);
+        }
         self.total_scheduled = self.total_scheduled.saturating_add(1);
     }
 
@@ -304,6 +314,23 @@ mod tests {
         assert_eq!(s.target(EventSlot::VBlank), Some(600));
         assert_eq!(s.lowest_target(), 600);
         assert_eq!(s.total_scheduled(), 1);
+    }
+
+    #[test]
+    fn rescheduling_the_earliest_event_later_moves_the_lowest_target() {
+        let mut s = Scheduler::new();
+        s.schedule(EventSlot::Sio0, 0, 10);
+        s.schedule(EventSlot::CdResponse, 0, 20);
+        assert_eq!(s.lowest_target(), 10);
+        // The pad port's event is replaced by a later one: the earliest is
+        // now the CD-ROM's, not the dropped deadline.
+        s.schedule(EventSlot::Sio0, 5, 100);
+        assert_eq!(s.lowest_target(), 20);
+        s.schedule(EventSlot::CdResponse, 7, 200);
+        assert_eq!(s.lowest_target(), 105);
+        // An earlier replacement still lowers it.
+        s.schedule(EventSlot::CdResponse, 8, 3);
+        assert_eq!(s.lowest_target(), 11);
     }
 
     #[test]
