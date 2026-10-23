@@ -91,10 +91,29 @@ fn lockstep_disc(cue: &std::path::Path, frames: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// The first file the cue sheet names that is not there, if any: a library
+/// can keep a cue sheet after its image is gone.
+fn missing_track(cue: &std::path::Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(cue).ok()?;
+    let dir = cue.parent()?;
+    text.lines()
+        .filter_map(|line| line.trim().strip_prefix("FILE"))
+        .filter_map(|rest| {
+            let start = rest.find('"')? + 1;
+            let end = rest.rfind('"')?;
+            (end > start).then(|| dir.join(&rest[start..end]))
+        })
+        .find(|track| !track.exists())
+}
+
 fn check(cue: &str, frames: u64) {
     let path = games_dir().join(cue);
     if !path.exists() {
         eprintln!("skipping {cue}: {} not found", path.display());
+        return;
+    }
+    if let Some(track) = missing_track(&path) {
+        eprintln!("skipping {cue}: its image {} is not there", track.display());
         return;
     }
     if let Err(e) = lockstep_disc(&path, frames) {
