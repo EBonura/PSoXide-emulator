@@ -87,6 +87,11 @@ fn stops_with_the_poll(extra_polls: u32, tier: bool) {
             bus.port1_completed_polls(),
             "the reference reaches the poll at the same instruction"
         );
+        // As anything that looks at the SPU does, catch both up: a batch
+        // leaves the samples due after its last device access to the next
+        // one.
+        rbus.run_spu_to_current_cycle();
+        bus.run_spu_to_current_cycle();
         assert_eq!(
             state_bytes(&rcpu, &rbus),
             state_bytes(&cpu, &bus),

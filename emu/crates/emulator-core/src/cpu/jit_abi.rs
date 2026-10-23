@@ -960,6 +960,7 @@ fn fast_device_access(
     // before the access.
     bus.advance_exact(run.issue + u64::from(crate::cpu::timing::cycle_cost(op.word)));
     run.issue = 0;
+    bus.settle_spu();
     let mut value = 0;
     let load = match access {
         FastAccess::CdromByte if opcode != 0x28 => {

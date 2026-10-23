@@ -133,9 +133,10 @@ impl Bus {
     /// do before the next step's drain. Batches issue cycles of steps that
     /// stay below [`Bus::quiet_limit`].
     /// The two parts of [`Bus::quiet_limit`]: the hard limit, the next
-    /// scheduler event or SPU sample (or the current cycle while a limit
-    /// oracle freezes the clock or GPU DMA waits for its request), which a
-    /// batch must not reach; and the soft limit, the end of the GPU's quiet
+    /// scheduler event, or SPU sample where
+    /// [`Bus::spu_deadline_for_batches`] says a batch must stop for it (or
+    /// the current cycle while a limit oracle freezes the clock or GPU DMA
+    /// waits for its request), which a batch must not reach; and the soft limit, the end of the GPU's quiet
     /// span (`u64::MAX` when there is none). Past the soft limit the clock
     /// is still exact when advanced one step at a time: a GPU list walk or
     /// FIFO drain then runs inside `advance_cycles` just as it would under
@@ -146,7 +147,10 @@ impl Bus {
         if self.limits.frozen() {
             return (self.cycles, self.cycles);
         }
-        let mut hard = self.scheduler.lowest_target().min(self.spu_sample_deadline);
+        let mut hard = self
+            .scheduler
+            .lowest_target()
+            .min(self.spu_deadline_for_batches());
         if self.gpu_dma_waiting_for_request {
             let wait = self.gpu_wait_quiet_cycles();
             if wait == 0 {
@@ -163,6 +167,60 @@ impl Bus {
             u64::MAX
         };
         (hard, soft)
+    }
+
+    /// The clock a batch's quiet advances must stay below: [`Bus::quiet_limits`]
+    /// folded into one.
+    #[inline(always)]
+    fn batch_quiet_limit(&self) -> u64 {
+        let (hard, soft) = self.quiet_limits();
+        hard.min(soft)
+    }
+
+    /// The SPU sample deadline as far as a batch must stop for it. A batch
+    /// may run through sample deadlines when the SPU can neither raise an
+    /// interrupt nor be seen by anything but an access to a device: the
+    /// samples are then produced late, in the same order with the same
+    /// inputs, at the first branch boundary past the deadline
+    /// ([`Bus::post_op_quiet`] is false from there) or at the next device
+    /// access ([`Bus::settle_spu`]), whichever comes first. An SPU interrupt
+    /// can only latch while it is armed and not already latched
+    /// ([`Spu::irq_triggerable`]), which only an access to the SPU's own
+    /// registers changes; with one possible, the deadline stops the batch as
+    /// before.
+    ///
+    /// [`Spu::irq_triggerable`]: crate::spu::Spu
+    #[inline(always)]
+    fn spu_deadline_for_batches(&self) -> u64 {
+        if self.spu.irq_triggerable() {
+            self.spu_sample_deadline
+        } else {
+            u64::MAX
+        }
+    }
+
+    /// The SPU samples whose deadline the batch ran past, produced now, as
+    /// the interpreter's tick would have at the end of the step that crossed
+    /// it. Called by a batched step after its issue cycles are applied and
+    /// before it touches a device, so that the device (the SPU's registers,
+    /// the CD-ROM controller whose audio the samples mix, the DMA) sees the
+    /// SPU where a step-by-step run leaves it.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn settle_spu(&mut self) {
+        if self.spu_sample_deadline <= self.cycles {
+            self.settle_spu_slow();
+        }
+    }
+
+    /// [`Bus::settle_spu`] with samples due.
+    #[inline(never)]
+    fn settle_spu_slow(&mut self) {
+        // What the scheduler drain that produced these samples in a
+        // step-by-step run does besides: the GPU's quiet span is looked up
+        // afresh.
+        self.gpu_quiet_until = 0;
+        self.run_spu_to_current_cycle();
     }
 
     /// Advance the clock by `n` with the ordinary (exact) path, for a batch
@@ -190,7 +248,7 @@ impl Bus {
         }
         self.scheduler
             .lowest_target()
-            .min(self.spu_sample_deadline)
+            .min(self.spu_deadline_for_batches())
             .min(self.timers.quiet_until())
             .min(self.cdrom.idle_until().saturating_add(1))
     }
@@ -205,7 +263,7 @@ impl Bus {
     #[doc(hidden)]
     #[inline(always)]
     pub fn advance_quiet(&mut self, n: u64) {
-        debug_assert!(n == 0 || self.cycles + n < self.quiet_limit());
+        debug_assert!(n == 0 || self.cycles + n < self.batch_quiet_limit());
         self.advance_cycles(n as u32);
     }
 

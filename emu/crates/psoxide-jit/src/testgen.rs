@@ -430,8 +430,31 @@ pub fn lockstep(
     seed: u64,
     tier: bool,
 ) -> Result<u64, String> {
+    lockstep_with(code, handler, instructions, full_every, seed, tier, &|_| {})
+}
+
+/// [`lockstep`] with `setup` applied to both machines' buses before the
+/// program starts (a playing SPU voice, say).
+///
+/// The whole-machine compares catch both SPUs up to their clocks first, as
+/// anything that looks at an SPU does: a batch may leave the SPU samples
+/// that fell due after the last device access to the next branch boundary
+/// or device access ([`Bus::settle_spu`]), where `Cpu::step` has produced
+/// them at the step that crossed the deadline.
+#[allow(clippy::too_many_arguments)]
+pub fn lockstep_with(
+    code: &[u32],
+    handler: &[u32],
+    instructions: u64,
+    full_every: u64,
+    seed: u64,
+    tier: bool,
+    setup: &dyn Fn(&mut Bus),
+) -> Result<u64, String> {
     let (mut ci, mut bi) = machine(code, handler);
     let (mut cr, mut br) = machine(code, handler);
+    setup(&mut bi);
+    setup(&mut br);
     if tier {
         crate::install_tier(&mut cr).ok_or("no executable memory")?;
     }
@@ -499,6 +522,10 @@ pub fn lockstep(
         if rr.is_err() {
             break;
         }
+        if full_every != 0 && chunks.is_multiple_of(full_every) {
+            bi.run_spu_to_current_cycle();
+            br.run_spu_to_current_cycle();
+        }
         if full_every != 0
             && chunks.is_multiple_of(full_every)
             && state_bytes(&ci, &bi) != state_bytes(&cr, &br)
@@ -510,6 +537,8 @@ pub fn lockstep(
             ));
         }
     }
+    bi.run_spu_to_current_cycle();
+    br.run_spu_to_current_cycle();
     if state_bytes(&ci, &bi) != state_bytes(&cr, &br) {
         return Err(format!("final full state differs at tick {}", cr.tick()));
     }

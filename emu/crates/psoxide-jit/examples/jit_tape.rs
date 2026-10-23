@@ -200,6 +200,8 @@ fn main() {
             }
             if cj.tick() >= full_from || (full_every != 0 && chunks.is_multiple_of(full_every)) {
                 fulls += 1;
+                bi.run_spu_to_current_cycle();
+                bj.run_spu_to_current_cycle();
                 if state_bytes(&ci, &bi) != state_bytes(&cj, &bj) {
                     outcome = format!(
                         "FULL STATE MISMATCH tick {tick} chunk {chunks} (CPU matched, tick {}; chunk began at tick {} pc={:08x} word={:08x}, code {}): {}",
@@ -235,6 +237,8 @@ fn main() {
             }
         }
     }
+    bi.run_spu_to_current_cycle();
+    bj.run_spu_to_current_cycle();
     let final_same = state_bytes(&ci, &bi) == state_bytes(&cj, &bj);
     println!(
         "tape-lockstep {outcome}: mode={} ticks={} chunks={chunks} full_checks={fulls} instructions={} final_state_equal={final_same} display_hash step={:016x} {}={:016x}",

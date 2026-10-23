@@ -1571,7 +1571,7 @@ impl Spu {
     /// by clearing SPUCNT bit 6 (which clears the SPUSTAT flag in
     /// `write_spucnt`); PSX-SPX: SPUSTAT bit 6 is a sticky flag that blocks
     /// re-latching until acknowledged.
-    fn irq_triggerable(&self) -> bool {
+    pub(crate) fn irq_triggerable(&self) -> bool {
         (self.spucnt & (1 << 6)) != 0 && (self.spustat & (1 << 6)) == 0
     }
 

@@ -141,6 +141,11 @@ fn check(load: u32, seed: u64, instructions: u64) {
             cr.tick()
         );
         assert_eq!(ci.gprs(), cr.gprs());
+        // As anything that looks at the SPU does, catch both up: a batch
+        // leaves the samples due after its last device access to the next
+        // one.
+        bi.run_spu_to_current_cycle();
+        br.run_spu_to_current_cycle();
         assert_eq!(
             state_bytes(&ci, &bi),
             state_bytes(&cr, &br),

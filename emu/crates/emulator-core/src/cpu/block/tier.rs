@@ -82,11 +82,13 @@ impl Cpu {
     /// provably does nothing inside the stretch done once, chaining from
     /// block to block across branches:
     ///
-    /// * every step's tick leaves the clock below [`Bus::quiet_limit`] (the
-    ///   next scheduler event or SPU sample, and the end of any GPU span in
-    ///   which advancing the clock only decays credit) and below
-    ///   `until_cycle`, so a tick's drain and the SPU catch-up at the start
-    ///   of a step do nothing, and clock advances add up.
+    /// * every step's tick leaves the clock below [`Bus::quiet_limits`] (the
+    ///   next scheduler event, the next SPU sample when an SPU interrupt could
+    ///   latch, and the end of any GPU span in which advancing the clock only
+    ///   decays credit) and below `until_cycle`, so a tick's drain and the
+    ///   SPU catch-up at the start of a step do nothing, and clock advances
+    ///   add up. Otherwise the SPU samples that fall due are produced late,
+    ///   before anything can tell ([`Bus::settle_spu`]);
     ///   Issue cycles are added up and applied before anything reads the
     ///   clock (a memory access, a multiply, the branch-boundary work);
     /// * loads and stores go to main RAM or the scratchpad only (checked
@@ -568,6 +570,8 @@ impl Cpu {
     pub(in crate::cpu) fn batch_gte_sample(&mut self, bus: &mut Bus, issue: &mut u64) -> bool {
         bus.advance_quiet(*issue);
         *issue = 0;
+        // The sample's drain produces the SPU samples a batch ran past.
+        bus.settle_spu();
         !bus.irq().pending() && bus.post_op_quiet()
     }
 
@@ -594,6 +598,8 @@ impl Cpu {
         }
         st.uncounted = 0;
         self.cursor.block = 0;
+        // The boundary's drain produces the SPU samples the batch ran past.
+        bus.settle_spu();
         if !bus.post_op_quiet() {
             bus.drain_scheduler_events_post_op();
             self.batch_new_limits(bus, st);
@@ -1048,6 +1054,10 @@ impl Cpu {
             OpClass::Load | OpClass::Store => {
                 bus.advance_exact(*issue);
                 *issue = 0;
+                // The batch may have run past SPU sample deadlines
+                // ([`Bus::quiet_limits`]); a device must find the SPU as a
+                // step-by-step run has it.
+                bus.settle_spu();
                 self.execute_memory_op(op, addr, bus);
                 if op.class == OpClass::Store {
                     *ram_ok = false;
