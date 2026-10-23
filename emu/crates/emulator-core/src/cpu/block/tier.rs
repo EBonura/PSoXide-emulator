@@ -7,6 +7,7 @@
 //! untouched when no compiler is installed.
 
 use super::*;
+use crate::cpu::jit_abi::BlockDone;
 
 /// A second tier that turns hot blocks into native code (the recompiler,
 /// `psoxide-jit`). Installed with [`Cpu::set_block_compiler`].
@@ -934,7 +935,7 @@ impl Cpu {
             // It ran the whole block (stopping after its last op): finish it
             // as the batch loop would.
             return Some(match self.native_block_done(bus, &run, st) {
-                Some(_) if !stopped => NativeExit::Resume,
+                BlockDone::Entered(_) | BlockDone::NoBlock if !stopped => NativeExit::Resume,
                 _ => NativeExit::Break,
             });
         }

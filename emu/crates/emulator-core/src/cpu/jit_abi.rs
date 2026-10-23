@@ -250,7 +250,7 @@ impl Cpu {
         bus: &mut Bus,
         run: &NativeRun,
         st: &mut crate::cpu::block::BatchState,
-    ) -> Option<usize> {
+    ) -> BlockDone {
         use crate::cpu::block::op_flags;
         let n = run.op_count as usize;
         // SAFETY: `ops` points at the current block's `op_count` ops.
@@ -263,17 +263,28 @@ impl Cpu {
         self.executing_in_branch_delay = false;
         if last.flags & op_flags::DELAY_SLOT != 0 && run.taken != 0 {
             if !self.batch_taken_boundary(bus, run.target, st) {
-                return None;
+                return BlockDone::Interrupted;
             }
         } else {
             self.pc = run.vaddr.wrapping_add(4 * n as u32);
             self.cursor.block = 0;
         }
         if !self.enter_block(bus, self.pc) {
-            return None;
+            return BlockDone::NoBlock;
         }
-        Some((self.cursor.block - 1) as usize)
+        BlockDone::Entered((self.cursor.block - 1) as usize)
     }
+}
+
+/// Where [`Cpu::native_block_done`] left the batch.
+pub(in crate::cpu) enum BlockDone {
+    /// An interrupt was taken: the PC is at its vector and the batch ends.
+    Interrupted,
+    /// No block can start at the new PC (an I-cache miss, say): the batch
+    /// goes on from there outside any block.
+    NoBlock,
+    /// The next block, entered at its first op.
+    Entered(usize),
 }
 
 /// End of a block whose ops compiled code all ran: what the batch loop does
@@ -295,9 +306,16 @@ pub unsafe extern "C" fn jit_chain(run: *mut NativeRun) -> usize {
         return entry + NATIVE_CHAIN_OFFSET;
     }
     run.flush_boundary(bus);
-    let Some(index) = cpu.native_block_done(bus, run, st) else {
-        run.status = NATIVE_BREAK;
-        return 0;
+    let index = match cpu.native_block_done(bus, run, st) {
+        BlockDone::Entered(index) => index,
+        BlockDone::NoBlock => {
+            run.status = NATIVE_NEXT_BLOCK;
+            return 0;
+        }
+        BlockDone::Interrupted => {
+            run.status = NATIVE_BREAK;
+            return 0;
+        }
     };
     let irq_enabled = cpu.irq_enabled();
     let ram_ok = irq_enabled && cpu.block_ram_matches(bus, index);
