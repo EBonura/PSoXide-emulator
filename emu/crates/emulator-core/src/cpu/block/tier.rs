@@ -723,10 +723,12 @@ impl Cpu {
             return None;
         }
         let index = (id - 1) as usize;
-        let block = &self.blocks.blocks[index];
+        // Another line of the I-cache having changed since the block was
+        // last checked says nothing about its own lines: `current` looks.
+        let block = &mut self.blocks.blocks[index];
         if block.vaddr != pc
-            || block.checked_epoch != self.instruction_cache.epoch()
             || block.native <= NATIVE_DECLINED
+            || !block.current(&self.instruction_cache)
         {
             return None;
         }
