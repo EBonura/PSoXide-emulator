@@ -307,6 +307,20 @@ pub struct LaunchArgs {
     /// into analog mode (ID 0x73).
     #[arg(long, conflicts_with = "digital_pad")]
     pub dualshock_pad: bool,
+    /// Plug a digital pad into port 2 as well, so a driver that polls both ports
+    /// reads a populated one. It sits released.
+    #[arg(long)]
+    pub pad2: bool,
+    /// CPU cycles from the end of each pad byte to the start of its `/ACK` pulse,
+    /// in place of the measured per-byte figures. Real controllers differ, so a
+    /// pad driver that paces on `/ACK` has to be read against an early and a late
+    /// one. Memory cards keep their own timing.
+    #[arg(long)]
+    pub pad_ack_delay: Option<u64>,
+    /// CPU cycles the pad holds `/ACK` asserted, in place of the measured figures
+    /// (at least 1).
+    #[arg(long)]
+    pub pad_ack_pulse: Option<u64>,
     /// Treat an authored disc as an embedded editor Play disc and boot it
     /// through the same no-BIOS HLE path used by the editor viewport.
     #[arg(long)]
@@ -924,6 +938,8 @@ fn run_headless_launch(
         return Err("--route-screenshot-interval must be greater than zero".to_string());
     }
 
+    let pad_options = PadOptions::from_args(&args);
+
     // Resolve `path`: direct flag or lookup by game-id.
     let game_path = match (args.path, args.game_id) {
         (Some(p), _) => p,
@@ -1015,7 +1031,7 @@ fn run_headless_launch(
             // starts in the homebrew payload and BIOS table calls are
             // intercepted by HLE dispatch.
             bus.enable_hle_bios();
-            attach_headless_playtest_pad(&mut bus, args.digital_pad, args.dualshock_pad);
+            attach_headless_playtest_pad(&mut bus, pad_options);
             if emit_summary {
                 eprintln!(
                     "[cli] side-loaded {} - entry=0x{:08x} payload={}B",
@@ -1038,7 +1054,7 @@ fn run_headless_launch(
                 maybe_fast_boot_disc(&mut bus, &mut cpu, &disc, &game_path)?;
             }
             bus.cdrom.insert_disc(Some(disc));
-            attach_headless_playtest_pad(&mut bus, args.digital_pad, args.dualshock_pad);
+            attach_headless_playtest_pad(&mut bus, pad_options);
             if emit_summary {
                 eprintln!("[cli] mounted disc {}", game_path.display());
             }
@@ -1057,7 +1073,7 @@ fn run_headless_launch(
             }
             bus.cdrom.insert_disc(Some(disc));
             crate::app::apply_libcrypt_sbi(&mut bus, &game_path);
-            attach_headless_playtest_pad(&mut bus, args.digital_pad, args.dualshock_pad);
+            attach_headless_playtest_pad(&mut bus, pad_options);
             if emit_summary {
                 eprintln!("[cli] mounted cue-backed disc {}", game_path.display());
             }
@@ -1075,7 +1091,7 @@ fn run_headless_launch(
             maybe_fast_boot_disc(&mut bus, &mut cpu, &disc, &game_path)?;
             bus.cdrom.insert_disc(Some(disc));
             crate::app::apply_libcrypt_sbi(&mut bus, &game_path);
-            attach_headless_playtest_pad(&mut bus, args.digital_pad, args.dualshock_pad);
+            attach_headless_playtest_pad(&mut bus, pad_options);
             if emit_summary {
                 eprintln!("[cli] mounted ccd-backed disc {}", game_path.display());
             }
@@ -1154,7 +1170,7 @@ fn run_headless_launch(
         // headless runner has no window event loop to release that key, so use
         // the same fresh neutral controller a normal headless launch starts
         // with before applying any explicit tape/pulse input below.
-        attach_headless_playtest_pad(&mut bus, args.digital_pad, args.dualshock_pad);
+        attach_headless_playtest_pad(&mut bus, pad_options);
         bus.set_port1_buttons(ButtonState::default());
         bus.set_port1_sticks(0x80, 0x80, 0x80, 0x80);
         if capture_gpu_commands {
@@ -3174,6 +3190,9 @@ fn validation_launch_args(
         pad_pulses: checkpoint.pad_pulses.clone(),
         digital_pad: false,
         dualshock_pad: false,
+        pad2: false,
+        pad_ack_delay: None,
+        pad_ack_pulse: None,
         embedded_playtest: artifact.embedded_playtest,
         scph_9902: false,
         dump_hash: false,
@@ -3278,15 +3297,42 @@ fn cli_repo_root() -> PathBuf {
         .join("..")
 }
 
-fn attach_headless_playtest_pad(bus: &mut Bus, digital_only: bool, dualshock: bool) {
-    if digital_only {
+/// The headless run's pad wiring, read from the arguments before they are
+/// taken apart.
+#[derive(Clone, Copy, Default)]
+struct PadOptions {
+    digital_only: bool,
+    dualshock: bool,
+    pad2: bool,
+    ack_delay: Option<u64>,
+    ack_pulse: Option<u64>,
+}
+
+impl PadOptions {
+    fn from_args(args: &LaunchArgs) -> Self {
+        PadOptions {
+            digital_only: args.digital_pad,
+            dualshock: args.dualshock_pad,
+            pad2: args.pad2,
+            ack_delay: args.pad_ack_delay,
+            ack_pulse: args.pad_ack_pulse,
+        }
+    }
+}
+
+fn attach_headless_playtest_pad(bus: &mut Bus, options: PadOptions) {
+    if options.digital_only {
         bus.attach_original_digital_pad_port1();
-    } else if dualshock {
+    } else if options.dualshock {
         bus.attach_digital_pad_port1();
     } else {
         bus.attach_digital_pad_port1();
         let _ = bus.force_port1_analog_mode();
     }
+    if options.pad2 {
+        bus.attach_digital_pad_port2();
+    }
+    bus.set_pad_ack_timing(options.ack_delay, options.ack_pulse);
 }
 
 fn load_headless_disc(path: &Path) -> Result<Disc, String> {
@@ -3678,7 +3724,7 @@ fn headless_play_session(cue: &Path, polls: u64) -> Result<HeadlessPlaySession, 
     let disc = psoxide_settings::library::load_disc_from_cue(cue)?;
     fast_boot_embedded_playtest_disc(&mut bus, &mut cpu, &disc, cue)?;
     bus.cdrom.insert_disc(Some(disc));
-    attach_headless_playtest_pad(&mut bus, false, false);
+    attach_headless_playtest_pad(&mut bus, PadOptions::default());
     bus.set_port1_sticks(0x80, 0x80, 0x80, 0x00);
     let mut stats = psoxide_debug_ui::GuestStats::new();
     stats.set_cpu_attribution(&mut cpu, true);

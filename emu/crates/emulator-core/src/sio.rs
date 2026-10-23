@@ -161,6 +161,14 @@ fn ack_timing(is_card: bool, slot: usize, index: u32, command: u8) -> (u64, u64)
     }
 }
 
+/// A run-wide replacement for the pad's measured `/ACK` timing (cycles): either
+/// half left `None` keeps the table value of each byte.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PadAckOverride {
+    delay: Option<u64>,
+    pulse: Option<u64>,
+}
+
 /// SIO0 state. Register-level accuracy for the "nothing plugged in"
 /// path; no shift-clock simulation, but every byte-write pulses an
 /// IRQ7 so the BIOS's pad-poll handler advances its descriptors.
@@ -247,6 +255,11 @@ pub struct Sio0 {
     /// The second byte of the card transaction under way (its command).
     #[serde(skip)]
     card_command: u8,
+    /// Host-side override of the pad's `/ACK` delay and pulse width, in CPU cycles
+    /// (see [`Sio0::set_pad_ack_timing`]). `None` keeps the measured per-byte table.
+    /// Not part of the machine state, so it is neither saved nor restored.
+    #[serde(skip)]
+    pad_ack_override: PadAckOverride,
 }
 
 impl Sio0 {
@@ -292,6 +305,7 @@ impl Sio0 {
             slow_ready_cycle: None,
             slow_desynced: false,
             card_command: 0,
+            pad_ack_override: PadAckOverride::default(),
         }
     }
 
@@ -305,6 +319,20 @@ impl Sio0 {
             self.slow_ready_cycle = None;
             self.slow_desynced = false;
         }
+    }
+
+    /// Replace the controller's `/ACK` timing for the whole run: `delay` is the
+    /// cycles from the end of a pad byte to the start of its pulse, `pulse` the
+    /// cycles it stays asserted (at least 1), each for every pad byte. `None`
+    /// keeps the measured per-byte value. Real controllers differ (a clone
+    /// answers early, an original late), and a driver that paces on the pulse
+    /// has to read all of them. Memory cards and absent devices keep their own
+    /// timing, and the defaults leave every run unchanged.
+    pub fn set_pad_ack_timing(&mut self, delay: Option<u64>, pulse: Option<u64>) {
+        self.pad_ack_override = PadAckOverride {
+            delay,
+            pulse: pulse.map(|p| p.max(1)),
+        };
     }
 
     /// Immutable access to port 1. Used by the frontend to read
@@ -640,6 +668,7 @@ impl Sio0 {
                 (0xff, false, true, PAD_ACK_DELAY_TICKS, PAD_ACK_PULSE_TICKS)
             } else {
                 let slot = usize::from(self.ctrl & ctrl_bit::SLOT != 0);
+                let ack_override = self.pad_ack_override;
                 let port = self.active_port();
                 let result = port.exchange_detailed_at(value, now);
                 let is_card = port.selected_is_memcard();
@@ -648,8 +677,12 @@ impl Sio0 {
                 } else {
                     self.card_command
                 };
-                let (ack_delay_ticks, ack_pulse_ticks) =
+                let (mut ack_delay_ticks, mut ack_pulse_ticks) =
                     ack_timing(is_card, slot, byte_index, command);
+                if !is_card {
+                    ack_delay_ticks = ack_override.delay.unwrap_or(ack_delay_ticks);
+                    ack_pulse_ticks = ack_override.pulse.unwrap_or(ack_pulse_ticks);
+                }
                 self.card_command = command;
                 (
                     result.rx,
@@ -1503,5 +1536,84 @@ mod tests {
                 sio.tick(now);
             }
         }
+    }
+
+    /// A pad override moves the pulse of every pad byte and sets its width;
+    /// a half left unset keeps the measured value, and a card is untouched.
+    #[test]
+    fn pad_ack_override_moves_and_widens_the_pulse_for_pads_only() {
+        use crate::pad::{DigitalPad, MemoryCard, PortDevice};
+
+        let t = DEFAULT_TRANSFER_TICKS;
+        let (delay, pulse) = (700, 2_500);
+        let mut sio = Sio0::new();
+        sio.set_pad_ack_timing(Some(delay), Some(pulse));
+        sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
+        sio.write16(
+            Sio0::BASE + 0xa,
+            ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE,
+        );
+        sio.write8_at(Sio0::BASE, 0x01, 100);
+        sio.tick(100 + t);
+        assert_eq!(sio.debug_ack_deadline(), Some(100 + t + delay));
+        sio.tick(100 + t + delay - 1);
+        assert_eq!(
+            sio.debug_stat() & stat_bit::ACK_INPUT,
+            0,
+            "not before the delay"
+        );
+        assert!(!sio.take_pending_irq());
+        sio.tick(100 + t + delay);
+        assert_ne!(sio.debug_stat() & stat_bit::ACK_INPUT, 0);
+        assert!(sio.take_pending_irq(), "IRQ7 follows the pulse's start");
+        assert_eq!(sio.debug_ack_end_deadline(), Some(100 + t + delay + pulse));
+        sio.tick(100 + t + delay + pulse - 1);
+        assert_ne!(
+            sio.debug_stat() & stat_bit::ACK_INPUT,
+            0,
+            "held for the width"
+        );
+        sio.tick(100 + t + delay + pulse);
+        assert_eq!(sio.debug_stat() & stat_bit::ACK_INPUT, 0);
+
+        // The next byte (a later table entry) takes the same override.
+        let next = 100 + t + delay + pulse + 1;
+        sio.write8_at(Sio0::BASE, 0x42, next);
+        sio.tick(next + t);
+        assert_eq!(sio.debug_ack_deadline(), Some(next + t + delay));
+
+        // Only the delay set: the pulse keeps the table's width for the byte.
+        let mut sio = Sio0::new();
+        sio.set_pad_ack_timing(Some(delay), None);
+        sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT);
+        sio.write8_at(Sio0::BASE, 0x01, 100);
+        sio.tick(100 + t + delay);
+        assert_eq!(
+            sio.debug_ack_end_deadline(),
+            Some(100 + t + delay + PAD_ACK_PULSES[0])
+        );
+
+        // A zero width is a one-cycle pulse, not none.
+        let mut sio = Sio0::new();
+        sio.set_pad_ack_timing(None, Some(0));
+        sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT);
+        sio.write8_at(Sio0::BASE, 0x01, 100);
+        let start = 100 + t + PAD_ACK_DELAYS[0];
+        sio.tick(start);
+        assert_eq!(sio.debug_ack_end_deadline(), Some(start + 1));
+
+        // A memory card keeps its own timing.
+        let mut sio = Sio0::new();
+        sio.set_pad_ack_timing(Some(delay), Some(pulse));
+        sio.attach_port1(PortDevice::empty().with_memcard(MemoryCard::new()));
+        sio.write16(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT);
+        sio.write8_at(Sio0::BASE, 0x81, 100);
+        sio.tick(100 + t);
+        assert_eq!(
+            sio.debug_ack_deadline(),
+            Some(100 + t + MEMCARD_ACK_DELAYS[0][0])
+        );
     }
 }

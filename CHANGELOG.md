@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A headless run can plug a pad into port 2 (`--pad2`) and set how late the
+  controller pulses `/ACK` after each byte and how long it holds it
+  (`--pad-ack-delay`, `--pad-ack-pulse`, CPU cycles; each replaces the measured
+  per-byte figure for every pad byte and leaves memory cards alone), so a pad
+  driver that paces on `/ACK` can be read against an early and a late
+  controller. Without the flags nothing changes.
 - Profile-guided release builds: `make build-pgo` and `make gate-pgo` build the
   emulator, the gate and the benchmarks from a recorded profile
   (`pgo/psoxide.profdata.gz`, refreshed by `make pgo-profile`). Every emulated

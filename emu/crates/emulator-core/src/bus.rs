@@ -952,6 +952,12 @@ impl Bus {
         self.sio0.set_slow_pad(slow);
     }
 
+    /// Replace the pad's `/ACK` delay and pulse width, in CPU cycles; `None` keeps
+    /// the measured per-byte value. See [`Sio0::set_pad_ack_timing`].
+    pub fn set_pad_ack_timing(&mut self, delay: Option<u64>, pulse: Option<u64>) {
+        self.sio0.set_pad_ack_timing(delay, pulse);
+    }
+
     /// Update the analog-stick positions on the port-1
     /// controller. Each axis is `0..=255` with `0x80` = centre.
     /// No-op when no pad is attached to port 1. The stick values
