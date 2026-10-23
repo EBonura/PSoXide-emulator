@@ -1499,9 +1499,11 @@ fn run_headless_launch(
     let mut audio_capture: Vec<(i16, i16)> = Vec::new();
     let gte_profile_before = cpu.cop2().profile_snapshot();
     // Options that look at every instruction. Without any of them the loop
-    // below runs the CPU in batches that end exactly where the per-step
-    // loop would next act: a route tick, a guest telemetry frame, the
-    // tape's 64-step poll stride, or the step budget.
+    // below runs the CPU in batches (through the native tier when one is
+    // installed) that end exactly where the per-step loop would next act: a
+    // route tick, a guest telemetry frame, a completed pad poll under a
+    // poll-bound tape, a completed guest debug-log line, the stop-at-poll
+    // trigger and its following display flip, or the step budget.
     let per_step = trace_exception
         || pc_line_histogram.is_some()
         || stack_high_water_profile.is_some()
@@ -1511,9 +1513,15 @@ fn run_headless_launch(
         || mmio_stall_lines.is_some()
         || ram_load_stall_lines.is_some()
         || icache_stall_lines.is_some()
-        || icache_event_log.is_some()
-        || args.stop_at_poll.is_some()
-        || args.guest_debug_log;
+        || icache_event_log.is_some();
+    let mut tape_seen_polls = bus.port1_completed_polls();
+    let exact_from_poll = exact_from_poll_count(
+        args.stop_at_poll,
+        tape_poll_bound
+            .then_some(tape_samples.as_ref())
+            .flatten()
+            .map(|samples| tape_start_poll.saturating_add(samples.len() as u64)),
+    );
     let mut next_step = 0u64;
     while next_step < args.steps {
         let mut i = next_step;
@@ -1565,22 +1573,32 @@ fn run_headless_launch(
         // catches up on missed simulation ticks it polls two or three times
         // inside a single route tick, so re-checking only on the route clock
         // would feed the burst a stale sample and desynchronise the route.
-        // Consecutive polls are a whole simulation tick apart, so this coarse
-        // stride is exact and stays off the per-instruction path.
-        if tape_poll_bound && i & 0x3f == 0 {
+        // The check runs only on a 64-step stride. A batch ends on the
+        // instruction that completes a poll and then runs on to the next
+        // stride boundary, so the sample lands exactly where a per-step loop
+        // checking every 64th step would put it.
+        let mut tape_stride_wait = false;
+        if tape_poll_bound {
             if let Some(samples) = tape_samples.as_ref() {
                 let polls = bus.port1_completed_polls();
-                if polls >= tape_start_poll {
-                    let index = polls.saturating_sub(tape_start_poll);
-                    if index >= samples.len() as u64 {
-                        tape_exhausted = true;
+                let changed =
+                    polls != tape_seen_polls || (!tape_started && polls >= tape_start_poll);
+                if changed && i & 0x3f == 0 {
+                    tape_seen_polls = polls;
+                    if polls >= tape_start_poll {
+                        let index = polls.saturating_sub(tape_start_poll);
+                        if index >= samples.len() as u64 {
+                            tape_exhausted = true;
+                        }
+                        let cursor = index.min(samples.len().saturating_sub(1) as u64) as usize;
+                        if !tape_started || cursor != tape_cursor {
+                            tape_started = true;
+                            tape_cursor = cursor;
+                            samples[tape_cursor].apply_to_bus(&mut bus);
+                        }
                     }
-                    let cursor = index.min(samples.len().saturating_sub(1) as u64) as usize;
-                    if !tape_started || cursor != tape_cursor {
-                        tape_started = true;
-                        tape_cursor = cursor;
-                        samples[tape_cursor].apply_to_bus(&mut bus);
-                    }
+                } else {
+                    tape_stride_wait = changed;
                 }
             }
         }
@@ -1589,11 +1607,18 @@ fn run_headless_launch(
         let mmio_attribution_pc = mmio_stall_lines.as_ref().map(|_| cpu.pc());
         let ram_load_attribution_pc = ram_load_stall_lines.as_ref().map(|_| cpu.pc());
         let icache_attribution_pc = icache_stall_lines.as_ref().map(|_| cpu.pc());
-        let batch = if per_step || tape_exhausted {
+        // The last poll interval before a poll-count stop (stop-at-poll, or the
+        // end of a poll-bound tape) runs instruction by instruction: what ends
+        // the run there is a deferred device event (the display-start flip, the
+        // poll that exhausts the tape) that a batch only notices at the end of
+        // a stretch, and `stopped-at` must stay instruction-exact.
+        let exact_zone = exact_from_poll
+            .is_some_and(|target| bus.port1_completed_polls().saturating_add(1) >= target);
+        let batch = if per_step || tape_exhausted || exact_zone {
             1
         } else {
             let mut n = (args.steps - i).min(ROUTE_RUN_STEPS_PER_FRAME - route_tick_steps);
-            if tape_poll_bound {
+            if tape_stride_wait {
                 n = n.min(64 - (i & 0x3f));
             }
             n.max(1)
@@ -1607,12 +1632,19 @@ fn run_headless_launch(
             let deadline = route_tick_deadline;
             let frames = observed_guest_frames;
             let visual = observed_visual_frames;
+            let tape_watch = tape_poll_bound.then_some(tape_seen_polls);
+            let watch_debug_log = args.guest_debug_log;
             cpu.run(&mut bus, batch, deadline, |bus| {
                 bus.telemetry.frames_seen() != frames
                     || bus
                         .telemetry
                         .counter_total(telemetry::counter::VISUAL_FRAMES)
                         != visual
+                    || tape_watch.is_some_and(|seen| bus.port1_completed_polls() != seen)
+                    || (watch_debug_log && bus.telemetry.has_debug_logs())
+                    || exact_from_poll.is_some_and(|target| {
+                        bus.port1_completed_polls().saturating_add(1) >= target
+                    })
             })
         };
         // `i` is now the step that failed, or else the last one that ran.
@@ -3324,6 +3356,16 @@ fn parse_u16_mask(text: &str) -> Option<u16> {
         u16::from_str_radix(hex, 16).ok()
     } else {
         s.parse::<u16>().ok()
+    }
+}
+
+/// The pad-poll count from which a headless run steps one instruction at a time
+/// (one poll interval ahead, see the launch loop): the earlier of the
+/// `--stop-at-poll` target and the poll that exhausts a poll-bound tape.
+fn exact_from_poll_count(stop_at_poll: Option<u64>, tape_end_poll: Option<u64>) -> Option<u64> {
+    match (stop_at_poll, tape_end_poll) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
     }
 }
 
@@ -5259,6 +5301,14 @@ mod press_script_tests {
         ] {
             assert!(Cli::try_parse_from(args).is_err());
         }
+    }
+
+    #[test]
+    fn exact_zone_starts_at_the_earlier_poll_stop() {
+        assert_eq!(exact_from_poll_count(None, None), None);
+        assert_eq!(exact_from_poll_count(Some(90), None), Some(90));
+        assert_eq!(exact_from_poll_count(None, Some(70)), Some(70));
+        assert_eq!(exact_from_poll_count(Some(90), Some(70)), Some(70));
     }
 
     #[test]

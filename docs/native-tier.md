@@ -1,18 +1,20 @@
 # Native CPU tier
 
-The optional AArch64 native tier compiles hot blocks from the interpreter's
+The AArch64 native tier compiles hot blocks from the interpreter's
 decoded-block cache. It preserves the interpreter's instruction timing,
 load delays, exceptions, device state and frame boundaries. Unsupported
 operations continue through the interpreter.
 
-Build the desktop frontend with:
+The desktop frontend and its headless `launch` commands (what the games' gates run through
+the `frontend` launcher) build with the tier by default: the `native-jit` feature of
+`psoxide-emulator` is on. Set `PSOXIDE_JIT=0` to use only the interpreter in the same
+binary, or build an interpreter-only binary with:
 
 ```sh
-cargo build --release -p psoxide-emulator --features native-jit
+cargo build --release -p psoxide-emulator --no-default-features
 ```
 
-This also enables the tier for headless `launch` commands. Set
-`PSOXIDE_JIT=0` to use only the interpreter in the same binary. The executable-memory backend supports macOS and Linux AArch64. Other
+`psoxide-gate` has the tier on by default as well. The executable-memory backend supports macOS and Linux AArch64. Other
 hosts, or hosts where executable memory cannot be mapped, use the interpreter. The
 feature does not enable native code in WebAssembly builds.
 
@@ -32,6 +34,6 @@ frame, or a recorded `.pxtape`) and compares the tier (or, with `run` in place o
 instruction, program counter and cycle count; `--refine-at` and `--sub` re-run
 the failing stretch in smaller pieces to find the instruction.
 
-The tier is experimental. Performance comparisons must use the same host
+Performance comparisons must use the same host
 loop and game windows, verify that the tier was installed, and compare
 final machine state. It is not yet the fastest measured recompiler.
