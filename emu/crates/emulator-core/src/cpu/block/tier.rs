@@ -232,10 +232,10 @@ impl Cpu {
                             break 'blocks;
                         }
                         self.gte_irq_watch = next_gte.then_some(next);
-                    } else {
+                    } else if self.gte_irq_watch.is_some() {
                         self.gte_irq_watch = None;
                     }
-                } else {
+                } else if self.gte_irq_watch.is_some() {
                     self.gte_irq_watch = None;
                 }
                 let memory = matches!(op.class, OpClass::Load | OpClass::Store);
@@ -311,7 +311,8 @@ impl Cpu {
                 self.tick += 1;
                 st.done += 1;
                 st.uncounted += 1;
-                if let Some(vector) = self.pending_exception_pc.take() {
+                if let Some(vector) = self.pending_exception_pc {
+                    self.pending_exception_pc = None;
                     // An `Other` op trapped (overflow, coprocessor
                     // unusable). Entering the exception left the block.
                     // In a taken branch's delay slot the step still does
@@ -991,13 +992,19 @@ impl Cpu {
             u64::from(cycle_cost(op.word))
         };
         let branch_after_this = if delay { self.pending_pc.take() } else { None };
-        self.branch_delay_next = false;
-        self.executing_in_branch_delay = delay;
         let loading = self.pending_load.is_some();
         if loading {
             self.committing_load = self.pending_load.take();
         }
         let memory = matches!(op.class, OpClass::Load | OpClass::Store);
+        // Register arithmetic and branches read neither the delay-slot flags
+        // nor raise anything: the batch loop sets `branch_delay_next` when
+        // the step is done, and `executing_in_branch_delay` is false between
+        // steps, so they are left alone for those ops.
+        if op.class != OpClass::Alu && op.class != OpClass::Branch {
+            self.branch_delay_next = false;
+            self.executing_in_branch_delay = delay;
+        }
         match op.class {
             OpClass::Alu | OpClass::Branch => self.execute_register_op(op, pc),
             // The steps below settle the clock before they look at it. That
@@ -1032,7 +1039,9 @@ impl Cpu {
                 let _ = self.execute(op.word, pc, delay, bus);
             }
         }
-        self.executing_in_branch_delay = false;
+        if op.class != OpClass::Alu && op.class != OpClass::Branch {
+            self.executing_in_branch_delay = false;
+        }
         if memory && bus.take_ram_load_from_cached_code() {
             self.load_shadow = Some(LoadShadow {
                 position: 0,
