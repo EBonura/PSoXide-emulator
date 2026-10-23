@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use emulator_core::button;
 
-use crate::input::model::{add_stick_dpad, BackendKind, DeviceEvent, DeviceIdentity, PadSnapshot};
+use crate::input::model::{BackendKind, DeviceEvent, DeviceIdentity, PadSnapshot, StickDpad};
 
 use super::DeviceBackend;
 
@@ -12,7 +12,7 @@ use super::DeviceBackend;
 #[derive(Default)]
 pub(crate) struct WebPadBackend {
     /// Announced pads by browser slot index.
-    known: BTreeMap<u32, String>,
+    known: BTreeMap<u32, (String, StickDpad)>,
 }
 
 impl DeviceBackend for WebPadBackend {
@@ -26,16 +26,17 @@ impl DeviceBackend for WebPadBackend {
             .copied()
             .collect();
         for index in removed {
-            if let Some(id) = self.known.remove(&index) {
+            if let Some((id, _)) = self.known.remove(&index) {
                 out.push(DeviceEvent::Disconnected(id));
             }
         }
         for (index, gamepad) in &connected {
             let id = match self.known.get(index) {
-                Some(id) => id.clone(),
+                Some((id, _)) => id.clone(),
                 None => {
                     let id = format!("web:{index}");
-                    self.known.insert(*index, id.clone());
+                    self.known
+                        .insert(*index, (id.clone(), StickDpad::default()));
                     out.push(DeviceEvent::Connected(DeviceIdentity {
                         id: id.clone(),
                         name: gamepad.id(),
@@ -47,10 +48,12 @@ impl DeviceBackend for WebPadBackend {
                     id
                 }
             };
-            out.push(DeviceEvent::Sample {
-                id,
-                snapshot: sample_web_pad(gamepad),
-            });
+            if let Some((_, stick)) = self.known.get_mut(index) {
+                out.push(DeviceEvent::Sample {
+                    id,
+                    snapshot: sample_web_pad(gamepad, stick),
+                });
+            }
         }
     }
 }
@@ -78,7 +81,7 @@ fn connected_web_gamepads() -> BTreeMap<u32, web_sys::Gamepad> {
     connected
 }
 
-fn sample_web_pad(gamepad: &web_sys::Gamepad) -> PadSnapshot {
+fn sample_web_pad(gamepad: &web_sys::Gamepad, stick: &mut StickDpad) -> PadSnapshot {
     use wasm_bindgen::JsCast;
 
     let buttons = gamepad.buttons();
@@ -122,9 +125,9 @@ fn sample_web_pad(gamepad: &web_sys::Gamepad) -> PadSnapshot {
     };
     let left = (axis(0), -axis(1));
     let right = (axis(2), -axis(3));
-    add_stick_dpad(&mut mask, left.0, left.1);
     PadSnapshot {
         buttons: mask,
+        stick_dpad: stick.update(left.0, left.1),
         left,
         right,
         mode: pressed(16),

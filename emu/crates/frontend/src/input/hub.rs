@@ -27,8 +27,10 @@ const DIRECTIONS: u16 = button::UP | button::DOWN | button::LEFT | button::RIGHT
 /// Buttons and sticks routed to one guest port this frame.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct RoutedPadInput {
-    /// Held PlayStation button bits.
+    /// Held PlayStation button bits (physical buttons only).
     pub(crate) mask: u16,
+    /// [`Self::mask`] plus the D-pad bits derived from the left stick.
+    pub(crate) mask_with_stick_dpad: u16,
     /// Left stick in host coordinates.
     pub(crate) left_stick: (f32, f32),
     /// Right stick in host coordinates.
@@ -36,8 +38,20 @@ pub(crate) struct RoutedPadInput {
 }
 
 impl RoutedPadInput {
+    /// The buttons the guest should see: while its pad is in analog mode the
+    /// stick is an axis and must not also press the D-pad; in digital mode
+    /// (which carries no stick) the stick stands in for the D-pad.
+    pub(crate) fn mask_for(&self, guest_pad_is_analog: bool) -> u16 {
+        if guest_pad_is_analog {
+            self.mask
+        } else {
+            self.mask_with_stick_dpad
+        }
+    }
+
     fn merge(&mut self, snapshot: &PadSnapshot) {
         self.mask |= snapshot.buttons;
+        self.mask_with_stick_dpad |= snapshot.buttons | snapshot.stick_dpad;
         self.left_stick = merge_stick(self.left_stick, snapshot.left);
         self.right_stick = merge_stick(self.right_stick, snapshot.right);
     }
@@ -214,7 +228,9 @@ pub(crate) struct InputHub {
     repeat: MenuRepeat,
     socd_all: SocdFilter,
     socd_port1: SocdFilter,
+    socd_port1_dpad: SocdFilter,
     socd_port2: SocdFilter,
+    socd_port2_dpad: SocdFilter,
     previous_mask: u16,
     previous_chord: bool,
     pending_notices: Vec<InputNotice>,
@@ -243,7 +259,9 @@ impl InputHub {
             repeat: MenuRepeat::default(),
             socd_all: SocdFilter::default(),
             socd_port1: SocdFilter::default(),
+            socd_port1_dpad: SocdFilter::default(),
             socd_port2: SocdFilter::default(),
+            socd_port2_dpad: SocdFilter::default(),
             previous_mask: 0,
             previous_chord: false,
             pending_notices: Vec::new(),
@@ -296,7 +314,11 @@ impl InputHub {
             if !state.sampled {
                 continue;
             }
-            let filtered = state.filter.filter(now_ms, state.snapshot.buttons);
+            // Buttons and the stick's D-pad proxy share one guard, so a baseline
+            // or a quarantine covers a stick pushed at connect or twitching.
+            let filtered = state
+                .filter
+                .filter(now_ms, state.snapshot.buttons | state.snapshot.stick_dpad);
             match filtered.change {
                 Some(ChatterChange::Ignored) => {
                     // A pad that is noise must not hold a controller port.
@@ -318,7 +340,8 @@ impl InputHub {
                 continue;
             }
             let live = PadSnapshot {
-                buttons: filtered.mask,
+                buttons: filtered.mask & state.snapshot.buttons,
+                stick_dpad: filtered.mask & state.snapshot.stick_dpad,
                 ..state.snapshot
             };
             state.live = live;
@@ -333,7 +356,7 @@ impl InputHub {
                 }
             }
 
-            merged |= live.buttons;
+            merged |= live.buttons | live.stick_dpad;
             frame.left_stick = merge_stick(frame.left_stick, live.left);
             frame.right_stick = merge_stick(frame.right_stick, live.right);
             match self.routing.port_for(id) {
@@ -361,13 +384,21 @@ impl InputHub {
         if chord {
             merged &= !CHORD_MASK;
             frame.port1.mask &= !CHORD_MASK;
+            frame.port1.mask_with_stick_dpad &= !CHORD_MASK;
             frame.port2.mask &= !CHORD_MASK;
+            frame.port2.mask_with_stick_dpad &= !CHORD_MASK;
         }
 
         let resolved = self.socd_all.resolve(merged);
         frame.mask = resolved;
         frame.port1.mask = self.socd_port1.resolve(frame.port1.mask);
+        frame.port1.mask_with_stick_dpad = self
+            .socd_port1_dpad
+            .resolve(frame.port1.mask_with_stick_dpad);
         frame.port2.mask = self.socd_port2.resolve(frame.port2.mask);
+        frame.port2.mask_with_stick_dpad = self
+            .socd_port2_dpad
+            .resolve(frame.port2.mask_with_stick_dpad);
 
         let edges = rising_edges(self.previous_mask, resolved);
         self.previous_mask = resolved;
@@ -434,6 +465,7 @@ impl InputHub {
 #[cfg(test)]
 mod tests {
     use super::super::filter::tests::noisy_face_buttons;
+    use super::super::model::StickDpad;
     use super::super::repeat::{END_RATE_HZ, INITIAL_DELAY_MS};
     use super::super::routing::test_identity;
     use super::*;
@@ -774,6 +806,48 @@ mod tests {
             ],
         );
         assert_eq!(frame.mask & (button::LEFT | button::RIGHT), button::RIGHT);
+    }
+
+    fn stick_sample(id: &str, x: f32, y: f32) -> DeviceEvent {
+        let mut stick = StickDpad::default();
+        DeviceEvent::Sample {
+            id: id.to_string(),
+            snapshot: PadSnapshot {
+                stick_dpad: stick.update(x, y),
+                left: (x, y),
+                ..PadSnapshot::default()
+            },
+        }
+    }
+
+    #[test]
+    fn a_stick_navigates_the_menu_and_feeds_the_guest_as_a_dpad_only_in_digital_mode() {
+        let mut hub = hub_with_pad();
+        // A light lean is not a press anywhere.
+        let frame = hub.step(100, vec![stick_sample("pad", -0.36, 0.0)]);
+        assert!(!frame.menu_left);
+        assert_eq!(frame.port1.mask_with_stick_dpad, 0);
+        // Pushed firmly: the menu moves and a digital guest sees the D-pad.
+        let frame = hub.step(116, vec![stick_sample("pad", -0.9, 0.0)]);
+        assert!(frame.menu_left);
+        assert_eq!(frame.port1.mask_for(false), button::LEFT);
+        // An analog guest reads the axis and no D-pad press.
+        assert_eq!(frame.port1.mask_for(true), 0);
+        assert_eq!(frame.port1.left_stick, (-0.9, 0.0));
+    }
+
+    #[test]
+    fn a_stick_held_at_connect_or_menu_open_waits_for_release_like_a_button() {
+        let mut hub = hub_with_pad();
+        hub.ignore_held_buttons();
+        let mut fired = 0;
+        for t in 0..30 {
+            fired += usize::from(
+                hub.step(100 + t * 16, vec![stick_sample("pad", 0.0, -1.0)])
+                    .menu_down,
+            );
+        }
+        assert_eq!(fired, 0);
     }
 
     #[test]

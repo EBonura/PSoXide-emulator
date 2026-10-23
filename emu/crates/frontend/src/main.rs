@@ -1163,6 +1163,7 @@ impl ApplicationHandler for Shell {
                     buttons: self.host_input.resolved_mask(0),
                     left: self.host_input.left_stick.vector(),
                     right: self.host_input.right_stick.vector(),
+                    stick_dpad: 0,
                     mode: false,
                 });
                 let pad_frame = self.input.poll();
@@ -1516,10 +1517,28 @@ impl ApplicationHandler for Shell {
                         port1 = input::RoutedPadInput::default();
                         port2 = input::RoutedPadInput::default();
                     }
-                    let live_pad_sample =
-                        Port1PadSample::from_host(port1.mask, port1.right_stick, port1.left_stick);
-                    let live_port2_sample =
-                        Port1PadSample::from_host(port2.mask, port2.right_stick, port2.left_stick);
+                    // A pad in analog mode reads the stick as an axis, so the
+                    // stick must not also press the D-pad; a digital pad has no
+                    // stick, so there the stick stands in for the D-pad.
+                    let analog = |mode: Option<emulator_core::pad::PadMode>| {
+                        mode == Some(emulator_core::pad::PadMode::Analog)
+                    };
+                    let (port1_analog, port2_analog) = self
+                        .state
+                        .bus
+                        .as_ref()
+                        .map(|bus| (analog(bus.port1_pad_mode()), analog(bus.port2_pad_mode())))
+                        .unwrap_or((false, false));
+                    let live_pad_sample = Port1PadSample::from_host(
+                        port1.mask_for(port1_analog),
+                        port1.right_stick,
+                        port1.left_stick,
+                    );
+                    let live_port2_sample = Port1PadSample::from_host(
+                        port2.mask_for(port2_analog),
+                        port2.right_stick,
+                        port2.left_stick,
+                    );
                     let mut frames_run = 0u32;
                     for _ in 0..frames_to_run {
                         // A disc read on demand (web) fetches ahead of the

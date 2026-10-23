@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use emulator_core::button;
 use gilrs::{Axis, Button, Event, EventType, Gamepad, GamepadId, Gilrs};
 
-use crate::input::model::{add_stick_dpad, BackendKind, DeviceEvent, DeviceIdentity, PadSnapshot};
+use crate::input::model::{BackendKind, DeviceEvent, DeviceIdentity, PadSnapshot, StickDpad};
 
 use super::DeviceBackend;
 
@@ -16,7 +16,7 @@ const TRIGGER_THRESHOLD: f32 = 0.5;
 pub(crate) struct GilrsBackend {
     gilrs: Option<Gilrs>,
     /// Router id of every pad announced so far.
-    pads: HashMap<GamepadId, String>,
+    pads: HashMap<GamepadId, (String, StickDpad)>,
 }
 
 impl GilrsBackend {
@@ -43,7 +43,8 @@ impl GilrsBackend {
         };
         let gamepad = gilrs.gamepad(id);
         let route_id = format!("gilrs:{id}");
-        self.pads.insert(id, route_id.clone());
+        self.pads
+            .insert(id, (route_id.clone(), StickDpad::default()));
         out.push(DeviceEvent::Connected(identity(&route_id, &gamepad)));
     }
 }
@@ -72,7 +73,7 @@ impl DeviceBackend for GilrsBackend {
             );
         }
         for id in disconnected {
-            if let Some(route_id) = self.pads.remove(&id) {
+            if let Some((route_id, _)) = self.pads.remove(&id) {
                 out.push(DeviceEvent::Disconnected(route_id));
             }
         }
@@ -84,12 +85,12 @@ impl DeviceBackend for GilrsBackend {
         let Some(gilrs) = self.gilrs.as_ref() else {
             return;
         };
-        for (id, route_id) in &self.pads {
+        for (id, (route_id, stick)) in &mut self.pads {
             let gamepad = gilrs.gamepad(*id);
             if gamepad.is_connected() {
                 out.push(DeviceEvent::Sample {
                     id: route_id.clone(),
-                    snapshot: snapshot(&gamepad),
+                    snapshot: snapshot(&gamepad, stick),
                 });
             }
         }
@@ -114,7 +115,7 @@ fn identity(route_id: &str, gamepad: &Gamepad<'_>) -> DeviceIdentity {
     }
 }
 
-fn snapshot(gamepad: &Gamepad<'_>) -> PadSnapshot {
+fn snapshot(gamepad: &Gamepad<'_>, stick: &mut StickDpad) -> PadSnapshot {
     let mut buttons = 0;
     for (pressed, bit) in [
         (gamepad.is_pressed(Button::South), button::CROSS),
@@ -154,9 +155,9 @@ fn snapshot(gamepad: &Gamepad<'_>) -> PadSnapshot {
         gamepad.value(Axis::RightStickX),
         gamepad.value(Axis::RightStickY),
     );
-    add_stick_dpad(&mut buttons, left.0, left.1);
     PadSnapshot {
         buttons,
+        stick_dpad: stick.update(left.0, left.1),
         left,
         right,
         mode: gamepad.is_pressed(Button::Mode),

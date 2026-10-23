@@ -11,8 +11,11 @@
 
 use emulator_core::button;
 
-/// Left-stick deadzone for the digital D-pad proxy path.
-pub(crate) const STICK_DEADZONE: f32 = 0.3;
+/// Left-stick travel that starts counting as a D-pad press.
+pub(crate) const STICK_DPAD_PRESS: f32 = 0.5;
+/// Left-stick travel below which a held D-pad proxy lets go. Lower than
+/// [`STICK_DPAD_PRESS`] so a stick resting near the threshold cannot flutter.
+pub(crate) const STICK_DPAD_RELEASE: f32 = 0.35;
 
 /// Which adapter produced a device. Informational only: logs and the
 /// controller panel show it, no logic branches on it.
@@ -82,14 +85,18 @@ impl DeviceIdentity {
 
 /// What a device holds right now, in the PS1 pad layout.
 ///
-/// `buttons` already contains the digital proxy of the left stick (adapters
-/// that want it call [`add_stick_dpad`]), so a snapshot is complete: the menu
-/// and the guest both read it as is. Sticks are in host orientation (positive
-/// Y is up), `-1.0..=1.0`.
+/// `buttons` are the physical buttons only. `stick_dpad` is the digital proxy
+/// of the left stick (adapters of devices with a real stick fill it with a
+/// [`StickDpad`]): the menu and the shortcuts read it as D-pad presses, and
+/// the guest reads it only while its pad is in digital mode, because in analog
+/// mode the stick is an axis and must not also press the D-pad. Sticks are in
+/// host orientation (positive Y is up), `-1.0..=1.0`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct PadSnapshot {
     /// Held PlayStation buttons ([`emulator_core::button`] bits).
     pub(crate) buttons: u16,
+    /// D-pad bits derived from the left stick (see the type docs).
+    pub(crate) stick_dpad: u16,
     /// Left stick.
     pub(crate) left: (f32, f32),
     /// Right stick.
@@ -164,19 +171,34 @@ pub(crate) enum DeviceEvent {
     },
 }
 
-/// Fold a stick into the D-pad bits (positive `y` is up).
-pub(crate) fn add_stick_dpad(mask: &mut u16, x: f32, y: f32) {
-    if y > STICK_DEADZONE {
-        *mask |= button::UP;
-    }
-    if y < -STICK_DEADZONE {
-        *mask |= button::DOWN;
-    }
-    if x < -STICK_DEADZONE {
-        *mask |= button::LEFT;
-    }
-    if x > STICK_DEADZONE {
-        *mask |= button::RIGHT;
+/// Turns a stick into D-pad bits with hysteresis: a direction presses at
+/// [`STICK_DPAD_PRESS`] travel and lets go below [`STICK_DPAD_RELEASE`].
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct StickDpad {
+    held: u16,
+}
+
+impl StickDpad {
+    /// The D-pad bits for a stick at (`x`, `y`) (positive `y` is up).
+    pub(crate) fn update(&mut self, x: f32, y: f32) -> u16 {
+        for (bit, value) in [
+            (button::UP, y),
+            (button::DOWN, -y),
+            (button::LEFT, -x),
+            (button::RIGHT, x),
+        ] {
+            let threshold = if self.held & bit != 0 {
+                STICK_DPAD_RELEASE
+            } else {
+                STICK_DPAD_PRESS
+            };
+            if value > threshold {
+                self.held |= bit;
+            } else {
+                self.held &= !bit;
+            }
+        }
+        self.held
     }
 }
 
@@ -204,12 +226,27 @@ mod tests {
     }
 
     #[test]
-    fn a_stick_pushed_past_the_deadzone_becomes_dpad_bits() {
-        let mut mask = 0;
-        add_stick_dpad(&mut mask, 0.2, -0.2);
-        assert_eq!(mask, 0);
-        add_stick_dpad(&mut mask, 0.9, -0.9);
-        assert_eq!(mask, button::RIGHT | button::DOWN);
+    fn a_stick_becomes_dpad_bits_only_when_pushed_firmly() {
+        let mut stick = StickDpad::default();
+        assert_eq!(stick.update(0.2, -0.2), 0);
+        // A drifting or lightly held stick (-0.36 was enough before) is not a press.
+        assert_eq!(stick.update(-0.4, 0.0), 0);
+        assert_eq!(stick.update(0.9, -0.9), button::RIGHT | button::DOWN);
+    }
+
+    #[test]
+    fn a_held_stick_direction_has_hysteresis() {
+        let mut stick = StickDpad::default();
+        assert_eq!(stick.update(0.0, 0.6), button::UP);
+        // Easing off but still past the release point keeps it held...
+        assert_eq!(stick.update(0.0, 0.4), button::UP);
+        // ...and only letting go below it releases, and it must be pushed
+        // firmly again to press.
+        assert_eq!(stick.update(0.0, 0.3), 0);
+        assert_eq!(stick.update(0.0, 0.4), 0);
+        assert_eq!(stick.update(0.0, 0.55), button::UP);
+        // Swinging through the middle changes direction cleanly.
+        assert_eq!(stick.update(0.0, -0.8), button::DOWN);
     }
 
     #[test]
@@ -219,6 +256,7 @@ mod tests {
             buttons: button::CROSS | button::UP,
             left: (0.5, -1.0),
             right: (0.05, 0.0),
+            stick_dpad: 0,
             mode: false,
         };
         assert_eq!(snapshot.describe(), "Up Cross L(+0.50,-1.00)");

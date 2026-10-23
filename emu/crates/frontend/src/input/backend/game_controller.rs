@@ -12,7 +12,7 @@ use objc2_game_controller::{GCController, GCDevice, GCExtendedGamepad};
 
 use emulator_core::button;
 
-use crate::input::model::{add_stick_dpad, BackendKind, DeviceEvent, DeviceIdentity, PadSnapshot};
+use crate::input::model::{BackendKind, DeviceEvent, DeviceIdentity, PadSnapshot, StickDpad};
 
 use super::DeviceBackend;
 
@@ -56,7 +56,7 @@ pub(crate) struct GcReading {
 
 impl GcReading {
     /// The same controller in the PS1 layout.
-    pub(crate) fn to_snapshot(self) -> PadSnapshot {
+    pub(crate) fn to_snapshot(self, stick: &mut StickDpad) -> PadSnapshot {
         let mut buttons = 0;
         for (down, bit) in [
             (self.south, button::CROSS),
@@ -86,9 +86,9 @@ impl GcReading {
                 buttons |= bit;
             }
         }
-        add_stick_dpad(&mut buttons, self.left_stick.0, self.left_stick.1);
         PadSnapshot {
             buttons,
+            stick_dpad: stick.update(self.left_stick.0, self.left_stick.1),
             left: self.left_stick,
             right: self.right_stick,
             mode: self.home,
@@ -136,6 +136,7 @@ fn read(pad: &GCExtendedGamepad) -> GcReading {
 
 struct Known {
     id: String,
+    stick: StickDpad,
     controller: Retained<GCController>,
 }
 
@@ -185,13 +186,11 @@ impl DeviceBackend for GameControllerBackend {
                 // A remote or other device without the full layout.
                 continue;
             };
-            let existing = self
-                .known
-                .iter()
-                .find(|known| Retained::as_ptr(&known.controller) == Retained::as_ptr(&controller))
-                .map(|known| known.id.clone());
-            let id = match existing {
-                Some(id) => id,
+            let existing = self.known.iter().position(|known| {
+                Retained::as_ptr(&known.controller) == Retained::as_ptr(&controller)
+            });
+            let index = match existing {
+                Some(index) => index,
                 None => {
                     let id = format!("gc:{}", self.next_serial);
                     self.next_serial += 1;
@@ -211,15 +210,17 @@ impl DeviceBackend for GameControllerBackend {
                         mapped: true,
                     }));
                     self.known.push(Known {
-                        id: id.clone(),
+                        id,
+                        stick: StickDpad::default(),
                         controller: controller.clone(),
                     });
-                    id
+                    self.known.len() - 1
                 }
             };
+            let known = &mut self.known[index];
             out.push(DeviceEvent::Sample {
-                id,
-                snapshot: read(&pad).to_snapshot(),
+                id: known.id.clone(),
+                snapshot: read(&pad).to_snapshot(&mut known.stick),
             });
         }
     }
@@ -249,7 +250,7 @@ mod tests {
             right_stick: (0.0, -1.0),
             ..GcReading::default()
         };
-        let snapshot = reading.to_snapshot();
+        let snapshot = reading.to_snapshot(&mut StickDpad::default());
         assert_eq!(
             snapshot.buttons,
             button::CROSS
@@ -271,19 +272,24 @@ mod tests {
     }
 
     #[test]
-    fn a_half_pulled_trigger_is_not_a_press_and_a_pushed_stick_is_a_dpad_press() {
+    fn a_half_pulled_trigger_is_not_a_press_and_a_pushed_stick_is_a_stick_dpad_press_not_a_button()
+    {
         let snapshot = GcReading {
             left_trigger: 0.3,
             left_stick: (0.0, 0.9),
             ..GcReading::default()
         }
-        .to_snapshot();
-        assert_eq!(snapshot.buttons, button::UP);
+        .to_snapshot(&mut StickDpad::default());
+        assert_eq!(snapshot.buttons, 0);
+        assert_eq!(snapshot.stick_dpad, button::UP);
         assert_eq!(snapshot.left, (0.0, 0.9));
     }
 
     #[test]
     fn an_idle_controller_reports_nothing() {
-        assert_eq!(GcReading::default().to_snapshot(), PadSnapshot::default());
+        assert_eq!(
+            GcReading::default().to_snapshot(&mut StickDpad::default()),
+            PadSnapshot::default()
+        );
     }
 }
