@@ -214,6 +214,10 @@ pub struct Block {
     /// The block lies in the HLE kernel's first 64 KiB of RAM
     /// ([`Cpu::enter_block`]).
     kernel: bool,
+    /// The block is one op, cut short because the word after it was not a
+    /// hit when it was decoded: it is decoded again once that word is
+    /// cached ([`Cpu::enter_block`]).
+    short: bool,
     /// `(line base physical address, generation)` of every I-cache line
     /// the ops were read from.
     lines: [(u32, u32); MAX_LINES],
@@ -607,7 +611,9 @@ impl Cpu {
         let id = self.blocks.slots[slot];
         let index = if id != 0 && {
             let block = &mut self.blocks.blocks[id as usize - 1];
-            block.vaddr == pc && block.current(&self.instruction_cache)
+            block.vaddr == pc
+                && block.current(&self.instruction_cache)
+                && !(block.short && self.instruction_cache.hit(phys.wrapping_add(4)).is_some())
         } {
             id - 1
         } else {
@@ -732,6 +738,7 @@ impl Cpu {
                     ram_stamp: RamStamp::default(),
                     exits: [(0, 0); 2],
                     kernel: false,
+                    short: false,
                 });
                 self.blocks.scratch = self.blocks.blocks.len() as u32;
                 self.blocks.blocks.len() - 1
@@ -832,6 +839,7 @@ impl Cpu {
                         ram_stamp: RamStamp::default(),
                         exits: [(0, 0); 2],
                         kernel: false,
+                        short: false,
                     },
                 );
                 old.ops.clear();
@@ -855,6 +863,7 @@ impl Cpu {
                 ram_stamp: RamStamp::default(),
                 exits: [(0, 0); 2],
                 kernel: false,
+                short: false,
             },
         };
         block.vaddr = pc;
@@ -938,6 +947,9 @@ impl Cpu {
             }
             line += 0x10;
         }
+        block.short = block.ops.len() == 1
+            && !matches!(block.ops[0].class, OpClass::Terminator | OpClass::Branch)
+            && self.instruction_cache.hit(base.wrapping_add(4)).is_none();
         block.checked_epoch = self.instruction_cache.epoch();
         self.blocks.built += 1;
         self.blocks.link_gen += 1;
