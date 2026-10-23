@@ -90,10 +90,17 @@ impl Bus {
     #[doc(hidden)]
     #[inline(always)]
     pub fn quiet_limit(&self) -> u64 {
-        if self.limits.frozen() || self.gpu_dma_waiting_for_request {
+        if self.limits.frozen() {
             return self.cycles;
         }
         let mut limit = self.scheduler.lowest_target().min(self.spu_sample_deadline);
+        if self.gpu_dma_waiting_for_request {
+            let wait = self.gpu_wait_quiet_cycles();
+            if wait == 0 {
+                return self.cycles;
+            }
+            limit = limit.min(self.cycles.saturating_add(wait));
+        }
         if self.experimental_gpu_list.is_some() {
             // Advancing the clock up to `gpu_quiet_until` (inclusive) is the
             // list walk's quiet batch; recompute it when not known.
@@ -103,6 +110,23 @@ impl Bus {
             limit = limit.min(self.cycles.saturating_add(self.gpu.fifo_quiet_cycles()));
         }
         limit
+    }
+
+    /// Cycles from now over which the clock may advance in one go although a
+    /// GPU DMA waits for its request: each advance retries the DMA, which
+    /// starts at the first advance that finds the request up. With a DMA
+    /// event already scheduled the retry only clears the flag, so nothing
+    /// limits the span; otherwise it is the time the request cannot rise in
+    /// ([`Gpu::dreq_quiet_cycles`]). Zero when it may rise at once.
+    #[inline(always)]
+    fn gpu_wait_quiet_cycles(&self) -> u64 {
+        if self
+            .scheduler
+            .is_pending(crate::scheduler::EventSlot::GpuDma)
+        {
+            return u64::MAX;
+        }
+        self.gpu.dreq_quiet_cycles(self.cycles)
     }
 
     /// Move the clock `n` cycles with no drain, as ticks and memory stalls
@@ -119,10 +143,17 @@ impl Bus {
     #[doc(hidden)]
     #[inline(always)]
     pub fn quiet_limits(&self) -> (u64, u64) {
-        if self.limits.frozen() || self.gpu_dma_waiting_for_request {
+        if self.limits.frozen() {
             return (self.cycles, self.cycles);
         }
-        let hard = self.scheduler.lowest_target().min(self.spu_sample_deadline);
+        let mut hard = self.scheduler.lowest_target().min(self.spu_sample_deadline);
+        if self.gpu_dma_waiting_for_request {
+            let wait = self.gpu_wait_quiet_cycles();
+            if wait == 0 {
+                return (self.cycles, self.cycles);
+            }
+            hard = hard.min(self.cycles.saturating_add(wait));
+        }
         let soft = if self.experimental_gpu_list.is_some() {
             let quiet_until = self.gpu_quiet_end();
             quiet_until.saturating_add(1)

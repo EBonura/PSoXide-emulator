@@ -6835,6 +6835,55 @@ mod tests {
         assert_eq!(bus.dma.channels[2].channel_control & (1 << 24), 0);
     }
 
+    /// While a GPU DMA waits for its request the clock may advance in one
+    /// go up to the quiet limit ([`Bus::quiet_limit`]); stepping on from
+    /// there one cycle at a time must leave exactly what stepping the whole
+    /// way leaves, the DMA starting at the same cycle. The request rises
+    /// here when a posted GP1 direction write lands.
+    #[test]
+    fn a_waiting_gpu_dma_starts_at_the_same_cycle_whether_the_clock_jumps_or_steps() {
+        let setup = || {
+            let mut bus = linked_list_upload_fixture(false, true, 0);
+            bus.gpu.write32(crate::gpu::GP1_ADDR, 0x0400_0000);
+            bus.run_dma_channel(2);
+            assert!(bus.gpu_dma_waiting_for_request);
+            // A CPU write posts the direction change; it lands later.
+            bus.write32(crate::gpu::GP1_ADDR, 0x0400_0002);
+            bus
+        };
+        let digest = |bus: &Bus| postcard::to_allocvec(bus).expect("serialise");
+        for total in [40u64, 400, 4000] {
+            let mut stepped = setup();
+            for _ in 0..total {
+                stepped.tick(1);
+            }
+            let mut jumped = setup();
+            let end = jumped.cycles() + total;
+            while jumped.cycles() < end {
+                let room = jumped.quiet_limit().saturating_sub(jumped.cycles());
+                let left = end - jumped.cycles();
+                if room > 1 {
+                    // Strictly below the limit, as a batch does.
+                    jumped.advance_quiet((room - 1).min(left));
+                } else {
+                    jumped.tick(1);
+                }
+            }
+            assert_eq!(jumped.cycles(), stepped.cycles());
+            assert_eq!(
+                jumped.gpu.vram.get_pixel(4, 5),
+                stepped.gpu.vram.get_pixel(4, 5),
+                "total {total}"
+            );
+            assert_eq!(
+                jumped.scheduler.target(EventSlot::GpuDma),
+                stepped.scheduler.target(EventSlot::GpuDma),
+                "total {total}"
+            );
+            assert!(digest(&jumped) == digest(&stepped), "total {total}");
+        }
+    }
+
     #[test]
     fn gpu_request_dma_cancellation_does_not_resume_on_later_dreq() {
         let mut bus = linked_list_upload_fixture(false, true, 0);

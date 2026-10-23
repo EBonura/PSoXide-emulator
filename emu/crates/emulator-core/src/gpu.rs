@@ -1904,6 +1904,41 @@ impl Gpu {
         self.dma_input_fifo.len() < self.dma_fifo_capacity()
     }
 
+    /// How many cycles from `now`, with the CPU not touching the GPU, GPUSTAT
+    /// bit 25 (the DMA request a held-back GPU DMA waits for) cannot change:
+    /// the time to the first of
+    ///
+    /// * a posted GP1 write landing (it can change the direction, or raise
+    ///   IRQ1 for the request latch), and
+    /// * whatever moves the request in the current direction: direction 0
+    ///   and 1 hold it clear and set; direction 3 mirrors the VRAM read-out
+    ///   state, which only GPUREAD reads move; direction 2 mirrors the DMA
+    ///   block-ready bit, which moves when the FIFO model drains or, without
+    ///   it, when the DMA busy credit runs out.
+    ///
+    /// Zero when the request is up or may rise at once.
+    pub(crate) fn dreq_quiet_cycles(&self, now: u64) -> u64 {
+        let posted = self
+            .pending_gp1_status
+            .iter()
+            .map(|&(deadline, _)| deadline.saturating_sub(now))
+            .min()
+            .unwrap_or(u64::MAX);
+        let state = match (self.status.raw >> 29) & 3 {
+            0 | 3 => u64::MAX,
+            1 => 0,
+            _ if self.experimental_dma_fifo => {
+                if self.dma_fifo_requests_node() {
+                    0
+                } else {
+                    self.fifo_quiet_cycles()
+                }
+            }
+            _ => self.dma_busy_credit,
+        };
+        posted.min(state)
+    }
+
     pub(crate) fn dma_fifo_requests_node(&self) -> bool {
         // The reference sequencer does not admit a new node while an
         // unterminated polyline is active, even when its FIFO is empty.
