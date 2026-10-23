@@ -126,7 +126,7 @@ pub fn draw(ctx: &Context, state: &mut AppState) {
 
     // Fade the restore tab in only once the bar has mostly cleared, so it
     // never overlaps the sliding toolbar.
-    if t > 0.5 {
+    if t > 0.5 && !state.menu.touch_mode() {
         draw_restore_tab(ctx, state, ((t - 0.5) / 0.5).clamp(0.0, 1.0));
     }
 }

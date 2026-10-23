@@ -14,6 +14,7 @@ pub mod profiler;
 pub mod registers;
 pub mod splash;
 pub mod toolbar;
+pub mod touch_overlay;
 pub mod vram;
 
 use crate::app::{AppState, ScaleMode};
@@ -98,6 +99,12 @@ pub fn draw_layout(
     // `debug_sidebar` flag and early-returns when fully closed.
     debug_sidebar::draw(ctx, state, vram_tex);
 
+    // With the on-screen controller up, the game keeps clear of the notch
+    // and, in portrait, of the controller's own panel under the picture.
+    if !embed {
+        draw_touch_reservations(ctx, input_router.touch());
+    }
+
     // Zero-margin frame: the game screen gets every pixel between the
     // toolbar and the sidebar; the 4:3 letterbox bars are plain black,
     // CRT-bezel style, with no inset or border chrome.
@@ -114,6 +121,13 @@ pub fn draw_layout(
 
     let menu_warning = state.menu_setup_warning();
     state.menu.draw(ctx, dt, menu_warning);
+    if let Some((kind, pct)) = state.menu.take_touch_slider() {
+        use crate::ui::menu::TouchSliderKind;
+        state.edit_touch_prefs(|p| match kind {
+            TouchSliderKind::Opacity => p.opacity_pct = pct,
+            TouchSliderKind::Size => p.size_pct = pct,
+        });
+    }
     let mut port_message = None;
     state
         .menu
@@ -126,6 +140,38 @@ pub fn draw_layout(
     draw_freecam_indicator(ctx, state);
     if !embed {
         draw_status_toast(ctx, state);
+        touch_overlay::draw(ctx, input_router.touch(), state.menu.open);
+    }
+}
+
+/// Black panels that keep the game out of the notch and the portrait
+/// controller panel. Empty (and free) when the controller is hidden.
+fn draw_touch_reservations(ctx: &egui::Context, touch: &crate::input::backend::touch::TouchDevice) {
+    let reserved = touch_overlay::reserved(ctx, touch);
+    let black = || egui::Frame::NONE.fill(egui::Color32::BLACK);
+    if reserved.top > 0.5 {
+        egui::TopBottomPanel::top("touch-safe-top")
+            .exact_height(reserved.top)
+            .frame(black())
+            .show(ctx, |_| {});
+    }
+    if reserved.bottom > 0.5 {
+        egui::TopBottomPanel::bottom("touch-controls-panel")
+            .exact_height(reserved.bottom)
+            .frame(black())
+            .show(ctx, |_| {});
+    }
+    if reserved.left > 0.5 {
+        egui::SidePanel::left("touch-safe-left")
+            .exact_width(reserved.left)
+            .frame(black())
+            .show(ctx, |_| {});
+    }
+    if reserved.right > 0.5 {
+        egui::SidePanel::right("touch-safe-right")
+            .exact_width(reserved.right)
+            .frame(black())
+            .show(ctx, |_| {});
     }
 }
 
@@ -299,6 +345,30 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
         }
         CycleUiScale => {
             state.cycle_ui_scale();
+            MenuOutcome::None
+        }
+        CycleTouchMode => {
+            state.edit_touch_prefs(|p| p.mode = p.mode.next());
+            MenuOutcome::None
+        }
+        CycleTouchOpacity => {
+            state.edit_touch_prefs(|p| p.cycle_opacity());
+            MenuOutcome::None
+        }
+        CycleTouchSize => {
+            state.edit_touch_prefs(|p| p.cycle_size());
+            MenuOutcome::None
+        }
+        ToggleTouchHaptics => {
+            state.edit_touch_prefs(|p| p.haptics = !p.haptics);
+            MenuOutcome::None
+        }
+        ToggleTouchLeftHanded => {
+            state.edit_touch_prefs(|p| p.left_handed = !p.left_handed);
+            MenuOutcome::None
+        }
+        ToggleFullscreen => {
+            state.fullscreen_requested = true;
             MenuOutcome::None
         }
         ToggleSmoothSlowHost => {

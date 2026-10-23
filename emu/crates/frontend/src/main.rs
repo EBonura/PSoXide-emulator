@@ -63,6 +63,8 @@ mod playtest_disc;
 mod playtest_input;
 mod theme;
 mod ui;
+// Browser glue for the touch controller (no-ops on native).
+mod web_touch;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -328,6 +330,10 @@ struct Shell {
     /// events. Always constructible; failed native gamepad initialisation
     /// leaves the keyboard route working.
     input: input::InputRouter,
+    /// The on-screen menu button was tapped; the next redraw toggles the menu.
+    touch_menu_pending: bool,
+    /// The toolbar was tucked away once for the touch controller.
+    touch_chrome_applied: bool,
     /// Last machine and routing generations applied to the emulated SIO ports.
     controller_layout_stamp: Option<(u64, u64)>,
     /// Wall-clock debt waiting to be converted into emulated
@@ -414,7 +420,11 @@ impl Shell {
             "[audio] no host output device available - running silent".to_string()
         };
         eprintln!("{audio_status}");
-        let input = input::InputRouter::new();
+        let mut input = input::InputRouter::new();
+        web_touch::install_listeners();
+        input
+            .touch_mut()
+            .set_coarse_pointer(web_touch::coarse_pointer());
         eprintln!("[input] keyboard ready; controllers are announced here as they appear");
         // The compute backend gets its own headless wgpu device.
         // We *could* share the main `Graphics` device for zero-copy
@@ -451,6 +461,8 @@ impl Shell {
             fullscreen,
             audio,
             input,
+            touch_menu_pending: false,
+            touch_chrome_applied: false,
             controller_layout_stamp: None,
             emu_frame_accum: 0.0,
             pace: HostPace::default(),
@@ -953,6 +965,42 @@ impl ApplicationHandler for Shell {
             return;
         };
 
+        // A finger on the on-screen controller belongs to it alone; the
+        // interface underneath must not also see the tap.
+        if let WindowEvent::Touch(touch) = &event {
+            use winit::event::TouchPhase;
+            let phase = match touch.phase {
+                TouchPhase::Started => input::touch::pad::Phase::Down,
+                TouchPhase::Moved => input::touch::pad::Phase::Move,
+                TouchPhase::Ended => input::touch::pad::Phase::Up,
+                TouchPhase::Cancelled => input::touch::pad::Phase::Cancel,
+            };
+            let at = egui::pos2(touch.location.x as f32, touch.location.y as f32);
+            let now_ms = self.input.now_ms();
+            let owned = self
+                .input
+                .touch_mut()
+                .handle_touch(touch.id, phase, at, now_ms);
+            web_touch::note_touch(owned, at.x, at.y);
+            if owned {
+                // Handled inside the event, where the browser still counts
+                // the tap as a user gesture (fullscreen needs one).
+                for action in self.input.touch_mut().take_actions() {
+                    match action {
+                        input::touch::pad::UiAction::Menu => self.touch_menu_pending = true,
+                        input::touch::pad::UiAction::Fullscreen => {
+                            web_touch::toggle_fullscreen(false);
+                        }
+                    }
+                }
+                if self.input.touch_mut().take_haptic() {
+                    web_touch::vibrate(10);
+                }
+                gfx.window.request_redraw();
+                return;
+            }
+        }
+
         let consumed = gfx.egui_winit.on_window_event(&gfx.window, &event).consumed;
 
         match event {
@@ -984,6 +1032,7 @@ impl ApplicationHandler for Shell {
             // fresh keys after refocusing.
             WindowEvent::Focused(false) => {
                 self.host_input.clear();
+                self.input.touch_mut().release_all();
             }
             WindowEvent::Focused(true) => {}
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -1180,6 +1229,16 @@ impl ApplicationHandler for Shell {
                     self.state.status_message_set(msg);
                 }
                 self.state.poll_burner_hotplug();
+                update_touch_controller(
+                    &mut self.state,
+                    &mut self.input,
+                    &mut self.touch_chrome_applied,
+                    dt,
+                    &gfx.window,
+                );
+                if std::mem::take(&mut self.touch_menu_pending) {
+                    input.toggle_open = true;
+                }
                 if pad_frame.toggle_menu {
                     // Select+Start is the gamepad equivalent of
                     // Escape -- route it into the same `toggle_open`
@@ -1529,6 +1588,13 @@ impl ApplicationHandler for Shell {
                         .as_ref()
                         .map(|bus| (analog(bus.port1_pad_mode()), analog(bus.port2_pad_mode())))
                         .unwrap_or((false, false));
+                    web_touch::note_guest(
+                        self.input.touch().visible(),
+                        port1.mask_for(port1_analog),
+                        port1_analog,
+                        self.state.menu.open,
+                        port1.left_stick,
+                    );
                     let live_pad_sample = Port1PadSample::from_host(
                         port1.mask_for(port1_analog),
                         port1.right_stick,
@@ -2026,6 +2092,9 @@ impl ApplicationHandler for Shell {
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
             self.install_pending_graphics();
+            if web_touch::take_release_request() {
+                self.input.touch_mut().release_all();
+            }
             // Apply any game file the user picked since the last frame.
             self.state.poll_web_uploads();
             // Embed mode: host commands in, run-state changes out.
@@ -2126,6 +2195,64 @@ impl Shell {
         } else {
             event_loop.set_control_flow(ControlFlow::WaitUntil(next));
         }
+    }
+}
+
+/// Per-frame upkeep of the on-screen controller: preferences, layout for
+/// this window and guest, the toolbar getting out of the way, and the
+/// fullscreen request from the menu.
+fn update_touch_controller(
+    state: &mut AppState,
+    input_router: &mut input::InputRouter,
+    chrome_applied: &mut bool,
+    dt: f32,
+    window: &winit::window::Window,
+) {
+    if state.touch_prefs_dirty {
+        state.touch_prefs_dirty = false;
+        input_router.touch_mut().set_prefs(state.touch_prefs);
+        web_touch::save_prefs(&state.touch_prefs);
+    }
+    if std::mem::take(&mut state.fullscreen_requested) {
+        web_touch::toggle_fullscreen(false);
+    }
+    let analog = |mode: Option<emulator_core::pad::PadMode>| {
+        mode == Some(emulator_core::pad::PadMode::Analog)
+    };
+    let guest_analog = state
+        .bus
+        .as_ref()
+        .is_some_and(|bus| analog(bus.port1_pad_mode()) || analog(bus.port2_pad_mode()));
+    let size = window.inner_size();
+    let scale = window.scale_factor() as f32;
+    let css = web_touch::safe_insets_css();
+    let params = input::touch::layout::LayoutParams {
+        size: egui::vec2(size.width as f32, size.height as f32),
+        scale,
+        safe: input::touch::layout::Insets {
+            top: css.top * scale,
+            right: css.right * scale,
+            bottom: css.bottom * scale,
+            left: css.left * scale,
+        },
+        analog: guest_analog,
+        size_pct: 100,
+        left_handed: false,
+        fullscreen_button: web_touch::fullscreen_available(),
+        menu_open: false,
+    };
+    let now_ms = input_router.now_ms();
+    let menu_open = state.menu.open;
+    let touch = input_router.touch_mut();
+    touch.set_menu_open(menu_open);
+    touch.update_layout(params, now_ms, dt.max(1.0 / 120.0));
+    let visible = touch.visible();
+    state.menu.set_touch_mode(visible);
+    if visible && !*chrome_applied {
+        // The toolbar costs a phone a tenth of its height; the menu button and
+        // the Settings rows reach everything on it.
+        *chrome_applied = true;
+        state.toolbar_hidden = true;
     }
 }
 

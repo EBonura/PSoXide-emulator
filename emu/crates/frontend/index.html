@@ -2,7 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#000000" />
     <title>PSoXide</title>
     <link data-trunk rel="icon" href="../../../assets/branding/psoxide-app-icon.png" />
     <script>
@@ -113,9 +117,12 @@
             if (c.state === "suspended") c.resume().then(update, update);
           });
         }
-        ["pointerdown", "keydown", "touchstart"].forEach(function (ev) {
+        // iOS only counts the end of a touch (and a click) as the gesture
+        // that may start audio, so listen for those as well as the starts.
+        ["pointerdown", "pointerup", "keydown", "touchstart", "touchend", "click"].forEach(function (ev) {
           window.addEventListener(ev, resume, true);
         });
+        window.psoxideUnlockAudio = resume;
         // Pad presses are not DOM events. Try a resume on one while sound is
         // still blocked; browsers that do not count a pad press as a gesture
         // keep the hint up until a click or key.
@@ -137,9 +144,14 @@
         margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden;
         user-select: none; -webkit-user-select: none;
         -webkit-tap-highlight-color: transparent;
+        /* A finger on the page is the game's: no scroll, pull-to-refresh,
+           pinch zoom, double-tap zoom, long-press callout or selection. */
+        touch-action: none; overscroll-behavior: none;
+        -webkit-touch-callout: none;
       }
+      body { position: fixed; inset: 0; width: 100%; }
       /* No text-selection highlight or focus ring around the game canvas. */
-      canvas { display: block; outline: none; }
+      canvas { display: block; outline: none; touch-action: none; }
       canvas:focus, canvas:focus-visible { outline: none; }
 
       .psoxide-loader {
@@ -222,6 +234,40 @@
         pointer-events: none;
       }
       .psoxide-sound-hint[hidden] { display: none; }
+      /* First visit on a touch screen: one tidy tap starts audio, goes
+         fullscreen where the browser allows it and keeps the screen awake. */
+      .psoxide-tap {
+        position: fixed; inset: 0; z-index: 2147483647;
+        display: none; flex-direction: column; align-items: center; justify-content: center;
+        gap: 22px; border: 0; margin: 0; padding: 24px; width: 100%; cursor: pointer;
+        color: #dce5ee; text-align: center;
+        padding-left: max(24px, env(safe-area-inset-left));
+        padding-right: max(24px, env(safe-area-inset-right));
+        background:
+          radial-gradient(circle at 50% 40%, rgba(15, 185, 215, 0.16), transparent 42%),
+          linear-gradient(180deg, #090d12 0%, #05070a 100%);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+      }
+      .psoxide-tap.is-on { display: flex; }
+      .psoxide-tap-mark {
+        color: #f4f8fb; font-size: clamp(34px, 9vw, 56px); font-weight: 750;
+        letter-spacing: 0.08em; line-height: 1;
+      }
+      .psoxide-tap-mark span { color: #22c8e5; }
+      .psoxide-tap-play {
+        display: grid; place-items: center; width: 84px; height: 84px; border-radius: 50%;
+        background: rgba(34, 200, 229, 0.16); box-shadow: 0 0 0 1.5px rgba(34, 200, 229, 0.6);
+        animation: psoxide-tap-pulse 2.4s ease-in-out infinite;
+      }
+      .psoxide-tap-play svg { width: 38px; height: 38px; margin-left: 5px; fill: #22c8e5; }
+      .psoxide-tap-label { font-size: 15px; font-weight: 650; letter-spacing: 0.18em; text-transform: uppercase; }
+      .psoxide-tap-note { color: #8997a6; font-size: 12px; font-weight: 600; letter-spacing: 0.1em; min-height: 1.4em; }
+      @keyframes psoxide-tap-pulse {
+        0%, 100% { box-shadow: 0 0 0 1.5px rgba(34, 200, 229, 0.6), 0 0 0 0 rgba(34, 200, 229, 0.25); }
+        50% { box-shadow: 0 0 0 1.5px rgba(34, 200, 229, 0.9), 0 0 0 14px rgba(34, 200, 229, 0); }
+      }
+      @media (prefers-reduced-motion: reduce) { .psoxide-tap-play { animation: none; } }
       /* Embedded player: a click-to-start poster over everything until the
          user asks for the program, then small overlay buttons on hover. */
       .psoxide-embed-idle .psoxide-loader { display: none; }
@@ -375,6 +421,14 @@
       </div>
     </div>
     <div id="psoxide-sound-hint" class="psoxide-sound-hint" hidden>Click or press a key for sound</div>
+    <button id="psoxide-tap" class="psoxide-tap" type="button">
+      <div class="psoxide-tap-mark" aria-label="PSoXide">PSo<span>X</span>ide</div>
+      <span class="psoxide-tap-play" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M7 4.5v15l12.5-7.5z" /></svg>
+      </span>
+      <span class="psoxide-tap-label">Tap to play</span>
+      <span id="psoxide-tap-note" class="psoxide-tap-note">Loading emulator</span>
+    </button>
     <button id="psoxide-poster" class="psoxide-poster" type="button" hidden>
       <span class="psoxide-poster-play" aria-hidden="true">
         <svg viewBox="0 0 24 24"><path d="M7 4.5v15l12.5-7.5z" /></svg>
@@ -392,6 +446,62 @@
       </button>
     </div>
     <noscript>PSoXide requires JavaScript.</noscript>
+    <script>
+      // Touch devices. The controller itself is drawn and handled by the
+      // emulator (src/input/touch); this page only keeps the browser out of
+      // the way and gives the first visit its one tap.
+      (function () {
+        var coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+        // No long-press menu, no iOS pinch gesture, no double-tap zoom.
+        document.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+        ["gesturestart", "gesturechange", "gestureend"].forEach(function (ev) {
+          document.addEventListener(ev, function (e) { e.preventDefault(); });
+        });
+        var lastEnd = 0;
+        document.addEventListener("touchend", function (e) {
+          var now = Date.now();
+          if (now - lastEnd < 350) e.preventDefault();
+          lastEnd = now;
+        }, { passive: false });
+
+        var tap = document.getElementById("psoxide-tap");
+        var note = document.getElementById("psoxide-tap-note");
+        var loader = document.getElementById("psoxide-loader");
+        if (!tap || !coarse || psoxideEmbed) return;
+        tap.classList.add("is-on");
+        function ready() {
+          return loader.classList.contains("is-ready") || loader.classList.contains("has-error");
+        }
+        function sync() {
+          note.textContent = ready() ? "Landscape works best" : "Loading emulator";
+        }
+        new MutationObserver(sync).observe(loader, { attributes: true, attributeFilter: ["class"] });
+        sync();
+        var wake = null;
+        function keepAwake() {
+          if (!navigator.wakeLock || document.visibilityState !== "visible") return;
+          navigator.wakeLock.request("screen").then(function (l) { wake = l; }, function () {});
+        }
+        document.addEventListener("visibilitychange", function () {
+          if (wake) { wake = null; keepAwake(); }
+        });
+        function go(e) {
+          e.preventDefault();
+          if (window.psoxideUnlockAudio) window.psoxideUnlockAudio();
+          var root = document.documentElement;
+          var request = root.requestFullscreen || root.webkitRequestFullscreen;
+          if (request && !document.fullscreenElement) {
+            try {
+              var p = request.call(root);
+              if (p && p.catch) p.catch(function () {});
+            } catch (err) {}
+          }
+          keepAwake();
+          tap.classList.remove("is-on");
+        }
+        tap.addEventListener("click", go);
+      })();
+    </script>
     <script>
       // Start the emulator. Trunk.toml leaves the hashed file names in
       // window.psoxideWasm rather than letting Trunk import them, so this

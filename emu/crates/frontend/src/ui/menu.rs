@@ -22,6 +22,12 @@ const CATEGORY_SPACING: f32 = 100.0;
 const ICON_SIZE_ACTIVE: f32 = 32.0;
 const ICON_SIZE_INACTIVE: f32 = 20.0;
 const ITEM_HEIGHT: f32 = 40.0;
+/// Row height on a touch screen: a comfortable thumb target.
+const TOUCH_ITEM_HEIGHT: f32 = 54.0;
+/// Finger travel (points) before a press becomes a scroll rather than a tap.
+const TOUCH_SLOP: f32 = 10.0;
+/// Horizontal travel (points) of a swipe that changes the category.
+const SWIPE_CATEGORY: f32 = 70.0;
 const FOLDER_INDENT: f32 = 18.0;
 /// Hard ceiling on item-row width (huge libraries / long paths elide past it).
 const ITEM_MAX_WIDTH: f32 = 820.0;
@@ -120,6 +126,18 @@ pub enum MenuAction {
     CycleMenuOpacity,
     /// Cycle the DPI-aware host UI scale through compact and enlarged presets.
     CycleUiScale,
+    /// Cycle when the on-screen controller shows: Auto, On, Off.
+    CycleTouchMode,
+    /// Cycle the on-screen controller's opacity.
+    CycleTouchOpacity,
+    /// Cycle the on-screen controller's size.
+    CycleTouchSize,
+    /// Turn the press vibration on or off.
+    ToggleTouchHaptics,
+    /// Swap the controller's sides for a left-handed grip.
+    ToggleTouchLeftHanded,
+    /// Enter or leave fullscreen (web).
+    ToggleFullscreen,
     /// Switch what a slow host gives up: game speed or smooth painting.
     ToggleSmoothSlowHost,
     /// Web: reconnect a previously-saved games folder.
@@ -276,6 +294,55 @@ pub(crate) const OPEN_DISC_SHORTCUT: &str = "Ctrl+O";
 /// Pseudo-folder key for the discs opened with "Open disc...".
 pub(crate) const RECENT_FOLDER: &str = "/recent";
 
+/// The touch settings that are sliders in the menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TouchSliderKind {
+    /// Controller opacity, percent.
+    Opacity,
+    /// Controller size, percent.
+    Size,
+}
+
+impl TouchSliderKind {
+    const fn index(self) -> usize {
+        match self {
+            Self::Opacity => 0,
+            Self::Size => 1,
+        }
+    }
+
+    /// Lowest and highest percent.
+    const fn range(self) -> (f32, f32) {
+        match self {
+            Self::Opacity => (15.0, 100.0),
+            Self::Size => (60.0, 160.0),
+        }
+    }
+
+    fn of(action: &MenuAction) -> Option<Self> {
+        match action {
+            MenuAction::CycleTouchOpacity => Some(Self::Opacity),
+            MenuAction::CycleTouchSize => Some(Self::Size),
+            _ => None,
+        }
+    }
+}
+
+/// A finger dragging the menu list: scrolls it, flicks it, or swipes categories.
+#[derive(Clone, Copy, Debug, Default)]
+struct TouchDrag {
+    /// A press started inside the list.
+    active: bool,
+    /// Total travel so far.
+    travel: Vec2,
+    /// The travel passed the slop: this is a scroll, not a tap.
+    moved: bool,
+    /// Scroll speed in rows per second, kept after release as a fling.
+    fling: f32,
+    /// The list is scrolled by hand: stop keeping the selection in view.
+    manual: bool,
+}
+
 pub struct MenuState {
     games: Vec<LibraryItem>,
     /// SDK examples, project builds and (web) the streamed demo disc,
@@ -326,6 +393,16 @@ pub struct MenuState {
     /// Live snapshot of this game's saves, newest first, set by
     /// [`MenuState::sync_save_states`], for the save-states panel.
     save_rows: Vec<SaveStateRow>,
+    /// Touch screen in use: bigger rows, a compact header, flick scrolling.
+    touch_mode: bool,
+    /// State of a finger dragging the list.
+    touch_drag: TouchDrag,
+    /// A finger is dragging one of the touch settings' sliders.
+    slider_grab: Option<TouchSliderKind>,
+    /// Where each slider's track was drawn last frame (grab test).
+    slider_tracks: [Option<Rect>; 2],
+    /// The value a slider was dragged to, waiting for the app to take it.
+    touch_slider: Option<(TouchSliderKind, u8)>,
     /// A "Load" click in the save-states panel doesn't load
     /// immediately -- it stages the target slot here so the panel can
     /// show a confirm-with-"resume paused" dialog first.
@@ -456,6 +533,11 @@ impl MenuState {
             about_open: false,
             save_states_open: false,
             save_rows: Vec::new(),
+            touch_mode: false,
+            touch_drag: TouchDrag::default(),
+            slider_grab: None,
+            slider_tracks: [None; 2],
+            touch_slider: None,
             pending_load_confirm: None,
             save_thumb_cache: HashMap::new(),
             controls_open: false,
@@ -722,6 +804,32 @@ impl MenuState {
         );
     }
 
+    /// Whether the touch layout is in use.
+    pub fn touch_mode(&self) -> bool {
+        self.touch_mode
+    }
+
+    /// Use the touch layout: bigger rows, compact header, flick scrolling.
+    pub fn set_touch_mode(&mut self, on: bool) {
+        self.touch_mode = on;
+    }
+
+    /// Reflect the on-screen controller's preferences in their Settings rows.
+    pub fn set_touch_prefs(&mut self, prefs: &crate::input::touch::prefs::TouchPrefs) {
+        let on_off = |on: bool| if on { "On" } else { "Off" }.to_string();
+        self.set_value(&MenuAction::CycleTouchMode, prefs.mode.label().to_string());
+        self.set_value(
+            &MenuAction::CycleTouchOpacity,
+            format!("{}%", prefs.opacity_pct),
+        );
+        self.set_value(&MenuAction::CycleTouchSize, format!("{}%", prefs.size_pct));
+        self.set_value(&MenuAction::ToggleTouchHaptics, on_off(prefs.haptics));
+        self.set_value(
+            &MenuAction::ToggleTouchLeftHanded,
+            on_off(prefs.left_handed),
+        );
+    }
+
     /// Reflect the slow-host choice in its Settings row.
     pub fn set_smooth_slow_host(&mut self, smooth: bool) {
         self.set_value(
@@ -789,6 +897,10 @@ impl MenuState {
             return None;
         }
 
+        if input.up || input.down || input.left || input.right {
+            self.touch_drag.manual = false;
+            self.touch_drag.fling = 0.0;
+        }
         let num_cats = self.categories.len();
         if num_cats > 0 {
             if input.left {
@@ -837,6 +949,11 @@ impl MenuState {
             self.open = false;
         }
         None
+    }
+
+    /// A touch slider's new value, when one was dragged this frame.
+    pub(crate) fn take_touch_slider(&mut self) -> Option<(TouchSliderKind, u8)> {
+        self.touch_slider.take()
     }
 
     /// Take a click action queued while painting this frame.
@@ -946,7 +1063,7 @@ impl MenuState {
             input
                 .pointer
                 .any_released()
-                .then(|| input.pointer.latest_pos())
+                .then(|| input.pointer.interact_pos())
                 .flatten()
         });
         let pointer_hover = ctx.input(|input| input.pointer.hover_pos());
@@ -972,11 +1089,22 @@ impl MenuState {
             let rect = Rect::from_min_size(screen.min, Vec2::new(sw, banner_h));
             // A calm info bar, not an alarm: this is setup guidance, not an error.
             painter.rect_filled(rect, 0.0, fade(egui::Color32::from_rgb(28, 42, 50)));
+            // On a touch screen the on-screen buttons sit at the top: keep the
+            // note to the left of them.
+            let (anchor, align, size) = if self.touch_mode {
+                (Pos2::new(14.0, banner_h / 2.0), Align2::LEFT_CENTER, 12.0)
+            } else {
+                (
+                    Pos2::new(sw / 2.0, banner_h / 2.0),
+                    Align2::CENTER_CENTER,
+                    14.0,
+                )
+            };
             painter.text(
-                Pos2::new(sw / 2.0, banner_h / 2.0),
-                Align2::CENTER_CENTER,
+                anchor,
+                align,
                 warning,
-                FontId::proportional(14.0),
+                FontId::proportional(size),
                 fade(theme::MENU_ACCENT),
             );
         }
@@ -989,7 +1117,89 @@ impl MenuState {
         }
 
         let center_x = sw / 2.0;
-        let center_y = sh * 0.38;
+        // A phone held sideways is barely 400 points tall: tuck the header
+        // into the top and give the rows the rest.
+        let compact = self.touch_mode && sh < 620.0;
+        let item_h = if self.touch_mode {
+            TOUCH_ITEM_HEIGHT
+        } else {
+            ITEM_HEIGHT
+        };
+        let center_y = if compact { 34.0 } else { sh * 0.38 };
+        let items_start_y = center_y + ICON_SIZE_ACTIVE + if compact { 36.0 } else { 44.0 };
+        let bottom_margin = if self.touch_mode { 16.0 } else { 56.0 };
+
+        // A finger on the list: tap to choose, drag or flick to scroll, swipe
+        // sideways to change category. Decided before anything reads the
+        // release so the end of a flick can never click what it lands on.
+        let mut swipe: Option<i32> = None;
+        let mut scroll_rows = 0.0_f32;
+        let mut interactive_release = interactive_release;
+        if self.touch_mode && !self.about_open {
+            let list_top = Rect::from_min_max(
+                Pos2::new(0.0, items_start_y),
+                Pos2::new(sw, sh - bottom_margin),
+            );
+            let row_stride = item_h + ITEM_GAP;
+            let (pressed, down, released, pos, delta) = ctx.input(|i| {
+                (
+                    i.pointer.any_pressed(),
+                    i.pointer.primary_down(),
+                    i.pointer.any_released(),
+                    i.pointer.interact_pos(),
+                    i.pointer.delta(),
+                )
+            });
+            let drag = &mut self.touch_drag;
+            let on_slider = pos.is_some_and(|p| {
+                self.slider_tracks
+                    .iter()
+                    .flatten()
+                    .any(|t| t.expand2(Vec2::new(14.0, item_h / 2.0)).contains(p))
+            });
+            if pressed && !on_slider && pos.is_some_and(|p| list_top.contains(p)) {
+                *drag = TouchDrag {
+                    active: true,
+                    fling: 0.0,
+                    ..TouchDrag::default()
+                };
+            }
+            if drag.active && down {
+                drag.travel += delta;
+                if !drag.moved && drag.travel.length() > TOUCH_SLOP {
+                    drag.moved = true;
+                }
+                if drag.moved && drag.travel.y.abs() >= drag.travel.x.abs() {
+                    scroll_rows = -delta.y / row_stride;
+                    let speed = scroll_rows / dt.max(0.004);
+                    drag.fling = 0.55 * drag.fling + 0.45 * speed;
+                    drag.manual = true;
+                }
+            }
+            if drag.active && released {
+                if drag.moved && drag.travel.x.abs() > drag.travel.y.abs() {
+                    if drag.travel.x.abs() > SWIPE_CATEGORY {
+                        swipe = Some(if drag.travel.x < 0.0 { 1 } else { -1 });
+                    }
+                    drag.fling = 0.0;
+                }
+                if drag.moved {
+                    interactive_release = None;
+                }
+                drag.active = false;
+                if drag.fling.abs() < 2.0 {
+                    drag.fling = 0.0;
+                }
+            }
+            if !drag.active && drag.fling != 0.0 {
+                // Coast to a stop after a flick.
+                scroll_rows += drag.fling * dt;
+                drag.fling *= (1.0 - 3.4 * dt).max(0.0);
+                if drag.fling.abs() < 0.6 {
+                    drag.fling = 0.0;
+                }
+            }
+        }
 
         // Category row. These used to be keyboard/gamepad only even though
         // they look like clickable tabs, which made Settings unreachable by
@@ -1043,6 +1253,7 @@ impl MenuState {
             self.category_index = index;
             self.item_index = 0;
             self.scroll_y = 0.0;
+            self.touch_drag = TouchDrag::default();
         }
 
         // Item list.
@@ -1057,7 +1268,6 @@ impl MenuState {
         let marquee_t = self.marquee_t;
 
         let cat = &self.categories[self.category_index];
-        let items_start_y = center_y + ICON_SIZE_ACTIVE + 44.0;
         let label_font = FontId::proportional(15.0);
         let value_font = FontId::proportional(13.0);
 
@@ -1065,7 +1275,8 @@ impl MenuState {
         // label fully, plus its action icons, plus a capped value column -- so
         // each category is only as wide as it needs (no global stretch).
         // Values past the cap elide; the window width is the hard ceiling.
-        let max_avail = (sw - 2.0 * 40.0).min(ITEM_MAX_WIDTH);
+        let side = if self.touch_mode { 12.0 } else { 40.0 };
+        let max_avail = (sw - 2.0 * side).min(ITEM_MAX_WIDTH);
         let measure = |text: &str, font: FontId| {
             line_galley(ctx, text, font, theme::MENU_TEXT_DIM, None)
                 .size()
@@ -1097,9 +1308,13 @@ impl MenuState {
             // 14px left pad + 12px right pad = 26.
             acc.max(26.0 + label_w + value_gap + value_w + action_w)
         });
-        let item_width = needed.clamp(ITEM_MIN_WIDTH, max_avail);
+        let item_width = if self.touch_mode {
+            max_avail
+        } else {
+            needed.max(ITEM_MIN_WIDTH).min(max_avail)
+        };
         let items_x = center_x - item_width / 2.0;
-        let row_stride = ITEM_HEIGHT + ITEM_GAP;
+        let row_stride = item_h + ITEM_GAP;
 
         // How many full rows fit between `items_start_y` and the
         // bottom edge of the screen (with a small bottom margin so
@@ -1109,7 +1324,6 @@ impl MenuState {
         // launch) still produces at least one visible row and avoids
         // a divide-by-zero in the visible-count math below.
         // Stop above the notice and hint lines painted at the bottom.
-        let bottom_margin = 56.0;
         let available_h = (sh - items_start_y - bottom_margin).max(row_stride);
         let visible_rows = (available_h / row_stride).floor().max(1.0) as usize;
 
@@ -1122,7 +1336,19 @@ impl MenuState {
         // is 0 -- nothing to scroll.
         let num_items = cat.items.len();
         let edge_margin: usize = if visible_rows >= 5 { 2 } else { 1 };
-        let target_scroll = if num_items <= visible_rows {
+        let max_scroll_rows = num_items.saturating_sub(visible_rows) as f32;
+        if scroll_rows != 0.0 {
+            let moved = (self.scroll_y + scroll_rows).clamp(0.0, max_scroll_rows);
+            if moved == self.scroll_y {
+                self.touch_drag.fling = 0.0;
+            }
+            self.scroll_y = moved;
+        }
+        let by_hand =
+            self.touch_drag.active || self.touch_drag.fling != 0.0 || self.touch_drag.manual;
+        let target_scroll = if by_hand {
+            self.scroll_y
+        } else if num_items <= visible_rows {
             0.0_f32
         } else {
             let max_scroll = (num_items - visible_rows) as f32;
@@ -1159,10 +1385,18 @@ impl MenuState {
         let list_painter = painter.with_clip_rect(list_rect);
         let pointer_hover = pointer_hover.filter(|p| list_rect.contains(*p));
         let interactive_release = interactive_release.filter(|p| list_rect.contains(*p));
+        let (ptr_pressed, ptr_down, ptr_pos) = ctx.input(|i| {
+            (
+                i.pointer.any_pressed(),
+                i.pointer.primary_down(),
+                i.pointer.interact_pos(),
+            )
+        });
+        let mut slider_tracks = [None; 2];
         for (i, item) in cat.items.iter().enumerate() {
             let painter = &list_painter;
             let y = items_start_y + (i as f32 - self.scroll_y) * row_stride;
-            let row_bottom = y + ITEM_HEIGHT;
+            let row_bottom = y + item_h;
             // Cull items entirely above the list region or below the
             // bottom margin. One row of overhang on each side so the
             // scroll animation doesn't "pop" items in/out at the
@@ -1170,8 +1404,7 @@ impl MenuState {
             if row_bottom < items_start_y - row_stride || y > sh - bottom_margin {
                 continue;
             }
-            let rect =
-                Rect::from_min_size(Pos2::new(items_x, y), Vec2::new(item_width, ITEM_HEIGHT));
+            let rect = Rect::from_min_size(Pos2::new(items_x, y), Vec2::new(item_width, item_h));
             let action_count = usize::from(item.burn_action.is_some())
                 + usize::from(
                     matches!(item.action, MenuAction::LaunchGame(_)) && item.burn_action.is_some(),
@@ -1184,7 +1417,20 @@ impl MenuState {
             if row_hovered {
                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
             }
-            if interactive_release.is_some_and(|position| main_rect.contains(position)) {
+            let slider = TouchSliderKind::of(&item.action).filter(|_| self.touch_mode);
+            // The slider's track sits between the label and the value.
+            let track = slider.map(|_| {
+                Rect::from_min_max(
+                    Pos2::new(items_x + 14.0 + 170.0, y + item_h / 2.0 - 3.0),
+                    Pos2::new(items_x + item_width - 96.0, y + item_h / 2.0 + 3.0),
+                )
+            });
+            let on_track = |p: Pos2| {
+                track.is_some_and(|t| t.expand2(Vec2::new(14.0, item_h / 2.0)).contains(p))
+            };
+            if interactive_release
+                .is_some_and(|position| main_rect.contains(position) && !on_track(position))
+            {
                 self.item_index = i;
                 self.pending_pointer_action = Some(item.action.clone());
             }
@@ -1198,7 +1444,7 @@ impl MenuState {
 
             if is_selected {
                 painter.rect_filled(
-                    Rect::from_min_size(Pos2::new(items_x, y), Vec2::new(3.0, ITEM_HEIGHT)),
+                    Rect::from_min_size(Pos2::new(items_x, y), Vec2::new(3.0, item_h)),
                     0.0,
                     fade(theme::MENU_ACCENT),
                 );
@@ -1212,7 +1458,7 @@ impl MenuState {
                 .filter(|_| item.burn_action.is_some());
             let mut content_left = items_x + 14.0 + item.depth as f32 * FOLDER_INDENT;
             if let MenuAction::ToggleLibraryFolder(folder) = &item.action {
-                let center = Pos2::new(content_left + 4.0, y + ITEM_HEIGHT / 2.0);
+                let center = Pos2::new(content_left + 4.0, y + item_h / 2.0);
                 let points = if self.expanded_folders.contains(folder) {
                     vec![
                         center + Vec2::new(-4.0, -2.0),
@@ -1262,9 +1508,9 @@ impl MenuState {
                 let off = marquee_offset(marquee_t, overflow);
                 let clip = Rect::from_min_size(
                     Pos2::new(content_left, y),
-                    Vec2::new(label_budget, ITEM_HEIGHT),
+                    Vec2::new(label_budget, item_h),
                 );
-                let ty = y + (ITEM_HEIGHT - full.size().y) / 2.0;
+                let ty = y + (item_h - full.size().y) / 2.0;
                 painter.with_clip_rect(clip).galley(
                     Pos2::new(content_left - off, ty),
                     full,
@@ -1278,13 +1524,56 @@ impl MenuState {
                     label_color,
                     Some(label_budget),
                 );
-                let ty = y + (ITEM_HEIGHT - g.size().y) / 2.0;
+                let ty = y + (item_h - g.size().y) / 2.0;
                 painter.galley(Pos2::new(content_left, ty), g, label_color);
             }
 
             if let Some(g) = value_galley {
-                let ty = y + (ITEM_HEIGHT - g.size().y) / 2.0;
+                let ty = y + (item_h - g.size().y) / 2.0;
                 painter.galley(Pos2::new(value_left, ty), g, fade(theme::MENU_TEXT_DIM));
+            }
+
+            if let (Some(kind), Some(track)) = (slider, track) {
+                if track.width() > 60.0 {
+                    slider_tracks[kind.index()] = Some(track);
+                    let (lo, hi) = kind.range();
+                    if ptr_pressed && ptr_pos.is_some_and(on_track) {
+                        self.slider_grab = Some(kind);
+                    }
+                    let mut shown = item
+                        .value
+                        .as_deref()
+                        .and_then(|v| v.trim_end_matches('%').parse::<f32>().ok())
+                        .unwrap_or(lo);
+                    if self.slider_grab == Some(kind) {
+                        match (ptr_down, ptr_pos) {
+                            (true, Some(p)) => {
+                                let t = ((p.x - track.left()) / track.width()).clamp(0.0, 1.0);
+                                let value = (lo + (hi - lo) * t).round();
+                                self.touch_slider = Some((kind, value as u8));
+                                shown = value;
+                            }
+                            _ => self.slider_grab = None,
+                        }
+                    }
+                    let t = ((shown - lo) / (hi - lo)).clamp(0.0, 1.0);
+                    let knob_x = track.left() + track.width() * t;
+                    painter.rect_filled(
+                        track,
+                        3.0,
+                        fade(theme::MENU_TEXT_DIM.gamma_multiply(0.45)),
+                    );
+                    painter.rect_filled(
+                        Rect::from_min_max(track.min, Pos2::new(knob_x, track.max.y)),
+                        3.0,
+                        fade(theme::MENU_ACCENT),
+                    );
+                    painter.circle_filled(
+                        Pos2::new(knob_x, track.center().y),
+                        11.0,
+                        fade(theme::MENU_TEXT_BRIGHT),
+                    );
+                }
             }
 
             let mut action_index = 0;
@@ -1292,7 +1581,7 @@ impl MenuState {
                 draw_row_icon_action(
                     ctx,
                     painter,
-                    row_action_rect(items_x, item_width, y, action_index),
+                    row_action_rect(items_x, item_width, y, item_h, action_index),
                     pointer_hover,
                     interactive_release,
                     icons::DISC,
@@ -1309,7 +1598,7 @@ impl MenuState {
                 draw_row_icon_action(
                     ctx,
                     painter,
-                    row_action_rect(items_x, item_width, y, action_index),
+                    row_action_rect(items_x, item_width, y, item_h, action_index),
                     pointer_hover,
                     interactive_release,
                     icons::PLAY,
@@ -1322,6 +1611,8 @@ impl MenuState {
                 );
             }
         }
+
+        self.slider_tracks = slider_tracks;
 
         // Scroll indicators: small triangles at the top/bottom edges
         // of the item strip when there's content outside the visible
@@ -1345,8 +1636,20 @@ impl MenuState {
             arrow(Pos2::new(center_x, sh - bottom_margin + 8.0), 5.0);
         }
 
+        if let Some(step) = swipe {
+            let count = self.categories.len() as i32;
+            if count > 0 {
+                self.category_index =
+                    (self.category_index as i32 + step).rem_euclid(count) as usize;
+                self.item_index = 0;
+                self.scroll_y = 0.0;
+                self.touch_drag.manual = false;
+            }
+        }
+
         // Project framing, shown on every menu screen in both builds.
-        painter.text(
+        if !self.touch_mode {
+            painter.text(
             Pos2::new(sw / 2.0, sh - 46.0),
             Align2::CENTER_TOP,
             "PSoXide is an independent, open-source PS1 developer environment. Load your homebrew games directly. No firmware image is required.",
@@ -1354,14 +1657,15 @@ impl MenuState {
             fade(theme::MENU_TEXT_DIM),
         );
 
-        // Bottom hint bar.
-        painter.text(
-            Pos2::new(sw / 2.0, sh - 30.0),
-            Align2::CENTER_TOP,
-            "Click/Enter: Select   Esc: Close   Arrows: Navigate",
-            FontId::proportional(12.0),
-            fade(theme::MENU_HINT),
-        );
+            // Bottom hint bar.
+            painter.text(
+                Pos2::new(sw / 2.0, sh - 30.0),
+                Align2::CENTER_TOP,
+                "Click/Enter: Select   Esc: Close   Arrows: Navigate",
+                FontId::proportional(12.0),
+                fade(theme::MENU_HINT),
+            );
+        }
 
         // About card overlay, painted on top when opened from Settings.
         if self.about_open {
@@ -1370,11 +1674,17 @@ impl MenuState {
     }
 }
 
-fn row_action_rect(items_x: f32, item_width: f32, y: f32, index_from_right: usize) -> Rect {
+fn row_action_rect(
+    items_x: f32,
+    item_width: f32,
+    y: f32,
+    item_h: f32,
+    index_from_right: usize,
+) -> Rect {
     let right = items_x + item_width - index_from_right as f32 * ROW_ACTION_WIDTH;
     Rect::from_min_size(
         Pos2::new(right - ROW_ACTION_WIDTH, y),
-        Vec2::new(ROW_ACTION_WIDTH, ITEM_HEIGHT),
+        Vec2::new(ROW_ACTION_WIDTH, item_h),
     )
 }
 
@@ -2537,6 +2847,16 @@ fn build_settings_category() -> Category {
             MenuAction::ToggleSmoothSlowHost,
             Some(slow_host_label(false)),
         ),
+        row("Touch controls", MenuAction::CycleTouchMode, Some("Auto")),
+        row("Touch opacity", MenuAction::CycleTouchOpacity, Some("60%")),
+        row("Touch size", MenuAction::CycleTouchSize, Some("100%")),
+        row("Touch haptics", MenuAction::ToggleTouchHaptics, Some("On")),
+        row(
+            "Left-handed layout",
+            MenuAction::ToggleTouchLeftHanded,
+            Some("Off"),
+        ),
+        row("Fullscreen", MenuAction::ToggleFullscreen, None),
         row("About", MenuAction::ShowAbout, None),
     ];
     // There is no "quit" in a browser tab.
@@ -3264,6 +3584,12 @@ mod tests {
                 "Menu opacity",
                 "UI scale",
                 "When the computer is slow",
+                "Touch controls",
+                "Touch opacity",
+                "Touch size",
+                "Touch haptics",
+                "Left-handed layout",
+                "Fullscreen",
                 "About",
                 "Quit PSoXide"
             ]

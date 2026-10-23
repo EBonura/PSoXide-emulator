@@ -1,0 +1,338 @@
+//! Browser glue for the touch controller: screen facts, haptics, fullscreen,
+//! per-device preferences, and the page events that mean "let go of every
+//! button". Native builds have the same functions as no-ops so the shell
+//! needs no cfg.
+
+use crate::input::touch::layout::Insets;
+use crate::input::touch::prefs::TouchPrefs;
+
+/// Key of the preferences in the browser's local storage.
+#[cfg(target_arch = "wasm32")]
+const STORAGE_KEY: &str = "psoxide.touch.v1";
+
+#[cfg(target_arch = "wasm32")]
+mod imp {
+    use std::cell::{Cell, RefCell};
+
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::{JsCast, JsValue};
+
+    use super::{Insets, TouchPrefs, STORAGE_KEY};
+
+    thread_local! {
+        static RELEASE: Cell<bool> = const { Cell::new(false) };
+        static PROBE: RefCell<Option<web_sys::HtmlElement>> = const { RefCell::new(None) };
+    }
+
+    fn window() -> Option<web_sys::Window> {
+        web_sys::window()
+    }
+
+    pub(super) fn coarse_pointer() -> bool {
+        window()
+            .and_then(|w| w.match_media("(pointer: coarse)").ok().flatten())
+            .is_some_and(|query| query.matches())
+    }
+
+    /// CSS `env(safe-area-inset-*)` in CSS pixels, read through a hidden
+    /// element whose padding uses them.
+    pub(super) fn safe_insets_css() -> Insets {
+        let Some(win) = window() else {
+            return Insets::default();
+        };
+        // `?safe=top,right,bottom,left` (CSS px) stands in for a notch and a
+        // home bar, so a desktop browser can show how the layout copes.
+        if let Some(fake) = win.location().search().ok().and_then(|q| {
+            q.trim_start_matches('?')
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("safe=").map(str::to_string))
+        }) {
+            let v: Vec<f32> = fake.split(',').filter_map(|n| n.parse().ok()).collect();
+            if let [top, right, bottom, left] = v[..] {
+                return Insets {
+                    top,
+                    right,
+                    bottom,
+                    left,
+                };
+            }
+        }
+        let probe = PROBE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                let element = win
+                    .document()
+                    .and_then(|doc| doc.create_element("div").ok())
+                    .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok());
+                if let Some(element) = element {
+                    let _ = element.set_attribute(
+                        "style",
+                        "position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;\
+                         pointer-events:none;padding:env(safe-area-inset-top) \
+                         env(safe-area-inset-right) env(safe-area-inset-bottom) \
+                         env(safe-area-inset-left)",
+                    );
+                    if let Some(body) = win.document().and_then(|d| d.body()) {
+                        let _ = body.append_child(&element);
+                    }
+                    *slot = Some(element);
+                }
+            }
+            slot.clone()
+        });
+        let Some(probe) = probe else {
+            return Insets::default();
+        };
+        let Ok(Some(style)) = win.get_computed_style(&probe) else {
+            return Insets::default();
+        };
+        let read = |name: &str| {
+            style
+                .get_property_value(name)
+                .ok()
+                .and_then(|v| v.trim_end_matches("px").parse::<f32>().ok())
+                .unwrap_or(0.0)
+        };
+        Insets {
+            top: read("padding-top"),
+            right: read("padding-right"),
+            bottom: read("padding-bottom"),
+            left: read("padding-left"),
+        }
+    }
+
+    pub(super) fn vibrate(ms: u32) {
+        if let Some(win) = window() {
+            let _ = win.navigator().vibrate_with_duration(ms);
+        }
+    }
+
+    pub(super) fn fullscreen_available() -> bool {
+        window()
+            .and_then(|w| w.document())
+            .is_some_and(|d| d.fullscreen_enabled())
+    }
+
+    pub(super) fn fullscreen_active() -> bool {
+        window()
+            .and_then(|w| w.document())
+            .is_some_and(|d| d.fullscreen_element().is_some())
+    }
+
+    pub(super) fn toggle_fullscreen(lock_landscape: bool) {
+        let Some(doc) = window().and_then(|w| w.document()) else {
+            return;
+        };
+        if doc.fullscreen_element().is_some() {
+            doc.exit_fullscreen();
+            if let Some(orientation) = window()
+                .and_then(|w| w.screen().ok())
+                .map(|s| s.orientation())
+            {
+                let _ = orientation.unlock();
+            }
+            return;
+        }
+        if let Some(root) = doc.document_element() {
+            let _ = root.request_fullscreen();
+        }
+        if lock_landscape {
+            if let Some(orientation) = window()
+                .and_then(|w| w.screen().ok())
+                .map(|s| s.orientation())
+            {
+                if let Ok(promise) = orientation.lock(web_sys::OrientationLockType::Landscape) {
+                    let swallow = Closure::once(|_: JsValue| {});
+                    let _ = promise.catch(&swallow);
+                    swallow.forget();
+                }
+            }
+        }
+    }
+
+    pub(super) fn load_prefs() -> TouchPrefs {
+        window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item(STORAGE_KEY).ok().flatten())
+            .map_or_else(TouchPrefs::default, |text| TouchPrefs::from_text(&text))
+    }
+
+    pub(super) fn save_prefs(prefs: &TouchPrefs) {
+        if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
+            let _ = storage.set_item(STORAGE_KEY, &prefs.to_text());
+        }
+    }
+
+    pub(super) fn install_listeners() {
+        let Some(win) = window() else { return };
+        let release = Closure::<dyn FnMut(web_sys::Event)>::new(|_| RELEASE.with(|r| r.set(true)));
+        let hidden = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
+            if window()
+                .and_then(|w| w.document())
+                .is_some_and(|d| d.visibility_state() == web_sys::VisibilityState::Hidden)
+            {
+                RELEASE.with(|r| r.set(true));
+            }
+        });
+        let _ = win.add_event_listener_with_callback("blur", release.as_ref().unchecked_ref());
+        let _ = win.add_event_listener_with_callback("pagehide", release.as_ref().unchecked_ref());
+        let _ = win.add_event_listener_with_callback(
+            "orientationchange",
+            release.as_ref().unchecked_ref(),
+        );
+        if let Some(doc) = win.document() {
+            let _ = doc.add_event_listener_with_callback(
+                "visibilitychange",
+                hidden.as_ref().unchecked_ref(),
+            );
+        }
+        release.forget();
+        hidden.forget();
+    }
+
+    pub(super) fn take_release_request() -> bool {
+        RELEASE.with(|r| r.replace(false))
+    }
+
+    thread_local! {
+        static GUEST: Cell<(bool, u16, bool, bool, f32, f32)> =
+            const { Cell::new((false, 0, false, false, 0.0, 0.0)) };
+        static EVENTS: Cell<(u32, u32, f32, f32)> = const { Cell::new((0, 0, 0.0, 0.0)) };
+    }
+
+    pub(super) fn note_touch(owned: bool, x: f32, y: f32) {
+        EVENTS.with(|e| {
+            let (n, o, _, _) = e.get();
+            e.set((n + 1, o + u32::from(owned), x, y));
+        });
+    }
+
+    pub(super) fn note_guest(
+        visible: bool,
+        port1_mask: u16,
+        analog: bool,
+        menu_open: bool,
+        left: (f32, f32),
+    ) {
+        GUEST.with(|g| g.set((visible, port1_mask, analog, menu_open, left.0, left.1)));
+    }
+
+    /// What the page can ask the emulator about the controller, as JSON: for
+    /// headless tests that prove a tap reached the guest's port 1.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = psoxideTouchState)]
+    pub fn touch_state() -> String {
+        let (visible, mask, analog, menu, lx, ly) = GUEST.with(Cell::get);
+        let (events, owned, x, y) = EVENTS.with(Cell::get);
+        format!(
+            "{{\"visible\":{visible},\"port1_mask\":{mask},\"analog\":{analog},\"menu_open\":{menu},\
+             \"left_x\":{lx:.2},\"left_y\":{ly:.2},\"touch_events\":{events},\"touch_owned\":{owned},\"last_x\":{x:.1},\"last_y\":{y:.1}}}"
+        )
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod imp {
+    use super::{Insets, TouchPrefs};
+
+    pub(super) fn coarse_pointer() -> bool {
+        false
+    }
+    pub(super) fn safe_insets_css() -> Insets {
+        Insets::default()
+    }
+    pub(super) fn vibrate(_ms: u32) {}
+    pub(super) fn fullscreen_available() -> bool {
+        false
+    }
+    pub(super) fn fullscreen_active() -> bool {
+        false
+    }
+    pub(super) fn toggle_fullscreen(_lock_landscape: bool) {}
+    pub(super) fn load_prefs() -> TouchPrefs {
+        TouchPrefs::default()
+    }
+    pub(super) fn save_prefs(_prefs: &TouchPrefs) {}
+    pub(super) fn install_listeners() {}
+    #[allow(dead_code)]
+    pub(super) fn take_release_request() -> bool {
+        false
+    }
+    pub(super) fn note_guest(
+        _visible: bool,
+        _port1_mask: u16,
+        _analog: bool,
+        _menu_open: bool,
+        _left: (f32, f32),
+    ) {
+    }
+    pub(super) fn note_touch(_owned: bool, _x: f32, _y: f32) {}
+}
+
+/// Whether the browser says the primary pointer is a finger.
+pub(crate) fn coarse_pointer() -> bool {
+    imp::coarse_pointer()
+}
+
+/// Safe-area insets in CSS pixels (notch, rounded corners, home indicator).
+pub(crate) fn safe_insets_css() -> Insets {
+    imp::safe_insets_css()
+}
+
+/// A short vibration tick, where the browser supports it.
+pub(crate) fn vibrate(ms: u32) {
+    imp::vibrate(ms);
+}
+
+/// Whether the page can enter fullscreen (iPhone Safari cannot).
+pub(crate) fn fullscreen_available() -> bool {
+    imp::fullscreen_available()
+}
+
+/// Whether the page is fullscreen now.
+#[allow(dead_code)]
+pub(crate) fn fullscreen_active() -> bool {
+    imp::fullscreen_active()
+}
+
+/// Enter or leave fullscreen; entering can ask for landscape.
+pub(crate) fn toggle_fullscreen(lock_landscape: bool) {
+    imp::toggle_fullscreen(lock_landscape);
+}
+
+/// The preferences saved on this device.
+pub(crate) fn load_prefs() -> TouchPrefs {
+    imp::load_prefs()
+}
+
+/// Save the preferences on this device.
+pub(crate) fn save_prefs(prefs: &TouchPrefs) {
+    imp::save_prefs(prefs);
+}
+
+/// Listen for blur, page hide and rotation, which must release every button.
+pub(crate) fn install_listeners() {
+    imp::install_listeners();
+}
+
+/// Whether a page event asked to release every held button since the last call.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn take_release_request() -> bool {
+    imp::take_release_request()
+}
+
+/// Record what the guest's port 1 was fed this frame, for [`psoxideTouchState`]
+/// (a no-op on native).
+pub(crate) fn note_guest(
+    visible: bool,
+    port1_mask: u16,
+    analog: bool,
+    menu_open: bool,
+    left: (f32, f32),
+) {
+    imp::note_guest(visible, port1_mask, analog, menu_open, left);
+}
+
+/// Count one touch event for [`psoxideTouchState`] (a no-op on native).
+pub(crate) fn note_touch(owned: bool, x: f32, y: f32) {
+    imp::note_touch(owned, x, y);
+}

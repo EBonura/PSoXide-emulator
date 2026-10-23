@@ -32,6 +32,8 @@ pub(crate) enum BackendKind {
     /// A browser Gamepad API pad.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Web,
+    /// The on-screen touch controller.
+    Touch,
 }
 
 impl BackendKind {
@@ -42,6 +44,7 @@ impl BackendKind {
             Self::Gilrs => "gilrs",
             Self::GameController => "GameController",
             Self::Web => "web",
+            Self::Touch => "touch",
         }
     }
 }

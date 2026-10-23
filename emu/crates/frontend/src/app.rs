@@ -346,6 +346,12 @@ pub struct AppState {
     /// When true the top toolbar is slid up out of view, leaving only a
     /// small floating restore tab at the top-right.
     pub toolbar_hidden: bool,
+    /// The on-screen controller's preferences, kept per device.
+    pub touch_prefs: crate::input::touch::prefs::TouchPrefs,
+    /// The preferences changed and the shell should hand them on and save.
+    pub touch_prefs_dirty: bool,
+    /// The fullscreen button or menu row was used (web).
+    pub fullscreen_requested: bool,
     /// Physical pixel size used by the central framebuffer on the
     /// previous UI frame. The renderer uses this as its internal
     /// resolution budget; one-frame latency is fine because it only
@@ -608,6 +614,9 @@ impl AppState {
             texture_filter: TextureFilter::default(),
             deinterlace: emulator_core::Deinterlace::default(),
             toolbar_hidden: false,
+            touch_prefs: crate::web_touch::load_prefs(),
+            touch_prefs_dirty: true,
+            fullscreen_requested: false,
             framebuffer_present_size_px: (320, 240),
             cpu,
             freelook: emulator_core::FreelookState::default(),
@@ -667,6 +676,7 @@ impl AppState {
         out.menu
             .set_menu_opacity(out.settings.video.menu_opacity_pct);
         out.menu.set_ui_scale(out.settings.video.ui_scale_pct);
+        out.menu.set_touch_prefs(&out.touch_prefs);
         #[cfg(feature = "editor")]
         out.menu.sync_editor_label(out.workspace.is_editor());
         out.menu
@@ -2727,6 +2737,17 @@ impl AppState {
                 self.status_message_set(format!("{message} (settings save failed)"));
             }
         }
+    }
+
+    /// Change the on-screen controller's preferences, show the result in its
+    /// Settings rows and ask the shell to apply and save it.
+    pub fn edit_touch_prefs(
+        &mut self,
+        edit: impl FnOnce(&mut crate::input::touch::prefs::TouchPrefs),
+    ) {
+        edit(&mut self.touch_prefs);
+        self.menu.set_touch_prefs(&self.touch_prefs);
+        self.touch_prefs_dirty = true;
     }
 
     /// Cycle the DPI-aware host UI scale, update its Settings row, and persist

@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use emulator_core::{button, Bus};
 
 use super::filter::{ChatterChange, PadFilter};
-use super::model::{rising_edges, DeviceEvent, DeviceIdentity, PadSnapshot};
+use super::model::{rising_edges, BackendKind, DeviceEvent, DeviceIdentity, PadSnapshot};
 use super::repeat::MenuRepeat;
 use super::routing::{
     configure_port, PadProfile, PortChoice, PsxPort, RoutingTable, KEYBOARD_DEVICE_ID,
@@ -283,11 +283,21 @@ impl InputHub {
                     } else {
                         self.devices
                             .insert(identity.id.clone(), DeviceState::new(identity.clone()));
-                        frame.notices.push(InputNotice::Connected {
-                            device: identity.clone(),
-                        });
+                        if identity.backend != BackendKind::Touch {
+                            frame.notices.push(InputNotice::Connected {
+                                device: identity.clone(),
+                            });
+                        }
                     }
+                    let touch = identity.backend == BackendKind::Touch;
+                    let id = identity.id.clone();
                     self.routing.connect(identity);
+                    if touch {
+                        // Showing the controller means the player will use
+                        // it: give it a port now, so a game that wants a
+                        // DualShock sees one before the first press.
+                        self.routing.claim(&id);
+                    }
                 }
                 DeviceEvent::Disconnected(id) => {
                     if id == KEYBOARD_DEVICE_ID {
@@ -349,10 +359,13 @@ impl InputHub {
             // The first deliberate input of an unassigned pad gives it a port.
             if live.is_active() {
                 if let Some(port) = self.routing.claim(id) {
-                    frame.notices.push(InputNotice::Claimed {
-                        name: state.identity.name.clone(),
-                        port,
-                    });
+                    // Touching the screen is not worth a toast.
+                    if state.identity.backend != BackendKind::Touch {
+                        frame.notices.push(InputNotice::Claimed {
+                            name: state.identity.name.clone(),
+                            port,
+                        });
+                    }
                 }
             }
 
@@ -410,6 +423,13 @@ impl InputHub {
         frame.menu_left = steps & button::LEFT != 0;
         frame.menu_right = steps & button::RIGHT != 0;
         frame
+    }
+
+    /// Whether a device other than `except` is being pressed right now.
+    pub(crate) fn other_device_active(&self, except: &str) -> bool {
+        self.devices
+            .iter()
+            .any(|(id, state)| id != except && state.live.is_active())
     }
 
     /// Make every device's currently held buttons a baseline that does
@@ -556,6 +576,21 @@ mod tests {
         let mut hub = InputHub::new();
         hub.step(0, vec![sample(KEYBOARD_DEVICE_ID, 0)]);
         hub
+    }
+
+    #[test]
+    fn a_touchscreen_takes_a_port_when_it_connects_so_a_dualshock_is_there_before_a_press() {
+        let mut identity = test_identity("touch", "Touchscreen");
+        identity.backend = BackendKind::Touch;
+        let mut hub = InputHub::new();
+        let frame = hub.step(0, vec![DeviceEvent::Connected(identity)]);
+        let touch = hub.devices().into_iter().find(|d| d.identity.id == "touch");
+        assert_eq!(touch.map(|d| d.port), Some(PsxPort::One));
+        assert!(frame.notices.is_empty(), "no toast for the touchscreen");
+        // A real pad still claims on its first press.
+        hub.step(1, vec![DeviceEvent::Connected(test_identity("pad", "Pad"))]);
+        let pad = hub.devices().into_iter().find(|d| d.identity.id == "pad");
+        assert_eq!(pad.map(|d| d.port), Some(PsxPort::Off));
     }
 
     #[test]

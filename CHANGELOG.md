@@ -21,6 +21,20 @@
   colour per native pixel at any scale. A scaled target's centre sub-pixel is
   now exactly the CPU's pixel for polygons whose attributes differ across the
   quad diagonal. At 1x the whole frame matches CPU1 on every journey checked.
+- The web build plays on phones and tablets. A PlayStation controller is drawn
+  on the page (D-pad with diagonals, face buttons, shoulders, Start and Select,
+  and two floating analog sticks while the game's pad is in analog mode) in
+  landscape beside the game and in portrait under it, inside the notch and home
+  bar. It is a device like any other in the input layer, so the menu, port
+  assignment and the guest need no special case; fingers slide across the D-pad
+  and between buttons, and any number work at once. It shows on touch devices
+  until a keyboard or gamepad is used, and Settings has its mode, opacity and
+  size sliders, haptics and a left-handed layout, kept per device. The menu
+  has big rows, flick scrolling and swipes between columns, an on-screen menu
+  button and a fullscreen button; the first visit shows one tap to start that
+  unlocks audio, goes fullscreen and keeps the screen awake.
+  Also fixed: the menu panicked on the first frame of a high-density phone
+  screen (a list narrower than its minimum width).
 - Controllers and the keyboard now share one input path. Every source is an
   adapter that produces a per-device snapshot in the PS1 pad layout, and the
   menu, the hold-to-repeat, the noise guard, port assignment and the guest feed

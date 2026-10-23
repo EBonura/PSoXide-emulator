@@ -6,6 +6,7 @@ use super::model::DeviceEvent;
 #[cfg(any(target_os = "macos", test))]
 pub(crate) mod dedupe;
 pub(crate) mod keyboard;
+pub(crate) mod touch;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod game_controller;
