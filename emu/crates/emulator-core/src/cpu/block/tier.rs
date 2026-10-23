@@ -152,25 +152,30 @@ impl Cpu {
                 // interpreter while that keeps the batch's guarantees.
                 self.cursor.block = 0;
                 let entry_ok = self.block_entry_ok();
-                // A hit on the last word of a line whose next line is a miss
-                // is one op of a block: it joins the missed line instead.
-                let mut miss = if entry_ok && self.pc & 0xc == 0xc {
+                // A word that is not a cache hit cannot start a block (one is
+                // current only while the words it was read from are hits), so
+                // it goes straight to the scratch block of its line; of the
+                // hits only the last word of a line, if the next line is a
+                // miss, joins the missed line (one op of a block otherwise).
+                let hit = entry_ok
+                    && self
+                        .instruction_cache
+                        .hit(memory::to_physical(self.pc))
+                        .is_some();
+                let miss = if !entry_ok {
+                    None
+                } else if !hit {
+                    self.enter_miss_line(bus, false)
+                } else if self.pc & 0xc == 0xc {
                     self.enter_miss_line(bus, true)
                 } else {
                     None
                 };
-                if miss.is_none() && !(entry_ok && self.enter_block(bus, self.pc)) {
-                    miss = if entry_ok {
-                        self.enter_miss_line(bus, false)
-                    } else {
-                        None
-                    };
-                    if miss.is_none() {
-                        if !self.batch_interpret_step(bus, &mut st) {
-                            break 'blocks;
-                        }
-                        continue 'blocks;
+                if miss.is_none() && !(hit && self.enter_block(bus, self.pc)) {
+                    if !self.batch_interpret_step(bus, &mut st) {
+                        break 'blocks;
                     }
+                    continue 'blocks;
                 }
                 if let Some(op) = miss {
                     miss_pending = true;
