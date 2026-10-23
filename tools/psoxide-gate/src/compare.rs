@@ -42,6 +42,9 @@ pub enum Class {
 
 pub struct Comparison {
     pub raw: u64,
+    /// Sub-pixels of unclassified native pixels that were not compared: every
+    /// sub-pixel of a block except its centre (see [`compare`]).
+    pub upscale_detail: u64,
     pub normalized_exact: u64,
     pub two_d: u64,
     pub unclassified: u64,
@@ -102,7 +105,7 @@ impl Comparison {
     pub fn description(&self) -> String {
         let coverage = self.coverage();
         format!(
-            "{}raw {}; normalized exact {}; surviving 2D {} HW pixels; unresolved unclassified {} HW pixels; 3D interior {} native pixels; 3D edge {} native pixels; accepted boundary {} native pixels; native coverage 2D={} 3D={} unclassified={}",
+            "{}raw {}; normalized exact {}; surviving 2D {} HW pixels; unresolved unclassified {} HW pixels; 3D interior {} native pixels; 3D edge {} native pixels; accepted boundary {} native pixels; native coverage 2D={} 3D={} unclassified={}{}",
             if self.has_differences() {
                 ""
             } else {
@@ -117,7 +120,15 @@ impl Comparison {
             self.accepted_edges,
             coverage[0],
             coverage[1],
-            coverage[2]
+            coverage[2],
+            if self.upscale_detail == 0 {
+                String::new()
+            } else {
+                format!(
+                    "; unclassified compared at the sample centre, {} upscale sub-pixels not compared",
+                    self.upscale_detail
+                )
+            }
         )
     }
     pub fn overlay(&self) -> Img {
@@ -288,6 +299,30 @@ pub fn classify(layout: &Layout, w: u32, h: u32) -> Result<Vec<Class>, String> {
     Ok(out)
 }
 
+/// Compare one hardware capture with the CPU reference at the same native size.
+///
+/// At 1x every pixel is compared exactly after normalization. At 3x a native
+/// pixel is a 3x3 block of hardware pixels and what is compared depends on the
+/// class of the native pixel:
+///
+/// - declared 2D (`two_d`, axis-aligned textured quads): all nine hardware
+///   pixels equal the CPU pixel;
+/// - declared 3D polygon interior/edge: the box average of the nine equals the
+///   CPU pixel, edges within the declared `edge_channel`;
+/// - unclassified: the centre hardware pixel equals the CPU pixel, and the other
+///   eight are not compared.
+///
+/// The centre rule is exact, not a tolerance. The CPU rasterizer samples a
+/// polygon, its colour and texture planes at the top-left corner of each
+/// native pixel. The hardware renderer shifts polygons half a native pixel
+/// down and right and evaluates the same planes at the sub-pixel it is shading,
+/// so the sample at the centre of a 3x3 block coincides with the CPU's own
+/// sample, with the same coverage, the same attributes and the same blend
+/// arithmetic. Any difference there is a hardware renderer fault, at every
+/// scale. The other eight samples are what the upscale adds (finer edges,
+/// texel boundaries and gradients inside the pixel); no CPU value exists to
+/// compare them against, and a 1x frame cannot say what is correct there. A
+/// bleed or shift of 2D content is still caught, by the declared 2D regions.
 pub fn compare(cpu: &Img, hw: &Img, scale: u32, layout: &Layout) -> Result<Comparison, String> {
     if ![1, 3].contains(&scale) || (hw.w, hw.h) != (cpu.w * scale, cpu.h * scale) {
         return Err("comparison requires native HW1 or exact 3x dimensions".into());
@@ -300,6 +335,7 @@ pub fn compare(cpu: &Img, hw: &Img, scale: u32, layout: &Layout) -> Result<Compa
     let normalized_exact = hardware.diff(&reference, 0, 1, &[], None).differing;
     let mut result = Comparison {
         raw,
+        upscale_detail: 0,
         normalized_exact,
         two_d: 0,
         unclassified: 0,
@@ -316,8 +352,15 @@ pub fn compare(cpu: &Img, hw: &Img, scale: u32, layout: &Layout) -> Result<Compa
             let class = result.classes[(y * cpu.w + x) as usize];
             let ref_px = cpu_n.px(x, y);
             if matches!(class, Class::Exact | Class::TwoD) {
+                let centre = scale / 2;
                 for yy in y * scale..(y + 1) * scale {
                     for xx in x * scale..(x + 1) * scale {
+                        if class == Class::Exact
+                            && (xx - x * scale != centre || yy - y * scale != centre)
+                        {
+                            result.upscale_detail += 1;
+                            continue;
+                        }
                         if result.hardware.px(xx, yy) != ref_px {
                             result.surviving[(yy * hw.w + xx) as usize] = true;
                             if class == Class::TwoD {
@@ -417,12 +460,69 @@ mod tests {
             .description()
             .starts_with("identical after comparison rules;"));
         let wrong = image(24, 24, 240);
+        // One centre sample per native pixel, 8 x 8 of them.
         assert_eq!(
             compare(&cpu, &wrong, 3, &Layout::default())
                 .unwrap()
                 .unclassified,
-            576
+            64
         );
+        // At 1x every pixel is its own centre.
+        assert_eq!(
+            compare(&cpu, &image(8, 8, 240), 1, &Layout::default())
+                .unwrap()
+                .unclassified,
+            64
+        );
+    }
+    #[test]
+    fn unclassified_pixels_are_decided_by_the_centre_sample() {
+        let cpu = image(8, 8, 80);
+        let mut hw = cpu.enlarge(3);
+        // The eight other sub-pixels of a block carry the upscale's own detail.
+        for (x, y) in [
+            (18, 18),
+            (19, 18),
+            (20, 18),
+            (18, 19),
+            (20, 19),
+            (18, 20),
+            (19, 20),
+            (20, 20),
+        ] {
+            set(&mut hw, x, y, 200);
+        }
+        let d = compare(&cpu, &hw, 3, &Layout::default()).unwrap();
+        assert!(!d.has_differences());
+        assert_eq!(d.projected(), 0);
+        assert_eq!(d.upscale_detail, 8 * 64);
+        assert!(d
+            .description()
+            .contains("512 upscale sub-pixels not compared"));
+        // The centre sub-pixel is the CPU's own sample point.
+        set(&mut hw, 19, 19, 88);
+        let d = compare(&cpu, &hw, 3, &Layout::default()).unwrap();
+        assert_eq!(d.unclassified, 1);
+        assert_eq!(d.projected(), 1);
+        assert!(d.has_differences());
+    }
+    #[test]
+    fn declared_2d_pixels_still_compare_every_sub_pixel() {
+        let cpu = image(8, 8, 80);
+        let mut hw = cpu.enlarge(3);
+        set(&mut hw, 18, 18, 200);
+        let layout = Layout {
+            two_d: vec![Rect {
+                x: 6,
+                y: 6,
+                w: 1,
+                h: 1,
+            }],
+            polygons: vec![],
+        };
+        let d = compare(&cpu, &hw, 3, &layout).unwrap();
+        assert_eq!(d.two_d, 1);
+        assert!(d.has_differences());
     }
     #[test]
     fn shifted_and_missing_glyph_pixels_survive() {
@@ -591,7 +691,7 @@ mod tests {
     fn hidden_edges_and_unclassified_pixels_are_not_forgiven() {
         let cpu = image(8, 8, 80);
         let mut hw = cpu.enlarge(3);
-        set(&mut hw, 18, 18, 88);
+        set(&mut hw, 19, 19, 88);
         assert_eq!(
             compare(
                 &cpu,

@@ -288,7 +288,10 @@ mod tests {
         let mut hw1 = cpu.clone();
         hw1.rgba[0] = 108;
         let mut hw3 = cpu.enlarge(3);
-        hw3.rgba[0] = 116;
+        // The centre sub-pixel of the first block: the CPU's own sample point.
+        // A different pixel of the block is not compared and shows no survivor.
+        hw3.rgba[(960 + 1) * 4] = 116;
+        hw3.rgba[0] = 200;
         let cap = Capture {
             comparison: crate::compare::Layout::default(),
             frame: None,
@@ -303,12 +306,13 @@ mod tests {
         assert_eq!((page.w, page.h), (1928, 1534));
         assert_eq!(page.px(0, 38), [100; 3]);
         assert_eq!(page.px(328, 38), [108, 100, 100]);
-        assert_eq!(page.px(656, 38), [116, 100, 100]);
+        assert_eq!(page.px(657, 39), [116, 100, 100]);
         assert_eq!(page.px(0, 814), [255, 0, 255]);
         assert_eq!(page.px(2, 816), [255, 0, 255]);
         assert_eq!(page.px(3, 814), [24; 3]);
-        assert_eq!(page.px(968, 814), [255, 0, 255]);
-        assert_eq!(page.px(969, 814), [24; 3]);
+        assert_eq!(page.px(968, 814), [24; 3]);
+        assert_eq!(page.px(969, 815), [255, 0, 255]);
+        assert_eq!(page.px(970, 815), [24; 3]);
         assert!(page.rgba.chunks_exact(4).all(|p| p[3] == 255));
     }
     #[test]

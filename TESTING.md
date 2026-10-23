@@ -106,12 +106,23 @@ window, so the persistent target holds what a player would see.
 - **CPU vs golden.** Exact by default. This catches any change to what the
   game draws.
 - **2D content.** Text, HUD, sprites and axis-aligned textured quads compare
-  exactly after normalization, at HW3 against nearest-neighbour CPU1. No
+  exactly after normalization, at HW3 against nearest-neighbour CPU1: all nine
+  hardware pixels of a native pixel equal the CPU pixel. No
   radius, channel or fraction allowance can hide shifted/missing glyphs.
   Declare native bounds with `strict = [{ x, y, w, h }]` or
   `comparison.two_d`. Conservative bounds include transparent holes and
   override polygon classes; they never hide underlying text/HUD errors.
+  The renderer keeps the colour of an axis-aligned textured quad constant over
+  each native pixel (a sheen over text steps per pixel), so such a region is
+  exact at 3x even with Gouraud colours. A strict region must hold only 2D
+  content: 3D surfaces (a held item, scenery) shade and rasterize at finer
+  than native pixels at 3x by design and do not belong in one.
 - **HW1 content.** Normalized channels compare exactly, including polygon edges.
+  The hardware renderer reproduces the console's 5-bit colour arithmetic where
+  it is visible: the four semi-transparency modes blend on 5-bit codes (the
+  source is cut to its code and scaled so the fixed-function blender lands on
+  the CPU's result for every pair of codes), and lines follow the console's
+  own pixel walk, so HW1 equals CPU1 and any difference is a renderer fault.
 - **3D content.** Only explicit final visible polygon runs qualify at HW3. Box-average
   canonical normalized 8-bit hardware channels, round once to an 8-bit channel,
   and compare to native CPU1. Never requantize the average to 5-bit codes.
@@ -123,9 +134,23 @@ window, so the persistent target holds what a player would see.
   Metadata vertices use a simple convex perimeter. Convert GP0 quad packet
   order (a triangle strip) to perimeter indices 0,1,3,2; malformed/bowtie
   metadata is rejected. Unsupported geometry stays unresolved and exact.
-- **Unclassified content.** Compare exactly at hardware resolution, without
-  any 3D relaxation, and report survivors separately as unresolved. Never
-  declare them 3D errors just because they differ. Final contribution data
+- **Unclassified content.** Everything not declared above. At HW1 every pixel
+  compares exactly. At HW3 the **centre** hardware pixel of each 3x3 block
+  compares exactly with the CPU pixel, and the other eight are not compared.
+  This is not a tolerance. The CPU rasterizer samples a polygon, its colour
+  and texture planes at the corner of each native pixel; the hardware renderer
+  shifts polygons by half a native pixel and evaluates the same planes at the
+  sub-pixel it shades, so the centre sample of a block is the CPU's own sample
+  point: same coverage, same texel, same colour, same blend arithmetic. Any
+  difference there is a hardware renderer fault, at every scale. The other
+  eight sub-pixels are what the upscale adds (finer edges, texel boundaries
+  and gradients inside the pixel); a 1x frame holds no value to compare them
+  with, and requiring them to equal the CPU pixel could never pass a textured
+  or shaded surface. (Until 2026-10-23 they were compared exactly, which made
+  every 3D HW3 comparison fail. Bleed or shift of 2D content is still caught,
+  by the 2D rule.) The count of uncompared sub-pixels is printed with every
+  such result. Survivors are reported as unresolved; never declare them 3D
+  errors just because they differ. Final contribution data for a 3D class
   must come from observable primitive/state evidence or an explicit reviewed
   region declaration; historical triangle unions and image gradients are
   insufficient. Invalid geometry, ownership, bounds or provenance fail closed.

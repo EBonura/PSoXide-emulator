@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The gate's HW3 comparison is now meaningful for 3D content. Every 3D pixel
+  used to be compared against the nearest-neighbour enlargement of the CPU
+  frame in all nine sub-pixels, which no textured or shaded surface can pass,
+  so every HW3 check of a 3D game failed (HL's full renderer matrix: 54 of 91
+  checks passed). Unclassified pixels now compare the centre sub-pixel of each
+  3x3 block exactly, which is the CPU rasterizer's own sample point, and report
+  how many sub-pixels were not compared. Declared 2D regions still compare all
+  nine. HW1 is unchanged (exact). Not a tolerance; see TESTING.md.
 - The hardware renderer now reproduces the CPU rasterizer's 5-bit arithmetic
   where it showed. The four semi-transparency modes blend on whole colour
   codes (the source is cut to its code and scaled per mode, so the fixed

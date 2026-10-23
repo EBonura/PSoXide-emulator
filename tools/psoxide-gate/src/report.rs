@@ -242,7 +242,7 @@ fn group_html(out: &mut String, dir_rel: &str, group: &Group, shots: &[(String, 
     if group.capture.is_some() {
         let _ = write!(
             out,
-            "<p class=\"note\"><a href=\"{dir_rel}/{}.exact-diffs.tsv\">Raw and normalized comparison inventory</a> | <a href=\"{dir_rel}/{}.crop-coverage.tsv\">Surviving crop coverage (omitted=0)</a>. Magenta shows surviving differences after canonical 5-bit normalization. Declared 2D and unclassified pixels compare exactly against NN CPU1. Explicit visible 3D polygons compare after box-downsampling; only their bounded actual edges receive tolerance. 2D counts use hardware pixels; 3D counts use native pixels. For visualization each native 3D error fills its hardware box. Crops show normalized source pixels at 1:1. Raw captures and raw zero-threshold counts remain available separately.</p>",
+            "<p class=\"note\"><a href=\"{dir_rel}/{}.exact-diffs.tsv\">Raw and normalized comparison inventory</a> | <a href=\"{dir_rel}/{}.crop-coverage.tsv\">Surviving crop coverage (omitted=0)</a>. Magenta shows surviving differences after canonical 5-bit normalization. Declared 2D pixels compare exactly against NN CPU1 (all nine sub-pixels at 3x). Unclassified pixels compare exactly at HW1 and, at HW3, at the centre sub-pixel of each block, which is the CPU's own sample point. Explicit visible 3D polygons compare after box-downsampling; only their bounded actual edges receive tolerance. 2D counts use hardware pixels; 3D counts use native pixels. For visualization each native 3D error fills its hardware box. Crops show normalized source pixels at 1:1. Raw captures and raw zero-threshold counts remain available separately.</p>",
             esc(&group.name),
             esc(&group.name)
         );
@@ -416,7 +416,7 @@ pub fn write_report(
         if !complete {
             html.push_str("<li>Incomplete hardware captures; no clean or acceptance claim.</li>");
         } else if !any {
-            html.push_str("<li>clean under the declared comparison rules; unclassified pixels were compared exactly, without 3D edge tolerance.</li>");
+            html.push_str("<li>clean under the declared comparison rules; unclassified pixels were compared exactly (at HW3 at each block's centre sample), without 3D edge tolerance.</li>");
         }
         html.push_str("</ul>");
     }
