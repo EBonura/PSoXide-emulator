@@ -110,7 +110,21 @@ wgpu = { workspace = true, features = ["webgl"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSImage"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSData"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSData", "NSArray", "NSString", "NSDate", "NSRunLoop"] }
+# Apple's GameController framework: Xbox, DualShock 4, DualSense and Switch Pro
+# controllers over USB and Bluetooth in one standard layout (src/input/backend).
+objc2-game-controller = { version = "0.3", default-features = false, features = [
+    "std",
+    "GCController",
+    "GCControllerAxisInput",
+    "GCControllerButtonInput",
+    "GCControllerDirectionPad",
+    "GCControllerElement",
+    "GCDevice",
+    "GCExtendedGamepad",
+    "GCPhysicalInputProfile",
+    "GCProductCategories",
+] }
 
 [dev-dependencies]
 claxon = "0.4"

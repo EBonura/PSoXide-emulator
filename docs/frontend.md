@@ -28,7 +28,8 @@ src/
 ├── gfx.rs            # Graphics -- wgpu surface + egui renderer + VRAM/display textures
 ├── theme.rs          # charcoal/teal palette, VT323 + Lucide fonts, section helpers
 ├── icons.rs          # Lucide codepoint constants
-├── cli.rs            # headless subcommands (launch, validate, build-project-disc, ...)
+├── cli.rs            # headless subcommands (launch, validate, input-probe, build-project-disc, ...)
+├── input/            # host input: one logical model, device adapters (see "Input")
 ├── disasm.rs         # MIPS disassembler for the registers/memory panels
 └── ui/
     ├── mod.rs           # draw_layout -- composes toolbar/sidebar/framebuffer/overlays
@@ -134,8 +135,21 @@ Three categories (Game / Debug / System) plus infrastructure for expansion. Draw
 
 - `anim_x` interpolates toward `target_x` at `10/dt`, yielding the signature horizontal slide.
 - Selection uses a 3-pixel accent-color bar on the left edge of the item rect.
-- Input: arrows navigate, Enter/Space confirms, Escape toggles open/closed.
-- Gamepad support will land alongside the controller subsystem.
+- Input: the d-pad or left stick (arrow keys by default) navigate, Cross (F by default), Enter or Space confirms, Circle goes back, Escape or Select+Start toggles open/closed.
+- Holding a direction scrolls: it moves on press, waits 300 ms, then repeats from 8 steps a second, speeding up to 30 a second over the next 1.5 s. Release or change direction to start over. The numbers live in `input/repeat.rs`.
+
+## Input
+
+Every input source is only an adapter that turns raw device state into one logical model, a per-device snapshot in the PS1 layout (d-pad, face buttons, L1/L2/R1/R2, Start/Select, both sticks) plus a device identity. Menu navigation, hold-to-repeat, the held-at-open baseline, the noise guard, port assignment and the guest feed all consume only that model (`input/hub.rs`), so the keyboard and a pad take exactly the same path.
+
+| Adapter | Where | Used for |
+|---|---|---|
+| keyboard | `input/backend/keyboard.rs` | the host keyboard, through the user's bindings |
+| GameController | `input/backend/game_controller.rs` | macOS: Xbox, DualShock 4, DualSense, Switch Pro over USB and Bluetooth |
+| gilrs | `input/backend/gilrs_pad.rs` | Linux and Windows pads; on macOS only HID pads the framework does not claim |
+| web | `input/backend/web.rs` | the browser Gamepad API |
+
+A pad starts unassigned and takes the lowest free PS1 port on its first real button press; the keyboard starts on port 1 and may share a port with one pad. The Controls panel lists every device with its live state and lets you pin it to a port. A device that reports input faster than a person can press it is ignored until it goes quiet, and buttons held when it connects or the menu opens do nothing until released. `psoxide-emulator input-probe` prints what the input layer sees, without a window.
 
 ## Keyboard shortcuts
 
@@ -163,5 +177,5 @@ The frontend is designed to double as a live debugger:
   is unit-tested; visual layout is verified by running the app.
 
 (The gaps this section once listed -- gamepad, audio, framebuffer display,
-save states -- have all since landed: gilrs input, cpal output, the live
+save states -- have all since landed: the input layer, cpal output, the live
 central framebuffer, and savestates via `psoxide-settings`.)

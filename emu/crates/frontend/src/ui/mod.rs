@@ -17,7 +17,7 @@ pub mod toolbar;
 pub mod vram;
 
 use crate::app::{AppState, ScaleMode};
-use crate::input::{InputRouter, PsxPort};
+use crate::input::{InputRouter, PortChoice};
 
 /// Paint every panel for this frame, in layering order.
 pub fn draw_layout(
@@ -318,12 +318,13 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
     }
 }
 
-/// The Controls panel's port section: which host device drives which PS1
-/// controller port, and whether it presents as a digital pad or a DualShock.
-/// Returns a status message when a setting changed.
+/// The Controls panel's device section: every connected input device with
+/// its live state, the guest port it drives, and the controller identity it
+/// presents. The keyboard is listed like any pad. Returns a status message
+/// when a setting changed.
 fn controller_ports(ui: &mut egui::Ui, input_router: &mut InputRouter) -> Option<String> {
     let mut message = None;
-    ui.label("Assign each host device to one PS1 controller port.");
+    ui.label("Auto gives each controller a port on its first button press.");
     ui.label(
         egui::RichText::new("Digital is compatible with early games such as Crash Bandicoot.")
             .small()
@@ -331,39 +332,76 @@ fn controller_ports(ui: &mut egui::Ui, input_router: &mut InputRouter) -> Option
     );
     ui.add_space(6.0);
     for device in input_router.devices() {
+        let name = &device.identity.name;
         ui.horizontal(|ui| {
             ui.add_sized(
                 [220.0, 26.0],
-                egui::Label::new(egui::RichText::new(&device.name).strong()).truncate(),
+                egui::Label::new(egui::RichText::new(name).strong()).truncate(),
             )
-            .on_hover_text(&device.name);
+            .on_hover_text(device.identity.describe());
 
-            let mut port = device.port;
-            egui::ComboBox::from_id_salt(("controller_port", &device.id))
-                .selected_text(port.label())
-                .width(72.0)
+            let mut choice = device.choice;
+            let selected = match device.choice {
+                PortChoice::Auto => format!("Auto ({})", device.port.label()),
+                PortChoice::Pinned(port) => port.label().to_string(),
+            };
+            egui::ComboBox::from_id_salt(("controller_port", &device.identity.id))
+                .selected_text(selected)
+                .width(110.0)
                 .show_ui(ui, |ui| {
-                    for choice in [PsxPort::Off, PsxPort::One, PsxPort::Two] {
-                        ui.selectable_value(&mut port, choice, choice.label());
+                    for option in PortChoice::ALL {
+                        ui.selectable_value(&mut choice, option, option.label());
                     }
                 });
-            if port != device.port && input_router.set_device_port(&device.id, port) {
-                message = Some(format!("{} assigned to {}", device.name, port.label()));
+            if choice != device.choice
+                && input_router.set_device_choice(&device.identity.id, choice)
+            {
+                message = Some(format!("{name}: {}", choice.label()));
             }
 
             if ui
                 .add_sized([78.0, 26.0], egui::Button::new(device.profile.label()))
                 .on_hover_text(device.profile.description())
                 .clicked()
-                && input_router.set_device_profile(&device.id, device.profile.next())
+                && input_router.set_device_profile(&device.identity.id, device.profile.next())
             {
                 message = Some(format!(
-                    "{} will use {} mode",
-                    device.name,
+                    "{name} will use {} mode",
                     device.profile.next().label()
                 ));
             }
         });
+        let dim = crate::theme::MENU_TEXT_DIM;
+        let status = if !device.identity.mapped {
+            egui::RichText::new("Unmapped device: its buttons are not recognised")
+                .small()
+                .color(egui::Color32::from_rgb(230, 150, 60))
+        } else if device.ignored {
+            egui::RichText::new("Ignored: sending constant input (stuck or faulty)")
+                .small()
+                .color(egui::Color32::from_rgb(230, 150, 60))
+        } else {
+            egui::RichText::new(device.live.describe())
+                .small()
+                .color(crate::theme::MENU_TEXT_VALUE)
+        };
+        ui.horizontal(|ui| {
+            ui.add_space(6.0);
+            ui.label(status);
+            ui.label(
+                egui::RichText::new(format!(
+                    "  {} · {}",
+                    device.identity.backend.label(),
+                    match device.identity.vid_pid {
+                        Some((vid, pid)) => format!("{vid:04x}:{pid:04x}"),
+                        None => "no id".to_string(),
+                    }
+                ))
+                .small()
+                .color(dim),
+            );
+        });
+        ui.add_space(4.0);
     }
     message
 }

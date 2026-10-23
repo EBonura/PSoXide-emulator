@@ -195,6 +195,19 @@ pub enum Command {
     /// Render the window chrome (menu, toolbar, debug sidebar) to a PNG
     /// without opening a window.
     UiPng(ui_png::UiPngArgs),
+
+    /// List every input device the emulator can see and print its live state
+    /// for a few seconds, without opening a window. Press buttons while it
+    /// runs to see exactly what the emulator receives.
+    InputProbe(InputProbeArgs),
+}
+
+/// Arguments for `input-probe`.
+#[derive(Debug, Args)]
+pub struct InputProbeArgs {
+    /// How long to watch, in seconds.
+    #[arg(long, default_value_t = 8)]
+    pub seconds: u64,
 }
 
 /// Arguments for `scan`.
@@ -763,6 +776,7 @@ pub fn run(cli: Cli) -> Result<(), String> {
         Command::Validate(args) => cmd_validate(&paths, args),
 
         Command::UiPng(args) => ui_png::render(args),
+        Command::InputProbe(args) => crate::input::probe::run(args.seconds),
     }
 }
 

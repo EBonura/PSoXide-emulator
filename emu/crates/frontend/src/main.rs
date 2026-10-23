@@ -83,6 +83,7 @@ use crate::app::AppState;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cli::Cli;
 use crate::gfx::Graphics;
+use crate::input::socd::{socd_resolve, update_socd_recency};
 use crate::pacing::{FramePacing, HostPace};
 use crate::playtest_input::Port1PadSample;
 use crate::ui::menu::MenuInput;
@@ -414,15 +415,7 @@ impl Shell {
         };
         eprintln!("{audio_status}");
         let input = input::InputRouter::new();
-        let input_status = if input.is_connected() {
-            format!(
-                "[input] already-connected pads: {}",
-                input.connected_names()
-            )
-        } else {
-            "[input] no pads connected at startup - watching for hot-plug".to_string()
-        };
-        eprintln!("{input_status}");
+        eprintln!("[input] keyboard ready; controllers are announced here as they appear");
         // The compute backend gets its own headless wgpu device.
         // We *could* share the main `Graphics` device for zero-copy
         // VRAM-to-display, but that needs `Arc<Device>` plumbing
@@ -558,64 +551,6 @@ fn keyboard_axis(negative: bool, positive: bool) -> f32 {
     }
 }
 
-fn merge_sticks(gamepad: (f32, f32), keyboard: (f32, f32)) -> (f32, f32) {
-    (
-        merge_axis(gamepad.0, keyboard.0),
-        merge_axis(gamepad.1, keyboard.1),
-    )
-}
-
-fn merge_axis(gamepad: f32, keyboard: f32) -> f32 {
-    if keyboard != 0.0 {
-        keyboard
-    } else {
-        gamepad
-    }
-}
-
-/// Strip simultaneous opposing cardinal directions from the pad mask,
-/// keeping only the most recently pressed side of each pair (see
-/// [`HostKeyboardInput`]). The real d-pad's rocker makes the
-/// combination impossible, so the guest must never see it; with no
-/// recorded recency (or a stale one no longer held) the pair resolves
-/// to neutral, which is what the rocker does mid-travel.
-fn socd_resolve(mask: u16, last_horiz: u16, last_vert: u16) -> u16 {
-    let mut out = mask;
-    const HORIZ: u16 = button::LEFT | button::RIGHT;
-    const VERT: u16 = button::UP | button::DOWN;
-    if out & HORIZ == HORIZ {
-        out = (out & !HORIZ) | (last_horiz & HORIZ);
-    }
-    if out & VERT == VERT {
-        out = (out & !VERT) | (last_vert & VERT);
-    }
-    out
-}
-
-/// Fold a set of rising-edge presses into the SOCD recency trackers.
-/// Shared by the keyboard press path (one button bit per event) and
-/// the gamepad path (a whole poll's edges at once) so both devices
-/// compete on equal terms -- a newer gamepad direction must beat an
-/// older keyboard one and vice versa. Opposite edges arriving in the
-/// same gamepad poll carry no ordering information, so the pair's
-/// recency resets and [`socd_resolve`] yields neutral.
-fn update_socd_recency(last_horiz: &mut u16, last_vert: &mut u16, pressed: u16) {
-    const HORIZ: u16 = button::LEFT | button::RIGHT;
-    const VERT: u16 = button::UP | button::DOWN;
-    match pressed & HORIZ {
-        button::LEFT => *last_horiz = button::LEFT,
-        button::RIGHT => *last_horiz = button::RIGHT,
-        HORIZ => *last_horiz = 0,
-        _ => {}
-    }
-    match pressed & VERT {
-        button::UP => *last_vert = button::UP,
-        button::DOWN => *last_vert = button::DOWN,
-        VERT => *last_vert = 0,
-        _ => {}
-    }
-}
-
 /// Every piece of pad state derived from host keyboard events: the
 /// port-1 button mask, both keyboard-emulated sticks, and the SOCD
 /// recency trackers.
@@ -681,17 +616,6 @@ impl HostKeyboardInput {
             .update_key(physical, state, &bindings.left_stick);
         self.right_stick
             .update_key(physical, state, &bindings.right_stick);
-    }
-
-    /// Fold the gamepad's rising-edge presses from this poll into the
-    /// SOCD recency, so a newer pad direction beats an older keyboard
-    /// one. Call before [`Self::resolved_mask`] each frame.
-    fn note_gamepad_edges(&mut self, pressed_mask: u16) {
-        update_socd_recency(
-            &mut self.socd_last_horiz,
-            &mut self.socd_last_vert,
-            pressed_mask,
-        );
     }
 
     /// The SOCD-clean guest mask: keyboard bits merged with the
@@ -1118,21 +1042,21 @@ impl ApplicationHandler for Shell {
                     let bindings = &self.state.settings.input.port1;
                     self.host_input
                         .apply_key_event(&physical_key, state, bindings);
-                    let press_analog = state == ElementState::Pressed
-                        && key_is_analog_button(&physical_key, bindings);
-                    if press_analog {
-                        let analog = self.input.toggle_keyboard_analog();
-                        self.state.status_message_set(format!(
-                            "Keyboard controller mode: {}",
-                            if analog { "Analog" } else { "Digital" }
-                        ));
+                    // A press is also latched for the input hub, so a tap
+                    // shorter than one frame still counts as a press.
+                    if state == ElementState::Pressed {
+                        self.input.note_keyboard_press(
+                            key_to_pad_button(&physical_key, bindings).unwrap_or(0),
+                            key_is_analog_button(&physical_key, bindings),
+                        );
                     }
                 }
-                // The Menu *does* honour OS-level key-repeat: holding
-                // down-arrow scrolls through a long Examples list one
-                // row per repeat tick, matching GUI-standard behaviour.
-                // Only press events (including repeats) trigger menu
-                // navigation; releases don't.
+                // The arrows, Cross/Circle and the rest of the keyboard's pad
+                // buttons reach the menu through the input hub like any other
+                // device (with its hold-to-repeat). Only Enter, Space and
+                // Escape are window-level shortcuts handled here, and the
+                // arrows too while the keyboard belongs to the editor and is
+                // not a game device.
                 #[cfg(feature = "editor")]
                 let escape_to_editor = matches!(logical_key, Key::Named(NamedKey::Escape))
                     && editor_owns_escape(
@@ -1143,7 +1067,8 @@ impl ApplicationHandler for Shell {
                 #[cfg(not(feature = "editor"))]
                 let escape_to_editor = false;
                 if state == ElementState::Pressed && !escape_to_editor {
-                    self.pending_input = merge_key(self.pending_input, &logical_key);
+                    self.pending_input =
+                        merge_key(self.pending_input, &logical_key, !route_keyboard_to_game);
                 }
                 // F12 -- toggle the display source between the CPU
                 // rasterizer's VRAM and the compute backend's. Only
@@ -1227,13 +1152,23 @@ impl ApplicationHandler for Shell {
                 let input_start = Instant::now();
                 let mut input = std::mem::take(&mut self.pending_input);
 
-                // Poll the gamepad router BEFORE doing anything
-                // else for this frame: the event drain is what
-                // lets gilrs notice hot-plugged Bluetooth pads, so
-                // we can't gate it on run state. We then merge the
-                // frame's edges into `MenuInput` and keep the merged
-                // mask handy for the run branch further down.
+                // Poll the input hub BEFORE doing anything else for this
+                // frame: the event drain is what lets the pad adapters
+                // notice hot-plugged controllers, so we can't gate it on run
+                // state. The keyboard is just another device: hand its held
+                // state over first, then everything (menu edges with
+                // hold-to-repeat, the merged mask, both guest ports) comes
+                // out of the same poll.
+                self.input.set_keyboard_held(input::PadSnapshot {
+                    buttons: self.host_input.resolved_mask(0),
+                    left: self.host_input.left_stick.vector(),
+                    right: self.host_input.right_stick.vector(),
+                    mode: false,
+                });
                 let pad_frame = self.input.poll();
+                for notice in &pad_frame.notices {
+                    eprintln!("{}", notice.log_line());
+                }
                 if !pad_frame.notices.is_empty() {
                     let msg = pad_frame
                         .notices
@@ -1251,24 +1186,14 @@ impl ApplicationHandler for Shell {
                     // what "PS button" does based on current state.
                     input.toggle_open = true;
                 }
-                if pad_frame.analog_button {
-                    self.state
-                        .status_message_set("Controller mode toggled".to_string());
-                }
 
-                // Merge keyboard-emulated and real-pad sticks once; used both
-                // to drive the freelook camera and (unless freelook steals
-                // them) to feed the guest pad below. The gamepad's press
-                // edges fold into SOCD recency *before* resolving, so a
-                // newer pad direction beats an older keyboard one. All
-                // A Reset Controls action clears the keyboard cache below;
-                // guest port samples are built afterward from that live cache.
-                self.host_input.note_gamepad_edges(pad_frame.pressed_mask);
-                let merged_left =
-                    merge_sticks(pad_frame.left_stick, self.host_input.left_stick.vector());
-                let merged_right =
-                    merge_sticks(pad_frame.right_stick, self.host_input.right_stick.vector());
-                let merged_mask = self.host_input.resolved_mask(pad_frame.pad1_mask);
+                // The hub already merged every device (keyboard included) and
+                // resolved opposing directions by recency. This all-device
+                // state drives the freelook camera and the shortcuts; the
+                // guest ports are fed from the per-port routes below.
+                let merged_left = pad_frame.left_stick;
+                let merged_right = pad_frame.right_stick;
+                let merged_mask = pad_frame.mask;
 
                 // Feed the controls panel its live held-target set so
                 // held keys light up on the drawing -- an in-app
@@ -1472,9 +1397,9 @@ impl ApplicationHandler for Shell {
                             // bindings, so every cached keyboard bit was
                             // set under a mapping that no longer exists
                             // -- a later release can't clear it. Drop
-                            // the cache and rebuild this frame's merged
-                            // sample from the gamepad alone, so not even
-                            // one stale keyboard frame reaches the guest.
+                            // the cache; the next frame hands the input
+                            // hub an empty keyboard, so no stale keyboard
+                            // state outlives the reset.
                             self.host_input.clear();
                         }
                         MenuOutcome::Quit => {
@@ -1573,26 +1498,11 @@ impl ApplicationHandler for Shell {
                 // and surfaces via the register panel. History captures
                 // only the tail via `push_history`'s ring-buffer semantics.
                 if self.state.running {
-                    // Route keyboard input and each physical controller to the
-                    // selected guest port. UI/freecam shortcuts still use the
+                    // The hub routed every device (the keyboard included) to
+                    // its guest port. UI/freecam shortcuts still use the
                     // all-device merged state above.
-                    let keyboard_left = self.host_input.left_stick.vector();
-                    let keyboard_right = self.host_input.right_stick.vector();
                     let mut port1 = pad_frame.port1;
                     let mut port2 = pad_frame.port2;
-                    match self.input.keyboard_port() {
-                        input::PsxPort::One => {
-                            port1.mask = self.host_input.resolved_mask(port1.mask);
-                            port1.left_stick = merge_sticks(port1.left_stick, keyboard_left);
-                            port1.right_stick = merge_sticks(port1.right_stick, keyboard_right);
-                        }
-                        input::PsxPort::Two => {
-                            port2.mask = self.host_input.resolved_mask(port2.mask);
-                            port2.left_stick = merge_sticks(port2.left_stick, keyboard_left);
-                            port2.right_stick = merge_sticks(port2.right_stick, keyboard_right);
-                        }
-                        input::PsxPort::Off => {}
-                    }
 
                     // Feed the guest the routed masks + sticks computed above.
                     // While freecam is engaged the pad belongs to the CAMERA,
@@ -2239,12 +2149,12 @@ fn editor_owns_escape(editor_workspace: bool, play_captured: bool, menu_open: bo
 /// OR a keypress into the next-frame Menu input. `Escape` both toggles
 /// the overlay and acts as back when navigating; the combined semantics
 /// are handled inside `MenuState::update`.
-fn merge_key(mut input: MenuInput, key: &Key) -> MenuInput {
+fn merge_key(mut input: MenuInput, key: &Key, arrows_navigate: bool) -> MenuInput {
     match key {
-        Key::Named(NamedKey::ArrowUp) => input.up = true,
-        Key::Named(NamedKey::ArrowDown) => input.down = true,
-        Key::Named(NamedKey::ArrowLeft) => input.left = true,
-        Key::Named(NamedKey::ArrowRight) => input.right = true,
+        Key::Named(NamedKey::ArrowUp) if arrows_navigate => input.up = true,
+        Key::Named(NamedKey::ArrowDown) if arrows_navigate => input.down = true,
+        Key::Named(NamedKey::ArrowLeft) if arrows_navigate => input.left = true,
+        Key::Named(NamedKey::ArrowRight) if arrows_navigate => input.right = true,
         Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => input.confirm = true,
         Key::Named(NamedKey::Escape) => {
             input.toggle_open = true;
@@ -2607,58 +2517,6 @@ mod tests {
     }
 
     #[test]
-    fn socd_recency_lets_the_newer_device_win() {
-        let bindings = PortBindings::default();
-
-        // Keyboard Left held, then gamepad Right pressed: the gamepad
-        // edge updates recency, so Right wins the merged clash.
-        let mut host = HostKeyboardInput::default();
-        press(&mut host, KeyCode::ArrowLeft, &bindings);
-        host.note_gamepad_edges(button::RIGHT);
-        assert_eq!(
-            host.resolved_mask(button::RIGHT) & (button::LEFT | button::RIGHT),
-            button::RIGHT
-        );
-
-        // Gamepad Left held (edge noted earlier), then keyboard Right
-        // pressed: the keyboard press updates recency, Right wins.
-        let mut host = HostKeyboardInput::default();
-        host.note_gamepad_edges(button::LEFT);
-        press(&mut host, KeyCode::ArrowRight, &bindings);
-        assert_eq!(
-            host.resolved_mask(button::LEFT) & (button::LEFT | button::RIGHT),
-            button::RIGHT
-        );
-
-        // Releasing the winner re-exposes the still-held opposite: the
-        // resolver only intervenes while both bits are actually down.
-        release(&mut host, KeyCode::ArrowRight, &bindings);
-        assert_eq!(
-            host.resolved_mask(button::LEFT) & (button::LEFT | button::RIGHT),
-            button::LEFT
-        );
-
-        // Opposite edges in the same gamepad poll carry no ordering
-        // information: recency resets and the pair resolves neutral.
-        let mut host = HostKeyboardInput::default();
-        press(&mut host, KeyCode::ArrowLeft, &bindings);
-        host.note_gamepad_edges(button::LEFT | button::RIGHT);
-        assert_eq!(
-            host.resolved_mask(button::LEFT | button::RIGHT) & (button::LEFT | button::RIGHT),
-            0
-        );
-
-        // The vertical pair tracks independently through the same path.
-        let mut host = HostKeyboardInput::default();
-        press(&mut host, KeyCode::ArrowUp, &bindings);
-        host.note_gamepad_edges(button::DOWN);
-        assert_eq!(
-            host.resolved_mask(button::DOWN) & (button::UP | button::DOWN),
-            button::DOWN
-        );
-    }
-
-    #[test]
     fn captured_keys_round_trip_through_binding_match() {
         // Every key the controls panel can capture must be recognised
         // by the matcher afterwards, or a rebind would save a binding
@@ -2750,12 +2608,6 @@ mod tests {
             ElementState::Pressed,
             &bindings.right_stick,
         ));
-    }
-
-    #[test]
-    fn keyboard_stick_axes_override_matching_gamepad_axes() {
-        assert_eq!(merge_sticks((0.25, -0.5), (0.0, 1.0)), (0.25, 1.0));
-        assert_eq!(merge_sticks((0.25, -0.5), (-1.0, 0.0)), (-1.0, -0.5));
     }
 
     #[test]

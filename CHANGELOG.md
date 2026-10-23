@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Controllers and the keyboard now share one input path. Every source is an
+  adapter that produces a per-device snapshot in the PS1 pad layout, and the
+  menu, the hold-to-repeat, the noise guard, port assignment and the guest feed
+  read only that, so a device cannot work for the keyboard and not for a pad.
+  On macOS, Xbox, DualShock 4, DualSense and Switch Pro controllers are read
+  through Apple's GameController framework (gilrs stays for other platforms and
+  for HID pads the framework does not claim). A pad takes the first free
+  controller port on its first button press; the Controls panel lists each
+  device with its live state and a port picker, and connects, disconnects and
+  noise quarantines are logged with the backend and vid:pid. Holding a menu
+  direction scrolls with an initial delay and accelerating repeat.
+  `psoxide-emulator input-probe` shows the input layer's view with no window.
 - A headless run can plug a pad into port 2 (`--pad2`) and set how late the
   controller pulses `/ACK` after each byte and how long it holds it
   (`--pad-ack-delay`, `--pad-ack-pulse`, CPU cycles; each replaces the measured
