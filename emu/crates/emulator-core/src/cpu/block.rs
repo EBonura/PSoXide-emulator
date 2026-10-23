@@ -303,6 +303,85 @@ mod tier;
 pub(in crate::cpu) use tier::DeviceMark;
 pub use tier::{tier_batch, BatchState, BlockCompiler, NATIVE_DECLINED};
 
+/// Entries of the table of decoded miss lines (a power of two).
+const MISS_MEMO_ENTRIES: usize = 16384;
+
+/// The ops of the words a missed fetch fills in, decoded as a block would be
+/// ([`Cpu::enter_miss_line`]): a pure function of `words`, remembered per
+/// RAM offset.
+#[derive(Clone, Copy)]
+struct MissMemo {
+    /// RAM offset of the first word; `u32::MAX` for an empty entry.
+    offset: u32,
+    /// Words the fill brings in, from the first.
+    count: u8,
+    /// Ops decoded from them; none when the first cannot start a block.
+    len: u8,
+    words: [u32; 4],
+    ops: [DecodedOp; 4],
+}
+
+impl MissMemo {
+    const EMPTY: Self = Self {
+        offset: u32::MAX,
+        count: 0,
+        len: 0,
+        words: [0; 4],
+        ops: [DecodedOp {
+            word: 0,
+            class: OpClass::Alu,
+            flags: 0,
+            rs: 0,
+            rt: 0,
+            handler: 0,
+        }; 4],
+    };
+
+    /// Decode `words` by the block builder's rules: a branch takes its delay
+    /// slot with it and ends the block, a terminator ends it, and a branch
+    /// without its slot among the words is left out.
+    #[inline(never)]
+    fn decode(offset: u32, words: &[u32]) -> Self {
+        let mut memo = Self::EMPTY;
+        memo.offset = offset;
+        memo.count = words.len() as u8;
+        memo.words[..words.len()].copy_from_slice(words);
+        let ops = &mut memo.ops;
+        let mut len = 0;
+        for (i, &word) in words.iter().enumerate() {
+            let Some(class) = classify(word) else { break };
+            if class == OpClass::Branch {
+                let Some(&slot) = words.get(i + 1) else { break };
+                let Some(slot_class) = classify(slot) else {
+                    break;
+                };
+                if slot_class == OpClass::Branch {
+                    break;
+                }
+                ops[len] = decoded(word, class, 0);
+                ops[len + 1] = decoded(slot, slot_class, op_flags::DELAY_SLOT);
+                len += 2;
+                break;
+            }
+            ops[len] = decoded(word, class, 0);
+            len += 1;
+            if class == OpClass::Terminator {
+                break;
+            }
+        }
+        if len != 0 {
+            ops[len - 1].flags |= op_flags::LAST;
+            for i in 1..len {
+                if ops[i].class == OpClass::GteCommand {
+                    ops[i - 1].flags |= op_flags::NEXT_GTE;
+                }
+            }
+        }
+        memo.len = len as u8;
+        memo
+    }
+}
+
 /// Decoded blocks, indexed by the physical word they start at.
 #[derive(Default)]
 pub struct BlockCache {
@@ -321,6 +400,8 @@ pub struct BlockCache {
     /// Block index plus one of the scratch block ([`Cpu::enter_miss_line`]),
     /// zero until it is first needed. It is in no slot, so no PC finds it.
     scratch: u32,
+    /// Decoded miss lines ([`Cpu::enter_miss_line`]); allocated on first use.
+    miss_memo: Vec<MissMemo>,
 }
 
 impl BlockCache {
@@ -466,6 +547,32 @@ impl Cpu {
         true
     }
 
+    /// [`Cpu::batch_fetch_streaming`] for a batch that keeps its issue cycles
+    /// unapplied (`issue`): the wait joins them instead of moving the clock
+    /// at once. Below the quiet limit, which the bounded wait checks the
+    /// fetch stays under, clock advances add up, and the zero advance the
+    /// settled version ends with does nothing there (the GPU's quiet span
+    /// outlasts the limit). `false` (the issue cycles applied, the op left to
+    /// the interpreter) when the wait would leave the span.
+    #[inline(never)]
+    pub(in crate::cpu) fn batch_fetch_streaming_deferred(
+        bus: &mut Bus,
+        pc: u32,
+        issue: &mut u64,
+        limit: u64,
+    ) -> bool {
+        let now = bus.cycles() + *issue;
+        let Some(wait) = bus.streaming_fill_wait_bounded(memory::to_physical(pc), now, limit)
+        else {
+            bus.advance_quiet(*issue);
+            *issue = 0;
+            return false;
+        };
+        *issue += u64::from(wait);
+        bus.note_cached_fetch(wait == 0);
+        true
+    }
+
     /// Find (building if needed) a current block starting at `pc` and point
     /// the cursor at its first op. `false` when no block can start there.
     #[inline(never)]
@@ -559,48 +666,27 @@ impl Cpu {
         let iblksz =
             ((self.cache_control & CACHE_CONTROL_IBLKSZ_MASK) >> CACHE_CONTROL_IBLKSZ_SHIFT) as u8;
         let first = ((phys >> 2) & 3) as usize;
-        let end = self.instruction_cache.miss_fill_end(phys, iblksz);
-        let offset = (phys % RAM_BYTES) as usize;
+        let count = self.instruction_cache.miss_fill_end(phys, iblksz) - first;
+        let offset = phys % RAM_BYTES;
         let mut words = [0u32; 4];
-        let count = end - first;
         for (i, word) in words[..count].iter_mut().enumerate() {
-            *word = bus.ram_word(offset + 4 * i);
+            *word = bus.ram_word(offset as usize + 4 * i);
         }
-        let words = &words[..count];
-        // The block builder's rules over these words: a branch takes its
-        // delay slot with it and ends the block, a terminator ends it.
-        let mut ops = [decoded(0, OpClass::Alu, 0); 4];
-        let mut len = 0;
-        for (i, &word) in words.iter().enumerate() {
-            let Some(class) = classify(word) else { break };
-            if class == OpClass::Branch {
-                let Some(&slot) = words.get(i + 1) else { break };
-                let Some(slot_class) = classify(slot) else {
-                    break;
-                };
-                if slot_class == OpClass::Branch {
-                    break;
-                }
-                ops[len] = decoded(word, class, 0);
-                ops[len + 1] = decoded(slot, slot_class, op_flags::DELAY_SLOT);
-                len += 2;
-                break;
-            }
-            ops[len] = decoded(word, class, 0);
-            len += 1;
-            if class == OpClass::Terminator {
-                break;
-            }
+        // The decoding is a function of the words, and the same lines come
+        // round again and again in code that does not fit the cache.
+        if self.blocks.miss_memo.is_empty() {
+            self.blocks.miss_memo = vec![MissMemo::EMPTY; MISS_MEMO_ENTRIES];
         }
-        if len == 0 || ops[0].class == OpClass::Terminator {
+        let slot = (((offset >> 2) ^ (offset >> 16)) as usize) & (MISS_MEMO_ENTRIES - 1);
+        let memo = &mut self.blocks.miss_memo[slot];
+        if memo.offset != offset || memo.count as usize != count || memo.words != words {
+            *memo = MissMemo::decode(offset, &words[..count]);
+        }
+        let len = memo.len as usize;
+        if len == 0 || memo.ops[0].class == OpClass::Terminator {
             return false;
         }
-        ops[len - 1].flags |= op_flags::LAST;
-        for i in 1..len {
-            if ops[i].class == OpClass::GteCommand {
-                ops[i - 1].flags |= op_flags::NEXT_GTE;
-            }
-        }
+        let ops = memo.ops;
         let index = match self.blocks.scratch {
             0 => {
                 self.blocks.blocks.push(Block {
@@ -632,7 +718,7 @@ impl Cpu {
         // Built from RAM just now, so RAM holds exactly these words.
         block.ram_matches = true;
         block.after_is_gte = bus.peek_is_gte_command(after);
-        block.ram_stamp = bus.ram_stamp(offset, 4 * len + 4);
+        block.ram_stamp = bus.ram_stamp(offset as usize, 4 * len + 4);
         block.kernel = false;
         self.cursor = Cursor {
             block: index as u32 + 1,

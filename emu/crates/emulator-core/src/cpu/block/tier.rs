@@ -942,7 +942,7 @@ impl Cpu {
         ram_ok: &mut bool,
     ) -> Option<Option<u32>> {
         if !bus.code_stream_idle() {
-            if !Self::batch_fetch_streaming(bus, pc, issue, limit) {
+            if !Self::batch_fetch_streaming_deferred(bus, pc, issue, limit) {
                 return None;
             }
             *refetch = true;
