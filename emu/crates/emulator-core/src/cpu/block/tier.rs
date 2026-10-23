@@ -995,7 +995,7 @@ impl Cpu {
     }
 
     /// [`Cpu::batch_step`] for an op whose fetch has been made already (a
-    /// miss, [`Cpu::fetch_instruction_slow`]): everything after the fetch.
+    /// miss, [`Cpu::fetch_miss`]): everything after the fetch.
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
     pub(in crate::cpu) fn batch_step_fetched(
