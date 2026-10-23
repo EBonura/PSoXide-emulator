@@ -2684,6 +2684,7 @@ impl Bus {
         while left > 0 {
             let n = left.min(ram_len - at);
             self.ram[at..at + n].fill(0);
+            self.ram_pages.touch_range(at, n);
             left -= n;
             at = 0;
         }
@@ -2699,6 +2700,7 @@ impl Bus {
         }
         // Both ends are masked into the 2 MiB window, so `end` is in range.
         self.ram[start..end].fill(0);
+        self.ram_pages.touch_range(start, end - start);
     }
 
     /// Run DMA on a single channel after its CHCR was just written

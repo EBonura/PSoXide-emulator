@@ -718,8 +718,13 @@ impl Cpu {
         }
         let len = memo.len as usize;
         // The first op must be one the loop can run, and with `edge` the
-        // missed word must have made it into the block.
-        if len <= lead || memo.ops[0].class == OpClass::Terminator {
+        // missed word must have made it into the block. A store before the
+        // miss could write the words the line is about to be filled with,
+        // after they were read here: that op is left to the block path.
+        if len <= lead
+            || memo.ops[0].class == OpClass::Terminator
+            || (edge && memo.ops[0].class == OpClass::Store)
+        {
             return None;
         }
         let ops = memo.ops;
