@@ -177,6 +177,13 @@ impl GuestTelemetry {
         self.debug_logs.drain(..).collect()
     }
 
+    /// Whether a complete guest debug log line is waiting to be drained. A headless
+    /// runner that batches instructions stops on this so that it drains every line
+    /// right after the instruction that completed it, as a per-instruction loop does.
+    pub fn has_debug_logs(&self) -> bool {
+        !self.debug_logs.is_empty()
+    }
+
     /// Number of guest frame-begin markers observed since reset.
     pub const fn frames_seen(&self) -> u64 {
         self.frames_seen

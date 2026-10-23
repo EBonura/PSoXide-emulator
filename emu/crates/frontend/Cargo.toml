@@ -10,15 +10,18 @@ publish = false
 default-run = "psoxide-emulator"
 
 [features]
-# The standalone emulator has no editor dependency.
-default = []
+# The standalone emulator has no editor dependency. The AArch64 native tier is on by
+# default: it reproduces the interpreter exactly, falls back to it on any other host
+# (and on wasm32, where the dependency does not exist), and `PSOXIDE_JIT=0` switches it
+# off at run time. Build with `--no-default-features` for an interpreter-only binary.
+default = ["native-jit"]
 # `editor` compiles the host editor workspace into the frontend: the embedded
 # 3D preview, the in-editor Play viewport and the project/disc authoring CLI.
 # The psxed-* crates and the editor-only modules live in PSoXide-editor, so
 # this feature builds only there. Here the four optional crates below resolve
 # to empty placeholders (emu/crates/editor-placeholders) so the manifest parses.
 editor = ["dep:psxed-ui", "dep:psxed-project", "dep:psx-asset", "dep:psx-bsp", "dep:psx-engine"]
-# AArch64 native tier, with PSOXIDE_JIT=0 as a runtime off switch.
+# AArch64 native tier, with PSOXIDE_JIT=0 as a runtime off switch (on by default).
 native-jit = ["dep:psoxide-jit"]
 # `mcp` (native-only) embeds a live MCP debug server (official `rmcp` SDK over
 # streamable HTTP) inside the running GUI, so an agent can drive the emulator:
