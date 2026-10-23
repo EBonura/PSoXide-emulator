@@ -306,6 +306,10 @@ mod tier;
 pub(in crate::cpu) use tier::DeviceMark;
 pub use tier::{tier_batch, BatchState, BlockCompiler, NATIVE_DECLINED};
 
+/// Words a decoded miss line holds: a line's four, and the hit word before
+/// it ([`Cpu::enter_miss_line`]).
+const MEMO_WORDS: usize = 5;
+
 /// Entries of the table of decoded miss lines (a power of two).
 const MISS_MEMO_ENTRIES: usize = 16384;
 
@@ -320,8 +324,8 @@ struct MissMemo {
     count: u8,
     /// Ops decoded from them; none when the first cannot start a block.
     len: u8,
-    words: [u32; 4],
-    ops: [DecodedOp; 4],
+    words: [u32; MEMO_WORDS],
+    ops: [DecodedOp; MEMO_WORDS],
 }
 
 impl MissMemo {
@@ -329,7 +333,7 @@ impl MissMemo {
         offset: u32::MAX,
         count: 0,
         len: 0,
-        words: [0; 4],
+        words: [0; MEMO_WORDS],
         ops: [DecodedOp {
             word: 0,
             class: OpClass::Alu,
@@ -337,7 +341,7 @@ impl MissMemo {
             rs: 0,
             rt: 0,
             handler: 0,
-        }; 4],
+        }; MEMO_WORDS],
     };
 
     /// Decode `words` by the block builder's rules: a branch takes its delay
@@ -636,45 +640,66 @@ impl Cpu {
         true
     }
 
-    /// Point the cursor at a scratch block holding the words a fetch at the
-    /// PC is about to fill the I-cache with, for [`Cpu::run_tiered`] to run
-    /// from, and return `true`. Only for a PC whose fetch is a miss and whose
-    /// step the batch loop can run ([`Cpu::block_entry_ok`] is the caller's
-    /// to check; main RAM outside the HLE kernel area, an executable first
-    /// word that is not a terminator); `false`, changing nothing, otherwise.
+    /// Point the cursor at a scratch block holding the words a fetch is
+    /// about to fill the I-cache with, for [`Cpu::run_tiered`] to run from,
+    /// and return the index of the op whose fetch is the miss (that op's
+    /// fetch has not happened: the caller makes it, [`Cpu::fetch_miss`],
+    /// before the op runs). Only for a missed fetch the batch loop can run
+    /// ([`Cpu::block_entry_ok`] is the caller's to check; main RAM outside
+    /// the HLE kernel area, an executable first word that is not a
+    /// terminator); `None`, changing nothing, otherwise.
     ///
     /// A miss fills the cache line from main RAM, from the requested word to
     /// the end of the fill ([`InstructionCache::miss_fill_end`]), so the words
-    /// that will run are exactly those in RAM now. The first op's fetch has
-    /// not happened yet: the caller makes it ([`Cpu::fetch_instruction_slow`])
-    /// before the op runs, and the words behind it are then hits behind a
-    /// streaming fill, as in any block. The block is valid only for the
-    /// stretch from here to its last op: it is never found by a PC, and its
-    /// words are the cache's, whatever RAM holds later.
+    /// that will run are exactly those in RAM now, and are hits behind a
+    /// streaming fill after the first, as in any block. The block is valid
+    /// only for the stretch from here to its last op: it is never found by a
+    /// PC, and its words are the cache's, whatever RAM holds later.
+    ///
+    /// With `edge`, the PC is instead a hit on the last word of its line
+    /// followed by a line that is not cached: a block there would be one op
+    /// (a branch cannot take its delay slot from the other line), so the
+    /// scratch block takes that op and the missed line after it, and the miss
+    /// is op 1.
     ///
     /// [`InstructionCache::miss_fill_end`]: super::icache::InstructionCache::miss_fill_end
     #[inline(never)]
-    pub(super) fn enter_miss_line(&mut self, bus: &Bus) -> bool {
+    pub(super) fn enter_miss_line(&mut self, bus: &Bus, edge: bool) -> Option<u32> {
         let pc = self.pc;
         if pc & 3 != 0 || pc >= 0xa000_0000 || self.fetch_glitch.is_some() {
-            return false;
+            return None;
         }
         let phys = memory::to_physical(pc);
         if phys >= memory::ram::MIRROR_END || (bus.hle_bios_enabled && phys < 0x1_0000) {
-            return false;
+            return None;
         }
-        if self.instruction_cache.hit(phys).is_some() {
-            return false;
-        }
+        let mut words = [0u32; MEMO_WORDS];
+        let (miss_phys, lead) = if edge {
+            if phys & 0xc != 0xc {
+                return None;
+            }
+            words[0] = self.instruction_cache.hit(phys)?;
+            let next = phys + 4;
+            if next >= memory::ram::MIRROR_END || self.instruction_cache.hit(next).is_some() {
+                return None;
+            }
+            (next, 1)
+        } else {
+            if self.instruction_cache.hit(phys).is_some() {
+                return None;
+            }
+            (phys, 0)
+        };
         let iblksz =
             ((self.cache_control & CACHE_CONTROL_IBLKSZ_MASK) >> CACHE_CONTROL_IBLKSZ_SHIFT) as u8;
-        let first = ((phys >> 2) & 3) as usize;
-        let count = self.instruction_cache.miss_fill_end(phys, iblksz) - first;
-        let offset = phys % RAM_BYTES;
-        let mut words = [0u32; 4];
-        for (i, word) in words[..count].iter_mut().enumerate() {
-            *word = bus.ram_word(offset as usize + 4 * i);
+        let first = ((miss_phys >> 2) & 3) as usize;
+        let filled = self.instruction_cache.miss_fill_end(miss_phys, iblksz) - first;
+        let miss_offset = (miss_phys % RAM_BYTES) as usize;
+        for (i, word) in words[lead..lead + filled].iter_mut().enumerate() {
+            *word = bus.ram_word(miss_offset + 4 * i);
         }
+        let count = lead + filled;
+        let offset = phys % RAM_BYTES;
         // The decoding is a function of the words, and the same lines come
         // round again and again in code that does not fit the cache.
         if self.blocks.miss_memo.is_empty() {
@@ -686,15 +711,17 @@ impl Cpu {
             *memo = MissMemo::decode(offset, &words[..count]);
         }
         let len = memo.len as usize;
-        if len == 0 || memo.ops[0].class == OpClass::Terminator {
-            return false;
+        // The first op must be one the loop can run, and with `edge` the
+        // missed word must have made it into the block.
+        if len <= lead || memo.ops[0].class == OpClass::Terminator {
+            return None;
         }
         let ops = memo.ops;
         let index = match self.blocks.scratch {
             0 => {
                 self.blocks.blocks.push(Block {
                     vaddr: 0,
-                    ops: Vec::with_capacity(4),
+                    ops: Vec::with_capacity(MEMO_WORDS),
                     lines: [(0, 0); MAX_LINES],
                     line_count: 0,
                     checked_epoch: 0,
@@ -715,17 +742,18 @@ impl Cpu {
         let block = &mut self.blocks.blocks[index];
         block.vaddr = pc;
         debug_assert!(block.ops.capacity() >= ops.len());
-        // SAFETY: the scratch block was made with room for four ops, and
-        // `ptr::copy_nonoverlapping` of four initialised ops fills them
-        // before the length takes in the first `len`.
+        // SAFETY: the scratch block was made with room for `MEMO_WORDS` ops,
+        // and `ptr::copy_nonoverlapping` of that many initialised ops fills
+        // them before the length takes in the first `len`.
         unsafe {
             std::ptr::copy_nonoverlapping(ops.as_ptr(), block.ops.as_mut_ptr(), ops.len());
             block.ops.set_len(len);
         }
         block.native = 0;
         block.hits = 0;
-        // Built from RAM just now, so RAM holds exactly these words.
-        block.ram_matches = true;
+        // The words after a leading hit were read from RAM just now; the
+        // hit word is the cache's, which RAM may no longer match.
+        block.ram_matches = lead == 0 || bus.ram_word(offset as usize) == words[0];
         block.after_is_gte = bus.peek_is_gte_command(after);
         block.ram_stamp = bus.ram_stamp(offset as usize, 4 * len + 4);
         block.kernel = false;
@@ -735,7 +763,7 @@ impl Cpu {
             pc,
             cache_control: self.cache_control,
         };
-        true
+        Some(lead as u32)
     }
 
     /// Whether main RAM holds exactly block `index`'s words, from a stamp

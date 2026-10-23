@@ -135,9 +135,11 @@ impl Cpu {
         // Set when the native tier handed back control at the start of a
         // block, so it is not asked again there.
         let mut skip_native = false;
-        // The cursor is at the first op of the scratch block of a missed
-        // line ([`Cpu::enter_miss_line`]), whose fetch has not been made.
-        let mut miss_first = false;
+        // The cursor is in the scratch block of a missed line
+        // ([`Cpu::enter_miss_line`]) and the op `miss_op` of it, whose fetch
+        // has not been made, is still to come.
+        let mut miss_pending = false;
+        let mut miss_op = 0;
         'blocks: loop {
             if self.cursor.block == 0 || self.cursor.pc != self.pc {
                 // Outside any block (an I-cache miss, a delay slot entered
@@ -146,15 +148,29 @@ impl Cpu {
                 // interpreter while that keeps the batch's guarantees.
                 self.cursor.block = 0;
                 let entry_ok = self.block_entry_ok();
-                if !(entry_ok && self.enter_block(bus, self.pc)) {
-                    if entry_ok && self.enter_miss_line(bus) {
-                        miss_first = true;
+                // A hit on the last word of a line whose next line is a miss
+                // is one op of a block: it joins the missed line instead.
+                let mut miss = if entry_ok && self.pc & 0xc == 0xc {
+                    self.enter_miss_line(bus, true)
+                } else {
+                    None
+                };
+                if miss.is_none() && !(entry_ok && self.enter_block(bus, self.pc)) {
+                    miss = if entry_ok {
+                        self.enter_miss_line(bus, false)
                     } else {
+                        None
+                    };
+                    if miss.is_none() {
                         if !self.batch_interpret_step(bus, &mut st) {
                             break 'blocks;
                         }
                         continue 'blocks;
                     }
+                }
+                if let Some(op) = miss {
+                    miss_pending = true;
+                    miss_op = op;
                 }
             }
             let irq_enabled = self.irq_enabled();
@@ -163,7 +179,10 @@ impl Cpu {
             // matches it; a store in the batch ends that for this block.
             let mut ram_ok = irq_enabled && self.block_ram_matches(bus, index);
             let after_is_gte = self.blocks.blocks[index].after_is_gte;
-            if !skip_native && !miss_first && self.cursor.op == 0 && self.blocks.compiler.is_some()
+            if !skip_native
+                && !miss_pending
+                && self.cursor.op == 0
+                && self.blocks.compiler.is_some()
             {
                 match self.run_native(bus, index, irq_enabled, ram_ok, &mut st) {
                     Some(NativeExit::Resume) => {
@@ -257,8 +276,8 @@ impl Cpu {
                     }
                 }
                 // -- the step, as `execute_one_inner` + `execute_fetched` --
-                let branch_after_this = if miss_first {
-                    miss_first = false;
+                let branch_after_this = if miss_pending && self.cursor.op == miss_op {
+                    miss_pending = false;
                     // The missed word's fetch: the clock settled, the line
                     // filled, its stall charged.
                     bus.advance_quiet(st.issue);
@@ -350,9 +369,9 @@ impl Cpu {
                 }
             }
         }
-        if miss_first {
-            // The batch ended before the missed word was fetched: nothing
-            // of the scratch block ran, and it is not to be resumed.
+        if miss_pending {
+            // The batch ended before the missed word was fetched: the scratch
+            // block is not to be resumed (its miss would be taken for a hit).
             self.cursor.block = 0;
         }
         bus.advance_quiet(st.issue);
