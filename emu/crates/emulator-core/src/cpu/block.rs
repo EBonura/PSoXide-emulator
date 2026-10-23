@@ -267,13 +267,16 @@ impl Block {
             if cache.generation(line) == generation {
                 continue;
             }
-            let mut phys = line.max(base);
-            while phys < (line + 0x10).min(end) {
-                let op = &self.ops[(phys.wrapping_sub(base) / 4) as usize];
-                if cache.hit(phys) != Some(op.word) {
-                    return false;
-                }
-                phys += 4;
+            let first = line.max(base);
+            let last = (line + 0x10).min(end);
+            let ops = &self.ops[(first.wrapping_sub(base) / 4) as usize..]
+                [..((last - first) / 4) as usize];
+            if !cache.line_holds(
+                line,
+                ((first - line) / 4) as usize,
+                ops.iter().map(|op| op.word),
+            ) {
+                return false;
             }
         }
         for (phys, generation) in &mut self.lines[..self.line_count as usize] {
@@ -711,8 +714,14 @@ impl Cpu {
         let after = pc.wrapping_add(4 * len as u32);
         let block = &mut self.blocks.blocks[index];
         block.vaddr = pc;
-        block.ops.clear();
-        block.ops.extend_from_slice(&ops[..len]);
+        debug_assert!(block.ops.capacity() >= ops.len());
+        // SAFETY: the scratch block was made with room for four ops, and
+        // `ptr::copy_nonoverlapping` of four initialised ops fills them
+        // before the length takes in the first `len`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(ops.as_ptr(), block.ops.as_mut_ptr(), ops.len());
+            block.ops.set_len(len);
+        }
         block.native = 0;
         block.hits = 0;
         // Built from RAM just now, so RAM holds exactly these words.
@@ -734,7 +743,7 @@ impl Cpu {
     /// a write to those pages). While it does, the GTE interrupt hazard's
     /// look at "the next instruction in RAM" can use the decoded words
     /// ([`op_flags::NEXT_GTE`], [`Block::after_is_gte`]).
-    #[inline]
+    #[inline(always)]
     pub(super) fn block_ram_matches(&mut self, bus: &Bus, index: usize) -> bool {
         let block = &mut self.blocks.blocks[index];
         let offset = (memory::to_physical(block.vaddr) % RAM_BYTES) as usize;
@@ -750,16 +759,25 @@ impl Cpu {
             "RAM written without a page count at block {:08x}",
             block.vaddr
         );
-        if stamp != block.ram_stamp {
-            block.ram_matches = block
-                .ops
-                .iter()
-                .enumerate()
-                .all(|(i, op)| bus.ram_word(offset + 4 * i) == op.word);
-            let after = block.vaddr.wrapping_add(4 * block.ops.len() as u32);
-            block.after_is_gte = bus.peek_is_gte_command(after);
-            block.ram_stamp = stamp;
+        if stamp == block.ram_stamp {
+            return block.ram_matches;
         }
+        Self::block_ram_compare(block, bus, offset, stamp)
+    }
+
+    /// [`Cpu::block_ram_matches`] after the RAM pages of the block were
+    /// written: compare the words again.
+    #[cold]
+    #[inline(never)]
+    fn block_ram_compare(block: &mut Block, bus: &Bus, offset: usize, stamp: RamStamp) -> bool {
+        block.ram_matches = block
+            .ops
+            .iter()
+            .enumerate()
+            .all(|(i, op)| bus.ram_word(offset + 4 * i) == op.word);
+        let after = block.vaddr.wrapping_add(4 * block.ops.len() as u32);
+        block.after_is_gte = bus.peek_is_gte_command(after);
+        block.ram_stamp = stamp;
         block.ram_matches
     }
 
@@ -2064,11 +2082,7 @@ mod tests {
                         for high in [0u32, 1] {
                             let word = (op << 26) | (rs << 21) | (rt << 16) | (high << 25) | funct;
                             // Bit 25 is rs bit 4; keep the field set as built.
-                            assert_eq!(
-                                classify(word),
-                                classify_by_fields(word),
-                                "word {word:08x}"
-                            );
+                            assert_eq!(classify(word), classify_by_fields(word), "word {word:08x}");
                         }
                     }
                 }

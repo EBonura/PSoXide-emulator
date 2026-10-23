@@ -109,6 +109,59 @@ impl InstructionCache {
         }
     }
 
+    /// [`Self::fetch`] of `phys`, a main-RAM address whose word is not a
+    /// hit, with the line read from RAM by the caller (`ram_line`) and no
+    /// refill event captured: the fill alone.
+    #[inline]
+    pub(super) fn fill_miss(
+        &mut self,
+        phys: u32,
+        iblksz: u8,
+        ram_line: [u32; WORDS_PER_LINE],
+    ) -> (u32, FillShape) {
+        let (line_index, word_index, tag) = Self::coordinates(phys);
+        self.generations[line_index] = self.generations[line_index].wrapping_add(1);
+        self.epoch += 1;
+        let line = &mut self.lines[line_index];
+        debug_assert!(
+            !(line.tag == tag && line.valid & (1 << word_index) != 0),
+            "a miss fill is for a word that is not a hit"
+        );
+        if line.tag != tag {
+            line.tag = tag;
+            line.valid = 0;
+            // A tag miss fills from the requested word to the end of the
+            // line without wrapping; IBLKSZ=0 is the two-word mode, for a
+            // miss beginning at word zero.
+            let end = if iblksz == 0 && word_index == 0 {
+                2
+            } else {
+                WORDS_PER_LINE
+            };
+            line.words[word_index..end].copy_from_slice(&ram_line[word_index..end]);
+            line.valid = ((1u8 << (end - word_index)) - 1) << word_index;
+            (
+                line.words[word_index],
+                FillShape {
+                    words: (end - word_index) as u32,
+                    lead_words: 0,
+                },
+            )
+        } else {
+            // A matching tag with an invalid requested word refills the
+            // complete line, irrespective of IBLKSZ.
+            line.words = ram_line;
+            line.valid = 0xf;
+            (
+                line.words[word_index],
+                FillShape {
+                    words: WORDS_PER_LINE as u32,
+                    lead_words: word_index as u32,
+                },
+            )
+        }
+    }
+
     /// Fetch one instruction, filling according to the CXD8606Q's
     /// documented per-word-valid behaviour.
     pub(super) fn fetch(
@@ -240,6 +293,30 @@ impl InstructionCache {
     #[inline(always)]
     pub(super) fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// Whether the line at physical line base `line` holds `words`, in
+    /// consecutive word positions from `first`, as hits: tag matching, the
+    /// words valid and equal. The line-wide form of [`Self::hit`].
+    #[inline]
+    pub(super) fn line_holds(
+        &self,
+        line: u32,
+        first: usize,
+        words: impl Iterator<Item = u32>,
+    ) -> bool {
+        let (line_index, _, tag) = Self::coordinates(line);
+        let held = &self.lines[line_index];
+        if held.tag != tag {
+            return false;
+        }
+        for (offset, word) in words.enumerate() {
+            let at = first + offset;
+            if held.valid & (1 << at) == 0 || held.words[at] != word {
+                return false;
+            }
+        }
+        true
     }
 
     /// Where [`InstructionCache::epoch`] lives, for compiled code.

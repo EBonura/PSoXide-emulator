@@ -427,6 +427,20 @@ impl Bus {
         }
     }
 
+    /// The four words of the 16-byte line of main RAM holding byte offset
+    /// `offset` (any mirror): what an I-cache fill of that line reads.
+    #[inline(always)]
+    pub(crate) fn ram_line(&self, offset: usize) -> [u32; 4] {
+        let base = (offset % memory::ram::SIZE) & !0xf;
+        let line = &self.ram[base..base + 16];
+        [
+            read_u32_le(&line[0..]),
+            read_u32_le(&line[4..]),
+            read_u32_le(&line[8..]),
+            read_u32_le(&line[12..]),
+        ]
+    }
+
     /// The word of main RAM at byte offset `offset` (any mirror).
     #[inline(always)]
     pub(crate) fn ram_word(&self, offset: usize) -> u32 {

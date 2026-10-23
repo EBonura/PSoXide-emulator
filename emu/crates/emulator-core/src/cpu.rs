@@ -1231,6 +1231,41 @@ impl Cpu {
         instruction
     }
 
+    /// [`Cpu::fetch_instruction_slow`] for a fetch the batch loop knows is a
+    /// miss of a cached main-RAM word (no fetch glitch armed, no profiler or
+    /// limit oracle on, the cache enabled): the wait on a fill still
+    /// streaming, the line fill and its stall.
+    #[inline(never)]
+    fn fetch_miss(&mut self, addr: u32, bus: &mut Bus) -> u32 {
+        let phys = memory::to_physical(addr);
+        let abandon = bus.streaming_fill_wait(phys);
+        if abandon != 0 {
+            bus.add_cycles(abandon);
+        }
+        let iblksz =
+            ((self.cache_control & CACHE_CONTROL_IBLKSZ_MASK) >> CACHE_CONTROL_IBLKSZ_SHIFT) as u8;
+        let (instruction, fill) =
+            self.instruction_cache
+                .fill_miss(phys, iblksz, bus.ram_line(phys as usize));
+        bus.note_cached_fetch(false);
+        let streaming = self.cache_control & CACHE_CONTROL_NOSTR == 0;
+        let stalls = bus.icache_fill_stalls(phys, fill.words, fill.lead_words, streaming);
+        self.instruction_cache_profile.refill_events = self
+            .instruction_cache_profile
+            .refill_events
+            .saturating_add(1);
+        self.instruction_cache_profile.refill_words = self
+            .instruction_cache_profile
+            .refill_words
+            .saturating_add(fill.words as u64);
+        self.instruction_cache_profile.refill_stall_cycles = self
+            .instruction_cache_profile
+            .refill_stall_cycles
+            .saturating_add(stalls as u64);
+        bus.add_cycles(stalls);
+        instruction
+    }
+
     #[inline]
     fn instruction_address_is_executable(addr: u32) -> bool {
         if addr >= 0xc000_0000 {

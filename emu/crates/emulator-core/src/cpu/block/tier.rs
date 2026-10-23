@@ -163,10 +163,7 @@ impl Cpu {
             // matches it; a store in the batch ends that for this block.
             let mut ram_ok = irq_enabled && self.block_ram_matches(bus, index);
             let after_is_gte = self.blocks.blocks[index].after_is_gte;
-            if !skip_native
-                && !miss_first
-                && self.cursor.op == 0
-                && self.blocks.compiler.is_some()
+            if !skip_native && !miss_first && self.cursor.op == 0 && self.blocks.compiler.is_some()
             {
                 match self.run_native(bus, index, irq_enabled, ram_ok, &mut st) {
                     Some(NativeExit::Resume) => {
@@ -266,7 +263,7 @@ impl Cpu {
                     // filled, its stall charged.
                     bus.advance_quiet(st.issue);
                     st.issue = 0;
-                    let word = self.fetch_instruction_slow(pc, bus);
+                    let word = self.fetch_miss(pc, bus);
                     debug_assert_eq!(word, op.word, "a miss fills with the scratch block's word");
                     st.refetch = true;
                     if bus.cycles() + 1 >= st.limit {
