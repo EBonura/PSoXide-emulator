@@ -95,6 +95,20 @@ impl InstructionCache {
         (line.tag == tag && line.valid & (1 << word_index) != 0).then_some(line.words[word_index])
     }
 
+    /// The word index one past the last word a fetch of `phys` fills, were it
+    /// a miss: the fill [`Self::fetch`] performs starts at the requested word
+    /// and runs to this index. Four, except that a tag miss at word zero with
+    /// IBLKSZ 0 (the two-word mode) fills two.
+    #[inline]
+    pub(super) fn miss_fill_end(&self, phys: u32, iblksz: u8) -> usize {
+        let (line_index, word_index, tag) = Self::coordinates(phys);
+        if iblksz == 0 && word_index == 0 && self.lines[line_index].tag != tag {
+            2
+        } else {
+            WORDS_PER_LINE
+        }
+    }
+
     /// Fetch one instruction, filling according to the CXD8606Q's
     /// documented per-word-valid behaviour.
     pub(super) fn fetch(

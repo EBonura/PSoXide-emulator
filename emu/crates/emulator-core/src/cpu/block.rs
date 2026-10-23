@@ -97,7 +97,68 @@ pub struct DecodedOp {
 /// Classify one instruction word for block building. `None`: the word
 /// cannot be executed from a block (an encoding the interpreter rejects);
 /// the block stops before it and the interpreter reports the error.
+///
+/// Table-driven: the class of a word depends on the primary opcode, and for
+/// four opcodes on one more field, so the answer is one load at a key built
+/// without branches ([`class_key`]) from [`CLASS_TABLE`], which is made out
+/// of [`classify_by_fields`] (the definition) at compile time. The words of
+/// a program are in no order the branch predictor can learn, so a `match` on
+/// them costs a misprediction a word.
+#[inline(always)]
 pub fn classify(word: u32) -> Option<OpClass> {
+    CLASS_TABLE[class_key(word)]
+}
+
+/// Index into [`CLASS_TABLE`]: the primary opcode (0..64), except that the
+/// SPECIAL opcode selects by its function field (64..128), COP2 by bit 25
+/// (128, 129), REGIMM by whether `rt` names a branch (130, 131) and COP0 by
+/// whether `rs` is zero, a register move (132, 133).
+#[inline(always)]
+fn class_key(word: u32) -> usize {
+    let op = word >> 26;
+    let mut key = op;
+    key = if op == 0 { 64 + (word & 0x3f) } else { key };
+    key = if op == 0x12 {
+        128 + ((word >> 25) & 1)
+    } else {
+        key
+    };
+    key = if op == 1 {
+        130 + u32::from((word >> 16) & 0x1f & !0x11 != 0)
+    } else {
+        key
+    };
+    key = if op == 0x10 {
+        132 + u32::from((word >> 21) & 0x1f != 0)
+    } else {
+        key
+    };
+    key as usize
+}
+
+static CLASS_TABLE: [Option<OpClass>; 134] = {
+    let mut table = [None; 134];
+    let mut op = 0;
+    while op < 64 {
+        table[op] = classify_by_fields((op as u32) << 26);
+        op += 1;
+    }
+    let mut funct = 0;
+    while funct < 64 {
+        table[64 + funct] = classify_by_fields(funct as u32);
+        funct += 1;
+    }
+    table[128] = classify_by_fields(0x12 << 26);
+    table[129] = classify_by_fields((0x12 << 26) | (1 << 25));
+    table[130] = classify_by_fields(1 << 26);
+    table[131] = classify_by_fields((1 << 26) | (2 << 16));
+    table[132] = classify_by_fields(0x10 << 26);
+    table[133] = classify_by_fields((0x10 << 26) | (1 << 21));
+    table
+};
+
+/// The definition [`classify`] tabulates.
+const fn classify_by_fields(word: u32) -> Option<OpClass> {
     let op = word >> 26;
     let rs = (word >> 21) & 0x1f;
     let rt = (word >> 16) & 0x1f;
@@ -257,6 +318,9 @@ pub struct BlockCache {
     /// code linked to a block at one count is still linked to it while
     /// this and the I-cache epoch are unchanged.
     link_gen: u64,
+    /// Block index plus one of the scratch block ([`Cpu::enter_miss_line`]),
+    /// zero until it is first needed. It is in no slot, so no PC finds it.
+    scratch: u32,
 }
 
 impl BlockCache {
@@ -270,6 +334,7 @@ impl BlockCache {
     pub fn clear(&mut self) {
         self.slots = Vec::new();
         self.blocks.clear();
+        self.scratch = 0;
         self.link_gen += 1;
     }
 
@@ -454,6 +519,123 @@ impl Cpu {
         block.hits = block.hits.wrapping_add(1);
         self.cursor = Cursor {
             block: index + 1,
+            op: 0,
+            pc,
+            cache_control: self.cache_control,
+        };
+        true
+    }
+
+    /// Point the cursor at a scratch block holding the words a fetch at the
+    /// PC is about to fill the I-cache with, for [`Cpu::run_tiered`] to run
+    /// from, and return `true`. Only for a PC whose fetch is a miss and whose
+    /// step the batch loop can run ([`Cpu::block_entry_ok`] is the caller's
+    /// to check; main RAM outside the HLE kernel area, an executable first
+    /// word that is not a terminator); `false`, changing nothing, otherwise.
+    ///
+    /// A miss fills the cache line from main RAM, from the requested word to
+    /// the end of the fill ([`InstructionCache::miss_fill_end`]), so the words
+    /// that will run are exactly those in RAM now. The first op's fetch has
+    /// not happened yet: the caller makes it ([`Cpu::fetch_instruction_slow`])
+    /// before the op runs, and the words behind it are then hits behind a
+    /// streaming fill, as in any block. The block is valid only for the
+    /// stretch from here to its last op: it is never found by a PC, and its
+    /// words are the cache's, whatever RAM holds later.
+    ///
+    /// [`InstructionCache::miss_fill_end`]: super::icache::InstructionCache::miss_fill_end
+    #[inline(never)]
+    pub(super) fn enter_miss_line(&mut self, bus: &Bus) -> bool {
+        let pc = self.pc;
+        if pc & 3 != 0 || pc >= 0xa000_0000 || self.fetch_glitch.is_some() {
+            return false;
+        }
+        let phys = memory::to_physical(pc);
+        if phys >= memory::ram::MIRROR_END || (bus.hle_bios_enabled && phys < 0x1_0000) {
+            return false;
+        }
+        if self.instruction_cache.hit(phys).is_some() {
+            return false;
+        }
+        let iblksz =
+            ((self.cache_control & CACHE_CONTROL_IBLKSZ_MASK) >> CACHE_CONTROL_IBLKSZ_SHIFT) as u8;
+        let first = ((phys >> 2) & 3) as usize;
+        let end = self.instruction_cache.miss_fill_end(phys, iblksz);
+        let offset = (phys % RAM_BYTES) as usize;
+        let mut words = [0u32; 4];
+        let count = end - first;
+        for (i, word) in words[..count].iter_mut().enumerate() {
+            *word = bus.ram_word(offset + 4 * i);
+        }
+        let words = &words[..count];
+        // The block builder's rules over these words: a branch takes its
+        // delay slot with it and ends the block, a terminator ends it.
+        let mut ops = [decoded(0, OpClass::Alu, 0); 4];
+        let mut len = 0;
+        for (i, &word) in words.iter().enumerate() {
+            let Some(class) = classify(word) else { break };
+            if class == OpClass::Branch {
+                let Some(&slot) = words.get(i + 1) else { break };
+                let Some(slot_class) = classify(slot) else {
+                    break;
+                };
+                if slot_class == OpClass::Branch {
+                    break;
+                }
+                ops[len] = decoded(word, class, 0);
+                ops[len + 1] = decoded(slot, slot_class, op_flags::DELAY_SLOT);
+                len += 2;
+                break;
+            }
+            ops[len] = decoded(word, class, 0);
+            len += 1;
+            if class == OpClass::Terminator {
+                break;
+            }
+        }
+        if len == 0 || ops[0].class == OpClass::Terminator {
+            return false;
+        }
+        ops[len - 1].flags |= op_flags::LAST;
+        for i in 1..len {
+            if ops[i].class == OpClass::GteCommand {
+                ops[i - 1].flags |= op_flags::NEXT_GTE;
+            }
+        }
+        let index = match self.blocks.scratch {
+            0 => {
+                self.blocks.blocks.push(Block {
+                    vaddr: 0,
+                    ops: Vec::with_capacity(4),
+                    lines: [(0, 0); MAX_LINES],
+                    line_count: 0,
+                    checked_epoch: 0,
+                    native: 0,
+                    hits: 0,
+                    ram_matches: false,
+                    after_is_gte: false,
+                    ram_stamp: RamStamp::default(),
+                    exits: [(0, 0); 2],
+                    kernel: false,
+                });
+                self.blocks.scratch = self.blocks.blocks.len() as u32;
+                self.blocks.blocks.len() - 1
+            }
+            id => id as usize - 1,
+        };
+        let after = pc.wrapping_add(4 * len as u32);
+        let block = &mut self.blocks.blocks[index];
+        block.vaddr = pc;
+        block.ops.clear();
+        block.ops.extend_from_slice(&ops[..len]);
+        block.native = 0;
+        block.hits = 0;
+        // Built from RAM just now, so RAM holds exactly these words.
+        block.ram_matches = true;
+        block.after_is_gte = bus.peek_is_gte_command(after);
+        block.ram_stamp = bus.ram_stamp(offset, 4 * len + 4);
+        block.kernel = false;
+        self.cursor = Cursor {
+            block: index as u32 + 1,
             op: 0,
             pc,
             cache_control: self.cache_control,
@@ -1551,30 +1733,33 @@ fn batch_access_kind(word: u32, addr: u32) -> BatchAccess {
     }
 }
 
+/// Decode `word`, of class `class`, into the op a block keeps. `flags` is
+/// what the position adds ([`op_flags::DELAY_SLOT`], which also keeps an
+/// [`OpClass::Other`] op out of the batch loops). Branch-free: words come in
+/// no order a predictor learns.
+#[inline(always)]
 fn decoded(word: u32, class: OpClass, flags: u8) -> DecodedOp {
-    let bus_flag = if word >> 26 >= 0x20 {
-        op_flags::TOUCHES_BUS
-    } else {
-        0
-    };
-    let batch = match class {
-        OpClass::Alu | OpClass::Branch => true,
-        // CPU loads and stores; not LWC2/SWC2, which go through the GTE.
-        OpClass::Load | OpClass::Store => word >> 26 <= 0x2e,
-        OpClass::Other => flags & op_flags::DELAY_SLOT == 0,
-        OpClass::GteCommand | OpClass::Terminator => false,
-    };
-    let bus_flag = bus_flag | if batch { op_flags::BATCH } else { 0 };
+    let op = word >> 26;
+    // One bit per class (Alu, Branch, Load, Store, Other).
+    let bit = |classes: u32| (classes >> class as u32) & 1 != 0;
+    let uses_bus = op >= 0x20;
+    // CPU loads and stores run in the batch loops; LWC2/SWC2 (above 0x2e)
+    // go through the GTE.
+    let batch = bit(0b00011)
+        || (bit(0b01100) && op <= 0x2e)
+        || (bit(0b10000) && flags & op_flags::DELAY_SLOT == 0);
     DecodedOp {
         word,
         class,
-        flags: flags | bus_flag,
+        flags: flags
+            | if uses_bus { op_flags::TOUCHES_BUS } else { 0 }
+            | if batch { op_flags::BATCH } else { 0 },
         rs: ((word >> 21) & 0x1f) as u8,
         rt: ((word >> 16) & 0x1f) as u8,
-        handler: if word >> 26 == 0 {
+        handler: if op == 0 {
             0x40 | (word & 0x3f) as u8
         } else {
-            (word >> 26) as u8
+            op as u8
         },
     }
 }
@@ -1778,6 +1963,29 @@ mod tests {
                     digest(&plain_bus),
                     "bus opcode {opcode:x}, branch {branch:?}"
                 );
+            }
+        }
+    }
+
+    /// The table agrees with the definition on every combination of the
+    /// fields the definition reads.
+    #[test]
+    fn classify_table_matches_the_definition() {
+        for op in 0..64u32 {
+            for funct in 0..64u32 {
+                for rs in 0..32u32 {
+                    for rt in 0..32u32 {
+                        for high in [0u32, 1] {
+                            let word = (op << 26) | (rs << 21) | (rt << 16) | (high << 25) | funct;
+                            // Bit 25 is rs bit 4; keep the field set as built.
+                            assert_eq!(
+                                classify(word),
+                                classify_by_fields(word),
+                                "word {word:08x}"
+                            );
+                        }
+                    }
+                }
             }
         }
     }

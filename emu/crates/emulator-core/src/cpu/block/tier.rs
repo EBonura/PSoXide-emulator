@@ -135,17 +135,26 @@ impl Cpu {
         // Set when the native tier handed back control at the start of a
         // block, so it is not asked again there.
         let mut skip_native = false;
+        // The cursor is at the first op of the scratch block of a missed
+        // line ([`Cpu::enter_miss_line`]), whose fetch has not been made.
+        let mut miss_first = false;
         'blocks: loop {
             if self.cursor.block == 0 || self.cursor.pc != self.pc {
                 // Outside any block (an I-cache miss, a delay slot entered
-                // from outside, a block end): run single steps through the
+                // from outside, a block end): a missed line runs from a
+                // scratch block, anything else as single steps through the
                 // interpreter while that keeps the batch's guarantees.
                 self.cursor.block = 0;
-                if !(self.block_entry_ok() && self.enter_block(bus, self.pc)) {
-                    if !self.batch_interpret_step(bus, &mut st) {
-                        break 'blocks;
+                let entry_ok = self.block_entry_ok();
+                if !(entry_ok && self.enter_block(bus, self.pc)) {
+                    if entry_ok && self.enter_miss_line(bus) {
+                        miss_first = true;
+                    } else {
+                        if !self.batch_interpret_step(bus, &mut st) {
+                            break 'blocks;
+                        }
+                        continue 'blocks;
                     }
-                    continue 'blocks;
                 }
             }
             let irq_enabled = self.irq_enabled();
@@ -154,7 +163,11 @@ impl Cpu {
             // matches it; a store in the batch ends that for this block.
             let mut ram_ok = irq_enabled && self.block_ram_matches(bus, index);
             let after_is_gte = self.blocks.blocks[index].after_is_gte;
-            if !skip_native && self.cursor.op == 0 && self.blocks.compiler.is_some() {
+            if !skip_native
+                && !miss_first
+                && self.cursor.op == 0
+                && self.blocks.compiler.is_some()
+            {
                 match self.run_native(bus, index, irq_enabled, ram_ok, &mut st) {
                     Some(NativeExit::Resume) => {
                         skip_native = true;
@@ -247,18 +260,50 @@ impl Cpu {
                     }
                 }
                 // -- the step, as `execute_one_inner` + `execute_fetched` --
-                let Some(branch_after_this) = self.batch_step(
-                    bus,
-                    op,
-                    pc,
-                    delay,
-                    addr,
-                    &mut st.issue,
-                    &mut st.refetch,
-                    st.limit,
-                    &mut ram_ok,
-                ) else {
-                    break 'blocks;
+                let branch_after_this = if miss_first {
+                    miss_first = false;
+                    // The missed word's fetch: the clock settled, the line
+                    // filled, its stall charged.
+                    bus.advance_quiet(st.issue);
+                    st.issue = 0;
+                    let word = self.fetch_instruction_slow(pc, bus);
+                    debug_assert_eq!(word, op.word, "a miss fills with the scratch block's word");
+                    st.refetch = true;
+                    if bus.cycles() + 1 >= st.limit {
+                        // The stall took the clock to the limits: as at the
+                        // top of the loop.
+                        let mut past_hard = bus.cycles() + 1 >= st.hard;
+                        if !past_hard {
+                            self.batch_new_limits(bus, &mut st);
+                            past_hard = bus.cycles() + 1 >= st.hard;
+                        }
+                        if past_hard {
+                            // The step cannot defer its issue cycle: run it
+                            // as the interpreter does and end the batch.
+                            self.cursor.block = 0;
+                            let _ = self.execute_fetched(bus, pc, word, false);
+                            st.done += 1;
+                            st.uncounted += 1;
+                            break 'blocks;
+                        }
+                        eager = bus.cycles() + 1 >= st.limit;
+                    }
+                    self.batch_step_fetched(bus, op, pc, delay, addr, &mut st.issue, &mut ram_ok)
+                } else {
+                    let Some(branch_after_this) = self.batch_step(
+                        bus,
+                        op,
+                        pc,
+                        delay,
+                        addr,
+                        &mut st.issue,
+                        &mut st.refetch,
+                        st.limit,
+                        &mut ram_ok,
+                    ) else {
+                        break 'blocks;
+                    };
+                    branch_after_this
                 };
                 if eager {
                     // This step's issue cycle, applied as its tick would.
@@ -306,6 +351,11 @@ impl Cpu {
                     break 'blocks;
                 }
             }
+        }
+        if miss_first {
+            // The batch ended before the missed word was fetched: nothing
+            // of the scratch block ran, and it is not to be resumed.
+            self.cursor.block = 0;
         }
         bus.advance_quiet(st.issue);
         if st.uncounted != 0 && bus.external_interrupt_pending_quiet(st.uncounted) {
@@ -900,6 +950,23 @@ impl Cpu {
             bus.note_cached_fetch(true);
             *refetch = false;
         }
+        Some(self.batch_step_fetched(bus, op, pc, delay, addr, issue, ram_ok))
+    }
+
+    /// [`Cpu::batch_step`] for an op whose fetch has been made already (a
+    /// miss, [`Cpu::fetch_instruction_slow`]): everything after the fetch.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::cpu) fn batch_step_fetched(
+        &mut self,
+        bus: &mut Bus,
+        op: DecodedOp,
+        pc: u32,
+        delay: bool,
+        addr: u32,
+        issue: &mut u64,
+        ram_ok: &mut bool,
+    ) -> Option<u32> {
         *issue += if self.load_shadow.is_some() && self.hides_in_load_shadow(op.word, bus) {
             0
         } else {
@@ -962,7 +1029,7 @@ impl Cpu {
                 }
             }
         }
-        Some(branch_after_this)
+        branch_after_this
     }
 }
 
