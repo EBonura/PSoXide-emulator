@@ -188,10 +188,21 @@ fn vs_main(in: VertexIn) -> VertexOut {
     // against `tri_raster_setup`), and evaluates colour and UV at that corner.
     // The host rasterizer samples pixel centres. Moving the polygon by half a
     // pixel in both axes makes the centre sample land on the CPU's corner
-    // sample: same coverage, same ties, same interpolants, at any internal
-    // scale S (the shift is half a PSX pixel, not half a host pixel).
+    // sample: same coverage, same ties, same interpolants, at scale 1 and at
+    // scale 3 (the gate's HW3 comparison reads the centre sample of each 3x3
+    // block and needs exactly that). At every other scale S the shift is half
+    // a HOST pixel (0.5 / S PSX pixels): the S x S host samples of a PSX pixel
+    // then all fall on one side of an edge together. The half-PSX-pixel shift
+    // left the first S / 2 host columns and rows of every polygon edge
+    // uncovered, which showed as a thin line of the previous frame along the
+    // left and top of the screen when the window scale was above 3.
     if (in.flags & FLAG_CORNER_SAMPLED) != 0u {
-        pos_psx += vec2<f32>(0.5, 0.5);
+        let scale = max(u_texfilter.y, 1u);
+        var shift = 0.5;
+        if scale != 3u {
+            shift = 0.5 / f32(scale);
+        }
+        pos_psx += vec2<f32>(shift, shift);
     }
     let ndc_xy = (pos_psx / vec2<f32>(VRAM_W_F, VRAM_H_F)) * 2.0 - 1.0;
     var out: VertexOut;
@@ -516,7 +527,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         }
         return vec4<f32>(blend_encode(rgb), in.color.a);
     }
-    // A polygon is drawn half a pixel down-right (see `vs_main`), so the
+    // A polygon is drawn half a host pixel down-right (see `vs_main`), so the
     // interpolant here is the plane at the pixel's top-left corner; the
     // CPU rasterizer adds 0.5 and floors, i.e. rounds to the nearest texel.
     // Rectangles are not shifted and their centre-sampled coordinate
