@@ -2257,8 +2257,30 @@ impl HomeState {
                 i.pointer.delta(),
             )
         });
+        // Where the button went down and up, from the events themselves: on a page that gets a
+        // few frames a second the pointer has often moved on by the time the frame runs, and a
+        // click must land where it was made, not where the mouse is now.
+        let (press_at, release_at) = ctx.input(|i| {
+            let (mut down_at, mut up_at) = (None, None);
+            for event in &i.events {
+                if let egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    ..
+                } = event
+                {
+                    if *pressed {
+                        down_at = Some(*pos);
+                    } else {
+                        up_at = Some(*pos);
+                    }
+                }
+            }
+            (down_at, up_at)
+        });
         if pressed {
-            if let Some(pos) = pos {
+            if let Some(pos) = press_at.or(pos) {
                 let slider = self.hits.iter().rev().find_map(|(r, c)| match c {
                     Click::Slider(i, track) if r.contains(pos) => Some((*i, *track)),
                     _ => None,
@@ -2311,7 +2333,7 @@ impl HomeState {
         }
         if released {
             let press = self.press.take();
-            let Some(pos) = pos else {
+            let Some(pos) = release_at.or(pos) else {
                 return;
             };
             // A sideways swipe: the next case on Home, the next section elsewhere.
