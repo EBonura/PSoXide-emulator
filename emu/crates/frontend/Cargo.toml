@@ -49,6 +49,7 @@ psx-gpu-render   = { workspace = true }
 psx-gte          = { workspace = true }
 psx-vram         = { workspace = true }
 psx-iso          = { workspace = true }
+psx-webdisc      = { workspace = true }
 psx-trace        = { workspace = true }
 psxed-project    = { workspace = true, optional = true }
 psxed-ui         = { workspace = true, optional = true }

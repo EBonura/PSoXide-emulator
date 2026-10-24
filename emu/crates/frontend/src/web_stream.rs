@@ -21,6 +21,12 @@
 //! requests (see `web_disc::open_lazy`); only a small sidecar of sector headers
 //! is downloaded up front.
 //!
+//! A third delivery, the compact one, serves the same XA discs smaller. Its
+//! manifest line names an index file (downloaded whole, a few tens of KB) and
+//! a payload of deflated 32-sector chunks that psx-webdisc rebuilds into the
+//! raw sectors; chunks are fetched with range requests as the drive reaches
+//! for them and kept in IndexedDB for the next visit (see `web_disc`).
+//!
 //! Ordering note: pieces download in disc order and the launcher cycles its
 //! menu tracks in the same order, so delivery stays ahead of the playhead on
 //! any connection that can stream audio at all.
@@ -195,6 +201,18 @@ impl ImageMeta {
     }
 }
 
+/// A compact disc delivery, from the manifest.
+struct CompactMeta {
+    /// The index file, and its size and FNV-1a-32 checksum.
+    index_file: String,
+    index_bytes: usize,
+    index_fnv: u32,
+    /// The payload file, or the stem of `.001`, `.002`... when split.
+    payload_file: String,
+    /// Bytes per payload file when the payload is split, else 0.
+    part_bytes: u64,
+}
+
 /// Where a background track stands, for the shell's progress line.
 #[derive(Clone, PartialEq, Eq)]
 pub enum TrackState {
@@ -253,6 +271,7 @@ struct Stream {
     /// The data piece's file name, from the manifest.
     data_file: String,
     image: Option<ImageMeta>,
+    compact: Option<CompactMeta>,
     /// The manifest has been read and parsed.
     manifest_parsed: bool,
     data_raw_bytes: usize,
@@ -296,6 +315,14 @@ pub enum BootStatus {
         /// What to open, and where it is served.
         image: crate::web_disc::LazyImage,
     },
+    /// A compact disc to read on demand, handed over exactly once, like
+    /// [`BootStatus::Lazy`].
+    Compact {
+        /// The disc being streamed.
+        disc: &'static StreamedDisc,
+        /// What to open, and where it is served.
+        source: crate::web_disc::CompactSource,
+    },
     /// The stream is dead; message handed over exactly once.
     Failed(String),
     /// The manifest is not served (or not a manifest): this page has no
@@ -328,6 +355,7 @@ pub fn start(disc: &'static StreamedDisc) {
             states: Vec::new(),
             data_file: String::new(),
             image: None,
+            compact: None,
             manifest_parsed: false,
             data_raw_bytes: 0,
             data_fnv: 0,
@@ -395,6 +423,25 @@ fn parse_manifest(text: &str, s: &mut Stream) -> Result<(), String> {
                     part_bytes,
                 });
             }
+            Some("compact") => {
+                // `compact INDEX_FILE INDEX_BYTES INDEX_FNV32 PAYLOAD_FILE
+                // BOOT_BYTES PART_BYTES`: see psx-webdisc.
+                let mut next = || parts.next().ok_or("manifest: short compact line");
+                let index_file = next()?.to_string();
+                let index_bytes = next()?.parse().map_err(|_| "manifest: index bytes")?;
+                let index_fnv = next()?.parse().map_err(|_| "manifest: index fnv")?;
+                let payload_file = next()?.to_string();
+                // Payload bytes the boot reads first: only index.html uses them.
+                let _boot_bytes: u64 = next()?.parse().map_err(|_| "manifest: boot bytes")?;
+                let part_bytes = next()?.parse().map_err(|_| "manifest: part bytes")?;
+                s.compact = Some(CompactMeta {
+                    index_file,
+                    index_bytes,
+                    index_fnv,
+                    payload_file,
+                    part_bytes,
+                });
+            }
             Some("track") => {
                 let number: u8 = parts
                     .next()
@@ -428,7 +475,7 @@ fn parse_manifest(text: &str, s: &mut Stream) -> Result<(), String> {
     }
     // A lazily read image needs no data or audio pieces; a split delivery
     // needs both.
-    if s.image.is_none() && (s.data_raw_bytes == 0 || s.tracks.is_empty()) {
+    if s.image.is_none() && s.compact.is_none() && (s.data_raw_bytes == 0 || s.tracks.is_empty()) {
         return Err("manifest: empty or unreadable".into());
     }
     Ok(())
@@ -539,7 +586,9 @@ pub fn poll_boot() -> BootStatus {
                         return BootStatus::NotServed(e);
                     }
                     s.manifest_parsed = true;
-                    if let Some(image) = &s.image {
+                    if let Some(compact) = &s.compact {
+                        ws_fetch("idx", &piece_url(&compact.index_file, compact.index_fnv));
+                    } else if let Some(image) = &s.image {
                         ws_fetch("hdr", &piece_url(&image.hdr_file, image.hdr_fnv));
                     } else {
                         ws_fetch("data", &piece_url(&s.data_file, s.data_fnv));
@@ -554,6 +603,9 @@ pub fn poll_boot() -> BootStatus {
             }
         }
 
+        if s.compact.is_some() {
+            return poll_compact(s);
+        }
         if s.image.is_some() {
             return poll_lazy(s);
         }
@@ -613,6 +665,52 @@ pub fn poll_boot() -> BootStatus {
             layout: s.tracks.iter().map(|t| (t.number, t.raw_bytes)).collect(),
         }
     })
+}
+
+/// The compact delivery's only up-front piece: the index. Fetch, verify,
+/// parse, and hand the disc over.
+fn poll_compact(s: &mut Stream) -> BootStatus {
+    let meta = s.compact.as_ref().expect("compact delivery");
+    match ws_state("idx").as_str() {
+        "done" => {
+            let bytes = ws_take("idx");
+            if bytes.len() != meta.index_bytes || fnv1a32(&bytes) != meta.index_fnv {
+                return fail(
+                    s,
+                    "disc index: checksum mismatch (try reloading the page)".into(),
+                );
+            }
+            let index = match psx_webdisc::Index::parse(&bytes) {
+                Ok(index) => index,
+                Err(e) => return fail(s, format!("disc index: {e}")),
+            };
+            let urls = if meta.part_bytes == 0 {
+                vec![piece_url(&meta.payload_file, meta.index_fnv)]
+            } else {
+                (1..=index.payload_bytes().div_ceil(meta.part_bytes))
+                    .map(|n| {
+                        piece_url(
+                            &psx_webdisc::part_name(&meta.payload_file, n),
+                            meta.index_fnv,
+                        )
+                    })
+                    .collect()
+            };
+            let cache_key = format!("{:016x}-{:08x}", index.image_hash(), meta.index_fnv);
+            let handoff = BootStatus::Compact {
+                disc: s.disc,
+                source: crate::web_disc::CompactSource {
+                    index,
+                    urls,
+                    cache_key,
+                },
+            };
+            s.phase = Phase::Done;
+            handoff
+        }
+        "error" => fail(s, ws_error("idx")),
+        _ => BootStatus::Progress(format!("{}: reading disc index...", s.disc.title)),
+    }
 }
 
 /// The lazy delivery's only up-front piece: the header sidecar. Fetch,

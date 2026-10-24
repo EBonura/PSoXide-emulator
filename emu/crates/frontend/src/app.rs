@@ -2259,12 +2259,16 @@ impl AppState {
             status,
             BootStatus::Ready { .. }
                 | BootStatus::Lazy { .. }
+                | BootStatus::Compact { .. }
                 | BootStatus::Failed(_)
                 | BootStatus::NotServed(_)
         ) && std::mem::take(&mut self.web_autoboot)
         {
             // The page-open boot has resolved; on failure show the menu.
-            self.menu.open = !matches!(status, BootStatus::Ready { .. } | BootStatus::Lazy { .. });
+            self.menu.open = !matches!(
+                status,
+                BootStatus::Ready { .. } | BootStatus::Lazy { .. } | BootStatus::Compact { .. }
+            );
             if stream_failure_is_quiet(true, matches!(status, BootStatus::NotServed(_))) {
                 self.status_message = None;
                 return;
@@ -2309,6 +2313,10 @@ impl AppState {
             }
             BootStatus::Lazy { disc, image } => {
                 crate::web_files::open_lazy(disc.id.to_string(), disc.title.to_string(), image);
+                self.status_message_set(format!("Opening {}...", disc.title));
+            }
+            BootStatus::Compact { disc, source } => {
+                crate::web_files::open_compact(disc.id.to_string(), disc.title.to_string(), source);
                 self.status_message_set(format!("Opening {}...", disc.title));
             }
             BootStatus::Failed(message) | BootStatus::NotServed(message) => {

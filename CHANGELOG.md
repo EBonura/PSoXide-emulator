@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- The web build reads XA discs in a compact format that is 44% smaller than the
+  raw image and starts sooner. A new crate, `psx-webdisc`, keeps only what a
+  sector cannot regenerate (2048 or 2324 user bytes, plus four subheader bytes
+  in the index) and deflates it in chunks of 32 sectors; sync, header, EDC and
+  ECC are rebuilt exactly on read, and the packer falls back to storing a sector
+  verbatim when a rebuild would differ, so every disc round-trips byte for byte
+  (its `webdisc pack` reads the files back and compares each sector with the
+  image). The demo disc v0.48 goes from 318 MiB to 178 MiB, its index from 330
+  KB of sector headers to 30 KB, and a launcher boot reads 0.68 MB instead of
+  1.43 MB. The page fetches the index and the boot chunks while the wasm
+  downloads, then fetches chunks by range request as the drive reaches for
+  them, keeps a few seconds of lookahead, and caches the chunks it has seen in
+  IndexedDB, so a return visit downloads no disc data it already has. The
+  native bin/cue path is unchanged, and so is the drive's timing: a chunk that
+  has not arrived holds the frame back, never the emulated drive.
 - The gate's HW3 comparison is now meaningful for 3D content. Every 3D pixel
   used to be compared against the nearest-neighbour enlargement of the CPU
   frame in all nine sub-pixels, which no textured or shaded surface can pass,

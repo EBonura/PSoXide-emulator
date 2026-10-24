@@ -3133,6 +3133,7 @@ dependencies = [
  "psx-iso",
  "psx-trace",
  "psx-vram",
+ "psx-webdisc",
  "psxed-project",
  "psxed-ui",
  "rfd",
@@ -3312,6 +3313,15 @@ version = "0.1.0"
 dependencies = [
  "psx-hw",
  "psx-io",
+]
+
+[[package]]
+name = "psx-webdisc"
+version = "0.1.0"
+dependencies = [
+ "emulator-core",
+ "miniz_oxide",
+ "psx-iso",
 ]
 
 [[package]]

@@ -16,6 +16,7 @@ members = [
     "emu/crates/psoxide-settings",
     "emu/crates/psoxide-validation",
     "emu/crates/psx-gpu-render",
+    "emu/crates/psx-webdisc",
     "tools/psoxide-gate",
     "tools/web-lazy-image"
 ]
@@ -92,6 +93,7 @@ psoxide-debug-ui   = { path = "emu/crates/psoxide-debug-ui" }
 psoxide-settings   = { path = "emu/crates/psoxide-settings" }
 psoxide-validation = { path = "emu/crates/psoxide-validation" }
 psx-gpu-render     = { path = "emu/crates/psx-gpu-render" }
+psx-webdisc        = { path = "emu/crates/psx-webdisc" }
 
 # ---- Placeholders for the editor workspace's crates ----------------------
 # The frontend's optional `editor` feature names them. The real crates live in

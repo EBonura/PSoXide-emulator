@@ -118,12 +118,34 @@
           var data = null;
           var first = null;
           var image = null;
+          var compact = null;
           new TextDecoder().decode(bytes).split("\n").forEach(function (line) {
             var p = line.trim().split(/\s+/);
             if (p[0] === "data" && p.length >= 5) data = { file: p[1], fnv: p[4] };
             if (p[0] === "track" && p.length >= 6 && !first) first = { file: p[2], fnv: p[5] };
             if (p[0] === "image" && p.length >= 8) image = { hdr: p[4], fnv: p[6] };
+            if (p[0] === "compact" && p.length >= 7) {
+              compact = { index: p[1], fnv: p[3], payload: p[4], boot: +p[5], part: +p[6] };
+            }
           });
+          // A compact disc: the index is the only gate, and the payload's
+          // boot chunks (one range request, the same string src/web_disc.rs
+          // builds) start coming down beside the wasm.
+          if (compact) {
+            var payload = compact.part > 0 ? compact.payload + ".001" : compact.payload;
+            var url = payload + "?v=" + compact.fnv;
+            window.psoxideRanges = window.psoxideRanges || {};
+            if (compact.boot > 0) {
+              window.psoxideRanges[url + ":0-" + compact.boot] = fetch(url, {
+                headers: { Range: "bytes=0-" + (compact.boot - 1) },
+              }).then(function (r) {
+                if (r.status !== 206) throw new Error(url + ": HTTP " + r.status + " to a range request");
+                return r.arrayBuffer();
+              });
+              window.psoxideRanges[url + ":0-" + compact.boot].catch(function () {});
+            }
+            return get(compact.index + "?v=" + compact.fnv);
+          }
           // The sidecar of sector headers is the only piece a lazy disc
           // needs before it boots; the sectors themselves come by Range.
           if (image) return get(image.hdr + "?v=" + image.fnv);

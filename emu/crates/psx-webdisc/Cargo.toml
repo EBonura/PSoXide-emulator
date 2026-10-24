@@ -1,0 +1,19 @@
+[package]
+name = "psx-webdisc"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Compact, chunked disc format for the browser build: what a sector cannot regenerate, deflated in independent chunks."
+
+[dependencies]
+psx-iso      = { workspace = true }
+miniz_oxide  = { version = "0.8", default-features = false, features = ["with-alloc"] }
+
+[dev-dependencies]
+emulator-core = { workspace = true }
+
+[[bin]]
+name = "webdisc"
+path = "src/bin/webdisc.rs"

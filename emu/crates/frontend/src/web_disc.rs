@@ -17,6 +17,11 @@
 //! each frame (`CdRom::prefetch_upcoming` in the emulator core) and holds
 //! the frame back until they are here. See that function for why this keeps the
 //! drive from ever waiting.
+//!
+//! A disc can also arrive in the compact format of `psx-webdisc`: a small
+//! index, then deflated chunks of 32 sectors fetched on demand (and kept in
+//! IndexedDB for the next visit). The cache then holds inflated chunks, and a
+//! sector read rebuilds the raw sector from its chunk.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -37,10 +42,26 @@ const CACHED_CHUNKS: usize = 160;
 const MAX_REQUEST_CHUNKS: u64 = 16;
 /// Bytes per read while scanning at open (a whole number of sectors).
 const SCAN_BYTES: u64 = 892 * SECTOR_BYTES as u64;
+/// Sectors a compact disc keeps in flight ahead of the drive, at least. The
+/// drive asks for 64 (half a second at double speed); a chunk is a request of
+/// its own, so a few seconds of buffer rides out the jitter of a slow link.
+const COMPACT_LOOKAHEAD_SECTORS: u64 = 6 * psx_webdisc::CHUNK_SECTORS as u64;
 
 #[wasm_bindgen(inline_js = r#"
 const _img = new Map();
 function _range(url, start, end) {
+  // The page may already have this exact range in flight (index.html asks
+  // for a compact disc's boot chunks while the wasm downloads). Adopt it once.
+  const pre = window.psoxideRanges;
+  const key = url + ':' + start + '-' + end;
+  if (pre && pre[key]) {
+    const p = pre[key];
+    delete pre[key];
+    return p.catch(() => _fetchRange(url, start, end));
+  }
+  return _fetchRange(url, start, end);
+}
+function _fetchRange(url, start, end) {
   return fetch(url, { headers: { Range: 'bytes=' + start + '-' + (end - 1) } }).then((r) => {
     if (r.status !== 206) throw new Error(url + ': HTTP ' + r.status + ' to a range request');
     return r.arrayBuffer();
@@ -79,6 +100,121 @@ export function wdRegisterUrl(id, url) { _img.set(id, { blob: null, url, done: [
 export function wdRegisterParts(id, urls, partBytes) {
   _img.set(id, { blob: null, url: null, parts: urls.split('\n'), partBytes, done: [] });
 }
+// ---- compact discs: chunk runs, cached in IndexedDB -----------------------
+// A cached chunk is its stored (deflated) bytes under `<disc key>/<chunk>`.
+// Anything that goes wrong with IndexedDB (private mode, a blocked or full
+// store) turns the cache off for the session; the network path is unchanged.
+let _db = null;
+function _idb() {
+  if (_db) return _db;
+  _db = new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    try {
+      const req = indexedDB.open('psoxide-disc-chunks', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('c');
+      req.onsuccess = () => done(req.result);
+      req.onerror = () => done(null);
+      req.onblocked = () => done(null);
+      setTimeout(() => done(null), 3000);
+    } catch (e) { done(null); }
+  });
+  return _db;
+}
+function _idbGet(db, keys) {
+  return new Promise((resolve) => {
+    const out = new Array(keys.length).fill(null);
+    try {
+      const tx = db.transaction('c', 'readonly');
+      const store = tx.objectStore('c');
+      keys.forEach((k, i) => {
+        store.get(k).onsuccess = (e) => { if (e.target.result) out[i] = new Uint8Array(e.target.result); };
+      });
+      tx.oncomplete = () => resolve(out);
+      tx.onerror = tx.onabort = () => resolve(new Array(keys.length).fill(null));
+    } catch (e) { resolve(new Array(keys.length).fill(null)); }
+  });
+}
+function _idbPut(db, entries) {
+  try {
+    const tx = db.transaction('c', 'readwrite');
+    const store = tx.objectStore('c');
+    for (const [k, v] of entries) store.put(v.slice().buffer, k);
+  } catch (e) { /* full or blocked: carry on without the cache */ }
+}
+// Stored bytes of the chunks in `spec` ([chunk, start, end] triples, adjacent
+// chunks adjacent in the payload). Cached ones come from IndexedDB, each run
+// of missing ones from one range request.
+async function _readChunks(s, spec) {
+  const n = spec.length / 3;
+  const db = s.key ? await _idb() : null;
+  const keys = [];
+  for (let i = 0; i < n; i++) keys.push(s.key + '/' + spec[3 * i]);
+  const cached = db ? await _idbGet(db, keys) : new Array(n).fill(null);
+  const out = new Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    const want = spec[3 * i + 2] - spec[3 * i + 1];
+    if (cached[i] && cached[i].length === want) out[i] = cached[i];
+  }
+  const fresh = [];
+  let i = 0;
+  while (i < n) {
+    if (out[i]) { i++; continue; }
+    let j = i;
+    while (j + 1 < n && !out[j + 1]) j++;
+    const from = spec[3 * i + 1];
+    const bytes = new Uint8Array(await _read(s, from, spec[3 * j + 2]));
+    for (let k = i; k <= j; k++) {
+      out[k] = bytes.slice(spec[3 * k + 1] - from, spec[3 * k + 2] - from);
+      fresh.push([keys[k], out[k]]);
+    }
+    i = j + 1;
+  }
+  if (db && fresh.length) _idbPut(db, fresh);
+  return out;
+}
+export function wdRegisterCompact(id, urls, partBytes, key) {
+  const parts = urls.split('\n');
+  _img.set(id, { blob: null, url: null, parts: partBytes > 0 ? parts : null,
+    partBytes, done: [], key, single: parts[0] });
+  const s = _img.get(id);
+  if (!s.parts) s.url = s.single;
+  // Chunks of an older build of the disc are of no use any more.
+  _idb().then((db) => {
+    if (!db) return;
+    try {
+      const store = db.transaction('c', 'readwrite').objectStore('c');
+      store.delete(IDBKeyRange.upperBound(key + '/', true));
+      store.delete(IDBKeyRange.lowerBound(key + '/\uffff', true));
+    } catch (e) { /* nothing to purge */ }
+  });
+}
+export function wdReadChunks(id, view) {
+  const s = _img.get(id);
+  if (!s) return;
+  // `view` aliases wasm memory, which the caller reuses at once: copy it.
+  const spec = Array.from(view);
+  const n = spec.length / 3;
+  _readChunks(s, spec).then(
+    (list) => { for (let i = 0; i < n; i++) s.done.push(spec[3 * i], list[i]); },
+    (e) => {
+      console.error('[psoxide] disc chunks', spec[0], e);
+      for (let i = 0; i < n; i++) s.done.push(spec[3 * i], null);
+    });
+}
+export async function wdReadChunksNow(id, view) {
+  const s = _img.get(id);
+  if (!s) throw new Error('disc closed');
+  return await _readChunks(s, Array.from(view));
+}
+export function wdForget(id, chunk) {
+  const s = _img.get(id);
+  if (!s || !s.key) return;
+  _idb().then((db) => {
+    if (!db) return;
+    try { db.transaction('c', 'readwrite').objectStore('c').delete(s.key + '/' + chunk); } catch (e) { /* ignore */ }
+  });
+}
 export function wdClose(id) { _img.delete(id); }
 export function wdRead(id, start, end) {
   const s = _img.get(id);
@@ -109,6 +245,14 @@ extern "C" {
     fn wd_register_url(id: u32, url: &str);
     #[wasm_bindgen(js_name = wdRegisterParts)]
     fn wd_register_parts(id: u32, urls: &str, part_bytes: f64);
+    #[wasm_bindgen(js_name = wdRegisterCompact)]
+    fn wd_register_compact(id: u32, urls: &str, part_bytes: f64, key: &str);
+    #[wasm_bindgen(js_name = wdReadChunks)]
+    fn wd_read_chunks(id: u32, spec: &[f64]);
+    #[wasm_bindgen(js_name = wdReadChunksNow)]
+    fn wd_read_chunks_now(id: u32, spec: &[f64]) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = wdForget)]
+    fn wd_forget(id: u32, chunk: u32);
     #[wasm_bindgen(js_name = wdClose)]
     fn wd_close(id: u32);
     #[wasm_bindgen(js_name = wdRead)]
@@ -119,7 +263,8 @@ extern "C" {
     fn wd_read_now(id: u32, start: f64, end: f64) -> js_sys::Promise;
 }
 
-struct Image {
+/// A raw image, read in 32-sector chunks of its own bytes.
+struct RawImage {
     len: u64,
     chunks: HashMap<u64, Box<[u8]>>,
     /// Least recently used first. Pinned chunks are not in here.
@@ -130,7 +275,7 @@ struct Image {
     headers: Vec<[u8; 8]>,
 }
 
-impl Image {
+impl RawImage {
     fn touch(&mut self, chunk: u64) {
         if self.pinned.contains(&chunk) {
             return;
@@ -171,7 +316,7 @@ impl Image {
     /// in runs of adjacent chunks.
     fn request(&mut self, id: u32, offset: u64, len: u64) {
         let mut run: Option<(u64, u64)> = None;
-        let flush = |run: (u64, u64), image: &Image| {
+        let flush = |run: (u64, u64), image: &RawImage| {
             let start = run.0 * CHUNK_BYTES;
             let end = ((run.1 + 1) * CHUNK_BYTES).min(image.len);
             wd_read(id, start as f64, end as f64);
@@ -268,6 +413,215 @@ impl Image {
     }
 }
 
+/// A compact disc (see `psx-webdisc`): inflated chunks, rebuilt per sector.
+struct CompactImage {
+    index: psx_webdisc::Index,
+    chunks: HashMap<u32, psx_webdisc::Chunk>,
+    /// Least recently used first. Pinned chunks are not in here.
+    order: VecDeque<u32>,
+    pinned: HashSet<u32>,
+    in_flight: HashSet<u32>,
+}
+
+impl CompactImage {
+    fn touch(&mut self, chunk: u32) {
+        if self.pinned.contains(&chunk) {
+            return;
+        }
+        if let Some(i) = self.order.iter().position(|&c| c == chunk) {
+            self.order.remove(i);
+        }
+        self.order.push_back(chunk);
+    }
+
+    fn insert(&mut self, chunk: u32, data: psx_webdisc::Chunk) {
+        self.chunks.insert(chunk, data);
+        self.touch(chunk);
+        while self.order.len() > CACHED_CHUNKS {
+            if let Some(old) = self.order.pop_front() {
+                self.chunks.remove(&old);
+            }
+        }
+    }
+
+    /// The chunks that hold the sectors of `offset..offset + len`.
+    fn chunk_range(&self, offset: u64, len: u64) -> std::ops::RangeInclusive<u32> {
+        let image = self.index.image_bytes();
+        let end = (offset + len.max(1)).min(image.max(1)) - 1;
+        let first = (offset / SECTOR_BYTES as u64) as u32;
+        let last = (end / SECTOR_BYTES as u64) as u32;
+        self.index.chunk_of(first)..=self.index.chunk_of(last)
+    }
+
+    fn resident(&mut self, offset: u64, len: u64) -> bool {
+        let range = self.chunk_range(offset, len);
+        if !range.clone().all(|c| self.chunks.contains_key(&c)) {
+            return false;
+        }
+        for c in range {
+            self.touch(c);
+        }
+        true
+    }
+
+    /// Ask for every chunk of the range that is neither here nor on its way,
+    /// in runs of adjacent chunks (one range request per run).
+    fn request(&mut self, id: u32, offset: u64, len: u64) {
+        let mut run: Vec<f64> = Vec::new();
+        let mut count = 0;
+        for c in self.chunk_range(offset, len) {
+            let wanted = !self.chunks.contains_key(&c) && !self.in_flight.contains(&c);
+            if wanted {
+                if count == MAX_REQUEST_CHUNKS as usize {
+                    wd_read_chunks(id, &run);
+                    run.clear();
+                    count = 0;
+                }
+                self.in_flight.insert(c);
+                let r = self.index.chunk_range(c);
+                run.extend([f64::from(c), r.start as f64, r.end as f64]);
+                count += 1;
+            } else if !run.is_empty() {
+                wd_read_chunks(id, &run);
+                run.clear();
+                count = 0;
+            }
+        }
+        if !run.is_empty() {
+            wd_read_chunks(id, &run);
+        }
+    }
+
+    /// Inflate finished browser reads into the cache.
+    fn pump(&mut self, id: u32) {
+        let done = wd_take(id);
+        if done.is_null() {
+            return;
+        }
+        let done = js_sys::Array::from(&done);
+        let mut i = 0;
+        while i + 1 < done.length() {
+            let chunk = done.get(i).as_f64().unwrap_or(0.0) as u32;
+            let bytes = done.get(i + 1);
+            i += 2;
+            self.in_flight.remove(&chunk);
+            if bytes.is_null() {
+                // A failed read: the next request retries.
+                continue;
+            }
+            let bytes = js_sys::Uint8Array::new(&bytes).to_vec();
+            match self.index.inflate(chunk, &bytes) {
+                Ok(data) => self.insert(chunk, data),
+                Err(error) => {
+                    // A bad chunk may have come from the browser's cache of
+                    // an earlier visit; drop it so the retry hits the network.
+                    web_sys::console::error_1(&format!("[psoxide] disc: {error}").into());
+                    wd_forget(id, chunk);
+                }
+            }
+        }
+    }
+
+    fn read(&mut self, offset: u64, out: &mut [u8]) -> bool {
+        let len = out.len() as u64;
+        if !self.resident(offset, len) {
+            return false;
+        }
+        let mut done = 0u64;
+        while done < len {
+            let at = offset + done;
+            let sector = (at / SECTOR_BYTES as u64) as u32;
+            let within = (at % SECTOR_BYTES as u64) as usize;
+            let chunk = &self.chunks[&self.index.chunk_of(sector)];
+            let raw = self.index.sector(chunk, sector);
+            let n = ((len - done) as usize).min(SECTOR_BYTES - within);
+            out[done as usize..done as usize + n].copy_from_slice(&raw[within..within + n]);
+            done += n as u64;
+        }
+        true
+    }
+
+    /// Bytes 12..20 of a sector, or a part of them, from the index.
+    fn header(&self, offset: u64, out: &mut [u8]) -> bool {
+        let sector = offset / SECTOR_BYTES as u64;
+        let within = (offset % SECTOR_BYTES as u64) as usize;
+        if within < 12 || within + out.len() > 20 {
+            return false;
+        }
+        let Some(header) = u32::try_from(sector).ok().and_then(|s| self.index.head8(s)) else {
+            return false;
+        };
+        out.copy_from_slice(&header[within - 12..within - 12 + out.len()]);
+        true
+    }
+}
+
+/// A disc image the browser reads on demand, raw or compact.
+enum Image {
+    Raw(RawImage),
+    Compact(CompactImage),
+}
+
+impl Image {
+    fn pump(&mut self, id: u32) {
+        match self {
+            Image::Raw(i) => i.pump(id),
+            Image::Compact(i) => i.pump(id),
+        }
+    }
+
+    fn read(&mut self, offset: u64, out: &mut [u8]) -> bool {
+        match self {
+            Image::Raw(i) => i.read(offset, out) || i.header(offset, out),
+            Image::Compact(i) => i.header(offset, out) || i.read(offset, out),
+        }
+    }
+
+    fn resident(&mut self, offset: u64, len: u64) -> bool {
+        match self {
+            Image::Raw(i) => i.resident(offset, len),
+            Image::Compact(i) => i.resident(offset, len),
+        }
+    }
+
+    fn request(&mut self, id: u32, offset: u64, len: u64) {
+        match self {
+            Image::Raw(i) => i.request(id, offset, len),
+            Image::Compact(i) => i.request(id, offset, len),
+        }
+    }
+
+    /// How far to prefetch when the drive asks for `len` bytes.
+    fn lookahead(&self, len: u64) -> u64 {
+        match self {
+            Image::Raw(_) => len,
+            Image::Compact(_) => len.max(COMPACT_LOOKAHEAD_SECTORS * SECTOR_BYTES as u64),
+        }
+    }
+
+    fn busy(&self) -> bool {
+        match self {
+            Image::Raw(i) => !i.in_flight.is_empty(),
+            Image::Compact(i) => !i.in_flight.is_empty(),
+        }
+    }
+
+    fn pin_resident(&mut self) {
+        match self {
+            Image::Raw(image) => {
+                let resident: Vec<u64> = image.chunks.keys().copied().collect();
+                image.pinned.extend(resident);
+                image.order.retain(|c| !image.pinned.contains(c));
+            }
+            Image::Compact(image) => {
+                let resident: Vec<u32> = image.chunks.keys().copied().collect();
+                image.pinned.extend(resident);
+                image.order.retain(|c| !image.pinned.contains(c));
+            }
+        }
+    }
+}
+
 thread_local! {
     static IMAGES: RefCell<HashMap<u32, Image>> = RefCell::new(HashMap::new());
     static NEXT_ID: Cell<u32> = const { Cell::new(1) };
@@ -310,7 +664,7 @@ impl TrackSource for WebImage {
             return false;
         }
         with_image(self.id, |image| {
-            if image.read(offset, out) || image.header(offset, out) {
+            if image.read(offset, out) {
                 return true;
             }
             image.request(self.id, offset, out.len() as u64);
@@ -324,10 +678,12 @@ impl TrackSource for WebImage {
     }
 
     fn prefetch(&self, offset: u64, len: u64) {
-        let len = len.min(self.len.saturating_sub(offset));
-        if len > 0 {
-            with_image(self.id, |image| image.request(self.id, offset, len));
-        }
+        with_image(self.id, |image| {
+            let len = image.lookahead(len).min(self.len.saturating_sub(offset));
+            if len > 0 {
+                image.request(self.id, offset, len);
+            }
+        });
     }
 }
 
@@ -340,18 +696,14 @@ impl Drop for WebImage {
 
 /// Whether image `id` still has reads in flight (after taking finished ones).
 pub fn busy(id: u32) -> bool {
-    with_image(id, |image| !image.in_flight.is_empty()).unwrap_or(false)
+    with_image(id, |image| image.busy()).unwrap_or(false)
 }
 
 /// Keep every chunk now in the cache for good. Called once a boot succeeds,
 /// so the boot files (volume descriptor, directories, SYSTEM.CNF, the
 /// executable) stay in hand for a reboot without another round of reads.
 pub fn pin_resident(id: u32) {
-    with_image(id, |image| {
-        let resident: Vec<u64> = image.chunks.keys().copied().collect();
-        image.pinned.extend(resident);
-        image.order.retain(|c| !image.pinned.contains(c));
-    });
+    with_image(id, |image| image.pin_resident());
 }
 
 /// An opened image plus what the scan learned.
@@ -437,7 +789,7 @@ pub async fn open_lazy(source: &LazyImage) -> Result<Opened, String> {
         }
         wd_register_parts(id, &urls.join("\n"), *part_bytes as f64);
     }
-    let mut image = Image {
+    let mut image = RawImage {
         len,
         chunks: HashMap::new(),
         order: VecDeque::new(),
@@ -471,7 +823,78 @@ pub async fn open_lazy(source: &LazyImage) -> Result<Opened, String> {
             .insert(chunk as u64, bytes.to_vec().into_boxed_slice());
         image.pinned.insert(chunk as u64);
     }
-    IMAGES.with(|images| images.borrow_mut().insert(id, image));
+    IMAGES.with(|images| images.borrow_mut().insert(id, Image::Raw(image)));
+    Ok(Opened {
+        image: WebImage { id, len },
+        hash,
+    })
+}
+
+/// A compact disc served beside the page: its parsed index and where the
+/// payload files are.
+pub struct CompactSource {
+    /// The parsed index file.
+    pub index: psx_webdisc::Index,
+    /// The payload file URLs in order: one, or one per part.
+    pub urls: Vec<String>,
+    /// Token tying the browser's chunk cache to this build of the disc.
+    pub cache_key: String,
+}
+
+/// Open a compact disc: register its payload and fetch the boot chunks.
+pub async fn open_compact(source: CompactSource) -> Result<Opened, String> {
+    let CompactSource {
+        index,
+        urls,
+        cache_key,
+    } = source;
+    let len = index.image_bytes();
+    let hash = index.image_hash();
+    let id = next_id();
+    let part_bytes = index.part_bytes();
+    if part_bytes == 0 {
+        if urls.len() != 1 {
+            return Err("compact disc: one payload file expected".into());
+        }
+    } else if urls.len() as u64 != index.payload_bytes().div_ceil(part_bytes) {
+        return Err("compact disc: part count and payload size disagree".into());
+    }
+    wd_register_compact(id, &urls.join("\n"), part_bytes as f64, &cache_key);
+    let boot = index.boot_chunks().max(1).min(index.chunk_count());
+    let mut spec = Vec::new();
+    for c in 0..boot {
+        let r = index.chunk_range(c);
+        spec.extend([f64::from(c), r.start as f64, r.end as f64]);
+    }
+    let mut image = CompactImage {
+        index,
+        chunks: HashMap::new(),
+        order: VecDeque::new(),
+        pinned: HashSet::new(),
+        in_flight: HashSet::new(),
+    };
+    let pieces = JsFuture::from(wd_read_chunks_now(id, &spec))
+        .await
+        .map_err(|e| {
+            wd_close(id);
+            js_error(e)
+        })?;
+    let pieces = js_sys::Array::from(&pieces);
+    for c in 0..boot {
+        let bytes = js_sys::Uint8Array::new(&pieces.get(c)).to_vec();
+        match image.index.inflate(c, &bytes) {
+            Ok(data) => {
+                image.chunks.insert(c, data);
+                image.pinned.insert(c);
+            }
+            Err(error) => {
+                wd_forget(id, c);
+                wd_close(id);
+                return Err(format!("compact disc: {error}"));
+            }
+        }
+    }
+    IMAGES.with(|images| images.borrow_mut().insert(id, Image::Compact(image)));
     Ok(Opened {
         image: WebImage { id, len },
         hash,
@@ -489,7 +912,7 @@ fn next_id() -> u32 {
 /// Read the image once, front to back: hash it, index the sector headers,
 /// and keep its first chunk (the disc model reads sector 0 at mount).
 async fn scan(id: u32, len: u64) -> Result<Opened, String> {
-    let mut image = Image {
+    let mut image = RawImage {
         len,
         chunks: HashMap::new(),
         order: VecDeque::new(),
@@ -530,7 +953,7 @@ async fn scan(id: u32, len: u64) -> Result<Opened, String> {
         }
         at = end;
     }
-    IMAGES.with(|images| images.borrow_mut().insert(id, image));
+    IMAGES.with(|images| images.borrow_mut().insert(id, Image::Raw(image)));
     Ok(Opened {
         image: WebImage { id, len },
         hash: hasher.finish(),

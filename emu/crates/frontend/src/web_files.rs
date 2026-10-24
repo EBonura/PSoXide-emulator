@@ -501,6 +501,26 @@ pub fn open_lazy(game_id: String, title: String, image: crate::web_disc::LazyIma
     });
 }
 
+/// Open a compact disc the manifest described and queue it like a picked
+/// file (see [`crate::web_disc::open_compact`]).
+pub fn open_compact(game_id: String, title: String, source: crate::web_disc::CompactSource) {
+    spawn_local(async move {
+        let urls = source.urls.join(" ");
+        match crate::web_disc::open_compact(source).await {
+            Ok(opened) => PENDING.with(|q| {
+                q.borrow_mut().push(LoadedFile {
+                    kind: Upload::Game,
+                    name: title,
+                    game_id: Some(game_id),
+                    bytes: Vec::new(),
+                    disc: Some(opened),
+                });
+            }),
+            Err(error) => report_load_error(format!("opening {urls}: {error}")),
+        }
+    });
+}
+
 async fn fetch_stream(url: &str) -> Result<Vec<u8>, String> {
     let opened = JsFuture::from(js_fetch_open(url)).await.map_err(js_error)?;
     let opened = js_sys::Array::from(&opened);
