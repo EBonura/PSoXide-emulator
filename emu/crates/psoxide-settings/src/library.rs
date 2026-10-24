@@ -606,6 +606,7 @@ fn boot_exe_name(system_cnf: &[u8]) -> Option<String> {
 /// The boot serial of a disc image, written the way the community cover
 /// collections write it (`SCUS-94900`), read from `SYSTEM.CNF`. `None` for an
 /// image without one (homebrew with `PSX.EXE`, audio, captures).
+#[must_use]
 pub fn disc_boot_serial(path: &Path) -> Option<String> {
     let reader = SectorReader::open(path)?;
     let pvd = reader.user(16)?;
