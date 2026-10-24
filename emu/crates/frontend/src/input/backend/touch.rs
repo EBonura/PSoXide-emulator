@@ -10,6 +10,8 @@ use crate::input::touch::prefs::{OverlayMode, TouchPrefs};
 
 /// Stable id of the touchscreen in the routing table.
 pub(crate) const TOUCH_DEVICE_ID: &str = "touch";
+/// The mouse's id among the pointers, clear of every touch id.
+const MOUSE_POINTER_ID: u64 = u64::MAX;
 /// Idle time before the controller dims.
 const DIM_AFTER_MS: u64 = 3500;
 /// How far it dims (fraction of its normal opacity).
@@ -51,6 +53,8 @@ pub(crate) struct TouchDevice {
     stick_dpad: StickDpad,
     announced: bool,
     menu_open: bool,
+    /// Only the shell is up (the home screen, no game behind it): the controller steps aside.
+    shell_only: bool,
     /// Current fade, `DIM_LEVEL..=1`.
     fade: f32,
     now_ms: u64,
@@ -66,6 +70,7 @@ impl Default for TouchDevice {
             stick_dpad: StickDpad::default(),
             announced: false,
             menu_open: false,
+            shell_only: false,
             fade: 1.0,
             now_ms: 0,
         }
@@ -107,12 +112,24 @@ impl TouchDevice {
         owned
     }
 
+    /// Feed the mouse as one more pointer (`phase` Down on a press, Move while held, Up on the
+    /// release). Unlike a touch it never counts as proof that this is a touch device. Returns
+    /// whether the controller owns it.
+    pub(crate) fn handle_mouse(&mut self, phase: Phase, pos: Pos2, now_ms: u64) -> bool {
+        let owned = self.pad.pointer(MOUSE_POINTER_ID, phase, pos);
+        if owned {
+            self.presence.last_touch_ms = now_ms;
+            self.fade = 1.0;
+        }
+        owned
+    }
+
     /// Recompute the layout for this frame's window and guest state, and
     /// advance the fade. Releases everything when the controller hides or the
     /// window turns the other way.
     pub(crate) fn update_layout(&mut self, params: LayoutParams, now_ms: u64, dt: f32) {
         self.now_ms = now_ms;
-        let visible = self.visible();
+        let visible = self.visible() && !self.shell_only;
         if !visible {
             self.params = None;
             self.pad.set_layout(None);
@@ -145,6 +162,12 @@ impl TouchDevice {
     /// Drop every held button (focus lost, tab hidden, rotation).
     pub(crate) fn release_all(&mut self) {
         self.pad.release_all();
+    }
+
+    /// Whether only the shell is on screen: the controller is not laid out at all, so the home
+    /// screen shows its own header and nothing else.
+    pub(crate) fn set_shell_only(&mut self, only: bool) {
+        self.shell_only = only;
     }
 
     /// Whether the menu is up: the pad controls step aside for taps on it.

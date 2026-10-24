@@ -318,6 +318,70 @@ mod tests {
     }
 
     #[test]
+    fn a_mouse_click_on_the_menu_button_asks_for_the_menu_like_a_tap() {
+        use super::touch::layout::UiId;
+        use super::touch::pad::{Phase, UiAction};
+
+        let mut router = touch_router();
+        let at = router
+            .touch()
+            .layout()
+            .and_then(|l| l.ui.iter().find(|b| b.id == UiId::Menu))
+            .map(|b| b.hit.center())
+            .expect("a menu button");
+        assert!(router.touch_mut().handle_mouse(Phase::Down, at, 0));
+        // A drag that stays on the button is still a click.
+        assert!(router.touch_mut().handle_mouse(Phase::Move, at, 1));
+        assert!(router.touch_mut().handle_mouse(Phase::Up, at, 2));
+        assert_eq!(router.touch_mut().take_actions(), vec![UiAction::Menu]);
+        // Off the controller the mouse is not its business.
+        assert!(!router
+            .touch_mut()
+            .handle_mouse(Phase::Down, egui::pos2(-50.0, -50.0), 3));
+    }
+
+    #[test]
+    fn the_controller_steps_aside_while_only_the_shell_is_up() {
+        let mut router = touch_router();
+        assert!(router.touch().layout().is_some());
+        router.touch_mut().set_shell_only(true);
+        router.touch_mut().update_layout(
+            super::touch::layout::LayoutParams {
+                size: egui::vec2(2556.0, 1179.0),
+                scale: 3.0,
+                safe: super::touch::layout::Insets::default(),
+                analog: false,
+                size_pct: 100,
+                left_handed: false,
+                fullscreen_button: false,
+                menu_open: false,
+            },
+            0,
+            0.016,
+        );
+        assert!(
+            router.touch().layout().is_none(),
+            "no controller over the home screen"
+        );
+        router.touch_mut().set_shell_only(false);
+        router.touch_mut().update_layout(
+            super::touch::layout::LayoutParams {
+                size: egui::vec2(2556.0, 1179.0),
+                scale: 3.0,
+                safe: super::touch::layout::Insets::default(),
+                analog: false,
+                size_pct: 100,
+                left_handed: false,
+                fullscreen_button: false,
+                menu_open: false,
+            },
+            0,
+            0.016,
+        );
+        assert!(router.touch().layout().is_some());
+    }
+
+    #[test]
     fn a_keyboard_press_hides_the_automatic_controller_and_a_touch_brings_it_back() {
         use super::touch::pad::Phase;
         use super::touch::prefs::OverlayMode;

@@ -234,6 +234,26 @@ pub(super) fn draw_list(
             LayoutKind::Portrait => 64.0 * u,
             LayoutKind::Landscape => 44.0 * u,
         };
+    let bottom = lay.safe.bottom()
+        - if desktop {
+            18.0 * u
+        } else {
+            lay.bar_reserve() + 4.0 * u
+        };
+    // Over a paused game the list sits on the shell's panel, as Controls and Debug do, so the
+    // rows are never read against the game picture.
+    if h.pausing(ms) && h.launch.is_none() {
+        let panel = Rect::from_min_max(
+            Pos2::new(left - 24.0 * u, head_top - 18.0 * u),
+            Pos2::new(left + width + 24.0 * u, bottom + 6.0 * u),
+        )
+        .intersect(lay.full.shrink(2.0));
+        p.add(Shape::convex_polygon(
+            super::chamfer(panel, tokens::CHAMFER * u),
+            fade(Color32::from_rgba_unmultiplied(8, 16, 22, 242), a),
+            Stroke::new(1.0, fade(tokens::hairline(), a)),
+        ));
+    }
     let title = match page {
         Page::Settings => "Settings",
         _ => "Game",
@@ -252,12 +272,6 @@ pub(super) fn draw_list(
         fade(tokens::TEXT, a),
     );
     let top = t.bottom() + 18.0 * u;
-    let bottom = lay.safe.bottom()
-        - if desktop {
-            18.0 * u
-        } else {
-            lay.bar_reserve() + 4.0 * u
-        };
     let view = Rect::from_min_max(Pos2::new(left, top), Pos2::new(left + width, bottom));
     // Keep the focused row on screen when the focus moved by key.
     if h.last_row != ms.item_index {

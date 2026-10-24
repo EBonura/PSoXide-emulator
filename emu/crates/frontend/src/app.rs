@@ -2949,26 +2949,18 @@ impl AppState {
         self.menu.sync_controls(labels);
     }
 
-    /// Bind `target` to `binding`, stealing it from any other target
-    /// that currently uses the same key -- one physical key silently
-    /// driving two pad inputs is never what the user meant. Persists
-    /// immediately and refreshes the panel labels; key events read the
-    /// bindings live, so the change applies to the running game on the
-    /// very next press.
+    /// Bind `target` to `binding`. One physical key driving two pad inputs is never what the
+    /// user meant, so any other target that held the key takes `target`'s old binding (the two
+    /// swap), and the toast says so: no action is ever left unbound without being told.
+    /// Persists immediately and refreshes the panel labels; key events read the bindings live,
+    /// so the change applies to the running game on the very next press.
     pub fn apply_rebind(&mut self, target: PadBindTarget, binding: psoxide_settings::InputBinding) {
-        for other in PadBindTarget::ALL {
-            if other != target && *binding_for_target(&self.settings.input.port1, other) == binding
-            {
-                *binding_for_target_mut(&mut self.settings.input.port1, other) =
-                    psoxide_settings::InputBinding::Unbound;
-            }
-        }
-        *binding_for_target_mut(&mut self.settings.input.port1, target) = binding.clone();
+        let message = rebind_swapping(&mut self.settings.input.port1, target, binding);
         if let Err(e) = self.save_settings() {
             eprintln!("[frontend] settings save after rebind: {e}");
         }
         self.sync_menu_controls();
-        self.status_message_set(format!("{} bound to {}", target.label(), binding.label()));
+        self.status_message_set(message);
     }
 
     /// Restore every port-1 binding to the built-in defaults.
@@ -5122,6 +5114,37 @@ fn disc_image_hash(disc: &Disc) -> u64 {
     hasher.finish()
 }
 
+/// Bind `target` to `binding` in `ports`. Any other target that held the key takes `target`'s
+/// old binding, so the two swap and nothing is left unbound by surprise. Returns the toast text.
+fn rebind_swapping(
+    ports: &mut psoxide_settings::settings::PortBindings,
+    target: PadBindTarget,
+    binding: psoxide_settings::InputBinding,
+) -> String {
+    use psoxide_settings::InputBinding;
+    let previous = binding_for_target(ports, target).clone();
+    let mut message = format!("{} bound to {}", target.label(), binding.label());
+    // Unbound is not a key: nothing to take, nothing to swap.
+    if binding != InputBinding::Unbound {
+        for other in PadBindTarget::ALL {
+            if other != target && *binding_for_target(ports, other) == binding {
+                *binding_for_target_mut(ports, other) = previous.clone();
+                if previous == InputBinding::Unbound {
+                    message.push_str(&format!(", {} is now unbound", other.label()));
+                } else {
+                    message.push_str(&format!(
+                        ", {} moved to {}",
+                        other.label(),
+                        previous.label()
+                    ));
+                }
+            }
+        }
+    }
+    *binding_for_target_mut(ports, target) = binding;
+    message
+}
+
 /// The settings field a rebind target reads from. Kept as a pair of
 /// free functions (rather than one `&mut` accessor used for reads too)
 /// so label-building can borrow the settings immutably.
@@ -5403,6 +5426,41 @@ mod tests {
     fn embedded_play_default_does_not_force_ram_heavy_telemetry() {
         assert_eq!(DEFAULT_EMBEDDED_PLAYTEST_FEATURES, "cd-stream-bench");
         assert!(!DEFAULT_EMBEDDED_PLAYTEST_FEATURES.contains("emulator-telemetry"));
+    }
+
+    #[test]
+    fn rebinding_onto_a_used_key_swaps_instead_of_unbinding() {
+        use psoxide_settings::settings::PortBindings;
+        let mut ports = PortBindings::default();
+        let cross = binding_for_target(&ports, PadBindTarget::Cross).clone();
+        let triangle = binding_for_target(&ports, PadBindTarget::Triangle).clone();
+        assert_ne!(cross, triangle);
+        let message = rebind_swapping(&mut ports, PadBindTarget::Cross, triangle.clone());
+        assert_eq!(*binding_for_target(&ports, PadBindTarget::Cross), triangle);
+        assert_eq!(*binding_for_target(&ports, PadBindTarget::Triangle), cross);
+        assert_eq!(
+            message,
+            format!(
+                "Cross bound to {}, Triangle moved to {}",
+                triangle.label(),
+                cross.label()
+            )
+        );
+    }
+
+    #[test]
+    fn rebinding_from_an_unbound_target_says_what_it_unbound() {
+        use psoxide_settings::settings::PortBindings;
+        use psoxide_settings::InputBinding;
+        let mut ports = PortBindings::default();
+        *binding_for_target_mut(&mut ports, PadBindTarget::Cross) = InputBinding::Unbound;
+        let triangle = binding_for_target(&ports, PadBindTarget::Triangle).clone();
+        let message = rebind_swapping(&mut ports, PadBindTarget::Cross, triangle.clone());
+        assert_eq!(
+            *binding_for_target(&ports, PadBindTarget::Triangle),
+            InputBinding::Unbound
+        );
+        assert!(message.ends_with("Triangle is now unbound"), "{message}");
     }
 
     #[test]

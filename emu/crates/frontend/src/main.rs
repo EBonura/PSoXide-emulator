@@ -338,6 +338,10 @@ struct Shell {
     input: input::InputRouter,
     /// The on-screen menu button was tapped; the next redraw toggles the menu.
     touch_menu_pending: bool,
+    /// Where the mouse pointer is, in window pixels, once it has moved over the window.
+    cursor_px: Option<egui::Pos2>,
+    /// The left mouse button went down on the on-screen controller and has not come up.
+    mouse_on_controller: bool,
     /// The toolbar was tucked away once for the touch controller.
     touch_chrome_applied: bool,
     /// Last machine and routing generations applied to the emulated SIO ports.
@@ -469,6 +473,8 @@ impl Shell {
             audio,
             input,
             touch_menu_pending: false,
+            cursor_px: None,
+            mouse_on_controller: false,
             touch_chrome_applied: false,
             controller_layout_stamp: None,
             emu_frame_accum: 0.0,
@@ -992,26 +998,63 @@ impl ApplicationHandler for Shell {
             if owned {
                 // Handled inside the event, where the browser still counts
                 // the tap as a user gesture (fullscreen needs one).
-                for action in self.input.touch_mut().take_actions() {
-                    match action {
-                        input::touch::pad::UiAction::Menu => self.touch_menu_pending = true,
-                        input::touch::pad::UiAction::Pause => {
-                            self.state.running = !self.state.running;
-                            self.state.menu.sync_run_label(self.state.running);
-                        }
-                        input::touch::pad::UiAction::Save => self.state.save_state(),
-                        input::touch::pad::UiAction::Debug => self.state.open_shell_page("Debug"),
-                        input::touch::pad::UiAction::Fullscreen => {
-                            web_touch::toggle_fullscreen(false);
-                        }
-                    }
-                }
-                if self.input.touch_mut().take_haptic() {
-                    web_touch::vibrate(10);
-                }
+                run_touch_actions(
+                    &mut self.state,
+                    &mut self.input,
+                    &mut self.touch_menu_pending,
+                );
                 gfx.window.request_redraw();
                 return;
             }
+        }
+
+        // The mouse reaches the on-screen controller too: a desktop with Touch controls set to On,
+        // or a phone emulator that sends clicks, must be able to use the menu button. The mouse is
+        // one more pointer for the controller; presses it does not own go on to the interface.
+        match &event {
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_px = Some(egui::pos2(position.x as f32, position.y as f32));
+                if self.mouse_on_controller {
+                    let at = self.cursor_px.unwrap_or_default();
+                    let now_ms = self.input.now_ms();
+                    self.input
+                        .touch_mut()
+                        .handle_mouse(input::touch::pad::Phase::Move, at, now_ms);
+                }
+            }
+            WindowEvent::MouseInput {
+                state: element_state,
+                button: winit::event::MouseButton::Left,
+                ..
+            } => {
+                use input::touch::pad::Phase;
+                use winit::event::ElementState;
+                let now_ms = self.input.now_ms();
+                let at = self.cursor_px.unwrap_or_default();
+                let handled = match element_state {
+                    ElementState::Pressed if self.cursor_px.is_some() => {
+                        self.mouse_on_controller =
+                            self.input.touch_mut().handle_mouse(Phase::Down, at, now_ms);
+                        self.mouse_on_controller
+                    }
+                    ElementState::Released if self.mouse_on_controller => {
+                        self.mouse_on_controller = false;
+                        self.input.touch_mut().handle_mouse(Phase::Up, at, now_ms);
+                        true
+                    }
+                    _ => false,
+                };
+                if handled {
+                    run_touch_actions(
+                        &mut self.state,
+                        &mut self.input,
+                        &mut self.touch_menu_pending,
+                    );
+                    gfx.window.request_redraw();
+                    return;
+                }
+            }
+            _ => {}
         }
 
         let consumed = gfx.egui_winit.on_window_event(&gfx.window, &event).consumed;
@@ -2228,6 +2271,30 @@ impl Shell {
     }
 }
 
+/// Act on what the on-screen controller's buttons reported: the menu, pause, save, debug and
+/// fullscreen taps, and the haptic tick for a fresh press.
+fn run_touch_actions(
+    state: &mut AppState,
+    input_router: &mut input::InputRouter,
+    menu_pending: &mut bool,
+) {
+    for action in input_router.touch_mut().take_actions() {
+        match action {
+            input::touch::pad::UiAction::Menu => *menu_pending = true,
+            input::touch::pad::UiAction::Pause => {
+                state.running = !state.running;
+                state.menu.sync_run_label(state.running);
+            }
+            input::touch::pad::UiAction::Save => state.save_state(),
+            input::touch::pad::UiAction::Debug => state.open_shell_page("Debug"),
+            input::touch::pad::UiAction::Fullscreen => web_touch::toggle_fullscreen(false),
+        }
+    }
+    if input_router.touch_mut().take_haptic() {
+        web_touch::vibrate(10);
+    }
+}
+
 /// Per-frame upkeep of the on-screen controller: preferences, layout for
 /// this window and guest, the toolbar getting out of the way, and the
 /// fullscreen request from the menu.
@@ -2275,6 +2342,8 @@ fn update_touch_controller(
     let menu_open = state.menu.open;
     let touch = input_router.touch_mut();
     touch.set_menu_open(menu_open);
+    // The home screen with no game behind it is the shell alone: the controller belongs to a game.
+    touch.set_shell_only(menu_open && state.menu.home_enabled() && !state.menu.home_over_game());
     touch.update_layout(params, now_ms, dt.max(1.0 / 120.0));
     let visible = touch.visible();
     let safe_top_px = touch.safe_px().top;

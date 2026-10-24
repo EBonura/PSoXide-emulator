@@ -322,6 +322,25 @@ impl MenuState {
         self.home.is_some()
     }
 
+    /// Whether a started game waits behind the shell (the pause shell), as opposed to the home
+    /// screen with nothing running. The on-screen controller belongs to a game, so it shows in the
+    /// first case only.
+    pub fn home_over_game(&self) -> bool {
+        self.home
+            .as_ref()
+            .is_some_and(|h| h.pausing(self) && h.launch.is_none())
+    }
+
+    /// How much of the window the shell covers, 0 (closed) to 1 (fully up). The toolbar steps
+    /// aside as this rises; always 0 without the home screen.
+    pub fn shell_cover(&self) -> f32 {
+        if self.home.is_some() {
+            self.appear
+        } else {
+            0.0
+        }
+    }
+
     /// Feed the home screen what the app knows this frame.
     pub fn set_home_feed(&mut self, feed: HomeFeed) {
         if let Some(h) = self.home.as_mut() {
@@ -427,7 +446,7 @@ impl MenuState {
             _ => -1.0,
         };
         format!(
-            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"controls\":{},\"cases\":[{}],\"hits\":[{}]}}",
+            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"controls\":{},\"cases\":[{}],\"hits\":[{}]}}",
             h.page.name(),
             if h.zone == Zone::Nav { "nav" } else { "body" },
             self.home_probe().1,
@@ -438,6 +457,7 @@ impl MenuState {
             h.started,
             h.pausing(self),
             h.launch.as_ref().map_or(-1.0, |l| l.t),
+            self.appear,
             nav_items(h.pausing(self)).len(),
             h.first_visit,
             h.covers.loaded(),

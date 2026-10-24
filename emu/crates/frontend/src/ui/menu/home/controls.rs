@@ -286,6 +286,14 @@ fn fit_job(text: &str, font: FontId, col: Color32, max_w: f32) -> egui::text::La
     job
 }
 
+/// Text that wraps to two rows and is cut with an ellipsis only after that.
+fn wrap_job(text: &str, font: FontId, col: Color32, max_w: f32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::simple(text.to_string(), font, col, max_w.max(8.0));
+    job.wrap.max_rows = 2;
+    job.wrap.break_anywhere = false;
+    job
+}
+
 /// What a device is, for its icon and its wording.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -777,7 +785,29 @@ fn draw_card(
     focus_rect: &mut Option<Rect>,
 ) -> f32 {
     let (p, u, a) = (f.p, f.u, f.a);
-    let top_h = 60.0 * u;
+    let lit = card.active;
+    // The chip and the words are measured first: the status line wraps to a second row, and the
+    // card grows to hold it rather than cutting it.
+    let chip_font = FontId::proportional(tokens::CAPTION_LARGE * u.min(1.15));
+    let chip_text = if lit { "Active" } else { card.chip };
+    let chip_galley = p.layout_no_wrap(chip_text.to_string(), chip_font.clone(), tokens::TEXT);
+    let chip_w = chip_galley.size().x + 26.0 * u + if card.connected { 12.0 * u } else { 0.0 };
+    let text_x = x + 30.0 * u + 20.0 * u + 14.0 * u;
+    let text_w = (x + w - 14.0 * u - chip_w) - 12.0 * u - text_x;
+    let title = p.layout_job(fit_job(
+        &card.title,
+        FontId::proportional(tokens::ROW_LABEL * u),
+        fade(tokens::TEXT, a),
+        text_w,
+    ));
+    let line = p.layout_job(wrap_job(
+        &card.line,
+        FontId::proportional(13.0 * u.max(0.95)),
+        fade(if lit { tokens::ACCENT } else { tokens::MUTED }, a),
+        text_w,
+    ));
+    let block = title.size().y + 3.0 * u + line.size().y;
+    let top_h = (60.0 * u).max(block + 20.0 * u);
     let bottom_h = if card.info.is_some() { 52.0 * u } else { 0.0 };
     let r = Rect::from_min_size(Pos2::new(x, f.sy(y)), Vec2::new(w, top_h + bottom_h));
     // Grey to cyan over one feedback beat, so a quick tap still shows.
@@ -785,7 +815,6 @@ fn draw_card(
     let k = f
         .ctx
         .animate_bool_with_time(id, card.active, tokens::FEEDBACK);
-    let lit = card.active;
     let mix = |rest: Color32, on: Color32| rest.lerp_to_gamma(on, k);
     let fill = mix(
         Color32::from_rgba_unmultiplied(40, 90, 110, 26),
@@ -810,10 +839,6 @@ fn draw_card(
     );
     draw_device_icon(p, icon_c, 11.0 * u, card.kind.icon(), fade(icon_col, a));
     // The chip.
-    let chip_font = FontId::proportional(tokens::CAPTION_LARGE * u.min(1.15));
-    let chip_text = if lit { "Active" } else { card.chip };
-    let chip_galley = p.layout_no_wrap(chip_text.to_string(), chip_font.clone(), tokens::TEXT);
-    let chip_w = chip_galley.size().x + 26.0 * u + if card.connected { 12.0 * u } else { 0.0 };
     let chip = Rect::from_center_size(
         Pos2::new(r.right() - 14.0 * u - chip_w / 2.0, r.top() + top_h / 2.0),
         Vec2::new(chip_w, 28.0 * u),
@@ -843,21 +868,6 @@ fn draw_card(
         chip_font,
         fade(chip_col, a),
     );
-    let text_x = icon_c.x + 20.0 * u + 14.0 * u;
-    let text_w = chip.left() - 12.0 * u - text_x;
-    let title = p.layout_job(fit_job(
-        &card.title,
-        FontId::proportional(tokens::ROW_LABEL * u),
-        fade(tokens::TEXT, a),
-        text_w,
-    ));
-    let line = p.layout_job(fit_job(
-        &card.line,
-        FontId::proportional(13.0 * u.max(0.95)),
-        fade(if lit { tokens::ACCENT } else { tokens::MUTED }, a),
-        text_w,
-    ));
-    let block = title.size().y + 3.0 * u + line.size().y;
     let ty = r.top() + (top_h - block) / 2.0;
     let line_y = ty + title.size().y + 3.0 * u;
     p.galley(Pos2::new(text_x, ty), title, tokens::TEXT);

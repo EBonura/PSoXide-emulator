@@ -244,6 +244,20 @@ class Page {
     fs.writeFileSync(path.join(SHOTS, `${name}.png`), Buffer.from(r.data, "base64"));
   }
 
+  /** Mean brightness of the page, 0 (black) to 1 (white), from a small copy of a screenshot. */
+  async meanLuma() {
+    const r = await this.cdp.send("Page.captureScreenshot", { format: "jpeg", quality: 40 }, this.top);
+    return this.eval(`(async () => {
+      const bmp = await createImageBitmap(await (await fetch("data:image/jpeg;base64,${r.data}")).blob());
+      const g = new OffscreenCanvas(64, 64).getContext("2d");
+      g.drawImage(bmp, 0, 0, 64, 64);
+      const d = g.getImageData(0, 0, 64, 64).data;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+      return sum / (d.length / 4) / 255;
+    })()`, this.top);
+  }
+
   /** Bytes of a low-quality JPEG of the page: a black or empty frame is a few KB, a drawn scene is tens of KB. */
   async frameWeight() {
     const r = await this.cdp.send("Page.captureScreenshot", { format: "jpeg", quality: 40 }, this.top);
@@ -592,6 +606,8 @@ async function journeyDesktop(label, urlFor, { embeddedMode = false } = {}) {
     const later = await page.ux();
     const heavy = requests.filter((r) => /\.pxw$/.test(r.path) && r.range && /^\d+-\d+$/.test(r.range) && Number(r.range.split("-")[1]) - Number(r.range.split("-")[0]) > 1_000_000);
     if (!(later.running && !later.menu_open)) return `after pick: ${JSON.stringify(later)}`;
+    // The shell stays up over the booting game until the launch sequence has handed over.
+    await page.waitFor("the shell gone", (x) => x.home.cover === 0, 15000);
     return heavy.length ? `big disc reads: ${heavy.length}` : true;
   });
 
@@ -715,7 +731,8 @@ async function journeyPhone(label, urlFor, size) {
   await step("every pad button reaches guest port 1 with the right PS1 bit", async () => {
     const t = await layout();
     const wrong = [];
-    for (const [mask, x, y] of t.buttons) {
+    // Hold a finger on a button until the guest reports it (bounded), then lift.
+    const press = async (mask, x, y) => {
       await page.touch("touchStart", [[x / dpr, y / dpr]]);
       let st = null;
       for (let k = 0; k < 8; k++) {
@@ -725,8 +742,29 @@ async function journeyPhone(label, urlFor, size) {
       }
       await page.touch("touchEnd", []);
       await sleep(120);
+      return st;
+    };
+    /** Frames the page drew in 300 ms: a loaded or swapping machine can stall it for seconds. */
+    const drawn = async () => {
+      const r0 = (await page.bench())?.redraws;
+      await sleep(300);
+      return (await page.bench())?.redraws - r0;
+    };
+    for (const [mask, x, y] of t.buttons) {
+      let st = await press(mask, x, y);
       if (args.trace) console.log("      touch state", JSON.stringify(st), x / dpr, y / dpr);
-      if (!(st.port1_mask & mask)) wrong.push(`0x${mask.toString(16)}:${st.port1_mask.toString(16)}`);
+      if (st.port1_mask & mask) continue;
+      // A miss. If the page was not drawing at all (a stall under load, seen once in a full run on a
+      // busy machine), nothing was tested: wait for it to wake and press again, once. A page that is
+      // drawing normally and still misses is a real bug and fails with what it saw.
+      const frames = await drawn();
+      if (frames < 3) {
+        console.log(`      note: the page drew ${frames} frames in 300 ms while 0x${mask.toString(16)} was pressed (stalled machine); retrying once`);
+        for (let i = 0; i < 40 && (await drawn()) < 5; i++) await sleep(250);
+        st = await press(mask, x, y);
+        if (st.port1_mask & mask) continue;
+      }
+      wrong.push(`0x${mask.toString(16)}:${st.port1_mask.toString(16)} at ${Math.round(x)},${Math.round(y)} events=${st.touch_events} owned=${st.touch_owned} last=${st.last_x},${st.last_y} drawn=${frames} frames in 300ms`);
     }
     return wrong.length ? `buttons that did not register: ${wrong.join(" ")}` : true;
   });
@@ -1190,6 +1228,10 @@ async function journeyHome(label, urlFor, size) {
     if (u.home.page !== "Home" || u.running || !u.menu_open) return JSON.stringify(u.home);
     return homeLayoutProblem(u, size) ?? true;
   });
+  if (mobile) await step("the home screen shows the shell header only: no touch controller on it", async () => {
+    const u = await page.ux();
+    return u.touch ? `the touch controller is drawn on the home screen: ${JSON.stringify(u.touch.ui)}` : true;
+  });
   await step("'What is on it' opens on demand and closes again", async () => {
     await activate(page, "peek");
     const on = await page.waitFor("the peek", (s) => s.home.peek, 4000);
@@ -1251,9 +1293,10 @@ async function journeyHome(label, urlFor, size) {
     u = await page.ux();
     if (u.running || !u.menu_open) return `Escape on a page left Home: ${JSON.stringify({ running: u.running, open: u.menu_open })}`;
     if (mobile) {
-      const m = u.touch?.ui.find((b) => b[0] === "menu");
-      if (!m) return "no touch menu button to press";
-      await page.tap(m[1] / size.dpr, m[2] / size.dpr);
+      // The controller belongs to a game: on the home screen there is no menu button to press (Back is
+      // Escape or the shell's own bar), and the key goes back like everywhere else.
+      if (u.touch) return `the touch controller is drawn on the home screen: ${JSON.stringify(u.touch.ui)}`;
+      await page.tapKey("Escape");
     } else {
       await page.padConnect();
       await sleep(300);
@@ -1263,7 +1306,7 @@ async function journeyHome(label, urlFor, size) {
     }
     await sleep(1500);
     u = await page.ux();
-    return u.running || !u.menu_open ? `the ${mobile ? "touch menu button" : "pad chord"} started the disc` : true;
+    return u.running || !u.menu_open ? `the ${mobile ? "touch Back key" : "pad chord"} started the disc` : true;
   });
   await step("Back (Circle) never starts the disc either, and Enter still does", async () => {
     await page.tapKey("g");
@@ -1494,18 +1537,22 @@ async function journeyShell(label, urlFor, size) {
     await page.waitFor("the home screen", (s) => s.home.countdown === "cancelled", 5000);
     await activate("primary");
     const marks = [0.4, 1.0, 1.7, 2.4, 3.2, 4.1];
-    let next = 0, seen = 0;
+    let next = 0, seen = 0, brightest = 0;
     const start = Date.now();
     while (Date.now() - start < 40000) {
       const u = await page.ux();
       if (u.running && !u.menu_open) break;
       if (u.home.launch >= 0) {
         seen = Math.max(seen, u.home.launch);
+        // The boot flash is a glow at the tray, never a wash over the whole screen.
+        if (u.home.launch >= 3.9) brightest = Math.max(brightest, await page.meanLuma());
         if (next < marks.length && u.home.launch >= marks[next]) { await page.shot(`${label}-launch-${next + 1}`); next++; }
       }
       await sleep(120);
     }
     if (seen < 4.0) return `the sequence only reached ${seen} s`;
+    if (args.trace) console.log("      brightest launch frame", brightest.toFixed(3));
+    if (brightest > FLASH_LUMA_MAX) return `the boot flash washed the screen to ${brightest.toFixed(2)} (limit ${FLASH_LUMA_MAX})`;
     const u = await waitDemoRunning(page, 30000);
     return u.running ? true : "the game never started";
   });
@@ -1558,6 +1605,24 @@ async function journeyShell(label, urlFor, size) {
     else await page.tapKey("g");
     await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
     return sidebar ? "a sidebar" : true;
+  });
+  if (mobile) await step("the on-screen menu button answers mouse clicks as it does taps: a click resumes, a click pauses into the shell", async () => {
+    // A phone emulator, or a desktop with Touch controls On, sends mouse events: the controller must not
+    // need a finger.
+    const before = await page.ux();
+    const spot = (u) => { const t = u.touch?.ui.find((b) => b[0] === "menu"); return t ? [t[1] / size.dpr, t[2] / size.dpr] : null; };
+    const first = spot(before);
+    if (!first) return "no menu button while the shell is up over a game";
+    await page.click(...first);
+    const resumed = await page.waitFor("resumed by a click", (s) => s.running && !s.menu_open, 5000).catch(() => null);
+    if (!resumed) return `a mouse click on the menu button did not resume: ${JSON.stringify(await page.ux())}`;
+    await sleep(600);
+    const second = spot(await page.ux());
+    if (!second) return "no menu button while the game runs";
+    await page.click(...second);
+    await page.waitFor("the shell opened by a click", (s) => s.menu_open && !s.running, 5000);
+    await page.shot(`${label}-menu-by-mouse`);
+    return (await page.ux()).machine === before.machine ? true : "the machine changed";
   });
   await step("Escape and the touch menu button leave the shell from Home and resume the same machine", async () => {
     const before = await page.ux();
@@ -1696,6 +1761,8 @@ async function journeyFullscreenFallback(label, urlFor, { framed }) {
 // A drawn launcher frame is well above this at 1280x800 and quality 40; black is a few KB.
 const BLANK_JPEG_BYTES = 12000;
 const RESET_FROM_RIGHT = 364;
+// The brightest the whole screen may get during the boot flash (mean luma, 0 to 1). The old flat white wash read about 0.5.
+const FLASH_LUMA_MAX = 0.3;
 const PAUSE_FROM_RIGHT = 404;
 
 /**
@@ -1923,6 +1990,26 @@ async function journeyControls(label, urlFor, size) {
     await activate("ctl:reset");
     await page.waitFor("the map reset", (s) => s.home.controls.keys.Cross === before, 4000);
   });
+  await step("binding a key another action holds swaps the two and says so; nothing is left unbound", async () => {
+    await showGroup("Keyboard");
+    const k0 = (await ctl()).keys;
+    const cross = k0.Cross, triangle = k0.Triangle;
+    if (!cross || !triangle || cross === triangle) return `unexpected defaults: ${JSON.stringify(k0)}`;
+    await activate("ctl:key:Cross");
+    await page.waitFor("a key being bound", (s) => s.home.controls.capture === "Cross", 4000);
+    await page.tapKey(triangle.length === 1 ? triangle.toLowerCase() : triangle);
+    const s = await page.waitFor("the key bound", (x) => x.home.controls.capture === null && x.home.controls.keys.Cross !== cross, 4000);
+    await page.shot(`${label}-controls-swapped`);
+    const k1 = s.home.controls.keys;
+    if (k1.Cross.toLowerCase() !== triangle.toLowerCase()) return `Cross is ${k1.Cross}, not ${triangle}`;
+    if (k1.Triangle.toLowerCase() !== cross.toLowerCase()) return `Triangle is ${k1.Triangle}, not Cross's old ${cross}: ${JSON.stringify(k1)}`;
+    const none = Object.entries(k1).filter(([, v]) => /^(none|-)$/i.test(v)).map(([t]) => t);
+    const before0 = Object.entries(k0).filter(([, v]) => /^(none|-)$/i.test(v)).map(([t]) => t);
+    if (none.length !== before0.length) return `an action was left unbound: ${none}`;
+    if (!/moved to/.test(s.status)) return `the toast does not say what moved: "${s.status}"`;
+    await activate("ctl:reset");
+    await page.waitFor("the map reset", (x) => x.home.controls.keys.Cross === cross, 4000);
+  });
   if (!mobile) await step("the keyboard moves between rows and along a row, Enter starts a binding, Escape cancels, then goes Home", async () => {
     await showGroup("Keyboard");
     let focus = (await ctl()).focus;
@@ -2143,6 +2230,74 @@ async function scenarioShots() {
   }
 }
 
+/**
+ * Review screenshots at the five sizes the design is checked at (`--scenario review --label before|after
+ * --shots <dir>`): the home screen, the Controls cards, the launch hand-off, the pause shell over a game
+ * (Game and Settings pages), and the phone menu button reached with a mouse click. Works against any build.
+ */
+async function scenarioReview() {
+  const SIZES = [["1280x800", 1280, 800, 1, false], ["800x600", 800, 600, 1, false], ["393x852", 393, 852, 3, true],
+    ["360x640", 360, 640, 3, true], ["852x393", 852, 393, 3, true]];
+  const only = args.size;
+  for (const [name, w, h, dpr, mobile] of SIZES) {
+    if (only && only !== name) continue;
+    await inChrome(dpr, async () => {
+      const tag = `${args.label ?? "review"}-${name}`;
+      const page = await newPage(name);
+      await page.viewport(w, h, { dpr, mobile });
+      await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+      await page.goto(direct("?countdown=30"));
+      await page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 120000);
+      await page.tapKey("x");
+      await page.waitFor("a cancelled countdown", (s) => s.home.countdown === "cancelled", 10000);
+      await sleep(600);
+      const activate = async (n) => (mobile ? homeTap(page, n) : homeClick(page, n));
+      await page.shot(`${tag}-2-home`);
+      await activate("nav:Controls");
+      await page.waitFor("Controls", (s) => s.home.page === "Controls", 4000);
+      await sleep(900);
+      await page.shot(`${tag}-6-controls-cards`);
+      await activate("nav:Home");
+      await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
+      await sleep(400);
+      await activate("primary");
+      const t0 = Date.now();
+      const marks = [3.6, 4.1, 4.4, 4.7, 5.0, 5.4, 6.0];
+      let next = 0;
+      while (Date.now() - t0 < 40000) {
+        const secs = (Date.now() - t0) / 1000;
+        if (next < marks.length && secs >= marks[next]) { await page.shot(`${tag}-5-launch-${marks[next]}s`); next++; }
+        if (next >= marks.length) break;
+        await sleep(60);
+      }
+      await waitDemoRunning(page, 90000);
+      await sleep(2500);
+      await page.shot(`${tag}-playing`);
+      if (mobile) {
+        const m = (await page.ux()).touch?.ui.find((b) => b[0] === "menu");
+        if (m) await page.click(m[1] / dpr, m[2] / dpr);
+        await sleep(900);
+        const viaMouse = (await page.ux()).menu_open;
+        console.log(`${tag}: menu button by mouse click opened the shell: ${viaMouse}`);
+        await page.shot(`${tag}-3-menu-by-mouse`);
+        if (!viaMouse && m) await page.tap(m[1] / dpr, m[2] / dpr);
+      } else {
+        await page.tapKey("Escape");
+      }
+      await page.waitFor("the shell", (s) => s.menu_open && s.home.page === "Home", 8000);
+      await sleep(700);
+      await page.shot(`${tag}-7-shell-home`);
+      for (const [section, n] of [["Game", "1-game"], ["Settings", "1-settings"]]) {
+        await activate(`nav:${section}`);
+        await page.waitFor(`the ${section} page`, (s) => s.home.page === section, 4000);
+        await sleep(800);
+        await page.shot(`${tag}-${n}`);
+      }
+      await cdp.send("Target.closeTarget", { targetId: page.targetId });
+    });
+  }
+}
+
 /** The launch sequence's cost: frames per second and the worst frame while it plays (use --throttle for a phone). */
 async function scenarioLaunch() {
   const w = Number(args.width ?? 1280), h = Number(args.height ?? 800);
@@ -2193,6 +2348,7 @@ async function main() {
     console.log(JSON.stringify({ throttle: args.fps ?? null, redraws_per_s: (b.redraws - a.redraws) / 3 }));
   }); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "cors") { await inChrome(1, scenarioCors); siteServer?.close(); parentServer?.close(); process.exit(0); }
+  if (args.scenario === "review") { await scenarioReview(); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "shots") { await scenarioShots(); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "tap") { await inChrome(1, scenarioTap); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "bench") { await inChrome(1, scenarioBench); siteServer?.close(); parentServer?.close(); process.exit(0); }

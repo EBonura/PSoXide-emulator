@@ -57,6 +57,7 @@ pub fn draw(ctx: &Context, state: &mut AppState) {
     // 0.0 = fully shown, 1.0 = fully hidden.
     let t = ctx.animate_bool_with_time(egui::Id::new("toolbar_slide"), state.toolbar_hidden, 0.22);
     let height = (BAR_HEIGHT * (1.0 - t)).max(0.0);
+    let cover = state.menu.shell_cover();
 
     if height >= 0.5 {
         // Zero-margin frame so `max_rect()` is exactly [0, height]; we paint
@@ -71,6 +72,13 @@ pub fn draw(ctx: &Context, state: &mut AppState) {
             .frame(egui::Frame::NONE.fill(panel_fill))
             .show(ctx, |ui| {
                 let panel_rect = ui.max_rect();
+                // The shell is the whole screen while it is up: the bar's icons would show
+                // faintly through it, so they fade out as it fades in and are not drawn at all
+                // once it is up. The bar keeps its height so the game does not move.
+                if cover >= 0.995 {
+                    return;
+                }
+                ui.set_opacity(1.0 - cover);
                 ui.painter()
                     .hline(panel_rect.x_range(), panel_rect.bottom() - 0.5, separator);
                 // Anchor the row to the panel bottom at full height; the
@@ -126,7 +134,7 @@ pub fn draw(ctx: &Context, state: &mut AppState) {
 
     // Fade the restore tab in only once the bar has mostly cleared, so it
     // never overlaps the sliding toolbar.
-    if t > 0.5 && !state.menu.touch_mode() {
+    if t > 0.5 && !state.menu.touch_mode() && cover < 0.5 {
         draw_restore_tab(ctx, state, ((t - 0.5) / 0.5).clamp(0.0, 1.0));
     }
 }

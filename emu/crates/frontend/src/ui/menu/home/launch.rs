@@ -68,6 +68,68 @@ fn disc_at(t: f32, yaw: f32) -> (f32, f32, f32, f32) {
     (y, z, rx, yaw * (1.0 - l) * (1.0 - m))
 }
 
+/// The boot flash: the design's linear rise from 4.02 s, then back to nothing by the hand-off, so
+/// the game never starts under a lit screen. It peaks at a bit over half strength: a pulse at the
+/// tray, not a wash (the screen's mean brightness stays under a third).
+fn flash_at(t: f32) -> f32 {
+    const PEAK_TIME: f32 = 4.35;
+    const STRENGTH: f32 = 0.55;
+    STRENGTH * span(t, 4.02, PEAK_TIME) * (1.0 - span(t, PEAK_TIME, DURATION))
+}
+
+/// A glow over the screen: the design's radial gradient (bright cyan at the tray, teal, then the
+/// void colour at the corners), never a flat wash. `k` is the strength, 0 to 1.
+fn draw_flash(p: &Painter, full: egui::Rect, k: f32) {
+    const SEGMENTS: usize = 48;
+    let centre = Pos2::new(full.center().x, full.top() + full.height() * 0.56);
+    // Farthest-corner, as the design's gradient.
+    let reach = [
+        full.left_top(),
+        full.right_top(),
+        full.left_bottom(),
+        full.right_bottom(),
+    ]
+    .iter()
+    .map(|c| (*c - centre).length())
+    .fold(0.0_f32, f32::max);
+    let k = k.clamp(0.0, 1.0);
+    let colour = |rgb: [u8; 3]| {
+        let s = |v: u8| (f32::from(v) * k).round() as u8;
+        Color32::from_rgba_premultiplied(s(rgb[0]), s(rgb[1]), s(rgb[2]), (255.0 * k).round() as u8)
+    };
+    let stops = [
+        (0.0, colour([201, 244, 255])),
+        (0.6, colour([27, 106, 128])),
+        (1.01, colour([3, 6, 10])),
+    ];
+    let white = egui::epaint::WHITE_UV;
+    let mut mesh = Mesh::default();
+    mesh.vertices.push(Vertex {
+        pos: centre,
+        uv: white,
+        color: stops[0].1,
+    });
+    for (radius, color) in &stops[1..] {
+        for i in 0..SEGMENTS {
+            let a = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+            mesh.vertices.push(Vertex {
+                pos: centre + Vec2::new(a.cos(), a.sin()) * reach * *radius,
+                uv: white,
+                color: *color,
+            });
+        }
+    }
+    let ring = |ring: usize, i: usize| (1 + ring * SEGMENTS + i % SEGMENTS) as u32;
+    for i in 0..SEGMENTS {
+        mesh.indices.extend([0, ring(0, i), ring(0, i + 1)]);
+        mesh.indices
+            .extend([ring(0, i), ring(0, i + 1), ring(1, i)]);
+        mesh.indices
+            .extend([ring(0, i + 1), ring(1, i + 1), ring(1, i)]);
+    }
+    p.add(Shape::mesh(mesh));
+}
+
 fn pose(t: f32) -> Pose {
     let lid = 108.0_f32.to_radians() * ease_out(span(t, 0.08, 0.83));
     let turn = ease_out(span(t, 0.0, 0.71));
@@ -108,7 +170,7 @@ fn pose(t: f32) -> Pose {
         tray: s,
         led,
         spin,
-        flash: span(t, 4.02, 4.49),
+        flash: flash_at(t),
         label,
     }
 }
@@ -362,13 +424,9 @@ pub(super) fn draw(
         FontId::proportional(13.0 * lay.u),
         fade(mix(tokens::MUTED, CYAN, 0.2), alpha),
     );
-    // The flash into the boot.
+    // The flash into the boot: a glow at the tray that fades out again by the hand-off.
     if ps.flash > 0.0 {
-        p.rect_filled(
-            lay.full,
-            0.0,
-            Color32::from_white_alpha((255.0 * ps.flash * alpha) as u8),
-        );
+        draw_flash(p, lay.full, ps.flash * alpha);
     }
     let _ = Vec2::ZERO;
 }
