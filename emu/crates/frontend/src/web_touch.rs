@@ -101,51 +101,93 @@ mod imp {
         }
     }
 
+    /// `target[name](args...)`, only when `name` is a function there, with a
+    /// JavaScript exception turned into `None`. Every optional browser API
+    /// goes through this: WebKit has no `vibrate`, no wake lock on old
+    /// versions and no Fullscreen API on an iPhone, and a missing method
+    /// called through a plain web-sys binding throws out of the wasm and
+    /// freezes the page.
+    fn call_optional(target: &JsValue, name: &str, args: &[JsValue]) -> Option<JsValue> {
+        let function = js_sys::Reflect::get(target, &JsValue::from_str(name)).ok()?;
+        let function: js_sys::Function = function.dyn_into().ok()?;
+        let args = js_sys::Array::from_iter(args.iter());
+        let result = function.apply(target, &args).ok()?;
+        // A returned promise may reject (fullscreen refused, orientation
+        // lock unsupported); nobody is waiting on it.
+        if let Some(promise) = result.dyn_ref::<js_sys::Promise>() {
+            let swallow = Closure::once(|_: JsValue| {});
+            let _ = promise.catch(&swallow);
+            swallow.forget();
+        }
+        Some(result)
+    }
+
+    /// `target[name]`, or `undefined`.
+    fn get_optional(target: &JsValue, name: &str) -> JsValue {
+        js_sys::Reflect::get(target, &JsValue::from_str(name)).unwrap_or(JsValue::UNDEFINED)
+    }
+
+    fn document_value() -> Option<JsValue> {
+        window()?.document().map(JsValue::from)
+    }
+
     pub(super) fn vibrate(ms: u32) {
         if let Some(win) = window() {
-            let _ = win.navigator().vibrate_with_duration(ms);
+            let navigator = JsValue::from(win.navigator());
+            let _ = call_optional(&navigator, "vibrate", &[JsValue::from(ms)]);
         }
     }
 
     pub(super) fn fullscreen_available() -> bool {
-        window()
-            .and_then(|w| w.document())
-            .is_some_and(|d| d.fullscreen_enabled())
+        let Some(doc) = document_value() else {
+            return false;
+        };
+        let enabled = ["fullscreenEnabled", "webkitFullscreenEnabled"]
+            .iter()
+            .any(|name| get_optional(&doc, name).is_truthy());
+        let root = get_optional(&doc, "documentElement");
+        enabled
+            && ["requestFullscreen", "webkitRequestFullscreen"]
+                .iter()
+                .any(|name| get_optional(&root, name).is_function())
     }
 
     pub(super) fn fullscreen_active() -> bool {
-        window()
-            .and_then(|w| w.document())
-            .is_some_and(|d| d.fullscreen_element().is_some())
+        document_value().is_some_and(|doc| {
+            ["fullscreenElement", "webkitFullscreenElement"]
+                .iter()
+                .any(|name| !get_optional(&doc, name).is_falsy())
+        })
     }
 
     pub(super) fn toggle_fullscreen(lock_landscape: bool) {
-        let Some(doc) = window().and_then(|w| w.document()) else {
+        let Some(doc) = document_value() else {
             return;
         };
-        if doc.fullscreen_element().is_some() {
-            doc.exit_fullscreen();
-            if let Some(orientation) = window()
-                .and_then(|w| w.screen().ok())
-                .map(|s| s.orientation())
-            {
-                let _ = orientation.unlock();
+        let orientation = window()
+            .map(JsValue::from)
+            .map(|w| get_optional(&w, "screen"))
+            .map(|screen| get_optional(&screen, "orientation"));
+        if fullscreen_active() {
+            for name in ["exitFullscreen", "webkitExitFullscreen"] {
+                if call_optional(&doc, name, &[]).is_some() {
+                    break;
+                }
+            }
+            if let Some(orientation) = &orientation {
+                let _ = call_optional(orientation, "unlock", &[]);
             }
             return;
         }
-        if let Some(root) = doc.document_element() {
-            let _ = root.request_fullscreen();
+        let root = get_optional(&doc, "documentElement");
+        for name in ["requestFullscreen", "webkitRequestFullscreen"] {
+            if call_optional(&root, name, &[]).is_some() {
+                break;
+            }
         }
         if lock_landscape {
-            if let Some(orientation) = window()
-                .and_then(|w| w.screen().ok())
-                .map(|s| s.orientation())
-            {
-                if let Ok(promise) = orientation.lock(web_sys::OrientationLockType::Landscape) {
-                    let swallow = Closure::once(|_: JsValue| {});
-                    let _ = promise.catch(&swallow);
-                    swallow.forget();
-                }
+            if let Some(orientation) = &orientation {
+                let _ = call_optional(orientation, "lock", &[JsValue::from_str("landscape")]);
             }
         }
     }
@@ -192,6 +234,13 @@ mod imp {
 
     pub(super) fn take_release_request() -> bool {
         RELEASE.with(|r| r.replace(false))
+    }
+
+    pub(super) fn show_fatal(message: &str) {
+        if let Some(win) = window() {
+            let win = JsValue::from(win);
+            let _ = call_optional(&win, "psoxideFatal", &[JsValue::from_str(message)]);
+        }
     }
 
     thread_local! {
@@ -257,6 +306,8 @@ mod imp {
     pub(super) fn take_release_request() -> bool {
         false
     }
+    #[allow(dead_code)]
+    pub(super) fn show_fatal(_message: &str) {}
     pub(super) fn note_guest(
         _visible: bool,
         _port1_mask: u16,
@@ -335,4 +386,11 @@ pub(crate) fn note_guest(
 /// Count one touch event for [`psoxideTouchState`] (a no-op on native).
 pub(crate) fn note_touch(owned: bool, x: f32, y: f32) {
     imp::note_touch(owned, x, y);
+}
+
+/// Show a fatal error on the page itself (web only), for failures on devices
+/// with no console.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn show_fatal(message: &str) {
+    imp::show_fatal(message);
 }

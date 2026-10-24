@@ -19,6 +19,57 @@
       }
     </script>
     <script>
+      // iPhone, iPod and iPad (iPadOS reports itself as a Mac with a touch screen).
+      window.psoxideIOS =
+        /iP(hone|od|ad)/.test(navigator.userAgent) ||
+        (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    </script>
+    <script>
+      // A failure on a phone has no console. Show it on the page, in a box
+      // that can be photographed: the message, where the page runs and which
+      // browser. Used for Rust panics (see src/main.rs) and for any uncaught
+      // JavaScript error or rejected promise.
+      (function () {
+        var shown = 0;
+        window.psoxideFatal = function (message) {
+          try {
+            if (shown++ >= 3) return;
+            var box = document.getElementById("psoxide-fatal");
+            if (!box) {
+              box = document.createElement("div");
+              box.id = "psoxide-fatal";
+              box.setAttribute("role", "alert");
+              box.style.cssText =
+                "position:fixed;left:0;right:0;bottom:0;max-height:55%;overflow:auto;" +
+                "z-index:2147483647;background:#3a0c10;color:#ffe9e9;padding:12px 14px;" +
+                "font:12px/1.4 ui-monospace,Menlo,monospace;white-space:pre-wrap;" +
+                "word-break:break-word;user-select:text;-webkit-user-select:text;" +
+                "touch-action:pan-y;";
+              var close = document.createElement("button");
+              close.textContent = "Dismiss";
+              close.style.cssText = "float:right;margin-left:8px;font:12px sans-serif;padding:4px 10px;";
+              close.onclick = function () { box.remove(); shown = 0; };
+              box.appendChild(close);
+              var body = document.createElement("div");
+              body.id = "psoxide-fatal-text";
+              box.appendChild(body);
+              (document.body || document.documentElement).appendChild(box);
+            }
+            var where = window.top !== window ? "iframe" : "top page";
+            box.lastChild.textContent +=
+              "PSoXide stopped (" + where + ")\n" + String(message).slice(0, 1500) + "\n" +
+              navigator.userAgent + "\n\n";
+          } catch (e) {}
+        };
+        window.addEventListener("error", function (e) {
+          window.psoxideFatal((e.error && e.error.stack) || e.message || "error");
+        });
+        window.addEventListener("unhandledrejection", function (e) {
+          window.psoxideFatal("unhandled rejection: " + ((e.reason && (e.reason.stack || e.reason.message)) || e.reason));
+        });
+      })();
+    </script>
+    <script>
       // Start the demo disc's delivery before the wasm has downloaded, let
       // alone compiled: the page boots that disc at open, and its data track
       // is the long pole. Responses wait in window.psoxidePrefetch, keyed by
@@ -91,18 +142,59 @@
       // policy), so cpal's audio stays silent on the auto-booting page.
       // Capture the AudioContext cpal creates, resume it on the first user
       // input, and show a small hint until it is actually running.
+      //
+      // iOS is stricter: the gesture must happen in this frame (itch.io runs
+      // the page in a cross-origin iframe, which counts as its own page), only
+      // the end of a touch or a click counts, the context goes to
+      // "interrupted" after a call or lock and must be resumed again, and
+      // without the "playback" audio session the silent switch mutes the
+      // page entirely.
       (function () {
         var Orig = window.AudioContext || window.webkitAudioContext;
+        // iOS before 17 has no audio session API. A looping silent <audio>
+        // started in a gesture moves the page to the "playback" session
+        // instead, which the silent switch does not mute. It stops while the
+        // tab is hidden so the phone can sleep.
+        var SILENT_WAV = "data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YSADAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA==";
+        var silent = null;
+        function silentLoop(on) {
+          try {
+            if (!on) { if (silent) silent.pause(); return; }
+            if (!silent) {
+              silent = new Audio(SILENT_WAV);
+              silent.loop = true;
+              silent.setAttribute("playsinline", "");
+            }
+            var p = silent.play();
+            if (p && p.catch) p.catch(function () {});
+          } catch (e) {}
+        }
+        function playbackSession() {
+          try {
+            if (navigator.audioSession) {
+              if (navigator.audioSession.type !== "playback") navigator.audioSession.type = "playback";
+            } else if (window.psoxideIOS) {
+              silentLoop(true);
+            }
+          } catch (e) {}
+        }
+        // True once the page is known to play through the silent switch.
+        window.psoxideSilentBypass = function () {
+          try { return !!navigator.audioSession && navigator.audioSession.type === "playback"; }
+          catch (e) { return false; }
+        };
+        playbackSession();
         if (!Orig) return;
         var ctxs = [];
-        function suspended() {
-          return ctxs.some(function (c) { return c.state === "suspended"; });
+        function notRunning() {
+          return ctxs.some(function (c) { return c.state !== "running" && c.state !== "closed"; });
         }
         function update() {
           var hint = document.getElementById("psoxide-sound-hint");
-          if (hint) hint.hidden = !suspended();
+          if (hint) hint.hidden = !notRunning();
         }
         function Patched(opts) {
+          playbackSession();
           var c = new Orig(opts);
           ctxs.push(c);
           c.addEventListener("statechange", update);
@@ -111,10 +203,26 @@
         }
         Patched.prototype = Orig.prototype;
         window.AudioContext = Patched;
-        window.webkitAudioContext = Patched;
+        if (window.webkitAudioContext) window.webkitAudioContext = Patched;
+        // A silent one-sample buffer played inside the gesture is what iOS
+        // wants before it lets a context run.
+        function poke(c) {
+          try {
+            var src = c.createBufferSource();
+            src.buffer = c.createBuffer(1, 1, 22050);
+            src.connect(c.destination);
+            src.start(0);
+          } catch (e) {}
+        }
         function resume() {
+          playbackSession();
           ctxs.forEach(function (c) {
-            if (c.state === "suspended") c.resume().then(update, update);
+            if (c.state === "running" || c.state === "closed") return;
+            try {
+              var p = c.resume();
+              if (p && p.then) p.then(update, update);
+            } catch (e) {}
+            poke(c);
           });
         }
         // iOS only counts the end of a touch (and a click) as the gesture
@@ -122,12 +230,28 @@
         ["pointerdown", "pointerup", "keydown", "touchstart", "touchend", "click"].forEach(function (ev) {
           window.addEventListener(ev, resume, true);
         });
+        // Back from a call, the lock screen or another tab: try again (this
+        // only works where the browser allows it, otherwise the next tap does).
+        document.addEventListener("visibilitychange", function () {
+          if (document.visibilityState === "visible") resume();
+          else if (!navigator.audioSession) silentLoop(false);
+        });
+        window.addEventListener("pageshow", resume);
+        window.addEventListener("focus", resume);
         window.psoxideUnlockAudio = resume;
+        // For a person (or a test) to read what the audio side is doing.
+        window.psoxideAudioDebug = function () {
+          return {
+            states: ctxs.map(function (c) { return c.state; }),
+            silentLoop: !!silent && !silent.paused,
+            session: navigator.audioSession ? navigator.audioSession.type : null,
+          };
+        };
         // Pad presses are not DOM events. Try a resume on one while sound is
         // still blocked; browsers that do not count a pad press as a gesture
         // keep the hint up until a click or key.
         setInterval(function () {
-          if (!suspended() || !navigator.getGamepads) return;
+          if (!notRunning() || !navigator.getGamepads) return;
           var pads = navigator.getGamepads();
           for (var i = 0; i < pads.length; i++) {
             if (pads[i] && pads[i].buttons.some(function (b) { return b.pressed; })) {
@@ -263,6 +387,22 @@
       .psoxide-tap-play svg { width: 38px; height: 38px; margin-left: 5px; fill: #22c8e5; }
       .psoxide-tap-label { font-size: 15px; font-weight: 650; letter-spacing: 0.18em; text-transform: uppercase; }
       .psoxide-tap-note { color: #8997a6; font-size: 12px; font-weight: 600; letter-spacing: 0.1em; min-height: 1.4em; }
+      .psoxide-silent {
+        position: fixed; z-index: 2147483647; display: none; align-items: center; gap: 10px;
+        left: 50%; transform: translateX(-50%);
+        bottom: max(28px, calc(env(safe-area-inset-bottom) + 18px));
+        width: max-content; max-width: calc(100vw - 32px); padding: 8px 8px 8px 16px; border-radius: 999px;
+        background: rgba(22, 26, 34, 0.92); color: #e2e8f0;
+        box-shadow: 0 0 0 1.5px rgba(226, 232, 240, 0.7);
+        font: 650 13px Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        letter-spacing: 0.04em;
+      }
+      .psoxide-silent.is-on { display: flex; }
+      .psoxide-silent button {
+        flex: none; border: 0; border-radius: 999px; padding: 8px 14px; min-height: 36px;
+        background: #22c8e5; color: #06222a; font: 700 12px inherit; letter-spacing: 0.08em;
+        text-transform: uppercase; cursor: pointer;
+      }
       @keyframes psoxide-tap-pulse {
         0%, 100% { box-shadow: 0 0 0 1.5px rgba(34, 200, 229, 0.6), 0 0 0 0 rgba(34, 200, 229, 0.25); }
         50% { box-shadow: 0 0 0 1.5px rgba(34, 200, 229, 0.9), 0 0 0 14px rgba(34, 200, 229, 0); }
@@ -445,6 +585,10 @@
         <svg class="psoxide-icon-muted" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9v6h4l5 5V4L7 9H3zm13.59 3L19 9.59 17.59 8.17 15.17 10.59 12.76 8.17 11.34 9.59 13.76 12l-2.42 2.41 1.42 1.42 2.41-2.42 2.42 2.42L19 14.41z" /></svg>
       </button>
     </div>
+    <div id="psoxide-silent" class="psoxide-silent" role="status">
+      <span>No sound? Switch off silent mode.</span>
+      <button id="psoxide-silent-ok" type="button">Got it</button>
+    </div>
     <noscript>PSoXide requires JavaScript.</noscript>
     <script>
       // Touch devices. The controller itself is drawn and handled by the
@@ -464,6 +608,23 @@
           lastEnd = now;
         }, { passive: false });
 
+        // iPhone silent switch: web audio is muted by it unless the page is in
+        // the "playback" session (see the audio script). The switch cannot be
+        // read, so where the bypass is not confirmed, say so once.
+        var silentBox = document.getElementById("psoxide-silent");
+        (function () {
+          var KEY = "psoxide.silenthint";
+          function seen() { try { return localStorage.getItem(KEY) === "1"; } catch (e) { return false; } }
+          function remember() { try { localStorage.setItem(KEY, "1"); } catch (e) {} }
+          if (!window.psoxideIOS || seen() || (window.psoxideSilentBypass && window.psoxideSilentBypass())) return;
+          silentBox.classList.add("is-on");
+          var timer = null;
+          function hide() { silentBox.classList.remove("is-on"); if (timer) clearTimeout(timer); }
+          document.getElementById("psoxide-silent-ok").addEventListener("click", function (e) {
+            e.preventDefault(); e.stopPropagation(); remember(); hide();
+          });
+          window.psoxideSilentLater = function () { timer = setTimeout(hide, 10000); };
+        })();
         var tap = document.getElementById("psoxide-tap");
         var note = document.getElementById("psoxide-tap-note");
         var loader = document.getElementById("psoxide-loader");
@@ -498,6 +659,7 @@
           }
           keepAwake();
           tap.classList.remove("is-on");
+          if (window.psoxideSilentLater) window.psoxideSilentLater();
         }
         tap.addEventListener("click", go);
       })();

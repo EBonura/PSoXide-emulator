@@ -227,7 +227,12 @@ fn main() {
 
     // Forward Rust panics to the devtools console instead of an opaque
     // `RuntimeError: unreachable`, so a panic during init is debuggable.
-    console_error_panic_hook::set_once();
+    // The page's own fatal-error box (index.html) also shows the message, so
+    // a failure on a phone, where there is no console, can be photographed.
+    std::panic::set_hook(Box::new(|info| {
+        console_error_panic_hook::hook(info);
+        web_touch::show_fatal(&info.to_string());
+    }));
 
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
