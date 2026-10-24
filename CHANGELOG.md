@@ -9,6 +9,19 @@
   loops removed, a hot-line range file, and a spill gate for registered
   kernels. Both oracles are inert unless set: a Half-Life replay is
   cycle-identical bucket by bucket with them off.
+
+- A new home screen replaces the cross media bar. It opens at once with the PSoXide
+  Demo Disc as one low-poly case on a quiet floor, a title, one line and one button
+  ("Start disc"); "What's on it" opens only when asked. Your own games get an "Open a
+  games folder" case and smaller cases for recent discs. On a first visit a line under
+  the disc counts three seconds and starts it, and any input cancels that and keeps
+  you home; later visits stay home. Library, Settings (real sliders, toggles and
+  choices), a pause list, calm welcome pages and a Debug sidebar with tabs and a
+  pinned summary all use the same controller-first focus. Box art for your own discs
+  is fetched at run time from public community collections (by boot serial, then by
+  file name), cached, credited and switchable off. The phone "tap to play" gate is
+  gone. Desktop, phone portrait, small phone and phone landscape are covered by new
+  journeys.
 - Web player menus, fullscreen and controller polish. The texture filter is one
   control (Settings), "Reconnect saved games" became "Reopen your games folder"
   and shows only after a folder was connected, and a few labels now say what they

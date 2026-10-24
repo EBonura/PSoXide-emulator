@@ -140,3 +140,15 @@ pub fn flag(name: &str) -> bool {
                 .any(|pair| pair == format!("{name}=1"))
         })
 }
+
+/// The `countdown` URL parameter in seconds (1 to 60): the browser journeys
+/// lengthen the first-visit countdown so a slow machine cannot outrun them.
+pub fn countdown_param() -> Option<f32> {
+    let search = web_sys::window()?.location().search().ok()?;
+    let value = search
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("countdown="))?;
+    let secs: f32 = value.parse().ok()?;
+    (1.0..=60.0).contains(&secs).then_some(secs)
+}

@@ -17,6 +17,11 @@ back by itself) and are enforced by `src/session.rs` plus the browser suite in
   the game was, unless the player had paused it themselves, and then it stays paused.
 - The menu never reopens by itself. The only exception is a guest fault, which shows the menu
   so the player can reset.
+- The page opens on the home screen while the demo disc streams and boots behind it. On a first
+  visit only, a line under the disc counts three seconds once the disc is ready and then starts
+  it; any input (a key, a pad button or stick, a click, a tap) cancels the countdown and that
+  input does nothing else. Later visits stay on the home screen until the player presses Start
+  disc. The embedded player (`?embed=1`) has no home screen.
 - Nothing needs a page refresh.
 - Every device presents an analog DualShock from the first poll in the browser (the demo disc
   needs one): keyboard, touchscreen and gamepads. Native keeps its own defaults (keyboard
@@ -26,17 +31,18 @@ back by itself) and are enforced by `src/session.rs` plus the browser suite in
 
 | Journey | Phone (touch) | Desktop (keyboard, gamepad) |
 |---|---|---|
-| First visit | Page loads, "tap to play" splash, one tap starts audio and the demo disc. Controller shows, guest is analog. | The demo disc boots by itself, guest is analog, arrow keys drive the launcher with no F9. |
-| Click or tap to play | The splash tap. | Nothing to click. |
+| First visit | Home opens at once with the Demo Disc case and a countdown line; with no input the disc starts. The first tap also unlocks sound. Controller shows once the game runs, guest is analog. | Same: home, countdown, then the demo disc runs, guest is analog, arrow keys drive the launcher with no F9. |
+| Start disc | Start disc button. | Enter, Cross, Start disc, or the countdown. |
 | Play | 10 pad buttons, D-pad, two floating sticks, Menu and Fullscreen buttons. | Keyboard (arrows are D-pad and left stick, F/G/H/X face, Q/E/1/3 shoulders, Enter Start, Backspace Select, I/J/K/L right stick) or a gamepad in the standard mapping. |
 | Open the menu | Menu button. Game pauses. | Esc, Select+Start, or the toolbar. Game pauses. |
 | Close the menu | Menu button, or Back. Game resumes. | Esc, Select+Start, Circle/G, or Resume. Game resumes. |
 | Reset | Menu, Game, Reset. Game restarts in place, menu closes, no download. | Toolbar Reset, menu Game / Reset, or the pad. Same. |
 | Pick the same disc again | Menu, Library, Homebrew, PSoXide Demo Disc. Restarts, no download. | Same. |
+| Open a games folder | Home, the folder case, Choose folder (or Library, Open a games folder). | Same. Box art for the folder's discs is fetched by file name and cached; offline or a miss leaves a generated case. |
 | Pick another program | Library entry loads it; the running game keeps playing until the new one boots. | Same. |
 | Rotate | Controller re-lays out, game and menu state untouched. | Resize keeps state. |
 | Background and return | Held buttons release, the game keeps its state. | Same. |
-| Reload the page | Splash again, disc boots from the browser cache. | The disc boots again. |
+| Reload the page | Home again, no countdown, the disc comes from the browser cache. | Same. |
 | Revisit | Volume, filters and key bindings persist (`localStorage`). | Same. |
 | Browser without WebGPU | One plain sentence on the loader instead of a panic. | Same. |
 | Fullscreen button | Enters fullscreen where the browser allows it. An iPhone has no Fullscreen API: inside another site's frame the button opens the player's own page in its own tab, on a page of its own it says how to Add to Home Screen (the page ships a web manifest with `display: fullscreen`). | The toolbar and the menu's Fullscreen row. |
@@ -100,11 +106,11 @@ for a phone): 59.3 guest fps at 1x (6.3 ms of emulation per guest frame), 38.7 f
 builds with fat LTO, one codegen unit, opt-level 3, `wasm-opt -O4` and simd128; wasm-opt -O3, -O4
 and -O4 --converge, and simd128 off, all measured within noise of each other, so nothing changed.
 
-Results on the landed build (Chrome 155 headless, macOS; WebKit was not driven, see NOTES):
+Results on the landed build (Chrome headless, macOS; WebKit was not driven, see NOTES): 193 of 193 steps pass.
 
 | Journey | Step | Result |
 |---|---|---|
-| desktop-direct | first visit: the demo disc boots by itself and runs | pass |
+| desktop-direct | first visit: the home screen counts down, then the demo disc runs | pass |
 | desktop-direct | guest sees an analog DualShock with no F9 step | pass |
 | desktop-direct | keyboard arrow reaches guest port 1 (left stick and D-pad) | pass |
 | desktop-direct | keyboard Cross (F) reaches the guest | pass |
@@ -118,9 +124,25 @@ Results on the landed build (Chrome 155 headless, macOS; WebKit was not driven, 
 | desktop-direct | hiding and showing the tab leaves the game running with the menu closed | pass |
 | desktop-direct | resizing the window (rotate) keeps the game and the menu state | pass |
 | desktop-direct | a pad connected later is analog and drives the guest | pass |
-| desktop-direct | reload: the player comes back running with the menu closed | pass |
+| desktop-direct | reload: a return visit stays on the home screen until Start disc | pass |
 | desktop-direct | page logged no errors | pass |
-| desktop-iframe | first visit: the demo disc boots by itself and runs | pass |
+| desktop-home | first visit: Home opens at once on the demo disc, with the countdown inline and nothing on top | pass |
+| desktop-home | 'What is on it' opens on demand and closes again | pass |
+| desktop-home | the countdown is cancelled by a key and the visitor stays on Home | pass |
+| desktop-home | a return visit stays on Home with no countdown, and Start disc starts the disc | pass |
+| desktop-home | the countdown is cancelled by a click and the visitor stays on Home | pass |
+| desktop-home | the countdown is cancelled by a pad button and the visitor stays on Home | pass |
+| desktop-home | the countdown is cancelled by a stick and the visitor stays on Home | pass |
+| desktop-home | Library, Settings and Back: the nav opens each page and Back returns Home | pass |
+| desktop-home | the keyboard moves focus: right changes the case, up reaches the nav, Enter opens it | pass |
+| desktop-home | the welcome pages page forward and back, and Close returns Home | pass |
+| desktop-home | Settings rows are real controls: a toggle flips and a slider drags | pass |
+| desktop-covers | cover fetch (hit): opening a folder asks the collections by file name | pass |
+| desktop-covers | a cached cover is not fetched again after a reload | pass |
+| desktop-covers | cover fetch (miss): opening a folder asks the collections by file name | pass |
+| desktop-covers | cover fetch (offline): opening a folder asks the collections by file name | pass |
+| desktop-covers | box art switched off in Settings: opening a folder fetches nothing | pass |
+| desktop-iframe | first visit: the home screen counts down, then the demo disc runs | pass |
 | desktop-iframe | guest sees an analog DualShock with no F9 step | pass |
 | desktop-iframe | keyboard arrow reaches guest port 1 (left stick and D-pad) | pass |
 | desktop-iframe | keyboard Cross (F) reaches the guest | pass |
@@ -134,7 +156,7 @@ Results on the landed build (Chrome 155 headless, macOS; WebKit was not driven, 
 | desktop-iframe | hiding and showing the tab leaves the game running with the menu closed | pass |
 | desktop-iframe | resizing the window (rotate) keeps the game and the menu state | pass |
 | desktop-iframe | a pad connected later is analog and drives the guest | pass |
-| desktop-iframe | reload: the player comes back running with the menu closed | pass |
+| desktop-iframe | reload: a return visit stays on the home screen until Start disc | pass |
 | desktop-iframe | page logged no errors | pass |
 | desktop-menus | the player is up | pass |
 | desktop-menus | Game / Resume (Enter) resumes the game and closes the menu | pass |
@@ -157,10 +179,11 @@ Results on the landed build (Chrome 155 headless, macOS; WebKit was not driven, 
 | desktop-menus | Settings / Touch size changes its value | pass |
 | desktop-menus | Settings / Touch haptics changes its value | pass |
 | desktop-menus | Settings / Left-handed layout changes its value | pass |
+| desktop-menus | Settings / Box art from the internet changes its value | pass |
 | desktop-menus | Settings / UI scale back to 100% (so the later steps aim right) | pass |
 | desktop-menus | Settings / Touch controls cycles back to Auto (desktop shows no pad) | pass |
 | desktop-menus | Settings / Controls opens the controls panel; Esc closes it | pass |
-| desktop-menus | Settings / About opens the card; Enter closes it | pass |
+| desktop-menus | Settings / About opens the welcome pages; Next pages through them and Back closes them | pass |
 | desktop-menus | Library rows: Homebrew expands, the folder rows are present, and closing resumes | pass |
 | desktop-menus | toolbar: save icon opens the save-states panel | pass |
 | desktop-menus | toolbar: controller icon opens the controls panel | pass |
@@ -184,7 +207,7 @@ Results on the landed build (Chrome 155 headless, macOS; WebKit was not driven, 
 | desktop-gamepad-iframe | pad navigation: D-pad moves the selection, Circle closes the menu and resumes | pass |
 | desktop-gamepad-iframe | pad navigation: Cross on Game / Reset restarts the game in place | pass |
 | desktop-gamepad-iframe | page logged no errors | pass |
-| phone-portrait | first visit: the tap-to-play splash shows, then the demo disc runs | pass |
+| phone-portrait | first visit: the home screen counts down on a phone, then the demo disc runs | pass |
 | phone-portrait | the controller is on screen, laid out inside the window, and the guest is analog | pass |
 | phone-portrait | every pad button reaches guest port 1 with the right PS1 bit | pass |
 | phone-portrait | the D-pad registers all four directions | pass |
@@ -195,9 +218,9 @@ Results on the landed build (Chrome 155 headless, macOS; WebKit was not driven, 
 | phone-portrait | rotating keeps the game running and re-lays the controller out | pass |
 | phone-portrait | backgrounding and returning releases held buttons and keeps the game running | pass |
 | phone-portrait | the fullscreen button does not break the player | pass |
-| phone-portrait | reload comes back to the tap-to-play splash, then plays | pass |
+| phone-portrait | reload comes back to the home screen; tapping Start disc plays | pass |
 | phone-portrait | page logged no errors | pass |
-| phone-iframe | first visit: the tap-to-play splash shows, then the demo disc runs | pass |
+| phone-iframe | first visit: the home screen counts down on a phone, then the demo disc runs | pass |
 | phone-iframe | the controller is on screen, laid out inside the window, and the guest is analog | pass |
 | phone-iframe | every pad button reaches guest port 1 with the right PS1 bit | pass |
 | phone-iframe | the D-pad registers all four directions | pass |
@@ -208,9 +231,45 @@ Results on the landed build (Chrome 155 headless, macOS; WebKit was not driven, 
 | phone-iframe | rotating keeps the game running and re-lays the controller out | pass |
 | phone-iframe | backgrounding and returning releases held buttons and keeps the game running | pass |
 | phone-iframe | the fullscreen button does not break the player | pass |
-| phone-iframe | reload comes back to the tap-to-play splash, then plays | pass |
+| phone-iframe | reload comes back to the home screen; tapping Start disc plays | pass |
 | phone-iframe | page logged no errors | pass |
-| phone-landscape | first visit: the tap-to-play splash shows, then the demo disc runs | pass |
+| phone-home | first visit: Home opens at once on the demo disc, with the countdown inline and nothing on top | pass |
+| phone-home | 'What is on it' opens on demand and closes again | pass |
+| phone-home | the countdown is cancelled by a key and the visitor stays on Home | pass |
+| phone-home | a return visit stays on Home with no countdown, and Start disc starts the disc | pass |
+| phone-home | the countdown is cancelled by a tap and the visitor stays on Home | pass |
+| phone-home | a return visit stays on Home with no countdown, and Start disc starts the disc | pass |
+| phone-home | the countdown is cancelled by a pad button and the visitor stays on Home | pass |
+| phone-home | the countdown is cancelled by a stick and the visitor stays on Home | pass |
+| phone-home | Library, Settings and Back: the nav opens each page and Back returns Home | pass |
+| phone-home | the keyboard moves focus: right changes the case, up reaches the nav, Enter opens it | pass |
+| phone-home | the welcome pages page forward and back, and Close returns Home | pass |
+| phone-home | Settings rows are real controls: a toggle flips and a slider drags | pass |
+| phone-home-small | first visit: Home opens at once on the demo disc, with the countdown inline and nothing on top | pass |
+| phone-home-small | 'What is on it' opens on demand and closes again | pass |
+| phone-home-small | the countdown is cancelled by a key and the visitor stays on Home | pass |
+| phone-home-small | a return visit stays on Home with no countdown, and Start disc starts the disc | pass |
+| phone-home-small | the countdown is cancelled by a tap and the visitor stays on Home | pass |
+| phone-home-small | a return visit stays on Home with no countdown, and Start disc starts the disc | pass |
+| phone-home-small | the countdown is cancelled by a pad button and the visitor stays on Home | pass |
+| phone-home-small | the countdown is cancelled by a stick and the visitor stays on Home | pass |
+| phone-home-small | Library, Settings and Back: the nav opens each page and Back returns Home | pass |
+| phone-home-small | the keyboard moves focus: right changes the case, up reaches the nav, Enter opens it | pass |
+| phone-home-small | the welcome pages page forward and back, and Close returns Home | pass |
+| phone-home-small | Settings rows are real controls: a toggle flips and a slider drags | pass |
+| phone-home-landscape | first visit: Home opens at once on the demo disc, with the countdown inline and nothing on top | pass |
+| phone-home-landscape | 'What is on it' opens on demand and closes again | pass |
+| phone-home-landscape | the countdown is cancelled by a key and the visitor stays on Home | pass |
+| phone-home-landscape | a return visit stays on Home with no countdown, and Start disc starts the disc | pass |
+| phone-home-landscape | the countdown is cancelled by a tap and the visitor stays on Home | pass |
+| phone-home-landscape | a return visit stays on Home with no countdown, and Start disc starts the disc | pass |
+| phone-home-landscape | the countdown is cancelled by a pad button and the visitor stays on Home | pass |
+| phone-home-landscape | the countdown is cancelled by a stick and the visitor stays on Home | pass |
+| phone-home-landscape | Library, Settings and Back: the nav opens each page and Back returns Home | pass |
+| phone-home-landscape | the keyboard moves focus: right changes the case, up reaches the nav, Enter opens it | pass |
+| phone-home-landscape | the welcome pages page forward and back, and Close returns Home | pass |
+| phone-home-landscape | Settings rows are real controls: a toggle flips and a slider drags | pass |
+| phone-landscape | first visit: the home screen counts down on a phone, then the demo disc runs | pass |
 | phone-landscape | the controller is on screen, laid out inside the window, and the guest is analog | pass |
 | phone-landscape | every pad button reaches guest port 1 with the right PS1 bit | pass |
 | phone-landscape | the D-pad registers all four directions | pass |
@@ -221,7 +280,7 @@ Results on the landed build (Chrome 155 headless, macOS; WebKit was not driven, 
 | phone-landscape | rotating keeps the game running and re-lays the controller out | pass |
 | phone-landscape | backgrounding and returning releases held buttons and keeps the game running | pass |
 | phone-landscape | the fullscreen button does not break the player | pass |
-| phone-landscape | reload comes back to the tap-to-play splash, then plays | pass |
+| phone-landscape | reload comes back to the home screen; tapping Start disc plays | pass |
 | phone-landscape | page logged no errors | pass |
 | phone-fullscreen | the fullscreen button is offered even without the Fullscreen API | pass |
 | phone-fullscreen | tapping it on a page of its own explains Add to Home Screen | pass |
@@ -231,7 +290,7 @@ Results on the landed build (Chrome 155 headless, macOS; WebKit was not driven, 
 | phone-fullscreen-iframe | tapping it inside a frame opens the player's own page in a new tab | pass |
 | phone-fullscreen-iframe | the game keeps running and the controller still works | pass |
 | phone-fullscreen-iframe | page logged no errors | pass |
-| phone-small | first visit: the tap-to-play splash shows, then the demo disc runs | pass |
+| phone-small | first visit: the home screen counts down on a phone, then the demo disc runs | pass |
 | phone-small | the controller is on screen, laid out inside the window, and the guest is analog | pass |
 | phone-small | every pad button reaches guest port 1 with the right PS1 bit | pass |
 | phone-small | the D-pad registers all four directions | pass |
@@ -242,5 +301,19 @@ Results on the landed build (Chrome 155 headless, macOS; WebKit was not driven, 
 | phone-small | rotating keeps the game running and re-lays the controller out | pass |
 | phone-small | backgrounding and returning releases held buttons and keeps the game running | pass |
 | phone-small | the fullscreen button does not break the player | pass |
-| phone-small | reload comes back to the tap-to-play splash, then plays | pass |
+| phone-small | reload comes back to the home screen; tapping Start disc plays | pass |
 | phone-small | page logged no errors | pass |
+
+## The home screen
+
+`src/ui/menu/home/` is the shell. It is a view over `MenuState`: the same library, settings and game
+rows, the same `MenuInput` edges from keyboard, pad and touch, the same `MenuAction`s going out. The
+page probe (`psoxideUxState().home`) lists the page, the focus, the countdown and every drawn hit
+area by name, which is how the journeys tap and click what is on screen. Box art comes from
+xlenore/psx-covers by boot serial and from libretro-thumbnails by file name, fetched at run time only
+and cached (IndexedDB on the web, a cache folder on the desktop); Settings has a switch.
+
+Home journeys: `desktop-home`, `phone-home`, `phone-home-small`, `phone-home-landscape` (first visit,
+the countdown cancelled by each input type, return visit, nav, focus, welcome pages, settings
+controls, layout inside the safe area with no overlaps) and `desktop-covers` (a hit, a miss, offline,
+cached, switched off).

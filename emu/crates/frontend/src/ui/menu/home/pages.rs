@@ -29,8 +29,8 @@ pub(super) const WELCOME: [WelcomePage; 4] = [
     WelcomePage {
         title: "A PlayStation, in your browser",
         body: &[
-            "PSoXide is a free emulator for the original PlayStation. It runs homebrew with no BIOS file.",
-            "It is an independent project and is not affiliated with Sony.",
+            "PSoXide is a free PlayStation emulator. It runs homebrew with no BIOS file.",
+            "It is independent and not affiliated with Sony.",
         ],
         links: &[],
     },
@@ -45,16 +45,16 @@ pub(super) const WELCOME: [WelcomePage; 4] = [
     WelcomePage {
         title: "Box art",
         body: &[
-            "Cover pictures for your own discs are fetched while you browse, from the community collections xlenore/psx-covers and libretro-thumbnails, and kept on this device.",
-            "Turn them off in Settings.",
+            "PSoXide fetches cover pictures for your own discs from two community collections, xlenore/psx-covers and libretro-thumbnails, and keeps them on this device.",
+            "You can turn this off in Settings.",
         ],
         links: &[],
     },
     WelcomePage {
         title: "Free to play",
         body: &[
-            "The demo disc is homebrew made with the PSoXide tools. The source is on GitHub.",
-            "If you want to support the project, there is an optional donation on itch.io.",
+            "The demo disc is homebrew made with the PSoXide tools, and the source is on GitHub.",
+            "You can support the project with an optional donation on itch.io.",
         ],
         links: &[
             ("Support PSoXide on itch.io", super::ITCH_URL),

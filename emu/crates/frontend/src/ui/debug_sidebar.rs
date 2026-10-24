@@ -137,7 +137,7 @@ fn draw_contents(ui: &mut egui::Ui, state: &mut AppState, vram_tex: egui::Textur
         for (i, t) in Tab::ALL.iter().enumerate() {
             let selected = tab == i;
             let text = RichText::new(t.label()).color(if selected {
-                theme::ACCENT
+                egui::Color32::WHITE
             } else {
                 theme::TEXT_DIM
             });
@@ -198,7 +198,7 @@ fn summary(ui: &mut egui::Ui, state: &AppState) {
                 .color(theme::ACCENT)
                 .size(theme::FONT_SIZE_HEADING),
         );
-        ui.label(RichText::new(format!("\u{25cf} {label}")).color(color));
+        ui.label(RichText::new(label).color(color));
         if let Some(game) = state.current_game.as_ref() {
             ui.label(RichText::new(&game.title).color(theme::TEXT));
         }

@@ -19,6 +19,15 @@ pub(crate) use covers::CoverState;
 
 /// Seconds of countdown before the demo disc starts on a first visit.
 const COUNTDOWN_SECS: f32 = 3.0;
+
+/// The countdown length: three seconds, or `?countdown=N` in the browser.
+fn countdown_secs() -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(secs) = crate::web_bench::countdown_param() {
+        return secs;
+    }
+    COUNTDOWN_SECS
+}
 /// Where the project's site lives (the quiet link under the home screen).
 const SITE_URL: &str = "https://ebonura.github.io/PSoXide/";
 /// Where the free builds, and the optional donation, live.
@@ -725,7 +734,7 @@ impl HomeState {
         }
         match self.countdown {
             Countdown::Armed if self.feed.demo == DemoStatus::Ready => {
-                self.countdown = Countdown::Running(COUNTDOWN_SECS);
+                self.countdown = Countdown::Running(countdown_secs());
             }
             Countdown::Running(left) => {
                 let left = left - dt;
@@ -1015,7 +1024,7 @@ impl HomeState {
         match (self.countdown, self.feed.demo) {
             (Countdown::Running(left), _) => Some(ProgressLine::Count(
                 left.ceil().max(1.0) as u32,
-                1.0 - left / COUNTDOWN_SECS,
+                1.0 - left / countdown_secs(),
             )),
             (Countdown::Armed, DemoStatus::Loading(f)) => Some(ProgressLine::Loading(f)),
             (Countdown::Cancelled, _) if self.first_visit => Some(ProgressLine::Cancelled),

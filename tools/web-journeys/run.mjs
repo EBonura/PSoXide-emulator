@@ -355,17 +355,33 @@ const DEMO = "demo-disc"; // filled in from the first loaded state
 
 let chrome, cdp, siteServer, parentServer;
 
+// Never leave a Chrome behind: every one this run starts is killed (with its profile directory) when the
+// process exits, on an error, and on a signal. The runs are silent (--mute-audio): nothing checks the
+// speakers, and a stranded Chrome would otherwise keep playing the demo disc.
+const startedChromes = new Map();
+function reapChromes() {
+  for (const [child, profile] of startedChromes) {
+    try { child.kill("SIGKILL"); } catch {}
+    try { fs.rmSync(profile, { recursive: true, force: true }); } catch {}
+  }
+  startedChromes.clear();
+}
+process.on("exit", reapChromes);
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => { reapChromes(); process.exit(130); });
+process.on("uncaughtException", (e) => { console.error(e); reapChromes(); process.exit(2); });
+
 async function launch(hostDpr = 1) {
   siteServer ??= serveSite().listen(PORT, "127.0.0.1");
   parentServer ??= serveParent().listen(PORT + 1, "localhost");
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "psoxide-journeys-"));
   chrome = spawn(CHROME, [
     "--headless=new", `--force-device-scale-factor=${hostDpr}`, `--remote-debugging-port=${DEBUG_PORT}`, `--user-data-dir=${profile}`,
-    "--no-first-run", "--no-default-browser-check", "--enable-unsafe-webgpu",
+    "--no-first-run", "--no-default-browser-check", "--enable-unsafe-webgpu", "--mute-audio",
     "--autoplay-policy=no-user-gesture-required", "--window-size=1280,800",
     "--disable-background-timer-throttling", "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows",
     "about:blank",
   ], { stdio: "ignore" });
+  startedChromes.set(chrome, profile);
   for (let i = 0; i < 60; i++) {
     try {
       const v = await (await fetch(`http://127.0.0.1:${DEBUG_PORT}/json/version`)).json();
@@ -1271,12 +1287,29 @@ async function rowValueOf(page, row) {
 /** Box art: a hit, a miss and the network being offline, with the toggle. Needs the folder picker (top page). */
 async function journeyCovers(label, urlFor) {
   current = label;
-  for (const mode of ["hit", "miss", "offline"]) {
+  for (const mode of ["hit", "miss", "offline", "switched-off"]) {
     const page = await newPage(label);
     await page.viewport(1280, 800, { dpr: 1 });
-    const net = await stubCovers(page, mode);
+    const net = await stubCovers(page, mode === "switched-off" ? "hit" : mode);
     await page.addInit(FAKE_FOLDER);
     await page.goto(urlFor());
+    if (mode === "switched-off") {
+      await step("box art switched off in Settings: opening a folder fetches nothing", async () => {
+        await page.waitFor("the home screen", (s) => s.home?.page === "Home" && s.has_bus, 90000);
+        await page.tapKey("x");
+        await menuSelect(page, "Settings", "Box art from the internet", { enter: false });
+        await page.tapKey("ArrowRight");
+        await page.waitFor("the row to read Off", (s) => s.menu.value === "Off", 4000);
+        await page.tapKey("g");
+        await homeClick(page, "case:1");
+        await homeClick(page, "primary");
+        await page.waitFor("the folder scanned", (s) => s.home.hits.some((h) => h[0] === "case:2"), 15000);
+        await sleep(2500);
+        return net.urls.length === 0 ? true : `fetched while switched off: ${net.urls}`;
+      });
+      await cdp.send("Target.closeTarget", { targetId: page.targetId });
+      continue;
+    }
     await step(`cover fetch (${mode}): opening a folder asks the collections by file name`, async () => {
       await page.waitFor("the home screen", (s) => s.home?.page === "Home" && s.has_bus, 90000);
       await page.tapKey("x"); // cancel the countdown
@@ -1293,7 +1326,7 @@ async function journeyCovers(label, urlFor) {
       return true;
     });
     if (mode === "hit") {
-      await step("a cached cover is not fetched again, and the toggle stops all fetching", async () => {
+      await step("a cached cover is not fetched again after a reload", async () => {
         const before = net.urls.length;
         await page.goto(urlFor());
         await page.waitFor("the home screen", (s) => s.home?.page === "Home" && s.has_bus, 90000);
@@ -1481,7 +1514,8 @@ async function inChrome(hostDpr, fn) {
     await fn();
   } finally {
     try { await cdp.send("Browser.close"); } catch {}
-    chrome.kill();
+    chrome.kill("SIGKILL");
+    startedChromes.delete(chrome);
     await sleep(500);
     try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 }); } catch {}
   }
@@ -1517,7 +1551,11 @@ async function scenarioBench() {
   await page.goto(`http://127.0.0.1:${PORT}/index.html${args.query ?? ""}`);
   // A build with the home screen waits there with the disc ready: press Start disc.
   const first = await page.waitFor("the player or the home screen", (s) => s.running || (s.home && s.menu_open && s.loaded_id), 120000).catch(() => null);
-  if (first && !first.running && first.home) await page.tapKey("Enter");
+  // The first press may only cancel a first-visit countdown: press until the disc runs.
+  for (let i = 0; first && !first.running && first.home && i < 4 && !(await page.ux())?.running; i++) {
+    await page.tapKey("Enter");
+    await sleep(700);
+  }
   // Not the UX probe: this must also run against a build that predates it.
   for (let i = 0; i < 800; i++) {
     const b = await page.bench();
@@ -1577,7 +1615,37 @@ async function scenarioTap() {
   console.log("end", JSON.stringify((await page.ux()).menu));
 }
 
+/** Screenshots at four sizes (works against any build): the first screen, playing, and the menu. */
+async function scenarioShots() {
+  const SIZES = [["desktop", 1280, 800, 1, false], ["phone", 393, 852, 3, true], ["small-phone", 360, 640, 3, true], ["phone-landscape", 852, 393, 3, true]];
+  for (const [name, w, h, dpr, mobile] of SIZES) {
+    await inChrome(dpr, async () => {
+      const page = await newPage(name);
+      await page.viewport(w, h, { dpr, mobile });
+      await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+      await page.goto(direct());
+      await page.waitFor("the player", (s) => s.has_bus, 90000);
+      await sleep(2500);
+      await page.shot(`${args.label}-${name}-1-open`);
+      await waitDemoRunning(page, 120000);
+      await sleep(2500);
+      await page.shot(`${args.label}-${name}-2-playing`);
+      if (mobile) {
+        const t = (await page.ux()).touch;
+        const m = t?.ui.find((b) => b[0] === "menu");
+        if (m) await page.tap(m[1] / dpr, m[2] / dpr);
+      } else {
+        await page.tapKey("Escape");
+      }
+      await sleep(1500);
+      await page.shot(`${args.label}-${name}-3-menu`);
+      await cdp.send("Target.closeTarget", { targetId: page.targetId });
+    });
+  }
+}
+
 async function main() {
+  if (args.scenario === "shots") { await scenarioShots(); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "tap") { await inChrome(1, scenarioTap); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "bench") { await inChrome(1, scenarioBench); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "spam") { await inChrome(1, scenarioSpam); siteServer?.close(); parentServer?.close(); process.exit(0); }
@@ -1586,7 +1654,7 @@ async function main() {
     if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu", "home", "covers"].some((k) => ONLY.includes(k))) {
       await inChrome(1, async () => {
         if (wanted("desktop-direct")) await journeyDesktop("desktop-direct", () => direct());
-        if (wanted("desktop-home")) await journeyHome("desktop-home", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-home")) await journeyHome("desktop-home", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-covers")) await journeyCovers("desktop-covers", () => direct());
         if (wanted("desktop-iframe")) await journeyDesktop("desktop-iframe", () => embedded(), { embeddedMode: true });
         if (wanted("desktop-menus")) await journeyMenus("desktop-menus", () => direct());
@@ -1599,9 +1667,9 @@ async function main() {
       await inChrome(3, async () => {
         if (wanted("phone-portrait")) await journeyPhone("phone-portrait", () => direct(), { w: 393, h: 852, dpr: 3 });
         if (wanted("phone-iframe")) await journeyPhone("phone-iframe", () => embedded(), { w: 393, h: 852, dpr: 3 });
-        if (wanted("phone-home")) await journeyHome("phone-home", () => direct(), { w: 393, h: 852, dpr: 3, mobile: true });
-        if (wanted("phone-home-small")) await journeyHome("phone-home-small", () => direct(), { w: 360, h: 640, dpr: 3, mobile: true });
-        if (wanted("phone-home-landscape")) await journeyHome("phone-home-landscape", () => direct(), { w: 852, h: 393, dpr: 3, mobile: true });
+        if (wanted("phone-home")) await journeyHome("phone-home", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
+        if (wanted("phone-home-small")) await journeyHome("phone-home-small", () => direct("?countdown=12"), { w: 360, h: 640, dpr: 3, mobile: true });
+        if (wanted("phone-home-landscape")) await journeyHome("phone-home-landscape", () => direct("?countdown=12"), { w: 852, h: 393, dpr: 3, mobile: true });
         if (wanted("phone-landscape")) await journeyPhone("phone-landscape", () => direct(), { w: 852, h: 393, dpr: 3 });
         if (wanted("phone-fullscreen")) await journeyFullscreenFallback("phone-fullscreen", () => direct(), { framed: false });
         if (wanted("phone-fullscreen-iframe")) await journeyFullscreenFallback("phone-fullscreen-iframe", () => embedded(), { framed: true });
