@@ -20,7 +20,7 @@ use crate::{icons, theme};
 
 mod home;
 
-pub(crate) use home::{is_first_visit as first_visit, DemoStatus, HomeFeed};
+pub(crate) use home::{is_first_visit as first_visit, DemoStatus, DeviceCommand, HomeFeed};
 
 const CATEGORY_SPACING: f32 = 100.0;
 const ICON_SIZE_ACTIVE: f32 = 32.0;
@@ -622,9 +622,7 @@ impl MenuState {
     /// the browser journey tests' state probe.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub fn panel_probe(&self) -> &'static str {
-        if self.controls_open
-            || (self.open && self.home_section().is_some_and(|(p, _)| p == "Controls"))
-        {
+        if self.controls_open || self.home_page_is_controls() {
             "controls"
         } else if self.about_open || self.home_page_is_welcome() {
             "about"
@@ -827,10 +825,7 @@ impl MenuState {
     /// checks this to route Escape to "close panel" instead of the
     /// menu toggle, and to skip the live-held sync when it's not up.
     pub fn controls_panel_open(&self) -> bool {
-        self.controls_open
-            || self
-                .home_section()
-                .is_some_and(|(page, _)| page == "Controls")
+        self.controls_open || self.home_page_is_controls()
     }
 
     /// Close the controls panel, disarming any pending capture.
@@ -1100,26 +1095,6 @@ impl MenuState {
     /// rebinding works mid-game. `controllers` draws the controller-port
     /// section, which needs the shell's input router. Closing the panel
     /// disarms any pending key capture with it.
-    /// Draw Controls as a section of the shell, in the rect the shell gave it.
-    pub fn draw_controls_section(
-        &mut self,
-        ctx: &egui::Context,
-        rect: Rect,
-        controllers: impl FnOnce(&mut egui::Ui),
-    ) {
-        let mut open = true;
-        controls_panel(
-            ctx,
-            &mut open,
-            &self.controls_labels,
-            &self.controls_live_held,
-            &mut self.controls_capture,
-            &mut self.pending_pointer_action,
-            Some(rect),
-            controllers,
-        );
-    }
-
     pub fn draw_controls(&mut self, ctx: &egui::Context, controllers: impl FnOnce(&mut egui::Ui)) {
         if !self.controls_open {
             return;
@@ -1131,7 +1106,6 @@ impl MenuState {
             &self.controls_live_held,
             &mut self.controls_capture,
             &mut self.pending_pointer_action,
-            None,
             controllers,
         );
         if !self.controls_open {
@@ -2181,15 +2155,14 @@ fn controls_panel(
     held: &[PadBindTarget],
     capture: &mut Option<PadBindTarget>,
     pending_pointer_action: &mut Option<MenuAction>,
-    inline: Option<Rect>,
     controllers: impl FnOnce(&mut egui::Ui),
 ) {
     use egui::{Color32, CornerRadius, Sense, Stroke};
 
     // One knob for the whole drawing: positions, sizes, and font sizes below are
-    // in a 470x300 design space multiplied by this. A section of the shell on a phone is narrower than the drawing: scale it down to fit.
+    // in a 470x300 design space multiplied by this.
     #[allow(non_snake_case)]
-    let S: f32 = inline.map_or(1.35, |r| ((r.width() - 28.0) / 470.0).clamp(0.45, 1.35));
+    const S: f32 = 1.35;
     #[allow(non_snake_case)]
     let CANVAS: Vec2 = Vec2::new(470.0 * S, 300.0 * S);
 
@@ -2761,33 +2734,15 @@ fn controls_panel(
             );
         });
     };
-    match inline {
-        // A section of the shell: the same contents, in the shell's own space.
-        Some(rect) => {
-            egui::Area::new(egui::Id::new("controls-section"))
-                .order(egui::Order::Foreground)
-                .fixed_pos(rect.min)
-                .show(ctx, |ui| {
-                    ui.set_clip_rect(rect);
-                    ui.set_width(rect.width());
-                    egui::ScrollArea::vertical()
-                        .max_height(rect.height())
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| body(ui));
-                });
-        }
-        None => {
-            egui::Window::new("Controls")
-                .open(&mut still_open)
-                .collapsible(false)
-                .resizable(false)
-                .order(egui::Order::Foreground)
-                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-                .vscroll(true)
-                .default_height(ctx.screen_rect().height() - 120.0)
-                .show(ctx, |ui| body(ui));
-        }
-    }
+    egui::Window::new("Controls")
+        .open(&mut still_open)
+        .collapsible(false)
+        .resizable(false)
+        .order(egui::Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .vscroll(true)
+        .default_height(ctx.screen_rect().height() - 120.0)
+        .show(ctx, body);
     *open = still_open;
 }
 /// Paint a save's thumbnail at `size`, loading and caching the

@@ -24,6 +24,10 @@ pub(super) const RING: Color32 = Color32::from_rgb(108, 127, 143);
 pub(super) fn hairline() -> Color32 {
     Color32::from_rgba_unmultiplied(160, 225, 240, 26)
 }
+/// A border that has to be seen: rgba(160,225,240,.22).
+pub(super) fn hairline_strong() -> Color32 {
+    Color32::from_rgba_unmultiplied(160, 225, 240, 56)
+}
 /// The only accent: active, primary, fills (9.95:1).
 pub(super) const ACCENT: Color32 = Color32::from_rgb(34, 200, 229);
 /// Focus outline and corner brackets.

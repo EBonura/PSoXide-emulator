@@ -5,6 +5,7 @@
 //! rows, the same [`MenuInput`] edges from keyboard, pad and touch, the same
 //! [`MenuAction`]s going out. Only the drawing and the focus rules are new.
 
+mod controls;
 mod covers;
 mod grid;
 mod launch;
@@ -18,6 +19,7 @@ use super::{LibraryItem, MenuAction, MenuInput, MenuState};
 use crate::icons;
 use scene::{fade, CoverKind, CYAN};
 
+pub(crate) use controls::Command as DeviceCommand;
 pub(crate) use covers::CoverState;
 
 /// Seconds of countdown before the demo disc starts on a first visit.
@@ -172,6 +174,8 @@ enum Click {
     Row(usize),
     RowBurn(usize),
     Slider(usize, Rect),
+    /// A control of the Controls page.
+    Ctl(controls::Item),
     Dismiss,
 }
 
@@ -189,6 +193,7 @@ pub(crate) struct HomeState {
     feed: HomeFeed,
     dither: Option<egui::TextureHandle>,
     list_scroll: f32,
+    controls: controls::ControlsState,
     press: Option<Press>,
     hits: Vec<(Rect, Click)>,
     pub(super) covers: CoverState,
@@ -201,9 +206,15 @@ pub(crate) struct HomeState {
     /// stick, seen before the menu's own edges): that press only cancels.
     cancelled_this_frame: bool,
     launch: Option<launch::Launch>,
-    /// The launch has been handed to the app; the sequence holds on its last moment.
+    /// The launch has been handed to the app (it starts with the sequence, so the boot
+    /// runs alongside the animation).
     launch_sent: bool,
+    /// The sequence has played out; it holds on its last moment until the game is up.
+    launch_done: bool,
     pending_launch: Option<MenuAction>,
+    /// The egui clock at the last drawn frame: the sequence runs on elapsed time, so a slow
+    /// or throttled page skips frames and still takes the same time.
+    clock: Option<f64>,
     label_tex: Option<egui::TextureHandle>,
     /// Where a Controls or Debug section is drawn this frame (by the shell around it).
     section: Option<Rect>,
@@ -244,6 +255,7 @@ impl HomeState {
             feed: HomeFeed::default(),
             dither: None,
             list_scroll: 0.0,
+            controls: controls::ControlsState::default(),
             press: None,
             hits: Vec::new(),
             covers: CoverState::default(),
@@ -253,7 +265,9 @@ impl HomeState {
             cancelled_this_frame: false,
             launch: None,
             launch_sent: false,
+            launch_done: false,
             pending_launch: None,
+            clock: None,
             label_tex: None,
             section: None,
             compact: false,
@@ -283,6 +297,7 @@ impl HomeState {
             self.last_row = usize::MAX;
             self.launch = None;
             self.launch_sent = false;
+            self.launch_done = false;
             if self.pausing(ms) {
                 ms.select_category("Game");
             }
@@ -388,6 +403,7 @@ impl MenuState {
                     Click::Slider(i, _) => {
                         format!("slider:{}", rows.get(*i).map_or("", |r| r.label.as_str()))
                     }
+                    Click::Ctl(item) => item.probe_name(),
                     Click::Dismiss => "dismiss".into(),
                 };
                 format!(
@@ -411,7 +427,7 @@ impl MenuState {
             _ => -1.0,
         };
         format!(
-            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"cases\":[{}],\"hits\":[{}]}}",
+            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"controls\":{},\"cases\":[{}],\"hits\":[{}]}}",
             h.page.name(),
             if h.zone == Zone::Nav { "nav" } else { "body" },
             self.home_probe().1,
@@ -425,6 +441,7 @@ impl MenuState {
             nav_items(h.pausing(self)).len(),
             h.first_visit,
             h.covers.loaded(),
+            h.controls.probe_json(self),
             cases.join(","),
             hits.join(",")
         )
@@ -452,12 +469,17 @@ impl MenuState {
         }
         h.page = match page {
             "game" => Page::Game,
-            "controls" => Page::Controls,
+            "controls" | "controls-keyboard" | "controls-touch" => Page::Controls,
             "debug" => Page::Debug,
             "settings" => Page::Settings,
             "welcome" => Page::Welcome,
             _ => Page::Home,
         };
+        h.controls.show_tab(match page {
+            "controls-keyboard" => 1,
+            "controls-touch" => 2,
+            _ => 0,
+        });
         h.case_focus = case;
         h.case_pos = case as f32;
         h.feed.keyboard = true;
@@ -514,7 +536,7 @@ impl MenuState {
         let h = self.home.as_ref()?;
         let rect = h.section?;
         match h.page {
-            Page::Controls | Page::Debug if self.open => Some((h.page.name(), rect)),
+            Page::Debug if self.open => Some((h.page.name(), rect)),
             _ => None,
         }
     }
@@ -529,6 +551,31 @@ impl MenuState {
                 .home
                 .as_ref()
                 .is_some_and(|h| !h.started || h.page != Page::Home)
+    }
+
+    /// Whether the Controls page is showing.
+    pub(super) fn home_page_is_controls(&self) -> bool {
+        self.open && self.home.as_ref().is_some_and(|h| h.page == Page::Controls)
+    }
+
+    /// Whether the Controls page wants this frame's devices from the app.
+    pub fn home_wants_devices(&self) -> bool {
+        self.home.as_ref().is_some_and(|h| h.wants_devices())
+    }
+
+    /// Hand the Controls page the connected devices.
+    pub(crate) fn home_set_devices(&mut self, devices: Vec<crate::input::InputDeviceInfo>) {
+        if let Some(h) = self.home.as_mut() {
+            h.set_controls_devices(devices);
+        }
+    }
+
+    /// What the Controls page asked to change on a device.
+    pub(crate) fn home_take_device_commands(&mut self) -> Vec<DeviceCommand> {
+        self.home
+            .as_mut()
+            .map(|h| h.take_controls_commands())
+            .unwrap_or_default()
     }
 
     /// Whether the welcome pages are showing.
@@ -740,7 +787,15 @@ impl HomeState {
                 frozen: false,
             });
             self.launch_sent = false;
+            self.launch_done = false;
             self.peek = false;
+            // A disc that has to load starts loading with the sequence. The demo disc waiting
+            // behind the shell is already booted: it resumes when the sequence ends.
+            if !(matches!(action, MenuAction::StartDemoDisc) && self.feed.demo == DemoStatus::Ready)
+            {
+                self.launch_sent = true;
+                self.pending_launch = Some(action.clone());
+            }
             return None;
         }
         Some(action.clone())
@@ -750,7 +805,10 @@ impl HomeState {
         if let Some(action) = ms.pending_pointer_action.take() {
             return Some(action);
         }
-        if input.toggle_open {
+        let playing = self.launch.is_some() && !self.launch_done;
+        // While the sequence plays, Escape and the other menu toggles skip it: the shell is not
+        // reopened under a game that is already booting.
+        if input.toggle_open && !playing {
             ms.open = !ms.open;
         }
         self.note_open_state(ms);
@@ -764,9 +822,6 @@ impl HomeState {
                 return self.activate(&case, &action, true);
             }
         }
-        if !ms.open {
-            return None;
-        }
         let any = input.up
             || input.down
             || input.left
@@ -778,6 +833,16 @@ impl HomeState {
             || input.options
             || input.letter_prev
             || input.letter_next;
+        if playing {
+            // Any input skips the sequence to the boot (not the press that began it).
+            if any || input.toggle_open {
+                self.skip_launch();
+            }
+            return None;
+        }
+        if !ms.open {
+            return None;
+        }
         if any {
             // The press that cancels the countdown only cancels it: it does not
             // also press Start disc.
@@ -793,16 +858,13 @@ impl HomeState {
         if ms.about_open {
             ms.about_open = false;
         }
-        // The launch sequence takes input only to skip it, or to give up when
-        // the game is slow to come.
-        if let Some(l) = self.launch.as_mut() {
+        // After the sequence the shell holds on the spinning disc while the game loads:
+        // any input gives up and goes back to Home.
+        if self.launch.is_some() {
             if any {
-                if self.launch_sent {
-                    self.launch = None;
-                    self.launch_sent = false;
-                } else if l.t > launch::SKIP_AFTER {
-                    l.t = launch::DURATION;
-                }
+                self.launch = None;
+                self.launch_sent = false;
+                self.launch_done = false;
             }
             return None;
         }
@@ -819,7 +881,8 @@ impl HomeState {
             Page::Welcome => self.update_welcome(input),
             Page::Home => self.update_home(ms, input),
             Page::Game | Page::Settings => self.update_list(ms, input),
-            Page::Controls | Page::Debug => self.update_section(ms, input),
+            Page::Controls => self.update_controls(ms, input),
+            Page::Debug => self.update_section(ms, input),
         }
     }
 
@@ -931,6 +994,12 @@ impl HomeState {
 
     /// Show a section of the shell.
     fn open_nav(&mut self, ms: &mut MenuState, item: NavItem) {
+        if item == NavItem::Controls && self.page != Page::Controls {
+            self.controls.reset();
+        }
+        if item != NavItem::Controls {
+            ms.controls_capture = None;
+        }
         self.page = item.page();
         match item {
             NavItem::Game => ms.select_category("Game"),
@@ -1023,7 +1092,17 @@ impl HomeState {
             );
         }
         ms.about_open = false;
-        let target = if ms.open { 1.0 } else { 0.0 };
+        // Elapsed time, not the frame step: the shell clamps that to 0.1 s for the emulator, which
+        // would stretch the sequence on a page that gets a few frames a second.
+        let now = ctx.input(|i| i.time);
+        let dt = self
+            .clock
+            .map_or(dt, |before| (now - before) as f32)
+            .clamp(0.0, 1.5);
+        self.clock = Some(now);
+        // The sequence keeps the shell up while the game boots behind it.
+        let playing = self.launch.is_some() && !self.launch_done;
+        let target = if ms.open || playing { 1.0 } else { 0.0 };
         let k = (super::FADE_SPEED * dt).min(0.5);
         ms.appear += (target - ms.appear) * k;
         if (ms.appear - target).abs() < 0.01 {
@@ -1050,11 +1129,7 @@ impl HomeState {
         if activity {
             self.cancel_countdown();
             // Any input skips the launch to the boot (not the press that began it).
-            if let Some(l) = self.launch.as_mut() {
-                if !self.launch_sent && !l.frozen && l.t > launch::SKIP_AFTER {
-                    l.t = launch::DURATION;
-                }
-            }
+            self.skip_launch();
         }
         let appear = ms.appear;
         let full = ctx.screen_rect();
@@ -1064,7 +1139,7 @@ impl HomeState {
         ));
         self.hits.clear();
         let lay = Layout::new(full, self.feed.safe);
-        let in_game = self.pausing(ms);
+        let in_game = self.pausing(ms) && self.launch.is_none();
         self.dither.get_or_insert_with(|| {
             ctx.load_texture(
                 "home-dither",
@@ -1113,7 +1188,8 @@ impl HomeState {
             match self.page {
                 Page::Home => self.draw_home(ms, ctx, &mut pc),
                 Page::Welcome => self.draw_welcome(ms, &mut pc),
-                Page::Controls | Page::Debug => self.draw_section_frame(&mut pc),
+                Page::Controls => controls::draw(self, ms, ctx, &mut pc),
+                Page::Debug => self.draw_section_frame(&mut pc),
                 Page::Game | Page::Settings => self.draw_list_page(ms, ctx, &mut pc),
             }
         }
@@ -1272,8 +1348,17 @@ fn decode_label(ctx: &egui::Context) -> Option<egui::TextureHandle> {
 }
 
 impl HomeState {
-    /// Advance the launch sequence; at its end the action goes to the app and
-    /// the last moment holds until the game's boot closes the shell.
+    /// Jump the sequence to its end. The press that started it does not count.
+    fn skip_launch(&mut self) {
+        if let Some(l) = self.launch.as_mut() {
+            if !self.launch_done && !l.frozen && l.t > launch::SKIP_AFTER {
+                l.t = launch::DURATION;
+            }
+        }
+    }
+
+    /// Advance the launch sequence by elapsed time. At its end the game gets its action if it
+    /// has not had it yet, and the last moment holds until the game's boot closes the shell.
     fn tick_launch(&mut self, dt: f32) {
         let Some(l) = self.launch.as_mut() else {
             return;
@@ -1281,16 +1366,19 @@ impl HomeState {
         if l.frozen {
             return;
         }
-        if self.launch_sent {
+        if self.launch_done {
             // Holding on the spinning disc while the game loads.
             l.t = launch::DURATION - 0.1;
             return;
         }
         l.t += dt;
         if l.t >= launch::DURATION {
-            self.launch_sent = true;
+            self.launch_done = true;
             l.t = launch::DURATION - 0.1;
-            self.pending_launch = Some(l.action.clone());
+            if !self.launch_sent {
+                self.launch_sent = true;
+                self.pending_launch = Some(l.action.clone());
+            }
         }
     }
 
@@ -2208,10 +2296,17 @@ impl HomeState {
                     ms.pending_pointer_action = Some(action);
                 }
             } else if press.travel > 10.0
-                && matches!(self.page, Page::Game | Page::Settings | Page::Home)
+                && matches!(
+                    self.page,
+                    Page::Game | Page::Settings | Page::Home | Page::Controls
+                )
             {
                 press.scrolled = true;
-                self.list_scroll = (self.list_scroll - delta.y).max(0.0);
+                if self.page == Page::Controls {
+                    self.controls.scroll_by(-delta.y);
+                } else {
+                    self.list_scroll = (self.list_scroll - delta.y).max(0.0);
+                }
             }
         }
         if released {
@@ -2320,6 +2415,7 @@ impl HomeState {
             Click::Dismiss => {
                 self.page = Page::Home;
             }
+            Click::Ctl(item) => return self.activate_item(ms, &item),
             Click::Slider(..) => {}
         }
         None

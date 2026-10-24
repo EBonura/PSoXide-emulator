@@ -111,9 +111,19 @@ class Cdp {
   send(method, params = {}, sessionId) {
     const id = this.nextId++;
     this.ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
-    return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
+    const answer = new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
+    // Each journey is its own browser context; closing its page must free the context too, or a long run
+    // piles up wasm instances until the machine swaps and the throttled journeys miss their clicks.
+    const context = method === "Target.closeTarget" ? this.contexts.get(params.targetId) : undefined;
+    if (context) {
+      this.contexts.delete(params.targetId);
+      return answer.finally(() => this.send("Target.disposeBrowserContext", { browserContextId: context }).catch(() => {}));
+    }
+    return answer;
   }
   on(handler) { this.handlers.push(handler); }
+  /** Browser context of each open journey page, by target id. */
+  contexts = new Map();
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -269,6 +279,18 @@ class Page {
     for (const session of this.frameSessions ?? []) await this.applyEmulation(session).catch(() => {});
   }
   async throttle(rate) { await this.cdp.send("Emulation.setCPUThrottlingRate", { rate }, this.top); }
+  /**
+   * Hold requestAnimationFrame to about `fps` frames a second in every new document, like a hidden or busy
+   * browser pane (call before goto). Timers and input events are untouched, as they are in such a pane.
+   */
+  async throttleFrames(fps) {
+    const gap = Math.round(1000 / fps);
+    // All callbacks asked for inside one gap run together in one frame, as a throttled browser does.
+    await this.addInit("(() => { const raw = window.requestAnimationFrame.bind(window); let queue = [], timer = 0, next = 0;"
+      + " window.requestAnimationFrame = (cb) => { const id = ++next; queue.push([id, cb]);"
+      + " if (!timer) timer = setTimeout(() => { timer = 0; const run = queue; queue = []; raw((t) => run.forEach(([, f]) => f(t))); }, " + gap + "); return id; };"
+      + " window.cancelAnimationFrame = (id) => { queue = queue.filter(([i]) => i !== id); }; })();");
+  }
 
   // Real input, delivered to the top page (the iframe fills it, so coordinates agree).
   async key(key, down = true, up = true) {
@@ -402,6 +424,7 @@ async function newPage(label) {
   const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
   const page = new Page(cdp, sessionId, label);
   page.targetId = targetId;
+  cdp.contexts.set(targetId, browserContextId);
   activePage = page;
   await page.setup();
   return page;
@@ -1680,6 +1703,275 @@ const PAUSE_FROM_RIGHT = 404;
  * the selection back from the state probe. Enter on the row when `enter` is set.
  */
 /** Escape until the shell is gone (a section goes back to Home first). */
+
+/**
+ * A slow or hidden browser pane gives the page a few animation frames a second. The launch sequence is
+ * driven by the clock, not by the frame count, so it still takes its 4.6 s; any input skips it; and a
+ * click, a tap, Enter or a quick pad press that lands between two frames is not dropped.
+ */
+async function journeyThrottled(label, urlFor, size, fps = 4) {
+  current = label;
+  const mobile = !!size.mobile;
+  const open = async () => {
+    const page = await newPage(label);
+    await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+    await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+    await page.throttleFrames(fps);
+    await page.goto(urlFor());
+    return page;
+  };
+  const close = (page) => cdp.send("Target.closeTarget", { targetId: page.targetId });
+  const activate = async (page, name) => (mobile ? homeTap(page, name) : homeClick(page, name));
+  /** Watch a launch from the moment it is asked for until the game is running; returns the clock readings. */
+  const watchLaunch = async (page, t0, limitMs = 40000) => {
+    const series = [];
+    while (Date.now() - t0 < limitMs) {
+      const u = await page.ux();
+      if (u) {
+        series.push([Date.now() - t0, u.home?.launch ?? -1]);
+        if (u.running && !u.menu_open) return { ms: Date.now() - t0, series };
+      }
+      await sleep(100);
+    }
+    return { ms: null, series };
+  };
+  const ready = (page) => page.waitFor("the home screen with the disc ready", (s) => s.menu_open && !s.running && s.loaded_id && s.home?.page === "Home" && s.home.countdown !== "running", 120000);
+
+  let page = await open();
+  await page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 120000);
+  await page.tapKey("x");
+  await page.waitFor("a cancelled countdown", (s) => s.home.countdown === "cancelled", 10000);
+  await step(`at ${fps} frames a second, clicking the nav switches sections`, async () => {
+    for (const section of ["Debug", "Controls", "Settings", "Home"]) {
+      await activate(page, `nav:${section}`);
+      await page.waitFor(`the ${section} page`, (s) => s.home.page === section, 6000);
+    }
+  });
+  await step(`at ${fps} frames a second, PageDown and Escape switch sections without dropping a press`, async () => {
+    await page.tapKey("PageDown");
+    await page.waitFor("the next section", (s) => s.home.page !== "Home", 6000);
+    await page.tapKey("Escape");
+    await page.waitFor("Home again", (s) => s.home.page === "Home", 6000);
+  });
+  await ready(page);
+  await step(`at ${fps} frames a second, Enter starts the focused disc and the launch takes about 4.6 s`, async () => {
+    const t0 = Date.now();
+    await page.tapKey("Enter");
+    const r = await watchLaunch(page, t0);
+    await page.shot(`${label}-launch-done`);
+    if (r.ms == null) return `the disc did not start in 40 s: ${JSON.stringify(r.series.slice(-6))}`;
+    // The sequence clock tracks the wall clock, not the frame count.
+    const seen = r.series.filter(([, t]) => t >= 1);
+    if (!seen.length) return `the launch clock never moved: ${JSON.stringify(r.series.slice(0, 8))}`;
+    const worst = Math.max(...seen.map(([ms, t]) => Math.abs(ms / 1000 - t)));
+    if (r.ms < 3800 || r.ms > 7000) return `the launch took ${r.ms} ms: ${JSON.stringify(r.series.filter((_, i) => i % 6 === 0))}`;
+    if (worst > 1.6) return `the launch clock drifted ${worst.toFixed(2)} s from the wall clock`;
+  });
+  await close(page);
+
+  page = await open();
+  await page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 120000);
+  await page.tapKey("x");
+  await page.waitFor("a cancelled countdown", (s) => s.home.countdown === "cancelled", 10000);
+  await ready(page);
+  await step(`at ${fps} frames a second, a click or tap on Start disc launches, and any input skips the sequence`, async () => {
+    const t0 = Date.now();
+    await activate(page, "primary");
+    await page.waitFor("the launch under way", (s) => s.home.launch >= 0, 8000);
+    await sleep(1400);
+    await page.tapKey("x");
+    const r = await watchLaunch(page, t0);
+    if (r.ms == null) return `the disc did not start: ${JSON.stringify(r.series.slice(-6))}`;
+    if (r.ms > 4200) return `skipping still took ${r.ms} ms`;
+  });
+  await close(page);
+
+  if (!mobile) {
+    page = await open();
+    await page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 120000);
+    await page.tapKey("x");
+    await page.waitFor("a cancelled countdown", (s) => s.home.countdown === "cancelled", 10000);
+    await ready(page);
+    await step(`at ${fps} frames a second, a quick pad press (Cross) on the focused Start disc launches it`, async () => {
+      await page.padConnect();
+      await page.waitFor("the pad", (s) => s.menu_open, 6000);
+      await sleep(1200);
+      const t0 = Date.now();
+      await page.padSet({ 0: true });
+      await sleep(70);
+      await page.padSet({});
+      const r = await watchLaunch(page, t0);
+      if (r.ms == null) return "a 70 ms Cross press between two frames did not start the disc";
+    });
+    await close(page);
+  }
+}
+
+
+/** The areas of the Controls page that must stay clear of each other and of the screen edges. */
+function controlsLayoutProblem(u, size) {
+  const [l, t, r, b] = insetsFor(size);
+  const own = u.home.hits.filter(([n]) => /^(ctl:|slider:Touch|row:Touch|row:Left-handed)/.test(n));
+  for (const [n, x0, y0, x1, y1] of own) {
+    if (x0 < l - 1 || y0 < t - 1 || x1 > size.w - r + 1 || y1 > size.h - b + 1) return `${n} [${x0},${y0},${x1},${y1}] is outside the safe area`;
+    // A control scrolled half out of the view is cut by it: judge the ones that are whole.
+    const [vt, vb] = u.home.controls.view;
+    const whole = y0 > vt + 1 && y1 < vb - 1;
+    if (size.mobile && whole && (y1 - y0 < 43.5 || (x1 - x0 < 43.5 && !n.startsWith("slider")))) return `${n} is ${Math.round(x1 - x0)} x ${Math.round(y1 - y0)}, under the 44 px touch target`;
+  }
+  const core = (h) => [h[1] + 3, h[2] + 3, h[3] - 3, h[4] - 3];
+  for (let i = 0; i < own.length; i++) {
+    for (let j = i + 1; j < own.length; j++) {
+      // A slider sits on top of its own row: a tap on the row's label still toggles or cycles it.
+      if (own[i][0].replace(/^(row|slider):/, "") === own[j][0].replace(/^(row|slider):/, "")) continue;
+      const [a0, b0, a1, b1] = core(own[i]), [c0, d0, c1, d1] = core(own[j]);
+      if (Math.min(a1, c1) - Math.max(a0, c0) > 1 && Math.min(b1, d1) - Math.max(b0, d0) > 1) return `${own[i][0]} and ${own[j][0]} overlap`;
+    }
+  }
+  return null;
+}
+
+/**
+ * The Controls page: live device cards, the remappable keyboard map, the analog toggle and the touch
+ * controller, inside the shell, reached by click, tap, keyboard and pad.
+ */
+async function journeyControls(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  const page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+  await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+  await page.goto(urlFor());
+  /** Scroll the page with the wheel until a control is fully on screen. */
+  const reveal = async (name) => {
+    for (let i = 0; i < 12; i++) {
+      const u = await page.ux();
+      const h = u.home.hits.find((x) => x[0] === name);
+      const view = u.home.controls.view;
+      if (h && h[4] - h[2] >= 40 && h[2] > view[0] && h[4] < view[1]) return;
+      // Not drawn at all: go back to the top first. Cut by the top edge: up a little. Otherwise down.
+      const dy = !h && i === 0 ? -4000 : h && h[2] <= view[0] + 1 ? -120 : 160;
+      await page.cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: size.w / 2, y: size.h / 2, deltaX: 0, deltaY: dy }, page.top);
+      await sleep(250);
+    }
+  };
+  const activate = async (name) => {
+    if (/^(ctl:(?!tab)|row:Touch|slider:)/.test(name)) await reveal(name);
+    return mobile ? homeTap(page, name) : homeClick(page, name);
+  };
+  const ctl = async () => (await page.ux()).home.controls;
+  const hasHit = async (name) => (await page.ux()).home.hits.some((h) => h[0] === name);
+  /** The phone shows one group at a time. */
+  const showGroup = async (name) => {
+    if (await hasHit(`ctl:tab:${name}`)) {
+      await activate(`ctl:tab:${name}`);
+      await page.waitFor(`the ${name} group`, (s) => s.home.controls.tab === ["Devices", "Keyboard", "Touch"].indexOf(name), 4000);
+      await sleep(250);
+    }
+  };
+  await page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 120000);
+  await page.tapKey("x");
+  await page.waitFor("a cancelled countdown", (s) => s.home.countdown === "cancelled", 10000);
+  await step("Controls opens inside the shell; each group fits the screen with 44 px targets and nothing overlaps", async () => {
+    await activate("nav:Controls");
+    await page.waitFor("the Controls page", (s) => s.home.page === "Controls" && s.panel === "controls", 4000);
+    await sleep(500);
+    for (const group of ["Devices", "Keyboard", "Touch"]) {
+      await showGroup(group);
+      await page.shot(`${label}-controls-${group.toLowerCase()}`);
+      const names = (await page.ux()).home.hits.map((h) => h[0]);
+      const need = { Devices: ["ctl:port:", "ctl:mode:"], Keyboard: ["ctl:key:Cross", "ctl:key:L1", "ctl:reset"], Touch: ["slider:Touch opacity", "row:Touch haptics"] }[group];
+      for (const n of need) {
+        // Scrolling brings anything below the fold on a small screen; a prefix is a device id.
+        if (!n.endsWith(":")) await reveal(n);
+        const now = (await page.ux()).home.hits.map((h) => h[0]);
+        if (!now.some((x) => x.startsWith(n))) return `${group}: no ${n} in ${now.filter((x) => x.startsWith("ctl") || x.startsWith("slider") || x.startsWith("row"))}`;
+      }
+      const problem = controlsLayoutProblem(await page.ux(), size);
+      if (problem) return `${group}: ${problem}`;
+    }
+    const names = (await page.ux()).home.hits.map((h) => h[0]);
+    if (mobile && !names.includes("ctl:tab:Keyboard")) return "no segmented bar on a phone";
+    if (!mobile && size.w >= 900 && !names.some((x) => x.startsWith("ctl:key:"))) return "a wide window should show all three groups";
+  });
+  await step("a device's port and analog toggle change the routing, and change back", async () => {
+    await showGroup("Devices");
+    const c0 = await ctl();
+    const dev = c0.devices.find((d) => /key/i.test(d[0])) ?? c0.devices[0];
+    if (!dev) return `no devices: ${JSON.stringify(c0.devices)}`;
+    await activate(`ctl:mode:${dev[0]}`);
+    const c1 = (await page.waitFor("the profile changed", (s) => s.home.controls.devices.find((d) => d[0] === dev[0])?.[2] !== dev[2], 4000)).home.controls;
+    await activate(`ctl:mode:${dev[0]}`);
+    await page.waitFor("the profile toggled again", (s) => s.home.controls.devices.find((d) => d[0] === dev[0])?.[2] !== c1.devices.find((d) => d[0] === dev[0])?.[2], 4000);
+    await activate(`ctl:port:${dev[0]}`);
+    await page.waitFor("the port changed", (s) => s.home.controls.devices.find((d) => d[0] === dev[0])?.[1] !== dev[1], 4000);
+  });
+  await step("a key is rebound by selecting it and pressing the new one; Escape cancels; Reset restores", async () => {
+    await showGroup("Keyboard");
+    const before = (await ctl()).keys.Cross;
+    await activate("ctl:key:Cross");
+    await page.waitFor("a key being bound", (s) => s.home.controls.capture === "Cross", 4000);
+    await page.shot(`${label}-controls-binding`);
+    await page.tapKey("Escape");
+    await page.waitFor("the binding cancelled", (s) => s.home.controls.capture === null, 4000);
+    if ((await page.ux()).home.page !== "Controls") return "Escape left the page while a key was being bound";
+    await activate("ctl:key:Cross");
+    await page.waitFor("a key being bound", (s) => s.home.controls.capture === "Cross", 4000);
+    await page.tapKey("z");
+    const after = (await page.waitFor("the key bound", (s) => s.home.controls.capture === null && s.home.controls.keys.Cross !== before, 4000)).home.controls.keys.Cross;
+    if (!/^z$/i.test(after)) return `Cross is ${after}, not Z`;
+    await activate("ctl:reset");
+    await page.waitFor("the map reset", (s) => s.home.controls.keys.Cross === before, 4000);
+  });
+  if (!mobile) await step("the keyboard moves between rows and along a row, Enter starts a binding, Escape cancels, then goes Home", async () => {
+    await showGroup("Keyboard");
+    let focus = (await ctl()).focus;
+    let moved = 0;
+    const path = [focus];
+    // The last step left the focus on Reset, below the keys; the narrow layout starts from the top.
+    const toward = focus === "ctl:reset" || focus.startsWith("ctl:touch") ? "ArrowUp" : "ArrowDown";
+    for (let i = 0; i < 14 && !focus.startsWith("ctl:key:"); i++) {
+      await page.tapKey(toward);
+      await sleep(160);
+      const next = (await ctl()).focus;
+      if (next !== focus) moved++;
+      focus = next;
+      path.push(focus);
+    }
+    if (!focus.startsWith("ctl:key:")) return `Down never reached the keys: ${path.join(" > ")}`;
+    await page.tapKey("ArrowRight");
+    await sleep(200);
+    const right = (await ctl()).focus;
+    if (right === focus) return `Right did not move along the row from ${focus}`;
+    await page.tapKey("Enter");
+    const armed = (await page.waitFor("a key being bound", (s) => s.home.controls.capture !== null, 4000)).home.controls.capture;
+    await page.tapKey("Escape");
+    await page.waitFor("the binding cancelled", (s) => s.home.controls.capture === null, 4000);
+    await page.tapKey("Escape");
+    await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
+    return armed ? true : "no key was armed";
+  });
+  await step("the touch rows work: a toggle flips and a slider drags", async () => {
+    if ((await page.ux()).home.page !== "Controls") { await activate("nav:Controls"); await page.waitFor("Controls", (s) => s.home.page === "Controls", 4000); }
+    await showGroup("Touch");
+    const v0 = (await ctl()).touch;
+    await activate("row:Touch haptics");
+    await page.waitFor("haptics flipped", (s) => s.home.controls.touch["Touch haptics"] !== v0["Touch haptics"], 4000);
+    await activate("row:Touch haptics");
+    await page.waitFor("haptics back", (s) => s.home.controls.touch["Touch haptics"] === v0["Touch haptics"], 4000);
+    const [x0, y0, x1, y1] = (await page.ux()).home.hits.find((h) => h[0] === "slider:Touch opacity").slice(1);
+    const y = (y0 + y1) / 2;
+    await page.mouse("mouseMoved", x0 + 20, y);
+    await page.mouse("mousePressed", x0 + 20, y);
+    for (let i = 1; i <= 6; i++) { await sleep(100); await page.mouse("mouseMoved", x0 + 20 + i * ((x1 - x0) * 0.6 / 6), y); }
+    await page.mouse("mouseReleased", x0 + 20 + (x1 - x0) * 0.6, y);
+    await page.waitFor("opacity changed", (s) => s.home.controls.touch["Touch opacity"] !== v0["Touch opacity"], 4000);
+    await page.shot(`${label}-controls-touch-after`);
+  });
+  await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
+
 async function closeShell(page) {
   for (let i = 0; i < 4 && (await page.ux()).menu_open; i++) { await page.tapKey("Escape"); await sleep(250); }
   await page.waitFor("the shell closed", (x) => !x.menu_open, 4000);
@@ -1891,6 +2183,15 @@ async function scenarioCors() {
 
 async function main() {
   if (args.scenario === "launch") { await inChrome(Number(args.hostdpr ?? 1), scenarioLaunch); siteServer?.close(); parentServer?.close(); process.exit(0); }
+  if (args.scenario === "fps") { await inChrome(1, async () => {
+    const page = await newPage("fps");
+    await page.viewport(1280, 800, { dpr: 1 });
+    if (args.fps) await page.throttleFrames(Number(args.fps));
+    await page.goto(direct("?countdown=30"));
+    await page.waitFor("the countdown", (s) => s.home?.countdown === "running", 120000);
+    const a = await page.bench(); await sleep(3000); const b = await page.bench();
+    console.log(JSON.stringify({ throttle: args.fps ?? null, redraws_per_s: (b.redraws - a.redraws) / 3 }));
+  }); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "cors") { await inChrome(1, scenarioCors); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "shots") { await scenarioShots(); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "tap") { await inChrome(1, scenarioTap); siteServer?.close(); parentServer?.close(); process.exit(0); }
@@ -1898,11 +2199,14 @@ async function main() {
   if (args.scenario === "spam") { await inChrome(1, scenarioSpam); siteServer?.close(); parentServer?.close(); process.exit(0); }
   const wanted = (name) => !ONLY || name.includes(ONLY);
   try {
-    if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu", "home", "covers", "shell"].some((k) => ONLY.includes(k))) {
+    if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu", "home", "covers", "shell", "throttled", "controls"].some((k) => ONLY.includes(k))) {
       await inChrome(1, async () => {
         if (wanted("desktop-direct")) await journeyDesktop("desktop-direct", () => direct());
         if (wanted("desktop-home")) await journeyHome("desktop-home", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-shell")) await journeyShell("desktop-shell", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-controls")) await journeyControls("desktop-controls", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-controls-narrow")) await journeyControls("desktop-controls-narrow", () => direct("?countdown=12"), { w: 800, h: 700, dpr: 1, mobile: false });
+        if (wanted("desktop-throttled")) await journeyThrottled("desktop-throttled", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-covers")) await journeyCovers("desktop-covers", () => direct());
         if (wanted("desktop-iframe")) await journeyDesktop("desktop-iframe", () => embedded(), { embeddedMode: true });
         if (wanted("desktop-menus")) await journeyMenus("desktop-menus", () => direct());
@@ -1911,7 +2215,7 @@ async function main() {
         if (wanted("desktop-gamepad-iframe")) await journeyGamepad("desktop-gamepad-iframe", () => embedded());
       });
     }
-    if (!ONLY || ONLY.includes("phone") || ONLY.includes("home") || ONLY.includes("shell")) {
+    if (!ONLY || ONLY.includes("phone") || ONLY.includes("home") || ONLY.includes("shell") || ONLY.includes("throttled") || ONLY.includes("controls")) {
       await inChrome(3, async () => {
         if (wanted("phone-portrait")) await journeyPhone("phone-portrait", () => direct(), { w: 393, h: 852, dpr: 3 });
         if (wanted("phone-iframe")) await journeyPhone("phone-iframe", () => embedded(), { w: 393, h: 852, dpr: 3 });
@@ -1920,6 +2224,10 @@ async function main() {
         if (wanted("phone-home-landscape")) await journeyHome("phone-home-landscape", () => direct("?countdown=12"), { w: 852, h: 393, dpr: 3, mobile: true });
         if (wanted("phone-shell")) await journeyShell("phone-shell", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-shell-small")) await journeyShell("phone-shell-small", () => direct("?countdown=12"), { w: 360, h: 640, dpr: 3, mobile: true });
+        if (wanted("phone-controls")) await journeyControls("phone-controls", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
+        if (wanted("phone-controls-small")) await journeyControls("phone-controls-small", () => direct("?countdown=12"), { w: 360, h: 640, dpr: 3, mobile: true });
+        if (wanted("phone-controls-landscape")) await journeyControls("phone-controls-landscape", () => direct("?countdown=12"), { w: 852, h: 393, dpr: 3, mobile: true });
+        if (wanted("phone-throttled")) await journeyThrottled("phone-throttled", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-shell-landscape")) await journeyShell("phone-shell-landscape", () => direct("?countdown=12"), { w: 852, h: 393, dpr: 3, mobile: true });
         if (wanted("phone-landscape")) await journeyPhone("phone-landscape", () => direct(), { w: 852, h: 393, dpr: 3 });
         if (wanted("phone-fullscreen")) await journeyFullscreenFallback("phone-fullscreen", () => direct(), { framed: false });

@@ -71,7 +71,7 @@ pub(super) struct Row {
 
 fn category_name(page: Page) -> &'static str {
     match page {
-        Page::Settings => "Settings",
+        Page::Settings | Page::Controls => "Settings",
         _ => "Game",
     }
 }
@@ -303,7 +303,7 @@ pub(super) fn draw_list(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_row(
+pub(super) fn draw_row(
     h: &mut HomeState,
     ms: &MenuState,
     ctx: &egui::Context,
@@ -456,32 +456,7 @@ fn draw_control(
     let right = r.right() - 16.0 * u;
     match ctrl {
         Control::Toggle(on) => {
-            let w = 44.0 * u;
-            let hgt = 24.0 * u;
-            let track =
-                Rect::from_min_size(Pos2::new(right - w, cy - hgt / 2.0), Vec2::new(w, hgt));
-            p.rect_filled(
-                track,
-                hgt / 2.0,
-                fade(
-                    if *on {
-                        Color32::from_rgb(19, 156, 176)
-                    } else {
-                        Color32::from_rgb(48, 59, 74)
-                    },
-                    a,
-                ),
-            );
-            let knob_x = if *on {
-                track.right() - hgt / 2.0
-            } else {
-                track.left() + hgt / 2.0
-            };
-            p.circle_filled(
-                Pos2::new(knob_x, cy),
-                hgt / 2.0 - 3.0,
-                fade(if *on { tokens::TEXT } else { tokens::MUTED }, a),
-            );
+            draw_toggle(p, right, cy, *on, u, a);
         }
         Control::Choice(options, at) => {
             let mut x = right;
@@ -521,7 +496,7 @@ fn draw_control(
         }
         Control::Slider(value, lo, hi) => {
             let label = format!("{}%", *value as u32);
-            let vt = p.text(
+            p.text(
                 Pos2::new(right, cy),
                 Align2::RIGHT_CENTER,
                 label,
@@ -529,9 +504,19 @@ fn draw_control(
                 fade(tokens::TEXT_2, a),
             );
             let tw = (200.0 * u).min(r.width() * 0.4);
+            // Every track starts at the same place: room for the widest value, not this one.
+            let widest = p
+                .layout_no_wrap(
+                    "150%".to_string(),
+                    FontId::monospace(tokens::SLIDER_VALUE * u),
+                    tokens::TEXT,
+                )
+                .size()
+                .x;
+            let track_right = right - widest - 16.0 * u;
             let track = Rect::from_min_max(
-                Pos2::new(vt.left() - 16.0 * u - tw, cy - 3.0),
-                Pos2::new(vt.left() - 16.0 * u, cy + 3.0),
+                Pos2::new(track_right - tw, cy - 3.0),
+                Pos2::new(track_right, cy + 3.0),
             );
             let t = ((value - lo) / (hi - lo)).clamp(0.0, 1.0);
             p.rect_filled(track, 3.0, fade(Color32::from_rgb(48, 59, 74), a));
@@ -549,7 +534,9 @@ fn draw_control(
                 fade(tokens::TEXT, a),
             );
             h.hits.push((
-                track.expand2(Vec2::new(14.0, 16.0)),
+                track
+                    .expand2(Vec2::new(14.0, 20.0))
+                    .intersect(p.clip_rect()),
                 Click::Slider(index, track),
             ));
         }
@@ -711,4 +698,41 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
     );
     h.hits
         .push((close.expand2(Vec2::new(12.0, 12.0)), Click::Dismiss));
+}
+
+/// A toggle switch whose right edge is at `right`. Returns its track.
+pub(super) fn draw_toggle(
+    p: &egui::Painter,
+    right: f32,
+    cy: f32,
+    on: bool,
+    u: f32,
+    a: f32,
+) -> Rect {
+    let w = 44.0 * u;
+    let hgt = 24.0 * u;
+    let track = Rect::from_min_size(Pos2::new(right - w, cy - hgt / 2.0), Vec2::new(w, hgt));
+    p.rect_filled(
+        track,
+        hgt / 2.0,
+        fade(
+            if on {
+                Color32::from_rgb(19, 156, 176)
+            } else {
+                Color32::from_rgb(48, 59, 74)
+            },
+            a,
+        ),
+    );
+    let knob_x = if on {
+        track.right() - hgt / 2.0
+    } else {
+        track.left() + hgt / 2.0
+    };
+    p.circle_filled(
+        Pos2::new(knob_x, cy),
+        hgt / 2.0 - 3.0,
+        fade(if on { tokens::TEXT } else { tokens::MUTED }, a),
+    );
+    track
 }

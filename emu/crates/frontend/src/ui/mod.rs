@@ -124,7 +124,25 @@ pub fn draw_layout(
     let menu_warning = state
         .menu_setup_warning()
         .filter(|_| !state.menu.home_enabled());
+    // The Controls page shows the live devices and says what to change on them.
+    if state.menu.home_wants_devices() {
+        state.menu.home_set_devices(input_router.devices());
+    }
     state.menu.draw(ctx, dt, menu_warning);
+    for command in state.menu.home_take_device_commands() {
+        use menu::DeviceCommand;
+        let message = match command {
+            DeviceCommand::Choice(id, choice) => input_router
+                .set_device_choice(&id, choice)
+                .then(|| format!("Port: {}", choice.label())),
+            DeviceCommand::Profile(id, profile) => input_router
+                .set_device_profile(&id, profile)
+                .then(|| format!("{} mode", profile.label())),
+        };
+        if let Some(message) = message {
+            state.status_message_set(message);
+        }
+    }
     if let Some((kind, pct)) = state.menu.take_touch_slider() {
         use crate::ui::menu::TouchSliderKind;
         state.edit_touch_prefs(|p| match kind {
@@ -136,16 +154,9 @@ pub fn draw_layout(
     state
         .menu
         .draw_controls(ctx, |ui| port_message = controller_ports(ui, input_router));
-    // Controls and Debug are sections of the shell, drawn in the space it leaves.
-    if let Some((page, rect)) = state.menu.home_section() {
-        match page {
-            "Controls" => {
-                state.menu.draw_controls_section(ctx, rect, |ui| {
-                    port_message = controller_ports(ui, input_router)
-                });
-            }
-            _ => debug_sidebar::draw_section(ctx, state, vram_tex, rect),
-        }
+    // Debug is a section of the shell, drawn in the space it leaves.
+    if let Some((_, rect)) = state.menu.home_section() {
+        debug_sidebar::draw_section(ctx, state, vram_tex, rect);
     }
     if let Some(message) = port_message {
         state.status_message_set(message);

@@ -219,15 +219,12 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
                 if let Some(covers) = state.menu.covers() {
                     covers.pump();
                 }
+                if state.menu.home_wants_devices() {
+                    state.menu.home_set_devices(sample_devices());
+                }
                 state.menu.draw(ctx, 0.1, None);
-                if let Some((page, rect)) = state.menu.home_section() {
-                    if page == "Controls" {
-                        state.menu.draw_controls_section(ctx, rect, |ui| {
-                            ui.label("Controllers are listed here.");
-                        });
-                    } else {
-                        ui::debug_sidebar::draw_section(ctx, &mut state, vram.id(), rect);
-                    }
+                if let Some((_, rect)) = state.menu.home_section() {
+                    ui::debug_sidebar::draw_section(ctx, &mut state, vram.id(), rect);
                 }
                 ui::draw_recording_indicator(ctx, &state);
                 if args.view == View::Window {
@@ -294,4 +291,50 @@ fn dump_ids(state: &AppState, games_root: &Path) {
         by_id.values().map(Vec::len).sum::<usize>(),
         by_id.len()
     );
+}
+
+/// A keyboard being used, a pad idle on port 2 and the touch screen: what the Controls page
+/// shows in a screenshot taken without any real device.
+fn sample_devices() -> Vec<crate::input::InputDeviceInfo> {
+    use crate::input::model::{BackendKind, DeviceIdentity};
+    use crate::input::routing::PsxPort;
+    use crate::input::{InputDeviceInfo, PadProfile, PadSnapshot, PortChoice};
+    let identity = |id: &str, name: &str, backend| DeviceIdentity {
+        id: id.into(),
+        name: name.into(),
+        backend,
+        vid_pid: None,
+        mapping: "standard".into(),
+        mapped: true,
+    };
+    let keys = PadSnapshot {
+        buttons: emulator_core::button::CROSS,
+        ..PadSnapshot::default()
+    };
+    vec![
+        InputDeviceInfo {
+            identity: identity("kbd", "Keyboard", BackendKind::Keyboard),
+            port: PsxPort::One,
+            choice: PortChoice::Auto,
+            profile: PadProfile::Analog,
+            ignored: false,
+            live: keys,
+        },
+        InputDeviceInfo {
+            identity: identity("pad", "Wireless Controller", BackendKind::Gilrs),
+            port: PsxPort::Two,
+            choice: PortChoice::Auto,
+            profile: PadProfile::DualShock,
+            ignored: false,
+            live: PadSnapshot::default(),
+        },
+        InputDeviceInfo {
+            identity: identity("touch", "Touchscreen", BackendKind::Touch),
+            port: PsxPort::One,
+            choice: PortChoice::Auto,
+            profile: PadProfile::Analog,
+            ignored: false,
+            live: PadSnapshot::default(),
+        },
+    ]
 }
