@@ -201,7 +201,8 @@ impl CoverState {
             decoded += 1;
             match decode(&bytes) {
                 Some(image) => {
-                    let tex = ctx.load_texture(format!("cover-{rid}"), image, TextureOptions::LINEAR);
+                    let tex =
+                        ctx.load_texture(format!("cover-{rid}"), image, TextureOptions::LINEAR);
                     self.textures.insert(rid, tex);
                 }
                 None => {
@@ -290,7 +291,13 @@ mod io {
 
     fn file_for(key: &str) -> String {
         key.chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect()
     }
 
@@ -322,7 +329,12 @@ mod io {
             let hit = dir.join(format!("{}.img", file_for(&cand.key)));
             let miss = dir.join(format!("{}.miss", file_for(&cand.key)));
             if let Ok(bytes) = std::fs::read(&hit) {
-                return Fetched { id: id.into(), bytes: Some(bytes), source: cand.key.clone(), missing: false };
+                return Fetched {
+                    id: id.into(),
+                    bytes: Some(bytes),
+                    source: cand.key.clone(),
+                    missing: false,
+                };
             }
             if let Ok(meta) = std::fs::metadata(&miss) {
                 let age = meta
@@ -344,7 +356,12 @@ mod io {
                 Ok(s) if s.success() => {
                     if let Ok(bytes) = std::fs::read(&tmp) {
                         let _ = std::fs::rename(&tmp, &hit);
-                        return Fetched { id: id.into(), bytes: Some(bytes), source: cand.key.clone(), missing: false };
+                        return Fetched {
+                            id: id.into(),
+                            bytes: Some(bytes),
+                            source: cand.key.clone(),
+                            missing: false,
+                        };
                     }
                 }
                 // curl exit 22: the server answered with an HTTP error, which
@@ -356,7 +373,12 @@ mod io {
             }
             let _ = std::fs::remove_file(&tmp);
         }
-        Fetched { id: id.into(), bytes: None, source: String::new(), missing: !offline }
+        Fetched {
+            id: id.into(),
+            bytes: None,
+            source: String::new(),
+            missing: !offline,
+        }
     }
 
     pub(super) fn poll() -> Vec<Fetched> {
@@ -477,7 +499,10 @@ mod tests {
 
     #[test]
     fn libretro_names_replace_forbidden_characters() {
-        assert_eq!(libretro_name("Spyro: Year of the Dragon (USA)"), "Spyro_ Year of the Dragon (USA)");
+        assert_eq!(
+            libretro_name("Spyro: Year of the Dragon (USA)"),
+            "Spyro_ Year of the Dragon (USA)"
+        );
     }
 
     #[test]

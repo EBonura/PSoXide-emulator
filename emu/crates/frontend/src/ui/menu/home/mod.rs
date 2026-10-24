@@ -279,7 +279,10 @@ impl MenuState {
             .iter()
             .map(|(r, click)| {
                 let name = match click {
-                    Click::Nav(item) => format!("nav:{}", NAV.iter().find(|n| n.0 == *item).map_or("", |n| n.1)),
+                    Click::Nav(item) => format!(
+                        "nav:{}",
+                        NAV.iter().find(|n| n.0 == *item).map_or("", |n| n.1)
+                    ),
                     Click::Logo => "logo".into(),
                     Click::Case(i) => format!("case:{i}"),
                     Click::Primary => "primary".into(),
@@ -287,8 +290,12 @@ impl MenuState {
                     Click::Link(url) => format!("link:{url}"),
                     Click::Welcome => "welcome".into(),
                     Click::WelcomeStep(n) => format!("welcome-step:{n}"),
-                    Click::Row(i) => format!("row:{}", rows.get(*i).map_or("", |r| r.label.as_str())),
-                    Click::Slider(i, _) => format!("slider:{}", rows.get(*i).map_or("", |r| r.label.as_str())),
+                    Click::Row(i) => {
+                        format!("row:{}", rows.get(*i).map_or("", |r| r.label.as_str()))
+                    }
+                    Click::Slider(i, _) => {
+                        format!("slider:{}", rows.get(*i).map_or("", |r| r.label.as_str()))
+                    }
                     Click::Back => "back".into(),
                     Click::Dismiss => "dismiss".into(),
                 };
@@ -419,7 +426,11 @@ impl HomeState {
             cover_key: None,
         });
         // Recently opened discs; failing that, what is in the games folder.
-        let shown = if ms.recent_discs.is_empty() { &ms.games } else { &ms.recent_discs };
+        let shown = if ms.recent_discs.is_empty() {
+            &ms.games
+        } else {
+            &ms.recent_discs
+        };
         for item in shown.iter().take(5) {
             out.push(CaseItem {
                 kind: CoverKind::Plain,
@@ -868,13 +879,16 @@ impl HomeState {
                 scene::V3::new(150.0, 134.0, 12.0)
             };
             let scale = base * (1.0 + 0.14 * near);
-            let art = item.cover_key.as_deref().and_then(|k| self.covers.texture(ctx, k));
-            let kind = if art.is_some() { CoverKind::Art } else { item.kind };
-            let center = scene::V3::new(
-                cx + d * step,
-                cy - near * 10.0 * u,
-                -d.abs() * 90.0 * u,
-            );
+            let art = item
+                .cover_key
+                .as_deref()
+                .and_then(|k| self.covers.texture(ctx, k));
+            let kind = if art.is_some() {
+                CoverKind::Art
+            } else {
+                item.kind
+            };
+            let center = scene::V3::new(cx + d * step, cy - near * 10.0 * u, -d.abs() * 90.0 * u);
             let draw = scene::CaseDraw {
                 kind,
                 title: &item.title,
@@ -891,7 +905,8 @@ impl HomeState {
             // Hit area for a click on the case.
             let half = Vec2::new(size.x, size.y) * scale * 0.5 + Vec2::splat(6.0);
             let at = cam.project(center);
-            self.hits.push((Rect::from_center_size(at, half * 2.0), Click::Case(i)));
+            self.hits
+                .push((Rect::from_center_size(at, half * 2.0), Click::Case(i)));
         }
         let Some(item) = cases.get(f) else {
             return;
@@ -915,7 +930,11 @@ impl HomeState {
             FontId::proportional(title_px),
             fade(text_col, a),
         );
-        let line_px = (if lay.kind == LayoutKind::Desktop { 16.0 } else { 14.0 }) * u;
+        let line_px = (if lay.kind == LayoutKind::Desktop {
+            16.0
+        } else {
+            14.0
+        }) * u;
         let sub_y = r.bottom() + 8.0 * u;
         let sub = p.text(
             Pos2::new(tx, sub_y),
@@ -942,7 +961,8 @@ impl HomeState {
                 [wio.left_bottom(), wio.right_bottom()],
                 Stroke::new(1.0, fade(Color32::from_rgb(127, 207, 224), a * 0.45)),
             );
-            self.hits.push((wio.expand2(Vec2::new(10.0, 8.0)), Click::Peek));
+            self.hits
+                .push((wio.expand2(Vec2::new(10.0, 8.0)), Click::Peek));
             below = wio.bottom();
         }
         // The countdown line, or the loading line, or nothing.
@@ -993,7 +1013,10 @@ impl HomeState {
 
     fn progress_line(&self) -> Option<ProgressLine> {
         match (self.countdown, self.feed.demo) {
-            (Countdown::Running(left), _) => Some(ProgressLine::Count(left.ceil().max(1.0) as u32, 1.0 - left / COUNTDOWN_SECS)),
+            (Countdown::Running(left), _) => Some(ProgressLine::Count(
+                left.ceil().max(1.0) as u32,
+                1.0 - left / COUNTDOWN_SECS,
+            )),
             (Countdown::Armed, DemoStatus::Loading(f)) => Some(ProgressLine::Loading(f)),
             (Countdown::Cancelled, _) if self.first_visit => Some(ProgressLine::Cancelled),
             _ => None,
@@ -1036,7 +1059,11 @@ impl HomeState {
         let c = Pos2::new(left + icon / 2.0, y + gal.size().y / 2.0);
         match line {
             ProgressLine::Count(_, frac) => {
-                p.circle_stroke(c, icon / 2.0 - 1.0, Stroke::new(1.5, fade(Color32::from_rgb(40, 56, 68), a)));
+                p.circle_stroke(
+                    c,
+                    icon / 2.0 - 1.0,
+                    Stroke::new(1.5, fade(Color32::from_rgb(40, 56, 68), a)),
+                );
                 let steps = 36;
                 let upto = (steps as f32 * frac.clamp(0.0, 1.0)) as usize;
                 let pts: Vec<Pos2> = (0..=upto)
@@ -1086,23 +1113,40 @@ impl HomeState {
         let link = fade(Color32::from_rgb(111, 195, 214), a);
         let y = s.bottom() - 26.0 * u;
         let more = p.text(
-            Pos2::new(s.right() - 48.0 * u * (lay.kind == LayoutKind::Desktop) as u8 as f32
-                - if lay.kind == LayoutKind::Desktop { 0.0 } else { 20.0 * u },
-                y),
+            Pos2::new(
+                s.right()
+                    - 48.0 * u * (lay.kind == LayoutKind::Desktop) as u8 as f32
+                    - if lay.kind == LayoutKind::Desktop {
+                        0.0
+                    } else {
+                        20.0 * u
+                    },
+                y,
+            ),
             Align2::RIGHT_CENTER,
             "More PSoXide games you build yourself",
             FontId::proportional(13.0 * u),
             link,
         );
-        self.hits.push((more.expand2(Vec2::new(8.0, 10.0)), Click::Link(SITE_URL)));
+        self.hits
+            .push((more.expand2(Vec2::new(8.0, 10.0)), Click::Link(SITE_URL)));
         let what = p.text(
-            Pos2::new(s.left() + if lay.kind == LayoutKind::Desktop { 48.0 * u } else { 20.0 * u }, y),
+            Pos2::new(
+                s.left()
+                    + if lay.kind == LayoutKind::Desktop {
+                        48.0 * u
+                    } else {
+                        20.0 * u
+                    },
+                y,
+            ),
             Align2::LEFT_CENTER,
             "What is this?",
             FontId::proportional(13.0 * u),
             dim,
         );
-        self.hits.push((what.expand2(Vec2::new(8.0, 10.0)), Click::Welcome));
+        self.hits
+            .push((what.expand2(Vec2::new(8.0, 10.0)), Click::Welcome));
         // Controller hints on the desktop shell; touch and phones go without.
         if lay.kind == LayoutKind::Desktop && !self.feed.touch {
             let mut x = what.right() + 40.0 * u;
@@ -1138,8 +1182,16 @@ impl HomeState {
         let a = pc.appear;
         let u = lay.u;
         let (x, y, wd) = match lay.kind {
-            LayoutKind::Desktop => (lay.safe.left() + 48.0 * u, lay.safe.top() + 110.0 * u, 250.0 * u),
-            _ => (lay.safe.center().x - 130.0 * u, lay.safe.top() + 120.0 * u, 260.0 * u),
+            LayoutKind::Desktop => (
+                lay.safe.left() + 48.0 * u,
+                lay.safe.top() + 110.0 * u,
+                250.0 * u,
+            ),
+            _ => (
+                lay.safe.center().x - 130.0 * u,
+                lay.safe.top() + 120.0 * u,
+                260.0 * u,
+            ),
         };
         let rows = pages::DISC_CONTENTS;
         let hgt = (rows.len() as f32 * 26.0 + 52.0) * u;
@@ -1202,8 +1254,16 @@ impl HomeState {
         p.add(Shape::galley(logo_rect.min, galley, Color32::WHITE));
         self.hits.push((logo_rect.expand(6.0), Click::Logo));
         // Nav as plain text.
-        let mut x = if desktop { logo_rect.right() + 34.0 * u } else { left };
-        let ny = if desktop { logo_rect.center().y } else { logo_rect.bottom() + 20.0 * u };
+        let mut x = if desktop {
+            logo_rect.right() + 34.0 * u
+        } else {
+            left
+        };
+        let ny = if desktop {
+            logo_rect.center().y
+        } else {
+            logo_rect.bottom() + 20.0 * u
+        };
         let active = match self.page {
             Page::Library => Some(0),
             Page::Settings => Some(1),
@@ -1212,7 +1272,11 @@ impl HomeState {
         for (i, (item, label)) in NAV.iter().enumerate() {
             let focused = self.zone == Zone::Nav && self.nav == i;
             let on = active == Some(i) || focused;
-            let col = if on { Color32::WHITE } else { Color32::from_rgb(111, 129, 146) };
+            let col = if on {
+                Color32::WHITE
+            } else {
+                Color32::from_rgb(111, 129, 146)
+            };
             let r = p.text(
                 Pos2::new(x, ny),
                 Align2::LEFT_CENTER,
@@ -1224,19 +1288,34 @@ impl HomeState {
                 let c = Pos2::new(r.center().x, r.bottom() + 5.0 * u);
                 let d = 3.0 * u;
                 p.add(Shape::convex_polygon(
-                    vec![c + Vec2::new(0.0, -d), c + Vec2::new(d, 0.0), c + Vec2::new(0.0, d), c + Vec2::new(-d, 0.0)],
-                    fade(if focused { Color32::from_rgb(140, 236, 251) } else { CYAN }, a),
+                    vec![
+                        c + Vec2::new(0.0, -d),
+                        c + Vec2::new(d, 0.0),
+                        c + Vec2::new(0.0, d),
+                        c + Vec2::new(-d, 0.0),
+                    ],
+                    fade(
+                        if focused {
+                            Color32::from_rgb(140, 236, 251)
+                        } else {
+                            CYAN
+                        },
+                        a,
+                    ),
                     Stroke::NONE,
                 ));
             }
-            self.hits.push((r.expand2(Vec2::new(10.0, 12.0)), Click::Nav(*item)));
+            self.hits
+                .push((r.expand2(Vec2::new(10.0, 12.0)), Click::Nav(*item)));
             x = r.right() + 26.0 * u;
         }
         // Controller indicators, top right: small, grey, cyan when in use.
         let mut ix = self
             .feed
             .touch_ui_left
-            .map_or(s.right() - if desktop { 48.0 * u } else { 20.0 * u }, |x| x - 10.0 * u);
+            .map_or(s.right() - if desktop { 48.0 * u } else { 20.0 * u }, |x| {
+                x - 10.0 * u
+            });
         let iy = top + 9.0 * u;
         let touch_on = self.feed.touch;
         let states = [
@@ -1245,16 +1324,26 @@ impl HomeState {
             (self.feed.keyboard && !touch_on, 0),
         ];
         for (on, which) in states {
-            let col = if on { CYAN } else { Color32::from_rgb(70, 84, 98) };
+            let col = if on {
+                CYAN
+            } else {
+                Color32::from_rgb(70, 84, 98)
+            };
             let c = Pos2::new(ix - 12.0 * u, iy);
             draw_device_icon(p, c, 11.0 * u, which, fade(col, a));
             ix -= 32.0 * u;
         }
         if let Some(text) = warning {
             let (anchor, align) = if desktop {
-                (Pos2::new(lay.full.center().x, s.top() + 8.0), Align2::CENTER_TOP)
+                (
+                    Pos2::new(lay.full.center().x, s.top() + 8.0),
+                    Align2::CENTER_TOP,
+                )
             } else {
-                (Pos2::new(s.left() + 20.0 * u, s.bottom() - 56.0 * u), Align2::LEFT_TOP)
+                (
+                    Pos2::new(s.left() + 20.0 * u, s.bottom() - 56.0 * u),
+                    Align2::LEFT_TOP,
+                )
             };
             p.text(
                 anchor,
@@ -1269,7 +1358,10 @@ impl HomeState {
             if f >= 0.0 {
                 let r = Rect::from_min_max(
                     Pos2::new(lay.full.left(), lay.full.bottom() - 2.0),
-                    Pos2::new(lay.full.left() + lay.full.width() * f.clamp(0.0, 1.0), lay.full.bottom()),
+                    Pos2::new(
+                        lay.full.left() + lay.full.width() * f.clamp(0.0, 1.0),
+                        lay.full.bottom(),
+                    ),
                 );
                 p.rect_filled(r, 0.0, fade(CYAN, a * 0.6));
             }
@@ -1317,7 +1409,9 @@ impl HomeState {
                 if let Some(action) = pages::slider_set(ms, row, t) {
                     ms.pending_pointer_action = Some(action);
                 }
-            } else if press.travel > 10.0 && matches!(self.page, Page::Library | Page::Settings | Page::Home) {
+            } else if press.travel > 10.0
+                && matches!(self.page, Page::Library | Page::Settings | Page::Home)
+            {
                 press.scrolled = true;
                 self.list_scroll = (self.list_scroll - delta.y).max(0.0);
             }
@@ -1330,7 +1424,12 @@ impl HomeState {
             if press.is_some_and(|p| p.scrolled || p.on_slider.is_some()) {
                 return;
             }
-            let hit = self.hits.iter().rev().find(|(r, _)| r.contains(pos)).cloned();
+            let hit = self
+                .hits
+                .iter()
+                .rev()
+                .find(|(r, _)| r.contains(pos))
+                .cloned();
             if let Some((_, click)) = hit {
                 self.cancel_countdown();
                 if let Some(action) = self.apply_click(ms, click) {
@@ -1371,9 +1470,7 @@ impl HomeState {
             }
             Click::WelcomeStep(step) => {
                 let next = self.welcome as i32 + step;
-                if next < 0 {
-                    self.page = Page::Home;
-                } else if next as usize >= pages::WELCOME.len() {
+                if next < 0 || next as usize >= pages::WELCOME.len() {
                     self.page = Page::Home;
                 } else {
                     self.welcome = next as usize;
@@ -1410,8 +1507,9 @@ enum ProgressLine {
 }
 
 fn hash_str(s: &str) -> u32 {
-    s.bytes()
-        .fold(2166136261u32, |h, b| (h ^ u32::from(b)).wrapping_mul(16777619))
+    s.bytes().fold(2166136261u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(16777619)
+    })
 }
 
 fn draw_device_icon(p: &egui::Painter, c: Pos2, r: f32, which: u8, col: Color32) {
@@ -1431,14 +1529,23 @@ fn draw_device_icon(p: &egui::Painter, c: Pos2, r: f32, which: u8, col: Color32)
         }
         // Gamepad: the phosphor glyph.
         1 => {
-            p.text(c, Align2::CENTER_CENTER, icons::GAMEPAD_2, FontId::proportional(r * 2.3), col);
+            p.text(
+                c,
+                Align2::CENTER_CENTER,
+                icons::GAMEPAD_2,
+                FontId::proportional(r * 2.3),
+                col,
+            );
         }
         // Touch: a phone.
         _ => {
             let rect = Rect::from_center_size(c, Vec2::new(r * 1.15, r * 2.0));
             p.rect_stroke(rect, 3.0, stroke, egui::StrokeKind::Inside);
             p.line_segment(
-                [rect.center_bottom() - Vec2::new(2.0, 2.6), rect.center_bottom() - Vec2::new(-2.0, 2.6)],
+                [
+                    rect.center_bottom() - Vec2::new(2.0, 2.6),
+                    rect.center_bottom() - Vec2::new(-2.0, 2.6),
+                ],
                 stroke,
             );
         }
@@ -1448,9 +1555,364 @@ fn draw_device_icon(p: &egui::Painter, c: Pos2, r: f32, which: u8, col: Color32)
 /// A small solid triangle: `down` true points down, false points right.
 pub(super) fn triangle(p: &egui::Painter, c: Pos2, r: f32, down: bool, col: Color32) {
     let pts = if down {
-        vec![c + Vec2::new(-r, -r * 0.6), c + Vec2::new(r, -r * 0.6), c + Vec2::new(0.0, r * 0.7)]
+        vec![
+            c + Vec2::new(-r, -r * 0.6),
+            c + Vec2::new(r, -r * 0.6),
+            c + Vec2::new(0.0, r * 0.7),
+        ]
     } else {
-        vec![c + Vec2::new(-r * 0.6, -r), c + Vec2::new(r * 0.7, 0.0), c + Vec2::new(-r * 0.6, r)]
+        vec![
+            c + Vec2::new(-r * 0.6, -r),
+            c + Vec2::new(r * 0.7, 0.0),
+            c + Vec2::new(-r * 0.6, r),
+        ]
     };
     p.add(Shape::convex_polygon(pts, col, Stroke::NONE));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn home(first_visit: bool, demo: DemoStatus) -> MenuState {
+        let mut ms = MenuState::new();
+        ms.enable_home(first_visit);
+        ms.set_home_feed(HomeFeed {
+            demo,
+            keyboard: true,
+            ..HomeFeed::default()
+        });
+        ms
+    }
+
+    fn press(ms: &mut MenuState, input: MenuInput) -> Option<MenuAction> {
+        ms.update(&input)
+    }
+
+    fn tick(ms: &mut MenuState, secs: f32) {
+        let mut h = ms.home.take().expect("home");
+        h.tick_countdown(secs);
+        ms.home = Some(h);
+    }
+
+    #[test]
+    fn countdown_waits_for_the_disc_then_starts_it() {
+        let mut ms = home(true, DemoStatus::Loading(-1.0));
+        tick(&mut ms, 5.0);
+        assert_eq!(
+            ms.home_probe().1,
+            "armed",
+            "no countdown while the disc streams"
+        );
+        ms.set_home_feed(HomeFeed {
+            demo: DemoStatus::Ready,
+            ..HomeFeed::default()
+        });
+        tick(&mut ms, 0.1);
+        assert_eq!(ms.home_probe().1, "running");
+        tick(&mut ms, 2.5);
+        assert_eq!(ms.home_probe().1, "running");
+        tick(&mut ms, 1.0);
+        assert_eq!(ms.home_probe().1, "done");
+        assert_eq!(
+            press(&mut ms, MenuInput::default()),
+            Some(MenuAction::StartDemoDisc)
+        );
+        assert_eq!(press(&mut ms, MenuInput::default()), None, "one shot");
+    }
+
+    #[test]
+    fn a_return_visit_has_no_countdown() {
+        let mut ms = home(false, DemoStatus::Ready);
+        tick(&mut ms, 10.0);
+        assert_eq!(ms.home_probe().1, "off");
+        assert_eq!(press(&mut ms, MenuInput::default()), None);
+    }
+
+    #[test]
+    fn any_input_cancels_the_countdown_and_only_cancels() {
+        for input in [
+            MenuInput {
+                up: true,
+                ..Default::default()
+            },
+            MenuInput {
+                right: true,
+                ..Default::default()
+            },
+            MenuInput {
+                back: true,
+                ..Default::default()
+            },
+            MenuInput {
+                confirm: true,
+                ..Default::default()
+            },
+        ] {
+            let mut ms = home(true, DemoStatus::Ready);
+            tick(&mut ms, 0.1);
+            assert_eq!(ms.home_probe().1, "running");
+            assert_eq!(
+                press(&mut ms, input),
+                None,
+                "{input:?} must not also start the disc"
+            );
+            assert_eq!(ms.home_probe().1, "cancelled");
+            tick(&mut ms, 10.0);
+            assert_eq!(ms.home_probe().1, "cancelled", "stays home");
+            assert!(ms.open);
+        }
+        // A pad button or stick seen outside the menu's own edges cancels too.
+        let mut ms = home(true, DemoStatus::Ready);
+        tick(&mut ms, 0.1);
+        ms.note_input();
+        assert_eq!(
+            press(
+                &mut ms,
+                MenuInput {
+                    confirm: true,
+                    ..Default::default()
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            press(
+                &mut ms,
+                MenuInput {
+                    confirm: true,
+                    ..Default::default()
+                }
+            ),
+            Some(MenuAction::StartDemoDisc),
+            "the next press is a real one"
+        );
+    }
+
+    #[test]
+    fn confirm_on_the_hero_starts_the_demo_and_the_next_case_opens_a_folder() {
+        let mut ms = home(false, DemoStatus::Ready);
+        let confirm = MenuInput {
+            confirm: true,
+            ..Default::default()
+        };
+        assert_eq!(press(&mut ms, confirm), Some(MenuAction::StartDemoDisc));
+        press(
+            &mut ms,
+            MenuInput {
+                right: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(press(&mut ms, confirm), Some(MenuAction::ChooseGamesPath));
+    }
+
+    #[test]
+    fn up_reaches_the_nav_and_enter_opens_a_page_back_returns() {
+        let mut ms = home(false, DemoStatus::Ready);
+        press(
+            &mut ms,
+            MenuInput {
+                up: true,
+                ..Default::default()
+            },
+        );
+        press(
+            &mut ms,
+            MenuInput {
+                right: true,
+                ..Default::default()
+            },
+        );
+        press(
+            &mut ms,
+            MenuInput {
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(ms.home_probe().0, "Settings");
+        assert_eq!(ms.selection_probe().0, "Settings");
+        press(
+            &mut ms,
+            MenuInput {
+                back: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(ms.home_probe().0, "Home");
+        // Debug is an action, not a page.
+        press(
+            &mut ms,
+            MenuInput {
+                up: true,
+                ..Default::default()
+            },
+        );
+        press(
+            &mut ms,
+            MenuInput {
+                right: true,
+                ..Default::default()
+            },
+        );
+        press(
+            &mut ms,
+            MenuInput {
+                right: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            press(
+                &mut ms,
+                MenuInput {
+                    confirm: true,
+                    ..Default::default()
+                }
+            ),
+            Some(MenuAction::OpenDebug)
+        );
+    }
+
+    #[test]
+    fn the_welcome_pages_step_forward_and_back_and_close() {
+        let mut ms = home(false, DemoStatus::Absent);
+        ms.show_about();
+        assert_eq!(ms.panel_probe(), "about");
+        press(
+            &mut ms,
+            MenuInput {
+                right: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(ms.home.as_ref().expect("home").welcome, 1);
+        press(
+            &mut ms,
+            MenuInput {
+                left: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(ms.home.as_ref().expect("home").welcome, 0);
+        press(
+            &mut ms,
+            MenuInput {
+                back: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(ms.panel_probe(), "none");
+    }
+
+    #[test]
+    fn settings_arrows_step_a_slider_and_flip_a_toggle() {
+        let mut ms = home(false, DemoStatus::Absent);
+        ms.sync_video_audio(true, "None", 1.0, false);
+        press(
+            &mut ms,
+            MenuInput {
+                up: true,
+                ..Default::default()
+            },
+        );
+        press(
+            &mut ms,
+            MenuInput {
+                right: true,
+                ..Default::default()
+            },
+        );
+        press(
+            &mut ms,
+            MenuInput {
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        for _ in 0..4 {
+            press(
+                &mut ms,
+                MenuInput {
+                    down: true,
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(ms.selection_probe().1, "Volume");
+        assert_eq!(
+            press(
+                &mut ms,
+                MenuInput {
+                    right: true,
+                    ..Default::default()
+                }
+            ),
+            Some(MenuAction::SetVolume(110))
+        );
+        assert_eq!(
+            press(
+                &mut ms,
+                MenuInput {
+                    left: true,
+                    ..Default::default()
+                }
+            ),
+            Some(MenuAction::SetVolume(90))
+        );
+        press(
+            &mut ms,
+            MenuInput {
+                down: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(ms.selection_probe().1, "Mute");
+        assert_eq!(
+            press(
+                &mut ms,
+                MenuInput {
+                    right: true,
+                    ..Default::default()
+                }
+            ),
+            Some(MenuAction::ToggleMute)
+        );
+    }
+
+    #[test]
+    fn reopening_the_shell_starts_at_the_top() {
+        let mut ms = home(false, DemoStatus::Ready);
+        ms.set_game_loaded(true);
+        press(
+            &mut ms,
+            MenuInput {
+                up: true,
+                ..Default::default()
+            },
+        );
+        press(
+            &mut ms,
+            MenuInput {
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(ms.home_probe().0, "Library");
+        ms.open = false;
+        press(&mut ms, MenuInput::default());
+        ms.open = true;
+        press(&mut ms, MenuInput::default());
+        assert_eq!(
+            ms.home_probe().0,
+            "Home",
+            "not the page left open last time"
+        );
+        assert_eq!(
+            ms.selection_probe().0,
+            "Game",
+            "a started game pauses on its own list"
+        );
+    }
 }

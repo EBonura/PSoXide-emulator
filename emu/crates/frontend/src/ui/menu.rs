@@ -898,7 +898,10 @@ impl MenuState {
 
     /// Reflect the box-art setting in its row and in the cover fetcher.
     pub fn set_box_art(&mut self, on: bool) {
-        self.set_value(&MenuAction::ToggleBoxArt, if on { "On" } else { "Off" }.into());
+        self.set_value(
+            &MenuAction::ToggleBoxArt,
+            if on { "On" } else { "Off" }.into(),
+        );
         if let Some(covers) = self.covers() {
             covers.set_enabled(on);
         }
@@ -2959,7 +2962,11 @@ fn build_settings_category() -> Category {
             MenuAction::ToggleTouchLeftHanded,
             Some("Off"),
         ),
-        row("Box art from the internet", MenuAction::ToggleBoxArt, Some("On")),
+        row(
+            "Box art from the internet",
+            MenuAction::ToggleBoxArt,
+            Some("On"),
+        ),
         row("Fullscreen", MenuAction::ToggleFullscreen, None),
         row("About", MenuAction::ShowAbout, None),
     ];
@@ -3721,6 +3728,7 @@ mod tests {
                 "Touch size",
                 "Touch haptics",
                 "Left-handed layout",
+                "Box art from the internet",
                 "Fullscreen",
                 "About",
                 "Quit PSoXide"

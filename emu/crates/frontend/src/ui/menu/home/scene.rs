@@ -357,7 +357,11 @@ pub(super) fn draw_case(painter: &Painter, cam: &Camera, c: &CaseDraw<'_>) {
         Color32::from_rgb(11, 28, 38)
     };
     let edge = fade(
-        if ghost { CYAN } else { Color32::from_rgb(70, 190, 215) },
+        if ghost {
+            CYAN
+        } else {
+            Color32::from_rgb(70, 190, 215)
+        },
         0.55 * o,
     );
     let mut faces: Vec<(&Face, Color32, bool)> = vec![
@@ -413,8 +417,14 @@ fn draw_cover(painter: &Painter, face: &Face, c: &CaseDraw<'_>, o: f32) {
             dashed_quad(painter, &inset, a);
             let m = map(0.5, 0.5);
             let r = 11.0 * unit;
-            painter.line_segment([m - Vec2::new(r, 0.0), m + Vec2::new(r, 0.0)], Stroke::new(1.5, a));
-            painter.line_segment([m - Vec2::new(0.0, r), m + Vec2::new(0.0, r)], Stroke::new(1.5, a));
+            painter.line_segment(
+                [m - Vec2::new(r, 0.0), m + Vec2::new(r, 0.0)],
+                Stroke::new(1.5, a),
+            );
+            painter.line_segment(
+                [m - Vec2::new(0.0, r), m + Vec2::new(0.0, r)],
+                Stroke::new(1.5, a),
+            );
         }
         CoverKind::Demo => draw_demo_cover(painter, &inset, o, unit, tilt),
         CoverKind::Plain => {
@@ -434,7 +444,10 @@ fn draw_cover(painter: &Painter, face: &Face, c: &CaseDraw<'_>, o: f32) {
                     m + Vec2::new(t.cos() * r, t.sin() * r)
                 })
                 .collect();
-            painter.add(Shape::closed_line(ring, Stroke::new(1.0, fade(CYAN, 0.5 * o))));
+            painter.add(Shape::closed_line(
+                ring,
+                Stroke::new(1.0, fade(CYAN, 0.5 * o)),
+            ));
             painter.circle_stroke(m, 4.0 * unit, Stroke::new(1.0, fade(CYAN, 0.5 * o)));
             let font = egui::FontId::proportional((w / 100.0 * 7.0).clamp(7.0, 40.0));
             let galley = painter.layout(
@@ -501,7 +514,12 @@ fn dashed_quad(painter: &Painter, f: &Face, color: Color32) {
     for i in 0..4 {
         let a = f.pts[i];
         let b = f.pts[(i + 1) % 4];
-        painter.extend(Shape::dashed_line(&[a, b], Stroke::new(1.2, color), 7.0, 5.0));
+        painter.extend(Shape::dashed_line(
+            &[a, b],
+            Stroke::new(1.2, color),
+            7.0,
+            5.0,
+        ));
     }
 }
 
@@ -536,7 +554,10 @@ fn draw_demo_cover(painter: &Painter, f: &Face, o: f32, unit: f32, tilt: f32) {
             centre + Vec2::new(t.cos() * r, t.sin() * r)
         })
         .collect();
-    painter.add(Shape::closed_line(ring, Stroke::new(1.4, fade(CYAN, 0.9 * o))));
+    painter.add(Shape::closed_line(
+        ring,
+        Stroke::new(1.4, fade(CYAN, 0.9 * o)),
+    ));
     painter.circle_stroke(centre, 4.0 * unit, Stroke::new(1.0, fade(CYAN, 0.8 * o)));
     let d = 9.0 * unit;
     for s in [1.0f32, -1.0] {
@@ -583,7 +604,13 @@ fn draw_demo_cover(painter: &Painter, f: &Face, o: f32, unit: f32, tilt: f32) {
         3.9 * unit,
         fade(Color32::from_rgb(159, 181, 196), o),
     );
-    small(painter, map(0.5, 0.84), "Demo Disc", 8.0 * unit, fade(Color32::WHITE, o));
+    small(
+        painter,
+        map(0.5, 0.84),
+        "Demo Disc",
+        8.0 * unit,
+        fade(Color32::WHITE, o),
+    );
     small(
         painter,
         map(0.5, 0.92),

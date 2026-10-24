@@ -1966,7 +1966,8 @@ impl AppState {
             }
             #[cfg(target_arch = "wasm32")]
             for (id, title, _) in &self.web_games {
-                let stem = id.rsplit('/').next().unwrap_or(title);
+                let name = id.strip_prefix("web:").unwrap_or(id);
+                let stem = name.rsplit('/').next().unwrap_or(title);
                 let stem = stem.rsplit_once('.').map_or(stem, |(s, _)| s);
                 covers.describe(id, stem, None);
             }
@@ -2056,7 +2057,10 @@ impl AppState {
             .collect();
         if let Some(covers) = self.menu.covers() {
             for item in &items {
-                let path = item.id.strip_prefix(OPEN_LAUNCH_ID_PREFIX).map(PathBuf::from);
+                let path = item
+                    .id
+                    .strip_prefix(OPEN_LAUNCH_ID_PREFIX)
+                    .map(PathBuf::from);
                 covers.describe(&item.id, &item.title, path);
             }
         }
@@ -2617,9 +2621,7 @@ impl AppState {
             self.menu.open = self.menu.home_enabled()
                 || !matches!(
                     status,
-                    BootStatus::Ready { .. }
-                        | BootStatus::Lazy { .. }
-                        | BootStatus::Compact { .. }
+                    BootStatus::Ready { .. } | BootStatus::Lazy { .. } | BootStatus::Compact { .. }
                 );
             if stream_failure_is_quiet(true, matches!(status, BootStatus::NotServed(_))) {
                 self.web_loading = None;
@@ -3167,7 +3169,10 @@ impl AppState {
         let demo = if crate::web_stream::find(DEMO_DISC_ID).is_none() {
             ui::menu::DemoStatus::Absent
         } else if self.bus.is_some()
-            && self.current_game.as_ref().is_some_and(|g| g.id == DEMO_DISC_ID)
+            && self
+                .current_game
+                .as_ref()
+                .is_some_and(|g| g.id == DEMO_DISC_ID)
         {
             ui::menu::DemoStatus::Ready
         } else {

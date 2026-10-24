@@ -153,7 +153,8 @@ class Page {
       if (msg.method === "Runtime.exceptionThrown") {
         this.logs.push(`exception: ${msg.params.exceptionDetails.exception?.description ?? msg.params.exceptionDetails.text}`);
       }
-      if (msg.method === "Target.attachedToTarget" && msg.params.targetInfo.type === "iframe") {
+      // Only this page's own frames: pages of finished journeys must not adopt later pages' iframes.
+      if (msg.method === "Target.attachedToTarget" && msg.params.targetInfo.type === "iframe" && msg.sessionId === this.top) {
         this.attachFrame(msg.params.sessionId);
       }
     });
@@ -1514,6 +1515,9 @@ async function scenarioBench() {
   await page.viewport(Number(args.width ?? 1280), Number(args.height ?? 800), { dpr: 1 });
   if (args.throttle) await page.throttle(Number(args.throttle));
   await page.goto(`http://127.0.0.1:${PORT}/index.html${args.query ?? ""}`);
+  // A build with the home screen waits there with the disc ready: press Start disc.
+  const first = await page.waitFor("the player or the home screen", (s) => s.running || (s.home && s.menu_open && s.loaded_id), 120000).catch(() => null);
+  if (first && !first.running && first.home) await page.tapKey("Enter");
   // Not the UX probe: this must also run against a build that predates it.
   for (let i = 0; i < 800; i++) {
     const b = await page.bench();

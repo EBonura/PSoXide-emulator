@@ -121,7 +121,9 @@ pub fn draw_layout(
             );
         });
 
-    let menu_warning = state.menu_setup_warning().filter(|_| !state.menu.home_enabled());
+    let menu_warning = state
+        .menu_setup_warning()
+        .filter(|_| !state.menu.home_enabled());
     state.menu.draw(ctx, dt, menu_warning);
     if let Some((kind, pct)) = state.menu.take_touch_slider() {
         use crate::ui::menu::TouchSliderKind;

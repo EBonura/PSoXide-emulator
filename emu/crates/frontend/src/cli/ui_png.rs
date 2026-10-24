@@ -167,7 +167,9 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
         View::Menu => {
             state.menu.select_category(&args.category);
             state.menu.open = true;
-            state.menu.home_preview(&args.page, args.case, args.demo, args.countdown);
+            state
+                .menu
+                .home_preview(&args.page, args.case, args.demo, args.countdown);
         }
         View::Window => {
             state.menu.open = false;

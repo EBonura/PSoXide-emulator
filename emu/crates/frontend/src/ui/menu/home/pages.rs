@@ -115,12 +115,13 @@ enum Control {
 fn control_for(row: &Row) -> Control {
     let on = row.value == "On";
     match &row.action {
-        MenuAction::ToggleMute | MenuAction::ToggleTouchHaptics | MenuAction::ToggleTouchLeftHanded => {
-            Control::Toggle(on)
-        }
-        MenuAction::ToggleSmoothSlowHost => {
-            Control::Choice(&["Skip frames", "Slow the game"], usize::from(row.value == "Slow the game"))
-        }
+        MenuAction::ToggleMute
+        | MenuAction::ToggleTouchHaptics
+        | MenuAction::ToggleTouchLeftHanded => Control::Toggle(on),
+        MenuAction::ToggleSmoothSlowHost => Control::Choice(
+            &["Skip frames", "Slow the game"],
+            usize::from(row.value == "Slow the game"),
+        ),
         MenuAction::CycleVideoScale => {
             Control::Choice(&["High-res", "Native"], usize::from(row.value == "Native"))
         }
@@ -150,13 +151,27 @@ fn control_for(row: &Row) -> Control {
 
 /// Left and Right on a settings row: sliders step, everything else cycles.
 /// Confirm activates the row.
-pub(super) fn step_action(ms: &mut MenuState, action: &MenuAction, input: &MenuInput) -> Option<MenuAction> {
+pub(super) fn step_action(
+    ms: &mut MenuState,
+    action: &MenuAction,
+    input: &MenuInput,
+) -> Option<MenuAction> {
     let rows = visible_rows(ms, Page::Settings, false);
     let row = rows.get(ms.item_index)?;
     match control_for(row) {
         Control::Slider(value, lo, hi) => {
-            let step = if matches!(row.action, MenuAction::CycleVolume) { 10.0 } else { 5.0 };
-            let delta = if input.right { step } else if input.left { -step } else { return None };
+            let step = if matches!(row.action, MenuAction::CycleVolume) {
+                10.0
+            } else {
+                5.0
+            };
+            let delta = if input.right {
+                step
+            } else if input.left {
+                -step
+            } else {
+                return None;
+            };
             let next = (value + delta).clamp(lo, hi);
             apply_slider(ms, &row.action, next as u32)
         }
@@ -188,9 +203,18 @@ pub(super) fn slider_set(ms: &mut MenuState, row_index: usize, t: f32) -> Option
     apply_slider(ms, &action, pct)
 }
 
-pub(super) fn draw_list(h: &mut HomeState, ms: &mut MenuState, ctx: &egui::Context, pc: &mut PageCtx<'_>) {
+pub(super) fn draw_list(
+    h: &mut HomeState,
+    ms: &mut MenuState,
+    ctx: &egui::Context,
+    pc: &mut PageCtx<'_>,
+) {
     let pausing = h.pausing(ms);
-    let page = if pausing && h.page == Page::Home { Page::Home } else { h.page };
+    let page = if pausing && h.page == Page::Home {
+        Page::Home
+    } else {
+        h.page
+    };
     let rows = visible_rows(ms, page, pausing);
     let lay = pc.lay;
     let p = pc.painter;
@@ -199,7 +223,12 @@ pub(super) fn draw_list(h: &mut HomeState, ms: &mut MenuState, ctx: &egui::Conte
     let desktop = lay.kind == LayoutKind::Desktop;
     let touch = ms.touch_mode;
     let row_h = (if touch { 54.0 } else { 46.0 }) * u.max(0.9);
-    let width = (if desktop { 780.0 } else { lay.safe.width() - 40.0 * u }).min(lay.safe.width() - 24.0);
+    let width = (if desktop {
+        780.0
+    } else {
+        lay.safe.width() - 40.0 * u
+    })
+    .min(lay.safe.width() - 24.0);
     let left = lay.safe.center().x - width / 2.0;
     let head_top = lay.safe.top() + if desktop { 96.0 * u } else { 82.0 * u };
     let title = match page {
@@ -259,7 +288,14 @@ pub(super) fn draw_list(h: &mut HomeState, ms: &mut MenuState, ctx: &egui::Conte
         );
     }
     if !desktop || touch {
-        back_button(h, p, lay.safe.left() + 20.0 * u, lay.safe.bottom() - 40.0 * u, u, a);
+        back_button(
+            h,
+            p,
+            lay.safe.left() + 20.0 * u,
+            lay.safe.bottom() - 40.0 * u,
+            u,
+            a,
+        );
     }
 }
 
@@ -295,7 +331,10 @@ fn draw_row(
     p.rect_filled(r, 6.0, fade(fill, a));
     if focused {
         p.rect_filled(
-            Rect::from_min_size(r.min + Vec2::new(0.0, 8.0), Vec2::new(3.0, r.height() - 16.0)),
+            Rect::from_min_size(
+                r.min + Vec2::new(0.0, 8.0),
+                Vec2::new(3.0, r.height() - 16.0),
+            ),
             1.5,
             fade(CYAN, a),
         );
@@ -337,12 +376,20 @@ fn draw_row(
                     Stroke::new(1.0, fade(CYAN, a * 0.35)),
                     egui::StrokeKind::Inside,
                 );
-                p.circle_stroke(box_r.center(), size.x * 0.22, Stroke::new(1.0, fade(CYAN, a * 0.5)));
+                p.circle_stroke(
+                    box_r.center(),
+                    size.x * 0.22,
+                    Stroke::new(1.0, fade(CYAN, a * 0.5)),
+                );
             }
         }
         x += size.x + 12.0 * u;
     }
-    let label_col = if focused { Color32::WHITE } else { Color32::from_rgb(214, 224, 232) };
+    let label_col = if focused {
+        Color32::WHITE
+    } else {
+        Color32::from_rgb(214, 224, 232)
+    };
     let ctrl = control_for(row);
     let right = r.right() - 16.0 * u;
     match ctrl {
@@ -398,10 +445,37 @@ fn draw_control(
         Control::Toggle(on) => {
             let w = 44.0 * u;
             let hgt = 24.0 * u;
-            let track = Rect::from_min_size(Pos2::new(right - w, cy - hgt / 2.0), Vec2::new(w, hgt));
-            p.rect_filled(track, hgt / 2.0, fade(if *on { Color32::from_rgb(19, 156, 176) } else { Color32::from_rgb(48, 59, 74) }, a));
-            let knob_x = if *on { track.right() - hgt / 2.0 } else { track.left() + hgt / 2.0 };
-            p.circle_filled(Pos2::new(knob_x, cy), hgt / 2.0 - 3.0, fade(if *on { Color32::WHITE } else { Color32::from_rgb(170, 180, 192) }, a));
+            let track =
+                Rect::from_min_size(Pos2::new(right - w, cy - hgt / 2.0), Vec2::new(w, hgt));
+            p.rect_filled(
+                track,
+                hgt / 2.0,
+                fade(
+                    if *on {
+                        Color32::from_rgb(19, 156, 176)
+                    } else {
+                        Color32::from_rgb(48, 59, 74)
+                    },
+                    a,
+                ),
+            );
+            let knob_x = if *on {
+                track.right() - hgt / 2.0
+            } else {
+                track.left() + hgt / 2.0
+            };
+            p.circle_filled(
+                Pos2::new(knob_x, cy),
+                hgt / 2.0 - 3.0,
+                fade(
+                    if *on {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_rgb(170, 180, 192)
+                    },
+                    a,
+                ),
+            );
         }
         Control::Choice(options, at) => {
             let mut x = right;
@@ -412,14 +486,30 @@ fn draw_control(
                     Color32::WHITE,
                 );
                 let w = galley.size().x + 22.0 * u;
-                let pill = Rect::from_min_size(Pos2::new(x - w, cy - 14.0 * u), Vec2::new(w, 28.0 * u));
+                let pill =
+                    Rect::from_min_size(Pos2::new(x - w, cy - 14.0 * u), Vec2::new(w, 28.0 * u));
                 if i == *at {
                     p.rect_filled(pill, 14.0 * u, fade(CYAN, a));
                 } else {
-                    p.rect_stroke(pill, 14.0 * u, Stroke::new(1.0, fade(Color32::from_rgb(48, 59, 74), a)), egui::StrokeKind::Inside);
+                    p.rect_stroke(
+                        pill,
+                        14.0 * u,
+                        Stroke::new(1.0, fade(Color32::from_rgb(48, 59, 74), a)),
+                        egui::StrokeKind::Inside,
+                    );
                 }
-                let col = if i == *at { Color32::from_rgb(4, 34, 42) } else { Color32::from_rgb(143, 164, 179) };
-                p.text(pill.center(), Align2::CENTER_CENTER, *opt, FontId::proportional(13.0 * u), fade(col, a));
+                let col = if i == *at {
+                    Color32::from_rgb(4, 34, 42)
+                } else {
+                    Color32::from_rgb(143, 164, 179)
+                };
+                p.text(
+                    pill.center(),
+                    Align2::CENTER_CENTER,
+                    *opt,
+                    FontId::proportional(13.0 * u),
+                    fade(col, a),
+                );
                 x = pill.left() - 6.0 * u;
             }
         }
@@ -440,12 +530,22 @@ fn draw_control(
             let t = ((value - lo) / (hi - lo)).clamp(0.0, 1.0);
             p.rect_filled(track, 3.0, fade(Color32::from_rgb(48, 59, 74), a));
             p.rect_filled(
-                Rect::from_min_max(track.min, Pos2::new(track.left() + track.width() * t, track.bottom())),
+                Rect::from_min_max(
+                    track.min,
+                    Pos2::new(track.left() + track.width() * t, track.bottom()),
+                ),
                 3.0,
                 fade(CYAN, a),
             );
-            p.circle_filled(Pos2::new(track.left() + track.width() * t, cy), 8.0 * u, fade(Color32::WHITE, a));
-            h.hits.push((track.expand2(Vec2::new(14.0, 16.0)), Click::Slider(index, track)));
+            p.circle_filled(
+                Pos2::new(track.left() + track.width() * t, cy),
+                8.0 * u,
+                fade(Color32::WHITE, a),
+            );
+            h.hits.push((
+                track.expand2(Vec2::new(14.0, 16.0)),
+                Click::Slider(index, track),
+            ));
         }
         Control::Stepper => {
             let vt = p.text(
@@ -470,7 +570,12 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
     let page = &WELCOME[h.welcome.min(WELCOME.len() - 1)];
     let width = (560.0 * u).min(s.width() - 40.0 * u);
     let x = s.center().x - width / 2.0;
-    let mut y = s.top() + if lay.kind == LayoutKind::Landscape { 64.0 * u } else { 140.0 * u };
+    let mut y = s.top()
+        + if lay.kind == LayoutKind::Landscape {
+            64.0 * u
+        } else {
+            140.0 * u
+        };
     p.text(
         Pos2::new(x, y),
         Align2::LEFT_TOP,
@@ -481,7 +586,11 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
     y += 28.0 * u;
     let title = p.layout(
         page.title.to_string(),
-        FontId::proportional(if lay.kind == LayoutKind::Landscape { 24.0 * u } else { 30.0 * u }),
+        FontId::proportional(if lay.kind == LayoutKind::Landscape {
+            24.0 * u
+        } else {
+            30.0 * u
+        }),
         fade(Color32::WHITE, a),
         width,
     );
@@ -511,15 +620,29 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
             [r.left_bottom(), r.right_bottom()],
             Stroke::new(1.0, fade(Color32::from_rgb(127, 207, 224), a * 0.5)),
         );
-        h.hits.push((r.expand2(Vec2::new(10.0, 10.0)), Click::Link(url)));
+        h.hits
+            .push((r.expand2(Vec2::new(10.0, 10.0)), Click::Link(url)));
         y = r.bottom() + 14.0 * u;
     }
     // Dots and the two steps.
-    let foot_y = (y + 36.0 * u).max(s.top() + 120.0 * u).min(s.bottom() - 70.0 * u);
+    let foot_y = (y + 36.0 * u)
+        .max(s.top() + 120.0 * u)
+        .min(s.bottom() - 70.0 * u);
     for i in 0..WELCOME.len() {
         let on = i == h.welcome;
         let c = Pos2::new(x + 6.0 * u + i as f32 * 18.0 * u, foot_y + 18.0 * u);
-        p.circle_filled(c, if on { 4.0 * u } else { 3.0 * u }, fade(if on { CYAN } else { Color32::from_rgb(42, 56, 70) }, a));
+        p.circle_filled(
+            c,
+            if on { 4.0 * u } else { 3.0 * u },
+            fade(
+                if on {
+                    CYAN
+                } else {
+                    Color32::from_rgb(42, 56, 70)
+                },
+                a,
+            ),
+        );
     }
     let last = h.welcome + 1 >= WELCOME.len();
     let next = Rect::from_min_size(
@@ -536,17 +659,40 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
     );
     h.hits.push((next, Click::WelcomeStep(1)));
     if h.welcome > 0 {
-        let prev = Rect::from_min_size(next.min - Vec2::new(110.0 * u, 0.0), Vec2::new(100.0 * u, 38.0 * u));
-        p.rect_stroke(prev, 19.0 * u, Stroke::new(1.0, fade(Color32::from_rgb(60, 76, 92), a)), egui::StrokeKind::Inside);
-        p.text(prev.center(), Align2::CENTER_CENTER, "BACK", FontId::proportional(13.0 * u), fade(Color32::from_rgb(190, 205, 216), a));
+        let prev = Rect::from_min_size(
+            next.min - Vec2::new(110.0 * u, 0.0),
+            Vec2::new(100.0 * u, 38.0 * u),
+        );
+        p.rect_stroke(
+            prev,
+            19.0 * u,
+            Stroke::new(1.0, fade(Color32::from_rgb(60, 76, 92), a)),
+            egui::StrokeKind::Inside,
+        );
+        p.text(
+            prev.center(),
+            Align2::CENTER_CENTER,
+            "BACK",
+            FontId::proportional(13.0 * u),
+            fade(Color32::from_rgb(190, 205, 216), a),
+        );
         h.hits.push((prev, Click::WelcomeStep(-1)));
     }
     let close = p.text(
-        Pos2::new(s.right() - if lay.kind == LayoutKind::Desktop { 48.0 * u } else { 20.0 * u }, s.top() + 74.0 * u),
+        Pos2::new(
+            s.right()
+                - if lay.kind == LayoutKind::Desktop {
+                    48.0 * u
+                } else {
+                    20.0 * u
+                },
+            s.top() + 74.0 * u,
+        ),
         Align2::RIGHT_TOP,
         "Close",
         FontId::proportional(14.0 * u),
         fade(Color32::from_rgb(143, 164, 179), a),
     );
-    h.hits.push((close.expand2(Vec2::new(12.0, 12.0)), Click::Dismiss));
+    h.hits
+        .push((close.expand2(Vec2::new(12.0, 12.0)), Click::Dismiss));
 }

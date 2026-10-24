@@ -615,7 +615,11 @@ pub fn disc_boot_serial(path: &Path) -> Option<String> {
     let sector = psx_iso::SECTOR_USER_DATA_BYTES as u64;
     let root_lba = le_u32(&pvd, 158)? as u64;
     let root_size = le_u32(&pvd, 166)? as usize;
-    let root = reader.extent(root_lba, (root_size as u64).div_ceil(sector).min(32), root_size)?;
+    let root = reader.extent(
+        root_lba,
+        (root_size as u64).div_ceil(sector).min(32),
+        root_size,
+    )?;
     let cnf = iso_records(&root)
         .into_iter()
         .find(|r| !r.is_dir && r.name.to_ascii_uppercase().starts_with("SYSTEM.CNF"))
@@ -624,12 +628,14 @@ pub fn disc_boot_serial(path: &Path) -> Option<String> {
 }
 
 /// The cover-collection serial named by a `SYSTEM.CNF`'s `BOOT` line.
+#[must_use]
 pub fn boot_serial_of_cnf(system_cnf: &[u8]) -> Option<String> {
     serial_of_boot_name(&boot_exe_name(system_cnf)?)
 }
 
 /// `SCUS_949.00` becomes `SCUS-94900`; anything that is not a retail serial
 /// is `None`.
+#[must_use]
 pub fn serial_of_boot_name(name: &str) -> Option<String> {
     let upper = name.trim().to_ascii_uppercase();
     let bytes = upper.as_bytes();
@@ -1676,6 +1682,29 @@ fn synth_sector(user_data: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn boot_names_become_cover_serials() {
+        assert_eq!(
+            serial_of_boot_name("SCUS_949.00").as_deref(),
+            Some("SCUS-94900")
+        );
+        assert_eq!(
+            serial_of_boot_name("slus_006.78").as_deref(),
+            Some("SLUS-00678")
+        );
+        assert_eq!(
+            serial_of_boot_name("SLES-012.34").as_deref(),
+            Some("SLES-01234")
+        );
+        assert_eq!(serial_of_boot_name("PSX.EXE"), None);
+        assert_eq!(serial_of_boot_name("GAME.EXE"), None);
+        assert_eq!(
+            boot_serial_of_cnf(b"BOOT = cdrom:\\SCUS_949.00;1\r\nTCB = 4\r\n").as_deref(),
+            Some("SCUS-94900")
+        );
+        assert_eq!(boot_serial_of_cnf(b"TCB = 4\r\n"), None);
+    }
+
     use super::*;
     use tempfile::TempDir;
 
