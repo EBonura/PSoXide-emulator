@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Web player menus, fullscreen and controller polish. The texture filter is one
+  control (Settings), "Reconnect saved games" became "Reopen your games folder"
+  and shows only after a folder was connected, and a few labels now say what they
+  do ("If the device is too slow: Skip frames / Slow the game"). The fullscreen
+  button no longer does nothing on an iPhone: inside another site's frame it opens
+  the player's own page in its own tab, and on a page of its own it explains Add to
+  Home Screen (a web manifest makes that install fullscreen). SELECT and START fit
+  their pills with room to spare on every phone, and the status toast clears the
+  controller's buttons under a notch. The journey suite checks all of it, and no
+  longer races the pad negotiation or another run's ports.
 - The web player's Reset, disc pick and menu now behave like a console's. Reset
   restarts the loaded game in place instead of reseating the CPU at a BIOS
   reset vector the browser machine does not have (which faulted and dropped the

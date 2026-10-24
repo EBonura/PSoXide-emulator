@@ -139,6 +139,12 @@ mod imp {
     }
 
     pub(super) fn fullscreen_available() -> bool {
+        // The page's own handler gives the button a use on every browser.
+        if window().is_some_and(|w| {
+            get_optional(&JsValue::from(w), "psoxideToggleFullscreen").is_function()
+        }) {
+            return true;
+        }
         let Some(doc) = document_value() else {
             return false;
         };
@@ -161,6 +167,21 @@ mod imp {
     }
 
     pub(super) fn toggle_fullscreen(lock_landscape: bool) {
+        // The page owns this (index.html): it enters fullscreen where the API
+        // works, and where it does not (an iPhone) opens the player's own page
+        // in a tab or explains Add to Home Screen, so the button is never dead.
+        if let Some(win) = window() {
+            let win = JsValue::from(win);
+            if call_optional(
+                &win,
+                "psoxideToggleFullscreen",
+                &[JsValue::from_bool(lock_landscape)],
+            )
+            .is_some()
+            {
+                return;
+            }
+        }
         let Some(doc) = document_value() else {
             return;
         };
@@ -426,7 +447,10 @@ pub(crate) fn note_guest(
 /// (`[side, x, y, ring]`) and the interface buttons (`[id, x, y]`), for the
 /// browser journey tests to aim at.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-pub(crate) fn layout_probe_json(layout: &crate::input::touch::layout::TouchLayout) -> String {
+pub(crate) fn layout_probe_json(
+    layout: &crate::input::touch::layout::TouchLayout,
+    safe: crate::input::touch::layout::Insets,
+) -> String {
     use crate::input::touch::layout::{StickSide, UiId};
     let buttons = layout
         .buttons
@@ -459,9 +483,30 @@ pub(crate) fn layout_probe_json(layout: &crate::input::touch::layout::TouchLayou
         })
         .collect::<Vec<_>>()
         .join(",");
+    // What is drawn, as [mask-or-0, x0, y0, x1, y1] (pad buttons, then interface buttons).
+    let rects = layout
+        .buttons
+        .iter()
+        .map(|b| (b.mask, b.draw.bounds()))
+        .chain(layout.ui.iter().map(|u| (0, u.draw)))
+        .map(|(id, r)| {
+            format!(
+                "[{id},{:.1},{:.1},{:.1},{:.1}]",
+                r.min.x, r.min.y, r.max.x, r.max.y
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        "{{\"buttons\":[{buttons}],\"dpad\":[{:.1},{:.1},{:.1}],\"sticks\":[{sticks}],\"ui\":[{ui}]}}",
-        layout.dpad.center.x, layout.dpad.center.y, layout.dpad.half_span
+        "{{\"buttons\":[{buttons}],\"dpad\":[{:.1},{:.1},{:.1}],\"sticks\":[{sticks}],\"ui\":[{ui}],\
+         \"rects\":[{rects}],\"safe\":[{:.1},{:.1},{:.1},{:.1}]}}",
+        layout.dpad.center.x,
+        layout.dpad.center.y,
+        layout.dpad.half_span,
+        safe.left,
+        safe.top,
+        safe.right,
+        safe.bottom
     )
 }
 

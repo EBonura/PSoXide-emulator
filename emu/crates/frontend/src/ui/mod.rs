@@ -503,7 +503,7 @@ pub(crate) fn draw_status_toast(ctx: &egui::Context, state: &AppState) {
 
     // Sit below whichever persistent indicators are up, so a toast never
     // lands on top of the freecam or recording badge.
-    let mut toast_y = 48.0;
+    let mut toast_y = 48.0 + state.toast_inset_top;
     if state.input_recording_status().0 {
         toast_y += 46.0;
     }

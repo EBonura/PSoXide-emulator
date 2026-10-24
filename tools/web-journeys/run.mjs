@@ -29,8 +29,9 @@ const SHOTS = args.shots ? path.resolve(args.shots) : null;
 const ONLY = args.only ?? "";
 const CHROME =
   args.chrome ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const PORT = Number(args.port ?? 8131);
-const DEBUG_PORT = Number(args["debug-port"] ?? 9331);
+// Ports default to a spread keyed by the process id, so two runs (two lanes) do not collide.
+const PORT = Number(args.port ?? 20000 + (process.pid % 20000) * 2);
+const DEBUG_PORT = Number(args["debug-port"] ?? (PORT < 40000 ? PORT + 20000 : PORT - 20000));
 if (SHOTS) fs.mkdirSync(SHOTS, { recursive: true });
 
 // ---------------------------------------------------------------- servers
@@ -78,7 +79,7 @@ function serveParent() {
     const url = new URL(req.url, "http://x");
     const query = url.search ? url.search + "&" : "?";
     res.writeHead(200, { "Content-Type": "text/html" });
-    res.end(`<!doctype html><meta charset=utf-8><style>html,body{margin:0;height:100%;background:#222}iframe{border:0;width:100%;height:100%}</style>
+    res.end(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1"><style>html,body{margin:0;height:100%;background:#222}iframe{border:0;width:100%;height:100%}</style>
 <iframe id=f allow="autoplay; fullscreen; gamepad; accelerometer; gyroscope" src="http://127.0.0.1:${PORT}/index.html${url.search}"></iframe>`);
   });
 }
@@ -162,6 +163,7 @@ class Page {
     const send = (m, p) => this.cdp.send(m, p, session);
     await send("Page.enable"); await send("Runtime.enable");
     await send("Page.addScriptToEvaluateOnNewDocument", { source: FAKE_GAMEPAD });
+    for (const source of this.initScripts ?? []) await send("Page.addScriptToEvaluateOnNewDocument", { source });
     await this.applyEmulation(session);
     await send("Runtime.runIfWaitingForDebugger").catch(() => {});
     this.app = session;
@@ -174,6 +176,12 @@ class Page {
     await this.cdp.send("Runtime.enable", {}, s);
     await this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: FAKE_GAMEPAD }, s);
     await this.cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, s);
+  }
+
+  /** Run `source` in every new document of the page, iframes included (call before goto). */
+  async addInit(source) {
+    this.initScripts = [...(this.initScripts ?? []), source];
+    await this.cdp.send("Page.addScriptToEvaluateOnNewDocument", { source }, this.top);
   }
 
   async goto(url) {
@@ -247,6 +255,10 @@ class Page {
     // Device metrics reach cross-origin iframes through the top-level target; only the top accepts the command.
     if (session === this.top) await this.cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: dpr, mobile }, session);
     await this.cdp.send("Emulation.setTouchEmulationEnabled", mobile ? { enabled: true, maxTouchPoints: 5 } : { enabled: false }, session).catch(() => {});
+    // A notch and a home indicator, like an iPhone: env(safe-area-inset-*) reads these.
+    const insets = !mobile ? { top: 0, bottom: 0, left: 0, right: 0 }
+      : width < height ? { top: 47, bottom: 34, left: 0, right: 0 } : { top: 0, bottom: 21, left: 47, right: 47 };
+    await this.cdp.send("Emulation.setSafeAreaInsetsOverride", { insets }, session).catch(() => {});
   }
 
   async viewport(width, height, { dpr = 1, mobile = false } = {}) {
@@ -383,6 +395,22 @@ async function waitDemoRunning(page, timeout = 90000) {
   return page.waitFor("the demo disc running", (u) => u.running && !u.menu_open && u.loaded_id && u.port1_mode !== "none", timeout);
 }
 
+/**
+ * The pad negotiation (profile applied to the new machine, the guest's configuration commands) settles
+ * a frame or two after a boot, so a read taken at that instant can still say "digital". Poll until the
+ * port reads analog, bounded; returns the last mode seen.
+ */
+async function settledMode(page, timeoutMs = 10000) {
+  const start = Date.now();
+  let mode = null;
+  while (Date.now() - start < timeoutMs) {
+    mode = (await page.ux())?.port1_mode ?? null;
+    if (mode === "analog") break;
+    await sleep(150);
+  }
+  return mode;
+}
+
 const nth = (list, i) => list[i];
 
 async function toolbarButtons(page) {
@@ -405,7 +433,11 @@ async function journeyDesktop(label, urlFor, { embeddedMode = false } = {}) {
   if (!u) { await cdp.send("Target.closeTarget", { targetId: page.targetId }); return page; }
   await page.shot(`${label}-01-first-visit`);
   const firstMachine = u.machine;
-  await step("guest sees an analog DualShock with no F9 step", () => (u.port1_mode === "analog" ? true : `port1_mode=${u.port1_mode}`));
+  await step("guest sees an analog DualShock with no F9 step", async () => {
+    // The pad negotiation settles a frame or two after boot; wait for it, bounded.
+    const settled = await page.waitFor("the analog mode", (x) => x.port1_mode === "analog", 10000).catch(() => null);
+    return settled ? true : `port1_mode=${(await page.ux()).port1_mode} after 10 s`;
+  });
   await step("keyboard arrow reaches guest port 1 (left stick and D-pad)", async () => {
     await page.key("ArrowRight", true, false);
     await sleep(250);
@@ -461,7 +493,7 @@ async function journeyDesktop(label, urlFor, { embeddedMode = false } = {}) {
     if (!(later.running && !later.menu_open)) return `after reset: ${JSON.stringify(later)}`;
     if (refetched.length) return `Reset fetched ${refetched.map((r) => r.path)}`;
     if (later.loaded_id !== before.loaded_id) return "game identity changed";
-    return s.port1_mode === "analog" ? true : `port1_mode=${s.port1_mode}`;
+    return (await settledMode(page)) === "analog" ? true : `port1_mode=${s.port1_mode}`;
   });
 
   // Reset from the menu: Esc, Right to the Game column, Down to Reset, Enter.
@@ -533,18 +565,44 @@ async function journeyDesktop(label, urlFor, { embeddedMode = false } = {}) {
     const t = await page.touchState();
     const s = await page.ux();
     await page.padSet({});
-    return s.port1_mode === "analog" && t.port1_mask & PS1.CROSS ? true : JSON.stringify({ t, mode: s.port1_mode });
+    return (await settledMode(page)) === "analog" && t.port1_mask & PS1.CROSS ? true : JSON.stringify({ t, mode: s.port1_mode });
   });
 
   await step("reload: the player comes back running with the menu closed", async () => {
     await page.goto(urlFor());
     const s = await waitDemoRunning(page);
-    return s.port1_mode === "analog" ? true : s.port1_mode;
+    return (await settledMode(page)) === "analog" ? true : s.port1_mode;
   });
   await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
   await cdp.send("Target.closeTarget", { targetId: page.targetId });
 }
 
+
+/**
+ * Every drawn control (pad buttons and the menu / fullscreen buttons) lies inside the window minus the
+ * safe-area insets, and no two pills overlap. `t` is the layout probe: rects are [mask, x0, y0, x1, y1]
+ * in window pixels, safe is [left, top, right, bottom].
+ */
+function layoutProblems(t, size, dpr) {
+  const [sl, st, sr, sb] = t.safe;
+  const W = size.w * dpr, H = size.h * dpr;
+  const eps = 0.6;
+  for (const [id, x0, y0, x1, y1] of t.rects) {
+    if (x0 < sl - eps || y0 < st - eps || x1 > W - sr + eps || y1 > H - sb + eps) {
+      return `control ${id ? "0x" + id.toString(16) : "ui"} [${x0}, ${y0}, ${x1}, ${y1}] is outside the safe area [${sl}, ${st}, ${W - sr}, ${H - sb}]`;
+    }
+  }
+  for (let i = 0; i < t.rects.length; i++) {
+    for (let j = i + 1; j < t.rects.length; j++) {
+      const [, a0, b0, a1, b1] = t.rects[i], [, c0, d0, c1, d1] = t.rects[j];
+      const overlap = Math.min(a1, c1) - Math.max(a0, c0) > 1 && Math.min(b1, d1) - Math.max(b0, d0) > 1;
+      const faces = t.rects[i][0] >= 0x1000 && t.rects[j][0] >= 0x1000; // face buttons overlap by design
+      if (overlap && !faces) return `controls ${t.rects[i][0]} and ${t.rects[j][0]} overlap`;
+    }
+  }
+  const inset = t.safe.some((v) => v > 0);
+  return inset ? null : "the safe-area insets did not reach the player (env() read as zero)";
+}
 
 /** Phone journeys: the on-screen controller, the touch menu, rotation. */
 async function journeyPhone(label, urlFor, size) {
@@ -575,9 +633,11 @@ async function journeyPhone(label, urlFor, size) {
     const s = await page.ux();
     const t = s.touch;
     if (!t) return "no touch layout (controller hidden)";
-    if (s.port1_mode !== "analog") return `port1_mode=${s.port1_mode}`;
+    if ((await settledMode(page)) !== "analog") return `port1_mode=${s.port1_mode}`;
     const bad = t.buttons.filter(([, x, y]) => x < 0 || y < 0 || x > size.w * dpr || y > size.h * dpr);
-    return bad.length ? `buttons outside the window: ${JSON.stringify(bad)}` : t.buttons.length === 10 ? true : `expected 10 pad buttons, got ${t.buttons.length}`;
+    if (bad.length) return `buttons outside the window: ${JSON.stringify(bad)}`;
+    if (t.buttons.length !== 10) return `expected 10 pad buttons, got ${t.buttons.length}`;
+    return layoutProblems(t, size, dpr) ?? true;
   });
   if (args.trace) {
     await page.eval(`window.__ev = []; for (const t of ["pointerdown","touchstart","mousedown","click"]) window.addEventListener(t, (e) => window.__ev.push(t + ":" + Math.round(e.clientX ?? e.touches?.[0]?.clientX) + "," + Math.round(e.clientY ?? e.touches?.[0]?.clientY) + ":" + e.target.tagName), true)`);
@@ -589,8 +649,12 @@ async function journeyPhone(label, urlFor, size) {
     const wrong = [];
     for (const [mask, x, y] of t.buttons) {
       await page.touch("touchStart", [[x / dpr, y / dpr]]);
-      await sleep(160);
-      const st = await page.touchState();
+      let st = null;
+      for (let k = 0; k < 8; k++) {
+        await sleep(120);
+        st = await page.touchState();
+        if (st.port1_mask & mask) break;
+      }
       await page.touch("touchEnd", []);
       await sleep(120);
       if (args.trace) console.log("      touch state", JSON.stringify(st), x / dpr, y / dpr);
@@ -657,7 +721,7 @@ async function journeyPhone(label, urlFor, size) {
     const refetched = requests.filter((r) => /web-manifest|\.pxi$/.test(r.path));
     await page.shot(`${label}-04-after-reset`);
     if (refetched.length) return `Reset fetched ${refetched.map((r) => r.path)}`;
-    return later.running && !later.menu_open && later.port1_mode === "analog" ? true : JSON.stringify(later);
+    return later.running && !later.menu_open && (await settledMode(page)) === "analog" ? true : JSON.stringify(later);
   });
   await step("picking the loaded disc from the touch menu restarts it without a download", async () => {
     if (!(size.w === 393 && size.h === 852)) return true; // row positions are calibrated for 393x852
@@ -687,8 +751,12 @@ async function journeyPhone(label, urlFor, size) {
     const wrong = [];
     for (const [mask, x, y] of t.buttons) {
       await page.touch("touchStart", [[x / dpr, y / dpr]]);
-      await sleep(160);
-      const st = await page.touchState();
+      let st = null;
+      for (let k = 0; k < 8; k++) {
+        await sleep(120);
+        st = await page.touchState();
+        if (st.port1_mask & mask) break;
+      }
       await page.touch("touchEnd", []);
       await sleep(100);
       if (!(st.port1_mask & mask)) wrong.push(`0x${mask.toString(16)}`);
@@ -726,7 +794,7 @@ async function journeyPhone(label, urlFor, size) {
     await page.waitFor("the emulator loaded", (s) => s.has_bus, 90000);
     await page.tap(size.w / 2, size.h / 2);
     const s = await waitDemoRunning(page);
-    return s.port1_mode === "analog" ? true : s.port1_mode;
+    return (await settledMode(page)) === "analog" ? true : s.port1_mode;
   });
   await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
   await cdp.send("Target.closeTarget", { targetId: page.targetId });
@@ -810,27 +878,40 @@ async function journeyMenus(label, urlFor) {
   await sleep(300);
   let st = await page.ux();
   if (!st.menu_open) await open();
-  if (!(args.skipstep ?? "").split(",").includes("replay")) await step("Game / Replay last recording and Load input replay do not break the player", async () => {
-    await menuSelect(page, "Game", "Replay last");
-    await sleep(500);
-    st = await page.ux();
-    if (!st.menu_open) await open();
+  if (!(args.skipstep ?? "").split(",").includes("replay")) await step("Game / Load input replay does not break the player", async () => {
     await menuSelect(page, "Game", "Load input replay");
     await sleep(500);
     st = await page.ux();
     return st.has_bus ? true : "machine lost";
   });
-  await step("Game / Texture filter cycles", async () => {
+  await step("no control appears twice, and the Library offers no Reconnect on a fresh visit", async () => {
     if (!(await page.ux()).menu_open) await open();
-    const before = await rowValue("Game", "Texture filter");
-    await page.tapKey("Enter");
-    await settle();
-    const after = (await page.ux()).menu.value;
-    return after !== before ? true : `value stayed ${before}`;
+    const seen = new Map();
+    const labels = {};
+    for (const column of ["Library", "Game", "Settings"]) {
+      await menuSelect(page, column, "", { enter: false }).catch(() => {});
+      const rows = (await page.ux()).menu.rows;
+      labels[column] = [];
+      for (let i = 0; i < rows; i++) {
+        const u = await page.ux();
+        labels[column].push(u.menu.row);
+        await page.tapKey("ArrowDown");
+      }
+    }
+    for (const [column, list] of Object.entries(labels)) {
+      for (const label of list) {
+        const key = label.replace(/\s*\(F\d\)$/, "").toLowerCase();
+        if (seen.has(key)) return `"${label}" is in both ${seen.get(key)} and ${column}`;
+        seen.set(key, column);
+      }
+    }
+    const all = Object.values(labels).flat().join(" | ");
+    if (/reconnect|reopen/i.test(all)) return `a saved-folder row shows on a fresh visit: ${all}`;
+    console.log(`      menu rows: ${JSON.stringify(labels)}`);
   });
 
   // Settings column: every cycling row changes its value.
-  const SWEEP = ["Video scale", "Deinterlace", "Volume", "Mute", "Menu opacity", "UI scale", "When the computer is slow", "Touch controls", "Touch opacity", "Touch size", "Touch haptics", "Left-handed layout"];
+  const SWEEP = ["Video scale", "Texture filter", "Deinterlace", "Volume", "Mute", "Menu opacity", "UI scale", "If the device is too slow", "Touch controls", "Touch opacity", "Touch size", "Touch haptics", "Left-handed layout"];
   for (const row of SWEEP.filter((r) => !(args.skip ?? "").split(",").includes(r))) {
     await step(`Settings / ${row} changes its value`, async () => {
       if (!(await page.ux()).menu_open) await open();
@@ -878,8 +959,7 @@ async function journeyMenus(label, urlFor) {
   await step("Library rows: Homebrew expands, the folder rows are present, and closing resumes", async () => {
     await menuSelect(page, "Library", "Homebrew");
     await menuSelect(page, "Library", "PSoXide Demo Disc", { enter: false });
-    await menuSelect(page, "Library", "Load games folder", { enter: false });
-    await menuSelect(page, "Library", "Reconnect saved games", { enter: false });
+    await menuSelect(page, "Library", "Open a games folder", { enter: false });
     await page.tapKey("Escape");
     await page.waitFor("resumed", (x) => x.running && !x.menu_open, 5000);
   });
@@ -966,7 +1046,7 @@ async function journeyGamepad(label, urlFor) {
     const s = await page.ux();
     await page.padSet({});
     await sleep(200);
-    return s.port1_mode === "analog" && t.port1_mask & PS1.CROSS ? true : JSON.stringify({ mode: s.port1_mode, t });
+    return (await settledMode(page)) === "analog" && t.port1_mask & PS1.CROSS ? true : JSON.stringify({ mode: s.port1_mode, t });
   });
   await step("the left stick reaches the guest as an axis", async () => {
     await page.padSet({}, [0.9, 0, 0, 0]);
@@ -1019,6 +1099,52 @@ async function journeyNoWebgpu(label, urlFor) {
     await page.shot(`${label}-01`);
     return t.err && /WebGPU/.test(t.status) && !t.fatal ? true : text;
   });
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
+
+/** An iPhone-like browser: no Fullscreen API. The button must still do something real. */
+async function journeyFullscreenFallback(label, urlFor, { framed }) {
+  current = label;
+  const size = { w: 393, h: 852, dpr: 3 };
+  const page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile: true });
+  await page.addInit(`
+    for (const name of ["fullscreenEnabled", "webkitFullscreenEnabled", "fullscreenElement", "webkitFullscreenElement"]) {
+      try { Object.defineProperty(Document.prototype, name, { get: () => (name.endsWith("Element") ? null : false), configurable: true }); } catch (e) {}
+    }
+    for (const name of ["requestFullscreen", "webkitRequestFullscreen"]) { try { Element.prototype[name] = undefined; } catch (e) {} }
+    window.__opened = [];
+    window.open = (url) => { window.__opened.push(String(url)); return {}; };
+    Object.defineProperty(navigator, "standalone", { value: false, configurable: true });
+  `);
+  await page.goto(urlFor());
+  await page.waitFor("the emulator loaded", (s) => s.has_bus, 90000);
+  await page.tap(size.w / 2, size.h / 2);
+  await waitDemoRunning(page);
+  await sleep(1000);
+  await step("the fullscreen button is offered even without the Fullscreen API", async () => {
+    const t = (await page.ux()).touch;
+    return t?.ui.some((b) => b[0] === "fullscreen") ? true : JSON.stringify(t?.ui);
+  });
+  await step(framed ? "tapping it inside a frame opens the player's own page in a new tab" : "tapping it on a page of its own explains Add to Home Screen", async () => {
+    const [, x, y] = (await page.ux()).touch.ui.find((b) => b[0] === "fullscreen");
+    if (args.trace) console.log("      fullscreen button at", x / size.dpr, y / size.dpr, await page.eval(`JSON.stringify({ fn: typeof window.psoxideToggleFullscreen, opened: window.__opened, top: window.top === window, fse: document.fullscreenEnabled, w: innerWidth, h: innerHeight, dpr: devicePixelRatio, cw: document.querySelector("canvas")?.width })`));
+    await page.tap(x / size.dpr, y / size.dpr);
+    let r;
+    for (let i = 0; i < 20; i++) {
+      await sleep(250);
+      r = JSON.parse(await page.eval(`JSON.stringify({ opened: window.__opened, tip: document.getElementById("psoxide-tip").classList.contains("is-on"), text: document.getElementById("psoxide-tip-text").textContent })`));
+      if (r.opened.length || r.tip) break;
+    }
+    await page.shot(`${label}-01`);
+    if (framed) return r.opened.length === 1 && /#fs$/.test(r.opened[0]) && !/embed/.test(r.opened[0]) ? true : JSON.stringify(r);
+    return r.tip && /Home Screen/.test(r.text) && r.opened.length === 0 ? true : JSON.stringify(r);
+  });
+  await step("the game keeps running and the controller still works", async () => {
+    const s = await page.ux();
+    return s.running && !s.menu_open ? true : JSON.stringify(s);
+  });
+  await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
   await cdp.send("Target.closeTarget", { targetId: page.targetId });
 }
 
@@ -1154,6 +1280,8 @@ async function main() {
         if (wanted("phone-portrait")) await journeyPhone("phone-portrait", () => direct(), { w: 393, h: 852, dpr: 3 });
         if (wanted("phone-iframe")) await journeyPhone("phone-iframe", () => embedded(), { w: 393, h: 852, dpr: 3 });
         if (wanted("phone-landscape")) await journeyPhone("phone-landscape", () => direct(), { w: 852, h: 393, dpr: 3 });
+        if (wanted("phone-fullscreen")) await journeyFullscreenFallback("phone-fullscreen", () => direct(), { framed: false });
+        if (wanted("phone-fullscreen-iframe")) await journeyFullscreenFallback("phone-fullscreen-iframe", () => embedded(), { framed: true });
         if (wanted("phone-small")) await journeyPhone("phone-small", () => direct(), { w: 360, h: 640, dpr: 3 });
       });
     }

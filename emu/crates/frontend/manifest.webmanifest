@@ -1,0 +1,15 @@
+{
+  "name": "PSoXide",
+  "short_name": "PSoXide",
+  "description": "PS1 emulator and demo disc in the browser",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "fullscreen",
+  "display_override": ["fullscreen", "standalone"],
+  "orientation": "any",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    { "src": "psoxide-app-icon.png", "sizes": "1024x1024", "type": "image/png", "purpose": "any" }
+  ]
+}

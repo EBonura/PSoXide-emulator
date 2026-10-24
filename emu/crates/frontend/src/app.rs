@@ -480,6 +480,9 @@ pub struct AppState {
     /// can wait for the reads its boot asks for.
     #[cfg(target_arch = "wasm32")]
     web_image_id: u32,
+    /// Points the status toast sits lower than usual, so it clears the touch
+    /// controller's top buttons when a notch pushes them down.
+    pub toast_inset_top: f32,
     /// The overlay menu paused a running game (see [`crate::session::Transport`]).
     /// Closing the menu resumes it; a game the player paused stays paused.
     paused_by_menu: bool,
@@ -686,6 +689,7 @@ impl AppState {
             #[cfg(target_arch = "wasm32")]
             web_image_id: 0,
             paused_by_menu: false,
+            toast_inset_top: 0.0,
             current_game_hash: None,
             // The menu starts open on the Library, which the startup scan
             // below has just covered.
@@ -2095,9 +2099,9 @@ impl AppState {
                 return None;
             }
             if crate::web_files::saved_available() {
-                return Some("Saved games found - reconnect your folder in the Library");
+                return Some("Your games folder is saved: reopen it from the Library");
             }
-            return Some("Load a games folder from the Library");
+            return Some("Optional: open a folder of your own games from the Library");
         }
         #[cfg(not(target_arch = "wasm32"))]
         if self.games_path_missing() {
@@ -2112,7 +2116,7 @@ impl AppState {
     #[cfg(target_arch = "wasm32")]
     pub fn reconnect_web_files(&mut self) {
         crate::web_files::reconnect();
-        self.status_message_set("Reconnecting saved games...");
+        self.status_message_set("Reopening your games folder...");
     }
 
     /// Pick a recorded input tape (CSV or `.pxtape`) and replay it against a
@@ -2378,6 +2382,10 @@ impl AppState {
     #[cfg(target_arch = "wasm32")]
     pub fn poll_web_uploads(&mut self) {
         self.poll_streamed_disc();
+        // The saved-folder check answers a moment after startup; the Library
+        // offers "Reopen your games folder" only once it says there is one.
+        self.menu
+            .set_saved_folder(crate::web_files::saved_available());
         // A folder scan finished: rebuild the Library and jump to it.
         if let Some(scanned) = crate::web_files::take_scanned() {
             let n = scanned.len();

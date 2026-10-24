@@ -9,6 +9,12 @@
     <meta name="theme-color" content="#000000" />
     <title>PSoXide</title>
     <link data-trunk rel="icon" href="../../../assets/branding/psoxide-app-icon.png" />
+    <!-- Add to Home Screen: a fullscreen app with no browser bars, the one true
+         fullscreen an iPhone offers (Safari has no Fullscreen API there). -->
+    <link data-trunk rel="copy-file" href="manifest.webmanifest" />
+    <link data-trunk rel="copy-file" href="../../../assets/branding/psoxide-app-icon.png" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="psoxide-app-icon.png" />
     <script>
       // ?embed=1 is the iframe player (see docs/web-player.md). Mark the root
       // early so the stylesheet can swap the loader for the start poster.
@@ -613,7 +619,84 @@
       <span>No sound? Switch off silent mode.</span>
       <button id="psoxide-silent-ok" type="button">Got it</button>
     </div>
+    <div id="psoxide-tip" class="psoxide-silent" role="status">
+      <span id="psoxide-tip-text"></span>
+      <button id="psoxide-tip-ok" type="button">OK</button>
+    </div>
     <noscript>PSoXide requires JavaScript.</noscript>
+    <script>
+      // The fullscreen button. Where the Fullscreen API works it enters and leaves
+      // fullscreen. An iPhone has none (an iPad does), and a refused request used
+      // to leave the button doing nothing; now the button always gives something:
+      // inside another site's frame it opens the player's own page in its own tab
+      // (the whole window, no frame around it), and on a page of its own it says
+      // how to get a true fullscreen app, which is Add to Home Screen.
+      (function () {
+        var tip = document.getElementById("psoxide-tip");
+        var tipText = document.getElementById("psoxide-tip-text");
+        var timer = null;
+        function showTip(text) {
+          tipText.textContent = text;
+          // One notice at a time in that corner.
+          var silent = document.getElementById("psoxide-silent");
+          if (silent) silent.classList.remove("is-on");
+          tip.classList.add("is-on");
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(function () { tip.classList.remove("is-on"); }, 9000);
+        }
+        document.getElementById("psoxide-tip-ok").addEventListener("click", function (e) {
+          e.preventDefault(); e.stopPropagation();
+          tip.classList.remove("is-on");
+        });
+        function active() { return document.fullscreenElement || document.webkitFullscreenElement; }
+        function standalone() {
+          return !!navigator.standalone ||
+            (window.matchMedia && window.matchMedia("(display-mode: fullscreen), (display-mode: standalone)").matches);
+        }
+        function homeScreenText() {
+          return window.psoxideIOS
+            ? "For a true full-screen app: tap Share, then Add to Home Screen."
+            : "For a full-screen app, install this page from your browser menu.";
+        }
+        function fallback() {
+          if (standalone()) { showTip("This is already a full-screen app."); return; }
+          if (window.top !== window) {
+            var w = null;
+            try { w = window.open(location.origin + location.pathname + "#fs", "_blank"); } catch (e) {}
+            if (!w) showTip("Your browser blocked the new tab. Allow pop-ups for this page, then try again.");
+            return;
+          }
+          // A page of its own: browser bars cannot be hidden from script on an iPhone.
+          showTip(homeScreenText());
+        }
+        window.psoxideToggleFullscreen = function (lockLandscape) {
+          var d = document, root = d.documentElement;
+          if (active()) {
+            var exit = d.exitFullscreen || d.webkitExitFullscreen;
+            if (exit) exit.call(d);
+            try { screen.orientation.unlock(); } catch (e) {}
+            return;
+          }
+          var request = root.requestFullscreen || root.webkitRequestFullscreen;
+          if (!request || !(d.fullscreenEnabled || d.webkitFullscreenEnabled)) { fallback(); return; }
+          var refused = false;
+          try {
+            var result = request.call(root);
+            if (result && result.catch) result.catch(function () { refused = true; fallback(); });
+            if (lockLandscape && screen.orientation && screen.orientation.lock) {
+              var lock = screen.orientation.lock("landscape");
+              if (lock && lock.catch) lock.catch(function () {});
+            }
+          } catch (e) { refused = true; fallback(); }
+          // Some browsers accept the call and do nothing.
+          setTimeout(function () { if (!refused && !active()) fallback(); }, 800);
+        };
+        // The page the iframe case opens: say how to make it a real app, once.
+        if (window.top === window && location.hash === "#fs" && !standalone()) {
+          window.addEventListener("load", function () { setTimeout(function () { showTip(homeScreenText()); }, 1500); });
+        }
+      })();
+    </script>
     <script>
       // Touch devices. The controller itself is drawn and handled by the
       // emulator (src/input/touch); this page only keeps the browser out of

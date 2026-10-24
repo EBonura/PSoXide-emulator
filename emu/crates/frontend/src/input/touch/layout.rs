@@ -652,6 +652,78 @@ pub(crate) mod tests {
         }
     }
 
+    /// The text of a pill ("SELECT", "START", "L1") sits inside its outline with room
+    /// to spare on every device: it is drawn at `touch_overlay::PILL_TEXT` of the pill's
+    /// height, so the pill must be at least as wide as the text plus a margin of
+    /// 15% of its width on each side.
+    #[test]
+    fn pill_labels_fit_inside_their_pills_on_every_device() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        ctx.begin_pass(egui::RawInput::default());
+        for device in &DEVICES {
+            for landscape in [false, true] {
+                for analog in [false, true] {
+                    let layout = TouchLayout::compute(&params(device, landscape, analog));
+                    for b in &layout.buttons {
+                        let Glyph::Label(text) = b.glyph else {
+                            continue;
+                        };
+                        let pill = b.draw.bounds();
+                        let width = ctx.fonts(|f| {
+                            f.layout_no_wrap(
+                                text.to_string(),
+                                egui::FontId::proportional(
+                                    pill.height() * crate::ui::touch_overlay::PILL_TEXT,
+                                ),
+                                egui::Color32::WHITE,
+                            )
+                            .size()
+                            .x
+                        });
+                        assert!(
+                            width <= pill.width() * 0.7,
+                            "{} {}: {text} is {width:.1} px wide in a {:.1} px pill",
+                            device.name,
+                            if landscape { "landscape" } else { "portrait" },
+                            pill.width(),
+                        );
+                    }
+                }
+            }
+        }
+        let _ = ctx.end_pass();
+    }
+
+    /// What is drawn (not just what is touchable) stays inside the safe area, with
+    /// the margin the layout promises: nothing sits flush against, or past, an edge.
+    #[test]
+    fn every_drawn_control_keeps_clear_of_the_safe_area_edges() {
+        for device in &DEVICES {
+            for landscape in [false, true] {
+                for analog in [false, true] {
+                    let p = params(device, landscape, analog);
+                    let layout = TouchLayout::compute(&p);
+                    let inner = safe_rect(&p).shrink(2.0 * device.dpr);
+                    let mut drawn: Vec<(String, Rect)> = layout
+                        .buttons
+                        .iter()
+                        .map(|b| (format!("button {:#x}", b.mask), b.draw.bounds()))
+                        .collect();
+                    drawn.extend(layout.ui.iter().map(|u| (format!("ui {:?}", u.id), u.draw)));
+                    for (name, rect) in drawn {
+                        assert!(
+                            inner.contains_rect(rect),
+                            "{} {}: {name} {rect:?} not inside {inner:?}",
+                            device.name,
+                            if landscape { "landscape" } else { "portrait" },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn touch_areas_of_different_controls_never_overlap() {
         for device in &DEVICES {

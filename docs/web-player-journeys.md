@@ -39,6 +39,8 @@ back by itself) and are enforced by `src/session.rs` plus the browser suite in
 | Reload the page | Splash again, disc boots from the browser cache. | The disc boots again. |
 | Revisit | Volume, filters and key bindings persist (`localStorage`). | Same. |
 | Browser without WebGPU | One plain sentence on the loader instead of a panic. | Same. |
+| Fullscreen button | Enters fullscreen where the browser allows it. An iPhone has no Fullscreen API: inside another site's frame the button opens the player's own page in its own tab, on a page of its own it says how to Add to Home Screen (the page ships a web manifest with `display: fullscreen`). | The toolbar and the menu's Fullscreen row. |
+| Reopen a saved games folder | Not offered. | "Reopen your games folder" appears in the Library only after a folder was connected on an earlier visit. |
 
 ## What was broken
 
@@ -54,6 +56,20 @@ back by itself) and are enforced by `src/session.rs` plus the browser suite in
 4. **Analog**: the keyboard started as an original digital pad (ID 0x41) and pads as a DualShock
    waiting for the handshake, so the launcher (which requires analog) said "This disc needs an
    analog controller" until F9.
+
+Menu audit (web and desktop, every page): the texture filter was in both Game and Settings (now Settings
+only); "Reconnect saved games" showed to everyone and meant nothing to most (now "Reopen your games folder",
+only after a folder was connected); "Load games folder" is "Open a games folder" with its hint; "1 entries" is
+"1 entry"; "When the computer is slow: Keep game speed / Keep it smooth" is "If the device is too slow: Skip
+frames / Slow the game"; "Replay last recording" is left out on the web (a recording downloads as a file, so
+there is nothing to replay); the banner no longer calls the optional folder a requirement. The suite walks
+every row of every column and fails on a label that appears twice.
+
+Controller layout: SELECT and START labels were drawn at 38% of the pill height and are now 34%, so the
+widest label fills at most 70% of its pill on every device in the layout table (a unit test measures the real
+font); a second test keeps everything drawn clear of the safe-area edges, and the browser suite checks every
+drawn rect of the live layout against a phone with a notch and a home indicator (portrait and landscape).
+The status toast clears the controller's top buttons when a notch pushes them down.
 
 Smaller fixes found by the suite: the save-states panel only had a mouse close button (Esc and
 Back now close it); setting Touch controls back to Auto left the toolbar hidden; every setting
@@ -84,7 +100,7 @@ for a phone): 59.3 guest fps at 1x (6.3 ms of emulation per guest frame), 38.7 f
 builds with fat LTO, one codegen unit, opt-level 3, `wasm-opt -O4` and simd128; wasm-opt -O3, -O4
 and -O4 --converge, and simd128 off, all measured within noise of each other, so nothing changed.
 
-Results on the landed build (chrome 130+ headless, macOS):
+Results on the landed build (Chrome 155 headless, macOS; WebKit was not driven, see NOTES):
 
 | Journey | Step | Result |
 |---|---|---|
@@ -126,15 +142,16 @@ Results on the landed build (chrome 130+ headless, macOS):
 | desktop-menus | Game / Load state opens the save-states panel | pass |
 | desktop-menus | the save-states panel closes with Back and leaves the menu usable | pass |
 | desktop-menus | Game / Record input starts a recording (the game reboots); the same row stops it | pass |
-| desktop-menus | Game / Replay last recording and Load input replay do not break the player | pass |
-| desktop-menus | Game / Texture filter cycles | pass |
+| desktop-menus | Game / Load input replay does not break the player | pass |
+| desktop-menus | no control appears twice, and the Library offers no Reconnect on a fresh visit | pass |
 | desktop-menus | Settings / Video scale changes its value | pass |
+| desktop-menus | Settings / Texture filter changes its value | pass |
 | desktop-menus | Settings / Deinterlace changes its value | pass |
 | desktop-menus | Settings / Volume changes its value | pass |
 | desktop-menus | Settings / Mute changes its value | pass |
 | desktop-menus | Settings / Menu opacity changes its value | pass |
 | desktop-menus | Settings / UI scale changes its value | pass |
-| desktop-menus | Settings / When the computer is slow changes its value | pass |
+| desktop-menus | Settings / If the device is too slow changes its value | pass |
 | desktop-menus | Settings / Touch controls changes its value | pass |
 | desktop-menus | Settings / Touch opacity changes its value | pass |
 | desktop-menus | Settings / Touch size changes its value | pass |
@@ -206,6 +223,14 @@ Results on the landed build (chrome 130+ headless, macOS):
 | phone-landscape | the fullscreen button does not break the player | pass |
 | phone-landscape | reload comes back to the tap-to-play splash, then plays | pass |
 | phone-landscape | page logged no errors | pass |
+| phone-fullscreen | the fullscreen button is offered even without the Fullscreen API | pass |
+| phone-fullscreen | tapping it on a page of its own explains Add to Home Screen | pass |
+| phone-fullscreen | the game keeps running and the controller still works | pass |
+| phone-fullscreen | page logged no errors | pass |
+| phone-fullscreen-iframe | the fullscreen button is offered even without the Fullscreen API | pass |
+| phone-fullscreen-iframe | tapping it inside a frame opens the player's own page in a new tab | pass |
+| phone-fullscreen-iframe | the game keeps running and the controller still works | pass |
+| phone-fullscreen-iframe | page logged no errors | pass |
 | phone-small | first visit: the tap-to-play splash shows, then the demo disc runs | pass |
 | phone-small | the controller is on screen, laid out inside the window, and the guest is analog | pass |
 | phone-small | every pad button reaches guest port 1 with the right PS1 bit | pass |
@@ -219,4 +244,3 @@ Results on the landed build (chrome 130+ headless, macOS):
 | phone-small | the fullscreen button does not break the player | pass |
 | phone-small | reload comes back to the tap-to-play splash, then plays | pass |
 | phone-small | page logged no errors | pass |
-

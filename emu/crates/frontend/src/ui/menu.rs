@@ -352,6 +352,8 @@ pub struct MenuState {
     recent_discs: Vec<LibraryItem>,
     /// Right-hand value of the Library's games-folder row (native: the path).
     games_path: String,
+    /// Web: a games folder was connected on an earlier visit and can be reopened.
+    saved_folder: bool,
     expanded_folders: HashSet<PathBuf>,
     /// Whether the Game column is showing (a game is loaded).
     game_loaded: bool,
@@ -504,7 +506,7 @@ impl MenuState {
         // AppState loads the cached entries. The Game column appears with
         // the first loaded game (`set_game_loaded`).
         let categories = vec![
-            build_library_category(&[], &[], &[], &HashSet::new(), ""),
+            build_library_category(&[], &[], &[], &HashSet::new(), "", false),
             // The Editor column is the entry point into the host editor
             // workspace. Standalone emulator builds do not have it.
             #[cfg(feature = "editor")]
@@ -517,6 +519,7 @@ impl MenuState {
             homebrew: Vec::new(),
             recent_discs: Vec::new(),
             games_path: String::new(),
+            saved_folder: false,
             expanded_folders: HashSet::new(),
             game_loaded: false,
             running,
@@ -620,6 +623,7 @@ impl MenuState {
             &self.recent_discs,
             &self.expanded_folders,
             &self.games_path,
+            self.saved_folder,
         );
         if self.category_index != 0 {
             return;
@@ -898,6 +902,14 @@ impl MenuState {
     }
 
     /// Show the games folder on the Library's folder row.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn set_saved_folder(&mut self, saved: bool) {
+        if self.saved_folder != saved {
+            self.saved_folder = saved;
+            self.rebuild_library();
+        }
+    }
+
     pub fn set_games_path_label(&mut self, games: impl Into<String>) {
         self.games_path = games.into();
         self.rebuild_library();
@@ -2891,7 +2903,7 @@ fn build_settings_category() -> Category {
         row("Menu opacity", MenuAction::CycleMenuOpacity, Some("90%")),
         row("UI scale", MenuAction::CycleUiScale, Some("100%")),
         row(
-            "When the computer is slow",
+            "If the device is too slow",
             MenuAction::ToggleSmoothSlowHost,
             Some(slow_host_label(false)),
         ),
@@ -2974,6 +2986,7 @@ fn build_library_category(
     recent: &[LibraryItem],
     expanded: &HashSet<PathBuf>,
     games_path: &str,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))] saved_folder: bool,
 ) -> Category {
     let mut items = Vec::with_capacity(games.len() + homebrew.len() + 4);
     let mut root = LibraryFolder::default();
@@ -2998,7 +3011,15 @@ fn build_library_category(
             label: "Homebrew".into(),
             action: MenuAction::ToggleLibraryFolder(key),
             burn_action: None,
-            value: Some(format!("{} entries", homebrew.len())),
+            value: Some(format!(
+                "{} {}",
+                homebrew.len(),
+                if homebrew.len() == 1 {
+                    "entry"
+                } else {
+                    "entries"
+                }
+            )),
         });
         if open {
             items.extend(homebrew.iter().map(|entry| {
@@ -3044,11 +3065,22 @@ fn build_library_category(
     }
 
     if cfg!(target_arch = "wasm32") {
-        items.push(row("Load games folder", MenuAction::ChooseGamesPath, None));
-        // Reload the folder remembered from a previous visit (Chrome/Edge;
-        // no-op where unsupported).
+        items.push(row(
+            "Open a games folder",
+            MenuAction::ChooseGamesPath,
+            Some("your own .bin / .exe files"),
+        ));
+        // Only offered once a folder was connected on an earlier visit: the
+        // browser keeps the handle but wants one click to grant access again
+        // (Chrome and Edge; never shown where unsupported).
         #[cfg(target_arch = "wasm32")]
-        items.push(row("Reconnect saved games", MenuAction::Reconnect, None));
+        if saved_folder {
+            items.push(row(
+                "Reopen your games folder",
+                MenuAction::Reconnect,
+                Some("the folder you opened last time"),
+            ));
+        }
     } else {
         items.push(row(
             "Open disc...",
@@ -3098,35 +3130,37 @@ fn build_create_category(editor_open: bool) -> Category {
 }
 
 fn build_game_category(running: bool, recording: bool) -> Category {
+    // The browser has no "last recording" to replay (a recording downloads as
+    // a file), so the row would only explain that; leave it out there. The
+    // texture filter lives in Settings only, one control for one setting.
+    let mut items = vec![
+        row(
+            if running { "Pause" } else { "Resume" },
+            MenuAction::ToggleRun,
+            None,
+        ),
+        row("Save state", MenuAction::SaveState, Some("F5")),
+        row("Load state", MenuAction::OpenSaveStates, Some("F7")),
+        row("Reset", MenuAction::Reset, None),
+        row(
+            recording_label(recording),
+            MenuAction::ToggleInputRecording,
+            Some("F8"),
+        ),
+        row(
+            "Replay last recording",
+            MenuAction::ReplayLastInput,
+            Some("F4"),
+        ),
+        row("Load input replay", MenuAction::LoadInputReplay, None),
+    ];
+    if cfg!(target_arch = "wasm32") {
+        items.retain(|item| item.action != MenuAction::ReplayLastInput);
+    }
     Category {
         name: "Game",
         icon: icons::GAMEPAD_2,
-        items: vec![
-            row(
-                if running { "Pause" } else { "Resume" },
-                MenuAction::ToggleRun,
-                None,
-            ),
-            row("Save state", MenuAction::SaveState, Some("F5")),
-            row("Load state", MenuAction::OpenSaveStates, Some("F7")),
-            row("Reset", MenuAction::Reset, None),
-            row(
-                recording_label(recording),
-                MenuAction::ToggleInputRecording,
-                Some("F8"),
-            ),
-            row(
-                "Replay last recording",
-                MenuAction::ReplayLastInput,
-                Some("F4"),
-            ),
-            row("Load input replay", MenuAction::LoadInputReplay, None),
-            row(
-                "Texture filter (F6)",
-                MenuAction::CycleTextureFilter,
-                Some("None"),
-            ),
-        ],
+        items,
     }
 }
 
@@ -3144,9 +3178,9 @@ fn recording_label(recording: bool) -> &'static str {
 /// Settings-row value for `video.smooth_slow_host`.
 fn slow_host_label(smooth: bool) -> &'static str {
     if smooth {
-        "Keep it smooth"
+        "Slow the game"
     } else {
-        "Keep game speed"
+        "Skip frames"
     }
 }
 
@@ -3343,8 +3377,7 @@ mod tests {
                 "Reset",
                 "Record input tape",
                 "Replay last recording",
-                "Load input replay",
-                "Texture filter (F6)"
+                "Load input replay"
             ]
         );
         s.sync_run_label(true);
@@ -3360,10 +3393,10 @@ mod tests {
             .collect();
         assert_eq!(rec.len(), 1);
         assert_eq!(rec[0].value.as_deref(), Some("F8"));
-        // The texture filter is reachable from both the Game and Settings
-        // columns, and one value update reaches both rows.
+        // The texture filter is one control, in Settings only (it used to be
+        // in the Game column as well).
         s.sync_video_audio(true, "Edge", 1.0, false);
-        for column in ["Game", "Settings"] {
+        for column in ["Settings"] {
             let filter: Vec<_> = s
                 .categories
                 .iter()
@@ -3376,6 +3409,13 @@ mod tests {
             assert_eq!(filter.len(), 1, "{column}");
             assert_eq!(filter[0].value.as_deref(), Some("Edge"), "{column}");
         }
+        let game = s.categories.iter().find(|c| c.name == "Game").unwrap();
+        assert!(
+            game.items
+                .iter()
+                .all(|item| item.action != MenuAction::CycleTextureFilter),
+            "no second texture filter row in Game"
+        );
 
         s.select_category("Game");
         s.set_game_loaded(false);
@@ -3631,7 +3671,7 @@ mod tests {
                 "Mute",
                 "Menu opacity",
                 "UI scale",
-                "When the computer is slow",
+                "If the device is too slow",
                 "Touch controls",
                 "Touch opacity",
                 "Touch size",
@@ -3652,7 +3692,7 @@ mod tests {
         assert_eq!(values[1], "Native");
         assert_eq!(values[2], "Edge");
         assert_eq!(&values[4..6], ["50%", "On"]);
-        assert_eq!(values[8], "Keep it smooth");
+        assert_eq!(values[8], "Slow the game");
         s.set_deinterlace("Bob");
         let row = category(&s, "Settings")
             .items

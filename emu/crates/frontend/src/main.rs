@@ -1474,11 +1474,12 @@ impl ApplicationHandler for Shell {
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
+                    let safe = self.input.touch().safe_px();
                     let layout = self
                         .input
                         .touch()
                         .layout()
-                        .map(web_touch::layout_probe_json);
+                        .map(|layout| web_touch::layout_probe_json(layout, safe));
                     web_touch::note_ux(self.state.ux_probe_json(layout.as_deref()));
                 }
                 #[cfg(feature = "editor")]
@@ -2252,6 +2253,8 @@ fn update_touch_controller(
     touch.set_menu_open(menu_open);
     touch.update_layout(params, now_ms, dt.max(1.0 / 120.0));
     let visible = touch.visible();
+    let safe_top_px = touch.safe_px().top;
+    state.toast_inset_top = if visible { safe_top_px / scale } else { 0.0 };
     state.menu.set_touch_mode(visible);
     if visible && !*chrome_applied {
         // The toolbar costs a phone a tenth of its height; the menu button and

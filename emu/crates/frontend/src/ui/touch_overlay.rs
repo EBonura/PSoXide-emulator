@@ -109,6 +109,10 @@ pub(crate) fn draw(ctx: &Context, touch: &TouchDevice, menu_open: bool) {
     }
 }
 
+/// Pill label size as a fraction of the pill's height. 0.34 leaves a clear margin
+/// either side of SELECT, the widest label, on every phone (see the layout tests).
+pub(crate) const PILL_TEXT: f32 = 0.34;
+
 fn draw_pill(painter: &Painter, s: &Space, rect: Rect, text: &str, down: bool, alpha: f32) {
     let r = s.rect(rect);
     let round = CornerRadius::same((r.height() * 0.5).round().min(255.0) as u8);
@@ -131,7 +135,7 @@ fn draw_pill(painter: &Painter, s: &Space, rect: Rect, text: &str, down: bool, a
         r.center(),
         egui::Align2::CENTER_CENTER,
         text,
-        FontId::proportional(r.height() * 0.38),
+        FontId::proportional(r.height() * PILL_TEXT),
         with_alpha(if down { BODY } else { INK }, (alpha + 0.2).min(1.0)),
     );
 }
