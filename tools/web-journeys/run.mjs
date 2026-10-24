@@ -1244,21 +1244,19 @@ async function journeyHome(label, urlFor, size) {
     const mute1 = (await page.ux()).menu.value;
     if (mute0 === mute1) return `Mute stayed ${mute0}`;
     await page.tapKey("ArrowRight"); // and back
+    const vol0 = await rowValueOf(page, "Volume");
     const volume = row(await page.ux(), "slider:Volume");
     if (!volume) return `no volume slider: ${before.home.hits.map((h) => h[0])}`;
-    const vol0 = (await rowValueOf(page, "Volume"));
     const [x0, y0, x1, y1] = volume.slice(1);
     const y = (y0 + y1) / 2;
     await page.mouse("mouseMoved", x0 + 20, y);
     await page.mouse("mousePressed", x0 + 20, y);
-    await sleep(80);
-    await page.mouse("mouseMoved", x0 + (x1 - x0) * 0.8, y);
-    await sleep(80);
-    await page.mouse("mouseReleased", x0 + (x1 - x0) * 0.8, y);
+    for (let i = 1; i <= 6; i++) { await sleep(100); await page.mouse("mouseMoved", x0 + 20 + i * ((x1 - x0) * 0.6 / 6), y); }
+    await page.mouse("mouseReleased", x0 + 20 + (x1 - x0) * 0.6, y);
     await sleep(300);
     await page.shot(`${label}-08-settings-after`);
     const vol1 = await rowValueOf(page, "Volume");
-    return vol0 !== vol1 ? true : `volume stayed ${vol0} after dragging the slider`;
+    return vol0 !== vol1 ? true : `volume stayed ${vol0} after dragging the slider ${JSON.stringify(volume)} y=${y} now ${JSON.stringify((await page.ux()).home.hits.find((h) => h[0] === 'slider:Volume'))}`;
   });
   await close(page);
 }
@@ -1550,28 +1548,33 @@ async function scenarioBench() {
 }
 
 async function scenarioTap() {
-  const size = { w: 852, h: 393, dpr: 3, mobile: true };
+  const size = { w: 1280, h: 800, dpr: 1, mobile: false };
   const page = await newPage("tap");
-  await page.viewport(size.w, size.h, { dpr: 3, mobile: true });
-  await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+  await page.viewport(size.w, size.h, { dpr: 1 });
   await page.goto(direct());
   await page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 90000);
-  console.log(JSON.stringify((await page.ux()).home.hits));
-  await homeTap(page, "nav:Library");
-  await sleep(600);
-  console.log("lib", JSON.stringify((await page.ux()).home.hits.filter((h) => /nav|back/.test(h[0]))));
-  await page.tapKey("g");
-  await sleep(600);
+  await page.tapKey("x");
+  await homeClick(page, "nav:Settings");
+  await sleep(500);
+  await menuSelect(page, "Settings", "Mute", { enter: false });
+  await page.tapKey("ArrowRight"); await sleep(300); await page.tapKey("ArrowRight");
+  await menuSelect(page, "Settings", "Volume", { enter: false });
   const u = await page.ux();
-  console.log("home?", u.home.page, JSON.stringify(u.home.hits.filter((h) => /nav|back/.test(h[0]))));
-  await homeTap(page, "nav:Settings");
-  await sleep(800);
-  const v = await page.ux();
-  console.log("after", v.home.page);
+  const v = u.home.hits.find((h) => h[0] === "slider:Volume");
+  console.log("slider", JSON.stringify(u.home.hits.slice(0, 16)), await page.eval("innerWidth"));
+  const [x0, y0, x1, y1] = v.slice(1);
+  const y = (y0 + y1) / 2;
+  await page.mouse("mouseMoved", x0 + 20, y);
+  await page.mouse("mousePressed", x0 + 20, y);
+  for (let i = 0; i < 6; i++) { await sleep(100); await page.mouse("mouseMoved", x0 + 20 + i * 15, y); console.log(i, JSON.stringify((await page.ux()).menu)); }
+  await page.mouse("mouseReleased", x0 + 110, y);
+  await sleep(300);
+  await menuSelect(page, "Settings", "Volume", { enter: false });
+  console.log("end", JSON.stringify((await page.ux()).menu));
 }
 
 async function main() {
-  if (args.scenario === "tap") { await inChrome(3, scenarioTap); siteServer?.close(); parentServer?.close(); process.exit(0); }
+  if (args.scenario === "tap") { await inChrome(1, scenarioTap); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "bench") { await inChrome(1, scenarioBench); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "spam") { await inChrome(1, scenarioSpam); siteServer?.close(); parentServer?.close(); process.exit(0); }
   const wanted = (name) => !ONLY || name.includes(ONLY);
