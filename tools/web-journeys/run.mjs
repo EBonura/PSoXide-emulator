@@ -369,6 +369,8 @@ function reapChromes() {
 process.on("exit", reapChromes);
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => { reapChromes(); process.exit(130); });
 process.on("uncaughtException", (e) => { console.error(e); reapChromes(); process.exit(2); });
+// A DevTools call to a page that has just closed is not a failed journey.
+process.on("unhandledRejection", (e) => console.error("unhandled rejection (ignored):", String(e?.message ?? e)));
 
 async function launch(hostDpr = 1) {
   siteServer ??= serveSite().listen(PORT, "127.0.0.1");
@@ -1124,9 +1126,11 @@ async function stubCovers(page, mode) {
     const id = msg.params.requestId;
     state.urls.push(msg.params.request.url);
     const cors = [{ name: "Access-Control-Allow-Origin", value: "*" }];
-    if (state.mode === "offline") page.cdp.send("Fetch.failRequest", { requestId: id, errorReason: "InternetDisconnected" }, page.top);
-    else if (state.mode === "hit") page.cdp.send("Fetch.fulfillRequest", { requestId: id, responseCode: 200, responseHeaders: [...cors, { name: "Content-Type", value: "image/png" }], body: ONE_PIXEL_PNG }, page.top);
-    else page.cdp.send("Fetch.fulfillRequest", { requestId: id, responseCode: 404, responseHeaders: cors, body: "" }, page.top);
+    // A page that is already closed answers nothing: never let that reject unhandled.
+    const quiet = (promise) => promise.catch(() => {});
+    if (state.mode === "offline") quiet(page.cdp.send("Fetch.failRequest", { requestId: id, errorReason: "InternetDisconnected" }, page.top));
+    else if (state.mode === "hit") quiet(page.cdp.send("Fetch.fulfillRequest", { requestId: id, responseCode: 200, responseHeaders: [...cors, { name: "Content-Type", value: "image/png" }], body: ONE_PIXEL_PNG }, page.top));
+    else quiet(page.cdp.send("Fetch.fulfillRequest", { requestId: id, responseCode: 404, responseHeaders: cors, body: "" }, page.top));
   });
   return state;
 }
