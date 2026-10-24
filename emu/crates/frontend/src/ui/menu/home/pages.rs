@@ -228,7 +228,12 @@ pub(super) fn draw_list(
     })
     .min(lay.safe.width() - 24.0);
     let left = lay.safe.center().x - width / 2.0;
-    let head_top = lay.safe.top() + if desktop { 96.0 * u } else { 82.0 * u };
+    let head_top = lay.safe.top()
+        + match lay.kind {
+            LayoutKind::Desktop => 96.0 * u,
+            LayoutKind::Portrait => 64.0 * u,
+            LayoutKind::Landscape => 44.0 * u,
+        };
     let title = match page {
         Page::Settings => "Settings",
         _ => "Game",
@@ -318,7 +323,7 @@ fn draw_row(
     if focused {
         super::focus_cage(p, r, a, u);
     }
-    h.hits.push((r, Click::Row(index)));
+    h.hits.push((r.intersect(p.clip_rect()), Click::Row(index)));
     let indent = row.depth as f32 * 22.0 * u;
     let mut x = r.left() + 18.0 * u + indent;
     let cy = r.center().y;
