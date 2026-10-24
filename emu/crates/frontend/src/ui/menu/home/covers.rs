@@ -182,7 +182,10 @@ impl CoverState {
                     .to_string();
                 (stem, p)
             };
-            let guess = if let Some(path) = id.strip_prefix("path:").or_else(|| id.strip_prefix("open:")) {
+            let guess = if let Some(path) = id
+                .strip_prefix("path:")
+                .or_else(|| id.strip_prefix("open:"))
+            {
                 let (stem, p) = from_path(path);
                 Some(Source {
                     stem,

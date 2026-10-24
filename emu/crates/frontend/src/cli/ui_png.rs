@@ -47,6 +47,9 @@ pub struct UiPngArgs {
     /// With `--home`: freeze the launch sequence at this many seconds.
     #[arg(long)]
     pub launch: Option<f32>,
+    /// With `--home`: the compact grid.
+    #[arg(long)]
+    pub compact: bool,
     /// With `--home`: the focused case.
     #[arg(long, default_value_t = 0)]
     pub case: usize,
@@ -170,6 +173,7 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
         View::Menu => {
             state.menu.select_category(&args.category);
             state.menu.open = true;
+            state.menu.home_preview_compact(args.compact);
             state.menu.home_preview(
                 &args.page,
                 args.case,

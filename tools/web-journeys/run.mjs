@@ -927,7 +927,9 @@ async function journeyMenus(label, urlFor) {
     for (const column of ["Game", "Settings"]) {
       await menuSelect(page, column, "", { enter: false }).catch(() => {});
       const rows = (await page.ux()).menu.rows;
-      for (let i = 0; i < rows; i++) await page.tapKey("ArrowUp"); // to the top: the lists do not wrap
+      // To the top: one more Up leaves the list for the nav row, and Down comes back.
+      for (let k = 0; k < 40 && (await page.ux()).home.zone !== "nav"; k++) await page.tapKey("ArrowUp");
+      await page.tapKey("ArrowDown");
       labels[column] = [];
       for (let i = 0; i < rows; i++) {
         const u = await page.ux();
@@ -1038,14 +1040,14 @@ async function journeyMenus(label, urlFor) {
     await page.tapKey("Escape"); await page.waitFor("menu", (x) => x.menu_open, 4000);
     const vol0 = await rowValue("Settings", "Volume");
     const mute0 = await rowValue("Settings", "Mute");
-    await page.tapKey("Escape"); await page.waitFor("closed", (x) => !x.menu_open, 4000);
+    await closeShell(page);
     await page.mouse("mouseMoved", 1060, 17); await page.mouse("mousePressed", 1060, 17); await sleep(60);
     await page.mouse("mouseMoved", 1090, 17); await sleep(60); await page.mouse("mouseReleased", 1090, 17); await sleep(200);
     await page.click(1160, 17);
     await page.tapKey("Escape"); await page.waitFor("menu", (x) => x.menu_open, 4000);
     const vol1 = await rowValue("Settings", "Volume");
     const mute1 = await rowValue("Settings", "Mute");
-    await page.tapKey("Escape"); await page.waitFor("closed", (x) => !x.menu_open, 4000);
+    await closeShell(page);
     if (vol0 === vol1) return `volume stayed ${vol0}`;
     return mute0 !== mute1 ? true : `mute stayed ${mute0}`;
   });
@@ -1278,13 +1280,13 @@ async function journeyHome(label, urlFor, size) {
     return moved.home.case === 1 ? true : "focus did not move";
   });
   await step("L1/R1 (Q/E, PageUp/PageDown) cycle the sections from anywhere and wrap", async () => {
-    const names = ["Home", "Controls", "Settings", "Debug"];
+    const names = ["Home", "Settings", "Controls", "Debug"];
     const at = async (want) => { await page.waitFor(`the ${want} page`, (s) => s.home.page === want, 4000); };
     for (let i = 1; i <= 4; i++) { await page.tapKey("PageDown"); await at(names[i % 4]); }
     await page.tapKey("PageUp"); await at("Debug");
-    await page.tapKey("PageUp"); await at("Settings");
+    await page.tapKey("PageUp"); await at("Controls");
     await page.tapKey("e"); await at("Debug");
-    await page.tapKey("q"); await at("Settings");
+    await page.tapKey("q"); await at("Controls");
     if (!mobile) {
       await page.padConnect();
       await sleep(300);
@@ -1292,7 +1294,7 @@ async function journeyHome(label, urlFor, size) {
       await tap(5); await at("Debug");
       await tap(5); await at("Home");
       await tap(4); await at("Debug");
-      await tap(4); await at("Settings");
+      await tap(4); await at("Controls");
     }
     await page.tapKey("g");
     await page.waitFor("Home again", (s) => s.home.page === "Home", 4000);
@@ -1312,7 +1314,7 @@ async function journeyHome(label, urlFor, size) {
       if (!mobile) {
         await back(async () => { await page.padConnect(); await sleep(200); await page.padSet({ 1: true }); await sleep(200); await page.padSet({}); });
       } else {
-        await back(async () => homeTap(page, "back"));
+        await back(async () => homeTap(page, "nav:Home"));
       }
     }
   });
@@ -1465,7 +1467,7 @@ async function journeyShell(label, urlFor, size) {
   await step("Start disc plays the launch sequence (case opens, disc out, case recedes, tray, spin) and boots", async () => {
     await page.waitFor("the home screen", (s) => s.home.countdown === "cancelled", 5000);
     await activate("primary");
-    const marks = [0.5, 1.2, 1.9, 2.7, 3.5, 4.5];
+    const marks = [0.4, 1.0, 1.7, 2.4, 3.2, 4.1];
     let next = 0, seen = 0;
     const start = Date.now();
     while (Date.now() - start < 40000) {
@@ -1477,7 +1479,7 @@ async function journeyShell(label, urlFor, size) {
       }
       await sleep(120);
     }
-    if (seen < 4.5) return `the sequence only reached ${seen} s`;
+    if (seen < 4.0) return `the sequence only reached ${seen} s`;
     const u = await waitDemoRunning(page, 30000);
     return u.running ? true : "the game never started";
   });
@@ -1502,7 +1504,7 @@ async function journeyShell(label, urlFor, size) {
     return homeLayoutProblem(u, size) ?? true;
   });
   await step("every section opens inside the shell and fits; each is left by pad or keyboard or touch", async () => {
-    for (const section of ["Game", "Controls", "Settings", "Debug"]) {
+    for (const section of ["Game", "Settings", "Controls", "Debug"]) {
       await activate(`nav:${section}`);
       await page.waitFor(`the ${section} page`, (s) => s.home.page === section, 4000);
       await sleep(700);
@@ -1512,7 +1514,7 @@ async function journeyShell(label, urlFor, size) {
       if (problem) return `${section}: ${problem}`;
       if (section === "Controls" && u.panel !== "controls") return "Controls opened outside the shell";
       // Back in the way this device has.
-      if (mobile) await homeTap(page, "back");
+      if (mobile) await homeTap(page, "nav:Home");
       else if (section === "Game") await page.tapKey("g");
       else if (section === "Controls") await page.tapKey("Escape");
       else { await page.padConnect(); await sleep(200); await page.padSet({ 1: true }); await sleep(200); await page.padSet({}); }
@@ -1525,8 +1527,8 @@ async function journeyShell(label, urlFor, size) {
     const u = await page.ux();
     const sidebar = await page.eval(`false`);
     const hits = u.home.hits.map((h) => h[0]);
-    if (mobile && !hits.includes("back")) return `no Back on the phone Debug page: ${hits}`;
-    if (mobile) await homeTap(page, "back");
+    if (mobile && !hits.includes("nav:Home")) return `no way back on the phone Debug page: ${hits}`;
+    if (mobile) await homeTap(page, "nav:Home");
     else await page.tapKey("g");
     await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
     return sidebar ? "a sidebar" : true;
@@ -1674,6 +1676,12 @@ const PAUSE_FROM_RIGHT = 404;
  * Walk the open menu with the keyboard to a column and a row (by label substring), reading
  * the selection back from the state probe. Enter on the row when `enter` is set.
  */
+/** Escape until the shell is gone (a section goes back to Home first). */
+async function closeShell(page) {
+  for (let i = 0; i < 4 && (await page.ux()).menu_open; i++) { await page.tapKey("Escape"); await sleep(250); }
+  await page.waitFor("the shell closed", (x) => !x.menu_open, 4000);
+}
+
 async function menuSelect(page, column, row, { enter = true } = {}) {
   // The shell's sections are one ring (L1/R1, PageUp/PageDown): Home, Game (while a game is started),
   // Controls, Settings, Debug. Rows live on the Game and Settings pages.
@@ -1856,7 +1864,7 @@ async function scenarioLaunch() {
   // Only the sequence itself: up to the moment it hands over to the boot.
   while (Date.now() - t0 < 30000) {
     const u = await page.ux();
-    if ((u.running && !u.menu_open) || u.home?.launch >= 5.4) break;
+    if ((u.running && !u.menu_open) || u.home?.launch >= 4.3) break;
     await sleep(100);
   }
   const st = await page.bench();

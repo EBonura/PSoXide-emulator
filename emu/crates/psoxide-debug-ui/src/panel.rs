@@ -315,8 +315,8 @@ fn host_line(ui: &mut Ui, stats: &GuestStats) {
     let gap_ms = stats.audio_gap_ms();
     let mut text = if behind {
         format!(
-            "Host: {frame_ms:.1} ms per redraw, emulating at {:.0}% of real time. \
-             The host is behind, so the game runs slower than the figures below.",
+            "Host is behind ({:.0}% of real time, {frame_ms:.1} ms per redraw). \
+             Try Video scale: Native.",
             speed * 100.0
         )
     } else {

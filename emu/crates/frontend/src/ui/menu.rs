@@ -274,6 +274,12 @@ pub struct MenuInput {
     pub tab_prev: bool,
     /// R1, E or PageDown: the next section of the shell.
     pub tab_next: bool,
+    /// L2: jump back to the previous first letter on the shelf.
+    pub letter_prev: bool,
+    /// R2: jump on to the next first letter on the shelf.
+    pub letter_next: bool,
+    /// Triangle or Tab: swap big cases and the compact grid.
+    pub options: bool,
     pub toggle_open: bool,
 }
 

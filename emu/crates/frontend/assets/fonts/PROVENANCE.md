@@ -39,3 +39,20 @@ All fonts are bundled as binary `.ttf` files. Their licenses are
 GPL-compatible: the SIL Open Font License is explicitly compatible
 with GPL when fonts are bundled with software, and MIT is a
 permissive license.
+
+## Michroma-Regular.ttf
+
+- **Designer**: Vernon Adams
+- **Source**: https://fonts.google.com/specimen/Michroma
+  (https://github.com/google/fonts/tree/main/ofl/michroma)
+- **License**: SIL Open Font License 1.1 (https://openfontlicense.org/).
+- **Used for**: titles and numbers of the home screen and the shell.
+
+## Jost-Variable.ttf
+
+- **Designer**: Owen Earl (Indestructible Type)
+- **Source**: https://fonts.google.com/specimen/Jost
+  (https://github.com/google/fonts/tree/main/ofl/jost, `Jost[wght].ttf`;
+  egui draws the default weight of the variable font).
+- **License**: SIL Open Font License 1.1 (https://openfontlicense.org/).
+- **Used for**: the text of the whole UI (the first proportional font).

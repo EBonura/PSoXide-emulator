@@ -60,6 +60,34 @@ pub const FONT_SIZE_MONO: f32 = 16.0;
 pub fn apply(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
+    // The shell's type: Michroma for titles and numbers, Jost for text.
+    const JOST_TTF: &[u8] = include_bytes!("../assets/fonts/Jost-Variable.ttf");
+    const MICHROMA_TTF: &[u8] = include_bytes!("../assets/fonts/Michroma-Regular.ttf");
+    fonts.font_data.insert(
+        "jost".to_owned(),
+        egui::FontData::from_static(JOST_TTF).into(),
+    );
+    fonts.font_data.insert(
+        "michroma".to_owned(),
+        egui::FontData::from_static(MICHROMA_TTF).into(),
+    );
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .insert(0, "jost".to_owned());
+    let mut titles = vec!["michroma".to_owned()];
+    titles.extend(
+        fonts
+            .families
+            .get(&FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default(),
+    );
+    fonts
+        .families
+        .insert(FontFamily::Name("michroma".into()), titles);
+
     // Phosphor icon font, two weights: regular (outline) for the default
     // state, fill (solid) for active toggles. Same codepoints in both.
     const PHOSPHOR_TTF: &[u8] = include_bytes!("../assets/fonts/Phosphor.ttf");
@@ -322,4 +350,9 @@ mod tests {
     fn editor_build_binds_the_lucide_family_at_startup() {
         lay_out_in(FontFamily::Name("lucide".into()));
     }
+}
+
+/// A font for titles and numbers (Michroma, with the text font behind it).
+pub fn title_font(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name("michroma".into()))
 }

@@ -3,7 +3,7 @@
 use egui::{Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2};
 
 use super::scene::{fade, CYAN};
-use super::{Click, HomeState, LayoutKind, Page, PageCtx};
+use super::{tokens, Click, HomeState, LayoutKind, Page, PageCtx};
 use crate::ui::menu::{MenuAction, MenuInput, MenuItem, MenuState, TouchSliderKind};
 
 /// What is on the public demo disc. Shown only when the visitor asks.
@@ -25,7 +25,7 @@ pub(super) struct WelcomePage {
     pub links: &'static [(&'static str, &'static str)],
 }
 
-pub(super) const WELCOME: [WelcomePage; 5] = [
+pub(super) const WELCOME: [WelcomePage; 3] = [
     WelcomePage {
         title: "A PlayStation, in your browser",
         body: &[
@@ -37,37 +37,25 @@ pub(super) const WELCOME: [WelcomePage; 5] = [
     WelcomePage {
         title: "Your games stay on your device",
         body: &[
-            "Open a folder of your own disc images or programs and play them here.",
-            "Files are read in place and never uploaded.",
-        ],
-        links: &[],
-    },
-    WelcomePage {
-        title: "Box art",
-        body: &[
-            "PSoXide fetches cover pictures for your own discs from two community collections, xlenore/psx-covers and libretro-thumbnails, and keeps them on this device.",
-            "You can turn this off in Settings.",
+            "Open a folder of your own disc images or programs and play them here. Files are read in place and never uploaded.",
+            "PSoXide fetches cover pictures for your discs from two community collections, xlenore/psx-covers and libretro-thumbnails, and keeps them on this device. You can turn this off in Settings.",
         ],
         links: &[],
     },
     WelcomePage {
         title: "Free to play",
         body: &[
-            "The demo disc is homebrew made with the PSoXide tools, and the source is on GitHub.",
-            "You can support the project with an optional donation on itch.io.",
+            "The demo disc is homebrew made with the PSoXide tools, and the source is on GitHub. You can support the project with an optional donation on itch.io.",
+            concat!(
+                "Version ",
+                env!("CARGO_PKG_VERSION"),
+                ", GPL-2.0-or-later. PlayStation and PS1 are trademarks of Sony Interactive Entertainment."
+            ),
         ],
         links: &[
             ("Support PSoXide on itch.io", super::ITCH_URL),
             ("Source code on GitHub", super::SOURCE_URL),
         ],
-    },
-    WelcomePage {
-        title: "About PSoXide",
-        body: &[
-            concat!("Version ", env!("CARGO_PKG_VERSION"), ". Licensed GPL-2.0-or-later."),
-            "PlayStation and PS1 are trademarks of Sony Interactive Entertainment. PSoXide is unaffiliated.",
-        ],
-        links: &[("Bonnie Studios on itch.io", "https://bonnie-studios.itch.io/")],
     },
 ];
 
@@ -226,7 +214,12 @@ pub(super) fn draw_list(
     let u = lay.u;
     let desktop = lay.kind == LayoutKind::Desktop;
     let touch = ms.touch_mode;
-    let row_h = (if touch { 54.0 } else { 46.0 }) * u.max(0.9);
+    let row_h = (if desktop {
+        tokens::ROW_DESKTOP
+    } else {
+        tokens::ROW_PHONE
+    }) * u.max(0.9);
+    let _ = touch;
     let width = (if desktop {
         780.0
     } else {
@@ -243,11 +236,22 @@ pub(super) fn draw_list(
         Pos2::new(left, head_top),
         Align2::LEFT_TOP,
         title,
-        FontId::proportional(26.0 * u),
-        fade(Color32::WHITE, a),
+        crate::theme::title_font(
+            if desktop {
+                tokens::TITLE_DESKTOP
+            } else {
+                tokens::TITLE_PHONE
+            } * u,
+        ),
+        fade(tokens::TEXT, a),
     );
     let top = t.bottom() + 18.0 * u;
-    let bottom = lay.safe.bottom() - if desktop { 18.0 * u } else { 56.0 * u };
+    let bottom = lay.safe.bottom()
+        - if desktop {
+            18.0 * u
+        } else {
+            lay.bar_reserve() + 4.0 * u
+        };
     let view = Rect::from_min_max(Pos2::new(left, top), Pos2::new(left + width, bottom));
     // Keep the focused row on screen when the focus moved by key.
     if h.last_row != ms.item_index {
@@ -278,7 +282,7 @@ pub(super) fn draw_list(
             Pos2::new(view.center().x, view.bottom() - 8.0),
             5.0 * u,
             true,
-            fade(Color32::from_rgb(111, 129, 146), a),
+            fade(tokens::DIM, a),
         );
     }
     if rows.is_empty() {
@@ -287,30 +291,9 @@ pub(super) fn draw_list(
             Align2::CENTER_TOP,
             "Nothing here yet.",
             FontId::proportional(15.0 * u),
-            fade(Color32::from_rgb(143, 164, 179), a),
+            fade(tokens::MUTED, a),
         );
     }
-    if !desktop || touch {
-        back_button(
-            h,
-            p,
-            lay.safe.left() + 20.0 * u,
-            lay.safe.bottom() - 40.0 * u,
-            u,
-            a,
-        );
-    }
-}
-
-fn back_button(h: &mut HomeState, p: &egui::Painter, x: f32, y: f32, u: f32, a: f32) {
-    let r = p.text(
-        Pos2::new(x, y),
-        Align2::LEFT_CENTER,
-        "\u{2039} Back",
-        FontId::proportional(15.0 * u),
-        fade(Color32::from_rgb(160, 180, 195), a),
-    );
-    h.hits.push((r.expand2(Vec2::new(14.0, 14.0)), Click::Back));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -326,21 +309,13 @@ fn draw_row(
     a: f32,
     index: usize,
 ) {
-    let fill = if focused {
-        Color32::from_rgb(14, 40, 50)
-    } else {
-        Color32::from_rgba_unmultiplied(16, 24, 32, 150)
-    };
-    p.rect_filled(r, 6.0, fade(fill, a));
+    // A flat list: a hairline between rows, and the focus cage on the row you are on.
+    p.line_segment(
+        [r.left_bottom(), r.right_bottom()],
+        Stroke::new(1.0, fade(tokens::hairline(), a)),
+    );
     if focused {
-        p.rect_filled(
-            Rect::from_min_size(
-                r.min + Vec2::new(0.0, 8.0),
-                Vec2::new(3.0, r.height() - 16.0),
-            ),
-            1.5,
-            fade(CYAN, a),
-        );
+        super::focus_cage(p, r, a, u);
     }
     h.hits.push((r, Click::Row(index)));
     let indent = row.depth as f32 * 22.0 * u;
@@ -368,7 +343,7 @@ fn draw_row(
                     tex,
                     box_r,
                     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    fade(Color32::WHITE, a),
+                    fade(tokens::TEXT, a),
                 );
             }
             None => {
@@ -405,15 +380,15 @@ fn draw_row(
             Align2::CENTER_CENTER,
             "Burn",
             FontId::proportional(12.0 * u),
-            fade(Color32::from_rgb(140, 236, 251), a),
+            fade(tokens::FOCUS, a),
         );
         h.hits.push((b.expand(4.0), Click::RowBurn(index)));
         value_right = b.left() - 12.0 * u;
     }
     let label_col = if focused {
-        Color32::WHITE
+        tokens::TEXT
     } else {
-        Color32::from_rgb(214, 224, 232)
+        tokens::TEXT_2
     };
     let ctrl = control_for(row);
     let right = value_right;
@@ -432,11 +407,11 @@ fn draw_row(
                 let galley = p.layout(
                     row.value.clone(),
                     FontId::proportional(13.0 * u),
-                    fade(Color32::from_rgb(127, 147, 162), a),
+                    fade(tokens::DIM, a),
                     max_w,
                 );
                 let gp = Pos2::new(vx - galley.size().x, cy - galley.size().y / 2.0);
-                p.add(Shape::galley(gp, galley, Color32::WHITE));
+                p.add(Shape::galley(gp, galley, tokens::TEXT));
             }
         }
         _ => {
@@ -454,7 +429,7 @@ fn draw_row(
                 max_w,
             );
             let pos = Pos2::new(x, cy - galley.size().y / 2.0);
-            p.add(Shape::galley(pos, galley, Color32::WHITE));
+            p.add(Shape::galley(pos, galley, tokens::TEXT));
             draw_control(h, p, &ctrl, row, r, index, u, a);
         }
     }
@@ -473,7 +448,6 @@ fn draw_control(
 ) {
     let cy = r.center().y;
     let right = r.right() - 16.0 * u;
-    let dim = fade(Color32::from_rgb(143, 164, 179), a);
     match ctrl {
         Control::Toggle(on) => {
             let w = 44.0 * u;
@@ -500,14 +474,7 @@ fn draw_control(
             p.circle_filled(
                 Pos2::new(knob_x, cy),
                 hgt / 2.0 - 3.0,
-                fade(
-                    if *on {
-                        Color32::WHITE
-                    } else {
-                        Color32::from_rgb(170, 180, 192)
-                    },
-                    a,
-                ),
+                fade(if *on { tokens::TEXT } else { tokens::MUTED }, a),
             );
         }
         Control::Choice(options, at) => {
@@ -516,7 +483,7 @@ fn draw_control(
                 let galley = p.layout_no_wrap(
                     (*opt).to_string(),
                     FontId::proportional(13.0 * u),
-                    Color32::WHITE,
+                    tokens::TEXT,
                 );
                 let w = galley.size().x + 22.0 * u;
                 let pill =
@@ -532,9 +499,9 @@ fn draw_control(
                     );
                 }
                 let col = if i == *at {
-                    Color32::from_rgb(4, 34, 42)
+                    tokens::ON_ACCENT
                 } else {
-                    Color32::from_rgb(143, 164, 179)
+                    tokens::MUTED
                 };
                 p.text(
                     pill.center(),
@@ -552,8 +519,8 @@ fn draw_control(
                 Pos2::new(right, cy),
                 Align2::RIGHT_CENTER,
                 label,
-                FontId::proportional(14.0 * u),
-                fade(Color32::from_rgb(214, 224, 232), a),
+                FontId::monospace(tokens::SLIDER_VALUE * u),
+                fade(tokens::TEXT_2, a),
             );
             let tw = (200.0 * u).min(r.width() * 0.4);
             let track = Rect::from_min_max(
@@ -573,7 +540,7 @@ fn draw_control(
             p.circle_filled(
                 Pos2::new(track.left() + track.width() * t, cy),
                 8.0 * u,
-                fade(Color32::WHITE, a),
+                fade(tokens::TEXT, a),
             );
             h.hits.push((
                 track.expand2(Vec2::new(14.0, 16.0)),
@@ -581,14 +548,24 @@ fn draw_control(
             ));
         }
         Control::Stepper => {
-            let vt = p.text(
-                Pos2::new(right, cy),
+            // The value, and a drawn chevron: it cycles on confirm or a tap.
+            let c = Pos2::new(right - 4.0 * u, cy);
+            let d = 4.5 * u;
+            p.add(Shape::line(
+                vec![
+                    c + Vec2::new(-d * 0.6, -d),
+                    c + Vec2::new(d * 0.6, 0.0),
+                    c + Vec2::new(-d * 0.6, d),
+                ],
+                Stroke::new(1.7, fade(tokens::ICON_REST, a)),
+            ));
+            p.text(
+                Pos2::new(right - 18.0 * u, cy),
                 Align2::RIGHT_CENTER,
-                format!("{}  \u{203a}", row.value),
-                FontId::proportional(14.0 * u),
-                dim,
+                &row.value,
+                FontId::proportional(tokens::BODY * u),
+                fade(tokens::MUTED, a),
             );
-            let _ = vt;
         }
         Control::Plain => {}
     }
@@ -613,32 +590,32 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
         Pos2::new(x, y),
         Align2::LEFT_TOP,
         format!("WELCOME  {} / {}", h.welcome + 1, WELCOME.len()),
-        FontId::proportional(11.5 * u),
+        FontId::proportional(tokens::CAPTION * u.max(1.0)),
         fade(CYAN, a),
     );
     y += 28.0 * u;
     let title = p.layout(
         page.title.to_string(),
-        FontId::proportional(if lay.kind == LayoutKind::Landscape {
-            24.0 * u
+        crate::theme::title_font(if lay.kind == LayoutKind::Desktop {
+            tokens::TITLE_DESKTOP * u
         } else {
-            30.0 * u
+            tokens::TITLE_PHONE * u
         }),
-        fade(Color32::WHITE, a),
+        fade(tokens::TEXT, a),
         width,
     );
     let th = title.size().y;
-    p.add(Shape::galley(Pos2::new(x, y), title, Color32::WHITE));
+    p.add(Shape::galley(Pos2::new(x, y), title, tokens::TEXT));
     y += th + 16.0 * u;
     for para in page.body {
         let g = p.layout(
             (*para).to_string(),
             FontId::proportional(17.0 * u),
-            fade(Color32::from_rgb(185, 197, 209), a),
+            fade(tokens::TEXT_2, a),
             width,
         );
         let gh = g.size().y;
-        p.add(Shape::galley(Pos2::new(x, y), g, Color32::WHITE));
+        p.add(Shape::galley(Pos2::new(x, y), g, tokens::TEXT));
         y += gh + 12.0 * u;
     }
     for (label, url) in page.links {
@@ -647,11 +624,11 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
             Align2::LEFT_TOP,
             *label,
             FontId::proportional(16.0 * u),
-            fade(Color32::from_rgb(127, 207, 224), a),
+            fade(tokens::ACCENT, a),
         );
         p.line_segment(
             [r.left_bottom(), r.right_bottom()],
-            Stroke::new(1.0, fade(Color32::from_rgb(127, 207, 224), a * 0.5)),
+            Stroke::new(1.0, fade(tokens::ACCENT, a * 0.5)),
         );
         h.hits
             .push((r.expand2(Vec2::new(10.0, 10.0)), Click::Link(url)));
@@ -688,7 +665,7 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
         Align2::CENTER_CENTER,
         if last { "DONE" } else { "NEXT" },
         FontId::proportional(13.0 * u),
-        fade(Color32::from_rgb(4, 34, 42), a),
+        fade(tokens::ON_ACCENT, a),
     );
     h.hits.push((next, Click::WelcomeStep(1)));
     if h.welcome > 0 {
@@ -699,7 +676,7 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
         p.rect_stroke(
             prev,
             19.0 * u,
-            Stroke::new(1.0, fade(Color32::from_rgb(60, 76, 92), a)),
+            Stroke::new(1.0, fade(tokens::RING, a)),
             egui::StrokeKind::Inside,
         );
         p.text(
@@ -707,7 +684,7 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
             Align2::CENTER_CENTER,
             "BACK",
             FontId::proportional(13.0 * u),
-            fade(Color32::from_rgb(190, 205, 216), a),
+            fade(tokens::TEXT_2, a),
         );
         h.hits.push((prev, Click::WelcomeStep(-1)));
     }
@@ -722,9 +699,9 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
             s.top() + 74.0 * u,
         ),
         Align2::RIGHT_TOP,
-        "Close",
+        "Skip",
         FontId::proportional(14.0 * u),
-        fade(Color32::from_rgb(143, 164, 179), a),
+        fade(tokens::MUTED, a),
     );
     h.hits
         .push((close.expand2(Vec2::new(12.0, 12.0)), Click::Dismiss));

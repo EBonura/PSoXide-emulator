@@ -37,6 +37,12 @@ pub(crate) enum Phase {
 /// A tap on one of the player's own buttons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UiAction {
+    /// Pause or resume.
+    Pause,
+    /// Save the state.
+    Save,
+    /// Open Debug.
+    Debug,
     /// The menu button.
     Menu,
     /// The fullscreen button.
@@ -249,6 +255,9 @@ impl TouchPad {
                 .is_some_and(|b| b.hit.contains(pos));
             if completed && inside {
                 self.pending.push(match ui {
+                    UiId::Pause => UiAction::Pause,
+                    UiId::Save => UiAction::Save,
+                    UiId::Debug => UiAction::Debug,
                     UiId::Menu => UiAction::Menu,
                     UiId::Fullscreen => UiAction::Fullscreen,
                 });

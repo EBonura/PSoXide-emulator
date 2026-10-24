@@ -280,8 +280,7 @@ fn summary(ui: &mut egui::Ui, state: &AppState, big: bool) {
                         ui.vertical(|ui| {
                             ui.label(
                                 RichText::new(value)
-                                    .monospace()
-                                    .size(30.0)
+                                    .font(egui::FontId::monospace(36.0))
                                     .color(egui::Color32::WHITE),
                             );
                             ui.label(RichText::new(caption).size(13.0).color(theme::TEXT_DIM));

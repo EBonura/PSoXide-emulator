@@ -176,6 +176,12 @@ pub(crate) struct InputFrame {
     pub(crate) menu_prev: bool,
     /// Menu: next section (R1 went down).
     pub(crate) menu_next: bool,
+    /// Menu: jump back a letter (L2 went down).
+    pub(crate) menu_letter_prev: bool,
+    /// Menu: jump on a letter (R2 went down).
+    pub(crate) menu_letter_next: bool,
+    /// Menu: the options button (Triangle went down), the case size toggle.
+    pub(crate) menu_options: bool,
     /// First non-neutral left stick, for freecam.
     pub(crate) left_stick: (f32, f32),
     /// First non-neutral right stick, for freecam.
@@ -423,6 +429,9 @@ impl InputHub {
         frame.menu_back = edges & button::CIRCLE != 0;
         frame.menu_prev = edges & button::L1 != 0;
         frame.menu_next = edges & button::R1 != 0;
+        frame.menu_letter_prev = edges & button::L2 != 0;
+        frame.menu_letter_next = edges & button::R2 != 0;
+        frame.menu_options = edges & button::TRIANGLE != 0;
         let steps = self.repeat.update(now_ms, resolved & DIRECTIONS);
         frame.menu_up = steps & button::UP != 0;
         frame.menu_down = steps & button::DOWN != 0;

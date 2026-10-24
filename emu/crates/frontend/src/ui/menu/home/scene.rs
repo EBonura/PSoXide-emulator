@@ -203,7 +203,7 @@ pub(super) fn draw_backdrop(painter: &Painter, dither: Option<TextureId>, b: Bac
             mesh.vertices.push(Vertex {
                 pos,
                 uv: Pos2::new(uv.x / 2.0, uv.y / 2.0),
-                color: fade(VOID, 0.5 * b.alpha),
+                color: fade(VOID, 0.2 * b.alpha),
             });
         }
         mesh.indices.extend([0, 1, 2, 0, 2, 3]);

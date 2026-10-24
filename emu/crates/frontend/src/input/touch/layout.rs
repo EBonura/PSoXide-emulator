@@ -35,6 +35,10 @@ const STICK_RING: f32 = 46.0;
 const SMALL_PILL: Vec2 = vec2(64.0, 34.0);
 /// Menu button size, CSS px.
 const MENU_BUTTON: Vec2 = vec2(76.0, 36.0);
+/// Pause, Save and Debug button size, CSS px (the icons beside Menu).
+const ICON_BUTTON: Vec2 = vec2(40.0, 36.0);
+/// Width of the whole row of interface buttons, CSS px (without fullscreen).
+const UI_ROW: f32 = 3.0 * (40.0 + 6.0) + 76.0;
 /// Fullscreen button size, CSS px.
 const FULLSCREEN_BUTTON: Vec2 = vec2(40.0, 36.0);
 /// Distance of a cluster centre from its screen edge, CSS px.
@@ -195,6 +199,12 @@ pub(crate) struct StickPlan {
 /// Buttons that belong to the player's interface rather than the pad.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UiId {
+    /// Pause or resume the game.
+    Pause,
+    /// Save the game's state.
+    Save,
+    /// Open the debug section.
+    Debug,
     /// Open or close the emulator menu.
     Menu,
     /// Enter or leave fullscreen.
@@ -283,7 +293,7 @@ impl TouchLayout {
         // corner while the menu list fills the screen.
         let ui_at = if p.menu_open {
             pos2(
-                ox + w_px - m - (MENU_BUTTON.x + 8.0 + FULLSCREEN_BUTTON.x) * u,
+                ox + w_px - m - (UI_ROW + 8.0 + FULLSCREEN_BUTTON.x) * u,
                 oy + 8.0 * u,
             )
         } else {
@@ -348,7 +358,7 @@ impl TouchLayout {
         layout.stacked_pills(pos2(cx_mid, cy), pill_w, u);
         layout.ui_buttons(
             pos2(
-                ox + w_px - m - (MENU_BUTTON.x + 8.0 + FULLSCREEN_BUTTON.x) * u,
+                ox + w_px - m - (UI_ROW + 8.0 + FULLSCREEN_BUTTON.x) * u,
                 oy + 8.0 * u,
             ),
             u,
@@ -463,7 +473,18 @@ impl TouchLayout {
     }
 
     fn ui_buttons(&mut self, min: Pos2, u: f32, fullscreen: bool) {
-        let menu = Rect::from_min_size(min, MENU_BUTTON * u);
+        // One pill of four icons: Pause, Save, Debug, Menu.
+        let mut x = min.x;
+        for id in [UiId::Pause, UiId::Save, UiId::Debug] {
+            let r = Rect::from_min_size(pos2(x, min.y), ICON_BUTTON * u);
+            self.ui.push(UiButton {
+                id,
+                draw: r,
+                hit: r.expand2(vec2(0.0, 6.0 * u)),
+            });
+            x += (ICON_BUTTON.x + 6.0) * u;
+        }
+        let menu = Rect::from_min_size(pos2(x, min.y), MENU_BUTTON * u);
         self.ui.push(UiButton {
             id: UiId::Menu,
             draw: menu,

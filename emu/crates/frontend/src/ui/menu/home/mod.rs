@@ -6,9 +6,11 @@
 //! [`MenuAction`]s going out. Only the drawing and the focus rules are new.
 
 mod covers;
+mod grid;
 mod launch;
 mod pages;
 mod scene;
+mod tokens;
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2};
 
@@ -107,7 +109,7 @@ fn nav_items(in_game: bool) -> Vec<NavItem> {
     if in_game {
         items.push(NavItem::Game);
     }
-    items.extend([NavItem::Controls, NavItem::Settings, NavItem::Debug]);
+    items.extend([NavItem::Settings, NavItem::Controls, NavItem::Debug]);
     items
 }
 
@@ -161,6 +163,8 @@ enum Click {
     Peek,
     Restart,
     Burn,
+    SizeToggle,
+    Rail,
     Act(MenuAction),
     Link(&'static str),
     Welcome,
@@ -168,7 +172,6 @@ enum Click {
     Row(usize),
     RowBurn(usize),
     Slider(usize, Rect),
-    Back,
     Dismiss,
 }
 
@@ -204,6 +207,14 @@ pub(crate) struct HomeState {
     label_tex: Option<egui::TextureHandle>,
     /// Where a Controls or Debug section is drawn this frame (by the shell around it).
     section: Option<Rect>,
+    /// The compact grid instead of the big cases.
+    compact: bool,
+    /// The letter shown big for a moment after a jump, and how long it has left.
+    badge: Option<(char, f32)>,
+    grid_scroll: f32,
+    grid_cols: usize,
+    /// The letter rail of the grid on a phone, when it is up.
+    rail: Option<(Rect, Vec<char>)>,
 }
 
 /// A pointer press being tracked, to tell a tap from a scroll.
@@ -243,6 +254,11 @@ impl HomeState {
             pending_launch: None,
             label_tex: None,
             section: None,
+            compact: false,
+            badge: None,
+            grid_scroll: 0.0,
+            grid_cols: 3,
+            rail: None,
         }
     }
 
@@ -252,6 +268,10 @@ impl HomeState {
         if !ms.open {
             self.closed = true;
             self.started = true;
+            // Once the game is going, the first-visit countdown is over.
+            if matches!(self.countdown, Countdown::Armed | Countdown::Running(_)) {
+                self.countdown = Countdown::Cancelled;
+            }
         } else if std::mem::take(&mut self.closed) {
             self.page = Page::Home;
             self.zone = Zone::Body;
@@ -350,6 +370,8 @@ impl MenuState {
                     Click::Peek => "peek".into(),
                     Click::Act(action) => format!("act:{action:?}"),
                     Click::Restart => "restart".into(),
+                    Click::SizeToggle => "size".into(),
+                    Click::Rail => "rail".into(),
                     Click::Burn => "burn".into(),
                     Click::Link(url) => format!("link:{url}"),
                     Click::Welcome => "welcome".into(),
@@ -363,7 +385,6 @@ impl MenuState {
                     Click::Slider(i, _) => {
                         format!("slider:{}", rows.get(*i).map_or("", |r| r.label.as_str()))
                     }
-                    Click::Back => "back".into(),
                     Click::Dismiss => "dismiss".into(),
                 };
                 format!(
@@ -470,9 +491,19 @@ impl MenuState {
             _ => return false,
         };
         let mut shell = self.home.take().expect("home");
+        // Asked for by name: this is where the shell opens, not the top.
+        shell.closed = false;
         shell.open_nav(self, item);
         self.home = Some(shell);
         true
+    }
+
+    /// Preview the compact grid.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn home_preview_compact(&mut self, on: bool) {
+        if let Some(h) = self.home.as_mut() {
+            h.compact = on;
+        }
     }
 
     /// Where the shell wants a Controls or Debug section drawn this frame.
@@ -566,6 +597,7 @@ impl HomeState {
                 restart: Some(MenuAction::LaunchGame(id.clone())),
                 burn: None,
                 launches: false,
+                shelf: false,
             });
         }
         if has_demo && current.is_none_or(|(id, _)| id != demo_id) {
@@ -579,6 +611,7 @@ impl HomeState {
                 restart: None,
                 burn: None,
                 launches: true,
+                shelf: false,
             });
         }
         out.push(CaseItem {
@@ -591,6 +624,7 @@ impl HomeState {
             restart: None,
             burn: None,
             launches: false,
+            shelf: false,
         });
         // A folder connected on an earlier visit is one click from being open again.
         #[cfg(target_arch = "wasm32")]
@@ -605,6 +639,7 @@ impl HomeState {
                 restart: None,
                 burn: None,
                 launches: false,
+                shelf: false,
             });
         }
         let mut shown: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -624,6 +659,7 @@ impl HomeState {
                     restart: None,
                     burn: None,
                     launches: true,
+                    shelf: false,
                 });
             }
         }
@@ -647,6 +683,7 @@ impl HomeState {
                     burn: (item.launchable && item.burnable)
                         .then(|| MenuAction::OpenBurnMenu(item.id.clone())),
                     launches: true,
+                    shelf: true,
                 });
             }
         }
@@ -676,6 +713,7 @@ impl HomeState {
                     burn: (item.launchable && item.burnable)
                         .then(|| MenuAction::OpenBurnMenu(item.id.clone())),
                     launches: item.launchable,
+                    shelf: false,
                 });
             }
         }
@@ -733,7 +771,10 @@ impl HomeState {
             || input.confirm
             || input.back
             || input.tab_prev
-            || input.tab_next;
+            || input.tab_next
+            || input.options
+            || input.letter_prev
+            || input.letter_next;
         if any {
             // The press that cancels the countdown only cancels it: it does not
             // also press Start disc.
@@ -833,11 +874,33 @@ impl HomeState {
         }
         let cases = self.cases(ms);
         let last = cases.len().saturating_sub(1);
+        if input.options {
+            self.compact = !self.compact;
+            return None;
+        }
+        if input.letter_prev || input.letter_next {
+            self.jump_letter(&cases, if input.letter_next { 1 } else { -1 });
+            return None;
+        }
+        let cols = if self.compact {
+            self.grid_cols.max(1)
+        } else {
+            1
+        };
         if input.left && self.case_focus > 0 {
             self.case_focus -= 1;
         }
         if input.right && self.case_focus < last {
             self.case_focus += 1;
+        }
+        if self.compact {
+            if input.down && self.case_focus + cols <= last {
+                self.case_focus += cols;
+            }
+            if input.up && self.case_focus >= cols {
+                self.case_focus -= cols;
+                return None;
+            }
         }
         if input.up {
             self.zone = Zone::Nav;
@@ -983,6 +1046,12 @@ impl HomeState {
         });
         if activity {
             self.cancel_countdown();
+            // Any input skips the launch to the boot (not the press that began it).
+            if let Some(l) = self.launch.as_mut() {
+                if !self.launch_sent && !l.frozen && l.t > launch::SKIP_AFTER {
+                    l.t = launch::DURATION;
+                }
+            }
         }
         let appear = ms.appear;
         let full = ctx.screen_rect();
@@ -1047,6 +1116,7 @@ impl HomeState {
         }
         if self.launch.is_none() {
             self.draw_chrome(ms, &mut pc, warning);
+            self.draw_badge(&pc, dt);
         }
         self.handle_pointer(ms, ctx);
     }
@@ -1097,6 +1167,8 @@ struct CaseItem {
     burn: Option<MenuAction>,
     /// Whether choosing it plays the launch sequence.
     launches: bool,
+    /// Part of the sorted shelf (the letter jump walks these).
+    shelf: bool,
 }
 
 /// Screen geometry for the current size and orientation.
@@ -1119,6 +1191,15 @@ pub(super) enum LayoutKind {
 }
 
 impl Layout {
+    /// Room the phone's bottom bar takes (zero on a desktop, where the nav is on top).
+    pub(super) fn bar_reserve(&self) -> f32 {
+        match self.kind {
+            LayoutKind::Desktop => 0.0,
+            LayoutKind::Portrait => 76.0 * self.u,
+            LayoutKind::Landscape => 60.0 * self.u,
+        }
+    }
+
     fn new(full: Rect, insets: [f32; 4]) -> Self {
         let safe = Rect::from_min_max(
             Pos2::new(full.left() + insets[2], full.top() + insets[0]),
@@ -1199,13 +1280,13 @@ impl HomeState {
         }
         if self.launch_sent {
             // Holding on the spinning disc while the game loads.
-            l.t = 4.6 + (l.t - 4.6 + dt) % 0.5;
+            l.t = launch::DURATION - 0.1;
             return;
         }
         l.t += dt;
         if l.t >= launch::DURATION {
             self.launch_sent = true;
-            l.t = 4.6;
+            l.t = launch::DURATION - 0.1;
             self.pending_launch = Some(l.action.clone());
         }
     }
@@ -1249,33 +1330,17 @@ impl HomeState {
                     - if lay.kind == LayoutKind::Desktop {
                         12.0 * u
                     } else {
-                        56.0 * u
+                        lay.bar_reserve() + 4.0 * u
                     },
             ),
         );
-        pc.painter.rect_filled(
-            rect.expand(6.0),
-            10.0,
-            fade(Color32::from_rgb(8, 14, 20), 0.94 * pc.appear),
-        );
-        pc.painter.rect_stroke(
-            rect.expand(6.0),
-            10.0,
-            Stroke::new(1.0, fade(CYAN, 0.25 * pc.appear)),
-            egui::StrokeKind::Outside,
-        );
+        let outline = chamfer(rect.expand(6.0), tokens::CHAMFER * u);
+        pc.painter.add(Shape::convex_polygon(
+            outline.clone(),
+            fade(Color32::from_rgba_unmultiplied(8, 16, 22, 184), pc.appear),
+            Stroke::new(1.0, fade(tokens::hairline(), pc.appear)),
+        ));
         self.section = Some(rect);
-        if lay.kind != LayoutKind::Desktop {
-            let back = pc.painter.text(
-                Pos2::new(lay.safe.left() + 20.0 * u, lay.safe.bottom() - 28.0 * u),
-                Align2::LEFT_CENTER,
-                "\u{2039} Back",
-                FontId::proportional(15.0 * u),
-                fade(Color32::from_rgb(160, 180, 195), pc.appear),
-            );
-            self.hits
-                .push((back.expand2(Vec2::new(14.0, 14.0)), Click::Back));
-        }
     }
 
     fn draw_home(&mut self, ms: &mut MenuState, ctx: &egui::Context, pc: &mut PageCtx<'_>) {
@@ -1286,6 +1351,10 @@ impl HomeState {
         let cases = self.cases(ms);
         self.case_focus = self.case_focus.min(cases.len().saturating_sub(1));
         let f = self.case_focus;
+        if self.compact {
+            self.draw_compact(ms, ctx, pc, &cases);
+            return;
+        }
         let (w, h) = (lay.full.width(), lay.full.height());
         // Case row placement per layout.
         let (cx, cy, step, base) = match lay.kind {
@@ -1352,23 +1421,33 @@ impl HomeState {
         let Some(item) = cases.get(f) else {
             return;
         };
-        let text_col = Color32::WHITE;
-        let sub_col = Color32::from_rgb(159, 178, 193);
+        let text_col = tokens::TEXT;
+        let sub_col = tokens::MUTED;
         let (tx, ty, align) = match lay.kind {
             LayoutKind::Landscape => (w * 0.52, h * 0.30, Align2::LEFT_TOP),
             LayoutKind::Portrait => (w * 0.5, h * 0.565, Align2::CENTER_TOP),
             LayoutKind::Desktop => (w * 0.5, h * 0.675, Align2::CENTER_TOP),
         };
         let title_px = match lay.kind {
-            LayoutKind::Portrait => 21.0 * u,
-            LayoutKind::Landscape => 22.0 * u,
-            LayoutKind::Desktop => 28.0 * u,
+            LayoutKind::Desktop => tokens::TITLE_DESKTOP * u,
+            _ => tokens::TITLE_PHONE * u,
         };
+        // Michroma is wide: shrink a long title until it fits the screen.
+        let max_title_w = if align == Align2::LEFT_TOP {
+            w - tx - 24.0 * u
+        } else {
+            w - 40.0 * u
+        };
+        let mut title_font = crate::theme::title_font(title_px);
+        let probe = p.layout_no_wrap(item.title.clone(), title_font.clone(), tokens::TEXT);
+        if probe.size().x > max_title_w {
+            title_font.size *= max_title_w / probe.size().x;
+        }
         let r = p.text(
             Pos2::new(tx, ty),
             align,
             &item.title,
-            FontId::proportional(title_px),
+            title_font,
             fade(text_col, a),
         );
         let line_px = (if lay.kind == LayoutKind::Desktop {
@@ -1396,11 +1475,11 @@ impl HomeState {
                 align,
                 "What's on it",
                 FontId::proportional(line_px * 0.92),
-                fade(Color32::from_rgb(127, 207, 224), a),
+                fade(tokens::ACCENT, a),
             );
             p.line_segment(
                 [wio.left_bottom(), wio.right_bottom()],
-                Stroke::new(1.0, fade(Color32::from_rgb(127, 207, 224), a * 0.45)),
+                Stroke::new(1.0, fade(tokens::ACCENT, a * 0.45)),
             );
             self.hits
                 .push((wio.expand2(Vec2::new(10.0, 8.0)), Click::Peek));
@@ -1433,7 +1512,7 @@ impl HomeState {
             p.rect_stroke(
                 btn.expand(3.0 * u),
                 bh / 2.0 + 3.0 * u,
-                Stroke::new(1.5, fade(Color32::from_rgb(140, 236, 251), a * 0.8)),
+                Stroke::new(1.5, fade(tokens::FOCUS, a * 0.8)),
                 egui::StrokeKind::Outside,
             );
         }
@@ -1442,7 +1521,7 @@ impl HomeState {
             Align2::CENTER_CENTER,
             label,
             FontId::proportional(13.0 * u),
-            fade(Color32::from_rgb(4, 34, 42), a),
+            fade(tokens::ON_ACCENT, a),
         );
         self.hits.push((btn, Click::Primary));
         // Quiet second actions under the button.
@@ -1462,7 +1541,7 @@ impl HomeState {
                 },
                 text,
                 FontId::proportional(13.0 * u),
-                fade(Color32::from_rgb(111, 195, 214), a),
+                fade(tokens::ACCENT, a),
             )
         };
         if item.restart.is_some() {
@@ -1481,6 +1560,94 @@ impl HomeState {
         if self.peek && matches!(item.kind, CoverKind::Demo) {
             self.draw_peek(pc);
         }
+    }
+
+    /// The compact grid with the focused case's title and button under it.
+    fn draw_compact(
+        &mut self,
+        ms: &mut MenuState,
+        ctx: &egui::Context,
+        pc: &mut PageCtx<'_>,
+        cases: &[CaseItem],
+    ) {
+        let lay = *pc.lay;
+        let a = pc.appear;
+        let u = lay.u;
+        let info = self.draw_grid(ms, ctx, pc, cases);
+        let p = pc.painter;
+        let Some(item) = cases.get(self.case_focus) else {
+            return;
+        };
+        let desktop = lay.kind == LayoutKind::Desktop;
+        let wide = lay.kind != LayoutKind::Portrait;
+        let label = item.button.to_uppercase();
+        let bw = (label.chars().count() as f32 * 8.5 + 56.0) * u;
+        let bh = 40.0 * u;
+        let (tx, ty) = if wide {
+            (info.left() + 48.0 * u, info.center().y - 22.0 * u)
+        } else {
+            (info.center().x, info.top() + 8.0 * u)
+        };
+        let mut font = crate::theme::title_font(if desktop { 17.0 * u } else { 14.0 * u });
+        let max_w = if wide {
+            info.width() - bw - 140.0 * u
+        } else {
+            info.width() - 40.0 * u
+        };
+        let probe = p.layout_no_wrap(item.title.clone(), font.clone(), tokens::TEXT);
+        if probe.size().x > max_w {
+            font.size *= max_w / probe.size().x;
+        }
+        let t = p.text(
+            Pos2::new(tx, ty),
+            if wide {
+                Align2::LEFT_TOP
+            } else {
+                Align2::CENTER_TOP
+            },
+            &item.title,
+            font,
+            fade(tokens::TEXT, a),
+        );
+        p.text(
+            Pos2::new(tx, t.bottom() + 6.0 * u),
+            if wide {
+                Align2::LEFT_TOP
+            } else {
+                Align2::CENTER_TOP
+            },
+            &item.line,
+            FontId::proportional(13.0 * u),
+            fade(tokens::MUTED, a),
+        );
+        let btn = if wide {
+            Rect::from_min_size(
+                Pos2::new(info.right() - 48.0 * u - bw, info.center().y - bh / 2.0),
+                Vec2::new(bw, bh),
+            )
+        } else {
+            Rect::from_center_size(
+                Pos2::new(info.center().x, info.bottom() - bh / 2.0 - 6.0 * u),
+                Vec2::new(bw, bh),
+            )
+        };
+        p.rect_filled(btn, bh / 2.0, fade(CYAN, a));
+        if self.zone == Zone::Body {
+            p.rect_stroke(
+                btn.expand(3.0 * u),
+                bh / 2.0 + 3.0 * u,
+                Stroke::new(1.5, fade(tokens::FOCUS, a * 0.8)),
+                egui::StrokeKind::Outside,
+            );
+        }
+        p.text(
+            btn.center(),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(12.5 * u),
+            fade(tokens::ON_ACCENT, a),
+        );
+        self.hits.push((btn, Click::Primary));
     }
 
     fn progress_line(&self) -> Option<ProgressLine> {
@@ -1506,8 +1673,8 @@ impl HomeState {
         a: f32,
         line: &ProgressLine,
     ) {
-        let col = fade(Color32::from_rgb(207, 227, 236), a);
-        let dim = fade(Color32::from_rgb(120, 140, 155), a);
+        let col = fade(tokens::TEXT_2, a);
+        let dim = fade(tokens::ICON_REST, a);
         let text = match line {
             ProgressLine::Count(n, _) => format!("Starting in {n}"),
             ProgressLine::Loading(f) if *f >= 0.0 => {
@@ -1581,9 +1748,9 @@ impl HomeState {
         let a = pc.appear;
         let u = lay.u;
         let s = lay.safe;
-        let dim = fade(Color32::from_rgb(127, 147, 162), a);
-        let link = fade(Color32::from_rgb(111, 195, 214), a);
-        let y = s.bottom() - 26.0 * u;
+        let dim = fade(tokens::DIM, a);
+        let link = fade(tokens::ACCENT, a);
+        let y = s.bottom() - 26.0 * u - lay.bar_reserve();
         let more = p.text(
             Pos2::new(
                 s.right()
@@ -1624,7 +1791,7 @@ impl HomeState {
             let mut x = what.right() + 40.0 * u;
             let mut hint = |cross: bool, label: &str| {
                 let c = Pos2::new(x + 9.0 * u, y);
-                let ring = Stroke::new(1.2, fade(Color32::from_rgb(74, 89, 103), a));
+                let ring = Stroke::new(1.2, fade(tokens::RING, a));
                 p.circle_stroke(c, 9.0 * u, ring);
                 let g = Stroke::new(1.3, dim);
                 if cross {
@@ -1698,8 +1865,8 @@ impl HomeState {
             r.min + Vec2::new(18.0 * u, 18.0 * u),
             Align2::LEFT_CENTER,
             "WHAT'S ON THE DISC",
-            FontId::proportional(10.5 * u),
-            fade(Color32::from_rgb(143, 164, 179), a),
+            FontId::proportional(tokens::CAPTION * u.max(1.0)),
+            fade(tokens::MUTED, a),
         );
         for (i, name) in rows.iter().enumerate() {
             p.text(
@@ -1707,10 +1874,127 @@ impl HomeState {
                 Align2::LEFT_CENTER,
                 *name,
                 FontId::proportional(14.5 * u),
-                fade(Color32::from_rgb(207, 224, 232), a),
+                fade(tokens::TEXT_2, a),
             );
         }
         self.hits.push((r, Click::Peek));
+    }
+
+    /// The desktop nav: plain text along the top, the active one marked.
+    fn draw_top_nav(&mut self, p: &egui::Painter, items: &[NavItem], logo: Rect, u: f32, a: f32) {
+        let mut x = logo.right() + 34.0 * u;
+        let ny = logo.center().y;
+        for (i, item) in items.iter().enumerate() {
+            let focused = self.zone == Zone::Nav && self.nav == i;
+            let on = item.page() == self.page || focused;
+            let col = if on { tokens::TEXT } else { tokens::DIM };
+            let r = p.text(
+                Pos2::new(x, ny),
+                Align2::LEFT_CENTER,
+                item.label(),
+                FontId::proportional(15.5 * u),
+                fade(col, a),
+            );
+            if on {
+                let c = Pos2::new(r.center().x, r.bottom() + 5.0 * u);
+                let d = 3.0 * u;
+                p.add(Shape::convex_polygon(
+                    vec![
+                        c + Vec2::new(0.0, -d),
+                        c + Vec2::new(d, 0.0),
+                        c + Vec2::new(0.0, d),
+                        c + Vec2::new(-d, 0.0),
+                    ],
+                    fade(if focused { tokens::FOCUS } else { CYAN }, a),
+                    Stroke::NONE,
+                ));
+            }
+            self.hits
+                .push((r.expand2(Vec2::new(10.0, 12.0)), Click::Nav(*item)));
+            x = r.right() + 26.0 * u;
+        }
+    }
+
+    /// The phone nav: a floating pill at the bottom, clear of the touch
+    /// overlay's own buttons at the top.
+    fn draw_bottom_bar(
+        &mut self,
+        p: &egui::Painter,
+        lay: &Layout,
+        items: &[NavItem],
+        u: f32,
+        a: f32,
+    ) {
+        let h = (if lay.kind == LayoutKind::Landscape {
+            44.0
+        } else {
+            56.0
+        }) * u;
+        let w = (items.len() as f32 * 76.0 * u).min(lay.safe.width() - 24.0 * u);
+        let bar = Rect::from_center_size(
+            Pos2::new(lay.safe.center().x, lay.safe.bottom() - h / 2.0 - 10.0 * u),
+            Vec2::new(w, h),
+        );
+        p.rect_filled(
+            bar,
+            h / 2.0,
+            fade(Color32::from_rgba_unmultiplied(12, 20, 28, 235), a),
+        );
+        p.rect_stroke(
+            bar,
+            h / 2.0,
+            Stroke::new(1.0, fade(Color32::from_rgb(38, 58, 72), a)),
+            egui::StrokeKind::Inside,
+        );
+        let cell = w / items.len() as f32;
+        for (i, item) in items.iter().enumerate() {
+            let focused = self.zone == Zone::Nav && self.nav == i;
+            let on = item.page() == self.page;
+            let c = Rect::from_min_size(
+                Pos2::new(bar.left() + cell * i as f32, bar.top()),
+                Vec2::new(cell, h),
+            );
+            if on {
+                p.rect_filled(
+                    c.shrink2(Vec2::new(4.0 * u, 5.0 * u)),
+                    (h - 10.0 * u) / 2.0,
+                    fade(Color32::from_rgb(16, 52, 62), a),
+                );
+            }
+            if focused {
+                p.rect_stroke(
+                    c.shrink2(Vec2::new(4.0 * u, 5.0 * u)),
+                    (h - 10.0 * u) / 2.0,
+                    Stroke::new(2.0, fade(tokens::FOCUS, a)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            let col = fade(if on { CYAN } else { tokens::ICON_REST }, a);
+            let tall = lay.kind != LayoutKind::Landscape;
+            let icon_c = if tall {
+                Pos2::new(c.center().x, c.center().y - 8.0 * u)
+            } else {
+                Pos2::new(c.left() + 22.0 * u, c.center().y)
+            };
+            draw_nav_icon(p, *item, icon_c, 9.0 * u, col);
+            let label_pos = if tall {
+                Pos2::new(c.center().x, c.center().y + 14.0 * u)
+            } else {
+                Pos2::new(c.left() + 36.0 * u, c.center().y)
+            };
+            p.text(
+                label_pos,
+                if tall {
+                    Align2::CENTER_CENTER
+                } else {
+                    Align2::LEFT_CENTER
+                },
+                item.label(),
+                FontId::proportional(tokens::CAPTION * u.max(1.0)),
+                col,
+            );
+            self.hits.push((c, Click::Nav(*item)));
+        }
     }
 
     /// Nav, controller indicators, the setup warning and the stream bar.
@@ -1727,9 +2011,9 @@ impl HomeState {
         let font = FontId::proportional(if desktop { 17.0 * u } else { 16.0 * u });
         let mut job = egui::text::LayoutJob::default();
         for (t, c) in [
-            ("PSo", Color32::WHITE),
+            ("PSo", tokens::TEXT),
             ("X", crate::theme::MENU_ACCENT),
-            ("ide", Color32::WHITE),
+            ("ide", tokens::TEXT),
         ] {
             job.append(
                 t,
@@ -1743,60 +2027,54 @@ impl HomeState {
         }
         let galley = p.layout_job(job);
         let logo_rect = Rect::from_min_size(Pos2::new(left, top), galley.size());
-        p.add(Shape::galley(logo_rect.min, galley, Color32::WHITE));
+        p.add(Shape::galley(logo_rect.min, galley, tokens::TEXT));
         self.hits.push((logo_rect.expand(6.0), Click::Logo));
-        // Nav as plain text.
-        let mut x = if desktop {
-            logo_rect.right() + 34.0 * u
-        } else {
-            left
-        };
-        let ny = if desktop {
-            logo_rect.center().y
-        } else {
-            logo_rect.bottom() + 20.0 * u
-        };
-        let items = nav_items(self.pausing(ms));
-        let gap = if desktop { 26.0 * u } else { 18.0 * u };
-        for (i, item) in items.iter().enumerate() {
-            let focused = self.zone == Zone::Nav && self.nav == i;
-            let on = item.page() == self.page || focused;
-            let col = if on {
-                Color32::WHITE
+        if self.page == Page::Home {
+            let side = 34.0 * u;
+            let at = if desktop {
+                Pos2::new(s.right() - 48.0 * u - side / 2.0, top + 54.0 * u)
             } else {
-                Color32::from_rgb(111, 129, 146)
+                Pos2::new(
+                    logo_rect.right() + 22.0 * u + side / 2.0,
+                    logo_rect.center().y,
+                )
             };
-            let r = p.text(
-                Pos2::new(x, ny),
-                Align2::LEFT_CENTER,
-                item.label(),
-                FontId::proportional(if desktop { 15.5 * u } else { 15.0 * u }),
-                fade(col, a),
+            let b = Rect::from_center_size(at, Vec2::splat(side));
+            p.rect_stroke(
+                b,
+                6.0,
+                Stroke::new(1.0, fade(tokens::RING, a)),
+                egui::StrokeKind::Inside,
             );
-            if on {
-                let c = Pos2::new(r.center().x, r.bottom() + 5.0 * u);
-                let d = 3.0 * u;
-                p.add(Shape::convex_polygon(
-                    vec![
-                        c + Vec2::new(0.0, -d),
-                        c + Vec2::new(d, 0.0),
-                        c + Vec2::new(0.0, d),
-                        c + Vec2::new(-d, 0.0),
-                    ],
-                    fade(
-                        if focused {
-                            Color32::from_rgb(140, 236, 251)
-                        } else {
-                            CYAN
-                        },
-                        a,
-                    ),
-                    Stroke::NONE,
-                ));
+            let col = fade(tokens::MUTED, a);
+            if self.compact {
+                p.rect_stroke(
+                    b.shrink(9.0 * u),
+                    2.0,
+                    Stroke::new(1.4, col),
+                    egui::StrokeKind::Inside,
+                );
+            } else {
+                let q = 5.0 * u;
+                for (dx, dy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                    p.rect_stroke(
+                        Rect::from_center_size(
+                            at + Vec2::new(dx * 5.5 * u, dy * 5.5 * u),
+                            Vec2::splat(q),
+                        ),
+                        1.0,
+                        Stroke::new(1.3, col),
+                        egui::StrokeKind::Inside,
+                    );
+                }
             }
-            self.hits
-                .push((r.expand2(Vec2::new(10.0, 12.0)), Click::Nav(*item)));
-            x = r.right() + gap;
+            self.hits.push((b.expand(4.0), Click::SizeToggle));
+        }
+        let items = nav_items(self.pausing(ms));
+        if desktop {
+            self.draw_top_nav(p, &items, logo_rect, u, a);
+        } else {
+            self.draw_bottom_bar(p, lay, &items, u, a);
         }
         // Controller indicators, top right: small, grey, cyan when in use.
         let mut ix = self
@@ -1812,12 +2090,10 @@ impl HomeState {
             (self.feed.gamepads > 0, 1),
             (self.feed.keyboard && !touch_on, 0),
         ];
-        for (on, which) in states {
-            let col = if on {
-                CYAN
-            } else {
-                Color32::from_rgb(70, 84, 98)
-            };
+        // On a phone the touch buttons take the top right: the device icons give way.
+        let room = self.feed.touch_ui_left.is_none() || desktop;
+        for (on, which) in states.into_iter().filter(|_| room) {
+            let col = if on { CYAN } else { tokens::RING };
             let c = Pos2::new(ix - 12.0 * u, iy);
             draw_device_icon(p, c, 11.0 * u, which, fade(col, a));
             ix -= 32.0 * u;
@@ -1839,7 +2115,7 @@ impl HomeState {
                 align,
                 text,
                 FontId::proportional(12.5 * u),
-                fade(Color32::from_rgb(127, 207, 224), a * 0.8),
+                fade(tokens::ACCENT, a * 0.8),
             );
         }
         // The disc stream, a hairline at the very bottom.
@@ -1887,6 +2163,20 @@ impl HomeState {
                     scrolled: false,
                     on_slider: slider,
                 });
+            }
+        }
+        // The letter rail: press or drag along it to jump by letter.
+        if down {
+            if let (Some((rail, letters)), Some(pos)) = (self.rail.as_ref(), pos) {
+                if rail.expand2(Vec2::new(10.0, 0.0)).contains(pos) {
+                    let k =
+                        (((pos.y - rail.top()) / rail.height()) * letters.len() as f32) as usize;
+                    let letter = letters[k.min(letters.len() - 1)];
+                    let cases = self.cases(ms);
+                    self.cancel_countdown();
+                    self.jump_to(&cases, letter);
+                    return;
+                }
             }
         }
         if let (Some(press), true) = (self.press.as_mut(), down) {
@@ -1977,6 +2267,8 @@ impl HomeState {
                 return self.activate(case, &action, true);
             }
             Click::Act(action) => return Some(action),
+            Click::SizeToggle => self.compact = !self.compact,
+            Click::Rail => {}
             Click::Burn => {
                 let cases = self.cases(ms);
                 return cases.get(self.case_focus).and_then(|c| c.burn.clone());
@@ -2006,13 +2298,6 @@ impl HomeState {
             Click::RowBurn(i) => {
                 let rows = pages::visible_rows(ms, self.page);
                 return rows.get(i).and_then(|r| r.burn.clone());
-            }
-            Click::Back => {
-                if self.page == Page::Home {
-                    ms.open = false;
-                } else {
-                    self.page = Page::Home;
-                }
             }
             Click::Dismiss => {
                 self.page = Page::Home;
@@ -2075,6 +2360,42 @@ fn draw_device_icon(p: &egui::Painter, c: Pos2, r: f32, which: u8, col: Color32)
     }
 }
 
+/// The focus cage: a 2 px outline, 9 px brackets on the corners and a faint
+/// tint, so focus is never colour alone.
+pub(super) fn focus_cage(p: &egui::Painter, r: Rect, a: f32, u: f32) {
+    p.rect_filled(r, 0.0, fade(tokens::ACCENT, tokens::FOCUS_TINT * a));
+    p.rect_stroke(
+        r,
+        0.0,
+        Stroke::new(tokens::FOCUS_STROKE, fade(tokens::FOCUS, a)),
+        egui::StrokeKind::Inside,
+    );
+    let b = tokens::BRACKET * u;
+    let s = Stroke::new(tokens::FOCUS_STROKE + 0.5, fade(tokens::FOCUS, a));
+    let o = 3.0;
+    for (corner, dx, dy) in [
+        (r.left_top(), 1.0, 1.0),
+        (r.right_top(), -1.0, 1.0),
+        (r.left_bottom(), 1.0, -1.0),
+        (r.right_bottom(), -1.0, -1.0),
+    ] {
+        let c = corner + Vec2::new(-dx * o, -dy * o);
+        p.line_segment([c, c + Vec2::new(dx * b, 0.0)], s);
+        p.line_segment([c, c + Vec2::new(0.0, dy * b)], s);
+    }
+}
+
+/// The outline of a panel with its one chamfered corner (top right).
+pub(super) fn chamfer(r: Rect, cut: f32) -> Vec<Pos2> {
+    vec![
+        r.left_top(),
+        Pos2::new(r.right() - cut, r.top()),
+        Pos2::new(r.right(), r.top() + cut),
+        r.right_bottom(),
+        r.left_bottom(),
+    ]
+}
+
 /// A small solid triangle: `down` true points down, false points right.
 pub(super) fn triangle(p: &egui::Painter, c: Pos2, r: f32, down: bool, col: Color32) {
     let pts = if down {
@@ -2091,6 +2412,59 @@ pub(super) fn triangle(p: &egui::Painter, c: Pos2, r: f32, down: bool, col: Colo
         ]
     };
     p.add(Shape::convex_polygon(pts, col, Stroke::NONE));
+}
+
+/// A small line icon for a nav entry.
+fn draw_nav_icon(p: &egui::Painter, item: NavItem, c: Pos2, r: f32, col: Color32) {
+    let stroke = Stroke::new(1.5, col);
+    match item {
+        NavItem::Home => {
+            let roof = [
+                c + Vec2::new(-r, 0.0),
+                c + Vec2::new(0.0, -r),
+                c + Vec2::new(r, 0.0),
+            ];
+            p.add(Shape::line(roof.to_vec(), stroke));
+            let body = Rect::from_min_max(c + Vec2::new(-r * 0.7, 0.0), c + Vec2::new(r * 0.7, r));
+            p.rect_stroke(body, 1.0, stroke, egui::StrokeKind::Inside);
+        }
+        NavItem::Game => {
+            p.add(Shape::convex_polygon(
+                vec![
+                    c + Vec2::new(-r * 0.6, -r),
+                    c + Vec2::new(r * 0.9, 0.0),
+                    c + Vec2::new(-r * 0.6, r),
+                ],
+                Color32::TRANSPARENT,
+                stroke,
+            ));
+        }
+        NavItem::Settings => {
+            for (i, k) in [0.35_f32, -0.2, 0.5].iter().enumerate() {
+                let y = c.y + (i as f32 - 1.0) * r * 0.8;
+                p.line_segment([Pos2::new(c.x - r, y), Pos2::new(c.x + r, y)], stroke);
+                p.circle_filled(Pos2::new(c.x + k * r, y), r * 0.26, col);
+            }
+        }
+        NavItem::Controls => {
+            p.text(
+                c,
+                Align2::CENTER_CENTER,
+                icons::GAMEPAD_2,
+                FontId::proportional(r * 2.2),
+                col,
+            );
+        }
+        NavItem::Debug => {
+            p.text(
+                c,
+                Align2::CENTER_CENTER,
+                icons::BUG,
+                FontId::proportional(r * 2.2),
+                col,
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2253,7 +2627,6 @@ mod tests {
         };
         press(&mut ms, key(|i| i.up = true));
         press(&mut ms, key(|i| i.right = true));
-        press(&mut ms, key(|i| i.right = true));
         press(&mut ms, key(|i| i.confirm = true));
         assert_eq!(ms.home_probe().0, "Settings");
         assert_eq!(ms.selection_probe().0, "Settings");
@@ -2281,7 +2654,7 @@ mod tests {
             tab_prev: true,
             ..Default::default()
         };
-        for want in ["Controls", "Settings", "Debug", "Home", "Controls"] {
+        for want in ["Settings", "Controls", "Debug", "Home", "Settings"] {
             press(&mut ms, next);
             assert_eq!(ms.home_probe().0, want);
         }
@@ -2360,7 +2733,7 @@ mod tests {
     fn settings_arrows_step_a_slider_and_flip_a_toggle() {
         let mut ms = home(false, DemoStatus::Absent);
         ms.sync_video_audio(true, "None", 1.0, false);
-        for _ in 0..2 {
+        for _ in 0..1 {
             press(
                 &mut ms,
                 MenuInput {
@@ -2455,7 +2828,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(ms.home_probe().0, "Controls");
+        assert_eq!(ms.home_probe().0, "Settings");
         ms.open = false;
         press(&mut ms, MenuInput::default());
         ms.open = true;

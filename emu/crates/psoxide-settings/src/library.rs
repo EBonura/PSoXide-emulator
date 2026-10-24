@@ -610,7 +610,10 @@ fn boot_exe_name(system_cnf: &[u8]) -> Option<String> {
 pub fn disc_boot_serial(path: &Path) -> Option<String> {
     // A cue sheet names the image that holds the first track.
     let bin;
-    let path = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("cue")) {
+    let path = if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("cue"))
+    {
         bin = primary_bin_from_cue(path)?;
         bin.as_path()
     } else {

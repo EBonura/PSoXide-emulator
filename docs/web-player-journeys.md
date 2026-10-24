@@ -304,16 +304,63 @@ Results on the landed build (Chrome headless, macOS; WebKit was not driven, see 
 | phone-small | reload comes back to the home screen; tapping Start disc plays | pass |
 | phone-small | page logged no errors | pass |
 
-## The home screen
+## The shell
 
-`src/ui/menu/home/` is the shell. It is a view over `MenuState`: the same library, settings and game
-rows, the same `MenuInput` edges from keyboard, pad and touch, the same `MenuAction`s going out. The
-page probe (`psoxideUxState().home`) lists the page, the focus, the countdown and every drawn hit
-area by name, which is how the journeys tap and click what is on screen. Box art comes from
-xlenore/psx-covers by boot serial and from libretro-thumbnails by file name, fetched at run time only
-and cached (IndexedDB on the web, a cache folder on the desktop); Settings has a switch.
+`src/ui/menu/home/` is the one shell, before and during a game. It is a view over `MenuState`: the
+same library, settings and game rows, the same `MenuInput` edges from keyboard, pad and touch, the
+same `MenuAction`s going out. Tokens (colours, type scale, spacing, easings) live in `tokens.rs`.
 
-Home journeys: `desktop-home`, `phone-home`, `phone-home-small`, `phone-home-landscape` (first visit,
-the countdown cancelled by each input type, return visit, nav, focus, welcome pages, settings
-controls, layout inside the safe area with no overlaps) and `desktop-covers` (a hit, a miss, offline,
-cached, switched off).
+- Sections, in one ring: Home, Game (only while a game is started), Settings, Controls, Debug. L1/R1
+  (Q/E, PageUp/PageDown, a sideways swipe) cycle them from anywhere and wrap. Back (Circle, Esc, G)
+  goes to Home from any section, and from Home resumes the game. Escape, Select+Start and the touch
+  Menu button are Back before a start and on a section: they never start a disc.
+- Home is the library: big cases on the floor, or a grid (the button at the top, Triangle or Tab).
+  L2/R2 jump by first letter with a big letter badge; on a phone a rail at the edge scrubs the
+  letters. Choosing a disc plays the launch sequence (4.6 s, any input skips to the boot).
+- On a phone the sections are a floating bar at the bottom, clear of the touch overlay.
+- Controls and Debug are sections of the shell (their content is drawn by the app in the space the
+  shell leaves); the page probe `psoxideUxState().home` lists the page, the focus, the cases and every
+  hit area by name, which is how the journeys tap and click.
+- Box art: xlenore/psx-covers by boot serial (read from SYSTEM.CNF), then libretro-thumbnails by file
+  name, fetched at run time only and cached (IndexedDB on the web, a cache folder on the desktop);
+  Settings has a switch. Live check: `node tools/web-journeys/run.mjs --site <dir> --scenario cors`.
+
+Journeys: `desktop-home`, `phone-home`, `phone-home-small`, `phone-home-landscape` (first visit, the
+countdown cancelled by each input, return visit, sections, L1/R1, ways back, welcome pages, settings
+controls, layout inside the safe area), `desktop-shell`, `phone-shell`, `phone-shell-small`,
+`phone-shell-landscape` (the launch sequence to the boot, the shell over a running game, every section
+by every way back) and `desktop-covers` (a hit, a miss, offline, cached, switched off, real recents).
+Scenarios: `--scenario launch --throttle N` (cost of the sequence), `shots` (before/after screens),
+`bench`, `cors`.
+
+## Parity audit: the new shell against the live v0.48-web3 (ba8b07b4)
+
+| web3 feature | New shell | Evidence |
+|---|---|---|
+| Demo disc boots at once on a first visit | Home opens at once, the case, a 3 s countdown line, then the launch sequence and the boot | desktop-direct, desktop-home |
+| Later visits | Stay on Home until Start disc (web3 booted again) | desktop-direct reload, phone reload |
+| Esc / Select+Start / touch Menu pause and resume the same machine | Same; before a start and on a section they are Back and never launch | desktop-direct, desktop-home, desktop-shell |
+| Back (Circle, G) closes the menu and resumes | Back on Home resumes; Back on a section returns Home | desktop-direct, desktop-shell |
+| Menu rows: Resume, Save state, Load state, Reset, Record input from boot, Load input replay, Replay last (native) | Game section (same rows, same actions) | desktop-menus |
+| Save-states panel (list, pin, confirm) | Same panel, still a window over the shell (not restyled) | desktop-menus |
+| Reset restarts in place, no menu, no download | Same (toolbar, Game / Reset) | desktop-direct |
+| Pick the loaded disc again restarts, no re-download | Start over on the game's case | desktop-direct, phone-portrait |
+| Pick another disc | Shelf: every game of the folder is a case; Play | desktop-covers |
+| Homebrew list, SDK examples (native) | Shelf cases; unbuilt ones offer Build examples | native only, not browser-tested |
+| Open a games folder | The folder case | desktop-covers |
+| Reopen your games folder (only after one was connected) | A "Reopen your games folder" case | desktop-covers |
+| Recent discs (native, opened by hand) | Recent cases, real play history only; the web keeps its own in localStorage | desktop-covers, unit tests |
+| Open disc..., Choose games folder, Refresh library (native) | Footer links and the folder case | native only |
+| Burn menu (native) | Burn to CD under the focused case | native only, not tested |
+| Settings: Video scale, Texture filter, Deinterlace, Volume, Mute, Menu opacity, UI scale, slow-host choice, Touch controls/opacity/size/haptics/left-handed | Settings section: sliders, toggles, choices, steppers | desktop-menus (every row changes), desktop-home |
+| Fullscreen row, button, iPhone fallback | Settings row, touch button, same fallback | phone-fullscreen* |
+| About | Welcome pages (version, licence, links) | desktop-home |
+| Quit (native) | Settings row | native only |
+| Controls panel (ports, drawing, rebinding) | Controls section inside the shell | desktop-menus, *-shell |
+| Toolbar: pause, reset, save, controls, volume, mute, debug, collapse | Unchanged; controls opens the Controls section, debug the sidebar | desktop-menus |
+| Debug panels: guest performance, CPU, memory, VRAM, input tape, developer | Debug section (tabs, pinned summary), the sidebar beside the game on desktop | desktop-menus, *-shell |
+| Touch controller, analog default, sticks, D-pad | Unchanged; Pause, Save, Debug and Menu form one pill | phone-portrait, phone-landscape |
+| No WebGPU message, settings persistence, embed player | Unchanged | desktop-nowebgpu, desktop-iframe |
+| New | Box art (xlenore by serial, libretro by name, switch in Settings), L1/R1 and swipe through sections, compact grid, letter jump | desktop-covers, desktop-home |
+
+Gaps left: the save-states panel and the burn dialog are still egui windows over the shell; the editor build's Editor column has no nav entry yet; the phone Debug is a full page, not a sheet over the running game; Controls has no tabs.

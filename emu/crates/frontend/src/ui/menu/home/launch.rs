@@ -7,11 +7,11 @@ use egui::epaint::{Mesh, Vertex};
 use egui::{Align2, Color32, FontId, Painter, Pos2, Shape, Stroke, TextureId, Vec2};
 
 use super::scene::{fade, mix, Camera, CaseDraw, CoverKind, CYAN, V3, VOID};
-use super::{Layout, LayoutKind};
+use super::{tokens, Layout, LayoutKind};
 use crate::ui::menu::MenuAction;
 
 /// Seconds from the press to the boot.
-pub(super) const DURATION: f32 = 5.8;
+pub(super) const DURATION: f32 = tokens::LAUNCH;
 
 /// A launch in progress.
 pub(super) struct Launch {
@@ -34,15 +34,11 @@ fn span(t: f32, a: f32, b: f32) -> f32 {
 }
 
 fn ease_in_out(x: f32) -> f32 {
-    if x < 0.5 {
-        4.0 * x * x * x
-    } else {
-        1.0 - (-2.0 * x + 2.0).powi(3) / 2.0
-    }
+    tokens::ease_in_out(x)
 }
 
 fn ease_out(x: f32) -> f32 {
-    1.0 - (1.0 - x).powi(3)
+    tokens::ease_out_expo(x)
 }
 
 /// Where everything is at time `t`.
@@ -64,8 +60,8 @@ struct Pose {
 }
 
 fn disc_at(t: f32, yaw: f32) -> (f32, f32, f32, f32) {
-    let l = ease_in_out(span(t, 0.7, 1.7));
-    let m = ease_in_out(span(t, 1.7, 2.95));
+    let l = ease_in_out(span(t, 0.55, 1.34));
+    let m = ease_in_out(span(t, 1.34, 2.32));
     let y = -40.0 * l + 210.0 * m;
     let z = -4.0 + 124.0 * l - 54.0 * m + 46.0 * (std::f32::consts::PI * m).sin();
     let rx = 60.0_f32.to_radians() * m;
@@ -73,26 +69,28 @@ fn disc_at(t: f32, yaw: f32) -> (f32, f32, f32, f32) {
 }
 
 fn pose(t: f32) -> Pose {
-    let lid = 108.0_f32.to_radians() * ease_out(span(t, 0.1, 1.05));
-    let turn = ease_out(span(t, 0.0, 0.9));
+    let lid = 108.0_f32.to_radians() * ease_out(span(t, 0.08, 0.83));
+    let turn = ease_out(span(t, 0.0, 0.71));
     let yaw = -0.40 + 0.40 * turn;
-    let recede = ease_in_out(span(t, 1.0, 2.4));
+    let recede = ease_in_out(span(t, 0.79, 1.89));
     let (disc_y, disc_z, disc_rx, disc_ry) = disc_at(t, yaw);
-    let echo = [1.0, 2.0, 3.0].map(|k| disc_at(t - 0.07 * k, yaw).0);
-    let echo_alpha = 0.42 * span(t, 0.8, 1.0) * (1.0 - span(t, 2.9, 3.2));
-    let s = ease_in_out(span(t, 2.75, 3.5));
-    let led = span(t, 3.15, 3.7);
-    let q = span(t, 2.9, 5.0);
-    let spin = if t < 5.0 {
-        std::f32::consts::TAU * 2.0 * q * q
+    let echo = [1.0, 2.0, 3.0].map(|k| disc_at(t - 0.055 * k, yaw).0);
+    let echo_alpha = 0.42 * span(t, 0.6, 0.8) * (1.0 - span(t, 2.3, 2.6));
+    let s = ease_in_out(span(t, 2.16, 2.76));
+    let led = span(t, 2.16, 2.92);
+    // Spin-up: angle 720 q squared, then at the speed it reached.
+    let q = span(t, 2.28, 3.94);
+    let full = std::f32::consts::TAU * 2.0;
+    let spin = if t < 3.94 {
+        full * q * q
     } else {
-        std::f32::consts::TAU * 2.0 + (t - 5.0) * std::f32::consts::TAU * 2.0
+        full + (t - 3.94) * full * 2.0 / (3.94 - 2.28)
     };
-    let label = if t < 1.0 {
+    let label = if t < 0.83 {
         "The case opens"
-    } else if t < 1.7 {
+    } else if t < 1.34 {
         "The disc comes out"
-    } else if t < 2.95 {
+    } else if t < 2.32 {
         "The disc goes into the tray"
     } else {
         "Spinning up"
@@ -110,7 +108,7 @@ fn pose(t: f32) -> Pose {
         tray: s,
         led,
         spin,
-        flash: span(t, 5.1, 5.7),
+        flash: span(t, 4.02, 4.49),
         label,
     }
 }
@@ -177,7 +175,7 @@ fn disc(
             fade(Color32::WHITE, alpha)
         } else {
             fade(
-                if (i + shift) % 2 == 0 {
+                if (i + shift).is_multiple_of(2) {
                     wedge_a
                 } else {
                     wedge_b
@@ -261,7 +259,7 @@ pub(super) fn draw(
     };
     let c0 = V3::new(w * 0.5, h * 0.37, 0.0);
     // The tray rises into place under the disc and slides in.
-    let tray_in = ease_in_out(span(t, 1.2, 2.2));
+    let tray_in = ease_in_out(span(t, 0.9, 1.9));
     let tray_c = V3::new(
         c0.x,
         c0.y + (236.0 - 70.0 * ps.tray + 60.0 * (1.0 - tray_in)) * su,
@@ -295,11 +293,7 @@ pub(super) fn draw(
         ));
         // The LED at the front edge.
         let led = cam.project(V3::new(tray_c.x + tw * 0.8, tray_c.y, tray_c.z + td * 0.8));
-        p.circle_filled(
-            led,
-            3.0 * su,
-            fade(Color32::from_rgb(82, 208, 138), a * ps.led),
-        );
+        p.circle_filled(led, 3.0 * su, fade(tokens::OK, a * ps.led));
     }
     // The case: opens, then recedes.
     let case_alpha = alpha * (1.0 - ps.recede);
@@ -366,7 +360,7 @@ pub(super) fn draw(
         Align2::CENTER_CENTER,
         ps.label,
         FontId::proportional(13.0 * lay.u),
-        fade(mix(Color32::from_rgb(160, 190, 205), CYAN, 0.2), alpha),
+        fade(mix(tokens::MUTED, CYAN, 0.2), alpha),
     );
     // The flash into the boot.
     if ps.flash > 0.0 {
@@ -379,5 +373,6 @@ pub(super) fn draw(
     let _ = Vec2::ZERO;
 }
 
-/// Seconds the sequence takes for an input to skip it.
-pub(super) const SKIP_AFTER: f32 = 0.6;
+/// Seconds before an input can skip the sequence (so the press that started it
+/// does not also skip it).
+pub(super) const SKIP_AFTER: f32 = 0.25;

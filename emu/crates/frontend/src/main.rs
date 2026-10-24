@@ -995,6 +995,12 @@ impl ApplicationHandler for Shell {
                 for action in self.input.touch_mut().take_actions() {
                     match action {
                         input::touch::pad::UiAction::Menu => self.touch_menu_pending = true,
+                        input::touch::pad::UiAction::Pause => {
+                            self.state.running = !self.state.running;
+                            self.state.menu.sync_run_label(self.state.running);
+                        }
+                        input::touch::pad::UiAction::Save => self.state.save_state(),
+                        input::touch::pad::UiAction::Debug => self.state.open_shell_page("Debug"),
                         input::touch::pad::UiAction::Fullscreen => {
                             web_touch::toggle_fullscreen(false);
                         }
@@ -1391,6 +1397,9 @@ impl ApplicationHandler for Shell {
                 input.back |= pad_frame.menu_back;
                 input.tab_prev |= pad_frame.menu_prev;
                 input.tab_next |= pad_frame.menu_next;
+                input.letter_prev |= pad_frame.menu_letter_prev;
+                input.letter_next |= pad_frame.menu_letter_next;
+                input.options |= pad_frame.menu_options;
 
                 // Escape is the "PS button" -- it toggles between
                 // "game running" and "game paused + menu open".
@@ -2330,6 +2339,7 @@ fn merge_key(mut input: MenuInput, key: &Key, arrows_navigate: bool) -> MenuInpu
         Key::Named(NamedKey::ArrowDown) if arrows_navigate => input.down = true,
         Key::Named(NamedKey::ArrowLeft) if arrows_navigate => input.left = true,
         Key::Named(NamedKey::ArrowRight) if arrows_navigate => input.right = true,
+        Key::Named(NamedKey::Tab) => input.options = true,
         Key::Named(NamedKey::PageUp) => input.tab_prev = true,
         Key::Named(NamedKey::PageDown) => input.tab_next = true,
         Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => input.confirm = true,

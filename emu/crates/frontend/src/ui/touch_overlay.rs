@@ -7,6 +7,7 @@ use egui::{
     pos2, vec2, Color32, Context, FontId, LayerId, Order, Painter, Pos2, Rect, Stroke, Vec2,
 };
 
+use crate::icons;
 use crate::input::backend::touch::TouchDevice;
 use crate::input::touch::layout::{Glyph, Region, StickSide, TouchLayout, UiId};
 use emulator_core::button;
@@ -103,6 +104,9 @@ pub(crate) fn draw(ctx: &Context, touch: &TouchDevice, menu_open: bool) {
     for ui in &layout.ui {
         let down = pad.ui_pressed() == Some(ui.id);
         match ui.id {
+            UiId::Pause => draw_icon_button(&painter, &space, ui.draw, icons::PAUSE, down, alpha),
+            UiId::Save => draw_icon_button(&painter, &space, ui.draw, icons::SAVE, down, alpha),
+            UiId::Debug => draw_icon_button(&painter, &space, ui.draw, icons::BUG, down, alpha),
             UiId::Menu => draw_menu_button(&painter, &space, ui.draw, down, menu_open, alpha),
             UiId::Fullscreen => draw_fullscreen_button(&painter, &space, ui.draw, down, alpha),
         }
@@ -317,6 +321,33 @@ fn draw_stick(painter: &Painter, s: &Space, touch: &TouchDevice, side: StickSide
         painter.circle_filled(knob_at, knob, with_alpha(INK, alpha * 0.2));
     }
     let _ = side;
+}
+
+/// One icon of the interface pill: Pause, Save or Debug.
+fn draw_icon_button(painter: &Painter, s: &Space, rect: Rect, glyph: char, down: bool, alpha: f32) {
+    let r = s.rect(rect);
+    let round = CornerRadius::same((r.height() * 0.5).round().min(255.0) as u8);
+    painter.rect_filled(
+        r,
+        round,
+        with_alpha(
+            if down { ACCENT } else { BODY },
+            alpha * if down { 0.9 } else { 0.62 },
+        ),
+    );
+    painter.rect_stroke(
+        r,
+        round,
+        Stroke::new(1.2, with_alpha(INK, alpha * 0.75)),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        r.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        egui::FontId::proportional(r.height() * 0.5),
+        with_alpha(if down { BODY } else { INK }, (alpha + 0.2).min(1.0)),
+    );
 }
 
 fn draw_menu_button(painter: &Painter, s: &Space, rect: Rect, down: bool, close: bool, alpha: f32) {
