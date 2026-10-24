@@ -1272,7 +1272,6 @@ async function journeyHome(label, urlFor, size) {
     await page.tapKey("ArrowUp");
     await page.waitFor("the nav row", (s) => s.home.zone === "nav", 4000);
     await page.tapKey("ArrowRight");
-    await page.tapKey("ArrowRight");
     await page.tapKey("Enter");
     await page.waitFor("the Settings page", (s) => s.home.page === "Settings", 4000);
     await page.tapKey("g");

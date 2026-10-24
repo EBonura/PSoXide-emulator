@@ -55,6 +55,7 @@ pub(super) const WELCOME: [WelcomePage; 3] = [
         links: &[
             ("Support PSoXide on itch.io", super::ITCH_URL),
             ("Source code on GitHub", super::SOURCE_URL),
+            ("More PSoXide games you build yourself", super::SITE_URL),
         ],
     },
 ];
@@ -637,7 +638,7 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
     // Dots and the two steps.
     let foot_y = (y + 36.0 * u)
         .max(s.top() + 120.0 * u)
-        .min(s.bottom() - 70.0 * u);
+        .min(s.bottom() - lay.bar_reserve() - 48.0 * u);
     for i in 0..WELCOME.len() {
         let on = i == h.welcome;
         let c = Pos2::new(x + 6.0 * u + i as f32 * 18.0 * u, foot_y + 18.0 * u);

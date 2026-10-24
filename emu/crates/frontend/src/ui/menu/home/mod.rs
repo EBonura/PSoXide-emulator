@@ -32,7 +32,7 @@ fn countdown_secs() -> f32 {
     COUNTDOWN_SECS
 }
 /// Where the project's site lives (the quiet link under the home screen).
-const SITE_URL: &str = "https://ebonura.github.io/PSoXide/";
+pub(super) const SITE_URL: &str = "https://ebonura.github.io/PSoXide/";
 /// Where the free builds, and the optional donation, live.
 const ITCH_URL: &str = "https://bonnie-studios.itch.io/psoxide";
 pub(super) const SOURCE_URL: &str = "https://github.com/EBonura/PSoXide";
@@ -215,6 +215,8 @@ pub(crate) struct HomeState {
     grid_cols: usize,
     /// The letter rail of the grid on a phone, when it is up.
     rail: Option<(Rect, Vec<char>)>,
+    /// Where the primary button ended last frame.
+    btn_bottom: f32,
 }
 
 /// A pointer press being tracked, to tell a tap from a scroll.
@@ -259,6 +261,7 @@ impl HomeState {
             grid_scroll: 0.0,
             grid_cols: 3,
             rail: None,
+            btn_bottom: 0.0,
         }
     }
 
@@ -1524,6 +1527,7 @@ impl HomeState {
             fade(tokens::ON_ACCENT, a),
         );
         self.hits.push((btn, Click::Primary));
+        self.btn_bottom = btn.bottom();
         // Quiet second actions under the button.
         let mut qy = btn.bottom() + 14.0 * u;
         let quiet = |p: &egui::Painter, text: &str, y: f32| {
@@ -1750,25 +1754,39 @@ impl HomeState {
         let s = lay.safe;
         let dim = fade(tokens::DIM, a);
         let link = fade(tokens::ACCENT, a);
-        let y = s.bottom() - 26.0 * u - lay.bar_reserve();
-        let more = p.text(
-            Pos2::new(
-                s.right()
-                    - 48.0 * u * (lay.kind == LayoutKind::Desktop) as u8 as f32
-                    - if lay.kind == LayoutKind::Desktop {
-                        0.0
-                    } else {
-                        20.0 * u
-                    },
-                y,
-            ),
-            Align2::RIGHT_CENTER,
-            "More PSoXide games you build yourself",
-            FontId::proportional(13.0 * u),
-            link,
-        );
-        self.hits
-            .push((more.expand2(Vec2::new(8.0, 10.0)), Click::Link(SITE_URL)));
+        let mut y = s.bottom() - 26.0 * u - lay.bar_reserve();
+        // On a short phone the button comes down to the footer: the links go under it.
+        let mut room_for_site_link = true;
+        if lay.kind != LayoutKind::Desktop && self.btn_bottom + 34.0 * u > y {
+            y = self.btn_bottom + 30.0 * u;
+            // Under the button there may be no room before the bar: the site link
+            // then lives on the welcome pages only.
+            let bar_top = lay.safe.bottom() - lay.bar_reserve() - 4.0 * u;
+            if y + 14.0 * u > bar_top {
+                room_for_site_link = false;
+                y = (lay.safe.bottom() - 26.0 * u - lay.bar_reserve()).min(y);
+            }
+        }
+        if room_for_site_link {
+            let more = p.text(
+                Pos2::new(
+                    s.right()
+                        - 48.0 * u * (lay.kind == LayoutKind::Desktop) as u8 as f32
+                        - if lay.kind == LayoutKind::Desktop {
+                            0.0
+                        } else {
+                            20.0 * u
+                        },
+                    y,
+                ),
+                Align2::RIGHT_CENTER,
+                "More PSoXide games you build yourself",
+                FontId::proportional(13.0 * u),
+                link,
+            );
+            self.hits
+                .push((more.expand2(Vec2::new(8.0, 10.0)), Click::Link(SITE_URL)));
+        }
         let what = p.text(
             Pos2::new(
                 s.left()
