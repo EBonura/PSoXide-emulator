@@ -38,6 +38,16 @@
 //! skipped) cycles are totalled per function. Range files hold one range per
 //! line: `START END [NAME]` in hex, END exclusive; `#` starts a comment.
 //!
+//! `PSOXIDE_RAM_DATA_LOG=FILE` writes, per 32-byte main-RAM line, the CPU load
+//! stall cycles and load count seen since activation (loads made inside
+//! `PSOXIDE_LIMIT_WAIT` ranges are skipped, so a vblank spin does not top the
+//! list). `PSOXIDE_LIMIT_FAST_DATA=FILE` names physical main-RAM ranges
+//! (`START END [NAME]`) whose CPU loads cost what the scratchpad costs: the
+//! "what if the engine kept these bytes in the scratchpad" bound. Both are
+//! inert unless set, so a run without them is cycle-identical (checked on a
+//! 900-poll Half-Life replay, every cycle-profile bucket of every vblank).
+//! `stall-tools hot-lines` turns the log into a range file.
+//!
 //! `PSOXIDE_LIMIT_FROM_POLL=N` keeps every switch off until the guest has
 //! completed N pad polls, so the run is identical to a plain one up to the
 //! start of the measured window (loads and menus included).
@@ -169,7 +179,13 @@ pub struct LimitOracles {
     free: RangeSet,
     wait: RangeSet,
     profile: RangeSet,
+    /// Lane stall-free: data addresses (physical, main RAM) whose loads cost like the scratchpad.
+    fast_data: RangeSet,
+    /// Lane stall-free: per 32-byte data line, (load stall cycles, loads), when `PSOXIDE_RAM_DATA_LOG` is set.
+    data_log: Option<std::collections::HashMap<u32, (u64, u64)>>,
     track_pc: bool,
+    /// Lane stall-free: PC of the instruction being executed (set while PCs are tracked).
+    cur_pc: u32,
     /// The instruction being executed is free: the clock does not move.
     frozen: bool,
     free_run: u64,
@@ -214,7 +230,40 @@ impl LimitOracles {
                 .as_deref()
                 .map(Path::new),
         )
+        .and_then(|limits| {
+            limits.with_data_oracles(
+                std::env::var_os("PSOXIDE_LIMIT_FAST_DATA")
+                    .as_deref()
+                    .map(Path::new),
+                std::env::var_os("PSOXIDE_RAM_DATA_LOG").is_some(),
+            )
+        })
         .unwrap_or_else(|error| panic!("PSOXIDE_LIMIT_*: {error}"))
+    }
+
+    /// Data-address oracles (`PSOXIDE_LIMIT_FAST_DATA`, `PSOXIDE_RAM_DATA_LOG`).
+    ///
+    /// `fast_data` names physical main-RAM ranges whose loads cost what the
+    /// scratchpad costs once the oracles are live: "what if these bytes lived
+    /// in the scratchpad". `log` records, per 32-byte main-RAM line, the stall
+    /// cycles and the number of CPU loads (outside `PSOXIDE_LIMIT_WAIT`
+    /// ranges), so a caller can rank lines and build such a range file.
+    /// Neither changes timing unless a range file is given, and neither is
+    /// active before `PSOXIDE_LIMIT_FROM_POLL` / `FROM_CYCLE`.
+    pub fn with_data_oracles(
+        mut self,
+        fast_data: Option<&Path>,
+        log: bool,
+    ) -> Result<Self, String> {
+        if let Some(path) = fast_data {
+            self.fast_data = RangeSet::load(path)?;
+            self.pending = true;
+        }
+        if log {
+            self.data_log = Some(std::collections::HashMap::new());
+            self.pending = true;
+        }
+        Ok(self)
     }
 
     fn from_settings(
@@ -276,10 +325,57 @@ impl LimitOracles {
         }
     }
 
+    /// Lane stall-free: a data load from `phys` costs like the scratchpad.
+    #[inline]
+    pub(crate) fn fast_data_hit(&self, phys: u32) -> bool {
+        self.activated_at_cycle.is_some()
+            && !self.fast_data.is_empty()
+            && self.fast_data.find(phys).is_some()
+    }
+
+    /// Lane stall-free: record a main-RAM data load's stall.
+    #[inline]
+    pub(crate) fn log_data(&mut self, phys: u32, stalls: u32) {
+        if self.activated_at_cycle.is_none() {
+            return;
+        }
+        if !self.wait.is_empty() && self.wait.find(self.cur_pc).is_some() {
+            return;
+        }
+        if let Some(log) = self.data_log.as_mut() {
+            let entry = log.entry(phys >> 5).or_insert((0, 0));
+            entry.0 += u64::from(stalls);
+            entry.1 += 1;
+        }
+    }
+
+    /// Lane stall-free: whether the data log is on.
+    #[inline]
+    pub(crate) fn logs_data(&self) -> bool {
+        self.data_log.is_some()
+    }
+
+    /// Lane stall-free: write the per-line data log, hottest first.
+    pub fn write_data_log(&self, path: &Path) -> Result<(), String> {
+        let Some(log) = self.data_log.as_ref() else {
+            return Ok(());
+        };
+        let mut rows: Vec<_> = log.iter().collect();
+        rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        let mut text = String::from("line_addr,stall_cycles,loads\n");
+        for (line, (stall, loads)) in rows {
+            text.push_str(&format!("{:#010x},{stall},{loads}\n", line << 5));
+        }
+        std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
+    }
+
     /// Whether any switch or range is configured.
     #[inline(always)]
     pub fn configured(&self) -> bool {
-        self.configured != 0 || self.track_pc
+        self.configured != 0
+            || self.track_pc
+            || self.data_log.is_some()
+            || !self.fast_data.is_empty()
     }
 
     /// Whether the switches are live (the start poll has been reached).
@@ -357,6 +453,7 @@ impl LimitOracles {
     /// `pc` is in a free range.
     #[inline]
     pub(crate) fn begin_instruction(&mut self, pc: u32) {
+        self.cur_pc = pc;
         if self.free.is_empty() {
             return;
         }
@@ -503,5 +600,66 @@ mod tests {
         limits.end_instruction(0x8002_0000, 1, 0);
         limits.begin_instruction(0x8001_0000);
         assert!(limits.frozen());
+    }
+
+    #[test]
+    fn data_oracles_are_off_until_configured_and_active() {
+        let mut limits = LimitOracles::from_settings(None, None, None, None, None, None).unwrap();
+        assert!(!limits.fast_data_hit(0x1000));
+        limits.log_data(0x1000, 6);
+        assert!(!limits.logs_data());
+
+        let dir = std::env::temp_dir().join(format!("limits-fast-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ranges = dir.join("fast.txt");
+        std::fs::write(&ranges, "00001000 00001040 hot\n").unwrap();
+        let mut limits = LimitOracles::from_settings(None, None, None, None, None, None)
+            .unwrap()
+            .with_data_oracles(Some(&ranges), true)
+            .unwrap();
+        assert!(limits.configured());
+        // Not live before activation.
+        assert!(!limits.fast_data_hit(0x1000));
+        limits.log_data(0x1000, 6);
+        limits.activate(0);
+        assert!(limits.fast_data_hit(0x1000));
+        assert!(limits.fast_data_hit(0x103f));
+        assert!(!limits.fast_data_hit(0x1040));
+        // Two loads in one 32-byte line and one in the next.
+        limits.log_data(0x1004, 6);
+        limits.log_data(0x101c, 7);
+        limits.log_data(0x1020, 5);
+        let out = dir.join("log.csv");
+        limits.write_data_log(&out).unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("line_addr,stall_cycles,loads"));
+        assert_eq!(lines.next(), Some("0x00001000,13,2"));
+        assert_eq!(lines.next(), Some("0x00001020,5,1"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn data_log_skips_loads_made_inside_wait_ranges() {
+        let wait = RangeSet::parse("80010000 80010010").unwrap();
+        let mut limits = LimitOracles::new(0, 0, RangeSet::default(), wait, RangeSet::default())
+            .with_data_oracles(None, true)
+            .unwrap();
+        limits.activate(0);
+        limits.begin_instruction(0x8001_0004);
+        limits.log_data(0x2000, 6);
+        limits.end_instruction(0x8001_0004, 7, 0);
+        limits.begin_instruction(0x8002_0000);
+        limits.log_data(0x2000, 6);
+        limits.end_instruction(0x8002_0000, 7, 0);
+        let dir = std::env::temp_dir().join(format!("limits-wait-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("log.csv");
+        limits.write_data_log(&out).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap().lines().nth(1),
+            Some("0x00002000,6,1")
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

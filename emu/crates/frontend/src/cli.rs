@@ -2387,6 +2387,9 @@ fn run_headless_launch(
             bus.limits.guard_trips,
             bus.limits.thawed_accesses,
         );
+        if let Some(path) = std::env::var_os("PSOXIDE_RAM_DATA_LOG") {
+            bus.limits.write_data_log(std::path::Path::new(&path))?;
+        }
         if let Some(path) = std::env::var_os("PSOXIDE_LIMIT_PROFILE_OUT") {
             bus.limits.write_profile(std::path::Path::new(&path))?;
         }

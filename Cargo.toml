@@ -24,7 +24,7 @@ members = [
 default-members = ["emu/crates/frontend"]
 # The device-side workspaces live inside this directory tree; cargo
 # requires nested workspace roots to be excluded explicitly.
-exclude = ["sdk", "engine", "build", "tools/web-player", "tools/compat-report"]
+exclude = ["sdk", "engine", "build", "tools/web-player", "tools/compat-report", "tools/stall-tools"]
 
 [workspace.package]
 edition = "2021"

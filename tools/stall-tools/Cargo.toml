@@ -1,0 +1,11 @@
+[package]
+name = "stall-tools"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+publish = false
+description = "Stall-budget report, hot-line ranking and spill gate for PSoXide guest runs."
+
+# Standalone on purpose, like compat-report: a small tool with no dependencies
+# that must not pull the emulator workspace into its build.
+[workspace]

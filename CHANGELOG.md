@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Stall-budget tooling. Two data-address limit oracles (`PSOXIDE_RAM_DATA_LOG`,
+  `PSOXIDE_LIMIT_FAST_DATA`) rank main-RAM lines by load stall and price
+  "these bytes live in the scratchpad", and `tools/stall-tools` (no
+  dependencies) turns a replay's logs into a stall-budget report with wait
+  loops removed, a hot-line range file, and a spill gate for registered
+  kernels. Both oracles are inert unless set: a Half-Life replay is
+  cycle-identical bucket by bucket with them off.
 - Web player menus, fullscreen and controller polish. The texture filter is one
   control (Settings), "Reconnect saved games" became "Reopen your games folder"
   and shows only after a folder was connected, and a few labels now say what they

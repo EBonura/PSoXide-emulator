@@ -1658,6 +1658,9 @@ impl Cpu {
                 return;
             }
             let stalls = bus.cpu_read_stalls(addr, width);
+            if bus.limits.logs_data() && memory::to_physical(addr) < memory::ram::MIRROR_END {
+                bus.limits.log_data(memory::to_physical(addr), stalls);
+            }
             if crate::timers::Timers::contains(memory::to_physical(addr)) {
                 bus.add_root_counter_read_stalls(addr, stalls);
             } else {
@@ -1672,6 +1675,7 @@ impl Cpu {
     fn limit_free_read(bus: &Bus, addr: u32) -> bool {
         let phys = memory::to_physical(addr);
         (bus.limit(crate::limits::RAM) && phys < memory::ram::MIRROR_END)
+            || bus.limits.fast_data_hit(phys)
             || (bus.limit(crate::limits::MMIO) && Self::polled_status_register(phys))
     }
 
