@@ -603,6 +603,46 @@ fn boot_exe_name(system_cnf: &[u8]) -> Option<String> {
     None
 }
 
+/// The boot serial of a disc image, written the way the community cover
+/// collections write it (`SCUS-94900`), read from `SYSTEM.CNF`. `None` for an
+/// image without one (homebrew with `PSX.EXE`, audio, captures).
+pub fn disc_boot_serial(path: &Path) -> Option<String> {
+    let reader = SectorReader::open(path)?;
+    let pvd = reader.user(16)?;
+    if pvd[0] != 1 || &pvd[1..6] != b"CD001" {
+        return None;
+    }
+    let sector = psx_iso::SECTOR_USER_DATA_BYTES as u64;
+    let root_lba = le_u32(&pvd, 158)? as u64;
+    let root_size = le_u32(&pvd, 166)? as usize;
+    let root = reader.extent(root_lba, (root_size as u64).div_ceil(sector).min(32), root_size)?;
+    let cnf = iso_records(&root)
+        .into_iter()
+        .find(|r| !r.is_dir && r.name.to_ascii_uppercase().starts_with("SYSTEM.CNF"))
+        .and_then(|r| reader.extent(r.lba, r.size.div_ceil(sector).min(2), r.size as usize))?;
+    boot_serial_of_cnf(&cnf)
+}
+
+/// The cover-collection serial named by a `SYSTEM.CNF`'s `BOOT` line.
+pub fn boot_serial_of_cnf(system_cnf: &[u8]) -> Option<String> {
+    serial_of_boot_name(&boot_exe_name(system_cnf)?)
+}
+
+/// `SCUS_949.00` becomes `SCUS-94900`; anything that is not a retail serial
+/// is `None`.
+pub fn serial_of_boot_name(name: &str) -> Option<String> {
+    let upper = name.trim().to_ascii_uppercase();
+    let bytes = upper.as_bytes();
+    if bytes.len() != 11 || !bytes[..4].iter().all(u8::is_ascii_uppercase) {
+        return None;
+    }
+    if !matches!(bytes[4], b'_' | b'-') || bytes[8] != b'.' {
+        return None;
+    }
+    let digits: String = upper[5..].chars().filter(char::is_ascii_digit).collect();
+    (digits.len() == 5).then(|| format!("{}-{}", &upper[..4], digits))
+}
+
 /// Sectors of the boot executable folded into a disc's identity.
 const IDENTITY_EXE_SECTORS: u64 = 256;
 

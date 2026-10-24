@@ -36,6 +36,7 @@ pub fn draw_layout(
     let recording_input = state.input_recording_status().0;
     state.menu.sync_input_recording_label(recording_input);
     state.menu.set_game_loaded(state.bus.is_some());
+    state.feed_home(input_router, ctx);
     state.menu.set_deinterlace(state.deinterlace.label());
     state.menu.sync_video_audio(
         state.scale_mode == ScaleMode::Window,
@@ -83,8 +84,9 @@ pub fn draw_layout(
         return;
     }
 
-    // One-shot boot splash on a foreground layer.
-    if !embed {
+    // One-shot boot splash on a foreground layer. The home screen is its own
+    // first impression.
+    if !embed && !state.menu.home_enabled() {
         splash::draw(ctx);
     }
 
@@ -383,6 +385,28 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
         }
         ShowAbout => {
             state.menu.show_about();
+            MenuOutcome::None
+        }
+        StartDemoDisc => {
+            state.start_demo_disc();
+            MenuOutcome::None
+        }
+        OpenDebug => {
+            state.panels.debug_sidebar = true;
+            state.menu.open = false;
+            MenuOutcome::None
+        }
+        OpenUrl(url) => {
+            menu::open_url(&url);
+            MenuOutcome::None
+        }
+        SetVolume(pct) => {
+            state.audio_volume = f32::from(pct) / 100.0;
+            state.audio_muted = false;
+            MenuOutcome::None
+        }
+        ToggleBoxArt => {
+            state.toggle_box_art();
             MenuOutcome::None
         }
         Quit => MenuOutcome::Quit,

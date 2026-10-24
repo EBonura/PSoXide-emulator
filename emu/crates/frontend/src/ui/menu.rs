@@ -18,6 +18,10 @@ use egui::{Align2, FontId, Pos2, Rect, Vec2};
 
 use crate::{icons, theme};
 
+mod home;
+
+pub(crate) use home::{is_first_visit as first_visit, DemoStatus, HomeFeed};
+
 const CATEGORY_SPACING: f32 = 100.0;
 const ICON_SIZE_ACTIVE: f32 = 32.0;
 const ICON_SIZE_INACTIVE: f32 = 20.0;
@@ -145,6 +149,17 @@ pub enum MenuAction {
     Reconnect,
     /// Open the About card (from the Settings menu).
     ShowAbout,
+    /// Start the demo disc from the home screen: resume it when it is booted
+    /// and waiting, load it otherwise.
+    StartDemoDisc,
+    /// Close the shell and show the debug sidebar.
+    OpenDebug,
+    /// Open a link in the browser.
+    OpenUrl(String),
+    /// Set the output volume, in percent.
+    SetVolume(u8),
+    /// Turn box art fetching on or off.
+    ToggleBoxArt,
     /// Quit the application.
     Quit,
 }
@@ -432,6 +447,9 @@ pub struct MenuState {
     controls_live_held: Vec<PadBindTarget>,
     pending_pointer_action: Option<MenuAction>,
     categories: Vec<Category>,
+    /// The home screen, once the shell turns it on; `None` keeps the old
+    /// cross media bar (the unit tests and old headless previews).
+    home: Option<Box<home::HomeState>>,
 }
 
 /// A save staged for loading, pending the user confirming (and
@@ -549,6 +567,7 @@ impl MenuState {
             controls_live_held: Vec::new(),
             pending_pointer_action: None,
             categories,
+            home: None,
         }
     }
 
@@ -877,6 +896,14 @@ impl MenuState {
         );
     }
 
+    /// Reflect the box-art setting in its row and in the cover fetcher.
+    pub fn set_box_art(&mut self, on: bool) {
+        self.set_value(&MenuAction::ToggleBoxArt, if on { "On" } else { "Off" }.into());
+        if let Some(covers) = self.covers() {
+            covers.set_enabled(on);
+        }
+    }
+
     /// Reflect the slow-host choice in its Settings row.
     pub fn set_smooth_slow_host(&mut self, smooth: bool) {
         self.set_value(
@@ -927,12 +954,19 @@ impl MenuState {
 
     /// Open the About card. Driven by the Settings "About" row.
     pub fn show_about(&mut self) {
+        if self.home.is_some() {
+            self.home_show_welcome();
+            return;
+        }
         self.about_open = true;
     }
 
     /// Feed one frame of input. Returns `Some(action)` when a confirm
     /// selects an item.
     pub fn update(&mut self, input: &MenuInput) -> Option<MenuAction> {
+        if self.home.is_some() {
+            return self.home_update(input);
+        }
         if let Some(action) = self.pending_pointer_action.take() {
             return Some(action);
         }
@@ -1069,6 +1103,10 @@ impl MenuState {
     /// Draw the Menu overlay on a middle-layer painter. `dt` drives the
     /// slide animation.
     pub fn draw(&mut self, ctx: &egui::Context, dt: f32, warning: Option<&str>) {
+        if self.home.is_some() {
+            self.home_draw(ctx, dt, warning);
+            return;
+        }
         // The save-states panel is reachable straight from the
         // always-visible toolbar icon, independent of whether the
         // full Menu overlay is open -- so it's drawn (and its own
@@ -2855,6 +2893,11 @@ fn about_panel(ctx: &egui::Context, open: &mut bool) {
 }
 
 /// Open a URL in the user's default browser (native) or a new tab (web).
+pub(crate) fn open_url(url: &str) {
+    open_external_url(url);
+}
+
+/// Open a URL in the user's default browser (native) or a new tab (web).
 #[cfg(not(target_arch = "wasm32"))]
 fn open_external_url(url: &str) {
     let opener = if cfg!(target_os = "macos") {
@@ -2916,6 +2959,7 @@ fn build_settings_category() -> Category {
             MenuAction::ToggleTouchLeftHanded,
             Some("Off"),
         ),
+        row("Box art from the internet", MenuAction::ToggleBoxArt, Some("On")),
         row("Fullscreen", MenuAction::ToggleFullscreen, None),
         row("About", MenuAction::ShowAbout, None),
     ];

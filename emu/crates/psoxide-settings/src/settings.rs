@@ -101,6 +101,14 @@ pub struct VideoSettings {
     /// back to the default instead of failing the whole settings file.
     #[serde(default = "default_deinterlace")]
     pub deinterlace: String,
+    /// Fetch box art for the player's own discs from the community cover
+    /// collections. On by default; the pictures are never bundled.
+    #[serde(default = "default_box_art")]
+    pub box_art: bool,
+}
+
+fn default_box_art() -> bool {
+    true
 }
 
 fn default_deinterlace() -> String {
@@ -129,6 +137,7 @@ impl Default for VideoSettings {
             smooth_slow_host: false,
             texture_filter: default_texture_filter(),
             deinterlace: default_deinterlace(),
+            box_art: default_box_art(),
         }
     }
 }

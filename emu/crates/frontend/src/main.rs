@@ -445,7 +445,8 @@ impl Shell {
         } else {
             None
         };
-        let state = AppState::with_config_dir(config_dir);
+        let mut state = AppState::with_config_dir(config_dir);
+        state.enable_home_screen();
         #[cfg(feature = "editor")]
         let state = {
             let mut state = state;
@@ -1377,6 +1378,11 @@ impl ApplicationHandler for Shell {
                 // is Enter, Circle is Back. `|=` so keyboard and
                 // pad can both contribute -- last-one-wins semantics
                 // don't matter at this granularity.
+                // Any pad button or stick movement counts as "an input" for the
+                // home screen's first-visit countdown.
+                if merged_mask != 0 || merged_left != (0.0, 0.0) || merged_right != (0.0, 0.0) {
+                    self.state.menu.note_input();
+                }
                 input.up |= pad_frame.menu_up;
                 input.down |= pad_frame.menu_down;
                 input.left |= pad_frame.menu_left;

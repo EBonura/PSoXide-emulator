@@ -471,6 +471,9 @@ pub struct AppState {
     /// the user's choice.
     #[cfg(target_arch = "wasm32")]
     web_autoboot: bool,
+    /// The home screen holds a freshly booted demo disc paused behind it, so
+    /// "Start disc" resumes it at once instead of racing the download.
+    hold_boot_for_home: bool,
     /// Web: the id of a disc the player picked whose boot has not landed yet
     /// (fetching, opening, or waiting for its boot files). A second pick of the
     /// same disc meanwhile does nothing.
@@ -684,6 +687,7 @@ impl AppState {
             web_pending_boot: None,
             #[cfg(target_arch = "wasm32")]
             web_autoboot: false,
+            hold_boot_for_home: false,
             #[cfg(target_arch = "wasm32")]
             web_loading: None,
             #[cfg(target_arch = "wasm32")]
@@ -827,7 +831,30 @@ impl AppState {
     fn machine_booted(&mut self) {
         let mut transport = self.transport(true);
         transport.game_booted();
+        if std::mem::take(&mut self.hold_boot_for_home) {
+            // Booted for the home screen: wait behind it for "Start disc".
+            transport.running = false;
+            transport.menu_open = true;
+            transport.paused_by_menu = true;
+        }
         self.set_transport(transport);
+    }
+
+    /// Show the home screen as the shell (the windowed and web players; the
+    /// embedded player has no shell). On the web the demo disc boots behind it
+    /// and waits for "Start disc".
+    pub fn enable_home_screen(&mut self) {
+        if embed_mode() {
+            return;
+        }
+        let first_visit = ui::menu::first_visit();
+        self.menu.enable_home(first_visit);
+        self.menu.set_box_art(self.settings.video.box_art);
+        #[cfg(target_arch = "wasm32")]
+        if self.web_autoboot {
+            self.hold_boot_for_home = true;
+            self.menu.open = true;
+        }
     }
 
     /// The machine was torn down: forget it, so the next pick loads from scratch.
@@ -1425,6 +1452,7 @@ impl AppState {
         #[cfg(target_arch = "wasm32")]
         if self.web_autoboot && id != DEMO_DISC_ID {
             self.web_autoboot = false;
+            self.hold_boot_for_home = false;
             crate::web_stream::abandon();
         }
         // Web streamed discs: kick off the fetch; boot happens on a later
@@ -2557,10 +2585,13 @@ impl AppState {
         ) && std::mem::take(&mut self.web_autoboot)
         {
             // The page-open boot has resolved; on failure show the menu.
-            self.menu.open = !matches!(
-                status,
-                BootStatus::Ready { .. } | BootStatus::Lazy { .. } | BootStatus::Compact { .. }
-            );
+            self.menu.open = self.menu.home_enabled()
+                || !matches!(
+                    status,
+                    BootStatus::Ready { .. }
+                        | BootStatus::Lazy { .. }
+                        | BootStatus::Compact { .. }
+                );
             if stream_failure_is_quiet(true, matches!(status, BootStatus::NotServed(_))) {
                 self.web_loading = None;
                 self.status_message = None;
@@ -3053,6 +3084,96 @@ impl AppState {
         edit(&mut self.touch_prefs);
         self.menu.set_touch_prefs(&self.touch_prefs);
         self.touch_prefs_dirty = true;
+    }
+
+    /// Tell the home screen what the app knows this frame: the demo disc, the
+    /// input devices and the safe-area insets.
+    pub fn feed_home(&mut self, input_router: &crate::input::InputRouter, ctx: &egui::Context) {
+        if !self.menu.home_enabled() {
+            return;
+        }
+        use crate::input::model::BackendKind;
+        let devices = input_router.devices();
+        let gamepads = devices
+            .iter()
+            .filter(|d| {
+                !matches!(
+                    d.identity.backend,
+                    BackendKind::Keyboard | BackendKind::Touch
+                )
+            })
+            .count();
+        let touch = input_router.touch();
+        let inv = 1.0 / ctx.pixels_per_point();
+        let safe = touch.safe_px();
+        #[cfg(target_arch = "wasm32")]
+        let demo = if crate::web_stream::find(DEMO_DISC_ID).is_none() {
+            ui::menu::DemoStatus::Absent
+        } else if self.bus.is_some()
+            && self.current_game.as_ref().is_some_and(|g| g.id == DEMO_DISC_ID)
+        {
+            ui::menu::DemoStatus::Ready
+        } else {
+            ui::menu::DemoStatus::Loading(-1.0)
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let demo = ui::menu::DemoStatus::Absent;
+        self.menu.set_home_feed(ui::menu::HomeFeed {
+            demo,
+            keyboard: devices
+                .iter()
+                .any(|d| matches!(d.identity.backend, BackendKind::Keyboard)),
+            gamepads,
+            touch: self.menu.touch_mode(),
+            safe: [
+                safe.top * inv,
+                safe.bottom * inv,
+                safe.left * inv,
+                safe.right * inv,
+            ],
+        });
+        if let Some(covers) = self.menu.covers() {
+            covers.pump();
+        }
+    }
+
+    /// "Start disc": resume the demo disc if it is booted and waiting behind
+    /// the home screen, otherwise load it.
+    pub fn start_demo_disc(&mut self) {
+        self.hold_boot_for_home = false;
+        let waiting = self.bus.is_some()
+            && self
+                .current_game
+                .as_ref()
+                .is_some_and(|g| g.id == DEMO_DISC_ID);
+        if waiting {
+            let mut transport = self.transport(true);
+            transport.menu_open = false;
+            transport.running = true;
+            transport.paused_by_menu = false;
+            self.set_transport(transport);
+            return;
+        }
+        match self.launch_by_id(DEMO_DISC_ID) {
+            Ok(()) => {
+                // The download runs behind the home screen; booting closes it.
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.menu.open = false;
+                }
+            }
+            Err(e) => self.status_message_set(format!("Launch failed: {e}")),
+        }
+    }
+
+    /// Turn box-art fetching on or off and persist the choice.
+    pub fn toggle_box_art(&mut self) {
+        let on = !self.settings.video.box_art;
+        self.settings.video.box_art = on;
+        self.menu.set_box_art(on);
+        if let Err(error) = self.save_settings() {
+            eprintln!("[frontend] {error}");
+        }
     }
 
     /// Cycle the DPI-aware host UI scale, update its Settings row, and persist

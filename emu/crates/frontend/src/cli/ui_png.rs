@@ -32,6 +32,21 @@ pub struct UiPngArgs {
     pub out: PathBuf,
     #[arg(long, value_enum, default_value = "menu")]
     pub view: View,
+    /// Draw the home screen instead of the cross media bar.
+    #[arg(long)]
+    pub home: bool,
+    /// With `--home`: the page to show (home, library, settings, welcome).
+    #[arg(long, default_value = "home")]
+    pub page: String,
+    /// With `--home`: show the demo disc case (the web build always has it).
+    #[arg(long)]
+    pub demo: bool,
+    /// With `--home`: pretend a first visit's countdown is on screen.
+    #[arg(long)]
+    pub countdown: bool,
+    /// With `--home`: the focused case.
+    #[arg(long, default_value_t = 0)]
+    pub case: usize,
     /// Menu column to select: Library, Game or Settings.
     #[arg(long, default_value = "Game")]
     pub category: String,
@@ -103,6 +118,9 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
         }
     }
     let mut state = AppState::with_config_dir(Some(root.to_path_buf()));
+    if args.home {
+        state.enable_home_screen();
+    }
     for folder in &args.expand {
         state.menu.toggle_library_folder(folder);
     }
@@ -149,6 +167,7 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
         View::Menu => {
             state.menu.select_category(&args.category);
             state.menu.open = true;
+            state.menu.home_preview(&args.page, args.case, args.demo, args.countdown);
         }
         View::Window => {
             state.menu.open = false;
