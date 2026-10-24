@@ -293,6 +293,10 @@ struct PendingInputProfileCapture {
     phase: &'static str,
 }
 
+/// `localStorage` key of the browser build's settings (RON text).
+#[cfg(target_arch = "wasm32")]
+const WEB_SETTINGS_KEY: &str = "psoxide-settings-v1";
+
 pub struct AppState {
     /// Active host workspace.
     pub workspace: Workspace,
@@ -467,6 +471,18 @@ pub struct AppState {
     /// the user's choice.
     #[cfg(target_arch = "wasm32")]
     web_autoboot: bool,
+    /// Web: the id of a disc the player picked whose boot has not landed yet
+    /// (fetching, opening, or waiting for its boot files). A second pick of the
+    /// same disc meanwhile does nothing.
+    #[cfg(target_arch = "wasm32")]
+    web_loading: Option<String>,
+    /// Web: the image id of the disc behind the current machine, so a restart
+    /// can wait for the reads its boot asks for.
+    #[cfg(target_arch = "wasm32")]
+    web_image_id: u32,
+    /// The overlay menu paused a running game (see [`crate::session::Transport`]).
+    /// Closing the menu resumes it; a game the player paused stays paused.
+    paused_by_menu: bool,
     /// [`emulator_core::game_image_hash`] of the current game image, both
     /// targets. Recorded into browser tape CSVs; compared when a replay
     /// loads so a changed build gets flagged to the user. `None` when the
@@ -488,6 +504,8 @@ struct PendingWebBoot {
     size: u64,
     hash: u64,
     attempts: u32,
+    /// A restart of the loaded game, not a first load: the toast says so.
+    restart: bool,
 }
 
 /// How the web build booted the current game (see `AppState::web_boot`).
@@ -548,6 +566,15 @@ impl AppState {
             }
         }
 
+        #[cfg(target_arch = "wasm32")]
+        let settings = match crate::web_touch::local_text(WEB_SETTINGS_KEY) {
+            Some(text) => Settings::from_ron(&text).unwrap_or_else(|e| {
+                eprintln!("[frontend] stored settings unreadable ({e}); using defaults");
+                Settings::default()
+            }),
+            None => Settings::default(),
+        };
+        #[cfg(not(target_arch = "wasm32"))]
         let settings = match Settings::load(&paths.settings_file()) {
             Ok(s) => s,
             Err(e) => {
@@ -654,6 +681,11 @@ impl AppState {
             web_pending_boot: None,
             #[cfg(target_arch = "wasm32")]
             web_autoboot: false,
+            #[cfg(target_arch = "wasm32")]
+            web_loading: None,
+            #[cfg(target_arch = "wasm32")]
+            web_image_id: 0,
+            paused_by_menu: false,
             current_game_hash: None,
             // The menu starts open on the Library, which the startup scan
             // below has just covered.
@@ -713,6 +745,7 @@ impl AppState {
                     // Quiet until the manifest answers: a dev build without
                     // the delivery staged falls back to the menu silently.
                     crate::web_stream::start(stream);
+                    out.web_loading = Some(id.to_string());
                     out.web_autoboot = true;
                     out.menu.open = false;
                 }
@@ -781,10 +814,114 @@ impl AppState {
         self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
         self.cpu = cpu;
         crate::install_native_tier(&mut self.cpu);
-        self.running = true;
-        self.menu.open = false;
-        self.menu.sync_run_label(true);
+        self.machine_booted();
         Ok(())
+    }
+
+    /// A machine just booted (first load, restart or reset): it runs and the menu
+    /// gets out of the way.
+    fn machine_booted(&mut self) {
+        let mut transport = self.transport(true);
+        transport.game_booted();
+        self.set_transport(transport);
+    }
+
+    /// The machine was torn down: forget it, so the next pick loads from scratch.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    fn machine_unloaded(&mut self) {
+        let mut transport = self.transport(true);
+        transport.game_unloaded();
+        transport.menu_open = true;
+        self.set_transport(transport);
+    }
+
+    /// The player's transport as JSON, for the browser journey tests.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn ux_probe_json(&self, touch_layout: Option<&str>) -> String {
+        let escape = |text: &str| text.replace('\\', "\\\\").replace('"', "\\\"");
+        let id = self
+            .current_game
+            .as_ref()
+            .map_or(String::new(), |game| escape(&game.id));
+        let status = self
+            .status_message
+            .as_ref()
+            .map_or(String::new(), |(msg, _)| escape(msg));
+        let mode = match self.bus.as_ref().and_then(|bus| bus.port1_pad_mode()) {
+            Some(emulator_core::pad::PadMode::Analog) => "analog",
+            Some(_) => "digital",
+            None => "none",
+        };
+        let (column, row, value, rows) = self.menu.selection_probe();
+        let panel = self.menu.panel_probe();
+        #[cfg(target_arch = "wasm32")]
+        let loading = self.web_loading.as_deref().map_or(String::new(), escape);
+        #[cfg(not(target_arch = "wasm32"))]
+        let loading = String::new();
+        format!(
+            "{{\"running\":{},\"menu_open\":{},\"loaded_id\":\"{id}\",\"loading\":\"{loading}\",\
+             \"machine\":{},\"port1_mode\":\"{mode}\",\"has_bus\":{},\"status\":\"{status}\",\
+             \"panel\":\"{panel}\",\"menu\":{{\"column\":\"{}\",\"row\":\"{}\",\"value\":\"{}\",\"rows\":{}}},\"touch\":{}}}",
+            self.running,
+            self.menu.open,
+            self.gpu_resync_generation,
+            self.bus.is_some(),
+            column,
+            escape(row),
+            escape(value),
+            rows,
+            touch_layout.unwrap_or("null"),
+        )
+    }
+
+    /// Reset the running game. Web: restart it in place from the image in hand.
+    /// Native: reseat the CPU at its reset vector, keeping the run state.
+    pub fn reset_game(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        self.reset_web_game();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Reboot the CPU but keep the run state -- reset shouldn't drop
+            // you into a paused state.
+            self.cpu = emulator_core::Cpu::new();
+            crate::install_native_tier(&mut self.cpu);
+            self.exec_history.clear();
+            self.gpr_snapshot = None;
+            if let Some(bus) = self.bus.as_mut() {
+                bus.gpu.vram.clear();
+                self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
+            }
+        }
+    }
+
+    /// The transport facts the PS button and Back decide on; `game_loaded` is the
+    /// caller's reading of "a machine is there to resume" (the editor's embedded
+    /// Play counts as one).
+    pub fn transport(&self, game_loaded: bool) -> crate::session::Transport {
+        crate::session::Transport {
+            running: self.running,
+            menu_open: self.menu.open,
+            game_loaded,
+            paused_by_menu: self.paused_by_menu,
+        }
+    }
+
+    /// Write a transition of [`Self::transport`] back.
+    pub fn set_transport(&mut self, transport: crate::session::Transport) {
+        self.running = transport.running;
+        self.menu.open = transport.menu_open;
+        self.paused_by_menu = transport.paused_by_menu;
+        self.menu.sync_run_label(self.running);
+    }
+
+    /// Back closed the menu: resume the game the menu paused. A game the player
+    /// paused themselves stays paused.
+    pub fn menu_closed_by_back(&mut self) {
+        let mut transport = self.transport(self.bus.is_some() && self.current_game.is_some());
+        // Back already closed the overlay; replay the close on the open-menu view.
+        transport.menu_open = true;
+        transport.menu_back();
+        self.set_transport(transport);
     }
 
     pub fn launch_entry(&mut self, entry: &LibraryEntry) -> Result<(), String> {
@@ -896,6 +1033,7 @@ impl AppState {
         self.cpu = cpu;
         crate::install_native_tier(&mut self.cpu);
         self.running = true;
+        self.paused_by_menu = false;
         self.workspace = Workspace::Emulator;
         self.exec_history.clear();
         self.gpr_snapshot = None;
@@ -1314,6 +1452,7 @@ impl AppState {
     /// entries provide. Save states use this id as their IndexedDB key.
     #[cfg(target_arch = "wasm32")]
     fn set_web_current_game(&mut self, id: String, title: String, kind: GameKind, size: u64) {
+        self.web_loading = None;
         self.current_game = Some(LibraryEntry {
             path: PathBuf::from(&id),
             id: id.clone(),
@@ -1920,6 +2059,21 @@ impl AppState {
     /// Persist the current `Settings` to `settings.ron`. Called
     /// when a settings-panel control commits a change.
     pub fn save_settings(&self) -> Result<(), String> {
+        // The browser has no config directory: the settings live in
+        // `localStorage`, so volume, filters and key bindings survive a visit.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let text = self
+                .settings
+                .to_ron()
+                .map_err(|e| format!("save settings: {e}"))?;
+            return if crate::web_touch::set_local_text(WEB_SETTINGS_KEY, &text) {
+                Ok(())
+            } else {
+                Err("browser storage is blocked".to_string())
+            };
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         self.settings
             .save(&self.paths.settings_file())
             .map_err(|e| format!("save settings.ron: {e}"))
@@ -2079,32 +2233,144 @@ impl AppState {
 
     /// Web: cold-boot the current game again from what was kept at launch.
     /// Recording and replay both start from this reboot so a tape's poll
-    /// clock counts from poll 0 of a deterministic fresh machine.
+    /// clock counts from poll 0 of a deterministic fresh machine. The boot
+    /// happens now or the call fails; [`Self::restart_loaded_web_game`] is the
+    /// variant that may finish a frame or two later.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn reboot_current_web_game(&mut self) -> Result<(), String> {
+        if self.restart_loaded_web_game(false)? {
+            Err("the disc is still reading its boot files".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Web: whether the loaded machine kept what a cold boot needs: the
+    /// executable bytes, or the disc still in the drive.
+    #[cfg(target_arch = "wasm32")]
+    fn web_can_restart(&mut self) -> bool {
+        match self.web_boot {
+            None => false,
+            Some(WebBoot::Exe(_)) => true,
+            Some(WebBoot::DiscHle) => self
+                .bus
+                .as_mut()
+                .is_some_and(|bus| bus.cdrom.disc_mut().is_some()),
+        }
+    }
+
+    /// Web: restart the loaded game in place from the image already in hand
+    /// (the in-memory chunks, which reads fall back to the browser cache for).
+    /// Returns `Ok(true)` when the boot is waiting on reads and lands on a
+    /// later frame (`allow_pending`), `Ok(false)` when the new machine is up.
+    /// On failure the machine is torn down cleanly, so the next pick of the
+    /// disc loads it from scratch instead of resuming a broken one.
+    #[cfg(target_arch = "wasm32")]
+    fn restart_loaded_web_game(&mut self, allow_pending: bool) -> Result<bool, String> {
         let boot = self
             .web_boot
             .clone()
             .ok_or_else(|| "launch a game first".to_string())?;
+        // One tape belongs to one machine: end a recording before replacing it.
+        self.stop_input_recording_if_active();
         // The boot helpers clear `current_game` (they serve first launches);
-        // a reboot keeps the game's identity, so save and restore it.
+        // a restart keeps the game's identity, so save and restore it.
         let saved_game = self.current_game.take();
         let result = match boot {
-            WebBoot::Exe(bytes) => self.boot_exe_bytes(bytes),
+            WebBoot::Exe(bytes) => self.boot_exe_bytes(bytes).map(|()| false),
             WebBoot::DiscHle => {
                 let disc = self
                     .bus
                     .as_mut()
                     .and_then(|bus| bus.cdrom.take_disc())
                     .ok_or_else(|| "no disc image to reboot".to_string());
-                match (disc, boot) {
-                    (Err(error), _) => Err(error),
-                    (Ok(disc), _) => self.boot_disc(disc),
+                match disc.map(|disc| self.try_boot_disc(disc)) {
+                    Err(error) => Err(error),
+                    Ok(Ok(())) => Ok(false),
+                    Ok(Err((disc, error))) => {
+                        if allow_pending && crate::web_disc::busy(self.web_image_id) {
+                            let game = saved_game.as_ref();
+                            self.web_pending_boot = Some(PendingWebBoot {
+                                disc,
+                                image_id: self.web_image_id,
+                                game_id: game.map(|g| g.id.clone()).unwrap_or_default(),
+                                title: game.map(|g| g.title.clone()).unwrap_or_default(),
+                                name: game.map(|g| g.title.clone()).unwrap_or_default(),
+                                size: game.map_or(0, |g| g.size),
+                                hash: self.current_game_hash.unwrap_or(0),
+                                attempts: 0,
+                                restart: true,
+                            });
+                            // The old machine has lost its disc: hold it still
+                            // until the new one is up.
+                            self.running = false;
+                            self.menu.sync_run_label(false);
+                            Ok(true)
+                        } else {
+                            Err(format!("boot disc: {error}"))
+                        }
+                    }
                 }
             }
         };
-        self.current_game = saved_game;
+        match result {
+            Ok(_) => self.current_game = saved_game,
+            Err(_) => {
+                // Nothing runnable is left: forget the game so a pick reloads it.
+                self.web_boot = None;
+                self.current_game = None;
+                self.machine_unloaded();
+            }
+        }
         result
+    }
+
+    /// Web Reset: restart the loaded game in place. It never opens the menu and
+    /// never downloads anything.
+    #[cfg(target_arch = "wasm32")]
+    fn reset_web_game(&mut self) {
+        use crate::session::{plan_reset, ResetPlan};
+        let can_restart = self.web_can_restart();
+        match plan_reset(self.current_game.is_some(), can_restart) {
+            ResetPlan::NothingLoaded => self.status_message_set("Nothing to reset"),
+            ResetPlan::RestartInPlace => match self.restart_loaded_web_game(true) {
+                Ok(true) => {}
+                Ok(false) => self.status_message_set("Game reset"),
+                Err(error) => self.status_message_set(format!("Reset failed: {error}")),
+            },
+        }
+    }
+
+    /// Web Library pick. Returns `true` when the pick was handled here (the
+    /// disc is the loaded one, or already on its way in); `false` means load it.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn pick_web_disc(&mut self, id: &str) -> bool {
+        use crate::session::{plan_pick, PickPlan};
+        let loaded = self.current_game.as_ref().map(|g| g.id.clone());
+        let can_restart = self.web_can_restart();
+        match plan_pick(
+            loaded.as_deref(),
+            can_restart,
+            self.web_loading.as_deref(),
+            id,
+        ) {
+            PickPlan::AlreadyLoading => {
+                self.status_message_set("Already loading that disc");
+                true
+            }
+            PickPlan::RestartInPlace => {
+                match self.restart_loaded_web_game(true) {
+                    Ok(true) => {}
+                    Ok(false) => self.status_message_set("Game restarted"),
+                    Err(error) => self.status_message_set(format!("Restart failed: {error}")),
+                }
+                true
+            }
+            PickPlan::Load => {
+                self.web_loading = Some(id.to_string());
+                false
+            }
+        }
     }
 
     /// Web: drain any game files the user picked and apply them. Called
@@ -2121,6 +2387,7 @@ impl AppState {
             self.status_message_set(format!("Found {n} game(s) in folder"));
         }
         for error in crate::web_files::drain_load_errors() {
+            self.web_loading = None;
             crate::web_embed::error(&error);
             self.status_message_set(error);
         }
@@ -2150,6 +2417,7 @@ impl AppState {
                             size,
                             hash: opened.hash,
                             attempts: 0,
+                            restart: false,
                         });
                         continue;
                     }
@@ -2182,11 +2450,13 @@ impl AppState {
                     match result {
                         Ok(()) => {
                             self.web_boot = Some(boot);
+                            self.web_image_id = 0;
                             self.current_game_hash = Some(game_hash);
                             self.set_web_current_game(game_id, title, kind, size);
                             self.status_message_set(format!("Launched: {}", loaded.name));
                         }
                         Err(e) => {
+                            self.web_loading = None;
                             crate::web_embed::error(&e);
                             self.status_message_set(e);
                         }
@@ -2220,6 +2490,7 @@ impl AppState {
             Ok(()) => {
                 crate::web_disc::pin_resident(pending.image_id);
                 self.web_boot = Some(WebBoot::DiscHle);
+                self.web_image_id = pending.image_id;
                 self.current_game_hash = Some(pending.hash);
                 self.set_web_current_game(
                     pending.game_id,
@@ -2227,7 +2498,12 @@ impl AppState {
                     GameKind::DiscBin,
                     pending.size,
                 );
-                self.status_message_set(format!("Launched: {}", pending.name));
+                let verb = if pending.restart {
+                    "Restarted"
+                } else {
+                    "Launched"
+                };
+                self.status_message_set(format!("{verb}: {}", pending.name));
             }
             Err((disc, error)) => {
                 // A boot that asked for nothing new has failed for real.
@@ -2238,6 +2514,14 @@ impl AppState {
                 } else {
                     let message = format!("{}: {error}", pending.name);
                     crate::web_embed::error(&message);
+                    self.web_loading = None;
+                    if pending.restart {
+                        // The old machine lost its disc: forget it, so a pick
+                        // loads the game from scratch.
+                        self.web_boot = None;
+                        self.current_game = None;
+                        self.machine_unloaded();
+                    }
                     self.status_message_set(message);
                 }
             }
@@ -2270,6 +2554,7 @@ impl AppState {
                 BootStatus::Ready { .. } | BootStatus::Lazy { .. } | BootStatus::Compact { .. }
             );
             if stream_failure_is_quiet(true, matches!(status, BootStatus::NotServed(_))) {
+                self.web_loading = None;
                 self.status_message = None;
                 return;
             }
@@ -2300,6 +2585,8 @@ impl AppState {
                 .and_then(|modelled| self.boot_disc(modelled));
                 match result {
                     Ok(()) => {
+                        self.web_boot = Some(WebBoot::DiscHle);
+                        self.web_image_id = 0;
                         self.set_web_current_game(
                             disc.id.to_string(),
                             disc.title.to_string(),
@@ -2308,7 +2595,10 @@ impl AppState {
                         );
                         self.status_message_set(format!("Launched: {}", disc.title));
                     }
-                    Err(e) => self.status_message_set(format!("{}: {e}", disc.title)),
+                    Err(e) => {
+                        self.web_loading = None;
+                        self.status_message_set(format!("{}: {e}", disc.title));
+                    }
                 }
             }
             BootStatus::Lazy { disc, image } => {
@@ -2320,6 +2610,7 @@ impl AppState {
                 self.status_message_set(format!("Opening {}...", disc.title));
             }
             BootStatus::Failed(message) | BootStatus::NotServed(message) => {
+                self.web_loading = None;
                 self.status_message_set(message)
             }
         }
@@ -2486,12 +2777,10 @@ impl AppState {
         self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
         self.cpu = cpu;
         crate::install_native_tier(&mut self.cpu);
-        self.running = true;
         self.current_game = None;
         self.exec_history.clear();
         self.gpr_snapshot = None;
-        self.menu.open = false;
-        self.menu.sync_run_label(true);
+        self.machine_booted();
     }
 
     /// Choose and persist the games folder from the Menu's Library.
@@ -4440,6 +4729,22 @@ pub fn disc_ready_for_frame(state: &AppState) -> bool {
         .is_none_or(|bus| bus.cdrom.prefetch_upcoming())
 }
 
+/// The guest faulted mid-frame: stop it and show the menu so the player can
+/// reset. Takes the fields it changes, so it can run while `bus` is borrowed.
+fn crash_guest(running: &mut bool, paused_by_menu: &mut bool, menu: &mut MenuState) {
+    let mut transport = crate::session::Transport {
+        running: *running,
+        menu_open: menu.open,
+        game_loaded: true,
+        paused_by_menu: *paused_by_menu,
+    };
+    transport.guest_crashed();
+    *running = transport.running;
+    *paused_by_menu = transport.paused_by_menu;
+    menu.open = transport.menu_open;
+    menu.sync_run_label(transport.running);
+}
+
 pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     let guest_panel_visible = state.guest_panel_visible();
     let max_steps = state.run_steps_per_frame.max(1);
@@ -4485,9 +4790,11 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
             steps_run = ran as u32;
             if result.is_err() {
                 steps_run += 1;
-                state.running = false;
-                state.menu.sync_run_label(false);
-                state.menu.open = true;
+                crash_guest(
+                    &mut state.running,
+                    &mut state.paused_by_menu,
+                    &mut state.menu,
+                );
             }
         }
     }
@@ -4503,9 +4810,11 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
         // is the BP address itself -- the instruction at that PC has
         // not yet executed.
         if check_breakpoints && state.breakpoints.contains(&state.cpu.pc()) {
-            state.running = false;
-            state.menu.sync_run_label(false);
-            state.menu.open = true;
+            crash_guest(
+                &mut state.running,
+                &mut state.paused_by_menu,
+                &mut state.menu,
+            );
             break;
         }
         steps_run += 1;
@@ -4522,9 +4831,11 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
             state.cpu.step(bus)
         };
         if result.is_err() {
-            state.running = false;
-            state.menu.sync_run_label(false);
-            state.menu.open = true;
+            crash_guest(
+                &mut state.running,
+                &mut state.paused_by_menu,
+                &mut state.menu,
+            );
             break;
         }
     }

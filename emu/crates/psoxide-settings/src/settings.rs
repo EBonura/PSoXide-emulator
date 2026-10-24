@@ -484,23 +484,13 @@ impl Settings {
         }
     }
 
-    /// Serialise to RON and write atomically. The content is written
-    /// to `<path>.tmp` first, then renamed to `path` -- so a crash
-    /// mid-write can never leave a half-written settings file
-    /// behind.
+    /// The settings as the RON text [`Settings::save`] writes, banner included.
+    /// The browser build keeps this text in `localStorage`.
     ///
-    /// The output starts with a short comment banner so the first
-    /// thing a user sees when they open the file is context, not
-    /// raw RON.
-    pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|source| SettingsError::Io {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-            }
-        }
+    /// # Errors
+    ///
+    /// Returns [`SettingsError::Serialize`] if RON cannot represent a value.
+    pub fn to_ron(&self) -> Result<String, SettingsError> {
         let ron_body = ron::ser::to_string_pretty(
             self,
             ron::ser::PrettyConfig::new()
@@ -519,7 +509,38 @@ impl Settings {
             "// you can delete anything you don't care about overriding.\n",
             "\n"
         );
-        let content = format!("{banner}{ron_body}\n");
+        Ok(format!("{banner}{ron_body}\n"))
+    }
+
+    /// Parse RON text written by [`Settings::to_ron`] and migrate old layouts.
+    ///
+    /// # Errors
+    ///
+    /// Returns the RON parse error for text that is not valid settings.
+    pub fn from_ron(text: &str) -> Result<Self, ron::error::SpannedError> {
+        let mut settings: Settings = ron::from_str(text)?;
+        settings.migrate();
+        Ok(settings)
+    }
+
+    /// Serialise to RON and write atomically. The content is written
+    /// to `<path>.tmp` first, then renamed to `path` -- so a crash
+    /// mid-write can never leave a half-written settings file
+    /// behind.
+    ///
+    /// The output starts with a short comment banner so the first
+    /// thing a user sees when they open the file is context, not
+    /// raw RON.
+    pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|source| SettingsError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+        }
+        let content = self.to_ron()?;
         let tmp = path.with_extension("ron.tmp");
         fs::write(&tmp, content).map_err(|source| SettingsError::Io {
             path: tmp.clone(),
@@ -773,6 +794,19 @@ mod tests {
         assert_eq!(InputBinding::Character('j').label(), "J");
         assert_eq!(InputBinding::Unbound.label(), "-");
     }
+    /// The browser keeps its settings as RON text in `localStorage`: what it writes
+    /// is what it reads back.
+    #[test]
+    fn ron_text_round_trips_through_to_ron_and_from_ron() {
+        let mut settings = Settings::default();
+        settings.video.menu_opacity_pct = 55;
+        let text = settings.to_ron().expect("serialise");
+        let back = Settings::from_ron(&text).expect("parse");
+        assert_eq!(back.video.menu_opacity_pct, 55);
+        assert_eq!(back.input, settings.input);
+        assert!(Settings::from_ron("not ron (").is_err());
+    }
+
     #[test]
     fn legacy_firmware_settings_are_discarded() {
         let old = r#"(paths: (bios: "/obsolete/firmware.bin", game_library: "games", parity_cache_dir: ""), emulator: (fast_boot_disc: false, hle_bios_for_side_load: false, hle_saves_to_real_memcard: true))"#;

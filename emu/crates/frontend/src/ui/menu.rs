@@ -575,6 +575,32 @@ impl MenuState {
         self.rebuild_library();
     }
 
+    /// The selected column and row (`(column name, row label, row value, row
+    /// count)`), for the browser journey tests' state probe.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn selection_probe(&self) -> (&'static str, &str, &str, usize) {
+        let category = &self.categories[self.category_index.min(self.categories.len() - 1)];
+        let item = category.items.get(self.item_index);
+        let label = item.map_or("", |i| i.label.as_str());
+        let value = item.and_then(|i| i.value.as_deref()).unwrap_or("");
+        (category.name, label, value, category.items.len())
+    }
+
+    /// Which sub-panel is up (`controls`, `about`, `savestates`, or `none`), for
+    /// the browser journey tests' state probe.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn panel_probe(&self) -> &'static str {
+        if self.controls_open {
+            "controls"
+        } else if self.about_open {
+            "about"
+        } else if self.save_states_open {
+            "savestates"
+        } else {
+            "none"
+        }
+    }
+
     /// Whether the Library column is what the menu is showing right now.
     pub fn library_view_visible(&self) -> bool {
         self.open && self.category_index == 0
@@ -770,6 +796,23 @@ impl MenuState {
     }
 
     /// Close the controls panel, disarming any pending capture.
+    /// Close the topmost sub-panel (the controls panel, else the save-states
+    /// panel). Returns whether one was open. Escape and Back dismiss the panel
+    /// before they touch the menu, so a keyboard, pad or touch player is never
+    /// stuck behind a panel that only has a mouse close button.
+    pub fn close_top_panel(&mut self) -> bool {
+        if self.controls_open {
+            self.close_controls();
+            true
+        } else if self.save_states_open {
+            self.save_states_open = false;
+            self.pending_load_confirm = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn close_controls(&mut self) {
         self.controls_open = false;
         self.controls_capture = None;
@@ -894,6 +937,11 @@ impl MenuState {
             if input.confirm || input.back {
                 self.about_open = false;
             }
+            return None;
+        }
+        // The save-states panel sits over the list: Back dismisses it first.
+        if input.back && self.save_states_open {
+            self.close_top_panel();
             return None;
         }
 
@@ -3626,6 +3674,38 @@ mod tests {
             s.take_pending_pointer_action(),
             Some(MenuAction::OpenControls)
         );
+    }
+
+    /// Escape and Back dismiss a sub-panel before they touch the menu, so a
+    /// keyboard, pad or touch player is never stuck behind a mouse-only close.
+    #[test]
+    fn close_top_panel_closes_the_panels_one_at_a_time() {
+        let mut s = MenuState::new();
+        assert!(!s.close_top_panel(), "nothing open");
+        s.open_save_states();
+        s.open_controls();
+        assert_eq!(s.panel_probe(), "controls");
+        assert!(s.close_top_panel());
+        assert_eq!(s.panel_probe(), "savestates");
+        assert!(s.close_top_panel());
+        assert_eq!(s.panel_probe(), "none");
+        assert!(!s.close_top_panel());
+    }
+
+    #[test]
+    fn back_dismisses_the_save_states_panel_before_closing_the_menu() {
+        let mut s = MenuState::new();
+        s.open = true;
+        s.open_save_states();
+        let back = MenuInput {
+            back: true,
+            ..Default::default()
+        };
+        s.update(&back);
+        assert!(s.open, "the menu stays");
+        assert_eq!(s.panel_probe(), "none");
+        s.update(&back);
+        assert!(!s.open, "the second Back closes the menu");
     }
 
     #[test]

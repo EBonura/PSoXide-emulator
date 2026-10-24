@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- The web player's Reset, disc pick and menu now behave like a console's. Reset
+  restarts the loaded game in place instead of reseating the CPU at a BIOS
+  reset vector the browser machine does not have (which faulted and dropped the
+  player into the menu over a black screen); picking the disc that is already
+  loaded restarts it from the image in hand with no download, and picking it
+  again after another game loads it again instead of doing nothing; closing the
+  menu with Back resumes the game it paused; the keyboard, touchscreen and
+  gamepads present an analog DualShock from the first poll in the browser, so
+  the demo disc needs no F9 step. The transport rules live in a pure state
+  machine (`session.rs`) with transcript tests, and `tools/web-journeys` drives
+  every control of the player in headless Chrome (desktop, phone portrait and
+  landscape, a cross-origin iframe, a faked gamepad). Also: the save-states
+  panel closes with Esc and Back, browser settings persist in `localStorage`
+  instead of toasting "settings save failed", the toolbar comes back when touch
+  controls are set to Auto, the iOS silent-mode notice no longer covers the
+  controller, and a browser without WebGPU gets an explanation instead of a
+  panic. See `docs/web-player-journeys.md`.
 - The web build reads XA discs in a compact format that is 44% smaller than the
   raw image and starts sooner. A new crate, `psx-webdisc`, keeps only what a
   sector cannot regenerate (2048 or 2324 user bytes, plus four subheader bytes

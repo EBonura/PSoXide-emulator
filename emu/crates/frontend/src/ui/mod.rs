@@ -201,16 +201,7 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             MenuOutcome::None
         }
         Reset => {
-            // Reboot the CPU but keep the run state -- reset shouldn't drop
-            // you into a paused state.
-            state.cpu = emulator_core::Cpu::new();
-            crate::install_native_tier(&mut state.cpu);
-            state.exec_history.clear();
-            state.gpr_snapshot = None;
-            if let Some(bus) = state.bus.as_mut() {
-                bus.gpu.vram.clear();
-                state.gpu_resync_generation = state.gpu_resync_generation.wrapping_add(1);
-            }
+            state.reset_game();
             MenuOutcome::None
         }
         ToggleInputRecording => {
@@ -257,11 +248,21 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             MenuOutcome::None
         }
         LaunchGame(id) => {
+            // The disc that is already loaded (or already on its way in)
+            // restarts from the image in hand: no second download.
+            #[cfg(target_arch = "wasm32")]
+            if state.pick_web_disc(&id) {
+                state.menu.open = false;
+                return MenuOutcome::None;
+            }
             // Game-launch rebuilds Bus + Cpu from scratch. Close
             // the Menu on success so the user sees the game boot.
             match state.launch_by_id(&id) {
                 Ok(()) => {
                     state.menu.open = false;
+                    // A download in flight leaves the current game running.
+                    #[cfg(target_arch = "wasm32")]
+                    state.menu_closed_by_back();
                 }
                 Err(e) => {
                     eprintln!("[frontend] launch failed: {e}");

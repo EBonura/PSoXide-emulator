@@ -83,6 +83,37 @@ pub(crate) enum PadProfile {
 }
 
 impl PadProfile {
+    /// What the keyboard presents to the guest before the player chooses.
+    ///
+    /// The browser build presents an analog DualShock from the first poll: the
+    /// demo disc requires one, and a visitor has no reason to know about an
+    /// Analog toggle. The native app keeps the original digital pad.
+    pub(crate) const KEYBOARD_DEFAULT: Self = Self::keyboard_default(cfg!(target_arch = "wasm32"));
+
+    /// What a connected controller (gamepad or touchscreen) presents before the
+    /// player chooses. Native powers up as a DualShock does on hardware (digital
+    /// until the game asks), so digital-only retail games work; the browser
+    /// presents it already in analog mode, like the keyboard.
+    pub(crate) const PAD_DEFAULT: Self = Self::pad_default(cfg!(target_arch = "wasm32"));
+
+    /// [`Self::KEYBOARD_DEFAULT`] for a build that is, or is not, the browser's.
+    pub(crate) const fn keyboard_default(web: bool) -> Self {
+        if web {
+            Self::Analog
+        } else {
+            Self::Digital
+        }
+    }
+
+    /// [`Self::PAD_DEFAULT`] for a build that is, or is not, the browser's.
+    pub(crate) const fn pad_default(web: bool) -> Self {
+        if web {
+            Self::Analog
+        } else {
+            Self::DualShock
+        }
+    }
+
     /// Short label of the controller panel's mode button.
     pub(crate) const fn label(self) -> &'static str {
         match self {
@@ -154,7 +185,7 @@ impl Default for RoutingTable {
                     mapped: true,
                 },
                 port: PsxPort::One,
-                profile: PadProfile::Digital,
+                profile: PadProfile::KEYBOARD_DEFAULT,
                 pinned: false,
             },
         );
@@ -175,14 +206,13 @@ impl RoutingTable {
             RoutingEntry {
                 identity,
                 port: PsxPort::Off,
-                // A host controller appears as a DualShock the way one powers
-                // up on hardware: digital (ID 0x41) until the game sends the
-                // analog handshake, which every DualShock-aware guest does.
-                // Starting in analog mode instead made digital-only retail
-                // games such as Tomb Raider pause on "No Controller", because
-                // they accept nothing but ID 0x41. The routing panel still
-                // offers the always-analog profile for guests that never ask.
-                profile: PadProfile::DualShock,
+                // Native: a host controller appears as a DualShock the way one
+                // powers up on hardware, digital (ID 0x41) until the game sends
+                // the analog handshake. Starting in analog mode there made
+                // digital-only retail games such as Tomb Raider pause on "No
+                // Controller". The browser starts analog (see PAD_DEFAULT); the
+                // panel switches either way.
+                profile: PadProfile::PAD_DEFAULT,
                 pinned: false,
             },
         );
@@ -476,6 +506,28 @@ mod tests {
         routes.claim("a");
         routes.release_auto("a");
         assert_eq!(routes.claim("b"), Some(PsxPort::One));
+    }
+
+    /// The browser presents an analog DualShock for every kind of device from the
+    /// first poll, so the demo disc's analog requirement needs no toggle; the
+    /// native app keeps its original defaults.
+    #[test]
+    fn the_browser_defaults_every_device_to_analog() {
+        assert_eq!(PadProfile::keyboard_default(true), PadProfile::Analog);
+        assert_eq!(PadProfile::pad_default(true), PadProfile::Analog);
+        assert_eq!(PadProfile::keyboard_default(false), PadProfile::Digital);
+        assert_eq!(PadProfile::pad_default(false), PadProfile::DualShock);
+        // The table's own defaults are the build's constants.
+        let mut routes = RoutingTable::default();
+        assert_eq!(
+            routes.profile_for(PsxPort::One),
+            Some(PadProfile::KEYBOARD_DEFAULT)
+        );
+        routes.connect(pad("pad-a"));
+        assert_eq!(
+            routes.devices.get("pad-a").map(|e| e.profile),
+            Some(PadProfile::PAD_DEFAULT)
+        );
     }
 
     #[test]

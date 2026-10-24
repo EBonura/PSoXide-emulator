@@ -337,13 +337,14 @@ pub enum BgEvent {
 }
 
 /// Kick off a stream. Idempotent while one is running: double-clicking the
-/// menu entry cannot fork the pipeline. A failed stream can be retried.
+/// menu entry cannot fork the pipeline. A failed stream can be retried, and so
+/// can one that already handed its disc over (the player picked it again).
 pub fn start(disc: &'static StreamedDisc) {
     STREAM.with(|cell| {
         let mut slot = cell.borrow_mut();
         if slot
             .as_ref()
-            .is_some_and(|s| !matches!(s.phase, Phase::Failed))
+            .is_some_and(|s| !matches!(s.phase, Phase::Failed | Phase::Done))
         {
             return;
         }

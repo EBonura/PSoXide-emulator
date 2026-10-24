@@ -199,6 +199,18 @@ mod imp {
             .map_or_else(TouchPrefs::default, |text| TouchPrefs::from_text(&text))
     }
 
+    pub(super) fn local_text(key: &str) -> Option<String> {
+        window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item(key).ok().flatten())
+    }
+
+    pub(super) fn set_local_text(key: &str, text: &str) -> bool {
+        window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .is_some_and(|s| s.set_item(key, text).is_ok())
+    }
+
     pub(super) fn save_prefs(prefs: &TouchPrefs) {
         if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
             let _ = storage.set_item(STORAGE_KEY, &prefs.to_text());
@@ -266,6 +278,22 @@ mod imp {
         GUEST.with(|g| g.set((visible, port1_mask, analog, menu_open, left.0, left.1)));
     }
 
+    thread_local! {
+        static UX: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+
+    pub(super) fn note_ux(json: String) {
+        UX.with(|u| *u.borrow_mut() = json);
+    }
+
+    /// What the page can ask about the player's transport (running, menu, loaded
+    /// game, machine generation, port 1 mode), as JSON: for the browser journey
+    /// tests in tools/web-journeys.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = psoxideUxState)]
+    pub fn ux_state() -> String {
+        UX.with(|u| u.borrow().clone())
+    }
+
     /// What the page can ask the emulator about the controller, as JSON: for
     /// headless tests that prove a tap reached the guest's port 1.
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = psoxideTouchState)]
@@ -300,6 +328,14 @@ mod imp {
     pub(super) fn load_prefs() -> TouchPrefs {
         TouchPrefs::default()
     }
+    #[allow(dead_code)]
+    pub(super) fn local_text(_key: &str) -> Option<String> {
+        None
+    }
+    #[allow(dead_code)]
+    pub(super) fn set_local_text(_key: &str, _text: &str) -> bool {
+        false
+    }
     pub(super) fn save_prefs(_prefs: &TouchPrefs) {}
     pub(super) fn install_listeners() {}
     #[allow(dead_code)]
@@ -317,6 +353,8 @@ mod imp {
     ) {
     }
     pub(super) fn note_touch(_owned: bool, _x: f32, _y: f32) {}
+    #[allow(dead_code)]
+    pub(super) fn note_ux(_json: String) {}
 }
 
 /// Whether the browser says the primary pointer is a finger.
@@ -381,6 +419,69 @@ pub(crate) fn note_guest(
     left: (f32, f32),
 ) {
     imp::note_guest(visible, port1_mask, analog, menu_open, left);
+}
+
+/// The touch controller's layout as JSON, in window pixels: the centre of every
+/// pad button (`[mask, x, y]`), the D-pad (`[x, y, half_span]`), the sticks
+/// (`[side, x, y, ring]`) and the interface buttons (`[id, x, y]`), for the
+/// browser journey tests to aim at.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn layout_probe_json(layout: &crate::input::touch::layout::TouchLayout) -> String {
+    use crate::input::touch::layout::{StickSide, UiId};
+    let buttons = layout
+        .buttons
+        .iter()
+        .map(|b| {
+            let c = b.hit.center();
+            format!("[{},{:.1},{:.1}]", b.mask, c.x, c.y)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let sticks = layout
+        .sticks
+        .iter()
+        .map(|s| {
+            let side = if s.side == StickSide::Left { "L" } else { "R" };
+            format!("[\"{side}\",{:.1},{:.1},{:.1}]", s.rest.x, s.rest.y, s.ring)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let ui = layout
+        .ui
+        .iter()
+        .map(|u| {
+            let id = match u.id {
+                UiId::Menu => "menu",
+                UiId::Fullscreen => "fullscreen",
+            };
+            let c = u.hit.center();
+            format!("[\"{id}\",{:.1},{:.1}]", c.x, c.y)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"buttons\":[{buttons}],\"dpad\":[{:.1},{:.1},{:.1}],\"sticks\":[{sticks}],\"ui\":[{ui}]}}",
+        layout.dpad.center.x, layout.dpad.center.y, layout.dpad.half_span
+    )
+}
+
+/// A string kept in the browser's `localStorage` (web only; `None` elsewhere or
+/// when storage is blocked).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn local_text(key: &str) -> Option<String> {
+    imp::local_text(key)
+}
+
+/// Keep a string in `localStorage` (web only). Returns whether it was stored.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn set_local_text(key: &str, text: &str) -> bool {
+    imp::set_local_text(key, text)
+}
+
+/// Publish the player's transport for [`psoxideUxState`] (a no-op on native).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn note_ux(json: String) {
+    imp::note_ux(json);
 }
 
 /// Count one touch event for [`psoxideTouchState`] (a no-op on native).

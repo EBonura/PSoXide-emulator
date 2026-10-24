@@ -61,6 +61,7 @@ mod pacing;
 #[rustfmt::skip]
 mod playtest_disc;
 mod playtest_input;
+mod session;
 mod theme;
 mod ui;
 // Browser glue for the touch controller (no-ops on native).
@@ -1404,10 +1405,7 @@ impl ApplicationHandler for Shell {
                     // nearest thing on screen should dismiss first.
                     // (A pending key capture never reaches here: the
                     // capture arm consumes Escape as its cancel.)
-                    let closed_controls_panel = self.state.menu.controls_panel_open() && {
-                        self.state.menu.close_controls();
-                        true
-                    };
+                    let closed_controls_panel = self.state.menu.close_top_panel();
                     // In the editor, Escape first releases an active embedded-play
                     // input capture instead of toggling the menu.
                     #[cfg(feature = "editor")]
@@ -1423,30 +1421,18 @@ impl ApplicationHandler for Shell {
                     let editor_released_capture = false;
                     if closed_controls_panel || editor_released_capture {
                         // Handled above: input capture released.
-                    } else if self.state.running {
-                        // Game mode → menu mode: pause and open overlay.
-                        self.state.running = false;
-                        self.state.menu.sync_run_label(false);
-                        self.state.menu.open = true;
-                    } else if self.state.menu.open {
-                        // Menu mode → game mode: resume if we have a
-                        // live game to resume; otherwise just close
-                        // the overlay.
-                        self.state.menu.open = false;
+                    } else {
+                        // The PS button: pause and open the menu while playing,
+                        // resume and close it while it is open (see session.rs).
                         #[cfg(feature = "editor")]
                         let resumable_embedded = self.state.embedded_playtest_input_captured();
                         #[cfg(not(feature = "editor"))]
                         let resumable_embedded = false;
-                        if self.state.bus.is_some()
-                            && (self.state.current_game.is_some() || resumable_embedded)
-                        {
-                            self.state.running = true;
-                            self.state.menu.sync_run_label(true);
-                        }
-                    } else {
-                        // No game running and Menu already closed --
-                        // Escape just opens the menu.
-                        self.state.menu.open = true;
+                        let game_loaded = self.state.bus.is_some()
+                            && (self.state.current_game.is_some() || resumable_embedded);
+                        let mut transport = self.state.transport(game_loaded);
+                        transport.ps_button();
+                        self.state.set_transport(transport);
                     }
                 }
 
@@ -1454,7 +1440,12 @@ impl ApplicationHandler for Shell {
                 // folder since it was last on screen.
                 #[cfg(not(target_arch = "wasm32"))]
                 self.state.rescan_on_library_view();
-                if let Some(action) = self.state.menu.update(&input) {
+                let menu_action = self.state.menu.update(&input);
+                if menu_action.is_none() && menu_open_at_frame_start && !self.state.menu.open {
+                    // Back closed the menu: resume the game the menu paused.
+                    self.state.menu_closed_by_back();
+                }
+                if let Some(action) = menu_action {
                     match ui::apply_menu_action(&mut self.state, action) {
                         MenuOutcome::None => {}
                         MenuOutcome::ClearHostKeyboardInput => {
@@ -1480,6 +1471,15 @@ impl ApplicationHandler for Shell {
                 // held across the change must not act on the other screen.
                 if self.state.menu.open != menu_open_at_frame_start {
                     self.input.ignore_held_buttons();
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let layout = self
+                        .input
+                        .touch()
+                        .layout()
+                        .map(web_touch::layout_probe_json);
+                    web_touch::note_ux(self.state.ux_probe_json(layout.as_deref()));
                 }
                 #[cfg(feature = "editor")]
                 self.state.poll_embedded_playtest_build();
@@ -2258,6 +2258,12 @@ fn update_touch_controller(
         // the Settings rows reach everything on it.
         *chrome_applied = true;
         state.toolbar_hidden = true;
+    } else if !visible && *chrome_applied {
+        // The controller went away again (Touch controls set back to Auto or
+        // Off on a machine with a keyboard): bring the toolbar back too, or the
+        // player is left with neither.
+        *chrome_applied = false;
+        state.toolbar_hidden = false;
     }
 }
 

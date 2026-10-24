@@ -412,7 +412,9 @@
       .psoxide-silent {
         position: fixed; z-index: 2147483647; display: none; align-items: center; gap: 10px;
         left: 50%; transform: translateX(-50%);
-        bottom: max(28px, calc(env(safe-area-inset-bottom) + 18px));
+        /* Top centre, under the menu and fullscreen buttons: at the bottom it sat
+           over Select/Start and the analog sticks, and swallowed their touches. */
+        top: max(76px, calc(env(safe-area-inset-top) + 68px));
         width: max-content; max-width: calc(100vw - 32px); padding: 8px 8px 8px 16px; border-radius: 999px;
         background: rgba(22, 26, 34, 0.92); color: #e2e8f0;
         box-shadow: 0 0 0 1.5px rgba(226, 232, 240, 0.7);
@@ -693,6 +695,18 @@
       // in embed mode (so an unstarted iframe costs no download, no GPU
       // context and no audio). Mirrors what Trunk's own script did.
       function psoxideStart() {
+        // The renderer needs WebGPU. Without it the wasm would panic on "request
+        // adapter", a message nobody can act on; say what to do instead.
+        if (!navigator.gpu) {
+          var loader = document.getElementById("psoxide-loader");
+          if (loader) loader.classList.add("has-error");
+          var status = document.getElementById("psoxide-loader-status");
+          if (status) {
+            status.textContent =
+              "PSoXide needs WebGPU, which this browser does not offer. Open this page in a current Chrome, Edge or Safari.";
+          }
+          return Promise.reject(new Error("WebGPU is not available in this browser"));
+        }
         var files = window.psoxideWasm;
         var wasm = fetch(files.wasm);
         return import(files.js).then(function (bindings) {
@@ -705,7 +719,10 @@
       }
 
       if (!psoxideEmbed) {
-        psoxideStart();
+        psoxideStart().catch(function (e) {
+          // The no-WebGPU message is on the page already; anything else stays loud.
+          if (navigator.gpu) throw e;
+        });
       } else {
         // Embed mode. The protocol (commands in, events out) is documented in
         // docs/web-player.md; keep the two in step.
