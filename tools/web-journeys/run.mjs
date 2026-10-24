@@ -123,8 +123,8 @@ const FAKE_GAMEPAD = `(() => {
   const pad = { id: "Xbox 360 Controller (STANDARD GAMEPAD Vendor: 045e Product: 028e)", index: 0, connected: true,
     mapping: "standard", timestamp: 0, axes: [0,0,0,0], buttons: Array.from({length: 17}, () => ({pressed:false, touched:false, value:0})) };
   window.__fakePad = { pad, on: false };
-  const real = navigator.getGamepads ? navigator.getGamepads.bind(navigator) : () => [];
-  navigator.getGamepads = () => (window.__fakePad.on ? [pad, null, null, null] : real());
+  // A real controller on the test machine must not leak into the runs: only the fake pad is ever reported.
+  navigator.getGamepads = () => (window.__fakePad.on ? [pad, null, null, null] : [null, null, null, null]);
   window.__fakePadSet = (buttons, axes) => {
     pad.timestamp = performance.now();
     pad.buttons.forEach((b, i) => { const p = !!(buttons && buttons[i]); b.pressed = p; b.touched = p; b.value = p ? 1 : 0; });
