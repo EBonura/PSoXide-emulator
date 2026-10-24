@@ -22,7 +22,7 @@ pub(super) const DISC_CONTENTS: [&str; 8] = [
 pub(super) struct WelcomePage {
     pub title: &'static str,
     pub body: &'static [&'static str],
-    pub link: Option<(&'static str, &'static str)>,
+    pub links: &'static [(&'static str, &'static str)],
 }
 
 pub(super) const WELCOME: [WelcomePage; 4] = [
@@ -32,7 +32,7 @@ pub(super) const WELCOME: [WelcomePage; 4] = [
             "PSoXide is a free emulator for the original PlayStation. It runs homebrew with no BIOS file.",
             "It is an independent project and is not affiliated with Sony.",
         ],
-        link: None,
+        links: &[],
     },
     WelcomePage {
         title: "Your games stay on your device",
@@ -40,7 +40,7 @@ pub(super) const WELCOME: [WelcomePage; 4] = [
             "Open a folder of your own disc images or programs and play them here.",
             "Files are read in place and never uploaded.",
         ],
-        link: None,
+        links: &[],
     },
     WelcomePage {
         title: "Box art",
@@ -48,7 +48,7 @@ pub(super) const WELCOME: [WelcomePage; 4] = [
             "Cover pictures for your own discs are fetched while you browse, from the community collections xlenore/psx-covers and libretro-thumbnails, and kept on this device.",
             "Turn them off in Settings.",
         ],
-        link: None,
+        links: &[],
     },
     WelcomePage {
         title: "Free to play",
@@ -56,7 +56,10 @@ pub(super) const WELCOME: [WelcomePage; 4] = [
             "The demo disc is homebrew made with the PSoXide tools. The source is on GitHub.",
             "If you want to support the project, there is an optional donation on itch.io.",
         ],
-        link: Some(("Support PSoXide on itch.io", super::ITCH_URL)),
+        links: &[
+            ("Support PSoXide on itch.io", super::ITCH_URL),
+            ("Source code on GitHub", super::SOURCE_URL),
+        ],
     },
 ];
 
@@ -496,11 +499,11 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
         p.add(Shape::galley(Pos2::new(x, y), g, Color32::WHITE));
         y += gh + 12.0 * u;
     }
-    if let Some((label, url)) = page.link {
+    for (label, url) in page.links {
         let r = p.text(
             Pos2::new(x, y + 4.0 * u),
             Align2::LEFT_TOP,
-            label,
+            *label,
             FontId::proportional(16.0 * u),
             fade(Color32::from_rgb(127, 207, 224), a),
         );

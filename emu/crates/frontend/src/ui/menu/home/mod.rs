@@ -23,7 +23,7 @@ const COUNTDOWN_SECS: f32 = 3.0;
 const SITE_URL: &str = "https://ebonura.github.io/PSoXide/";
 /// Where the free builds, and the optional donation, live.
 const ITCH_URL: &str = "https://bonnie-studios.itch.io/psoxide";
-const SOURCE_URL: &str = "https://github.com/EBonura/PSoXide";
+pub(super) const SOURCE_URL: &str = "https://github.com/EBonura/PSoXide";
 
 /// The pages the shell can show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +73,7 @@ pub(crate) enum DemoStatus {
     #[default]
     Absent,
     /// Streaming; the fraction is 0..1, or negative when unknown.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Loading(f32),
     /// Booted and waiting behind the home screen.
     Ready,
@@ -85,6 +86,9 @@ pub(crate) struct HomeFeed {
     pub keyboard: bool,
     pub gamepads: usize,
     pub touch: bool,
+    /// Left edge (points) of the touch Menu and Fullscreen buttons, when they
+    /// sit in the top band.
+    pub touch_ui_left: Option<f32>,
     /// Safe-area insets in points: top, bottom, left, right.
     pub safe: [f32; 4],
 }
@@ -136,15 +140,17 @@ pub(crate) struct HomeState {
     pub(super) covers: CoverState,
     /// Where the page opened from, for Back.
     first_visit: bool,
-    /// Fade-in/out of the whole shell is `MenuState::appear`.
-    launch: Option<f32>,
     last_row: usize,
+    /// The shell was closed since it last opened: the next opening starts at the top.
+    closed: bool,
+    /// An input already cancelled the countdown this frame (a pad button or a
+    /// stick, seen before the menu's own edges): that press only cancels.
+    cancelled_this_frame: bool,
 }
 
 /// A pointer press being tracked, to tell a tap from a scroll.
 #[derive(Clone, Copy, Debug)]
 struct Press {
-    start: Pos2,
     travel: f32,
     scrolled: bool,
     on_slider: Option<(usize, Rect)>,
@@ -170,8 +176,27 @@ impl HomeState {
             hits: Vec::new(),
             covers: CoverState::default(),
             first_visit,
-            launch: None,
             last_row: usize::MAX,
+            closed: false,
+            cancelled_this_frame: false,
+        }
+    }
+
+    /// Reopening the shell starts at its top: the pause list of a started
+    /// game, or the home page, never a page left open last time.
+    fn note_open_state(&mut self, ms: &mut MenuState) {
+        if !ms.open {
+            self.closed = true;
+            self.started = true;
+        } else if std::mem::take(&mut self.closed) {
+            self.page = Page::Home;
+            self.zone = Zone::Body;
+            self.peek = false;
+            self.list_scroll = 0.0;
+            self.last_row = usize::MAX;
+            if self.pausing(ms) {
+                ms.select_category("Game");
+            }
         }
     }
 
@@ -240,7 +265,65 @@ impl MenuState {
         self.home.as_mut().map(|h| &mut h.covers)
     }
 
+    /// The home screen's state as JSON, for the browser journeys: the page,
+    /// focus, countdown and every drawn hit area with a name.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn home_probe_json(&self) -> String {
+        let Some(h) = self.home.as_ref() else {
+            return "null".into();
+        };
+        let escape = |t: &str| t.replace('\\', "\\\\").replace('"', "\\\"");
+        let rows = pages::visible_rows(self, h.page, h.pausing(self));
+        let hits: Vec<String> = h
+            .hits
+            .iter()
+            .map(|(r, click)| {
+                let name = match click {
+                    Click::Nav(item) => format!("nav:{}", NAV.iter().find(|n| n.0 == *item).map_or("", |n| n.1)),
+                    Click::Logo => "logo".into(),
+                    Click::Case(i) => format!("case:{i}"),
+                    Click::Primary => "primary".into(),
+                    Click::Peek => "peek".into(),
+                    Click::Link(url) => format!("link:{url}"),
+                    Click::Welcome => "welcome".into(),
+                    Click::WelcomeStep(n) => format!("welcome-step:{n}"),
+                    Click::Row(i) => format!("row:{}", rows.get(*i).map_or("", |r| r.label.as_str())),
+                    Click::Slider(i, _) => format!("slider:{}", rows.get(*i).map_or("", |r| r.label.as_str())),
+                    Click::Back => "back".into(),
+                    Click::Dismiss => "dismiss".into(),
+                };
+                format!(
+                    "[\"{}\",{:.0},{:.0},{:.0},{:.0}]",
+                    escape(&name),
+                    r.left(),
+                    r.top(),
+                    r.right(),
+                    r.bottom()
+                )
+            })
+            .collect();
+        let left = match h.countdown {
+            Countdown::Running(l) => l,
+            _ => -1.0,
+        };
+        format!(
+            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"first_visit\":{},\"covers\":{},\"hits\":[{}]}}",
+            h.page.name(),
+            if h.zone == Zone::Nav { "nav" } else { "body" },
+            self.home_probe().1,
+            left,
+            h.case_focus,
+            h.nav,
+            h.peek,
+            h.started,
+            h.first_visit,
+            h.covers.loaded(),
+            hits.join(",")
+        )
+    }
+
     /// Put the home screen in a given state, for headless previews.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn home_preview(&mut self, page: &str, case: usize, demo: bool, countdown: bool) {
         let Some(h) = self.home.as_mut() else {
             return;
@@ -262,6 +345,12 @@ impl MenuState {
             h.first_visit = true;
             h.countdown = Countdown::Running(6.0);
         }
+    }
+
+    /// Whether the welcome pages are showing.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(super) fn home_page_is_welcome(&self) -> bool {
+        self.home.as_ref().is_some_and(|h| h.page == Page::Welcome)
     }
 
     /// Open the welcome pages (the Settings "About" row).
@@ -293,6 +382,7 @@ impl HomeState {
         match self.countdown {
             Countdown::Armed | Countdown::Running(_) => {
                 self.countdown = Countdown::Cancelled;
+                self.cancelled_this_frame = true;
                 remember_visit();
             }
             _ => {}
@@ -328,11 +418,17 @@ impl HomeState {
             button: "Choose folder",
             cover_key: None,
         });
-        for item in ms.recent_discs.iter().take(5) {
+        // Recently opened discs; failing that, what is in the games folder.
+        let shown = if ms.recent_discs.is_empty() { &ms.games } else { &ms.recent_discs };
+        for item in shown.iter().take(5) {
             out.push(CaseItem {
                 kind: CoverKind::Plain,
                 title: item.title.clone(),
-                line: "Played recently".into(),
+                line: if ms.recent_discs.is_empty() {
+                    "From your games folder".into()
+                } else {
+                    "Played recently".into()
+                },
                 action: MenuAction::LaunchGame(item.id.clone()),
                 button: "Play",
                 cover_key: Some(item.id.clone()),
@@ -351,13 +447,22 @@ impl HomeState {
         if input.toggle_open {
             ms.open = !ms.open;
         }
+        self.note_open_state(ms);
         if !ms.open {
-            self.started = true;
             return None;
         }
         if input.up || input.down || input.left || input.right || input.confirm || input.back {
+            // The press that cancels the countdown only cancels it: it does not
+            // also press Start disc.
+            let counting = matches!(self.countdown, Countdown::Armed | Countdown::Running(_))
+                || self.cancelled_this_frame;
             self.cancel_countdown();
+            self.cancelled_this_frame = false;
+            if counting {
+                return None;
+            }
         }
+        self.cancelled_this_frame = false;
         if ms.about_open {
             ms.about_open = false;
         }
@@ -528,9 +633,7 @@ impl HomeState {
         if (ms.appear - target).abs() < 0.01 {
             ms.appear = target;
         }
-        if !ms.open {
-            self.started = true;
-        }
+        self.note_open_state(ms);
         if ms.appear <= 0.0 {
             self.hits.clear();
             return;
@@ -594,7 +697,6 @@ impl HomeState {
             painter: &layer,
             lay: &lay,
             appear,
-            dither,
         };
         match self.page {
             Page::Home if !pausing => self.draw_home(ms, ctx, &mut pc),
@@ -699,7 +801,6 @@ pub(super) struct PageCtx<'a> {
     pub painter: &'a egui::Painter,
     pub lay: &'a Layout,
     pub appear: f32,
-    pub dither: Option<egui::TextureId>,
 }
 
 fn remember_visit() {
@@ -884,7 +985,7 @@ impl HomeState {
         );
         self.hits.push((btn, Click::Primary));
         // Quiet links at the bottom.
-        self.draw_footer(ms, pc, &cases);
+        self.draw_footer(pc);
         if self.peek && matches!(item.kind, CoverKind::Demo) {
             self.draw_peek(pc);
         }
@@ -975,7 +1076,7 @@ impl HomeState {
         ));
     }
 
-    fn draw_footer(&mut self, ms: &MenuState, pc: &mut PageCtx<'_>, cases: &[CaseItem]) {
+    fn draw_footer(&mut self, pc: &mut PageCtx<'_>) {
         let lay = pc.lay;
         let p = pc.painter;
         let a = pc.appear;
@@ -1029,7 +1130,6 @@ impl HomeState {
             hint(true, "Select");
             hint(false, "Back");
         }
-        let _ = ms;
     }
 
     fn draw_peek(&mut self, pc: &mut PageCtx<'_>) {
@@ -1133,7 +1233,10 @@ impl HomeState {
             x = r.right() + 26.0 * u;
         }
         // Controller indicators, top right: small, grey, cyan when in use.
-        let mut ix = s.right() - if desktop { 48.0 * u } else { 20.0 * u };
+        let mut ix = self
+            .feed
+            .touch_ui_left
+            .map_or(s.right() - if desktop { 48.0 * u } else { 20.0 * u }, |x| x - 10.0 * u);
         let iy = top + 9.0 * u;
         let touch_on = self.feed.touch;
         let states = [
@@ -1198,7 +1301,6 @@ impl HomeState {
                     _ => None,
                 });
                 self.press = Some(Press {
-                    start: pos,
                     travel: 0.0,
                     scrolled: false,
                     on_slider: slider,
@@ -1206,7 +1308,10 @@ impl HomeState {
             }
         }
         if let (Some(press), true) = (self.press.as_mut(), down) {
-            press.travel += delta.length();
+            // On the press frame the pointer jumps to the touch point: not travel.
+            if !pressed {
+                press.travel += delta.length();
+            }
             if let (Some((row, track)), Some(pos)) = (press.on_slider, pos) {
                 let t = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0);
                 if let Some(action) = pages::slider_set(ms, row, t) {

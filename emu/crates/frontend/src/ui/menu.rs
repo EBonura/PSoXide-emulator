@@ -614,7 +614,7 @@ impl MenuState {
     pub fn panel_probe(&self) -> &'static str {
         if self.controls_open {
             "controls"
-        } else if self.about_open {
+        } else if self.about_open || self.home_page_is_welcome() {
             "about"
         } else if self.save_states_open {
             "savestates"

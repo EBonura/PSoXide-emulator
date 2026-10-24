@@ -376,7 +376,10 @@ async function launch(hostDpr = 1) {
 }
 
 async function newPage(label) {
-  const { targetId } = await cdp.send("Target.createTarget", { url: "about:blank" });
+  // Each journey is its own visitor: a fresh browser context has empty storage, so the first-visit
+  // countdown is the first visit unless the journey itself reloads.
+  const { browserContextId } = await cdp.send("Target.createBrowserContext");
+  const { targetId } = await cdp.send("Target.createTarget", { url: "about:blank", browserContextId });
   const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
   const page = new Page(cdp, sessionId, label);
   page.targetId = targetId;
@@ -393,6 +396,31 @@ const embedded = (q = "") => `http://localhost:${PORT + 1}/${q}`;
 /** Desktop page open, tap/click to play is not needed: the demo disc boots itself. */
 async function waitDemoRunning(page, timeout = 90000) {
   return page.waitFor("the demo disc running", (u) => u.running && !u.menu_open && u.loaded_id && u.port1_mode !== "none", timeout);
+}
+
+/** The centre of a named hit area on the home screen (css px), from the state probe. */
+async function homeHit(page, name, timeout = 8000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const u = await page.ux();
+    const hit = u?.home?.hits?.find((h) => h[0] === name);
+    if (hit) {
+      if (args.trace) console.log(`      hit ${name} at ${hit.slice(1)} (page ${u.home.page}, zone ${u.home.zone})`);
+      return [(hit[1] + hit[3]) / 2, (hit[2] + hit[4]) / 2, u];
+    }
+    await sleep(120);
+  }
+  const u = await page.ux();
+  throw new Error(`no hit area "${name}" on the home screen: ${JSON.stringify(u?.home?.hits?.map((h) => h[0]))}`);
+}
+async function homeClick(page, name) { const [x, y] = await homeHit(page, name); await page.click(x, y); }
+async function homeTap(page, name) { const [x, y] = await homeHit(page, name); await page.tap(x, y); }
+
+/** Wait for the home screen with the disc booted and waiting behind it, then press Start disc. */
+async function startFromHome(page, timeout = 90000) {
+  await page.waitFor("the home screen with the disc ready", (s) => s.menu_open && !s.running && s.loaded_id && s.home && s.home.page === "Home", timeout);
+  await page.tapKey("Enter");
+  return waitDemoRunning(page, timeout);
 }
 
 /**
@@ -427,7 +455,8 @@ async function journeyDesktop(label, urlFor, { embeddedMode = false } = {}) {
   requests.length = 0;
   await page.goto(urlFor());
   let u;
-  await step("first visit: the demo disc boots by itself and runs", async () => {
+  await step("first visit: the home screen counts down, then the demo disc runs", async () => {
+    await page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 90000);
     u = await waitDemoRunning(page);
   });
   if (!u) { await cdp.send("Target.closeTarget", { targetId: page.targetId }); return page; }
@@ -568,9 +597,13 @@ async function journeyDesktop(label, urlFor, { embeddedMode = false } = {}) {
     return (await settledMode(page)) === "analog" && t.port1_mask & PS1.CROSS ? true : JSON.stringify({ t, mode: s.port1_mode });
   });
 
-  await step("reload: the player comes back running with the menu closed", async () => {
+  await step("reload: a return visit stays on the home screen until Start disc", async () => {
     await page.goto(urlFor());
-    const s = await waitDemoRunning(page);
+    await page.waitFor("the home screen with the disc ready", (s) => s.menu_open && !s.running && s.loaded_id && s.home?.page === "Home", 90000);
+    await sleep(5000);
+    const stay = await page.ux();
+    if (stay.running || !stay.menu_open || stay.home.countdown !== "off") return `the return visit did not stay home: ${JSON.stringify(stay.home)}`;
+    const s = await startFromHome(page);
     return (await settledMode(page)) === "analog" ? true : s.port1_mode;
   });
   await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
@@ -613,15 +646,9 @@ async function journeyPhone(label, urlFor, size) {
   await page.goto(urlFor());
   const dpr = size.dpr;
   let u;
-  await step("first visit: the tap-to-play splash shows, then the demo disc runs", async () => {
-    await page.waitFor("the emulator loaded", (s) => s.has_bus, 90000);
-    const splash = await page.eval(`document.getElementById("psoxide-tap")?.classList.contains("is-on")`);
-    await page.shot(`${label}-01-splash`);
-    if (!splash) return "no tap-to-play splash on a touch device";
-    await page.tap(size.w / 2, size.h / 2);
-    await sleep(500);
-    const gone = await page.eval(`!document.getElementById("psoxide-tap")?.classList.contains("is-on")`);
-    if (!gone) return "the splash did not go away after a tap";
+  await step("first visit: the home screen counts down on a phone, then the demo disc runs", async () => {
+    await page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 90000);
+    await page.shot(`${label}-01-home`);
     u = await waitDemoRunning(page);
   });
   if (!u) { await cdp.send("Target.closeTarget", { targetId: page.targetId }); return; }
@@ -708,7 +735,6 @@ async function journeyPhone(label, urlFor, size) {
     return s.machine === before.machine ? true : "machine changed";
   });
   await step("Reset from the touch menu restarts in place (no menu, no download)", async () => {
-    if (!(size.w === 393 && size.h === 852)) return true; // row positions are calibrated for 393x852
     const before = await page.ux();
     const menu = before.touch.ui.find((b) => b[0] === "menu");
     requests.length = 0;
@@ -724,7 +750,6 @@ async function journeyPhone(label, urlFor, size) {
     return later.running && !later.menu_open && (await settledMode(page)) === "analog" ? true : JSON.stringify(later);
   });
   await step("picking the loaded disc from the touch menu restarts it without a download", async () => {
-    if (!(size.w === 393 && size.h === 852)) return true; // row positions are calibrated for 393x852
     const before = await page.ux();
     const menu = before.touch.ui.find((b) => b[0] === "menu");
     requests.length = 0;
@@ -789,10 +814,14 @@ async function journeyPhone(label, urlFor, size) {
     const s = await page.ux();
     return s.running ? true : JSON.stringify(s);
   });
-  await step("reload comes back to the tap-to-play splash, then plays", async () => {
+  await step("reload comes back to the home screen; tapping Start disc plays", async () => {
     await page.goto(urlFor());
-    await page.waitFor("the emulator loaded", (s) => s.has_bus, 90000);
-    await page.tap(size.w / 2, size.h / 2);
+    await page.waitFor("the home screen with the disc ready", (s) => s.menu_open && !s.running && s.loaded_id && s.home?.page === "Home", 90000);
+    await sleep(3500);
+    const stay = await page.ux();
+    if (stay.running || stay.home.countdown !== "off") return `the return visit did not stay home: ${JSON.stringify(stay.home)}`;
+    await page.shot(`${label}-06-return-home`);
+    await homeTap(page, "primary");
     const s = await waitDemoRunning(page);
     return (await settledMode(page)) === "analog" ? true : s.port1_mode;
   });
@@ -806,19 +835,15 @@ async function journeyPhone(label, urlFor, size) {
  * the others 100 pt to each side (see shots/phone-portrait-03-menu.png). A tap on a row activates it.
  */
 async function touchMenuSelect(page, size, column, row) {
-  const COLUMNS = ["Library", "Game", "Settings"];
-  const ROW_INDEX = { Reset: 3, Homebrew: 0, "PSoXide Demo Disc": 1 };
+  const PAGE = { Library: "Library", Settings: "Settings", Game: "Home" };
   const u = await page.ux();
-  const here = COLUMNS.indexOf(u.menu.column);
-  const want = COLUMNS.indexOf(column);
-  if (here !== want) {
-    await page.tap(size.w / 2 + (want - here) * 100, TOUCH_MENU_TABS_Y);
-    await page.waitFor(`column ${column}`, (s) => s.menu.column === column, 3000);
+  if (u.home.page !== PAGE[column]) {
+    if (u.home.page !== "Home") await homeTap(page, "back");
+    if (column !== "Game") await homeTap(page, `nav:${column}`);
+    await page.waitFor(`the ${column} page`, (s) => s.home?.page === PAGE[column], 4000);
   }
-  await page.tap(size.w / 2, 426 + ROW_INDEX[row] * 56);
+  await homeTap(page, `row:${row}`);
 }
-const TOUCH_MENU_TABS_Y = 323;
-
 
 /** Every menu row and every toolbar button on the desktop layout. */
 async function journeyMenus(label, urlFor) {
@@ -911,12 +936,12 @@ async function journeyMenus(label, urlFor) {
   });
 
   // Settings column: every cycling row changes its value.
-  const SWEEP = ["Video scale", "Texture filter", "Deinterlace", "Volume", "Mute", "Menu opacity", "UI scale", "If the device is too slow", "Touch controls", "Touch opacity", "Touch size", "Touch haptics", "Left-handed layout"];
+  const SWEEP = ["Video scale", "Texture filter", "Deinterlace", "Volume", "Mute", "Menu opacity", "UI scale", "If the device is too slow", "Touch controls", "Touch opacity", "Touch size", "Touch haptics", "Left-handed layout", "Box art from the internet"];
   for (const row of SWEEP.filter((r) => !(args.skip ?? "").split(",").includes(r))) {
     await step(`Settings / ${row} changes its value`, async () => {
       if (!(await page.ux()).menu_open) await open();
       const before = await rowValue("Settings", row);
-      await page.tapKey("Enter");
+      await page.tapKey("ArrowRight");
       await settle();
       const after = (await page.ux()).menu.value;
       return after !== before ? true : `value stayed "${before}"`;
@@ -926,7 +951,7 @@ async function journeyMenus(label, urlFor) {
     for (let i = 0; i < 8; i++) {
       const v = await rowValue("Settings", "UI scale");
       if (v === "100%") return true;
-      await page.tapKey("Enter");
+      await page.tapKey("ArrowRight");
       await settle();
     }
     return "never came back to 100%";
@@ -934,7 +959,7 @@ async function journeyMenus(label, urlFor) {
   await step("Settings / Touch controls cycles back to Auto (desktop shows no pad)", async () => {
     for (let i = 0; i < 6; i++) {
       if (await rowValue("Settings", "Touch controls") === "Auto") return true;
-      await page.tapKey("Enter");
+      await page.tapKey("ArrowRight");
       await settle();
     }
     return "never came back to Auto";
@@ -947,14 +972,16 @@ async function journeyMenus(label, urlFor) {
     await page.tapKey("Escape");
     await page.waitFor("panel closed", (x) => x.panel === "none", 4000);
   });
-  await step("Settings / About opens the card; Enter closes it", async () => {
+  await step("Settings / About opens the welcome pages; Next pages through them and Back closes them", async () => {
     let s = await page.ux();
     if (!s.menu_open) await open();
     await menuSelect(page, "Settings", "About");
-    await page.waitFor("about card", (x) => x.panel === "about", 4000);
+    await page.waitFor("welcome pages", (x) => x.panel === "about", 4000);
     await page.shot(`${label}-12-about`);
-    await page.tapKey("Enter");
-    await page.waitFor("card closed", (x) => x.panel === "none", 4000);
+    await page.tapKey("ArrowRight");
+    await page.tapKey("ArrowLeft");
+    await page.tapKey("g");
+    await page.waitFor("welcome closed", (x) => x.panel === "none", 4000);
   });
   await step("Library rows: Homebrew expands, the folder rows are present, and closing resumes", async () => {
     await menuSelect(page, "Library", "Homebrew");
@@ -1026,6 +1053,258 @@ async function journeyMenus(label, urlFor) {
   await cdp.send("Target.closeTarget", { targetId: page.targetId });
 }
 
+
+
+// ---------------------------------------------------------------- the home screen
+
+/** A point on the home screen that no hit area covers (pads of 14 px), inside the safe area. */
+async function emptyPoint(page, size) {
+  const u = await page.ux();
+  const [l, t, r, b] = insetsFor(size);
+  for (let fy = 0.22; fy < 0.95; fy += 0.03) {
+    for (let fx = 0.1; fx < 0.95; fx += 0.04) {
+      const x = fx * size.w, y = fy * size.h;
+      if (x < l + 10 || x > size.w - r - 10 || y < t + 10 || y > size.h - b - 10) continue;
+      if (!u.home.hits.some(([, x0, y0, x1, y1]) => x > x0 - 14 && x < x1 + 14 && y > y0 - 14 && y < y1 + 14)) return [x, y];
+    }
+  }
+  throw new Error("no empty point on the home screen");
+}
+
+/** Safe-area insets the emulation applies (see Page.applyEmulation), as [left, top, right, bottom]. */
+function insetsFor(size) {
+  if (!size.mobile) return [0, 0, 0, 0];
+  return size.w < size.h ? [0, 47, 0, 34] : [47, 0, 47, 21];
+}
+
+/** Named hit areas (not the cases, which tilt off the edges on purpose) lie inside the safe area and apart. */
+function homeLayoutProblem(u, size) {
+  const [l, t, r, b] = insetsFor(size);
+  const named = u.home.hits.filter(([n]) => /^(nav|primary|peek|welcome|link|back|logo|row|welcome-step|dismiss)/.test(n) && !/^row/.test(n));
+  for (const [n, x0, y0, x1, y1] of named) {
+    if (x0 < l - 1 || y0 < t - 1 || x1 > size.w - r + 1 || y1 > size.h - b + 1) return `${n} [${x0},${y0},${x1},${y1}] is outside the safe area [${l},${t},${size.w - r},${size.h - b}]`;
+  }
+  const shrink = (h) => [h[1] + 8, h[2] + 8, h[3] - 8, h[4] - 8]; // hit areas are padded; compare the drawn core
+  for (let i = 0; i < named.length; i++) {
+    for (let j = i + 1; j < named.length; j++) {
+      const [a0, b0, a1, b1] = shrink(named[i]), [c0, d0, c1, d1] = shrink(named[j]);
+      if (Math.min(a1, c1) - Math.max(a0, c0) > 1 && Math.min(b1, d1) - Math.max(b0, d0) > 1) return `${named[i][0]} and ${named[j][0]} overlap`;
+    }
+  }
+  return null;
+}
+
+const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+/** Answer requests to the cover collections: "hit", "miss" (404) or "offline", and log them. */
+async function stubCovers(page, mode) {
+  const state = { mode, urls: [] };
+  await page.cdp.send("Fetch.enable", { patterns: [{ urlPattern: "https://raw.githubusercontent.com/*" }] }, page.top);
+  page.cdp.on((msg) => {
+    if (msg.method !== "Fetch.requestPaused" || msg.sessionId !== page.top) return;
+    const id = msg.params.requestId;
+    state.urls.push(msg.params.request.url);
+    const cors = [{ name: "Access-Control-Allow-Origin", value: "*" }];
+    if (state.mode === "offline") page.cdp.send("Fetch.failRequest", { requestId: id, errorReason: "InternetDisconnected" }, page.top);
+    else if (state.mode === "hit") page.cdp.send("Fetch.fulfillRequest", { requestId: id, responseCode: 200, responseHeaders: [...cors, { name: "Content-Type", value: "image/png" }], body: ONE_PIXEL_PNG }, page.top);
+    else page.cdp.send("Fetch.fulfillRequest", { requestId: id, responseCode: 404, responseHeaders: cors, body: "" }, page.top);
+  });
+  return state;
+}
+
+const FAKE_FOLDER = `
+  class FakeDir { constructor() { this.kind = "directory"; this.name = "games"; }
+    async *entries() { for (const n of ["Crash Bandicoot (USA).bin", "Nothing Here (USA).bin", "notes.txt"]) yield [n, { kind: "file", name: n }]; } }
+  window.showDirectoryPicker = async () => new FakeDir();
+`;
+
+/** One visitor, from the first countdown to the settings controls. */
+async function journeyHome(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  const open = async (init) => {
+    const page = await newPage(label);
+    await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+    // The iPhone silent-switch note has its own journey; here it only covers the page.
+    await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+    if (init) await page.addInit(init);
+    await page.goto(urlFor());
+    return page;
+  };
+  const close = (page) => cdp.send("Target.closeTarget", { targetId: page.targetId });
+  const activate = async (page, name) => (mobile ? homeTap(page, name) : homeClick(page, name));
+  const countdown = (page) => page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 90000);
+
+  let page = await open();
+  await step("first visit: Home opens at once on the demo disc, with the countdown inline and nothing on top", async () => {
+    const u = await countdown(page);
+    await page.shot(`${label}-01-first-visit`);
+    const names = u.home.hits.map((h) => h[0]);
+    for (const need of ["case:0", "primary", "nav:Library", "nav:Settings", "nav:Debug", "peek", "welcome"]) if (!names.includes(need)) return `missing ${need}: ${names}`;
+    if (u.home.page !== "Home" || u.running || !u.menu_open) return JSON.stringify(u.home);
+    return homeLayoutProblem(u, size) ?? true;
+  });
+  await step("'What is on it' opens on demand and closes again", async () => {
+    await activate(page, "peek");
+    const on = await page.waitFor("the peek", (s) => s.home.peek, 4000);
+    await page.shot(`${label}-02-peek`);
+    await activate(page, "peek");
+    await page.waitFor("peek closed", (s) => !s.home.peek, 4000);
+    return on.home.peek ? true : "no peek";
+  });
+  await close(page);
+
+  // Every kind of input cancels the countdown, and the visitor stays on Home.
+  const inputs = [
+    ["a key", async (p) => p.tapKey("x")],
+    ["a click", async (p) => { const [x, y] = await emptyPoint(p, size); await p.click(x, y); }],
+    ["a tap", async (p) => { const [x, y] = await emptyPoint(p, size); await p.tap(x, y); }],
+    ["a pad button", async (p) => { await p.padConnect(); await sleep(300); await p.padSet({ 0: true }); await sleep(200); await p.padSet({}); }],
+    ["a stick", async (p) => { await p.padConnect(); await sleep(300); await p.padSet({}, [0.9, 0, 0, 0]); await sleep(300); await p.padSet({}, [0, 0, 0, 0]); }],
+  ].filter(([name]) => (mobile ? name !== "a click" : name !== "a tap"));
+  for (const [name, send] of inputs) {
+    page = await open();
+    await step(`the countdown is cancelled by ${name} and the visitor stays on Home`, async () => {
+      await countdown(page);
+      await send(page);
+      await page.waitFor("a cancelled countdown", (s) => s.home.countdown === "cancelled", 5000);
+      await sleep(4500);
+      const u = await page.ux();
+      if (u.running || !u.menu_open || u.home.page !== "Home") return JSON.stringify({ running: u.running, open: u.menu_open, home: u.home.page });
+      await page.shot(`${label}-03-cancelled-${name.replace(/\W+/g, "-")}`);
+      return true;
+    });
+    if (name === "a key" || name === "a tap") {
+      await step("a return visit stays on Home with no countdown, and Start disc starts the disc", async () => {
+        await page.goto(urlFor());
+        await page.waitFor("the home screen with the disc ready", (s) => s.menu_open && !s.running && s.loaded_id && s.home?.page === "Home", 90000);
+        await sleep(5000);
+        const u = await page.ux();
+        if (u.running || u.home.countdown !== "off") return `not staying home: ${JSON.stringify(u.home)}`;
+        await page.shot(`${label}-04-return-visit`);
+        await activate(page, "primary");
+        await waitDemoRunning(page);
+      });
+    }
+    await close(page);
+  }
+
+  // Navigation and focus.
+  page = await open();
+  await step("Library, Settings and Back: the nav opens each page and Back returns Home", async () => {
+    await countdown(page);
+    await activate(page, "nav:Library");
+    await page.waitFor("the Library page", (s) => s.home.page === "Library", 4000);
+    await page.shot(`${label}-05-library`);
+    await page.tapKey("g");
+    await page.waitFor("Home again", (s) => s.home.page === "Home", 4000);
+    await activate(page, "nav:Settings");
+    await page.waitFor("the Settings page", (s) => s.home.page === "Settings", 4000);
+    await page.shot(`${label}-06-settings`);
+    const u = await page.ux();
+    const problem = homeLayoutProblem(u, size);
+    await page.tapKey("g");
+    await page.waitFor("Home again", (s) => s.home.page === "Home", 4000);
+    return problem ?? true;
+  });
+  await step("the keyboard moves focus: right changes the case, up reaches the nav, Enter opens it", async () => {
+    await page.tapKey("ArrowRight");
+    const moved = await page.waitFor("the second case", (s) => s.home.case === 1, 4000);
+    await page.tapKey("ArrowLeft");
+    await page.tapKey("ArrowUp");
+    await page.waitFor("the nav row", (s) => s.home.zone === "nav", 4000);
+    await page.tapKey("ArrowRight");
+    await page.tapKey("Enter");
+    await page.waitFor("the Settings page", (s) => s.home.page === "Settings", 4000);
+    await page.tapKey("g");
+    await page.waitFor("Home again", (s) => s.home.page === "Home", 4000);
+    return moved.home.case === 1 ? true : "focus did not move";
+  });
+  await step("the welcome pages page forward and back, and Close returns Home", async () => {
+    await activate(page, "welcome");
+    await page.waitFor("the welcome pages", (s) => s.home.page === "Welcome", 4000);
+    await page.shot(`${label}-07-welcome`);
+    const u = await page.ux();
+    const problem = homeLayoutProblem(u, size);
+    await activate(page, "welcome-step:1");
+    await activate(page, "welcome-step:-1");
+    await activate(page, "dismiss");
+    await page.waitFor("Home again", (s) => s.home.page === "Home", 4000);
+    return problem ?? true;
+  });
+  await step("Settings rows are real controls: a toggle flips and a slider drags", async () => {
+    await activate(page, "nav:Settings");
+    await page.waitFor("the Settings page", (s) => s.home.page === "Settings", 4000);
+    const before = await page.ux();
+    const row = (u, name) => u.home.hits.find((h) => h[0] === name);
+    await menuSelect(page, "Settings", "Mute", { enter: false });
+    const mute0 = (await page.ux()).menu.value;
+    await page.tapKey("ArrowRight");
+    await sleep(300);
+    const mute1 = (await page.ux()).menu.value;
+    if (mute0 === mute1) return `Mute stayed ${mute0}`;
+    await page.tapKey("ArrowRight"); // and back
+    const volume = row(await page.ux(), "slider:Volume");
+    if (!volume) return `no volume slider: ${before.home.hits.map((h) => h[0])}`;
+    const vol0 = (await rowValueOf(page, "Volume"));
+    const [x0, y0, x1, y1] = volume.slice(1);
+    const y = (y0 + y1) / 2;
+    await page.mouse("mouseMoved", x0 + 20, y);
+    await page.mouse("mousePressed", x0 + 20, y);
+    await sleep(80);
+    await page.mouse("mouseMoved", x0 + (x1 - x0) * 0.8, y);
+    await sleep(80);
+    await page.mouse("mouseReleased", x0 + (x1 - x0) * 0.8, y);
+    await sleep(300);
+    await page.shot(`${label}-08-settings-after`);
+    const vol1 = await rowValueOf(page, "Volume");
+    return vol0 !== vol1 ? true : `volume stayed ${vol0} after dragging the slider`;
+  });
+  await close(page);
+}
+
+/** The value of a Settings row, read through the keyboard selection probe. */
+async function rowValueOf(page, row) {
+  await menuSelect(page, "Settings", row, { enter: false });
+  return (await page.ux()).menu.value;
+}
+
+/** Box art: a hit, a miss and the network being offline, with the toggle. Needs the folder picker (top page). */
+async function journeyCovers(label, urlFor) {
+  current = label;
+  for (const mode of ["hit", "miss", "offline"]) {
+    const page = await newPage(label);
+    await page.viewport(1280, 800, { dpr: 1 });
+    const net = await stubCovers(page, mode);
+    await page.addInit(FAKE_FOLDER);
+    await page.goto(urlFor());
+    await step(`cover fetch (${mode}): opening a folder asks the collections by file name`, async () => {
+      await page.waitFor("the home screen", (s) => s.home?.page === "Home" && s.has_bus, 90000);
+      await page.tapKey("x"); // cancel the countdown
+      await homeClick(page, "case:1"); // focus the folder case
+      await homeClick(page, "primary"); // Choose folder -> the fake picker
+      await page.waitFor("the folder scanned", (s) => /Found 2/.test(s.status) || s.home.hits.some((h) => h[0] === "case:2"), 15000);
+      await sleep(2500);
+      const u = await page.ux();
+      await page.shot(`${label}-cover-${mode}`);
+      const asked = net.urls.some((x) => /Named_Boxarts\/Crash%20Bandicoot%20%28USA%29\.png$/.test(x));
+      if (!asked) return `the collection was not asked: ${JSON.stringify(net.urls)}`;
+      if (mode === "hit" && !(u.home.covers >= 1)) return `no picture was kept: ${u.home.covers}`;
+      if (mode !== "hit" && u.home.covers !== 0) return `a picture appeared on a ${mode}: ${u.home.covers}`;
+      return true;
+    });
+    if (mode === "hit") {
+      await step("a cached cover is not fetched again, and the toggle stops all fetching", async () => {
+        const before = net.urls.length;
+        await page.goto(urlFor());
+        await page.waitFor("the home screen", (s) => s.home?.page === "Home" && s.has_bus, 90000);
+        await sleep(1500);
+        return net.urls.length === before ? true : `refetched after reload: ${net.urls.slice(before)}`;
+      });
+    }
+    await cdp.send("Target.closeTarget", { targetId: page.targetId });
+  }
+}
 
 /** A gamepad (the standard mapping, faked): analog from the first poll, menu chord, navigation, Reset. */
 async function journeyGamepad(label, urlFor) {
@@ -1119,7 +1398,6 @@ async function journeyFullscreenFallback(label, urlFor, { framed }) {
   `);
   await page.goto(urlFor());
   await page.waitFor("the emulator loaded", (s) => s.has_bus, 90000);
-  await page.tap(size.w / 2, size.h / 2);
   await waitDemoRunning(page);
   await sleep(1000);
   await step("the fullscreen button is offered even without the Fullscreen API", async () => {
@@ -1160,24 +1438,35 @@ const PAUSE_FROM_RIGHT = 404;
  * the selection back from the state probe. Enter on the row when `enter` is set.
  */
 async function menuSelect(page, column, row, { enter = true } = {}) {
-  const COLUMNS = ["Library", "Game", "Settings"];
-  let last = null;
-  for (let i = 0; i < 60; i++) {
+  const PAGE = { Library: "Library", Settings: "Settings", Game: "Home" };
+  const NAV = { Library: 0, Settings: 1 };
+  let dir = "ArrowDown", lastRow = null;
+  for (let i = 0; i < 80; i++) {
     const u = await page.ux();
-    const here = u.menu.column;
-    if (last && last.menu.column !== here && last.pressed === "ArrowDown") {
-      console.log(`      NOTE menu column jumped ${last.menu.column} -> ${here} on ArrowDown (row ${last.menu.row}); before ${JSON.stringify({...last, touch: 0})} after ${JSON.stringify({...u, touch: 0})}`);
-    }
-    if (here !== column) {
-      const delta = (COLUMNS.indexOf(column) - COLUMNS.indexOf(here) + 3) % 3;
-      last = { ...u, pressed: delta === 1 ? "ArrowRight" : "ArrowLeft" };
-      await page.tapKey(last.pressed);
-    } else if (!u.menu.row.includes(row)) {
-      last = { ...u, pressed: "ArrowDown" };
-      await page.tapKey("ArrowDown");
-    } else {
+    const h = u.home;
+    const onList = h.zone === "body" && h.page === PAGE[column] && u.menu.column === column;
+    if (onList) {
+      if (!u.menu.row.includes(row)) {
+        // The lists do not wrap: turn around at the end.
+        if (u.menu.row === lastRow) dir = dir === "ArrowDown" ? "ArrowUp" : "ArrowDown";
+        lastRow = u.menu.row;
+        await page.tapKey(dir);
+        continue;
+      }
       if (enter) await page.tapKey("Enter");
       return;
+    }
+    if (column === "Game") {
+      // Back out to the pause list.
+      await page.tapKey(h.zone === "nav" ? "ArrowDown" : "g");
+    } else if (h.zone === "nav") {
+      if (h.nav < NAV[column]) await page.tapKey("ArrowRight");
+      else if (h.nav > NAV[column]) await page.tapKey("ArrowLeft");
+      else await page.tapKey("Enter");
+    } else if (h.page !== "Home") {
+      await page.tapKey("g");
+    } else {
+      await page.tapKey("ArrowUp");
     }
   }
   throw new Error(`could not reach ${column} / ${row}: ${JSON.stringify((await page.ux()).menu)}`);
@@ -1260,14 +1549,38 @@ async function scenarioBench() {
   await page.shot(`bench-${args.label ?? "x"}`);
 }
 
+async function scenarioTap() {
+  const size = { w: 852, h: 393, dpr: 3, mobile: true };
+  const page = await newPage("tap");
+  await page.viewport(size.w, size.h, { dpr: 3, mobile: true });
+  await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+  await page.goto(direct());
+  await page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 90000);
+  console.log(JSON.stringify((await page.ux()).home.hits));
+  await homeTap(page, "nav:Library");
+  await sleep(600);
+  console.log("lib", JSON.stringify((await page.ux()).home.hits.filter((h) => /nav|back/.test(h[0]))));
+  await page.tapKey("g");
+  await sleep(600);
+  const u = await page.ux();
+  console.log("home?", u.home.page, JSON.stringify(u.home.hits.filter((h) => /nav|back/.test(h[0]))));
+  await homeTap(page, "nav:Settings");
+  await sleep(800);
+  const v = await page.ux();
+  console.log("after", v.home.page);
+}
+
 async function main() {
+  if (args.scenario === "tap") { await inChrome(3, scenarioTap); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "bench") { await inChrome(1, scenarioBench); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "spam") { await inChrome(1, scenarioSpam); siteServer?.close(); parentServer?.close(); process.exit(0); }
   const wanted = (name) => !ONLY || name.includes(ONLY);
   try {
-    if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu"].some((k) => ONLY.includes(k))) {
+    if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu", "home", "covers"].some((k) => ONLY.includes(k))) {
       await inChrome(1, async () => {
         if (wanted("desktop-direct")) await journeyDesktop("desktop-direct", () => direct());
+        if (wanted("desktop-home")) await journeyHome("desktop-home", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-covers")) await journeyCovers("desktop-covers", () => direct());
         if (wanted("desktop-iframe")) await journeyDesktop("desktop-iframe", () => embedded(), { embeddedMode: true });
         if (wanted("desktop-menus")) await journeyMenus("desktop-menus", () => direct());
         if (wanted("desktop-nowebgpu")) await journeyNoWebgpu("desktop-nowebgpu", () => direct());
@@ -1275,10 +1588,13 @@ async function main() {
         if (wanted("desktop-gamepad-iframe")) await journeyGamepad("desktop-gamepad-iframe", () => embedded());
       });
     }
-    if (!ONLY || ONLY.includes("phone")) {
+    if (!ONLY || ONLY.includes("phone") || ONLY.includes("home")) {
       await inChrome(3, async () => {
         if (wanted("phone-portrait")) await journeyPhone("phone-portrait", () => direct(), { w: 393, h: 852, dpr: 3 });
         if (wanted("phone-iframe")) await journeyPhone("phone-iframe", () => embedded(), { w: 393, h: 852, dpr: 3 });
+        if (wanted("phone-home")) await journeyHome("phone-home", () => direct(), { w: 393, h: 852, dpr: 3, mobile: true });
+        if (wanted("phone-home-small")) await journeyHome("phone-home-small", () => direct(), { w: 360, h: 640, dpr: 3, mobile: true });
+        if (wanted("phone-home-landscape")) await journeyHome("phone-home-landscape", () => direct(), { w: 852, h: 393, dpr: 3, mobile: true });
         if (wanted("phone-landscape")) await journeyPhone("phone-landscape", () => direct(), { w: 852, h: 393, dpr: 3 });
         if (wanted("phone-fullscreen")) await journeyFullscreenFallback("phone-fullscreen", () => direct(), { framed: false });
         if (wanted("phone-fullscreen-iframe")) await journeyFullscreenFallback("phone-fullscreen-iframe", () => embedded(), { framed: true });

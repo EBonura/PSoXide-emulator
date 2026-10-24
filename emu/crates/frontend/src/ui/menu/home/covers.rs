@@ -123,10 +123,6 @@ impl CoverState {
         self.enabled = on;
     }
 
-    pub(crate) fn enabled(&self) -> bool {
-        self.enabled
-    }
-
     /// Tell the state what a launch id is: its file stem and, on the desktop,
     /// the file to read the serial from.
     pub(crate) fn describe(&mut self, id: &str, stem: &str, path: Option<PathBuf>) {
@@ -136,9 +132,15 @@ impl CoverState {
     }
 
     /// A disc that was booted told its serial.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub(crate) fn set_serial(&mut self, id: &str, serial: Option<String>) {
         let entry = self.sources.entry(id.to_string()).or_default();
-        entry.serial = serial;
+        if serial.is_some() && entry.serial != serial {
+            // A serial is a better key than the file name: look again.
+            self.failed.remove(id);
+            self.requested.remove(id);
+        }
+        entry.serial = serial.or_else(|| entry.serial.take());
         entry.serial_read = true;
     }
 

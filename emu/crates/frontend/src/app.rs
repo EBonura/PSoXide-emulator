@@ -474,6 +474,8 @@ pub struct AppState {
     /// The home screen holds a freshly booted demo disc paused behind it, so
     /// "Start disc" resumes it at once instead of racing the download.
     hold_boot_for_home: bool,
+    /// The boot serial of the disc the last boot read, for box art.
+    last_boot_serial: Option<String>,
     /// Web: the id of a disc the player picked whose boot has not landed yet
     /// (fetching, opening, or waiting for its boot files). A second pick of the
     /// same disc meanwhile does nothing.
@@ -688,6 +690,7 @@ impl AppState {
             #[cfg(target_arch = "wasm32")]
             web_autoboot: false,
             hold_boot_for_home: false,
+            last_boot_serial: None,
             #[cfg(target_arch = "wasm32")]
             web_loading: None,
             #[cfg(target_arch = "wasm32")]
@@ -815,6 +818,9 @@ impl AppState {
         if let Err(e) = fast_boot_disc(&mut bus, &mut cpu, &disc) {
             return Err((disc, format!("boot disc: {e:?}")));
         }
+        self.last_boot_serial = emulator_core::system_cnf::read_file(&disc, "SYSTEM.CNF;1")
+            .ok()
+            .and_then(|cnf| psoxide_settings::library::boot_serial_of_cnf(&cnf));
         bus.cdrom.insert_disc(Some(disc));
         bus.attach_digital_pad_port1();
         self.memcard_port1_path = None;
@@ -885,6 +891,7 @@ impl AppState {
         };
         let (column, row, value, rows) = self.menu.selection_probe();
         let panel = self.menu.panel_probe();
+        let home = self.menu.home_probe_json();
         #[cfg(target_arch = "wasm32")]
         let loading = self.web_loading.as_deref().map_or(String::new(), escape);
         #[cfg(not(target_arch = "wasm32"))]
@@ -892,7 +899,7 @@ impl AppState {
         format!(
             "{{\"running\":{},\"menu_open\":{},\"loaded_id\":\"{id}\",\"loading\":\"{loading}\",\
              \"machine\":{},\"port1_mode\":\"{mode}\",\"has_bus\":{},\"status\":\"{status}\",\
-             \"panel\":\"{panel}\",\"menu\":{{\"column\":\"{}\",\"row\":\"{}\",\"value\":\"{}\",\"rows\":{}}},\"touch\":{}}}",
+             \"panel\":\"{panel}\",\"home\":{home},\"menu\":{{\"column\":\"{}\",\"row\":\"{}\",\"value\":\"{}\",\"rows\":{}}},\"touch\":{}}}",
             self.running,
             self.menu.open,
             self.gpu_resync_generation,
@@ -1485,6 +1492,10 @@ impl AppState {
     #[cfg(target_arch = "wasm32")]
     fn set_web_current_game(&mut self, id: String, title: String, kind: GameKind, size: u64) {
         self.web_loading = None;
+        let serial = self.last_boot_serial.take();
+        if let Some(covers) = self.menu.covers() {
+            covers.set_serial(&id, serial);
+        }
         self.current_game = Some(LibraryEntry {
             path: PathBuf::from(&id),
             id: id.clone(),
@@ -1948,6 +1959,18 @@ impl AppState {
                 launchable: true,
             });
         }
+        if let Some(covers) = self.menu.covers() {
+            for e in &self.library.entries {
+                let stem = e.path.file_stem().and_then(|n| n.to_str()).unwrap_or("");
+                covers.describe(&e.id, stem, Some(e.path.clone()));
+            }
+            #[cfg(target_arch = "wasm32")]
+            for (id, title, _) in &self.web_games {
+                let stem = id.rsplit('/').next().unwrap_or(title);
+                let stem = stem.rsplit_once('.').map_or(stem, |(s, _)| s);
+                covers.describe(id, stem, None);
+            }
+        }
         self.menu.set_library(&games, &examples, &projects);
         self.sync_menu_recent_discs();
     }
@@ -2031,6 +2054,12 @@ impl AppState {
                 }
             })
             .collect();
+        if let Some(covers) = self.menu.covers() {
+            for item in &items {
+                let path = item.id.strip_prefix(OPEN_LAUNCH_ID_PREFIX).map(PathBuf::from);
+                covers.describe(&item.id, &item.title, path);
+            }
+        }
         self.menu.set_recent_discs(&items);
     }
 
@@ -3093,6 +3122,15 @@ impl AppState {
             return;
         }
         use crate::input::model::BackendKind;
+        // "Launched: ..." means nothing while the home screen hides the game.
+        if self.menu.open
+            && self
+                .status_message
+                .as_ref()
+                .is_some_and(|(msg, _)| msg.starts_with("Launched:"))
+        {
+            self.status_message = None;
+        }
         let devices = input_router.devices();
         let gamepads = devices
             .iter()
@@ -3105,7 +3143,26 @@ impl AppState {
             .count();
         let touch = input_router.touch();
         let inv = 1.0 / ctx.pixels_per_point();
-        let safe = touch.safe_px();
+        // The notch and the home indicator come from the page's CSS, whether or
+        // not the on-screen controller is showing.
+        #[cfg(target_arch = "wasm32")]
+        let home_safe = {
+            let css = crate::web_touch::safe_insets_css();
+            let k = 1.0 / ctx.zoom_factor();
+            [css.top * k, css.bottom * k, css.left * k, css.right * k]
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let home_safe = [0.0; 4];
+        // The touch Menu and Fullscreen buttons sit in the top-right corner
+        // while the shell is up: the device icons stay to their left.
+        let touch_ui_left = touch.layout().and_then(|layout| {
+            layout
+                .ui
+                .iter()
+                .filter(|b| b.draw.top() * inv < 100.0)
+                .map(|b| b.draw.left() * inv)
+                .reduce(f32::min)
+        });
         #[cfg(target_arch = "wasm32")]
         let demo = if crate::web_stream::find(DEMO_DISC_ID).is_none() {
             ui::menu::DemoStatus::Absent
@@ -3125,12 +3182,8 @@ impl AppState {
                 .any(|d| matches!(d.identity.backend, BackendKind::Keyboard)),
             gamepads,
             touch: self.menu.touch_mode(),
-            safe: [
-                safe.top * inv,
-                safe.bottom * inv,
-                safe.left * inv,
-                safe.right * inv,
-            ],
+            touch_ui_left,
+            safe: home_safe,
         });
         if let Some(covers) = self.menu.covers() {
             covers.pump();

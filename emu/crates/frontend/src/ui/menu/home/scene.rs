@@ -79,11 +79,6 @@ pub(super) fn fade(c: Color32, k: f32) -> Color32 {
     c.gamma_multiply(k.clamp(0.0, 1.0))
 }
 
-/// Ease-out cubic.
-pub(super) fn ease_out(x: f32) -> f32 {
-    1.0 - (1.0 - x.clamp(0.0, 1.0)).powi(3)
-}
-
 /// A vertical gradient strip.
 fn gradient(painter: &Painter, rect: Rect, top: Color32, bottom: Color32) {
     let mut mesh = Mesh::default();

@@ -386,35 +386,6 @@
         pointer-events: none;
       }
       .psoxide-sound-hint[hidden] { display: none; }
-      /* First visit on a touch screen: one tidy tap starts audio, goes
-         fullscreen where the browser allows it and keeps the screen awake. */
-      .psoxide-tap {
-        position: fixed; inset: 0; z-index: 2147483647;
-        display: none; flex-direction: column; align-items: center; justify-content: center;
-        gap: 22px; border: 0; margin: 0; padding: 24px; width: 100%; cursor: pointer;
-        color: #dce5ee; text-align: center;
-        padding-left: max(24px, env(safe-area-inset-left));
-        padding-right: max(24px, env(safe-area-inset-right));
-        background:
-          radial-gradient(circle at 50% 40%, rgba(15, 185, 215, 0.16), transparent 42%),
-          linear-gradient(180deg, #090d12 0%, #05070a 100%);
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-          "Segoe UI", sans-serif;
-      }
-      .psoxide-tap.is-on { display: flex; }
-      .psoxide-tap-mark {
-        color: #f4f8fb; font-size: clamp(34px, 9vw, 56px); font-weight: 750;
-        letter-spacing: 0.08em; line-height: 1;
-      }
-      .psoxide-tap-mark span { color: #22c8e5; }
-      .psoxide-tap-play {
-        display: grid; place-items: center; width: 84px; height: 84px; border-radius: 50%;
-        background: rgba(34, 200, 229, 0.16); box-shadow: 0 0 0 1.5px rgba(34, 200, 229, 0.6);
-        animation: psoxide-tap-pulse 2.4s ease-in-out infinite;
-      }
-      .psoxide-tap-play svg { width: 38px; height: 38px; margin-left: 5px; fill: #22c8e5; }
-      .psoxide-tap-label { font-size: 15px; font-weight: 650; letter-spacing: 0.18em; text-transform: uppercase; }
-      .psoxide-tap-note { color: #8997a6; font-size: 12px; font-weight: 600; letter-spacing: 0.1em; min-height: 1.4em; }
       .psoxide-silent {
         position: fixed; z-index: 2147483647; display: none; align-items: center; gap: 10px;
         left: 50%; transform: translateX(-50%);
@@ -433,11 +404,6 @@
         background: #22c8e5; color: #06222a; font: 700 12px inherit; letter-spacing: 0.08em;
         text-transform: uppercase; cursor: pointer;
       }
-      @keyframes psoxide-tap-pulse {
-        0%, 100% { box-shadow: 0 0 0 1.5px rgba(34, 200, 229, 0.6), 0 0 0 0 rgba(34, 200, 229, 0.25); }
-        50% { box-shadow: 0 0 0 1.5px rgba(34, 200, 229, 0.9), 0 0 0 14px rgba(34, 200, 229, 0); }
-      }
-      @media (prefers-reduced-motion: reduce) { .psoxide-tap-play { animation: none; } }
       /* Embedded player: a click-to-start poster over everything until the
          user asks for the program, then small overlay buttons on hover. */
       .psoxide-embed-idle .psoxide-loader { display: none; }
@@ -591,14 +557,6 @@
       </div>
     </div>
     <div id="psoxide-sound-hint" class="psoxide-sound-hint" hidden>Click or press a key for sound</div>
-    <button id="psoxide-tap" class="psoxide-tap" type="button">
-      <div class="psoxide-tap-mark" aria-label="PSoXide">PSo<span>X</span>ide</div>
-      <span class="psoxide-tap-play" aria-hidden="true">
-        <svg viewBox="0 0 24 24"><path d="M7 4.5v15l12.5-7.5z" /></svg>
-      </span>
-      <span class="psoxide-tap-label">Tap to play</span>
-      <span id="psoxide-tap-note" class="psoxide-tap-note">Loading emulator</span>
-    </button>
     <button id="psoxide-poster" class="psoxide-poster" type="button" hidden>
       <span class="psoxide-poster-play" aria-hidden="true">
         <svg viewBox="0 0 24 24"><path d="M7 4.5v15l12.5-7.5z" /></svg>
@@ -732,19 +690,7 @@
           });
           window.psoxideSilentLater = function () { timer = setTimeout(hide, 10000); };
         })();
-        var tap = document.getElementById("psoxide-tap");
-        var note = document.getElementById("psoxide-tap-note");
-        var loader = document.getElementById("psoxide-loader");
-        if (!tap || !coarse || psoxideEmbed) return;
-        tap.classList.add("is-on");
-        function ready() {
-          return loader.classList.contains("is-ready") || loader.classList.contains("has-error");
-        }
-        function sync() {
-          note.textContent = ready() ? "Landscape works best" : "Loading emulator";
-        }
-        new MutationObserver(sync).observe(loader, { attributes: true, attributeFilter: ["class"] });
-        sync();
+        if (!coarse || psoxideEmbed) return;
         var wake = null;
         function keepAwake() {
           if (!navigator.wakeLock || document.visibilityState !== "visible") return;
@@ -753,22 +699,12 @@
         document.addEventListener("visibilitychange", function () {
           if (wake) { wake = null; keepAwake(); }
         });
-        function go(e) {
-          e.preventDefault();
+        function go() {
           if (window.psoxideUnlockAudio) window.psoxideUnlockAudio();
-          var root = document.documentElement;
-          var request = root.requestFullscreen || root.webkitRequestFullscreen;
-          if (request && !document.fullscreenElement) {
-            try {
-              var p = request.call(root);
-              if (p && p.catch) p.catch(function () {});
-            } catch (err) {}
-          }
           keepAwake();
-          tap.classList.remove("is-on");
           if (window.psoxideSilentLater) window.psoxideSilentLater();
         }
-        tap.addEventListener("click", go);
+        document.addEventListener("click", go, { once: true, capture: true });
       })();
     </script>
     <script>

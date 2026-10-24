@@ -34,9 +34,16 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
         return;
     }
     let animating = t < 0.998;
-    let target = state
-        .sidebar_width
-        .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+    // On a phone the sidebar is the whole width; it never runs off the edge.
+    let screen_w = ctx.screen_rect().width();
+    let narrow = screen_w < 700.0;
+    let max_w = SIDEBAR_MAX_WIDTH.min(screen_w);
+    let min_w = SIDEBAR_MIN_WIDTH.min(max_w);
+    let target = if narrow {
+        screen_w
+    } else {
+        state.sidebar_width.clamp(min_w, max_w)
+    };
     let panel_fill = ctx.style().visuals.panel_fill;
     let separator = ctx.style().visuals.widgets.noninteractive.bg_stroke;
 
@@ -49,8 +56,8 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
         panel
             .resizable(true)
             .default_width(target)
-            .min_width(SIDEBAR_MIN_WIDTH)
-            .max_width(SIDEBAR_MAX_WIDTH)
+            .min_width(min_w)
+            .max_width(max_w)
     };
 
     let response = panel.show(ctx, |ui| {
@@ -85,58 +92,123 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
     });
 
     if !animating {
-        state.sidebar_width = response
-            .response
-            .rect
-            .width()
-            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        state.sidebar_width = response.response.rect.width().clamp(min_w, max_w);
+    }
+}
+
+/// The tabs of the debug sidebar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tab {
+    Performance,
+    Cpu,
+    Memory,
+    Video,
+    Tools,
+}
+
+impl Tab {
+    const ALL: [Self; 5] = [
+        Self::Performance,
+        Self::Cpu,
+        Self::Memory,
+        Self::Video,
+        Self::Tools,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Performance => "Performance",
+            Self::Cpu => "CPU",
+            Self::Memory => "Memory",
+            Self::Video => "Video",
+            Self::Tools => "Tools",
+        }
     }
 }
 
 fn draw_contents(ui: &mut egui::Ui, state: &mut AppState, vram_tex: egui::TextureId) {
-    // No close button: the sidebar is toggled from the toolbar's bug icon,
-    // same as it was opened.
-    ui.label(
-        RichText::new("Debug")
-            .color(theme::ACCENT)
-            .size(theme::FONT_SIZE_HEADING),
-    );
+    // A summary that stays put while the tabs change: what is loaded, whether
+    // it runs, and how fast.
+    summary(ui, state);
+    ui.add_space(4.0);
+    let id = egui::Id::new("debug_sidebar_tab");
+    let mut tab = ui.ctx().data(|d| d.get_temp::<usize>(id)).unwrap_or(0);
+    ui.horizontal_wrapped(|ui| {
+        for (i, t) in Tab::ALL.iter().enumerate() {
+            let selected = tab == i;
+            let text = RichText::new(t.label()).color(if selected {
+                theme::ACCENT
+            } else {
+                theme::TEXT_DIM
+            });
+            if ui.selectable_label(selected, text).clicked() {
+                tab = i;
+            }
+        }
+    });
+    ui.ctx().data_mut(|d| d.insert_temp(id, tab));
     ui.separator();
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show(ui, |ui| {
-            collapsible(ui, "Input tape", true, |ui| input_tape(ui, state));
-            collapsible(ui, "Developer", true, |ui| developer(ui, state));
-            let mut export = None;
-            collapsible(ui, "Guest performance (PS1)", true, |ui| {
-                export = psoxide_debug_ui::draw(ui, &mut state.guest_stats, Some(vram_tex));
-            });
-            if let Some(psoxide_debug_ui::PanelAction::ExportCsv { csv, seconds }) = export {
-                state.export_guest_stats_csv(&csv, seconds);
+        .show(ui, |ui| match Tab::ALL[tab.min(Tab::ALL.len() - 1)] {
+            Tab::Performance => {
+                let mut export = None;
+                theme::viz_frame(ui, "", |ui| {
+                    export = psoxide_debug_ui::draw(ui, &mut state.guest_stats, Some(vram_tex));
+                });
+                if let Some(psoxide_debug_ui::PanelAction::ExportCsv { csv, seconds }) = export {
+                    state.export_guest_stats_csv(&csv, seconds);
+                }
             }
-            collapsible(ui, "CPU Registers", state.panels.registers, |ui| {
-                registers::draw_contents(
-                    ui,
-                    &state.cpu,
-                    &state.exec_history,
-                    &mut state.breakpoints,
-                    &mut state.gpr_snapshot,
-                );
-            });
-            collapsible(ui, "Memory", state.panels.memory, |ui| {
-                memory::draw_contents(
-                    ui,
-                    &mut state.memory_view,
-                    state.bus.as_ref(),
-                    &state.cpu,
-                    &mut state.breakpoints,
-                );
-            });
-            collapsible(ui, "VRAM", state.panels.vram, |ui| {
-                vram::draw_contents(ui, vram_tex);
-            });
+            Tab::Cpu => registers::draw_contents(
+                ui,
+                &state.cpu,
+                &state.exec_history,
+                &mut state.breakpoints,
+                &mut state.gpr_snapshot,
+            ),
+            Tab::Memory => memory::draw_contents(
+                ui,
+                &mut state.memory_view,
+                state.bus.as_ref(),
+                &state.cpu,
+                &mut state.breakpoints,
+            ),
+            Tab::Video => vram::draw_contents(ui, vram_tex),
+            Tab::Tools => {
+                collapsible(ui, "Input tape", true, |ui| input_tape(ui, state));
+                collapsible(ui, "Developer", true, |ui| developer(ui, state));
+            }
         });
+}
+
+/// The pinned line above the tabs.
+fn summary(ui: &mut egui::Ui, state: &AppState) {
+    let (label, color) = if state.bus.is_none() {
+        ("No game", theme::TEXT_DIM)
+    } else if state.running {
+        ("Running", egui::Color32::from_rgb(82, 208, 138))
+    } else {
+        ("Paused", egui::Color32::from_rgb(242, 196, 106))
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("Debug")
+                .color(theme::ACCENT)
+                .size(theme::FONT_SIZE_HEADING),
+        );
+        ui.label(RichText::new(format!("\u{25cf} {label}")).color(color));
+        if let Some(game) = state.current_game.as_ref() {
+            ui.label(RichText::new(&game.title).color(theme::TEXT));
+        }
+        if let Some(fps) = state.guest_stats.recent_fps() {
+            ui.label(RichText::new(format!("{fps:.0} fps")).monospace());
+        }
+        if let Some((speed, _)) = state.guest_stats.host_speed() {
+            ui.label(RichText::new(format!("{:.0}% speed", speed * 100.0)).monospace());
+        }
+    });
 }
 
 /// Record a controller tape (`.pxtape`) of the running game and replay it.
