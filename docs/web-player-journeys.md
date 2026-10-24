@@ -451,3 +451,13 @@ Scenarios: `--scenario launch --throttle N` (cost of the sequence), `shots` (bef
 | New | Box art (xlenore by serial, libretro by name, switch in Settings), L1/R1 and swipe through sections, compact grid, letter jump | desktop-covers, desktop-home |
 
 Gaps left: the save-states panel and the burn dialog are still egui windows over the shell; the editor build's Editor column has no nav entry yet; the phone Debug is a full page, not a sheet over the running game.
+
+## Shell polish journeys (10-24 night)
+
+Added after the first drive-through: phone-home checks that no touch controller is drawn on the home
+screen; phone-shell checks that the on-screen menu button answers mouse clicks (resume, then pause into
+the shell) as well as taps; the controls journeys check that binding a key another action holds swaps the
+two and says so; the shell journeys sample the screen's mean brightness through the boot flash (limit 0.3);
+the pad-button step tells a stalled page (no frames drawn, retried once, logged) from a missed hit. The
+`--scenario review --label <name> --shots <dir>` run takes the before/after screenshots at 1280x800,
+800x600, 393x852, 360x640 and 852x393.
