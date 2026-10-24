@@ -19,6 +19,9 @@
 //! - `cd`: data reads seek for free and stream sectors 8x faster than double
 //!   speed. Not literally instant: the guest's per-sector interrupt handler
 //!   has to keep up. XA-audio reads (mode bit 6) keep their pace.
+//! - `spram` (ablation, excluded from `all`): scratchpad loads cost what main-RAM
+//!   loads cost, so the difference to a plain run is what the guest's current
+//!   scratchpad tenants are worth.
 //! - `mmio`: CPU reads of GPUSTAT, the DMA, timer and interrupt registers
 //!   cost the one issue cycle only.
 //!
@@ -70,11 +73,15 @@ pub const GPU: u32 = 1 << 4;
 pub const CD: u32 = 1 << 5;
 /// Status-register polling costs one cycle.
 pub const MMIO: u32 = 1 << 6;
+/// Ablation, not a limit: scratchpad loads cost what main-RAM loads cost.
+/// Prices what the scratchpad tenants a guest already has are worth. Not part
+/// of `all`.
+pub const SPRAM: u32 = 1 << 7;
 
 /// Consecutive free instructions after which a free range is charged again.
 pub const FREE_GUARD: u64 = 1 << 24;
 
-const NAMES: [(&str, u32); 7] = [
+const NAMES: [(&str, u32); 8] = [
     ("icache", ICACHE),
     ("ram", RAM),
     ("muldiv", MULDIV),
@@ -82,6 +89,7 @@ const NAMES: [(&str, u32); 7] = [
     ("gpu", GPU),
     ("cd", CD),
     ("mmio", MMIO),
+    ("spram", SPRAM),
 ];
 
 /// One named code range, `start..end`.
@@ -535,7 +543,7 @@ fn parse_oracles(list: &str) -> Result<u32, String> {
         .filter(|name| !name.is_empty())
     {
         if name == "all" {
-            mask |= NAMES.iter().map(|(_, bit)| bit).fold(0, |a, b| a | b);
+            mask |= NAMES.iter().map(|(_, bit)| bit).fold(0, |a, b| a | b) & !SPRAM;
             continue;
         }
         let bit = NAMES
@@ -564,6 +572,7 @@ mod tests {
     fn parses_oracle_names_and_rejects_unknown_ones() {
         assert_eq!(parse_oracles("gte, muldiv").unwrap(), GTE | MULDIV);
         assert_eq!(parse_oracles("all").unwrap(), 0x7f);
+        assert_eq!(parse_oracles("spram").unwrap(), SPRAM);
         assert!(parse_oracles("gtee").is_err());
     }
 

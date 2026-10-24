@@ -1657,9 +1657,23 @@ impl Cpu {
             if Self::limit_free_read(bus, addr) {
                 return;
             }
-            let stalls = bus.cpu_read_stalls(addr, width);
-            if bus.limits.logs_data() && memory::to_physical(addr) < memory::ram::MIRROR_END {
-                bus.limits.log_data(memory::to_physical(addr), stalls);
+            // Ablation `spram`: a scratchpad load is charged as a main-RAM load.
+            let charged = if bus.limit(crate::limits::SPRAM)
+                && (memory::scratchpad::BASE
+                    ..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
+                    .contains(&memory::to_physical(addr))
+            {
+                0x8000_1000
+            } else {
+                addr
+            };
+            let stalls = bus.cpu_read_stalls(charged, width);
+            if bus.limits.logs_data() {
+                let phys = memory::to_physical(addr);
+                if phys < memory::ram::MIRROR_END || charged != addr {
+                    // Scratchpad lines are logged at their own addresses while `spram` prices them.
+                    bus.limits.log_data(phys, stalls);
+                }
             }
             if crate::timers::Timers::contains(memory::to_physical(addr)) {
                 bus.add_root_counter_read_stalls(addr, stalls);
