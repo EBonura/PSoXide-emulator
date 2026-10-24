@@ -1389,6 +1389,8 @@ impl ApplicationHandler for Shell {
                 input.right |= pad_frame.menu_right;
                 input.confirm |= pad_frame.menu_confirm;
                 input.back |= pad_frame.menu_back;
+                input.tab_prev |= pad_frame.menu_prev;
+                input.tab_next |= pad_frame.menu_next;
 
                 // Escape is the "PS button" -- it toggles between
                 // "game running" and "game paused + menu open".
@@ -1402,6 +1404,13 @@ impl ApplicationHandler for Shell {
                 // go nowhere rather than opening one over the host's example.
                 if crate::app::embed_mode() {
                     input.toggle_open = false;
+                }
+                // Before anything has started, and on any section but Home, Escape,
+                // Select+Start and the touch Menu button are Back: they never start the
+                // disc and never leave the shell from a section.
+                if input.toggle_open && self.state.menu.home_blocks_ps_button() {
+                    input.toggle_open = false;
+                    input.back = true;
                 }
                 if input.toggle_open {
                     input.toggle_open = false;
@@ -2321,6 +2330,8 @@ fn merge_key(mut input: MenuInput, key: &Key, arrows_navigate: bool) -> MenuInpu
         Key::Named(NamedKey::ArrowDown) if arrows_navigate => input.down = true,
         Key::Named(NamedKey::ArrowLeft) if arrows_navigate => input.left = true,
         Key::Named(NamedKey::ArrowRight) if arrows_navigate => input.right = true,
+        Key::Named(NamedKey::PageUp) => input.tab_prev = true,
+        Key::Named(NamedKey::PageDown) => input.tab_next = true,
         Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => input.confirm = true,
         Key::Named(NamedKey::Escape) => {
             input.toggle_open = true;

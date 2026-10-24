@@ -44,6 +44,9 @@ pub struct UiPngArgs {
     /// With `--home`: pretend a first visit's countdown is on screen.
     #[arg(long)]
     pub countdown: bool,
+    /// With `--home`: freeze the launch sequence at this many seconds.
+    #[arg(long)]
+    pub launch: Option<f32>,
     /// With `--home`: the focused case.
     #[arg(long, default_value_t = 0)]
     pub case: usize,
@@ -167,9 +170,13 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
         View::Menu => {
             state.menu.select_category(&args.category);
             state.menu.open = true;
-            state
-                .menu
-                .home_preview(&args.page, args.case, args.demo, args.countdown);
+            state.menu.home_preview(
+                &args.page,
+                args.case,
+                args.demo,
+                args.countdown,
+                args.launch,
+            );
         }
         View::Window => {
             state.menu.open = false;
@@ -191,6 +198,8 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
     // Enough frames for the menu dissolve, the column slide and the sidebar
     // slide to settle.
     for frame in 0..40u32 {
+        // Real time for the cover fetch threads to answer.
+        std::thread::sleep(std::time::Duration::from_millis(80));
         let output = ctx.run(
             input(
                 args.width,
@@ -203,7 +212,19 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
                     ui::toolbar::draw(ctx, &mut state);
                     ui::debug_sidebar::draw(ctx, &mut state, vram.id());
                 }
+                if let Some(covers) = state.menu.covers() {
+                    covers.pump();
+                }
                 state.menu.draw(ctx, 0.1, None);
+                if let Some((page, rect)) = state.menu.home_section() {
+                    if page == "Controls" {
+                        state.menu.draw_controls_section(ctx, rect, |ui| {
+                            ui.label("Controllers are listed here.");
+                        });
+                    } else {
+                        ui::debug_sidebar::draw_section(ctx, &mut state, vram.id(), rect);
+                    }
+                }
                 ui::draw_recording_indicator(ctx, &state);
                 if args.view == View::Window {
                     ui::draw_status_toast(ctx, &state);

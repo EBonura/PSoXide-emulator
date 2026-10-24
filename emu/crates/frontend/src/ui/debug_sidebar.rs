@@ -80,7 +80,7 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
                 .layout(Layout::top_down(Align::Min)),
             |ui| {
                 ui.set_clip_rect(content_rect.intersect(panel_rect));
-                draw_contents(ui, state, vram_tex);
+                draw_contents(ui, state, vram_tex, panel_rect.bottom(), false);
             },
         );
         // egui persists the panel's width from the frame content's measured
@@ -96,60 +96,129 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
     }
 }
 
-/// The tabs of the debug sidebar.
+/// The tabs of the debug views.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
     Performance,
+    InputTape,
+    Developer,
     Cpu,
     Memory,
     Video,
-    Tools,
 }
 
 impl Tab {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Performance,
+        Self::InputTape,
+        Self::Developer,
         Self::Cpu,
         Self::Memory,
         Self::Video,
-        Self::Tools,
     ];
 
     fn label(self) -> &'static str {
         match self {
             Self::Performance => "Performance",
+            Self::InputTape => "Input tape",
+            Self::Developer => "Developer",
             Self::Cpu => "CPU",
             Self::Memory => "Memory",
             Self::Video => "Video",
-            Self::Tools => "Tools",
         }
     }
 }
 
-fn draw_contents(ui: &mut egui::Ui, state: &mut AppState, vram_tex: egui::TextureId) {
+/// The debug section of the shell: the whole page, one column, built for a
+/// thumb on a phone (big pinned summary, big tabs, full-width charts) and the
+/// same information and functions as the desktop sidebar.
+pub fn draw_section(
+    ctx: &egui::Context,
+    state: &mut AppState,
+    vram_tex: egui::TextureId,
+    rect: Rect,
+) {
+    egui::Area::new(egui::Id::new("debug-section"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .show(ctx, |ui| {
+            ui.set_clip_rect(rect);
+            ui.set_width(rect.width());
+            ui.scope(|ui| {
+                // Tap targets of at least 44 points and nothing under 13.
+                let style = ui.style_mut();
+                style.spacing.interact_size.y = 44.0;
+                style.spacing.button_padding = egui::vec2(14.0, 10.0);
+                style.spacing.item_spacing = egui::vec2(8.0, 10.0);
+                style.spacing.slider_width = (rect.width() - 120.0).max(120.0);
+                for (text_style, size) in [
+                    (egui::TextStyle::Body, 15.0),
+                    (egui::TextStyle::Button, 15.0),
+                    (egui::TextStyle::Small, 13.0),
+                    (egui::TextStyle::Monospace, 14.0),
+                ] {
+                    if let Some(font) = style.text_styles.get_mut(&text_style) {
+                        font.size = size;
+                    }
+                }
+                draw_contents(ui, state, vram_tex, rect.bottom(), true);
+            });
+        });
+}
+
+fn draw_contents(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    vram_tex: egui::TextureId,
+    bottom: f32,
+    big: bool,
+) {
     // A summary that stays put while the tabs change: what is loaded, whether
     // it runs, and how fast.
-    summary(ui, state);
+    summary(ui, state, big);
     ui.add_space(4.0);
     let id = egui::Id::new("debug_sidebar_tab");
     let mut tab = ui.ctx().data(|d| d.get_temp::<usize>(id)).unwrap_or(0);
-    ui.horizontal_wrapped(|ui| {
-        for (i, t) in Tab::ALL.iter().enumerate() {
-            let selected = tab == i;
-            let text = RichText::new(t.label()).color(if selected {
-                egui::Color32::WHITE
-            } else {
-                theme::TEXT_DIM
-            });
-            if ui.selectable_label(selected, text).clicked() {
-                tab = i;
-            }
+    let tab_button = |ui: &mut egui::Ui, i: usize, width: Option<f32>, tab: &mut usize| {
+        let selected = *tab == i;
+        let text = RichText::new(Tab::ALL[i].label()).color(if selected {
+            egui::Color32::WHITE
+        } else {
+            theme::TEXT_DIM
+        });
+        let button = egui::Button::new(text).selected(selected);
+        let response = match width {
+            Some(w) => ui.add_sized([w, if big { 44.0 } else { 24.0 }], button),
+            None => ui.add(button),
+        };
+        if response.clicked() {
+            *tab = i;
         }
-    });
+    };
+    if big {
+        // Two rows of three big buttons.
+        let w = (ui.available_width() - 2.0 * ui.spacing().item_spacing.x) / 3.0;
+        for row in 0..2 {
+            ui.horizontal(|ui| {
+                for col in 0..3 {
+                    tab_button(ui, row * 3 + col, Some(w), &mut tab);
+                }
+            });
+        }
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            for i in 0..Tab::ALL.len() {
+                tab_button(ui, i, None, &mut tab);
+            }
+        });
+    }
     ui.ctx().data_mut(|d| d.insert_temp(id, tab));
     ui.separator();
 
+    let height = (bottom - ui.cursor().top()).max(120.0);
     egui::ScrollArea::vertical()
+        .max_height(height)
+        .min_scrolled_height(height)
         .auto_shrink([false, false])
         .show(ui, |ui| match Tab::ALL[tab.min(Tab::ALL.len() - 1)] {
             Tab::Performance => {
@@ -161,6 +230,8 @@ fn draw_contents(ui: &mut egui::Ui, state: &mut AppState, vram_tex: egui::Textur
                     state.export_guest_stats_csv(&csv, seconds);
                 }
             }
+            Tab::InputTape => input_tape(ui, state),
+            Tab::Developer => developer(ui, state),
             Tab::Cpu => registers::draw_contents(
                 ui,
                 &state.cpu,
@@ -176,15 +247,12 @@ fn draw_contents(ui: &mut egui::Ui, state: &mut AppState, vram_tex: egui::Textur
                 &mut state.breakpoints,
             ),
             Tab::Video => vram::draw_contents(ui, vram_tex),
-            Tab::Tools => {
-                collapsible(ui, "Input tape", true, |ui| input_tape(ui, state));
-                collapsible(ui, "Developer", true, |ui| developer(ui, state));
-            }
         });
 }
 
-/// The pinned line above the tabs.
-fn summary(ui: &mut egui::Ui, state: &AppState) {
+/// The pinned card above the tabs: state, frame rate, frame time, how fast
+/// the emulation runs against real time and how many frames were late.
+fn summary(ui: &mut egui::Ui, state: &AppState, big: bool) {
     let (label, color) = if state.bus.is_none() {
         ("No game", theme::TEXT_DIM)
     } else if state.running {
@@ -192,6 +260,50 @@ fn summary(ui: &mut egui::Ui, state: &AppState) {
     } else {
         ("Paused", egui::Color32::from_rgb(242, 196, 106))
     };
+    let fps = state.guest_stats.recent_fps();
+    let speed = state.guest_stats.host_speed();
+    if big {
+        egui::Frame::NONE
+            .fill(egui::Color32::from_rgb(14, 24, 32))
+            .corner_radius(10)
+            .inner_margin(12)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(label).color(color).size(15.0));
+                    if let Some(game) = state.current_game.as_ref() {
+                        ui.label(RichText::new(&game.title).color(theme::TEXT).size(15.0));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let big_num = |ui: &mut egui::Ui, value: String, caption: &str| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(value)
+                                    .monospace()
+                                    .size(30.0)
+                                    .color(egui::Color32::WHITE),
+                            );
+                            ui.label(RichText::new(caption).size(13.0).color(theme::TEXT_DIM));
+                        });
+                        ui.add_space(18.0);
+                    };
+                    big_num(ui, fps.map_or("--".into(), |f| format!("{f:.0}")), "fps");
+                    big_num(
+                        ui,
+                        fps.filter(|f| *f > 0.0)
+                            .map_or("--".into(), |f| format!("{:.1}", 1000.0 / f)),
+                        "ms per frame",
+                    );
+                    big_num(
+                        ui,
+                        speed.map_or("--".into(), |(s, _)| format!("{:.0}%", s * 100.0)),
+                        "of real time",
+                    );
+                });
+            });
+        return;
+    }
     ui.horizontal_wrapped(|ui| {
         ui.label(
             RichText::new("Debug")
@@ -202,10 +314,10 @@ fn summary(ui: &mut egui::Ui, state: &AppState) {
         if let Some(game) = state.current_game.as_ref() {
             ui.label(RichText::new(&game.title).color(theme::TEXT));
         }
-        if let Some(fps) = state.guest_stats.recent_fps() {
+        if let Some(fps) = fps {
             ui.label(RichText::new(format!("{fps:.0} fps")).monospace());
         }
-        if let Some((speed, _)) = state.guest_stats.host_speed() {
+        if let Some((speed, _)) = speed {
             ui.label(RichText::new(format!("{:.0}% speed", speed * 100.0)).monospace());
         }
     });
@@ -320,20 +432,4 @@ fn developer(ui: &mut egui::Ui, state: &mut AppState) {
     {
         state.start_examples_build();
     }
-}
-
-fn collapsible(
-    ui: &mut egui::Ui,
-    title: &str,
-    default_open: bool,
-    add_contents: impl FnOnce(&mut egui::Ui),
-) {
-    // `default_open` seeds the first render; egui persists collapse state
-    // afterwards (the user expands/collapses each section by hand).
-    egui::CollapsingHeader::new(RichText::new(title).color(theme::TEXT).strong())
-        .default_open(default_open)
-        .show(ui, |ui| {
-            theme::viz_frame(ui, "", add_contents);
-        });
-    ui.add_space(4.0);
 }

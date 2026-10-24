@@ -856,6 +856,8 @@ impl AppState {
         let first_visit = ui::menu::first_visit();
         self.menu.enable_home(first_visit);
         self.menu.set_box_art(self.settings.video.box_art);
+        // The library was listed before the shell existed: describe its discs to it now.
+        self.refresh_menu_library();
         #[cfg(target_arch = "wasm32")]
         if self.web_autoboot {
             self.hold_boot_for_home = true;
@@ -1492,6 +1494,10 @@ impl AppState {
     #[cfg(target_arch = "wasm32")]
     fn set_web_current_game(&mut self, id: String, title: String, kind: GameKind, size: u64) {
         self.web_loading = None;
+        if id.starts_with("web:") {
+            crate::web_files::note_recent(&id);
+            self.sync_menu_recent_discs();
+        }
         let serial = self.last_boot_serial.take();
         if let Some(covers) = self.menu.covers() {
             covers.set_serial(&id, serial);
@@ -2027,7 +2033,40 @@ impl AppState {
 
     /// Show the discs opened with "Open disc..." (newest first) in the
     /// Library's "Recent discs" folder. Files that are gone are skipped.
+    /// The browser keeps its own play history: a disc is "recent" when it was
+    /// played here and the connected folder still lists it. `None` off the web.
+    #[cfg(target_arch = "wasm32")]
+    fn web_recent_items(&self) -> Option<Vec<MenuLibraryItem>> {
+        Some(
+            crate::web_files::recent_ids()
+                .into_iter()
+                .filter_map(|id| {
+                    self.web_games
+                        .iter()
+                        .find(|(known, _, _)| *known == id)
+                        .map(|(id, title, subtitle)| MenuLibraryItem {
+                            folder: PathBuf::new(),
+                            id: id.clone(),
+                            title: title.clone(),
+                            subtitle: subtitle.clone(),
+                            burnable: false,
+                            launchable: true,
+                        })
+                })
+                .collect(),
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn web_recent_items(&self) -> Option<Vec<MenuLibraryItem>> {
+        None
+    }
+
     pub fn sync_menu_recent_discs(&mut self) {
+        if let Some(items) = self.web_recent_items() {
+            self.menu.set_recent_discs(&items);
+            return;
+        }
         let items: Vec<MenuLibraryItem> = self
             .settings
             .paths
@@ -3188,11 +3227,27 @@ impl AppState {
             gamepads,
             touch: self.menu.touch_mode(),
             touch_ui_left,
+            current: self
+                .current_game
+                .as_ref()
+                .map(|g| (g.id.clone(), g.title.clone())),
             safe: home_safe,
         });
         if let Some(covers) = self.menu.covers() {
             covers.pump();
         }
+    }
+
+    /// Open the shell on one of its sections, pausing the game behind it when
+    /// one is running.
+    pub fn open_shell_page(&mut self, page: &str) {
+        if !self.menu.open {
+            let game_loaded = self.bus.is_some() && self.current_game.is_some();
+            let mut transport = self.transport(game_loaded);
+            transport.ps_button();
+            self.set_transport(transport);
+        }
+        self.menu.home_goto(page);
     }
 
     /// "Start disc": resume the demo disc if it is booted and waiting behind

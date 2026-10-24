@@ -136,6 +136,17 @@ pub fn draw_layout(
     state
         .menu
         .draw_controls(ctx, |ui| port_message = controller_ports(ui, input_router));
+    // Controls and Debug are sections of the shell, drawn in the space it leaves.
+    if let Some((page, rect)) = state.menu.home_section() {
+        match page {
+            "Controls" => {
+                state.menu.draw_controls_section(ctx, rect, |ui| {
+                    port_message = controller_ports(ui, input_router)
+                });
+            }
+            _ => debug_sidebar::draw_section(ctx, state, vram_tex, rect),
+        }
+    }
     if let Some(message) = port_message {
         state.status_message_set(message);
     }
@@ -233,7 +244,11 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             MenuOutcome::None
         }
         OpenControls => {
-            state.menu.open_controls();
+            if state.menu.home_enabled() {
+                state.open_shell_page("Controls");
+            } else {
+                state.menu.open_controls();
+            }
             MenuOutcome::None
         }
         ResetControls => {
@@ -393,9 +408,9 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.start_demo_disc();
             MenuOutcome::None
         }
-        OpenDebug => {
-            state.panels.debug_sidebar = true;
+        ResumeGame => {
             state.menu.open = false;
+            state.menu_closed_by_back();
             MenuOutcome::None
         }
         OpenUrl(url) => {
@@ -430,9 +445,9 @@ fn controller_ports(ui: &mut egui::Ui, input_router: &mut InputRouter) -> Option
     ui.add_space(6.0);
     for device in input_router.devices() {
         let name = &device.identity.name;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.add_sized(
-                [220.0, 26.0],
+                [(ui.available_width() - 12.0).clamp(80.0, 220.0), 26.0],
                 egui::Label::new(egui::RichText::new(name).strong()).truncate(),
             )
             .on_hover_text(device.identity.describe());

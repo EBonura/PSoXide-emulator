@@ -6,12 +6,13 @@
 //! [`MenuAction`]s going out. Only the drawing and the focus rules are new.
 
 mod covers;
+mod launch;
 mod pages;
 mod scene;
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2};
 
-use super::{MenuAction, MenuInput, MenuState};
+use super::{LibraryItem, MenuAction, MenuInput, MenuState};
 use crate::icons;
 use scene::{fade, CoverKind, CYAN};
 
@@ -37,9 +38,15 @@ pub(super) const SOURCE_URL: &str = "https://github.com/EBonura/PSoXide";
 /// The pages the shell can show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Page {
+    /// The cases and animations: the library of discs, and the game you left.
     Home,
-    Library,
+    /// What you can do to the running game.
+    Game,
+    /// Controllers, keyboard and touch, inside the shell.
+    Controls,
     Settings,
+    /// The debug section, a full page of the shell.
+    Debug,
     Welcome,
 }
 
@@ -47,8 +54,10 @@ impl Page {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Home => "Home",
-            Self::Library => "Library",
+            Self::Game => "Game",
+            Self::Controls => "Controls",
             Self::Settings => "Settings",
+            Self::Debug => "Debug",
             Self::Welcome => "Welcome",
         }
     }
@@ -61,19 +70,46 @@ enum Zone {
     Body,
 }
 
-/// The nav entries. Debug is an action, not a page.
+/// The nav entries, in order. `Game` shows only while a game is started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NavItem {
-    Library,
+    Home,
+    Game,
+    Controls,
     Settings,
     Debug,
 }
 
-const NAV: [(NavItem, &str); 3] = [
-    (NavItem::Library, "Library"),
-    (NavItem::Settings, "Settings"),
-    (NavItem::Debug, "Debug"),
-];
+impl NavItem {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Home => "Home",
+            Self::Game => "Game",
+            Self::Controls => "Controls",
+            Self::Settings => "Settings",
+            Self::Debug => "Debug",
+        }
+    }
+
+    fn page(self) -> Page {
+        match self {
+            Self::Home => Page::Home,
+            Self::Game => Page::Game,
+            Self::Controls => Page::Controls,
+            Self::Settings => Page::Settings,
+            Self::Debug => Page::Debug,
+        }
+    }
+}
+
+fn nav_items(in_game: bool) -> Vec<NavItem> {
+    let mut items = vec![NavItem::Home];
+    if in_game {
+        items.push(NavItem::Game);
+    }
+    items.extend([NavItem::Controls, NavItem::Settings, NavItem::Debug]);
+    items
+}
 
 /// How far along the demo disc is.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -89,7 +125,7 @@ pub(crate) enum DemoStatus {
 }
 
 /// What the shell tells the home screen each frame.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct HomeFeed {
     pub demo: DemoStatus,
     pub keyboard: bool,
@@ -98,6 +134,8 @@ pub(crate) struct HomeFeed {
     /// Left edge (points) of the touch Menu and Fullscreen buttons, when they
     /// sit in the top band.
     pub touch_ui_left: Option<f32>,
+    /// The game that is loaded: its launch id and title.
+    pub current: Option<(String, String)>,
     /// Safe-area insets in points: top, bottom, left, right.
     pub safe: [f32; 4],
 }
@@ -121,10 +159,14 @@ enum Click {
     Case(usize),
     Primary,
     Peek,
+    Restart,
+    Burn,
+    Act(MenuAction),
     Link(&'static str),
     Welcome,
     WelcomeStep(i32),
     Row(usize),
+    RowBurn(usize),
     Slider(usize, Rect),
     Back,
     Dismiss,
@@ -155,11 +197,19 @@ pub(crate) struct HomeState {
     /// An input already cancelled the countdown this frame (a pad button or a
     /// stick, seen before the menu's own edges): that press only cancels.
     cancelled_this_frame: bool,
+    launch: Option<launch::Launch>,
+    /// The launch has been handed to the app; the sequence holds on its last moment.
+    launch_sent: bool,
+    pending_launch: Option<MenuAction>,
+    label_tex: Option<egui::TextureHandle>,
+    /// Where a Controls or Debug section is drawn this frame (by the shell around it).
+    section: Option<Rect>,
 }
 
 /// A pointer press being tracked, to tell a tap from a scroll.
 #[derive(Clone, Copy, Debug)]
 struct Press {
+    start: Pos2,
     travel: f32,
     scrolled: bool,
     on_slider: Option<(usize, Rect)>,
@@ -188,6 +238,11 @@ impl HomeState {
             last_row: usize::MAX,
             closed: false,
             cancelled_this_frame: false,
+            launch: None,
+            launch_sent: false,
+            pending_launch: None,
+            label_tex: None,
+            section: None,
         }
     }
 
@@ -203,13 +258,15 @@ impl HomeState {
             self.peek = false;
             self.list_scroll = 0.0;
             self.last_row = usize::MAX;
+            self.launch = None;
+            self.launch_sent = false;
             if self.pausing(ms) {
                 ms.select_category("Game");
             }
         }
     }
 
-    /// Whether the shell is acting as the pause overlay of a started game.
+    /// Whether a started game is waiting behind the shell.
     fn pausing(&self, ms: &MenuState) -> bool {
         self.started && ms.game_loaded
     }
@@ -230,7 +287,6 @@ impl MenuState {
     /// Feed the home screen what the app knows this frame.
     pub fn set_home_feed(&mut self, feed: HomeFeed) {
         if let Some(h) = self.home.as_mut() {
-            let keep = (h.feed.demo, h.feed.keyboard);
             if h.countdown == Countdown::Off
                 && h.first_visit
                 && !h.started
@@ -238,7 +294,6 @@ impl MenuState {
             {
                 h.countdown = Countdown::Armed;
             }
-            let _ = keep;
             h.feed = feed;
         }
     }
@@ -282,25 +337,28 @@ impl MenuState {
             return "null".into();
         };
         let escape = |t: &str| t.replace('\\', "\\\\").replace('"', "\\\"");
-        let rows = pages::visible_rows(self, h.page, h.pausing(self));
+        let rows = pages::visible_rows(self, h.page);
         let hits: Vec<String> = h
             .hits
             .iter()
             .map(|(r, click)| {
                 let name = match click {
-                    Click::Nav(item) => format!(
-                        "nav:{}",
-                        NAV.iter().find(|n| n.0 == *item).map_or("", |n| n.1)
-                    ),
+                    Click::Nav(item) => format!("nav:{}", item.label()),
                     Click::Logo => "logo".into(),
                     Click::Case(i) => format!("case:{i}"),
                     Click::Primary => "primary".into(),
                     Click::Peek => "peek".into(),
+                    Click::Act(action) => format!("act:{action:?}"),
+                    Click::Restart => "restart".into(),
+                    Click::Burn => "burn".into(),
                     Click::Link(url) => format!("link:{url}"),
                     Click::Welcome => "welcome".into(),
                     Click::WelcomeStep(n) => format!("welcome-step:{n}"),
                     Click::Row(i) => {
                         format!("row:{}", rows.get(*i).map_or("", |r| r.label.as_str()))
+                    }
+                    Click::RowBurn(i) => {
+                        format!("burn:{}", rows.get(*i).map_or("", |r| r.label.as_str()))
                     }
                     Click::Slider(i, _) => {
                         format!("slider:{}", rows.get(*i).map_or("", |r| r.label.as_str()))
@@ -318,12 +376,18 @@ impl MenuState {
                 )
             })
             .collect();
+        let cases: Vec<String> = h
+            .cases(self)
+            .iter()
+            .take(16)
+            .map(|c| format!("[\"{}\",\"{}\"]", escape(&c.title), escape(&c.line)))
+            .collect();
         let left = match h.countdown {
             Countdown::Running(l) => l,
             _ => -1.0,
         };
         format!(
-            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"first_visit\":{},\"covers\":{},\"hits\":[{}]}}",
+            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"cases\":[{}],\"hits\":[{}]}}",
             h.page.name(),
             if h.zone == Zone::Nav { "nav" } else { "body" },
             self.home_probe().1,
@@ -332,21 +396,40 @@ impl MenuState {
             h.nav,
             h.peek,
             h.started,
+            h.pausing(self),
+            h.launch.as_ref().map_or(-1.0, |l| l.t),
+            nav_items(h.pausing(self)).len(),
             h.first_visit,
             h.covers.loaded(),
+            cases.join(","),
             hits.join(",")
         )
     }
 
     /// Put the home screen in a given state, for headless previews.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub fn home_preview(&mut self, page: &str, case: usize, demo: bool, countdown: bool) {
+    pub fn home_preview(
+        &mut self,
+        page: &str,
+        case: usize,
+        demo: bool,
+        countdown: bool,
+        launch: Option<f32>,
+    ) {
         let Some(h) = self.home.as_mut() else {
             return;
         };
-        h.started = page == "pause";
+        h.started = launch.is_none() && (page == "game" || page == "resume");
+        if h.started {
+            h.feed.current = Some((
+                crate::app::DEMO_DISC_ID.to_string(),
+                "PSoXide Demo Disc".to_string(),
+            ));
+        }
         h.page = match page {
-            "library" => Page::Library,
+            "game" => Page::Game,
+            "controls" => Page::Controls,
+            "debug" => Page::Debug,
             "settings" => Page::Settings,
             "welcome" => Page::Welcome,
             _ => Page::Home,
@@ -361,6 +444,57 @@ impl MenuState {
             h.first_visit = true;
             h.countdown = Countdown::Running(6.0);
         }
+        if let Some(t) = launch {
+            h.launch = Some(launch::Launch {
+                t,
+                action: MenuAction::StartDemoDisc,
+                kind: CoverKind::Demo,
+                title: "PSoXide Demo Disc".into(),
+                cover_key: None,
+                frozen: true,
+            });
+        }
+    }
+
+    /// Show a section of the shell by name; false when it does not exist.
+    pub fn home_goto(&mut self, page: &str) -> bool {
+        if self.home.is_none() {
+            return false;
+        }
+        let item = match page {
+            "Home" => NavItem::Home,
+            "Game" => NavItem::Game,
+            "Controls" => NavItem::Controls,
+            "Settings" => NavItem::Settings,
+            "Debug" => NavItem::Debug,
+            _ => return false,
+        };
+        let mut shell = self.home.take().expect("home");
+        shell.open_nav(self, item);
+        self.home = Some(shell);
+        true
+    }
+
+    /// Where the shell wants a Controls or Debug section drawn this frame.
+    pub fn home_section(&self) -> Option<(&'static str, Rect)> {
+        let h = self.home.as_ref()?;
+        let rect = h.section?;
+        match h.page {
+            Page::Controls | Page::Debug if self.open => Some((h.page.name(), rect)),
+            _ => None,
+        }
+    }
+
+    /// Whether Escape, the pad's Select+Start and the touch Menu button mean
+    /// "back" right now: on the home screen before anything started (they never
+    /// start the disc) and on any section other than Home (they never leave the
+    /// shell from there).
+    pub fn home_blocks_ps_button(&self) -> bool {
+        self.open
+            && self
+                .home
+                .as_ref()
+                .is_some_and(|h| !h.started || h.page != Page::Home)
     }
 
     /// Whether the welcome pages are showing.
@@ -405,18 +539,36 @@ impl HomeState {
         }
     }
 
-    /// The case row: (kind, title, one line, action).
+    /// The shelf: the game you left, the demo disc, your own discs.
     fn cases(&self, ms: &MenuState) -> Vec<CaseItem> {
         let mut out = Vec::new();
-        let demo = ms
-            .homebrew
-            .iter()
-            .find(|e| e.id == crate::app::DEMO_DISC_ID)
-            .map(|e| e.id.clone())
-            .or_else(|| {
-                (self.feed.demo != DemoStatus::Absent).then(|| crate::app::DEMO_DISC_ID.to_string())
+        let current = self.feed.current.as_ref().filter(|_| self.pausing(ms));
+        let demo_id = crate::app::DEMO_DISC_ID;
+        let has_demo =
+            ms.homebrew.iter().any(|e| e.id == demo_id) || self.feed.demo != DemoStatus::Absent;
+        if let Some((id, title)) = current {
+            let is_demo = id == demo_id;
+            out.push(CaseItem {
+                kind: if is_demo {
+                    CoverKind::Demo
+                } else {
+                    CoverKind::Plain
+                },
+                title: if is_demo {
+                    "PSoXide Demo Disc".into()
+                } else {
+                    title.clone()
+                },
+                line: "Paused. Pick up where you left off".into(),
+                action: MenuAction::ResumeGame,
+                button: "Resume",
+                cover_key: (!is_demo).then(|| id.clone()),
+                restart: Some(MenuAction::LaunchGame(id.clone())),
+                burn: None,
+                launches: false,
             });
-        if demo.is_some() {
+        }
+        if has_demo && current.is_none_or(|(id, _)| id != demo_id) {
             out.push(CaseItem {
                 kind: CoverKind::Demo,
                 title: "PSoXide Demo Disc".into(),
@@ -424,6 +576,9 @@ impl HomeState {
                 action: MenuAction::StartDemoDisc,
                 button: "Start disc",
                 cover_key: None,
+                restart: None,
+                burn: None,
+                launches: true,
             });
         }
         out.push(CaseItem {
@@ -433,45 +588,153 @@ impl HomeState {
             action: MenuAction::ChooseGamesPath,
             button: "Choose folder",
             cover_key: None,
+            restart: None,
+            burn: None,
+            launches: false,
         });
-        // Recently opened discs; failing that, what is in the games folder.
-        let shown = if ms.recent_discs.is_empty() {
-            &ms.games
-        } else {
-            &ms.recent_discs
-        };
-        for item in shown.iter().take(5) {
+        // A folder connected on an earlier visit is one click from being open again.
+        #[cfg(target_arch = "wasm32")]
+        if ms.saved_folder {
             out.push(CaseItem {
-                kind: CoverKind::Plain,
-                title: item.title.clone(),
-                line: if ms.recent_discs.is_empty() {
-                    "From your games folder".into()
-                } else {
-                    "Played recently".into()
-                },
-                action: MenuAction::LaunchGame(item.id.clone()),
-                button: "Play",
-                cover_key: Some(item.id.clone()),
+                kind: CoverKind::Ghost,
+                title: "Reopen your games folder".into(),
+                line: "The folder you opened last time".into(),
+                action: MenuAction::Reconnect,
+                button: "Reopen folder",
+                cover_key: None,
+                restart: None,
+                burn: None,
+                launches: false,
             });
         }
+        let mut shown: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        if let Some((id, _)) = current {
+            shown.insert(id.as_str());
+        }
+        // Real recents first: discs this browser or this machine really played.
+        for item in ms.recent_discs.iter().take(5) {
+            if shown.insert(item.id.as_str()) {
+                out.push(CaseItem {
+                    kind: CoverKind::Plain,
+                    title: item.title.clone(),
+                    line: "Played recently".into(),
+                    action: MenuAction::LaunchGame(item.id.clone()),
+                    button: "Play",
+                    cover_key: Some(item.id.clone()),
+                    restart: None,
+                    burn: None,
+                    launches: true,
+                });
+            }
+        }
+        // Then the rest of the shelf: your games folder and the SDK examples.
+        let mut rest: Vec<&LibraryItem> = ms.games.iter().collect();
+        rest.sort_by_key(|g| g.title.to_lowercase());
+        for item in rest {
+            if shown.insert(item.id.as_str()) {
+                out.push(CaseItem {
+                    kind: CoverKind::Plain,
+                    title: item.title.clone(),
+                    line: if item.subtitle.is_empty() {
+                        "From your games folder".into()
+                    } else {
+                        item.subtitle.clone()
+                    },
+                    action: MenuAction::LaunchGame(item.id.clone()),
+                    button: "Play",
+                    cover_key: Some(item.id.clone()),
+                    restart: None,
+                    burn: (item.launchable && item.burnable)
+                        .then(|| MenuAction::OpenBurnMenu(item.id.clone())),
+                    launches: true,
+                });
+            }
+        }
+        for item in &ms.homebrew {
+            if item.id != demo_id && shown.insert(item.id.as_str()) {
+                out.push(CaseItem {
+                    kind: CoverKind::Plain,
+                    title: item.title.clone(),
+                    line: if item.launchable {
+                        item.subtitle.clone()
+                    } else {
+                        "Not built yet".into()
+                    },
+                    action: if item.launchable {
+                        MenuAction::LaunchGame(item.id.clone())
+                    } else {
+                        MenuAction::BuildExamples
+                    },
+                    button: if item.launchable {
+                        "Play"
+                    } else {
+                        "Build examples"
+                    },
+                    // The SDK's own examples have no box art to look up.
+                    cover_key: None,
+                    restart: None,
+                    burn: (item.launchable && item.burnable)
+                        .then(|| MenuAction::OpenBurnMenu(item.id.clone())),
+                    launches: item.launchable,
+                });
+            }
+        }
         out
+    }
+
+    /// Run a case's action: a disc plays the launch sequence first.
+    fn activate(
+        &mut self,
+        case: &CaseItem,
+        action: &MenuAction,
+        launches: bool,
+    ) -> Option<MenuAction> {
+        if launches && self.launch.is_none() {
+            self.launch = Some(launch::Launch {
+                t: 0.0,
+                action: action.clone(),
+                kind: case.kind,
+                title: case.title.clone(),
+                cover_key: case.cover_key.clone(),
+                frozen: false,
+            });
+            self.launch_sent = false;
+            self.peek = false;
+            return None;
+        }
+        Some(action.clone())
     }
 
     fn update(&mut self, ms: &mut MenuState, input: &MenuInput) -> Option<MenuAction> {
         if let Some(action) = ms.pending_pointer_action.take() {
             return Some(action);
         }
-        if self.take_countdown_start() {
-            return Some(MenuAction::StartDemoDisc);
-        }
         if input.toggle_open {
             ms.open = !ms.open;
         }
         self.note_open_state(ms);
+        if self.take_countdown_start() {
+            if let Some(case) = self
+                .cases(ms)
+                .into_iter()
+                .find(|c| c.action == MenuAction::StartDemoDisc)
+            {
+                let action = case.action.clone();
+                return self.activate(&case, &action, true);
+            }
+        }
         if !ms.open {
             return None;
         }
-        if input.up || input.down || input.left || input.right || input.confirm || input.back {
+        let any = input.up
+            || input.down
+            || input.left
+            || input.right
+            || input.confirm
+            || input.back
+            || input.tab_prev
+            || input.tab_next;
+        if any {
             // The press that cancels the countdown only cancels it: it does not
             // also press Start disc.
             let counting = matches!(self.countdown, Countdown::Armed | Countdown::Running(_))
@@ -486,16 +749,46 @@ impl HomeState {
         if ms.about_open {
             ms.about_open = false;
         }
+        // The launch sequence takes input only to skip it, or to give up when
+        // the game is slow to come.
+        if let Some(l) = self.launch.as_mut() {
+            if any {
+                if self.launch_sent {
+                    self.launch = None;
+                    self.launch_sent = false;
+                } else if l.t > launch::SKIP_AFTER {
+                    l.t = launch::DURATION;
+                }
+            }
+            return None;
+        }
         // A panel that floats over the shell takes Back first.
         if input.back && ms.save_states_open {
             ms.close_top_panel();
             return None;
         }
+        if (input.tab_prev || input.tab_next) && self.page != Page::Welcome {
+            self.cycle_tab(ms, if input.tab_next { 1 } else { -1 });
+            return None;
+        }
         match self.page {
             Page::Welcome => self.update_welcome(input),
-            Page::Home if !self.pausing(ms) => self.update_home(ms, input),
-            _ => self.update_list(ms, input),
+            Page::Home => self.update_home(ms, input),
+            Page::Game | Page::Settings => self.update_list(ms, input),
+            Page::Controls | Page::Debug => self.update_section(ms, input),
         }
+    }
+
+    /// L1/R1 and friends: the next section of the nav, wrapping.
+    fn cycle_tab(&mut self, ms: &mut MenuState, step: i32) {
+        let items = nav_items(self.pausing(ms));
+        let at = items
+            .iter()
+            .position(|i| i.page() == self.page)
+            .unwrap_or(0) as i32;
+        let next = (at + step).rem_euclid(items.len() as i32) as usize;
+        self.nav = next;
+        self.open_nav(ms, items[next]);
     }
 
     fn update_welcome(&mut self, input: &MenuInput) -> Option<MenuAction> {
@@ -515,97 +808,118 @@ impl HomeState {
         None
     }
 
+    /// Left, right and confirm on the nav row.
+    fn update_nav(&mut self, ms: &mut MenuState, input: &MenuInput) {
+        let items = nav_items(self.pausing(ms));
+        self.nav = self.nav.min(items.len() - 1);
+        if input.left && self.nav > 0 {
+            self.nav -= 1;
+        }
+        if input.right && self.nav + 1 < items.len() {
+            self.nav += 1;
+        }
+        if input.down || input.back {
+            self.zone = Zone::Body;
+        }
+        if input.confirm {
+            self.open_nav(ms, items[self.nav]);
+        }
+    }
+
     fn update_home(&mut self, ms: &mut MenuState, input: &MenuInput) -> Option<MenuAction> {
+        if self.zone == Zone::Nav {
+            self.update_nav(ms, input);
+            return None;
+        }
         let cases = self.cases(ms);
         let last = cases.len().saturating_sub(1);
-        match self.zone {
-            Zone::Body => {
-                if input.left && self.case_focus > 0 {
-                    self.case_focus -= 1;
-                }
-                if input.right && self.case_focus < last {
-                    self.case_focus += 1;
-                }
-                if input.up {
-                    self.zone = Zone::Nav;
-                }
-                if input.confirm {
-                    return cases.get(self.case_focus).map(|c| c.action.clone());
-                }
-                if input.back {
-                    if self.peek {
-                        self.peek = false;
-                    } else if self.started {
-                        ms.open = false;
-                    }
-                }
+        if input.left && self.case_focus > 0 {
+            self.case_focus -= 1;
+        }
+        if input.right && self.case_focus < last {
+            self.case_focus += 1;
+        }
+        if input.up {
+            self.zone = Zone::Nav;
+            self.nav = nav_items(self.pausing(ms))
+                .iter()
+                .position(|i| i.page() == Page::Home)
+                .unwrap_or(0);
+        }
+        if input.confirm {
+            if let Some(case) = cases.get(self.case_focus) {
+                let action = case.action.clone();
+                return self.activate(case, &action, case.launches);
             }
-            Zone::Nav => {
-                if input.left && self.nav > 0 {
-                    self.nav -= 1;
-                }
-                if input.right && self.nav + 1 < NAV.len() {
-                    self.nav += 1;
-                }
-                if input.down || input.back {
-                    self.zone = Zone::Body;
-                }
-                if input.confirm {
-                    return self.open_nav(ms, NAV[self.nav].0);
-                }
+        }
+        if input.back {
+            if self.peek {
+                self.peek = false;
+            } else if self.pausing(ms) {
+                // Back from a game's shell resumes it.
+                ms.open = false;
             }
         }
         None
     }
 
-    fn open_nav(&mut self, ms: &mut MenuState, item: NavItem) -> Option<MenuAction> {
+    /// Show a section of the shell.
+    fn open_nav(&mut self, ms: &mut MenuState, item: NavItem) {
+        self.page = item.page();
         match item {
-            NavItem::Library => {
-                self.page = Page::Library;
-                ms.select_category("Library");
-            }
-            NavItem::Settings => {
-                self.page = Page::Settings;
-                ms.select_category("Settings");
-            }
-            NavItem::Debug => return Some(MenuAction::OpenDebug),
+            NavItem::Game => ms.select_category("Game"),
+            NavItem::Settings => ms.select_category("Settings"),
+            _ => {}
         }
         self.zone = Zone::Body;
         self.list_scroll = 0.0;
+        self.last_row = usize::MAX;
+        self.peek = false;
+    }
+
+    /// Controls and Debug: the section draws itself; the shell gives Back and the nav.
+    fn update_section(&mut self, ms: &mut MenuState, input: &MenuInput) -> Option<MenuAction> {
+        if self.zone == Zone::Nav {
+            self.update_nav(ms, input);
+            return None;
+        }
+        if input.up {
+            self.zone = Zone::Nav;
+            self.nav = nav_items(self.pausing(ms))
+                .iter()
+                .position(|i| i.page() == self.page)
+                .unwrap_or(0);
+        }
+        if input.back {
+            self.page = Page::Home;
+        }
         None
     }
 
-    /// Library, Settings and the pause list: rows of the matching category.
+    /// Game and Settings: rows of the matching category.
     fn update_list(&mut self, ms: &mut MenuState, input: &MenuInput) -> Option<MenuAction> {
-        let name = match self.page {
-            Page::Library => "Library",
-            Page::Settings => "Settings",
-            _ => "Game",
+        let name = if self.page == Page::Settings {
+            "Settings"
+        } else {
+            "Game"
         };
         if ms.categories[ms.category_index].name != name {
             ms.select_category(name);
         }
         if self.zone == Zone::Nav {
-            if input.left && self.nav > 0 {
-                self.nav -= 1;
-            }
-            if input.right && self.nav + 1 < NAV.len() {
-                self.nav += 1;
-            }
-            if input.down || input.back {
-                self.zone = Zone::Body;
-            }
-            if input.confirm {
-                return self.open_nav(ms, NAV[self.nav].0);
-            }
+            self.update_nav(ms, input);
             return None;
         }
-        let rows = pages::visible_rows(ms, self.page, self.pausing(ms));
+        let rows = pages::visible_rows(ms, self.page);
         let count = rows.len();
         if count > 0 {
             if input.up {
                 if ms.item_index == 0 {
                     self.zone = Zone::Nav;
+                    self.nav = nav_items(self.pausing(ms))
+                        .iter()
+                        .position(|i| i.page() == self.page)
+                        .unwrap_or(0);
                 } else {
                     ms.item_index -= 1;
                 }
@@ -625,11 +939,7 @@ impl HomeState {
             }
         }
         if input.back {
-            if self.page == Page::Home {
-                ms.open = false;
-            } else {
-                self.page = Page::Home;
-            }
+            self.page = Page::Home;
         }
         None
     }
@@ -682,8 +992,7 @@ impl HomeState {
         ));
         self.hits.clear();
         let lay = Layout::new(full, self.feed.safe);
-        let pausing = self.pausing(ms);
-        let on_scene = !pausing;
+        let in_game = self.pausing(ms);
         self.dither.get_or_insert_with(|| {
             ctx.load_texture(
                 "home-dither",
@@ -697,33 +1006,48 @@ impl HomeState {
             )
         });
         let dither = self.dither.as_ref().map(egui::TextureHandle::id);
-        if on_scene {
-            layer.rect_filled(full, 0.0, fade(scene::VOID, appear));
-            let page_dim = if self.page == Page::Home { 1.0 } else { 0.45 };
-            scene::draw_backdrop(
-                &layer,
-                dither,
-                scene::Backdrop {
-                    rect: full,
-                    horizon: lay.horizon,
-                    alpha: appear * page_dim,
-                    time: self.time,
-                },
-            );
+        // The same shell before and during a game: over the void, or over the
+        // game itself dimmed down.
+        if in_game {
+            let scrim = f32::from(ms.backdrop_pct.max(50)) * 2.55 * 0.8;
+            layer.rect_filled(full, 0.0, Color32::from_black_alpha((appear * scrim) as u8));
         } else {
-            layer.rect_filled(full, 0.0, Color32::from_black_alpha((appear * 214.0) as u8));
+            layer.rect_filled(full, 0.0, fade(scene::VOID, appear));
         }
+        let page_dim = if self.page == Page::Home { 1.0 } else { 0.45 };
+        scene::draw_backdrop(
+            &layer,
+            dither,
+            scene::Backdrop {
+                rect: full,
+                horizon: lay.horizon,
+                alpha: appear * page_dim * if in_game { 0.7 } else { 1.0 },
+                time: self.time,
+            },
+        );
         let mut pc = PageCtx {
             painter: &layer,
             lay: &lay,
             appear,
         };
-        match self.page {
-            Page::Home if !pausing => self.draw_home(ms, ctx, &mut pc),
-            Page::Welcome => self.draw_welcome(ms, &mut pc),
-            _ => self.draw_list_page(ms, ctx, &mut pc),
+        self.section = None;
+        if self.label_tex.is_none() {
+            self.label_tex = decode_label(ctx);
         }
-        self.draw_chrome(ms, &mut pc, warning);
+        self.tick_launch(dt);
+        if self.launch.is_some() {
+            self.draw_launch(ms, ctx, &mut pc);
+        } else {
+            match self.page {
+                Page::Home => self.draw_home(ms, ctx, &mut pc),
+                Page::Welcome => self.draw_welcome(ms, &mut pc),
+                Page::Controls | Page::Debug => self.draw_section_frame(&mut pc),
+                Page::Game | Page::Settings => self.draw_list_page(ms, ctx, &mut pc),
+            }
+        }
+        if self.launch.is_none() {
+            self.draw_chrome(ms, &mut pc, warning);
+        }
         self.handle_pointer(ms, ctx);
     }
 
@@ -768,6 +1092,11 @@ struct CaseItem {
     action: MenuAction,
     button: &'static str,
     cover_key: Option<String>,
+    /// A second, quiet action: start the game over.
+    restart: Option<MenuAction>,
+    burn: Option<MenuAction>,
+    /// Whether choosing it plays the launch sequence.
+    launches: bool,
 }
 
 /// Screen geometry for the current size and orientation.
@@ -849,7 +1178,106 @@ pub(crate) fn is_first_visit() -> bool {
 #[cfg(target_arch = "wasm32")]
 const VISIT_KEY: &str = "psoxide.home.visited";
 
+fn decode_label(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    const LABEL_PNG: &[u8] =
+        include_bytes!("../../../../../../../assets/branding/demo-disc-label.png");
+    let rgba = image::load_from_memory(LABEL_PNG).ok()?.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw());
+    Some(ctx.load_texture("demo-disc-label", img, egui::TextureOptions::LINEAR))
+}
+
 impl HomeState {
+    /// Advance the launch sequence; at its end the action goes to the app and
+    /// the last moment holds until the game's boot closes the shell.
+    fn tick_launch(&mut self, dt: f32) {
+        let Some(l) = self.launch.as_mut() else {
+            return;
+        };
+        if l.frozen {
+            return;
+        }
+        if self.launch_sent {
+            // Holding on the spinning disc while the game loads.
+            l.t = 4.6 + (l.t - 4.6 + dt) % 0.5;
+            return;
+        }
+        l.t += dt;
+        if l.t >= launch::DURATION {
+            self.launch_sent = true;
+            l.t = 4.6;
+            self.pending_launch = Some(l.action.clone());
+        }
+    }
+
+    fn draw_launch(&mut self, ms: &mut MenuState, ctx: &egui::Context, pc: &mut PageCtx<'_>) {
+        let Some(l) = self.launch.as_ref() else {
+            return;
+        };
+        let art = l
+            .cover_key
+            .as_deref()
+            .and_then(|k| self.covers.texture(ctx, k));
+        let label = self.label_tex.as_ref().map(egui::TextureHandle::id);
+        launch::draw(pc.painter, pc.lay, l, art, label, pc.appear);
+        if let Some(action) = self.pending_launch.take() {
+            ms.pending_pointer_action = Some(action);
+        }
+    }
+
+    /// The frame of a Controls or Debug section; the content comes from the
+    /// app around the shell (it needs the emulator state).
+    fn draw_section_frame(&mut self, pc: &mut PageCtx<'_>) {
+        let lay = pc.lay;
+        let u = lay.u;
+        let top = lay.safe.top()
+            + match lay.kind {
+                LayoutKind::Desktop => 88.0 * u,
+                LayoutKind::Portrait => 96.0 * u,
+                LayoutKind::Landscape => 62.0 * u,
+            };
+        let side = if lay.kind == LayoutKind::Desktop {
+            48.0 * u
+        } else {
+            12.0 * u
+        };
+        let rect = Rect::from_min_max(
+            Pos2::new(lay.safe.left() + side, top),
+            Pos2::new(
+                lay.safe.right() - side,
+                lay.safe.bottom()
+                    - if lay.kind == LayoutKind::Desktop {
+                        12.0 * u
+                    } else {
+                        56.0 * u
+                    },
+            ),
+        );
+        pc.painter.rect_filled(
+            rect.expand(6.0),
+            10.0,
+            fade(Color32::from_rgb(8, 14, 20), 0.94 * pc.appear),
+        );
+        pc.painter.rect_stroke(
+            rect.expand(6.0),
+            10.0,
+            Stroke::new(1.0, fade(CYAN, 0.25 * pc.appear)),
+            egui::StrokeKind::Outside,
+        );
+        self.section = Some(rect);
+        if lay.kind != LayoutKind::Desktop {
+            let back = pc.painter.text(
+                Pos2::new(lay.safe.left() + 20.0 * u, lay.safe.bottom() - 28.0 * u),
+                Align2::LEFT_CENTER,
+                "\u{2039} Back",
+                FontId::proportional(15.0 * u),
+                fade(Color32::from_rgb(160, 180, 195), pc.appear),
+            );
+            self.hits
+                .push((back.expand2(Vec2::new(14.0, 14.0)), Click::Back));
+        }
+    }
+
     fn draw_home(&mut self, ms: &mut MenuState, ctx: &egui::Context, pc: &mut PageCtx<'_>) {
         let lay = *pc.lay;
         let p = pc.painter;
@@ -880,6 +1308,9 @@ impl HomeState {
         for i in order {
             let item = &cases[i];
             let d = i as f32 - self.case_pos;
+            if d.abs() > 4.6 {
+                continue;
+            }
             let near = (1.0 - d.abs()).clamp(0.0, 1.0);
             let hero = matches!(item.kind, CoverKind::Demo);
             let size = if hero {
@@ -906,6 +1337,7 @@ impl HomeState {
                 center,
                 yaw: sway * near - d.clamp(-1.5, 1.5) * 0.30,
                 pitch: -0.07,
+                lid: 0.0,
                 scale,
                 opacity: a * (0.38 + 0.62 * near),
                 seed: hash_str(&item.title),
@@ -976,7 +1408,7 @@ impl HomeState {
         }
         // The countdown line, or the loading line, or nothing.
         let mut cd_y = below + 16.0 * u;
-        if matches!(item.kind, CoverKind::Demo) {
+        if matches!(item.kind, CoverKind::Demo) && !self.started {
             if let Some(line) = self.progress_line() {
                 self.draw_progress_line(p, tx, cd_y, align, u, a, &line);
                 cd_y += 22.0 * u;
@@ -1013,6 +1445,37 @@ impl HomeState {
             fade(Color32::from_rgb(4, 34, 42), a),
         );
         self.hits.push((btn, Click::Primary));
+        // Quiet second actions under the button.
+        let mut qy = btn.bottom() + 14.0 * u;
+        let quiet = |p: &egui::Painter, text: &str, y: f32| {
+            p.text(
+                Pos2::new(
+                    match align {
+                        Align2::LEFT_TOP => btn.left(),
+                        _ => btn.center().x,
+                    },
+                    y,
+                ),
+                match align {
+                    Align2::LEFT_TOP => Align2::LEFT_TOP,
+                    _ => Align2::CENTER_TOP,
+                },
+                text,
+                FontId::proportional(13.0 * u),
+                fade(Color32::from_rgb(111, 195, 214), a),
+            )
+        };
+        if item.restart.is_some() {
+            let r = quiet(p, "Start over", qy);
+            self.hits
+                .push((r.expand2(Vec2::new(12.0, 8.0)), Click::Restart));
+            qy = r.bottom() + 6.0 * u;
+        }
+        if item.burn.is_some() {
+            let r = quiet(p, "Burn to CD", qy);
+            self.hits
+                .push((r.expand2(Vec2::new(12.0, 8.0)), Click::Burn));
+        }
         // Quiet links at the bottom.
         self.draw_footer(pc);
         if self.peek && matches!(item.kind, CoverKind::Demo) {
@@ -1182,6 +1645,26 @@ impl HomeState {
             };
             hint(true, "Select");
             hint(false, "Back");
+            // Desktop only: a disc that is not in the games folder, and a rescan.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let mut qx = x + 40.0 * u;
+                for (label, action) in [
+                    ("Open disc...", MenuAction::OpenDisc),
+                    ("Refresh library", MenuAction::RescanLibrary),
+                ] {
+                    let r = p.text(
+                        Pos2::new(qx, y),
+                        Align2::LEFT_CENTER,
+                        label,
+                        FontId::proportional(13.0 * u),
+                        link,
+                    );
+                    self.hits
+                        .push((r.expand2(Vec2::new(8.0, 10.0)), Click::Act(action)));
+                    qx = r.right() + 24.0 * u;
+                }
+            }
         }
     }
 
@@ -1273,14 +1756,11 @@ impl HomeState {
         } else {
             logo_rect.bottom() + 20.0 * u
         };
-        let active = match self.page {
-            Page::Library => Some(0),
-            Page::Settings => Some(1),
-            _ => None,
-        };
-        for (i, (item, label)) in NAV.iter().enumerate() {
+        let items = nav_items(self.pausing(ms));
+        let gap = if desktop { 26.0 * u } else { 18.0 * u };
+        for (i, item) in items.iter().enumerate() {
             let focused = self.zone == Zone::Nav && self.nav == i;
-            let on = active == Some(i) || focused;
+            let on = item.page() == self.page || focused;
             let col = if on {
                 Color32::WHITE
             } else {
@@ -1289,7 +1769,7 @@ impl HomeState {
             let r = p.text(
                 Pos2::new(x, ny),
                 Align2::LEFT_CENTER,
-                *label,
+                item.label(),
                 FontId::proportional(if desktop { 15.5 * u } else { 15.0 * u }),
                 fade(col, a),
             );
@@ -1316,7 +1796,7 @@ impl HomeState {
             }
             self.hits
                 .push((r.expand2(Vec2::new(10.0, 12.0)), Click::Nav(*item)));
-            x = r.right() + 26.0 * u;
+            x = r.right() + gap;
         }
         // Controller indicators, top right: small, grey, cyan when in use.
         let mut ix = self
@@ -1402,6 +1882,7 @@ impl HomeState {
                     _ => None,
                 });
                 self.press = Some(Press {
+                    start: pos,
                     travel: 0.0,
                     scrolled: false,
                     on_slider: slider,
@@ -1419,7 +1900,7 @@ impl HomeState {
                     ms.pending_pointer_action = Some(action);
                 }
             } else if press.travel > 10.0
-                && matches!(self.page, Page::Library | Page::Settings | Page::Home)
+                && matches!(self.page, Page::Game | Page::Settings | Page::Home)
             {
                 press.scrolled = true;
                 self.list_scroll = (self.list_scroll - delta.y).max(0.0);
@@ -1430,6 +1911,21 @@ impl HomeState {
             let Some(pos) = pos else {
                 return;
             };
+            // A sideways swipe: the next case on Home, the next section elsewhere.
+            if let Some(pr) = press {
+                let (dx, dy) = (pos.x - pr.start.x, pos.y - pr.start.y);
+                if pr.on_slider.is_none() && dx.abs() > 80.0 && dy.abs() < dx.abs() * 0.6 {
+                    self.cancel_countdown();
+                    let step = if dx < 0.0 { 1 } else { -1 };
+                    if self.page == Page::Home {
+                        let last = self.cases(ms).len().saturating_sub(1) as i32;
+                        self.case_focus = (self.case_focus as i32 + step).clamp(0, last) as usize;
+                    } else if self.page != Page::Welcome {
+                        self.cycle_tab(ms, step);
+                    }
+                    return;
+                }
+            }
             if press.is_some_and(|p| p.scrolled || p.on_slider.is_some()) {
                 return;
             }
@@ -1453,8 +1949,7 @@ impl HomeState {
     fn apply_click(&mut self, ms: &mut MenuState, click: Click) -> Option<MenuAction> {
         match click {
             Click::Nav(item) => {
-                self.zone = Zone::Body;
-                return self.open_nav(ms, item);
+                self.open_nav(ms, item);
             }
             Click::Logo => {
                 self.page = Page::Home;
@@ -1463,13 +1958,28 @@ impl HomeState {
             Click::Case(i) => {
                 let cases = self.cases(ms);
                 if i == self.case_focus {
-                    return cases.get(i).map(|c| c.action.clone());
+                    let case = cases.get(i)?;
+                    let action = case.action.clone();
+                    return self.activate(case, &action, case.launches);
                 }
                 self.case_focus = i.min(cases.len().saturating_sub(1));
             }
             Click::Primary => {
                 let cases = self.cases(ms);
-                return cases.get(self.case_focus).map(|c| c.action.clone());
+                let case = cases.get(self.case_focus)?;
+                let action = case.action.clone();
+                return self.activate(case, &action, case.launches);
+            }
+            Click::Restart => {
+                let cases = self.cases(ms);
+                let case = cases.get(self.case_focus)?;
+                let action = case.restart.clone()?;
+                return self.activate(case, &action, true);
+            }
+            Click::Act(action) => return Some(action),
+            Click::Burn => {
+                let cases = self.cases(ms);
+                return cases.get(self.case_focus).and_then(|c| c.burn.clone());
             }
             Click::Peek => self.peek = !self.peek,
             Click::Link(url) => return Some(MenuAction::OpenUrl(url.to_string())),
@@ -1486,12 +1996,16 @@ impl HomeState {
                 }
             }
             Click::Row(i) => {
-                let rows = pages::visible_rows(ms, self.page, self.pausing(ms));
+                let rows = pages::visible_rows(ms, self.page);
                 ms.item_index = i.min(rows.len().saturating_sub(1));
                 self.zone = Zone::Body;
                 if let Some(row) = rows.get(i) {
                     return Some(row.action.clone());
                 }
+            }
+            Click::RowBurn(i) => {
+                let rows = pages::visible_rows(ms, self.page);
+                return rows.get(i).and_then(|r| r.burn.clone());
             }
             Click::Back => {
                 if self.page == Page::Home {
@@ -1623,11 +2137,11 @@ mod tests {
         assert_eq!(ms.home_probe().1, "running");
         tick(&mut ms, 1.0);
         assert_eq!(ms.home_probe().1, "done");
-        assert_eq!(
-            press(&mut ms, MenuInput::default()),
-            Some(MenuAction::StartDemoDisc)
+        assert_eq!(press(&mut ms, MenuInput::default()), None);
+        assert!(
+            ms.home.as_ref().expect("home").launch.is_some(),
+            "the launch sequence starts"
         );
-        assert_eq!(press(&mut ms, MenuInput::default()), None, "one shot");
     }
 
     #[test]
@@ -1693,9 +2207,10 @@ mod tests {
                     ..Default::default()
                 }
             ),
-            Some(MenuAction::StartDemoDisc),
+            None,
             "the next press is a real one"
         );
+        assert!(ms.home.as_ref().expect("home").launch.is_some());
     }
 
     #[test]
@@ -1705,7 +2220,19 @@ mod tests {
             confirm: true,
             ..Default::default()
         };
-        assert_eq!(press(&mut ms, confirm), Some(MenuAction::StartDemoDisc));
+        assert_eq!(
+            press(&mut ms, confirm),
+            None,
+            "the disc plays its launch sequence first"
+        );
+        let launch = ms
+            .home
+            .as_mut()
+            .expect("home")
+            .launch
+            .take()
+            .expect("launching");
+        assert_eq!(launch.action, MenuAction::StartDemoDisc);
         press(
             &mut ms,
             MenuInput {
@@ -1719,29 +2246,49 @@ mod tests {
     #[test]
     fn up_reaches_the_nav_and_enter_opens_a_page_back_returns() {
         let mut ms = home(false, DemoStatus::Ready);
-        press(
-            &mut ms,
-            MenuInput {
-                up: true,
-                ..Default::default()
-            },
-        );
-        press(
-            &mut ms,
-            MenuInput {
-                right: true,
-                ..Default::default()
-            },
-        );
-        press(
-            &mut ms,
-            MenuInput {
-                confirm: true,
-                ..Default::default()
-            },
-        );
+        let key = |f: fn(&mut MenuInput)| {
+            let mut i = MenuInput::default();
+            f(&mut i);
+            i
+        };
+        press(&mut ms, key(|i| i.up = true));
+        press(&mut ms, key(|i| i.right = true));
+        press(&mut ms, key(|i| i.right = true));
+        press(&mut ms, key(|i| i.confirm = true));
         assert_eq!(ms.home_probe().0, "Settings");
         assert_eq!(ms.selection_probe().0, "Settings");
+        press(&mut ms, key(|i| i.back = true));
+        assert_eq!(ms.home_probe().0, "Home");
+        // Debug is a page of the shell like the others, and Back leaves it.
+        press(&mut ms, key(|i| i.up = true));
+        for _ in 0..3 {
+            press(&mut ms, key(|i| i.right = true));
+        }
+        press(&mut ms, key(|i| i.confirm = true));
+        assert_eq!(ms.home_probe().0, "Debug");
+        press(&mut ms, key(|i| i.back = true));
+        assert_eq!(ms.home_probe().0, "Home");
+    }
+
+    #[test]
+    fn l1_and_r1_cycle_the_sections_and_wrap() {
+        let mut ms = home(false, DemoStatus::Ready);
+        let next = MenuInput {
+            tab_next: true,
+            ..Default::default()
+        };
+        let prev = MenuInput {
+            tab_prev: true,
+            ..Default::default()
+        };
+        for want in ["Controls", "Settings", "Debug", "Home", "Controls"] {
+            press(&mut ms, next);
+            assert_eq!(ms.home_probe().0, want);
+        }
+        press(&mut ms, prev);
+        press(&mut ms, prev);
+        assert_eq!(ms.home_probe().0, "Debug", "backwards wraps from Home");
+        // Back from any section is Home.
         press(
             &mut ms,
             MenuInput {
@@ -1750,38 +2297,32 @@ mod tests {
             },
         );
         assert_eq!(ms.home_probe().0, "Home");
-        // Debug is an action, not a page.
-        press(
-            &mut ms,
-            MenuInput {
-                up: true,
-                ..Default::default()
-            },
-        );
-        press(
-            &mut ms,
-            MenuInput {
-                right: true,
-                ..Default::default()
-            },
-        );
-        press(
-            &mut ms,
-            MenuInput {
-                right: true,
-                ..Default::default()
-            },
-        );
+    }
+
+    #[test]
+    fn a_started_game_adds_the_game_section_and_a_resume_case() {
+        let mut ms = home(false, DemoStatus::Ready);
+        ms.set_game_loaded(true);
+        let mut h = ms.home.take().expect("home");
+        h.started = true;
+        h.feed.current = Some(("game".into(), "A Game".into()));
+        ms.home = Some(h);
+        let confirm = MenuInput {
+            confirm: true,
+            ..Default::default()
+        };
         assert_eq!(
-            press(
-                &mut ms,
-                MenuInput {
-                    confirm: true,
-                    ..Default::default()
-                }
-            ),
-            Some(MenuAction::OpenDebug)
+            press(&mut ms, confirm),
+            Some(MenuAction::ResumeGame),
+            "the first case is the paused game"
         );
+        let next = MenuInput {
+            tab_next: true,
+            ..Default::default()
+        };
+        press(&mut ms, next);
+        assert_eq!(ms.home_probe().0, "Game");
+        assert_eq!(ms.selection_probe().0, "Game");
     }
 
     #[test]
@@ -1819,27 +2360,15 @@ mod tests {
     fn settings_arrows_step_a_slider_and_flip_a_toggle() {
         let mut ms = home(false, DemoStatus::Absent);
         ms.sync_video_audio(true, "None", 1.0, false);
-        press(
-            &mut ms,
-            MenuInput {
-                up: true,
-                ..Default::default()
-            },
-        );
-        press(
-            &mut ms,
-            MenuInput {
-                right: true,
-                ..Default::default()
-            },
-        );
-        press(
-            &mut ms,
-            MenuInput {
-                confirm: true,
-                ..Default::default()
-            },
-        );
+        for _ in 0..2 {
+            press(
+                &mut ms,
+                MenuInput {
+                    tab_next: true,
+                    ..Default::default()
+                },
+            );
+        }
         for _ in 0..4 {
             press(
                 &mut ms,
@@ -1891,24 +2420,42 @@ mod tests {
     }
 
     #[test]
-    fn reopening_the_shell_starts_at_the_top() {
+    fn the_ps_button_is_back_before_a_start_and_on_sections() {
+        let mut ms = home(true, DemoStatus::Ready);
+        assert!(ms.home_blocks_ps_button(), "Escape means Back here");
+        ms.open = false;
+        press(&mut ms, MenuInput::default());
+        ms.open = true;
+        press(&mut ms, MenuInput::default());
+        assert!(
+            !ms.home_blocks_ps_button(),
+            "after a start, Escape on Home resumes"
+        );
+        press(
+            &mut ms,
+            MenuInput {
+                tab_next: true,
+                ..Default::default()
+            },
+        );
+        assert!(
+            ms.home_blocks_ps_button(),
+            "but on a section it goes back to Home"
+        );
+    }
+
+    #[test]
+    fn reopening_the_shell_starts_at_home() {
         let mut ms = home(false, DemoStatus::Ready);
         ms.set_game_loaded(true);
         press(
             &mut ms,
             MenuInput {
-                up: true,
+                tab_next: true,
                 ..Default::default()
             },
         );
-        press(
-            &mut ms,
-            MenuInput {
-                confirm: true,
-                ..Default::default()
-            },
-        );
-        assert_eq!(ms.home_probe().0, "Library");
+        assert_eq!(ms.home_probe().0, "Controls");
         ms.open = false;
         press(&mut ms, MenuInput::default());
         ms.open = true;
@@ -1917,11 +2464,6 @@ mod tests {
             ms.home_probe().0,
             "Home",
             "not the page left open last time"
-        );
-        assert_eq!(
-            ms.selection_probe().0,
-            "Game",
-            "a started game pauses on its own list"
         );
     }
 }

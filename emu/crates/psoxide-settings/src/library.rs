@@ -608,6 +608,14 @@ fn boot_exe_name(system_cnf: &[u8]) -> Option<String> {
 /// image without one (homebrew with `PSX.EXE`, audio, captures).
 #[must_use]
 pub fn disc_boot_serial(path: &Path) -> Option<String> {
+    // A cue sheet names the image that holds the first track.
+    let bin;
+    let path = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("cue")) {
+        bin = primary_bin_from_cue(path)?;
+        bin.as_path()
+    } else {
+        path
+    };
     let reader = SectorReader::open(path)?;
     let pvd = reader.user(16)?;
     if pvd[0] != 1 || &pvd[1..6] != b"CD001" {
@@ -1683,6 +1691,18 @@ fn synth_sector(user_data: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// Run with `PSOXIDE_SERIAL_IMAGE=<.bin/.cue>` to read a real disc's serial.
+    #[test]
+    #[ignore]
+    fn the_serial_of_a_real_image_is_read() {
+        let Some(path) = std::env::var_os("PSOXIDE_SERIAL_IMAGE") else {
+            return;
+        };
+        let serial = disc_boot_serial(Path::new(&path));
+        println!("serial: {serial:?}");
+        assert!(serial.is_some());
+    }
+
     #[test]
     fn boot_names_become_cover_serials() {
         assert_eq!(

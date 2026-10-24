@@ -172,6 +172,10 @@ pub(crate) struct InputFrame {
     pub(crate) menu_confirm: bool,
     /// Menu: back (Circle went down).
     pub(crate) menu_back: bool,
+    /// Menu: previous section (L1 went down).
+    pub(crate) menu_prev: bool,
+    /// Menu: next section (R1 went down).
+    pub(crate) menu_next: bool,
     /// First non-neutral left stick, for freecam.
     pub(crate) left_stick: (f32, f32),
     /// First non-neutral right stick, for freecam.
@@ -417,6 +421,8 @@ impl InputHub {
         self.previous_mask = resolved;
         frame.menu_confirm = edges & button::CROSS != 0;
         frame.menu_back = edges & button::CIRCLE != 0;
+        frame.menu_prev = edges & button::L1 != 0;
+        frame.menu_next = edges & button::R1 != 0;
         let steps = self.repeat.update(now_ms, resolved & DIRECTIONS);
         frame.menu_up = steps & button::UP != 0;
         frame.menu_down = steps & button::DOWN != 0;

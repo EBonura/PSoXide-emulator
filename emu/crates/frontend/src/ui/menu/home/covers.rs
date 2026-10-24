@@ -170,6 +170,33 @@ impl CoverState {
         if !self.enabled || self.requested.contains(id) || self.failed.contains(id) {
             return None;
         }
+        if !self.sources.contains_key(id) {
+            // The launch id says where the disc is: a library path, a path opened
+            // by hand, or (web) a path inside the connected folder.
+            let from_path = |path: &str| {
+                let p = PathBuf::from(path);
+                let stem = p
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                (stem, p)
+            };
+            let guess = if let Some(path) = id.strip_prefix("path:").or_else(|| id.strip_prefix("open:")) {
+                let (stem, p) = from_path(path);
+                Some(Source {
+                    stem,
+                    path: Some(p),
+                    ..Source::default()
+                })
+            } else {
+                id.strip_prefix("web:").map(|path| Source {
+                    stem: from_path(path).0,
+                    ..Source::default()
+                })
+            };
+            self.sources.insert(id.to_string(), guess?);
+        }
         let source = self.sources.get_mut(id)?;
         #[cfg(not(target_arch = "wasm32"))]
         if !source.serial_read {

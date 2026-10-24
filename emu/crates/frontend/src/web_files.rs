@@ -838,3 +838,32 @@ async fn read_blob(blob: &web_sys::Blob) -> Result<Vec<u8>, String> {
     }
     Ok(bytes)
 }
+
+/// The ids of the folder games this browser played, newest first (kept in
+/// `localStorage`, at most [`RECENT_KEEP`]).
+const RECENTS_KEY: &str = "psoxide.recents";
+const RECENT_KEEP: usize = 8;
+
+pub fn recent_ids() -> Vec<String> {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|s| s.get_item(RECENTS_KEY).ok().flatten())
+        .map(|text| {
+            text.lines()
+                .map(str::to_string)
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Record that the game `id` was played, newest first.
+pub fn note_recent(id: &str) {
+    let mut ids = recent_ids();
+    ids.retain(|known| known != id);
+    ids.insert(0, id.to_string());
+    ids.truncate(RECENT_KEEP);
+    if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = storage.set_item(RECENTS_KEY, &ids.join("\n"));
+    }
+}

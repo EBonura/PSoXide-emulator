@@ -30,17 +30,17 @@ impl V3 {
         Self { x, y, z }
     }
 
-    fn rot_y(self, a: f32) -> Self {
+    pub(super) fn rot_y(self, a: f32) -> Self {
         let (s, c) = a.sin_cos();
         Self::new(self.x * c + self.z * s, self.y, -self.x * s + self.z * c)
     }
 
-    fn rot_x(self, a: f32) -> Self {
+    pub(super) fn rot_x(self, a: f32) -> Self {
         let (s, c) = a.sin_cos();
         Self::new(self.x, self.y * c - self.z * s, self.y * s + self.z * c)
     }
 
-    fn add(self, o: Self) -> Self {
+    pub(super) fn add(self, o: Self) -> Self {
         Self::new(self.x + o.x, self.y + o.y, self.z + o.z)
     }
 }
@@ -252,6 +252,8 @@ pub(super) struct CaseDraw<'a> {
     pub center: V3,
     pub yaw: f32,
     pub pitch: f32,
+    /// How far the front cover has swung open about its left hinge (radians).
+    pub lid: f32,
     pub scale: f32,
     pub opacity: f32,
     /// Placeholder hue seed.
@@ -364,13 +366,18 @@ pub(super) fn draw_case(painter: &Painter, cam: &Camera, c: &CaseDraw<'_>) {
         },
         0.55 * o,
     );
+    let open = c.lid > 0.01;
     let mut faces: Vec<(&Face, Color32, bool)> = vec![
         (&back, mix(body, VOID, 0.4), false),
         (&left, mix(body, CYAN, 0.1), false),
         (&right, mix(body, CYAN, 0.06), false),
         (&top, mix(body, CYAN, 0.16), false),
         (&bottom, mix(body, VOID, 0.5), false),
-        (&front, body, true),
+        (
+            &front,
+            if open { mix(body, VOID, 0.55) } else { body },
+            !open,
+        ),
     ];
     faces.sort_by(|a, b| a.0.z.total_cmp(&b.0.z));
     for (face, color, is_front) in faces {
@@ -384,6 +391,46 @@ pub(super) fn draw_case(painter: &Painter, cam: &Camera, c: &CaseDraw<'_>) {
         ));
         if is_front {
             draw_cover(painter, face, c, o);
+        }
+    }
+    if open {
+        // The empty tray: a hub ring where the disc sat.
+        let centre = bilerp(&front, 0.5, 0.5);
+        let r = (front.pts[1] - front.pts[0]).length() * 0.2;
+        painter.circle_stroke(centre, r, Stroke::new(1.0, fade(CYAN, 0.4 * o)));
+        painter.circle_stroke(centre, r * 0.28, Stroke::new(1.0, fade(CYAN, 0.4 * o)));
+        // The cover, hinged on the left edge.
+        let (s, k) = c.lid.sin_cos();
+        let hinge = |fx: f32, sy: f32| -> (Pos2, f32) {
+            let dx = fx * 2.0 * hw;
+            let v = V3::new(-hw + dx * k, sy * hh, hd + dx * s)
+                .rot_y(c.yaw)
+                .rot_x(c.pitch)
+                .add(c.center);
+            (cam.project(v), v.z)
+        };
+        let (a0, za) = hinge(0.0, -1.0);
+        let (a1, zb) = hinge(1.0, -1.0);
+        let (a2, zc) = hinge(1.0, 1.0);
+        let (a3, zd) = hinge(0.0, 1.0);
+        let door = Face {
+            pts: [a0, a1, a2, a3],
+            z: (za + zb + zc + zd) / 4.0,
+        };
+        if area(&door.pts) > 0.0 {
+            painter.add(Shape::convex_polygon(
+                door.pts.to_vec(),
+                fade(body, o),
+                Stroke::new(1.0, edge),
+            ));
+            draw_cover(painter, &door, c, o);
+        } else {
+            // Seen from behind: clear plastic.
+            painter.add(Shape::convex_polygon(
+                door.pts.to_vec(),
+                fade(Color32::from_rgba_unmultiplied(40, 90, 110, 120), o),
+                Stroke::new(1.0, edge),
+            ));
         }
     }
 }

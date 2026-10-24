@@ -25,7 +25,7 @@ pub(super) struct WelcomePage {
     pub links: &'static [(&'static str, &'static str)],
 }
 
-pub(super) const WELCOME: [WelcomePage; 4] = [
+pub(super) const WELCOME: [WelcomePage; 5] = [
     WelcomePage {
         title: "A PlayStation, in your browser",
         body: &[
@@ -61,6 +61,14 @@ pub(super) const WELCOME: [WelcomePage; 4] = [
             ("Source code on GitHub", super::SOURCE_URL),
         ],
     },
+    WelcomePage {
+        title: "About PSoXide",
+        body: &[
+            concat!("Version ", env!("CARGO_PKG_VERSION"), ". Licensed GPL-2.0-or-later."),
+            "PlayStation and PS1 are trademarks of Sony Interactive Entertainment. PSoXide is unaffiliated.",
+        ],
+        links: &[("Bonnie Studios on itch.io", "https://bonnie-studios.itch.io/")],
+    },
 ];
 
 /// A row of a list page.
@@ -69,19 +77,19 @@ pub(super) struct Row {
     pub label: String,
     pub value: String,
     pub depth: usize,
+    pub burn: Option<MenuAction>,
 }
 
-fn category_name(page: Page, pausing: bool) -> &'static str {
-    match (page, pausing) {
-        (Page::Library, _) => "Library",
-        (Page::Settings, _) => "Settings",
+fn category_name(page: Page) -> &'static str {
+    match page {
+        Page::Settings => "Settings",
         _ => "Game",
     }
 }
 
 /// The rows of the page's category, in order.
-pub(super) fn visible_rows(ms: &MenuState, page: Page, pausing: bool) -> Vec<Row> {
-    let name = category_name(page, pausing);
+pub(super) fn visible_rows(ms: &MenuState, page: Page) -> Vec<Row> {
+    let name = category_name(page);
     ms.categories
         .iter()
         .find(|c| c.name == name)
@@ -93,6 +101,7 @@ pub(super) fn visible_rows(ms: &MenuState, page: Page, pausing: bool) -> Vec<Row
                     label: i.label.clone(),
                     value: i.value.clone().unwrap_or_default(),
                     depth: i.depth,
+                    burn: i.burn_action.clone(),
                 })
                 .collect()
         })
@@ -156,7 +165,7 @@ pub(super) fn step_action(
     action: &MenuAction,
     input: &MenuInput,
 ) -> Option<MenuAction> {
-    let rows = visible_rows(ms, Page::Settings, false);
+    let rows = visible_rows(ms, Page::Settings);
     let row = rows.get(ms.item_index)?;
     match control_for(row) {
         Control::Slider(value, lo, hi) => {
@@ -193,7 +202,7 @@ fn apply_slider(ms: &mut MenuState, action: &MenuAction, pct: u32) -> Option<Men
 
 /// A drag across a slider track: `t` is 0..1 along it.
 pub(super) fn slider_set(ms: &mut MenuState, row_index: usize, t: f32) -> Option<MenuAction> {
-    let rows = visible_rows(ms, Page::Settings, false);
+    let rows = visible_rows(ms, Page::Settings);
     let row = rows.get(row_index)?;
     let Control::Slider(_, lo, hi) = control_for(row) else {
         return None;
@@ -209,13 +218,8 @@ pub(super) fn draw_list(
     ctx: &egui::Context,
     pc: &mut PageCtx<'_>,
 ) {
-    let pausing = h.pausing(ms);
-    let page = if pausing && h.page == Page::Home {
-        Page::Home
-    } else {
-        h.page
-    };
-    let rows = visible_rows(ms, page, pausing);
+    let page = h.page;
+    let rows = visible_rows(ms, page);
     let lay = pc.lay;
     let p = pc.painter;
     let a = pc.appear;
@@ -232,9 +236,8 @@ pub(super) fn draw_list(
     let left = lay.safe.center().x - width / 2.0;
     let head_top = lay.safe.top() + if desktop { 96.0 * u } else { 82.0 * u };
     let title = match page {
-        Page::Library => "Library",
         Page::Settings => "Settings",
-        _ => "Paused",
+        _ => "Game",
     };
     let t = p.text(
         Pos2::new(left, head_top),
@@ -244,7 +247,7 @@ pub(super) fn draw_list(
         fade(Color32::WHITE, a),
     );
     let top = t.bottom() + 18.0 * u;
-    let bottom = lay.safe.bottom() - 18.0 * u;
+    let bottom = lay.safe.bottom() - if desktop { 18.0 * u } else { 56.0 * u };
     let view = Rect::from_min_max(Pos2::new(left, top), Pos2::new(left + width, bottom));
     // Keep the focused row on screen when the focus moved by key.
     if h.last_row != ms.item_index {
@@ -385,13 +388,35 @@ fn draw_row(
         }
         x += size.x + 12.0 * u;
     }
+    let mut value_right = r.right() - 16.0 * u;
+    if row.burn.is_some() {
+        let b = Rect::from_center_size(
+            Pos2::new(r.right() - 40.0 * u, r.center().y),
+            Vec2::new(56.0 * u, 26.0 * u),
+        );
+        p.rect_stroke(
+            b,
+            13.0 * u,
+            Stroke::new(1.0, fade(CYAN, a * 0.7)),
+            egui::StrokeKind::Inside,
+        );
+        p.text(
+            b.center(),
+            Align2::CENTER_CENTER,
+            "Burn",
+            FontId::proportional(12.0 * u),
+            fade(Color32::from_rgb(140, 236, 251), a),
+        );
+        h.hits.push((b.expand(4.0), Click::RowBurn(index)));
+        value_right = b.left() - 12.0 * u;
+    }
     let label_col = if focused {
         Color32::WHITE
     } else {
         Color32::from_rgb(214, 224, 232)
     };
     let ctrl = control_for(row);
-    let right = r.right() - 16.0 * u;
+    let right = value_right;
     match ctrl {
         Control::Plain => {
             let lab = p.text(
@@ -415,13 +440,21 @@ fn draw_row(
             }
         }
         _ => {
-            p.text(
-                Pos2::new(x, cy),
-                Align2::LEFT_CENTER,
-                &row.label,
-                FontId::proportional(16.0 * u),
+            // A long label wraps in the room the control leaves it.
+            let share = if r.width() > 600.0 { 0.55 } else { 0.40 };
+            let max_w = ((r.width() - 36.0 * u) * share - (x - r.left())).max(60.0);
+            let galley = p.layout(
+                row.label.clone(),
+                FontId::proportional(if r.width() > 600.0 {
+                    16.0 * u
+                } else {
+                    15.0 * u
+                }),
                 fade(label_col, a),
+                max_w,
             );
+            let pos = Pos2::new(x, cy - galley.size().y / 2.0);
+            p.add(Shape::galley(pos, galley, Color32::WHITE));
             draw_control(h, p, &ctrl, row, r, index, u, a);
         }
     }
