@@ -180,3 +180,17 @@ modules rewritten above no longer contain their code as far as the history
 and the review can show; the modules listed under "Not rewritten" still
 carry behaviour matched to PCSX-Redux traces. The ps1-tests captures (MIT) are used
 as external oracles and are not redistributed.
+
+## Cover art and the disc catalogue (runtime data, not shipped)
+
+The home shell fetches box art at run time, on the player's device, and never
+bundles or mirrors it: pictures from xlenore/psx-covers and
+libretro-thumbnails (neither declares a licence), found by the disc's boot
+serial or its exact name. To name a disc exactly it also downloads, once, the
+Redump PlayStation dump list from libretro-database
+(`metadat/redump/Sony - PlayStation.dat`, CC BY-SA 4.0) and keeps it in the
+player's cache (the desktop cache folder, IndexedDB in the browser); the
+program looks a disc up by the CRC-32 of its data track and by its serial. The
+list is data the program reads, not part of the program, and it is credited
+on the Welcome pages. Switching off "Box art from the internet" stops both
+downloads.

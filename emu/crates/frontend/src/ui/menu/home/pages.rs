@@ -38,7 +38,7 @@ pub(super) const WELCOME: [WelcomePage; 3] = [
         title: "Your games stay on your device",
         body: &[
             "Open a folder of your own disc images or programs and play them here. Files are read in place and never uploaded.",
-            "PSoXide fetches cover pictures for your discs from two community collections, xlenore/psx-covers and libretro-thumbnails, and keeps them on this device. You can turn this off in Settings.",
+            "PSoXide fetches cover pictures for your discs from community collections (xlenore/psx-covers and libretro-thumbnails) and names your discs with the Redump list from libretro-database (CC BY-SA 4.0). Both are kept on this device. You can turn this off in Settings.",
         ],
         links: &[],
     },
