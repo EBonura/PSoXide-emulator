@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Save states are a sheet of slots. A game has a quick slot and eight numbered ones; each shows the
+  picture taken when it was saved, when, and how far the game had run, and the sheet has a Save and a Load
+  mode, so loading is as visible as saving. Saving over a slot asks first, a slot can be deleted, and a save
+  can be exported to a file and imported again. F5 and F7 (Select+R1 and Select+L1 on a pad) quick-save and
+  quick-load with a toast; the toolbar and the phone's Save and Load buttons open the sheet. Saves survive
+  restarts (a file per slot on the desktop, IndexedDB in the browser) and carry the identity of the disc:
+  one made on another disc or build, for another game, in another state format or damaged is listed with the
+  reason and refused, and the running game is left alone. Saves from before slots still load.
+- Debug is no longer a page of the shell. It is a live panel of the game view: beside the game on a wide
+  window (a phone held sideways gives it a share of the width and lays the controller out around it), under
+  the game on a tall one. The game keeps running at full speed with it open; summary readouts first, then the
+  tabs. Toolbar button, F3, the phone's Debug button and Select+R3 on a pad toggle it.
+- The phone's controller no longer draws over the game. In portrait the interface buttons are the first line
+  of the panel under the picture and the controls sit lower; in landscape every control is in the black bar on
+  its side of the picture and shrinks to fit. The tab bar is centred in the viewport, also inside another
+  page's frame, and the Controls touch preview is centred in its column.
+- The picture sits on whole device pixels and the web canvas is drawn pixelated, so PS1 pixels stay sharp on a
+  phone; where a whole multiple of the display's rows costs under 8% of the picture's size, it snaps to it.
+
 - The shell moves. The tab highlight is one pill (phone bar) or marker (desktop) that
   slides to the page you pick on a small spring, and the Controls selector slides the
   same way. Pages arrive part by part (title, then rows or cards), a list's focus frame

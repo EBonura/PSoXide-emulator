@@ -33,7 +33,7 @@ src/
 ├── disasm.rs         # MIPS disassembler for the registers/memory panels
 └── ui/
     ├── mod.rs           # draw_layout -- composes toolbar/sidebar/framebuffer/overlays
-    ├── toolbar.rs       # top strip: status dot + FPS; play/pause, reset, save states, controls, volume, sidebar
+    ├── toolbar.rs       # top strip: status dot + FPS; play/pause, reset, save, load, controls, volume, debug panel
     ├── debug_sidebar.rs # right sidebar: Developer tools plus the debug sections below
     ├── registers.rs     # CPU + COP0 + history + breakpoints section
     ├── memory.rs        # hex+ASCII / RAM visual map / disasm viewer, quick-jump, BP toggle
@@ -48,7 +48,7 @@ src/
 ## Layer order, outside-in
 
 1. **Toolbar** (`egui::TopBottomPanel::top`) -- status dot and FPS, play/pause, reset, save states, controls, volume, debug sidebar toggle.
-2. **Debug sidebar** (`egui::SidePanel::right`, hidden by default) -- one resizable sidebar docking four `CollapsingHeader` sections: CPU Registers, Memory, VRAM, Frame Profiler. All sections lay out width-aware: the GPR grid reflows 1/2/4 columns, the hex dump adapts bytes-per-row (16/8/4), the memory visual map shows a bucketed 2 MiB RAM overview, profiler bars stretch with the panel, and the VRAM image keeps its true 2:1 aspect.
+2. **Debug panel** (`egui::SidePanel::right` beside the game on a wide window, `egui::TopBottomPanel::bottom` under it on a tall one; hidden by default; it never pauses the game) -- one resizable sidebar docking four `CollapsingHeader` sections: CPU Registers, Memory, VRAM, Frame Profiler. All sections lay out width-aware: the GPR grid reflows 1/2/4 columns, the hex dump adapts bytes-per-row (16/8/4), the memory visual map shows a bucketed 2 MiB RAM overview, profiler bars stretch with the panel, and the VRAM image keeps its true 2:1 aspect.
 3. **Central panel** -- the live PS1 framebuffer at 4:3.
 4. **Menu overlay** on `egui::Order::Middle` -- dims background, slides animated category icons: Library, Game (while a game is loaded), Settings.
 5. **Burn window / status toast** on top.

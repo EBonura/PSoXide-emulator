@@ -409,24 +409,42 @@ Results on the landed build (Chrome headless, macOS; WebKit was not driven, see 
 same library, settings and game rows, the same `MenuInput` edges from keyboard, pad and touch, the
 same `MenuAction`s going out. Tokens (colours, type scale, spacing, easings) live in `tokens.rs`.
 
-- Sections, in one ring: Home, Game (only while a game is started), Settings, Controls, Debug. L1/R1
+- Sections, in one ring: Home, Game (only while a game is started), Settings, Controls. L1/R1
   (Q/E, PageUp/PageDown, a sideways swipe) cycle them from anywhere and wrap. Back (Circle, Esc, G)
   goes to Home from any section, and from Home resumes the game. Escape, Select+Start and the touch
   Menu button are Back before a start and on a section: they never start a disc.
 - Home is the library: big cases on the floor, or a grid (the button at the top, Triangle or Tab).
   L2/R2 jump by first letter with a big letter badge; on a phone a rail at the edge scrubs the
   letters. Choosing a disc plays the launch sequence (2.3 s of wall clock at any frame rate; the boot starts with it; any input fast-forwards it on its own curves instead of jumping to the end).
-- On a phone the sections are a floating bar at the bottom, clear of the touch overlay.
+- On a phone the sections are a floating bar at the bottom, clear of the touch overlay, centred in the
+  viewport with the same margin either side (also inside another page's frame).
+- Debug is not a section: it is a live panel of the game view (`ui/debug_sidebar.rs`). A window wider than
+  tall docks it on the right (a phone held sideways gives it about 38% of the width and the controller lays
+  itself out in what is left); a taller one docks it as a strip between the game and the controller's panel.
+  The game never pauses for it. Toolbar bug button, F3, the touch Debug button and Select+R3 on a pad toggle it.
+- Save states are a sheet of slots (`ui/menu/slots.rs`, `app/slots.rs`, `psoxide-settings/src/slots.rs`):
+  the quick slot and eight numbered ones, each with a picture, the time and how far the game had run, in
+  Save and Load modes. A slot is the machine state plus a trailer (thumbnail, disc hash, format) kept in one
+  file (desktop) or one IndexedDB record (web), so a save made on another disc, another game or another state
+  format is listed as such and refused with a message, the game untouched. F5 and F7 (Select+R1 and Select+L1
+  on a pad) quick-save and quick-load; the toolbar and the touch Save and Load buttons open the sheet.
+- The touch controller never draws over the game picture: in portrait the interface buttons are the first
+  line of the panel under it; in landscape every control lives in the black bar on its side of the picture.
 - Controls is drawn by the shell itself (`home/controls.rs`): live device cards (grey while idle,
   cyan while a device is in use) with a port chip and an analog toggle, the remappable keyboard map
   (select a cap, press the new key; Escape cancels; Reset), and the touch rows with a layout preview.
   A wide window shows the three groups side by side; a phone shows one under a Devices, Keyboard,
-  Touch bar. Every control is a focus stop for pad, keys and touch. Debug is a section whose content
-  the app draws in the space the shell leaves. The page probe `psoxideUxState().home` lists the page, the focus, the cases and every
+  Touch bar. Every control is a focus stop for pad, keys and touch. The page probe `psoxideUxState().home` lists the page, the focus, the cases and every
   hit area by name, which is how the journeys tap and click.
 - Box art: xlenore/psx-covers by boot serial (read from SYSTEM.CNF), then libretro-thumbnails by file
   name, fetched at run time only and cached (IndexedDB on the web, a cache folder on the desktop);
   Settings has a switch. Live check: `node tools/web-journeys/run.mjs --site <dir> --scenario cors`.
+
+Journeys for the debug panel, save states and centring: `desktop-debug`, `phone-*-debug` (the panel opens, the
+game keeps its speed, the controller is laid out around it, nothing meets the game picture), `desktop-slots`,
+`phone-*-slots` (save, overwrite with a question, load, quick keys, reload and load again, a save from another disc or
+a newer format refused, a damaged save refused, delete) and `desktop-centre`, `phone-*-centre` (the Controls
+touch preview and the phone tab bar are centred).
 
 Journeys: `desktop-home`, `phone-home`, `phone-home-small`, `phone-home-landscape` (first visit, the
 countdown cancelled by each input, return visit, sections, L1/R1, ways back, welcome pages, settings

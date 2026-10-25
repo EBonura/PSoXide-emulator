@@ -134,7 +134,10 @@ const FAKE_GAMEPAD = `(() => {
     mapping: "standard", timestamp: 0, axes: [0,0,0,0], buttons: Array.from({length: 17}, () => ({pressed:false, touched:false, value:0})) };
   window.__fakePad = { pad, on: false };
   // A real controller on the test machine must not leak into the runs: only the fake pad is ever reported.
-  navigator.getGamepads = () => (window.__fakePad.on ? [pad, null, null, null] : [null, null, null, null]);
+  // Every poll is counted: a press only exists once the page has looked at it, so a step waits on this
+  // instead of a fixed sleep (a loaded machine gives the page a frame every few hundred ms).
+  window.__fakePad.polls = 0;
+  navigator.getGamepads = () => { window.__fakePad.polls++; return window.__fakePad.on ? [pad, null, null, null] : [null, null, null, null]; };
   window.__fakePadSet = (buttons, axes) => {
     pad.timestamp = performance.now();
     pad.buttons.forEach((b, i) => { const p = !!(buttons && buttons[i]); b.pressed = p; b.touched = p; b.value = p ? 1 : 0; });
@@ -311,7 +314,7 @@ class Page {
     const KEYS = {
       Escape: ["Escape", 27], Enter: ["Enter", 13], Backspace: ["Backspace", 8],
       ArrowUp: ["ArrowUp", 38], ArrowDown: ["ArrowDown", 40], ArrowLeft: ["ArrowLeft", 37], ArrowRight: ["ArrowRight", 39],
-      F9: ["F9", 120], F5: ["F5", 116], F7: ["F7", 118], PageUp: ["PageUp", 33], PageDown: ["PageDown", 34],
+      F9: ["F9", 120], F3: ["F3", 114], F5: ["F5", 116], F7: ["F7", 118], PageUp: ["PageUp", 33], PageDown: ["PageDown", 34],
     };
     const [code, vk] = KEYS[key] ?? [key.length === 1 ? `Key${key.toUpperCase()}` : key, key.toUpperCase().charCodeAt(0)];
     const base = { key: key.length === 1 ? key : key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk };
@@ -352,8 +355,17 @@ class Page {
     await this.touch("touchEnd", []);
     await sleep(150);
   }
+  /**
+   * Set the fake pad and wait until the page has polled it twice since, so the new state was really seen (a
+   * press taken between two frames of a loaded machine is not dropped). Bounded: a page that stops polling
+   * (a hidden tab, a pad nothing listens to) does not hang the run.
+   */
   async padSet(buttons, axes) {
+    const polls = () => this.eval(`window.__fakePad.polls`).catch(() => 0);
+    const before = await polls();
     await this.eval(`window.__fakePadSet(${JSON.stringify(buttons)}, ${JSON.stringify(axes ?? null)})`);
+    const start = Date.now();
+    while (Date.now() - start < 4000 && (await polls()) < before + 3) await sleep(30);
   }
   async padConnect() {
     await this.eval(`window.__fakePadConnect()`);
@@ -502,6 +514,33 @@ async function toolbarButtons(page) {
   // a screenshot-free rule: the bar is 40 css px tall and the buttons are 34 px wide,
   // 8 px apart, ending 8 px before the right edge (see ui/toolbar.rs).
   return page.size;
+}
+
+/**
+ * The toolbar's icons, found in a screenshot instead of by remembered coordinates: the x of the centre of each
+ * lit run along the bar, left to right. With the full bar at 1280 wide the runs are: pause, reset, save, load,
+ * controls, the volume slider, mute, debug, collapse.
+ */
+async function toolbarIcons(page) {
+  const r = await page.cdp.send("Page.captureScreenshot", { format: "png" }, page.top);
+  return page.eval(`(async () => {
+    const bmp = await createImageBitmap(await (await fetch("data:image/png;base64,${r.data}")).blob());
+    const g = new OffscreenCanvas(bmp.width, 34).getContext("2d");
+    g.drawImage(bmp, 0, 0);
+    const d = g.getImageData(0, 0, bmp.width, 34).data;
+    const lit = [];
+    for (let x = 0; x < bmp.width; x++) {
+      let n = 0;
+      for (let y = 6; y < 28; y++) { const i = (y * bmp.width + x) * 4; if (d[i] + d[i + 1] + d[i + 2] > 270) n++; }
+      lit.push(n > 0);
+    }
+    const runs = []; let start = -1, gap = 0;
+    for (let x = 0; x <= lit.length; x++) {
+      if (lit[x]) { if (start < 0) start = x; gap = 0; }
+      else if (start >= 0 && ++gap > 6) { runs.push([start, x - gap]); start = -1; }
+    }
+    return runs.filter(([a, b]) => b - a >= 6 && a > bmp.width * 0.4).map(([a, b]) => (a + b) / 2 / (bmp.width / innerWidth));
+  })()`, page.top);
 }
 
 async function journeyDesktop(label, urlFor, { embeddedMode = false } = {}) {
@@ -694,6 +733,27 @@ function layoutProblems(t, size, dpr) {
   return inset ? null : "the safe-area insets did not reach the player (env() read as zero)";
 }
 
+/**
+ * No control of the on-screen controller (pad buttons, sticks' rest points, interface buttons) meets the game
+ * picture. `u` is the player's state; rects are window px and the picture css px.
+ */
+function gameProblems(u, dpr) {
+  const g = u.game;
+  const t = u.touch;
+  if (!t || !g || g[2] - g[0] < 50) return "the player reports no game picture";
+  for (const [id, x0, y0, x1, y1] of t.rects) {
+    const r = [x0 / dpr, y0 / dpr, x1 / dpr, y1 / dpr];
+    if (Math.min(r[2], g[2]) - Math.max(r[0], g[0]) > 0.75 && Math.min(r[3], g[3]) - Math.max(r[1], g[1]) > 0.75) {
+      return `control ${id ? "0x" + id.toString(16) : "ui"} [${r.map((v) => v.toFixed(1))}] is over the game picture [${g}]`;
+    }
+  }
+  for (const [name, x, y] of [...t.buttons.map((b) => [`0x${b[0].toString(16)}`, b[1], b[2]]), ...t.ui.map((b) => [b[0], b[1], b[2]])]) {
+    const [cx, cy] = [x / dpr, y / dpr];
+    if (cx > g[0] && cx < g[2] && cy > g[1] && cy < g[3]) return `the touch centre of ${name} (${cx.toFixed(0)},${cy.toFixed(0)}) is inside the game picture [${g}]`;
+  }
+  return null;
+}
+
 /** Phone journeys: the on-screen controller, the touch menu, rotation. */
 async function journeyPhone(label, urlFor, size) {
   current = label;
@@ -721,13 +781,20 @@ async function journeyPhone(label, urlFor, size) {
     const bad = t.buttons.filter(([, x, y]) => x < 0 || y < 0 || x > size.w * dpr || y > size.h * dpr);
     if (bad.length) return `buttons outside the window: ${JSON.stringify(bad)}`;
     if (t.buttons.length !== 10) return `expected 10 pad buttons, got ${t.buttons.length}`;
-    return layoutProblems(t, size, dpr) ?? true;
+    return layoutProblems(t, size, dpr) ?? gameProblems(s, dpr) ?? true;
   });
   if (args.trace) {
     await page.eval(`window.__ev = []; for (const t of ["pointerdown","touchstart","mousedown","click"]) window.addEventListener(t, (e) => window.__ev.push(t + ":" + Math.round(e.clientX ?? e.touches?.[0]?.clientX) + "," + Math.round(e.clientY ?? e.touches?.[0]?.clientY) + ":" + e.target.tagName), true)`);
     await page.tap(size.w / 2, size.h * 0.7);
     console.log("      events seen in the frame:", await page.eval(`JSON.stringify(window.__ev)`));
   }
+  await step("the canvas backing store is its CSS size times the device pixel ratio, drawn pixelated, with the picture on whole device pixels", async () => {
+    const c = JSON.parse(await page.eval(`(() => { const c = document.querySelector("canvas"); const r = c.getBoundingClientRect(); return JSON.stringify({ w: c.width, h: c.height, cw: r.width * devicePixelRatio, ch: r.height * devicePixelRatio, ir: getComputedStyle(c).imageRendering, dpr: devicePixelRatio }); })()`));
+    if (Math.abs(c.w - c.cw) > 1.5 || Math.abs(c.h - c.ch) > 1.5) return `the backing store is ${c.w}x${c.h} but the canvas covers ${c.cw}x${c.ch} device pixels: the browser would resample it`;
+    if (!/pixelated|crisp/.test(c.ir)) return `image-rendering is "${c.ir}"`;
+    const u = await page.ux();
+    for (const v of u.game) if (Math.abs(v * c.dpr - Math.round(v * c.dpr)) > 0.02) return `the picture [${u.game}] is off the device pixel grid at ${c.dpr}x`;
+  });
   await step("every pad button reaches guest port 1 with the right PS1 bit", async () => {
     const t = await layout();
     const wrong = [];
@@ -758,6 +825,18 @@ async function journeyPhone(label, urlFor, size) {
       // busy machine), nothing was tested: wait for it to wake and press again, once. A page that is
       // drawing normally and still misses is a real bug and fails with what it saw.
       const frames = await drawn();
+      // A press the page did not take, on a page that is drawing normally, is looked at again once with
+      // the layout read afresh: right after a rotation the first touch can land between the old layout
+      // and the new one. A second miss is a real bug and fails with what the page saw.
+      if (frames >= 3) {
+        await sleep(600);
+        const fresh = (await layout()).buttons.find((b) => b[0] === mask);
+        if (fresh) {
+          console.log(`      note: 0x${mask.toString(16)} did not register at first; pressing again at its freshly read place`);
+          st = await press(mask, fresh[1], fresh[2]);
+          if (st.port1_mask & mask) continue;
+        }
+      }
       if (frames < 3) {
         console.log(`      note: the page drew ${frames} frames in 300 ms while 0x${mask.toString(16)} was pressed (stalled machine); retrying once`);
         for (let i = 0; i < 40 && (await drawn()) < 5; i++) await sleep(250);
@@ -850,19 +929,30 @@ async function journeyPhone(label, urlFor, size) {
     if (!t) return "controller hidden after rotation";
     const bad = t.buttons.filter(([, x, y]) => x < 0 || y < 0 || x > size.h * dpr || y > size.w * dpr);
     if (bad.length) return `buttons outside the rotated window: ${JSON.stringify(bad)}`;
-    // And every button still works in landscape.
+    // And every button still works in landscape. Each press reads the layout afresh and is looked at
+    // again once: right after a rotation the first touch can land between the old layout and the new.
     const wrong = [];
-    for (const [mask, x, y] of t.buttons) {
-      await page.touch("touchStart", [[x / dpr, y / dpr]]);
+    const pressAt = async (mask) => {
+      const now = (await layout()).buttons.find((b) => b[0] === mask);
+      if (!now) return null;
+      await page.touch("touchStart", [[now[1] / dpr, now[2] / dpr]]);
       let st = null;
-      for (let k = 0; k < 8; k++) {
+      for (let k = 0; k < 10; k++) {
         await sleep(120);
         st = await page.touchState();
         if (st.port1_mask & mask) break;
       }
       await page.touch("touchEnd", []);
-      await sleep(100);
-      if (!(st.port1_mask & mask)) wrong.push(`0x${mask.toString(16)}`);
+      await sleep(150);
+      return st;
+    };
+    for (const [mask] of t.buttons) {
+      let st = await pressAt(mask);
+      if (!(st && st.port1_mask & mask)) {
+        await sleep(500);
+        st = await pressAt(mask);
+      }
+      if (!(st && st.port1_mask & mask)) wrong.push(`0x${mask.toString(16)}`);
     }
     await page.viewport(size.w, size.h, { dpr: size.dpr, mobile: true });
     await sleep(800);
@@ -944,24 +1034,23 @@ async function journeyMenus(label, urlFor) {
     return s.loaded_id ? true : "no game";
   });
   await open();
-  if (!(args.skipstep ?? "").split(",").includes("save")) await step("Game / Save state stores a browser quick-save", async () => {
+  await step("Game / Save state opens the slot sheet in Save mode, and Back returns to the Game page", async () => {
     await menuSelect(page, "Game", "Save state");
-    const s = await page.waitFor("save status", (x) => /quick-save/i.test(x.status), 8000);
-    return true;
+    const u = await page.waitFor("the slot sheet", (x) => x.home.page === "Slots" && x.panel === "savestates", 4000);
+    if (u.slots.mode !== "Save") return `the sheet opened in ${u.slots.mode} mode`;
+    await page.tapKey("g");
+    await page.waitFor("the Game page again", (x) => x.home.page === "Game" && x.menu_open, 4000);
   });
-  await step("Game / Load state opens the save-states panel", async () => {
+  await step("Game / Load state opens the slot sheet in Load mode, with every slot in a grid", async () => {
     await menuSelect(page, "Game", "Load state");
-    await page.waitFor("save-states panel", (x) => x.panel === "savestates", 4000);
+    const u = await page.waitFor("the slot sheet", (x) => x.home.page === "Slots" && x.panel === "savestates", 4000);
+    if (u.slots.mode !== "Load") return `the sheet opened in ${u.slots.mode} mode`;
+    if (u.slots.cards.length !== 9) return `${u.slots.cards.length} slots`;
     await page.shot(`${label}-10-savestates`);
   });
-  await step("the save-states panel closes with Back and leaves the menu usable", async () => {
+  await step("the sheet closes with Back and leaves the menu usable", async () => {
     await page.tapKey("g");
-    await page.tapKey("Escape");
-    await sleep(300);
-    let s = await page.ux();
-    if (s.panel !== "none") { await page.tapKey("Escape"); s = await page.ux(); }
-    if (s.panel !== "none") return `panel still ${s.panel}`;
-    if (!s.menu_open) await open();
+    await page.waitFor("the Game page again", (x) => x.home.page === "Game" && x.menu_open && x.panel === "none", 4000);
   });
   if (!(args.skipstep ?? "").split(",").includes("record")) await step("Game / Record input starts a recording (the game reboots); the same row stops it", async () => {
     const before = await page.ux();
@@ -1072,18 +1161,20 @@ async function journeyMenus(label, urlFor) {
 
   // Toolbar (desktop): pause, reset, save, controls, volume, mute, debug, collapse.
   const bar = (fromRight) => 1280 - fromRight;
-  await step("toolbar: save icon opens the save-states panel", async () => {
-    await page.click(964, 17);
-    await page.waitFor("save-states panel", (x) => x.panel === "savestates", 4000);
-    await page.tapKey("Escape");
-    await sleep(300);
-    const s = await page.ux();
-    if (s.panel !== "none") { await page.click(964, 17); await sleep(300); }
+  await step("toolbar: the save and load icons open the slot sheet in their own mode, and Back resumes the game", async () => {
+    for (const [x, mode] of [[936, "Save"], [974, "Load"]]) {
+      await page.click(x, 17);
+      const u = await page.waitFor("the slot sheet", (v) => v.home.page === "Slots" && v.panel === "savestates" && v.menu_open, 4000);
+      if (u.slots.mode !== mode) return `the ${mode} icon opened the sheet in ${u.slots.mode} mode`;
+      if (u.running) return "the game still runs behind the sheet";
+      await page.tapKey("Escape");
+      await page.waitFor("the game running again", (v) => v.running && !v.menu_open && v.panel === "none", 5000);
+    }
   });
   await step("toolbar: controller icon opens the controls panel", async () => {
     let s = await page.ux();
     if (s.panel !== "none") { await page.tapKey("Escape"); await sleep(300); }
-    await page.click(1004, 17);
+    await page.click(1012, 17);
     // Controls is a section of the shell now: the game pauses and the shell opens on it.
     await page.waitFor("the Controls section", (x) => x.panel === "controls" && x.home.page === "Controls" && x.menu_open, 4000);
     await page.tapKey("Escape");
@@ -1094,32 +1185,39 @@ async function journeyMenus(label, urlFor) {
   await step("toolbar: pause stops the guest and play resumes it", async () => {
     let s = await page.ux();
     if (!s.running || s.menu_open) await page.tapKey("Escape");
-    await page.click(876, 17);
+    await page.click(843, 17);
     await page.waitFor("paused", (x) => !x.running, 4000);
-    await page.click(876, 17);
+    await page.click(843, 17);
     await page.waitFor("running", (x) => x.running, 4000);
   });
-  await step("toolbar: the volume slider and the mute icon change Settings / Volume and Mute", async () => {
+  const settingsValue = async (row) => {
     await page.tapKey("Escape"); await page.waitFor("menu", (x) => x.menu_open, 4000);
-    const vol0 = await rowValue("Settings", "Volume");
-    const mute0 = await rowValue("Settings", "Mute");
+    const value = await rowValue("Settings", row);
     await closeShell(page);
-    await page.mouse("mouseMoved", 1060, 17); await page.mouse("mousePressed", 1060, 17); await sleep(60);
-    await page.mouse("mouseMoved", 1090, 17); await sleep(60); await page.mouse("mouseReleased", 1090, 17); await sleep(200);
-    await page.click(1160, 17);
-    await page.tapKey("Escape"); await page.waitFor("menu", (x) => x.menu_open, 4000);
-    const vol1 = await rowValue("Settings", "Volume");
-    const mute1 = await rowValue("Settings", "Mute");
-    await closeShell(page);
-    if (vol0 === vol1) return `volume stayed ${vol0}`;
-    return mute0 !== mute1 ? true : `mute stayed ${mute0}`;
+    return value;
+  };
+  await step("toolbar: the volume slider changes Settings / Volume", async () => {
+    const vol0 = await settingsValue("Volume");
+    await page.mouse("mouseMoved", 1055, 17); await page.mouse("mousePressed", 1055, 17); await sleep(60);
+    await page.mouse("mouseMoved", 1100, 17); await sleep(60); await page.mouse("mouseReleased", 1100, 17); await sleep(200);
+    const vol1 = await settingsValue("Volume");
+    return vol0 === vol1 ? `volume stayed ${vol0}` : true;
+  });
+  await step("toolbar: the mute icon flips Settings / Mute, and again flips it back", async () => {
+    const mute0 = await settingsValue("Mute");
+    await page.click(1147, 17);
+    const mute1 = await settingsValue("Mute");
+    await page.click(1147, 17);
+    const mute2 = await settingsValue("Mute");
+    if (mute0 === mute1) return `mute stayed ${mute0}`;
+    return mute2 === mute0 ? true : `a second click left mute at ${mute2}, not ${mute0}`;
   });
   await step("toolbar: debug and collapse buttons keep the game running", async () => {
-    await page.click(1208, 17);
+    await page.click(1202, 17);
     await sleep(500);
     await page.shot(`${label}-13-debug`);
-    await page.click(1208, 17);
-    await page.click(1256, 17);
+    await page.click(1202, 17);
+    await page.click(1257, 17);
     await sleep(500);
     await page.shot(`${label}-14-collapsed`);
     const s = await page.ux();
@@ -1235,7 +1333,7 @@ async function journeyHome(label, urlFor, size) {
     const u = await countdown(page);
     await page.shot(`${label}-01-first-visit`);
     const names = u.home.hits.map((h) => h[0]);
-    for (const need of ["case:0", "primary", "nav:Home", "nav:Controls", "nav:Settings", "nav:Debug", "peek", "welcome"]) if (!names.includes(need)) return `missing ${need}: ${names}`;
+    for (const need of ["case:0", "primary", "nav:Home", "nav:Controls", "nav:Settings", "peek", "welcome"]) if (!names.includes(need)) return `missing ${need}: ${names}`;
     if (u.home.page !== "Home" || u.running || !u.menu_open) return JSON.stringify(u.home);
     return homeLayoutProblem(u, size) ?? true;
   });
@@ -1330,9 +1428,10 @@ async function journeyHome(label, urlFor, size) {
 
   // Navigation and focus.
   page = await open();
-  await step("Controls, Settings and Debug: each opens inside the shell, fits the screen, and Back returns Home", async () => {
+  await step("Controls and Settings: each opens inside the shell, fits the screen, and Back returns Home; there is no Debug tab", async () => {
     await countdown(page);
-    for (const section of ["Controls", "Settings", "Debug"]) {
+    if ((await page.ux()).home.hits.some((h) => h[0] === "nav:Debug")) return "Debug is still a tab";
+    for (const section of ["Controls", "Settings"]) {
       await activate(page, `nav:${section}`);
       await page.waitFor(`the ${section} page`, (s) => s.home.page === section, 4000);
       await sleep(600);
@@ -1360,27 +1459,27 @@ async function journeyHome(label, urlFor, size) {
     return moved.home.case === 1 ? true : "focus did not move";
   });
   await step("L1/R1 (Q/E, PageUp/PageDown) cycle the sections from anywhere and wrap", async () => {
-    const names = ["Home", "Settings", "Controls", "Debug"];
+    const names = ["Home", "Settings", "Controls"];
     const at = async (want) => { await page.waitFor(`the ${want} page`, (s) => s.home.page === want, 4000); };
-    for (let i = 1; i <= 4; i++) { await page.tapKey("PageDown"); await at(names[i % 4]); }
-    await page.tapKey("PageUp"); await at("Debug");
+    for (let i = 1; i <= 3; i++) { await page.tapKey("PageDown"); await at(names[i % 3]); }
     await page.tapKey("PageUp"); await at("Controls");
-    await page.tapKey("e"); await at("Debug");
-    await page.tapKey("q"); await at("Controls");
+    await page.tapKey("PageUp"); await at("Settings");
+    await page.tapKey("e"); await at("Controls");
+    await page.tapKey("q"); await at("Settings");
     if (!mobile) {
       await page.padConnect();
       await sleep(300);
       const tap = async (b) => { await page.padSet({ [b]: true }); await sleep(200); await page.padSet({}); await sleep(250); };
-      await tap(5); await at("Debug");
+      await tap(5); await at("Controls");
       await tap(5); await at("Home");
-      await tap(4); await at("Debug");
       await tap(4); await at("Controls");
+      await tap(4); await at("Settings");
     }
     await page.tapKey("g");
     await page.waitFor("Home again", (s) => s.home.page === "Home", 4000);
   });
   await step("every section is left the same visible ways: Back, Escape, the nav, the logo and a swipe or tap", async () => {
-    for (const section of ["Controls", "Settings", "Debug"]) {
+    for (const section of ["Controls", "Settings"]) {
       const back = async (how) => {
         await activate(page, `nav:${section}`);
         await page.waitFor(`the ${section} page`, (s) => s.home.page === section, 4000);
@@ -1784,12 +1883,12 @@ async function journeyShell(label, urlFor, size) {
     await page.shot(`${label}-shell-home`);
     const u = await page.ux();
     const names = u.home.hits.map((h) => h[0]);
-    for (const need of ["nav:Home", "nav:Game", "nav:Controls", "nav:Settings", "nav:Debug", "primary", "restart"]) if (!names.includes(need)) return `missing ${need}: ${names}`;
+    for (const need of ["nav:Home", "nav:Game", "nav:Controls", "nav:Settings", "primary", "restart"]) if (!names.includes(need)) return `missing ${need}: ${names}`;
     if (u.running) return "the game is still running behind the shell";
     return homeLayoutProblem(u, size) ?? true;
   });
   await step("every section opens inside the shell and fits; each is left by pad or keyboard or touch", async () => {
-    for (const section of ["Game", "Settings", "Controls", "Debug"]) {
+    for (const section of ["Game", "Settings", "Controls"]) {
       await activate(`nav:${section}`);
       await page.waitFor(`the ${section} page`, (s) => s.home.page === section, 4000);
       await sleep(700);
@@ -1806,17 +1905,10 @@ async function journeyShell(label, urlFor, size) {
       await page.waitFor(`Home after ${section}`, (s) => s.home.page === "Home" && s.menu_open, 4000);
     }
   });
-  await step("Debug on a phone is a full page of the shell: one column, nothing over the game, a way back", async () => {
-    await activate("nav:Debug");
-    await page.waitFor("the Debug page", (s) => s.home.page === "Debug", 4000);
+  await step("the shell has no Debug page: Debug is a live panel of the game view", async () => {
     const u = await page.ux();
-    const sidebar = await page.eval(`false`);
     const hits = u.home.hits.map((h) => h[0]);
-    if (mobile && !hits.includes("nav:Home")) return `no way back on the phone Debug page: ${hits}`;
-    if (mobile) await homeTap(page, "nav:Home");
-    else await page.tapKey("g");
-    await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
-    return sidebar ? "a sidebar" : true;
+    return hits.includes("nav:Debug") ? "Debug is still a tab of the shell" : true;
   });
   if (mobile) await step("the on-screen menu button answers mouse clicks as it does taps: a click pauses into the shell, a click on the header's close resumes", async () => {
     // A phone emulator, or a desktop with Touch controls On, sends mouse events: the controller must not
@@ -1847,7 +1939,8 @@ async function journeyShell(label, urlFor, size) {
 /**
  * The motion and honesty pass on the shell (home-polish3): the tab highlight slides, the pages arrive part by
  * part, every control answers a press, a phone does not claim a keyboard, the paused shell shows the running
- * game as its hero with nothing of the touch controller over it, and Debug opens inside the shell.
+ * game as its hero with nothing of the touch controller over it. (Debug is a live panel of the game
+ * view since home-polish4, not a page of the shell.)
  */
 async function journeyPolish(label, urlFor, size) {
   current = label;
@@ -1868,6 +1961,23 @@ async function journeyPolish(label, urlFor, size) {
     await loop;
     return out;
   };
+  /**
+   * Run a timed measurement and judge it only if the page drew enough frames while it ran: a busy machine
+   * gives the page a few frames a second, and an animation measured over four frames proves nothing. The
+   * measurement is repeated (bounded) until the page had the frames; `run` gets the attempt number.
+   */
+  const withFrames = async (run, minFrames = 12, tries = 5) => {
+    let out;
+    for (let i = 0; i < tries; i++) {
+      const r0 = (await page.bench())?.redraws ?? 0;
+      out = await run(i);
+      const frames = ((await page.bench())?.redraws ?? 0) - r0;
+      if (frames >= minFrames) return out;
+      console.log(`      note: the page drew ${frames} frames while measuring (a busy machine); measuring again`);
+      await sleep(600);
+    }
+    return out;
+  };
   await page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 90000);
   await step("a phone does not claim a keyboard until a key is pressed; a desktop has one", async () => {
     await activate("nav:Controls");
@@ -1884,24 +1994,31 @@ async function journeyPolish(label, urlFor, size) {
     }
   });
   await step("the tab highlight slides to the tab you pick, with a little spring, and settles", async () => {
-    await activate("nav:Home");
-    await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
-    await sleep(900);
-    const mid = sleep(150).then(() => page.shot(`${label}-2-nav-mid`));
-    const series = await sampled((u) => u.home.nav_hl, async () => { await activate("nav:Debug"); }, 900);
-    await mid;
+    const series = await withFrames(async () => {
+      await activate("nav:Home");
+      await page.waitFor("Home", (s) => s.home.page === "Home" && s.home.nav_hl < 0.05, 8000);
+      await sleep(900);
+      const mid = sleep(150).then(() => page.shot(`${label}-2-nav-mid`));
+      const out = await sampled((u) => u.home.nav_hl, async () => { await activate("nav:Controls"); }, 900);
+      await mid;
+      return out;
+    });
     await page.shot(`${label}-2-nav-settled`);
     const end = series.at(-1);
-    const between = series.filter((v) => v > 0.2 && v < 2.8);
+    const between = series.filter((v) => v > 0.2 && v < 1.8);
     const peak = Math.max(...series);
-    if (Math.abs(end - 3) > 0.02) return `the highlight ended at ${end}, not on Debug (3)`;
+    if (Math.abs(end - 2) > 0.02) return `the highlight ended at ${end}, not on Controls (2)`;
     if (between.length < 2) return `the highlight jumped instead of sliding: ${series.map((v) => v.toFixed(2)).join(" ")}`;
-    if (peak > 3.5) return `the spring overshoots too far (${peak.toFixed(2)})`;
+    if (peak > 2.5) return `the spring overshoots too far (${peak.toFixed(2)})`;
   });
   await step("a page arrives part by part: its clock restarts on every page and runs on", async () => {
-    const mid = sleep(250).then(() => page.shot(`${label}-3-settings-arriving`));
-    const ages = await sampled((u) => u.home.page_age, async () => { await activate("nav:Settings"); }, 900);
-    await mid;
+    const ages = await withFrames(async (i) => {
+      if (i > 0) { await activate("nav:Home"); await page.waitFor("Home", (s) => s.home.page === "Home", 8000); await sleep(600); }
+      const mid = sleep(250).then(() => page.shot(`${label}-3-settings-arriving`));
+      const out = await sampled((u) => u.home.page_age, async () => { await activate("nav:Settings"); }, 900);
+      await mid;
+      return out;
+    });
     await page.shot(`${label}-3-settings`);
     if (!ages.some((v) => v < 0.2) || ages.at(-1) < 0.6) return `no staged arrival: ${ages.map((v) => v.toFixed(2)).join(" ")}`;
   });
@@ -1912,13 +2029,14 @@ async function journeyPolish(label, urlFor, size) {
     const [x, y] = await homeHit(page, "nav:Settings");
     if (mobile) await page.touch("touchStart", [[x, y]]);
     else { await page.mouse("mouseMoved", x, y); await sleep(40); await page.mouse("mousePressed", x, y); }
-    await sleep(220);
-    const held = (await page.ux()).home.press;
+    // The glow rises over a few frames: wait for the page to have drawn them (bounded), not for a fixed time.
+    const lit = await page.waitFor("the glow under the held control", (s) => s.home.press > 0.5, 8000).catch(() => null);
+    const held = lit ? lit.home.press : (await page.ux()).home.press;
     await page.shot(`${label}-4-press`);
     if (mobile) await page.touch("touchEnd", []);
     else await page.mouse("mouseReleased", x, y);
-    await sleep(400);
-    const gone = (await page.ux()).home.press;
+    const drained = await page.waitFor("the glow draining", (s) => s.home.press < 0.05, 8000).catch(() => null);
+    const gone = drained ? drained.home.press : (await page.ux()).home.press;
     await page.waitFor("Settings after the press", (s) => s.home.page === "Settings", 4000);
     if (!(held > 0.5)) return `no press feedback while held (${held})`;
     if (!(gone < 0.05)) return `the glow did not drain (${gone})`;
@@ -1927,9 +2045,13 @@ async function journeyPolish(label, urlFor, size) {
     await activate("nav:Controls");
     await page.waitFor("Controls", (s) => s.home.page === "Controls", 4000);
     await sleep(900);
-    const mid = sleep(150).then(() => page.shot(`${label}-5-controls-selector-mid`));
-    const series = await sampled((u) => u.home.controls.seg, async () => { await activate("ctl:tab:Touch"); }, 900);
-    await mid;
+    const series = await withFrames(async (i) => {
+      if (i > 0) { await activate("ctl:tab:Devices"); await sleep(900); }
+      const mid = sleep(150).then(() => page.shot(`${label}-5-controls-selector-mid`));
+      const out = await sampled((u) => u.home.controls.seg, async () => { await activate("ctl:tab:Touch"); }, 900);
+      await mid;
+      return out;
+    });
     await page.shot(`${label}-5-controls-touch`);
     const end = series.at(-1);
     const between = series.filter((v) => v > 0.2 && v < 1.8);
@@ -1970,7 +2092,7 @@ async function journeyPolish(label, urlFor, size) {
     const problem = homeLayoutProblem(u, size);
     if (problem) return problem;
     // The other pages over the game keep clear of the header's close button too.
-    for (const section of ["Controls", "Settings", "Debug"]) {
+    for (const section of ["Controls", "Settings"]) {
       await activate(`nav:${section}`);
       await page.waitFor(`${section}`, (s) => s.home.page === section, 4000);
       await sleep(700);
@@ -1980,11 +2102,14 @@ async function journeyPolish(label, urlFor, size) {
     await activate("nav:Home");
     await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
   });
-  if (size.framed) await step("framed by another page: the tab bar leaves the host's fullscreen corner clear", async () => {
+  if (mobile) await step("the phone's tab bar is centred in the viewport, with the same margin either side (framed or not)", async () => {
     const u = await page.ux();
-    if (!u.home.framed) return "the player does not know it is framed";
-    const debug = u.home.hits.find((h) => h[0] === "nav:Debug");
-    if (!debug || debug[3] > size.w - 40) return `the last tab runs under the corner: ${JSON.stringify(debug)}`;
+    const tabs = u.home.hits.filter((h) => /^nav:/.test(h[0]));
+    if (tabs.length !== 4) return `expected four tabs (Home, Game, Settings, Controls): ${tabs.map((h) => h[0])}`;
+    const left = Math.min(...tabs.map((h) => h[1])), right = Math.max(...tabs.map((h) => h[3]));
+    const offset = (left + right) / 2 - size.w / 2;
+    if (Math.abs(offset) > 1.5) return `the bar spans ${left.toFixed(1)}..${right.toFixed(1)} of ${size.w}: ${offset.toFixed(1)} px off centre`;
+    if (size.framed && u.home.framed !== true) return "the player does not know it is framed";
   });
   /** Back to the game from the shell: the header's close button (a build before it had the controller's menu button). */
   const closeShell = async () => {
@@ -1993,21 +2118,496 @@ async function journeyPolish(label, urlFor, size) {
     const t = u.touch?.ui.find((b) => b[0] === "menu");
     if (t) await page.tap(t[1] / size.dpr, t[2] / size.dpr);
   };
-  if (mobile) await step("Debug from the touch overlay opens inside the shell over the paused game, and one tap returns", async () => {
-    await closeShell();
+  await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
+
+// ---------------------------------------------------------------- debug panel, save states, centring
+
+const SILENT = `try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`;
+
+/**
+ * Start the demo disc from a fresh page: cancel the countdown, press Start disc, wait for it to run. A phone does
+ * it with fingers: a key press would tell the player there is a keyboard and hide the on-screen controller.
+ */
+async function bootDemo(page, size) {
+  await page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 90000);
+  if (size.mobile) {
+    const [x, y] = await emptyPoint(page, size);
+    await page.tap(x, y);
+  } else await page.tapKey("x");
+  await page.waitFor("a cancelled countdown", (s) => s.home.countdown === "cancelled", 10000);
+  await page.waitFor("the home screen with the disc ready", (s) => s.menu_open && !s.running && s.loaded_id && s.home?.page === "Home", 90000);
+  if (size.mobile) await homeTap(page, "primary");
+  else await page.tapKey("Enter");
+  await waitDemoRunning(page, 90000);
+  // The launch sequence hands over to the game a moment after it runs: wait until the shell is gone.
+  await page.waitFor("the shell gone", (x) => x.home.cover === 0, 20000);
+  // The disc streams in: the screen stays black until the game has drawn its first picture.
+  await page.waitFor("the game's first picture", (x) => x.display_lit === undefined || x.display_lit > 100, 120000);
+  await sleep(1000);
+  if (args.trace) {
+    const seen = [];
+    for (let i = 0; i < 40; i++) { { const u = await page.ux(); seen.push(u.display.join(",") + " lit=" + (u.display_lit > 100 ? "many" : u.display_lit)); } await sleep(50); }
+    console.log("      display areas over 2 s:", [...new Set(seen)].map((d) => `${d} x${seen.filter((v) => v === d).length}`).join(" | "));
+  }
+}
+
+/** A return visit: wait for Home with the disc ready and start it the way this device does. */
+async function startAgain(page, size) {
+  await page.waitFor("the home screen with the disc ready", (s) => s.menu_open && !s.running && s.loaded_id && s.home?.page === "Home", 90000);
+  if (size.mobile) await homeTap(page, "primary");
+  else await page.tapKey("Enter");
+  await waitDemoRunning(page, 90000);
+  await page.waitFor("the shell gone", (x) => x.home.cover === 0, 20000);
+  await page.waitFor("the game's first picture", (x) => x.display_lit === undefined || x.display_lit > 100, 120000);
+  await sleep(1000);
+}
+
+/** A touch button of the on-screen controller, by name, in css px. */
+async function touchButton(page, size, name) {
+  const t = (await page.ux())?.touch?.ui.find((b) => b[0] === name);
+  if (!t) throw new Error(`no ${name} button on the touch controller`);
+  return [t[1] / size.dpr, t[2] / size.dpr];
+}
+
+/**
+ * The live debug panel (home-polish4): it opens beside or under the running game, the game never pauses, the
+ * controller is laid out around it, and it goes away again.
+ */
+async function journeyDebug(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  const page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+  await page.addInit(SILENT);
+  await page.goto(urlFor());
+  await bootDemo(page, size);
+  const toggle = async () => {
+    if (mobile) { const [x, y] = await touchButton(page, size, "debug"); await page.tap(x, y); }
+    else await page.tapKey("F3");
+  };
+  /** The controller's drawn rects in css px; `padOnly` leaves out the pause, save, load, debug and menu buttons. */
+  const padRects = async (padOnly = false) => ((await page.ux()).touch?.rects ?? []).filter((r) => !padOnly || r[0] !== 0).map((r) => r.slice(1).map((v) => v / size.dpr));
+  const before = await page.ux();
+  const padBefore = mobile ? JSON.stringify(await padRects()) : "";
+  await page.shot(`${label}-1-closed`);
+  await step("the debug button opens the panel and the game keeps running at full speed", async () => {
+    const a = await page.ux();
+    await sleep(900);
+    const rate0 = (await page.ux()).cpu_tick - a.cpu_tick;
+    await toggle();
+    const open = await page.waitFor("the panel open", (s) => s.debug.open && s.debug.slide > 0.99, 4000);
+    await sleep(900);
+    await page.shot(`${label}-2-open`);
+    const later = await page.ux();
+    if (!later.running || later.menu_open) return `the game paused or the shell opened: ${JSON.stringify({ r: later.running, m: later.menu_open })}`;
+    if (later.machine !== before.machine) return "the machine changed";
+    const ran = later.cpu_tick - open.cpu_tick;
+    // The same stretch of time with the panel away is the yardstick: the panel may cost a little, never the game.
+    if (ran < rate0 * 0.6) return `the guest ran ${ran} cycles in 0.9 s with the panel open, ${rate0} without`;
+  });
+  await step("the panel sits where it should and nothing of the controller is under it", async () => {
+    const u = await page.ux();
+    if (mobile) { const problem = gameProblems(u, size.dpr); if (problem) return problem; }
+    const [x0, y0, x1, y1] = u.debug.rect;
+    const landscape = size.w >= size.h;
+    if (x0 < -0.5 || y0 < -0.5 || x1 > size.w + 0.5 || y1 > size.h + 0.5) return `the panel is off screen: ${u.debug.rect}`;
+    if (landscape) {
+      if (x1 < size.w - 60) return `the panel is not at the right edge: ${u.debug.rect}`;
+      if (x1 - x0 < 240 || x1 - x0 > size.w * 0.6) return `the panel is ${x1 - x0} wide in a ${size.w} window`;
+      if (mobile) for (const [rx0, ry0, rx1] of (await padRects()).map((r) => [r[0], r[1], r[2]])) if (rx1 > x0 + 1) return `a control reaches ${rx1} into the panel at ${x0}`;
+    } else {
+      if (y1 < size.h - 120 && !mobile) return `the strip is not at the bottom: ${u.debug.rect}`;
+      if (y1 - y0 < 110) return `the strip is only ${y1 - y0} tall`;
+      if (mobile) {
+        const pads = await padRects(true);
+        const top = Math.min(...pads.map((r) => r[1]));
+        if (y1 > top + 1) return `the strip (to ${y1}) runs into the controls (from ${top})`;
+        if (y0 < 140) return `the game has only ${y0} px above the strip`;
+      }
+    }
+  });
+  if (mobile) await step("the controller still plays the game while the panel is open", async () => {
+    const u = await page.ux();
+    const cross = u.touch.buttons.find((b) => b[0] === 0x4000);
+    if (!cross) return "no Cross on the controller";
+    await page.touch("touchStart", [[cross[1] / size.dpr, cross[2] / size.dpr]]);
+    await sleep(250);
+    const t = await page.touchState();
+    await page.touch("touchEnd", []);
+    return t && t.port1_mask & PS1.CROSS ? true : JSON.stringify(t);
+  });
+  else await step("the keyboard still plays the game while the panel is open", async () => {
+    await page.key("f", true, false);
+    await sleep(250);
+    const t = await page.touchState();
+    await page.key("f", false, true);
+    return t && t.port1_mask & PS1.CROSS ? true : JSON.stringify(t);
+  });
+  await step("the panel has no shell page behind it: the shell is closed and Debug is not a tab", async () => {
+    const u = await page.ux();
+    return !u.menu_open && !u.home.hits.some((h) => h[0] === "nav:Debug") ? true : "the shell is up or has a Debug tab";
+  });
+  await step("closing the panel slides it away, the game keeps running and the controller returns to its place", async () => {
+    await toggle();
+    await page.waitFor("the panel gone", (s) => !s.debug.open && s.debug.slide < 0.01, 4000);
+    await sleep(500);
+    await page.shot(`${label}-3-closed-again`);
+    const u = await page.ux();
+    if (!u.running || u.menu_open) return "the game paused";
+    if (mobile && JSON.stringify(await padRects()) !== padBefore) return "the controller did not return to its place";
+  });
+  if (!mobile) await step("a gamepad: Select+R3 shows the panel and again hides it", async () => {
+    await page.padConnect();
+    await sleep(400);
+    await page.padSet({ 8: true });
+    await sleep(120);
+    await page.padSet({ 8: true, 11: true });
+    await page.waitFor("the panel opened by the pad", (s) => s.debug.open, 4000);
+    await page.padSet({});
+    await sleep(300);
+    await page.padSet({ 8: true });
+    await sleep(120);
+    await page.padSet({ 8: true, 11: true });
+    await page.waitFor("the panel closed by the pad", (s) => !s.debug.open, 4000);
+    await page.padSet({});
+    const t = await page.touchState();
+    return t.port1_mask & PS1.R3 ? "R3 reached the guest" : true;
+  });
+  await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
+
+/** Rewrite the stored save of a slot in the page's IndexedDB: `change` names which field of the trailer to alter. */
+async function mutateSave(page, gameId, slot, change) {
+  return page.eval(`(async () => {
+    const open = () => new Promise((res, rej) => { const r = indexedDB.open('psoxide-fs', 2); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    const get = (db, k) => new Promise((res, rej) => { const q = db.transaction('savestates').objectStore('savestates').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
+    const put = (db, k, v) => new Promise((res, rej) => { const t = db.transaction('savestates', 'readwrite'); t.objectStore('savestates').put(v, k); t.oncomplete = () => res(); t.onerror = () => rej(t.error); });
+    const varint = (b, i) => { let v = 0n, s = 0n, n = 0; for (;;) { const x = b[i + n++]; v |= BigInt(x & 127) << s; s += 7n; if (!(x & 128)) break; } return [v, n]; };
+    const enc = (v) => { const out = []; do { let x = Number(v & 127n); v >>= 7n; if (v) x |= 128; out.push(x); } while (v); return out; };
+    const db = await open();
+    const rec = await get(db, 'slot:${gameId}:${slot}');
+    const bytes = rec.bytes;
+    const tail = bytes.length - 12;
+    const metaLen = new DataView(bytes.buffer, bytes.byteOffset + tail, 4).getUint32(0, true);
+    const metaStart = tail - metaLen;
+    const meta = Array.from(bytes.slice(metaStart, tail));
+    // meta_version, game_id, title, disc_hash, created_at, cpu_tick, format_version, creator, thumb
+    let i = 0, n;
+    [, n] = varint(meta, i); i += n;
+    for (let k = 0; k < 2; k++) { let len; [len, n] = varint(meta, i); i += n + Number(len); }
+    const field = (name) => { const at = i; const [v, w] = varint(meta, at); i += w; return { name, at, w, v }; };
+    const disc = field('disc'); field('created'); field('tick'); const fmt = field('format');
+    const target = '${change}' === 'disc' ? disc : fmt;
+    const value = '${change}' === 'disc' ? disc.v ^ 0x5a5a5a5an : fmt.v + 5n;
+    const newMeta = meta.slice(0, target.at).concat(enc(value), meta.slice(target.at + target.w));
+    const out = new Uint8Array(metaStart + newMeta.length + 12);
+    out.set(bytes.slice(0, metaStart), 0);
+    out.set(newMeta, metaStart);
+    new DataView(out.buffer).setUint32(metaStart + newMeta.length, newMeta.length, true);
+    out.set(bytes.slice(tail + 4), metaStart + newMeta.length + 4);
+    await put(db, 'slot:${gameId}:${slot}', { bytes: out });
+    await put(db, 'slotmeta:${gameId}:${slot}', new Uint8Array(newMeta));
+    return true;
+  })()`);
+}
+
+/** Cut a stored save short, as a failed write or a bad disk would. */
+async function truncateSave(page, gameId, slot) {
+  return page.eval(`(async () => {
+    const db = await new Promise((res, rej) => { const r = indexedDB.open('psoxide-fs', 2); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    const rec = await new Promise((res, rej) => { const q = db.transaction('savestates').objectStore('savestates').get('slot:${gameId}:${slot}'); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
+    const bytes = rec.bytes;
+    // Keep the trailer (so the sheet still lists it) but lose most of the machine state.
+    const tail = bytes.length - 12;
+    const metaLen = new DataView(bytes.buffer, bytes.byteOffset + tail, 4).getUint32(0, true);
+    const keep = bytes.slice(tail - metaLen);
+    const out = new Uint8Array(1000 + keep.length);
+    out.set(bytes.slice(0, 1000), 0);
+    out.set(keep, 1000);
+    await new Promise((res, rej) => { const t = db.transaction('savestates', 'readwrite'); t.objectStore('savestates').put({ bytes: out }, 'slot:${gameId}:${slot}'); t.oncomplete = () => res(); t.onerror = () => rej(t.error); });
+    return true;
+  })()`);
+}
+
+/**
+ * Save states (home-polish4): a sheet of slots with pictures; save, overwrite with a question, load, delete;
+ * survive a reload; refuse another disc, another format or a damaged save without touching the game.
+ */
+async function journeySlots(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  const page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+  await page.addInit(SILENT);
+  await page.goto(urlFor());
+  await bootDemo(page, size);
+  const gameId = (await page.ux()).loaded_id;
+  const slots = async () => (await page.ux()).slots;
+  const hit = async (name) => {
+    const h = (await slots()).hits.find((x) => x[0] === name);
+    if (!h) throw new Error(`no "${name}" on the sheet: ${(await slots()).hits.map((x) => x[0])}`);
+    return [(h[1] + h[3]) / 2, (h[2] + h[4]) / 2];
+  };
+  const press = async (name) => {
+    // A short screen shows one row of the grid: scroll the sheet until the control is in view.
+    let [x, y] = await hit(name);
+    for (let i = 0; i < 14 && (y > size.h - 70 || y < 100) && !/^(mode|ask|file):/.test(name); i++) {
+      await page.cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: size.w / 2, y: size.h / 2, deltaX: 0, deltaY: y > size.h / 2 ? 140 : -140 }, page.top);
+      await sleep(300);
+      [x, y] = await hit(name);
+    }
+    await (mobile ? page.tap(x, y) : page.click(x, y));
+    await sleep(250);
+  };
+  /** Open the sheet the way this device does. */
+  const openSheet = async (mode) => {
+    const now = await page.ux();
+    if (now.menu_open && now.home.page === "Slots") {
+      if (now.slots.mode !== mode) await press(`mode:${mode}`);
+      return;
+    }
+    if (mobile) { const [x, y] = await touchButton(page, size, mode === "Save" ? "save" : "load"); await page.tap(x, y); }
+    else {
+      // Esc, the Game page, the row.
+      await page.tapKey("Escape");
+      await page.waitFor("the shell", (s) => s.menu_open, 4000);
+      await menuSelect(page, "Game", mode === "Save" ? "Save state" : "Load state");
+    }
+    await page.waitFor("the slot sheet", (s) => s.home.page === "Slots" && s.menu_open, 5000);
+    await sleep(900);
+    const u = await slots();
+    if (u.mode !== mode) await press(`mode:${mode}`);
+  };
+  /** Leave the sheet and go back to the running game. */
+  const resume = async () => {
+    for (let i = 0; i < 5 && (await page.ux()).menu_open; i++) {
+      const u = await page.ux();
+      if (mobile && u.home.hits.some((h) => h[0] === "close")) await homeTap(page, "close");
+      else await page.tapKey("Escape");
+      await sleep(350);
+    }
     await page.waitFor("the game running", (s) => s.running && !s.menu_open, 6000);
+  };
+  const status = async () => (await page.ux()).status;
+  const tickNow = async () => (await page.ux()).cpu_tick;
+
+  let savedTick = 0, stamp1 = 0, sig1 = "";
+  await step("the sheet opens over the paused game and every slot starts empty", async () => {
+    await openSheet("Save");
+    await page.shot(`${label}-1-sheet-empty`);
+    const u = await page.ux();
+    if (u.running) return "the game still runs behind the sheet";
+    if (u.slots.cards.length !== 9) return `expected 9 slots, got ${u.slots.cards.length}`;
+    if (u.slots.cards.some((c) => c.stamp !== 0)) return "a fresh game has saves";
+    if (u.home.hits.some((h) => h[0] === "nav:Debug")) return "a Debug tab";
+    if (!u.home.hits.some((h) => h[0] === "nav:Game")) return "no Game tab";
+    savedTick = u.cpu_tick;
+  });
+  await step("saving into Slot 1 stores it with a picture, the time and a toast", async () => {
+    await press("slot:1");
+    const u = await page.waitFor("the save landing", (s) => s.slots.cards[1].stamp > 0, 6000);
+    stamp1 = u.slots.cards[1].stamp;
+    await page.shot(`${label}-2-sheet-saved`);
+    if (!u.slots.cards[1].thumb) return "no thumbnail";
+    if (u.slots.cards[1].luma < 2) return `the picture is black (luma ${u.slots.cards[1].luma})`;
+    sig1 = u.slots.cards[1].sig;
+    if (u.cpu_tick !== savedTick) return "the machine moved while the sheet was open";
+    return /Saved to Slot 1/.test(u.status) ? true : `status "${u.status}"`;
+  });
+  await step("a second save into the same slot asks first; Cancel keeps the old one, Replace writes the new", async () => {
     await sleep(1200);
-    const t = (await page.ux()).touch?.ui.find((b) => b[0] === "debug");
-    if (!t) return "no debug button on the touch overlay";
-    const pages = [];
-    const series = await sampled((u) => `${u.home.page}|${u.menu_open}|${u.home.launch >= 0}`, async () => { await page.tap(t[1] / size.dpr, t[2] / size.dpr); }, 1500);
-    pages.push(...new Set(series));
-    await page.shot(`${label}-7-debug`);
-    const wrong = series.filter((v) => v.split("|")[1] === "true" && (v.startsWith("Home") || v.endsWith("|true")));
-    if (wrong.length) return `the shell showed the home page or a launch on the way: ${[...new Set(series)].join(" ")}`;
-    if (!series.at(-1).startsWith("Debug|true")) return `Debug did not open in the shell: ${[...new Set(series)].join(" ")}`;
-    await closeShell();
-    await page.waitFor("back in the game in one tap", (s) => s.running && !s.menu_open, 6000);
+    await press("slot:1");
+    await page.waitFor("the question", (s) => s.slots.ask === "overwrite:1", 3000);
+    await page.shot(`${label}-3-overwrite-asks`);
+    await press("ask:cancel");
+    await page.waitFor("the question gone", (s) => s.slots.ask === null, 3000);
+    if ((await slots()).cards[1].stamp !== stamp1) return "Cancel changed the save";
+    await press("slot:1");
+    await page.waitFor("the question again", (s) => s.slots.ask === "overwrite:1", 3000);
+    await press("ask:confirm");
+    const u = await page.waitFor("the new save", (s) => s.slots.cards[1].stamp > stamp1, 6000);
+    stamp1 = u.slots.cards[1].stamp;
+  });
+  await step("leaving the sheet resumes the game; it runs on past the saved moment", async () => {
+    await resume();
+    await sleep(2500);
+    const t = await tickNow();
+    return t > savedTick + 15_000_000 ? true : `only ${t - savedTick} cycles on`;
+  });
+  await step("Load shows the grid; choosing Slot 1 puts the machine back where it was saved, and the game runs on", async () => {
+    const beforeLoad = await tickNow();
+    await openSheet("Load");
+    await page.shot(`${label}-4-sheet-load`);
+    const paused = await tickNow();
+    await press("slot:1");
+    const u = await page.waitFor("the load", (s) => s.running && !s.menu_open && /Loaded Slot 1/.test(s.status), 8000);
+    await sleep(300);
+    const after = await tickNow();
+    // The slot was saved at `paused - 0` cycles of this sheet's pause; the machine goes back to it.
+    if (after > paused + 40_000_000 && after > savedTick + 40_000_000) return `after the load the machine is at ${after}, not back near ${savedTick}..${paused}`;
+    if (after > beforeLoad) return "the machine did not go back";
+    await page.shot(`${label}-5-after-load`);
+  });
+  await step("quick save and quick load: F5 and F7 on a keyboard, or the Quick card on a phone", async () => {
+    if (!mobile) {
+      await page.tapKey("F5");
+      await page.waitFor("the quick save toast", (s) => /Quick saved/.test(s.status), 6000);
+      const saved = await tickNow();
+      await sleep(2000);
+      await page.tapKey("F7");
+      await page.waitFor("the quick load toast", (s) => /Quick loaded/.test(s.status), 8000);
+      const after = await tickNow();
+      if (after > saved + 40_000_000) return `F7 left the machine at ${after}, saved at ${saved}`;
+      const quick = (await slots()).cards[0];
+      if (!quick.thumb || quick.luma < 2) return `the quick save's picture is black: ${JSON.stringify(quick)}`;
+    } else {
+      await openSheet("Save");
+      await press("slot:0");
+      await page.waitFor("the quick save", (s) => s.slots.cards[0].stamp > 0, 6000);
+      await resume();
+      await openSheet("Load");
+      await press("slot:0");
+      await page.waitFor("the quick load", (s) => s.running && /Quick loaded/.test(s.status), 8000);
+    }
+  });
+  if (!mobile) await step("a gamepad: Select+R1 quick-saves and Select+L1 quick-loads, with toasts", async () => {
+    await page.padConnect();
+    await sleep(400);
+    const chord = async (b) => { await page.padSet({ 8: true }); await sleep(120); await page.padSet({ 8: true, [b]: true }); await sleep(250); await page.padSet({}); await sleep(300); };
+    await chord(5);
+    await page.waitFor("quick saved", (s) => /Quick saved/.test(s.status), 6000);
+    await chord(4);
+    await page.waitFor("quick loaded", (s) => /Quick loaded/.test(s.status), 8000);
+  });
+  await step("a slot's save survives a reload of the page", async () => {
+    await page.goto(urlFor());
+    await page.waitFor("the home screen with the disc ready", (s) => s.menu_open && !s.running && s.loaded_id && s.home?.page === "Home", 90000);
+    await startAgain(page, size);
+    await openSheet("Load");
+    await page.shot(`${label}-6-after-reload`);
+    const u = await page.ux();
+    const c = u.slots.cards[1];
+    if (c.stamp !== stamp1) return `Slot 1 reads ${c.stamp} after the reload, not ${stamp1}`;
+    if (!c.thumb || c.problem) return `Slot 1 after the reload: ${JSON.stringify(c)}`;
+    if (c.sig !== sig1) return `the picture changed across the reload: ${sig1} then ${c.sig}`;
+    if (!/[1-9]/.test(sig1)) return `the picture is blank: ${sig1}`;
+  });
+  await step("loading Slot 1 after the reload restores the saved machine", async () => {
+    const paused = await tickNow();
+    await press("slot:1");
+    await page.waitFor("the load", (s) => s.running && !s.menu_open && /Loaded Slot 1/.test(s.status), 10000);
+    await sleep(300);
+    const after = await tickNow();
+    return after < savedTick + 80_000_000 ? true : `the machine is at ${after}; the save was taken near ${savedTick}`;
+  });
+  await step("Export hands the focused slot over as a file (where the sheet is wide enough to show it)", async () => {
+    await openSheet("Load");
+    const names = (await slots()).hits.map((h) => h[0]);
+    if (!names.includes("file:export")) return true;
+    await page.cdp.send("Page.setDownloadBehavior", { behavior: "deny" }, page.top).catch(() => {});
+    await press("file:export");
+    const u = await page.waitFor("the export toast", (s) => /Exported .*\.psxstate/.test(s.status), 8000);
+    return u ? true : "no export";
+  });
+  await step("a save made on another disc or build is listed as such and refused, the game untouched", async () => {
+    await mutateSave(page, gameId, 1, "disc");
+    await page.goto(urlFor());
+    await page.waitFor("the disc ready", (s) => s.menu_open && !s.running && s.loaded_id && s.home?.page === "Home", 90000);
+    await startAgain(page, size);
+    await openSheet("Load");
+    const c = (await slots()).cards[1];
+    if (!/different disc/i.test(c.problem)) return `no disc problem on the card: ${JSON.stringify(c)}`;
+    await page.shot(`${label}-7-other-disc`);
+    await press("slot:1");
+    await page.waitFor("the explanation", (s) => s.slots.ask === "problem:1", 3000);
+    await page.shot(`${label}-8-other-disc-asks`);
+    const tick = await tickNow();
+    await press("ask:ok");
+    await page.waitFor("the question gone", (s) => s.slots.ask === null, 3000);
+    const u = await page.ux();
+    if (u.running || !u.menu_open) return "a refused load changed the transport";
+    if (u.cpu_tick !== tick) return "a refused load changed the machine";
+  });
+  await step("a save from a newer PSoXide is refused with its own message", async () => {
+    await mutateSave(page, gameId, 1, "format");
+    await page.goto(urlFor());
+    await page.waitFor("the disc ready", (s) => s.menu_open && !s.running && s.loaded_id && s.home?.page === "Home", 90000);
+    await startAgain(page, size);
+    await openSheet("Load");
+    const c = (await slots()).cards[1];
+    return /newer/i.test(c.problem) ? true : `card: ${JSON.stringify(c)}`;
+  });
+  await step("a damaged save says so and leaves the game running", async () => {
+    // Put a good save in Slot 2, then cut it short.
+    await openSheet("Save");
+    await press("slot:2");
+    await page.waitFor("the save", (s) => s.slots.cards[2].stamp > 0, 6000);
+    await truncateSave(page, gameId, 2);
+    await page.goto(urlFor());
+    await page.waitFor("the disc ready", (s) => s.menu_open && !s.running && s.loaded_id && s.home?.page === "Home", 90000);
+    await startAgain(page, size);
+    await openSheet("Load");
+    const tick = await tickNow();
+    await press("slot:2");
+    const u = await page.waitFor("the refusal", (s) => /damaged/i.test(s.status), 8000);
+    if (u.running) return "the damaged load resumed the game";
+    if ((await tickNow()) !== tick) return "the machine changed";
+    await page.shot(`${label}-9-damaged`);
+  });
+  await step("delete asks first and then empties the slot", async () => {
+    await press("slot:2:delete");
+    await page.waitFor("the question", (s) => s.slots.ask === "delete:2", 3000);
+    await press("ask:cancel");
+    if ((await slots()).cards[2].stamp === 0) return "Cancel deleted it";
+    await press("slot:2:delete");
+    await page.waitFor("the question", (s) => s.slots.ask === "delete:2", 3000);
+    await press("ask:confirm");
+    await page.waitFor("the slot empty", (s) => s.slots.cards[2].stamp === 0, 5000);
+  });
+  await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
+
+/** Touch preview and the phone's tab bar are centred, at this size. */
+async function journeyCentre(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  const page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+  await page.addInit(SILENT);
+  await page.goto(urlFor());
+  await page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 90000);
+  await page.tapKey("x");
+  await step("the Controls > Touch layout preview is centred in its column", async () => {
+    await (mobile ? homeTap : homeClick)(page, "nav:Controls");
+    await page.waitFor("Controls", (s) => s.home.page === "Controls", 4000);
+    if (mobile) { await (mobile ? homeTap : homeClick)(page, "ctl:tab:Touch"); await page.waitFor("Touch", (s) => s.home.controls.tab === 2, 4000); }
+    await sleep(900);
+    for (let i = 0; i < 14 && !(await page.ux()).home.controls.preview; i++) {
+      await page.cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: size.w / 2, y: size.h / 2, deltaX: 0, deltaY: 200 }, page.top);
+      await sleep(250);
+    }
+    await sleep(500);
+    await page.shot(`${label}-preview`);
+    const p = (await page.ux()).home.controls.preview;
+    if (!p) return "the preview is not on screen";
+    const [px0, px1, cx0, cx1] = p;
+    const off = (px0 + px1) / 2 - (cx0 + cx1) / 2;
+    return Math.abs(off) <= 1 ? true : `the preview is ${off.toFixed(1)} px off the centre of its column`;
+  });
+  if (mobile) await step("the tab bar is centred in the viewport", async () => {
+    await homeTap(page, "nav:Home");
+    await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
+    await sleep(600);
+    await page.shot(`${label}-tabbar`);
+    const u = await page.ux();
+    const tabs = u.home.hits.filter((h) => /^nav:/.test(h[0]));
+    const left = Math.min(...tabs.map((h) => h[1])), right = Math.max(...tabs.map((h) => h[3]));
+    const off = (left + right) / 2 - size.w / 2;
+    return Math.abs(off) <= 1.5 ? true : `the bar spans ${left.toFixed(1)}..${right.toFixed(1)} of ${size.w}`;
   });
   await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
   await cdp.send("Target.closeTarget", { targetId: page.targetId });
@@ -2138,10 +2738,10 @@ async function journeyFullscreenFallback(label, urlFor, { framed }) {
 // 1280-wide window in the first run; see docs/web-player-journeys.md.
 // A drawn launcher frame is well above this at 1280x800 and quality 40; black is a few KB.
 const BLANK_JPEG_BYTES = 12000;
-const RESET_FROM_RIGHT = 364;
+const RESET_FROM_RIGHT = 400;
 // The brightest the whole screen may get during the boot flash (mean luma, 0 to 1). The old flat white wash read about 0.5.
 const FLASH_LUMA_MAX = 0.3;
-const PAUSE_FROM_RIGHT = 404;
+const PAUSE_FROM_RIGHT = 437;
 
 /**
  * Walk the open menu with the keyboard to a column and a row (by label substring), reading
@@ -2187,7 +2787,7 @@ async function journeyThrottled(label, urlFor, size, fps = 4) {
   await page.tapKey("x");
   await page.waitFor("a cancelled countdown", (s) => s.home.countdown === "cancelled", 10000);
   await step(`at ${fps} frames a second, clicking the nav switches sections`, async () => {
-    for (const section of ["Debug", "Controls", "Settings", "Home"]) {
+    for (const section of ["Controls", "Settings", "Home"]) {
       await activate(page, `nav:${section}`);
       await page.waitFor(`the ${section} page`, (s) => s.home.page === section, 6000);
     }
@@ -2455,7 +3055,7 @@ async function closeShell(page) {
 
 async function menuSelect(page, column, row, { enter = true } = {}) {
   // The shell's sections are one ring (L1/R1, PageUp/PageDown): Home, Game (while a game is started),
-  // Controls, Settings, Debug. Rows live on the Game and Settings pages.
+  // Controls, Settings. Rows live on the Game and Settings pages.
   const PAGE = { Game: "Game", Settings: "Settings" };
   let dir = "ArrowDown", lastRow = null;
   for (let i = 0; i < 80; i++) {
@@ -2736,6 +3336,17 @@ async function main() {
     const a = await page.bench(); await sleep(3000); const b = await page.bench();
     console.log(JSON.stringify({ throttle: args.fps ?? null, redraws_per_s: (b.redraws - a.redraws) / 3 }));
   }); siteServer?.close(); parentServer?.close(); process.exit(0); }
+  if (args.scenario === "toolbar") { await inChrome(1, async () => {
+    const page = await newPage("toolbar");
+    await page.viewport(1280, 800, { dpr: 1 });
+    await page.addInit(SILENT);
+    await page.goto(direct("?countdown=12"));
+    await bootDemo(page, { mobile: false });
+    console.log("toolbar icons at 1280:", JSON.stringify((await toolbarIcons(page)).map((v) => Math.round(v))));
+    await page.viewport(800, 600, { dpr: 1 });
+    await sleep(800);
+    console.log("toolbar icons at 800:", JSON.stringify((await toolbarIcons(page)).map((v) => Math.round(v))));
+  }); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "cors") { await inChrome(1, scenarioCors); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "review") { await scenarioReview(); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "shots") { await scenarioShots(); siteServer?.close(); parentServer?.close(); process.exit(0); }
@@ -2744,7 +3355,7 @@ async function main() {
   if (args.scenario === "spam") { await inChrome(1, scenarioSpam); siteServer?.close(); parentServer?.close(); process.exit(0); }
   const wanted = (name) => !ONLY || name.includes(ONLY);
   try {
-    if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu", "home", "covers", "shell", "throttled", "controls", "grouping", "selection", "cover-states", "hints", "polish"].some((k) => ONLY.includes(k))) {
+    if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu", "home", "covers", "shell", "throttled", "controls", "grouping", "selection", "cover-states", "hints", "polish", "debug", "slots", "centre"].some((k) => ONLY.includes(k))) {
       await inChrome(1, async () => {
         if (wanted("desktop-direct")) await journeyDesktop("desktop-direct", () => direct());
         if (wanted("desktop-home")) await journeyHome("desktop-home", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
@@ -2759,6 +3370,11 @@ async function main() {
         if (wanted("desktop-hints")) await journeyHints("desktop-hints", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-polish")) await journeyPolish("desktop-polish", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-polish-small")) await journeyPolish("desktop-polish-small", () => direct("?countdown=12"), { w: 800, h: 600, dpr: 1, mobile: false });
+        if (wanted("desktop-debug")) await journeyDebug("desktop-debug", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-debug-small")) await journeyDebug("desktop-debug-small", () => direct("?countdown=12"), { w: 800, h: 600, dpr: 1, mobile: false });
+        if (wanted("desktop-slots")) await journeySlots("desktop-slots", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-slots-small")) await journeySlots("desktop-slots-small", () => direct("?countdown=12"), { w: 800, h: 600, dpr: 1, mobile: false });
+        if (wanted("desktop-centre")) await journeyCentre("desktop-centre", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-iframe")) await journeyDesktop("desktop-iframe", () => embedded(), { embeddedMode: true });
         if (wanted("desktop-menus")) await journeyMenus("desktop-menus", () => direct());
         if (wanted("desktop-nowebgpu")) await journeyNoWebgpu("desktop-nowebgpu", () => direct());
@@ -2766,7 +3382,7 @@ async function main() {
         if (wanted("desktop-gamepad-iframe")) await journeyGamepad("desktop-gamepad-iframe", () => embedded());
       });
     }
-    if (!ONLY || ONLY.includes("phone") || ONLY.includes("home") || ONLY.includes("shell") || ONLY.includes("throttled") || ONLY.includes("controls") || ONLY.includes("grouping") || ONLY.includes("hints") || ONLY.includes("selection") || ONLY.includes("cover-states") || ONLY.includes("polish")) {
+    if (!ONLY || ONLY.includes("phone") || ONLY.includes("home") || ONLY.includes("shell") || ONLY.includes("throttled") || ONLY.includes("controls") || ONLY.includes("grouping") || ONLY.includes("hints") || ONLY.includes("selection") || ONLY.includes("cover-states") || ONLY.includes("polish") || ONLY.includes("debug") || ONLY.includes("slots") || ONLY.includes("centre")) {
       await inChrome(3, async () => {
         if (wanted("phone-portrait")) await journeyPhone("phone-portrait", () => direct(), { w: 393, h: 852, dpr: 3 });
         if (wanted("phone-iframe")) await journeyPhone("phone-iframe", () => embedded(), { w: 393, h: 852, dpr: 3 });
@@ -2782,6 +3398,20 @@ async function main() {
         if (wanted("phone-polish-small")) await journeyPolish("phone-polish-small", () => direct("?countdown=12"), { w: 360, h: 640, dpr: 3, mobile: true });
         if (wanted("phone-polish-landscape")) await journeyPolish("phone-polish-landscape", () => direct("?countdown=12"), { w: 852, h: 393, dpr: 3, mobile: true });
         if (wanted("phone-polish-iframe")) await journeyPolish("phone-polish-iframe", () => embedded("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true, framed: true });
+        for (const [name, size, url] of [
+          ["phone-portrait", { w: 393, h: 852, dpr: 3 }, direct],
+          ["phone-375", { w: 375, h: 812, dpr: 3 }, direct],
+          ["phone-small", { w: 360, h: 640, dpr: 3 }, direct],
+          ["phone-se", { w: 375, h: 667, dpr: 3 }, direct],
+          ["phone-se-landscape", { w: 667, h: 375, dpr: 3 }, direct],
+          ["phone-landscape", { w: 852, h: 393, dpr: 3 }, direct],
+          ["phone-iframe", { w: 393, h: 852, dpr: 3 }, embedded],
+        ]) {
+          const q = () => url("?countdown=12");
+          if (wanted(`${name}-debug`)) await journeyDebug(`${name}-debug`, q, { ...size, mobile: true });
+          if (wanted(`${name}-slots`)) await journeySlots(`${name}-slots`, q, { ...size, mobile: true });
+          if (wanted(`${name}-centre`)) await journeyCentre(`${name}-centre`, q, { ...size, mobile: true, framed: name === "phone-iframe" });
+        }
         if (wanted("phone-shell")) await journeyShell("phone-shell", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-shell-small")) await journeyShell("phone-shell-small", () => direct("?countdown=12"), { w: 360, h: 640, dpr: 3, mobile: true });
         if (wanted("phone-controls")) await journeyControls("phone-controls", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
@@ -2793,6 +3423,9 @@ async function main() {
         if (wanted("phone-fullscreen")) await journeyFullscreenFallback("phone-fullscreen", () => direct(), { framed: false });
         if (wanted("phone-fullscreen-iframe")) await journeyFullscreenFallback("phone-fullscreen-iframe", () => embedded(), { framed: true });
         if (wanted("phone-small")) await journeyPhone("phone-small", () => direct(), { w: 360, h: 640, dpr: 3 });
+        // The iPhone SE's screen, in both orientations (at the 3x the harness runs at): the shortest the controller is laid out for.
+        if (wanted("phone-se")) await journeyPhone("phone-se", () => direct(), { w: 375, h: 667, dpr: 3 });
+        if (wanted("phone-se-landscape")) await journeyPhone("phone-se-landscape", () => direct(), { w: 667, h: 375, dpr: 3 });
       });
     }
   } finally {
