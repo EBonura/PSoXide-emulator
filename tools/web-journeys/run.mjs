@@ -1713,11 +1713,13 @@ async function journeyHints(label, urlFor, size) {
     await page.padSet({ 3: true });
     await sleep(120);
     await page.padSet({});
+    await sleep(120); // the hub sees a press as an up-to-down edge between polls: hold the release past a frame
     const on = await page.waitFor("the grid", (s) => s.home.compact !== c0, 3000);
     await page.shot(`${label}-hints-grid`);
     await page.padSet({ 3: true });
     await sleep(120);
     await page.padSet({});
+    await sleep(120);
     const back = await page.waitFor("the cases again", (s) => s.home.compact === c0, 3000);
     return on.home.compact !== back.home.compact ? true : "Triangle did not toggle both ways";
   });
