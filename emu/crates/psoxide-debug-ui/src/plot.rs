@@ -43,9 +43,10 @@ pub fn body() -> FontId {
     FontId::proportional(12.0)
 }
 
-/// Monospace digits for values.
-pub fn mono(size: f32) -> FontId {
-    FontId::monospace(size)
+/// Digits for values, in the same face as the rest of the interface. (The pixel face the
+/// monospace family starts with reads badly at these sizes, and no value here needs columns.)
+pub fn figures(size: f32) -> FontId {
+    FontId::proportional(size + 1.5)
 }
 
 /// Mix `color` toward black (`t` < 0) or white (`t` > 0).

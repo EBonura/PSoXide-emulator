@@ -3207,12 +3207,14 @@ impl AppState {
         let demo = ui::menu::DemoStatus::Absent;
         self.menu.set_home_feed(ui::menu::HomeFeed {
             demo,
-            keyboard: devices
-                .iter()
-                .any(|d| matches!(d.identity.backend, BackendKind::Keyboard)),
+            keyboard: input_router.keyboard_present()
+                && devices
+                    .iter()
+                    .any(|d| matches!(d.identity.backend, BackendKind::Keyboard)),
             gamepads,
             touch: self.menu.touch_mode(),
             touch_ui_left,
+            framed: crate::web_touch::in_frame(),
             current: self
                 .current_game
                 .as_ref()

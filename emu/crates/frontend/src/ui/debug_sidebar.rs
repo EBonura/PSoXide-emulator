@@ -137,11 +137,14 @@ pub fn draw_section(
     state: &mut AppState,
     vram_tex: egui::TextureId,
     rect: Rect,
+    reveal: f32,
 ) {
+    // The page's parts arrive in turn: the content fades in and rises a little into the panel.
     egui::Area::new(egui::Id::new("debug-section"))
         .order(egui::Order::Foreground)
-        .fixed_pos(rect.min)
+        .fixed_pos(rect.min + egui::vec2(0.0, (1.0 - reveal) * 12.0))
         .show(ctx, |ui| {
+            ui.set_opacity(reveal);
             ui.set_clip_rect(rect);
             ui.set_width(rect.width());
             ui.scope(|ui| {
@@ -280,7 +283,7 @@ fn summary(ui: &mut egui::Ui, state: &AppState, big: bool) {
                         ui.vertical(|ui| {
                             ui.label(
                                 RichText::new(value)
-                                    .font(egui::FontId::monospace(36.0))
+                                    .font(egui::FontId::proportional(34.0))
                                     .color(egui::Color32::WHITE),
                             );
                             ui.label(RichText::new(caption).size(13.0).color(theme::TEXT_DIM));
@@ -314,10 +317,10 @@ fn summary(ui: &mut egui::Ui, state: &AppState, big: bool) {
             ui.label(RichText::new(&game.title).color(theme::TEXT));
         }
         if let Some(fps) = fps {
-            ui.label(RichText::new(format!("{fps:.0} fps")).monospace());
+            ui.label(RichText::new(format!("{fps:.0} fps")));
         }
         if let Some((speed, _)) = speed {
-            ui.label(RichText::new(format!("{:.0}% speed", speed * 100.0)).monospace());
+            ui.label(RichText::new(format!("{:.0}% speed", speed * 100.0)));
         }
     });
 }

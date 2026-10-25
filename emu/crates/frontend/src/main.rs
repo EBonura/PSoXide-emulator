@@ -1106,6 +1106,9 @@ impl ApplicationHandler for Shell {
                     },
                 ..
             } => {
+                if state == ElementState::Pressed {
+                    self.input.note_key_event();
+                }
                 // A controls-panel rebind capture owns the keyboard
                 // outright: the next key press becomes the binding
                 // (Escape cancels), and nothing leaks through to the
@@ -2346,6 +2349,8 @@ fn update_touch_controller(
     touch.set_menu_open(menu_open);
     // The home screen with no game behind it is the shell alone: the controller belongs to a game.
     touch.set_shell_only(menu_open && state.menu.home_enabled() && !state.menu.home_over_game());
+    // Over a game the shell has its own header: the controller's top buttons step aside.
+    touch.set_shell_up(menu_open && state.menu.home_enabled() && state.menu.home_over_game());
     touch.update_layout(params, now_ms, dt.max(1.0 / 120.0));
     let visible = touch.visible();
     let safe_top_px = touch.safe_px().top;

@@ -10,6 +10,7 @@ mod covers;
 mod grid;
 mod hints;
 mod launch;
+mod motion;
 mod pages;
 mod scene;
 pub(crate) mod tokens;
@@ -23,6 +24,9 @@ use scene::{fade, CoverKind, CYAN};
 
 pub(crate) use controls::Command as DeviceCommand;
 pub(crate) use covers::CoverState;
+
+/// Room a host page's fullscreen button takes at the bottom right of a frame, in design units.
+const CORNER_BUTTON: f32 = 46.0;
 
 /// Seconds of countdown before the demo disc starts on a first visit.
 const COUNTDOWN_SECS: f32 = 3.0;
@@ -142,6 +146,9 @@ pub(crate) struct HomeFeed {
     /// Left edge (points) of the touch Menu and Fullscreen buttons, when they
     /// sit in the top band.
     pub touch_ui_left: Option<f32>,
+    /// The player sits in another page's frame (itch.io), which puts its own fullscreen button
+    /// over the bottom right corner.
+    pub framed: bool,
     /// The game that is loaded: its launch id and title.
     pub current: Option<(String, String)>,
     /// Safe-area insets in points: top, bottom, left, right.
@@ -173,6 +180,8 @@ enum Click {
     /// A shoulder glyph beside the tabs: step to the previous (-1) or next (1) section.
     TabStep(i32),
     Rail,
+    /// The shell's close button on a phone: back to the game that is paused behind it.
+    Close,
     Act(MenuAction),
     Link(&'static str),
     Welcome,
@@ -251,6 +260,30 @@ pub(crate) struct HomeState {
     /// Desktop: the Demo Disc is a disc in the games folder (or beside the program), found by
     /// name, not one the page streams in.
     local_demo: bool,
+    /// The page whose parts are being revealed, and seconds since it opened: its parts arrive one
+    /// after another (title, then rows). Reset when the page changes or the shell reopens.
+    shown_page: Page,
+    page_age: f32,
+    /// Which way the page change went along the nav (-1 back, 1 forward), for the slide-in.
+    page_dir: f32,
+    /// Seconds since the Home text last changed (a new page or another case in focus).
+    home_age: f32,
+    last_case: usize,
+    /// The tab highlight, in tabs from the first: it slides between them with a small spring.
+    nav_hl: motion::Spring,
+    /// The keyboard or pad focus on the tabs, the same way.
+    nav_ring: motion::Spring,
+    /// How much of the highlight shows (it fades when no tab is the page, as on Welcome), and
+    /// how far the focus is on the tabs.
+    nav_vis: f32,
+    ring_vis: f32,
+    /// The focus frame of a list page: where it is (in px from the list's top), gliding.
+    row_cage: motion::Spring,
+    /// The welcome page shown last, to restart the reveal when it turns.
+    last_welcome: usize,
+    /// A control being pressed: where it is and how far the press feedback has risen.
+    press_rect: Option<Rect>,
+    press_t: f32,
 }
 
 /// The animation of one case: how focused it is (a spring, so it settles with
@@ -325,6 +358,19 @@ impl HomeState {
             calm_setting: false,
             calm_browser: prefers_reduced_motion(),
             local_demo: false,
+            shown_page: Page::Home,
+            page_age: 0.0,
+            page_dir: 0.0,
+            home_age: 0.0,
+            last_case: 0,
+            nav_hl: motion::Spring::default(),
+            nav_ring: motion::Spring::default(),
+            nav_vis: 0.0,
+            ring_vis: 0.0,
+            row_cage: motion::Spring::default(),
+            last_welcome: 0,
+            press_rect: None,
+            press_t: 0.0,
         }
     }
 
@@ -465,9 +511,73 @@ impl HomeState {
             self.launch = None;
             self.launch_sent = false;
             self.launch_done = false;
+            self.page_age = 0.0;
+            self.home_age = 0.0;
+            self.page_dir = 0.0;
             if self.pausing(ms) {
                 ms.select_category("Game");
+                // The game that is running is the first case: the shell opens on it.
+                self.case_focus = 0;
+                self.case_pos = 0.0;
             }
+        }
+    }
+
+    /// Advance the reveal clocks and notice a page change (which way it went along the nav).
+    fn tick_motion(&mut self, ms: &MenuState, dt: f32) {
+        if self.page != self.shown_page {
+            let items = nav_items(self.pausing(ms));
+            let at = |page: Page| items.iter().position(|i| i.page() == page);
+            self.page_dir = match (at(self.shown_page), at(self.page)) {
+                (Some(from), Some(to)) if to > from => 1.0,
+                (Some(from), Some(to)) if to < from => -1.0,
+                _ => 0.0,
+            };
+            self.shown_page = self.page;
+            self.page_age = 0.0;
+            self.home_age = 0.0;
+        } else {
+            self.page_age += dt;
+            self.home_age += dt;
+        }
+        if self.welcome != self.last_welcome {
+            self.page_dir = if self.welcome > self.last_welcome { 1.0 } else { -1.0 };
+            self.last_welcome = self.welcome;
+            self.page_age = 0.0;
+        }
+        if self.case_focus != self.last_case {
+            self.last_case = self.case_focus;
+            // Another case: its words come in again, but from half way, so they never blank.
+            self.home_age = 0.05;
+        }
+    }
+
+    /// How far part `index` of the page is revealed, 0 to 1 (always 1 with reduced motion).
+    fn reveal(&self, index: usize) -> f32 {
+        if self.calm() {
+            1.0
+        } else {
+            motion::stage(self.page_age, index)
+        }
+    }
+
+    /// The same for the Home page's text, which also re-arrives when another case takes focus.
+    fn home_reveal(&self, index: usize) -> f32 {
+        if self.calm() {
+            1.0
+        } else {
+            motion::stage(self.home_age, index)
+        }
+    }
+
+    /// Where a part that is `s` revealed sits relative to its place: a short slide along the way
+    /// the nav went (or up from below when the page did not come from a neighbour).
+    fn slide(&self, s: f32, u: f32) -> Vec2 {
+        let k = 1.0 - s;
+        if self.page_dir == 0.0 {
+            Vec2::new(0.0, k * 12.0 * u)
+        } else {
+            Vec2::new(self.page_dir * k * 24.0 * u, 0.0)
         }
     }
 
@@ -586,6 +696,7 @@ impl MenuState {
                     Click::SizeToggle => "size".into(),
                     Click::TabStep(n) => format!("tab-step:{n}"),
                     Click::Rail => "rail".into(),
+                    Click::Close => "close".into(),
                     Click::Burn => "burn".into(),
                     Click::Link(url) => format!("link:{url}"),
                     Click::Welcome => "welcome".into(),
@@ -642,7 +753,7 @@ impl MenuState {
             _ => -1.0,
         };
         format!(
-            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"controls\":{},\"cases\":[{}],\"hits\":[{}]}}",
+            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"nav_hl\":{:.3},\"nav_vis\":{:.2},\"page_age\":{:.2},\"keyboard\":{},\"framed\":{},\"press\":{:.2},\"controls\":{},\"cases\":[{}],\"hits\":[{}]}}",
             h.page.name(),
             if h.zone == Zone::Nav { "nav" } else { "body" },
             self.home_probe().1,
@@ -659,6 +770,12 @@ impl MenuState {
             h.covers.loaded(),
             h.calm(),
             h.compact,
+            h.nav_hl.pos,
+            h.nav_vis,
+            h.page_age.min(99.0),
+            h.feed.keyboard,
+            h.feed.framed,
+            h.press_t,
             h.controls.probe_json(self),
             cases.join(","),
             hits.join(",")
@@ -766,6 +883,12 @@ impl MenuState {
             Page::Debug if self.open => Some((h.page.name(), rect)),
             _ => None,
         }
+    }
+
+    /// How far the section's content has arrived, 0 to 1: the page's parts come in one after
+    /// another, and the egui content of the Debug section fades in with the rest.
+    pub fn home_section_reveal(&self) -> f32 {
+        self.home.as_ref().map_or(1.0, |h| h.reveal(1))
     }
 
     /// Whether Escape, the pad's Select+Start and the touch Menu button mean
@@ -937,7 +1060,7 @@ impl HomeState {
                 } else {
                     title.clone()
                 },
-                line: "Paused. Pick up where you left off".into(),
+                line: "Pick up where you left off".into(),
                 action: MenuAction::ResumeGame,
                 button: "Resume",
                 cover_key: if local.is_some()
@@ -951,6 +1074,7 @@ impl HomeState {
                 burn: None,
                 launches: false,
                 shelf: false,
+                badge: Some("Running"),
             });
         }
         if let Some(local) = local.as_ref() {
@@ -968,6 +1092,7 @@ impl HomeState {
                 burn: None,
                 launches: true,
                 shelf: false,
+                badge: None,
             });
         }
         out.push(CaseItem {
@@ -981,6 +1106,7 @@ impl HomeState {
             burn: None,
             launches: false,
             shelf: false,
+            badge: None,
         });
         // A folder connected on an earlier visit is one click from being open again.
         #[cfg(target_arch = "wasm32")]
@@ -996,6 +1122,7 @@ impl HomeState {
                 burn: None,
                 launches: false,
                 shelf: false,
+                badge: None,
             });
         }
         let mut shown: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -1020,6 +1147,7 @@ impl HomeState {
                     burn: None,
                     launches: true,
                     shelf: false,
+                    badge: None,
                 });
             }
         }
@@ -1047,6 +1175,7 @@ impl HomeState {
                         .then(|| MenuAction::OpenBurnMenu(item.id.clone())),
                     launches: true,
                     shelf: true,
+                    badge: None,
                 });
             }
         }
@@ -1077,6 +1206,7 @@ impl HomeState {
                         .then(|| MenuAction::OpenBurnMenu(item.id.clone())),
                     launches: item.launchable,
                     shelf: false,
+                    badge: None,
                 });
             }
         }
@@ -1275,7 +1405,7 @@ impl HomeState {
         if input.secondary {
             // The second action of the focused case, whichever it has.
             let click = cases.get(self.case_focus).and_then(|c| {
-                if matches!(c.kind, CoverKind::Demo) {
+                if matches!(c.kind, CoverKind::Demo) && c.badge.is_none() {
                     Some(Click::Peek)
                 } else if c.restart.is_some() {
                     Some(Click::Restart)
@@ -1462,6 +1592,7 @@ impl HomeState {
         }
         ctx.request_repaint();
         self.time += dt;
+        self.tick_motion(ms, dt);
         self.tick_countdown(dt);
         // Any key, click or touch before the user chose anything cancels.
         let activity = ctx.input(|i| {
@@ -1503,7 +1634,10 @@ impl HomeState {
         // The same shell before and during a game: over the void, or over the
         // game itself dimmed down.
         if in_game {
-            let scrim = f32::from(ms.backdrop_pct.max(50)) * 2.55 * 0.8;
+            // The game is still there, but dark enough that the shell reads against it: its
+            // picture must never compete with the words (the old 70% let a game's text show
+            // through the title).
+            let scrim = f32::from(ms.backdrop_pct.max(88)) * 2.55 * 0.95;
             layer.rect_filled(full, 0.0, Color32::from_black_alpha((appear * scrim) as u8));
         } else {
             layer.rect_filled(full, 0.0, fade(scene::VOID, appear));
@@ -1545,6 +1679,64 @@ impl HomeState {
             self.draw_badge(&pc, dt);
         }
         self.handle_pointer(ms, ctx);
+        self.draw_press_feedback(ctx, dt);
+    }
+
+    /// The control under a finger or the mouse button answers at once: a soft glow rises under it
+    /// while it is held and drains when it is let go. One rule for every control; things that
+    /// would look wrong lit (the cases, the sliders, a scroll) are left out.
+    fn draw_press_feedback(&mut self, ctx: &egui::Context, dt: f32) {
+        let held = self.press.filter(|p| !p.scrolled && p.on_slider.is_none() && p.travel < 10.0);
+        let full = ctx.screen_rect();
+        let target = held.and_then(|press| {
+            self.hits
+                .iter()
+                .rev()
+                .find(|(r, _)| r.contains(press.start))
+                .filter(|(r, click)| {
+                    r.width() * r.height() < full.width() * full.height() * 0.25
+                        && !matches!(
+                            click,
+                            Click::Case(_)
+                                | Click::Slider(..)
+                                | Click::Rail
+                                | Click::Dismiss
+                                | Click::Peek
+                        )
+                })
+                .map(|(r, _)| *r)
+        });
+        let pressed = ctx.input(|i| i.pointer.primary_down());
+        match target {
+            Some(rect) if pressed => {
+                if self.press_rect != Some(rect) {
+                    self.press_t = 0.0;
+                }
+                self.press_rect = Some(rect);
+                self.press_t = (self.press_t + dt / 0.07).min(1.0);
+            }
+            _ => self.press_t = (self.press_t - dt / 0.20).max(0.0),
+        }
+        if self.calm() && target.is_none() {
+            self.press_t = 0.0;
+        }
+        let Some(rect) = self.press_rect.filter(|_| self.press_t > 0.0) else {
+            return;
+        };
+        let k = self.press_t;
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("menu"),
+        ));
+        let round = (rect.height() / 2.0).min(14.0);
+        painter.rect_filled(rect, round, fade(tokens::FOCUS, 0.14 * k));
+        painter.rect_stroke(
+            rect,
+            round,
+            Stroke::new(1.0, fade(tokens::FOCUS, 0.38 * k)),
+            egui::StrokeKind::Inside,
+        );
+        ctx.request_repaint();
     }
 
     fn tick_countdown(&mut self, dt: f32) {
@@ -1612,6 +1804,8 @@ struct CaseItem {
     launches: bool,
     /// Part of the sorted shelf (the letter jump walks these).
     shelf: bool,
+    /// A state shown as a small chip under the title (the game that is running).
+    badge: Option<&'static str>,
 }
 
 /// Screen geometry for the current size and orientation.
@@ -1855,10 +2049,11 @@ impl HomeState {
         );
         self.draw_page_hints(pc, &[(Btn::Circle, "Back")]);
         let outline = chamfer(rect.expand(6.0), tokens::CHAMFER * u);
+        let head = self.reveal(0);
         pc.painter.add(Shape::convex_polygon(
             outline.clone(),
-            fade(Color32::from_rgba_unmultiplied(8, 16, 22, 184), pc.appear),
-            Stroke::new(1.0, fade(tokens::hairline(), pc.appear)),
+            fade(Color32::from_rgba_unmultiplied(8, 16, 22, 184), pc.appear * head),
+            Stroke::new(1.0, fade(tokens::hairline(), pc.appear * head)),
         ));
         self.section = Some(rect);
     }
@@ -1954,6 +2149,11 @@ impl HomeState {
         let Some(item) = cases.get(f) else {
             return;
         };
+        // The page's own words arrive in turn: title and line, then the button, then the
+        // quiet actions, each sliding up a little as it fades in.
+        let (rt, rb, rq) = (self.home_reveal(0), self.home_reveal(2), self.home_reveal(3));
+        let (ta, ba, qa) = (a * rt, a * rb, a * rq);
+        let m0 = motion::mark(ctx, p);
         let text_col = tokens::TEXT;
         let sub_col = tokens::MUTED;
         let (tx, ty, align) = match lay.kind {
@@ -1981,24 +2181,62 @@ impl HomeState {
             align,
             &item.title,
             title_font,
-            fade(text_col, a),
+            fade(text_col, ta),
         );
         let line_px = (if lay.kind == LayoutKind::Desktop {
             16.0
         } else {
             14.0
         }) * u;
-        let sub_y = r.bottom() + 8.0 * u;
-        let sub = p.text(
-            Pos2::new(tx, sub_y),
-            align,
-            &item.line,
-            FontId::proportional(line_px),
-            fade(sub_col, a),
-        );
-        // "What's on it", only on the demo disc and only on demand.
+        let mut sub_y = r.bottom() + 8.0 * u;
+        if let Some(text) = item.badge {
+            // The state of the case, as a small chip: a lit dot and a word.
+            let font = FontId::proportional(tokens::CAPTION * u.max(0.95));
+            let galley = p.layout_no_wrap(text.to_uppercase(), font, fade(tokens::TEXT_2, ta));
+            let (cw, ch) = (galley.size().x + 34.0 * u, 24.0 * u);
+            let left = match align {
+                Align2::LEFT_TOP => tx,
+                _ => tx - cw / 2.0,
+            };
+            let chip = Rect::from_min_size(Pos2::new(left, sub_y), Vec2::new(cw, ch));
+            p.rect_filled(chip, ch / 2.0, fade(Color32::from_rgb(10, 34, 40), ta * 0.9));
+            p.rect_stroke(
+                chip,
+                ch / 2.0,
+                Stroke::new(1.0, fade(tokens::ACCENT, ta * 0.55)),
+                egui::StrokeKind::Inside,
+            );
+            // The dot breathes while the game waits (still under reduced motion).
+            let pulse = if self.calm() {
+                0.8
+            } else {
+                0.65 + 0.35 * (self.time * 2.6).sin().abs()
+            };
+            let dot = Pos2::new(chip.left() + 13.0 * u, chip.center().y);
+            p.circle_filled(dot, 3.2 * u, fade(tokens::OK, ta * pulse));
+            p.galley(
+                Pos2::new(chip.left() + 24.0 * u, chip.center().y - galley.size().y / 2.0),
+                galley,
+                tokens::TEXT_2,
+            );
+            sub_y = chip.bottom() + 8.0 * u;
+        }
+        // A case with a state chip lets the chip say it (the line stays in the probe), which
+        // keeps a short phone's button clear of the tab bar.
+        let sub = if item.badge.is_some() {
+            Rect::from_min_size(Pos2::new(tx, sub_y - 8.0 * u), Vec2::ZERO)
+        } else {
+            p.text(
+                Pos2::new(tx, sub_y),
+                align,
+                &item.line,
+                FontId::proportional(line_px),
+                fade(sub_col, ta),
+            )
+        };
+        // "What's on it", only on the demo disc and only on demand (not while it is running).
         let mut below = sub.bottom();
-        if matches!(item.kind, CoverKind::Demo) {
+        if matches!(item.kind, CoverKind::Demo) && item.badge.is_none() {
             let wio_pos = match align {
                 Align2::LEFT_TOP => Pos2::new(sub.left(), below + 8.0 * u),
                 _ => Pos2::new(tx, below + 8.0 * u),
@@ -2008,25 +2246,27 @@ impl HomeState {
                 align,
                 "What's on it",
                 FontId::proportional(line_px * 0.92),
-                fade(tokens::ACCENT, a),
+                fade(tokens::ACCENT, ta),
             );
             p.line_segment(
                 [wio.left_bottom(), wio.right_bottom()],
-                Stroke::new(1.0, fade(tokens::ACCENT, a * 0.45)),
+                Stroke::new(1.0, fade(tokens::ACCENT, ta * 0.45)),
             );
             self.hits
                 .push((wio.expand2(Vec2::new(10.0, 8.0)), Click::Peek));
-            self.square_glyph(p, &lay, wio, a);
+            self.square_glyph(p, &lay, wio, ta);
             below = wio.bottom();
         }
         // The countdown line, or the loading line, or nothing.
         let mut cd_y = below + 16.0 * u;
         if matches!(item.kind, CoverKind::Demo) && !self.started {
             if let Some(line) = self.progress_line() {
-                self.draw_progress_line(p, tx, cd_y, align, u, a, &line);
+                self.draw_progress_line(p, tx, cd_y, align, u, ta, &line);
                 cd_y += 22.0 * u;
             }
         }
+        motion::shift_since(ctx, p, m0, self.slide(rt, u));
+        let m1 = motion::mark(ctx, p);
         // The one button.
         let label = item.button.to_uppercase();
         let pad_glyph = self.hint_style(&lay) == Some(HintStyle::Pad);
@@ -2043,12 +2283,12 @@ impl HomeState {
         };
         let btn = Rect::from_min_size(btn_pos, Vec2::new(bw, bh));
         let focused = self.zone == Zone::Body;
-        p.rect_filled(btn, bh / 2.0, fade(CYAN, a));
+        p.rect_filled(btn, bh / 2.0, fade(CYAN, ba));
         if focused {
             p.rect_stroke(
                 btn.expand(3.0 * u),
                 bh / 2.0 + 3.0 * u,
-                Stroke::new(1.5, fade(tokens::FOCUS, a * 0.8)),
+                Stroke::new(1.5, fade(tokens::FOCUS, ba * 0.8)),
                 egui::StrokeKind::Outside,
             );
         }
@@ -2058,7 +2298,7 @@ impl HomeState {
                 Pos2::new(btn.left() + 24.0 * u, btn.center().y),
                 hints::face_radius(u) * 0.9,
                 Btn::Cross,
-                a,
+                ba,
             );
             btn.center() + Vec2::new(12.0 * u, 0.0)
         } else {
@@ -2069,10 +2309,12 @@ impl HomeState {
             Align2::CENTER_CENTER,
             label,
             FontId::proportional(13.0 * u),
-            fade(tokens::ON_ACCENT, a),
+            fade(tokens::ON_ACCENT, ba),
         );
         self.hits.push((btn, Click::Primary));
         self.btn_bottom = btn.bottom();
+        motion::shift_since(ctx, p, m1, self.slide(rb, u));
+        let m2 = motion::mark(ctx, p);
         // Quiet second actions under the button.
         let mut qy = btn.bottom() + 14.0 * u;
         let quiet = |p: &egui::Painter, text: &str, y: f32| {
@@ -2090,25 +2332,29 @@ impl HomeState {
                 },
                 text,
                 FontId::proportional(13.0 * u),
-                fade(tokens::ACCENT, a),
+                fade(tokens::ACCENT, qa),
             )
         };
         if item.restart.is_some() {
             let r = quiet(p, "Start over", qy);
             self.hits
                 .push((r.expand2(Vec2::new(12.0, 8.0)), Click::Restart));
-            self.square_glyph(p, &lay, r, a);
+            self.square_glyph(p, &lay, r, qa);
             qy = r.bottom() + 6.0 * u;
+            // The footer makes room under the button and what hangs from it.
+            self.btn_bottom = r.bottom() + 6.0 * u;
         }
         if item.burn.is_some() {
             let r = quiet(p, "Burn to CD", qy);
             self.hits
                 .push((r.expand2(Vec2::new(12.0, 8.0)), Click::Burn));
+            self.btn_bottom = r.bottom() + 6.0 * u;
             // Square is the first of Start over and Burn that the case has.
             if item.restart.is_none() && !matches!(item.kind, CoverKind::Demo) {
-                self.square_glyph(p, &lay, r, a);
+                self.square_glyph(p, &lay, r, qa);
             }
         }
+        motion::shift_since(ctx, p, m2, self.slide(rq, u));
         // Quiet links at the bottom.
         self.draw_footer(pc);
         if self.peek && matches!(item.kind, CoverKind::Demo) {
@@ -2489,7 +2735,42 @@ impl HomeState {
         self.hits.push((r, Click::Peek));
     }
 
-    /// The desktop nav: plain text along the top, the active one marked.
+    /// Move the tab highlight and the focus ring toward their tabs, once per frame.
+    fn tick_nav(&mut self, items: &[NavItem], shell_up: f32) {
+        let dt = self.frame_dt;
+        // While the shell is fading in the springs jump, so the highlight never travels
+        // from where the last visit left it.
+        let snap = self.calm() || shell_up < 0.6;
+        let active = items.iter().position(|i| i.page() == self.page);
+        if let Some(at) = active {
+            self.nav_hl.step(at as f32, dt, snap || self.nav_vis < 0.05);
+        }
+        let ease = |v: f32, target: f32| v + (target - v) * (1.0 - (-14.0 * dt).exp());
+        self.nav_vis = if snap {
+            f32::from(active.is_some())
+        } else {
+            ease(self.nav_vis, f32::from(active.is_some()))
+        };
+        let focused = self.zone == Zone::Nav;
+        let ring_at = if focused {
+            self.nav.min(items.len().saturating_sub(1)) as f32
+        } else {
+            self.nav_hl.pos
+        };
+        self.nav_ring.step(ring_at, dt, snap || self.ring_vis < 0.05);
+        self.ring_vis = if snap {
+            f32::from(focused)
+        } else {
+            ease(self.ring_vis, f32::from(focused))
+        };
+    }
+
+    /// How near tab `i` is to the tab highlight, 1 on it and 0 a tab away: its colour follows.
+    fn tab_near(&self, i: usize) -> f32 {
+        (1.0 - (self.nav_hl.pos - i as f32).abs()).clamp(0.0, 1.0) * self.nav_vis
+    }
+
+    /// The desktop nav: plain text along the top, and a marker that slides to the active tab.
     fn draw_top_nav(
         &mut self,
         p: &egui::Painter,
@@ -2513,10 +2794,11 @@ impl HomeState {
             ));
             x += w + 18.0 * u;
         }
+        let mut centres: Vec<(f32, f32)> = Vec::with_capacity(items.len());
+        let mut bottom = ny;
         for (i, item) in items.iter().enumerate() {
-            let focused = self.zone == Zone::Nav && self.nav == i;
-            let on = item.page() == self.page || focused;
-            let col = if on { tokens::TEXT } else { tokens::DIM };
+            let near = self.tab_near(i).max(self.ring_vis * (1.0 - (self.nav_ring.pos - i as f32).abs()).clamp(0.0, 1.0));
+            let col = scene::mix(tokens::DIM, tokens::TEXT, near);
             let r = p.text(
                 Pos2::new(x, ny),
                 Align2::LEFT_CENTER,
@@ -2524,23 +2806,36 @@ impl HomeState {
                 FontId::proportional(15.5 * u),
                 fade(col, a),
             );
-            if on {
-                let c = Pos2::new(r.center().x, r.bottom() + 5.0 * u);
-                let d = 3.0 * u;
-                p.add(Shape::convex_polygon(
-                    vec![
-                        c + Vec2::new(0.0, -d),
-                        c + Vec2::new(d, 0.0),
-                        c + Vec2::new(0.0, d),
-                        c + Vec2::new(-d, 0.0),
-                    ],
-                    fade(if focused { tokens::FOCUS } else { CYAN }, a),
-                    Stroke::NONE,
-                ));
-            }
+            centres.push((r.center().x, r.bottom()));
+            bottom = r.bottom();
             self.hits
                 .push((r.expand2(Vec2::new(10.0, 12.0)), Click::Nav(*item)));
             x = r.right() + 26.0 * u;
+        }
+        // The marker: a small diamond under the tab. It rests on the active tab (cyan) and
+        // follows the focus while the pad or keys are on the tabs (the focus colour).
+        let pos = self.nav_hl.pos + (self.nav_ring.pos - self.nav_hl.pos) * self.ring_vis;
+        if let (Some(first), Some(last)) = (centres.first(), centres.last()) {
+            let at = |t: f32| -> f32 {
+                let t = t.clamp(0.0, (centres.len() - 1) as f32);
+                let i = t.floor() as usize;
+                let j = (i + 1).min(centres.len() - 1);
+                centres[i].0 + (centres[j].0 - centres[i].0) * (t - i as f32)
+            };
+            let vis = (self.nav_vis + self.ring_vis).min(1.0);
+            let c = Pos2::new(at(pos).clamp(first.0 - 6.0 * u, last.0 + 6.0 * u), bottom + 5.0 * u);
+            let d = 3.0 * u;
+            let col = scene::mix(CYAN, tokens::FOCUS, self.ring_vis);
+            p.add(Shape::convex_polygon(
+                vec![
+                    c + Vec2::new(0.0, -d),
+                    c + Vec2::new(d, 0.0),
+                    c + Vec2::new(0.0, d),
+                    c + Vec2::new(-d, 0.0),
+                ],
+                fade(col, a * vis),
+                Stroke::NONE,
+            ));
         }
         // R1 at the right end.
         if let Some(style) = style {
@@ -2571,9 +2866,20 @@ impl HomeState {
         }) * u;
         let style = self.hint_style(lay);
         let side = style.map_or(0.0, |st| hints::btn_width(p, u, st, Btn::L1) + 10.0 * u);
-        let w = (items.len() as f32 * 76.0 * u).min(lay.safe.width() - 24.0 * u - 2.0 * side);
+        // A host page's own fullscreen button sits over the bottom right corner of a frame:
+        // on a phone the bar gives that corner up instead of running under it.
+        let corner = if self.feed.framed && lay.kind == LayoutKind::Portrait {
+            CORNER_BUTTON * u
+        } else {
+            0.0
+        };
+        let w = (items.len() as f32 * 76.0 * u)
+            .min(lay.safe.width() - 24.0 * u - 2.0 * side - corner);
         let bar = Rect::from_center_size(
-            Pos2::new(lay.safe.center().x, lay.safe.bottom() - h / 2.0 - 10.0 * u),
+            Pos2::new(
+                lay.safe.center().x - corner / 2.0,
+                lay.safe.bottom() - h / 2.0 - 10.0 * u,
+            ),
             Vec2::new(w, h),
         );
         p.rect_filled(
@@ -2603,29 +2909,36 @@ impl HomeState {
             }
         }
         let cell = w / items.len() as f32;
+        let pill_r = (h - 10.0 * u) / 2.0;
+        let inset = Vec2::new(4.0 * u, 5.0 * u);
+        let last = (items.len() - 1) as f32;
+        // The highlight: one pill that slides between the tabs (a spring, so it settles with a
+        // small bounce) instead of switching on in the new cell.
+        if self.nav_vis > 0.01 {
+            let x = bar.left() + cell * self.nav_hl.pos.clamp(0.0, last);
+            let pill = Rect::from_min_size(Pos2::new(x, bar.top()), Vec2::new(cell, h)).shrink2(inset);
+            p.rect_filled(
+                pill,
+                pill_r,
+                fade(Color32::from_rgb(16, 52, 62), a * self.nav_vis),
+            );
+        }
+        if self.ring_vis > 0.01 {
+            let x = bar.left() + cell * self.nav_ring.pos.clamp(0.0, last);
+            let ring = Rect::from_min_size(Pos2::new(x, bar.top()), Vec2::new(cell, h)).shrink2(inset);
+            p.rect_stroke(
+                ring,
+                pill_r,
+                Stroke::new(2.0, fade(tokens::FOCUS, a * self.ring_vis)),
+                egui::StrokeKind::Inside,
+            );
+        }
         for (i, item) in items.iter().enumerate() {
-            let focused = self.zone == Zone::Nav && self.nav == i;
-            let on = item.page() == self.page;
             let c = Rect::from_min_size(
                 Pos2::new(bar.left() + cell * i as f32, bar.top()),
                 Vec2::new(cell, h),
             );
-            if on {
-                p.rect_filled(
-                    c.shrink2(Vec2::new(4.0 * u, 5.0 * u)),
-                    (h - 10.0 * u) / 2.0,
-                    fade(Color32::from_rgb(16, 52, 62), a),
-                );
-            }
-            if focused {
-                p.rect_stroke(
-                    c.shrink2(Vec2::new(4.0 * u, 5.0 * u)),
-                    (h - 10.0 * u) / 2.0,
-                    Stroke::new(2.0, fade(tokens::FOCUS, a)),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            let col = fade(if on { CYAN } else { tokens::ICON_REST }, a);
+            let col = fade(scene::mix(tokens::ICON_REST, CYAN, self.tab_near(i)), a);
             let tall = lay.kind != LayoutKind::Landscape;
             let icon_c = if tall {
                 Pos2::new(c.center().x, c.center().y - 8.0 * u)
@@ -2741,19 +3054,38 @@ impl HomeState {
             }
         }
         let items = nav_items(self.pausing(ms));
+        self.tick_nav(&items, ms.appear);
         if desktop {
             self.draw_top_nav(p, lay, &items, logo_rect, u, a);
         } else {
             self.draw_bottom_bar(p, lay, &items, u, a);
         }
         // Controller indicators, top right: small, grey, cyan when in use.
+        let mut right_edge = s.right() - if desktop { 48.0 * u } else { 20.0 * u };
+        let iy = top + 9.0 * u;
+        // On a phone the touch controller's own buttons step aside while the shell is up, so the
+        // way back to the game lives in the header: one tap on the X.
+        if self.pausing(ms) && !desktop {
+            let side = 34.0 * u;
+            let b = Rect::from_center_size(Pos2::new(right_edge - side / 2.0, iy), Vec2::splat(side));
+            p.circle_filled(b.center(), side / 2.0, fade(Color32::from_rgba_unmultiplied(8, 16, 22, 200), a));
+            p.circle_stroke(
+                b.center(),
+                side / 2.0,
+                Stroke::new(1.0, fade(tokens::RING, a)),
+            );
+            let k = side * 0.17;
+            let ink = Stroke::new(1.6, fade(tokens::TEXT_2, a));
+            let c = b.center();
+            p.line_segment([c + Vec2::new(-k, -k), c + Vec2::new(k, k)], ink);
+            p.line_segment([c + Vec2::new(-k, k), c + Vec2::new(k, -k)], ink);
+            self.hits.push((b.expand(7.0 * u), Click::Close));
+            right_edge -= side + 14.0 * u;
+        }
         let mut ix = self
             .feed
             .touch_ui_left
-            .map_or(s.right() - if desktop { 48.0 * u } else { 20.0 * u }, |x| {
-                x - 10.0 * u
-            });
-        let iy = top + 9.0 * u;
+            .map_or(right_edge, |x| x - 10.0 * u);
         let touch_on = self.feed.touch;
         let states = [
             (self.feed.touch || ms.touch_mode, 2),
@@ -2969,6 +3301,7 @@ impl HomeState {
             Click::SizeToggle => self.compact = !self.compact,
             Click::TabStep(step) => self.cycle_tab(ms, step),
             Click::Rail => {}
+            Click::Close => return Some(MenuAction::ResumeGame),
             Click::Burn => {
                 let cases = self.cases(ms);
                 return cases.get(self.case_focus).and_then(|c| c.burn.clone());
@@ -3338,6 +3671,66 @@ mod tests {
                 "Quake (quake-psx)"
             ]
         );
+    }
+
+    /// Run the clocks the way a drawn frame does, without drawing.
+    fn step(ms: &mut MenuState, secs: f32) {
+        let mut h = ms.home.take().expect("home");
+        h.frame_dt = secs;
+        h.tick_motion(ms, secs);
+        let items = nav_items(h.pausing(ms));
+        h.tick_nav(&items, 1.0);
+        ms.home = Some(h);
+    }
+
+    #[test]
+    fn the_tab_highlight_slides_to_the_page_and_settles_there() {
+        let mut ms = home(false, DemoStatus::Absent);
+        step(&mut ms, 0.016);
+        assert!(ms.home_goto("Debug"));
+        // The first frames after the change are on the way, not there.
+        step(&mut ms, 0.016);
+        let near = ms.home.as_ref().expect("home").nav_hl.pos;
+        assert!(near < 1.0, "the highlight jumped to Debug at once: {near}");
+        let mut peak = near;
+        for _ in 0..90 {
+            step(&mut ms, 1.0 / 60.0);
+            peak = peak.max(ms.home.as_ref().expect("home").nav_hl.pos);
+        }
+        let h = ms.home.as_ref().expect("home");
+        // Home, Settings, Controls, Debug: Debug is the fourth tab.
+        assert!((h.nav_hl.pos - 3.0).abs() < 0.01, "settled at {}", h.nav_hl.pos);
+        assert!(peak < 3.4, "a small overshoot only: {peak}");
+    }
+
+    #[test]
+    fn reduced_motion_puts_the_highlight_and_every_part_in_place_at_once() {
+        let mut ms = home(false, DemoStatus::Absent);
+        ms.set_reduce_motion(true);
+        step(&mut ms, 0.016);
+        ms.home_goto("Controls");
+        step(&mut ms, 0.016);
+        let h = ms.home.as_ref().expect("home");
+        assert_eq!(h.nav_hl.pos, 2.0);
+        assert_eq!(h.reveal(5), 1.0);
+        assert_eq!(h.home_reveal(0), 1.0);
+    }
+
+    #[test]
+    fn a_page_change_restarts_the_reveal_and_remembers_the_way_it_went() {
+        let mut ms = home(false, DemoStatus::Absent);
+        step(&mut ms, 2.0);
+        assert_eq!(ms.home.as_ref().expect("home").reveal(0), 1.0);
+        ms.home_goto("Settings");
+        step(&mut ms, 0.016);
+        step(&mut ms, 0.12);
+        let h = ms.home.as_ref().expect("home");
+        assert!(h.reveal(0) < 0.99, "the first part is still arriving");
+        assert!(h.reveal(4) < h.reveal(0), "parts arrive in turn");
+        assert_eq!(h.page_dir, 1.0, "Home to Settings goes forward");
+        ms.home_goto("Home");
+        step(&mut ms, 0.016);
+        assert_eq!(ms.home.as_ref().expect("home").page_dir, -1.0);
     }
 
     #[test]

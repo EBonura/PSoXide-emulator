@@ -456,7 +456,6 @@ fn draw_metrics(ui: &mut egui::Ui, state: &AppState) {
         Label::new(
             RichText::new(fps)
                 .color(tokens::TEXT_2)
-                .monospace()
                 .size(METRIC_TEXT_SIZE + 3.0),
         )
         .truncate(),

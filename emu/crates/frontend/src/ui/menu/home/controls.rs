@@ -10,10 +10,10 @@ use std::collections::HashMap;
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2};
 
-use super::scene::fade;
+use super::scene::{fade, mix};
 use super::{
-    chamfer, draw_device_icon, focus_cage, pages, tokens, Click, HomeState, LayoutKind, Page,
-    PageCtx, Zone,
+    chamfer, draw_device_icon, focus_cage, motion, pages, tokens, Click, HomeState, LayoutKind,
+    Page, PageCtx, Zone,
 };
 use crate::input::model::BackendKind;
 use crate::input::{InputDeviceInfo, PadProfile, PortChoice};
@@ -86,6 +86,13 @@ pub(super) struct ControlsState {
     active_at: HashMap<String, f64>,
     /// The focus the last frame drew, to scroll to it only when it moved.
     seen_focus: Option<usize>,
+    /// The highlight of the segmented bar, in segments from the first: it slides.
+    seg: motion::Spring,
+    /// The segment whose content is on screen, seconds since it came up, and which way the
+    /// bar moved to get there (-1 left, 1 right, 0 none).
+    shown_tab: usize,
+    tab_age: f32,
+    tab_dir: f32,
 }
 
 impl ControlsState {
@@ -94,6 +101,10 @@ impl ControlsState {
         self.focus = 0;
         self.scroll = 0.0;
         self.seen_focus = None;
+        self.seg = motion::Spring::at(self.tab as f32);
+        self.shown_tab = self.tab;
+        self.tab_age = f32::MAX;
+        self.tab_dir = 0.0;
     }
 
     /// The page's state as JSON for the browser journeys: the segment, the focus, the key being
@@ -138,8 +149,9 @@ impl ControlsState {
             .get(self.focus)
             .map_or(String::new(), |s| s.item.probe_name());
         format!(
-            "{{\"tab\":{},\"focus\":\"{}\",\"stops\":{},\"scroll\":{:.0},\"view\":[{:.0},{:.0}],\"capture\":{},\"keys\":{{{}}},\"touch\":{{{}}},\"devices\":[{}]}}",
+            "{{\"tab\":{},\"seg\":{:.3},\"focus\":\"{}\",\"stops\":{},\"scroll\":{:.0},\"view\":[{:.0},{:.0}],\"capture\":{},\"keys\":{{{}}},\"touch\":{{{}}},\"devices\":[{}]}}",
             self.tab,
+            self.seg.pos,
             esc(&focus),
             self.stops.len(),
             self.scroll,
@@ -155,6 +167,8 @@ impl ControlsState {
     /// Open on a segment of the phone's bar (screenshots).
     pub(super) fn show_tab(&mut self, tab: usize) {
         self.tab = tab.min(TABS.len() - 1);
+        self.seg = motion::Spring::at(self.tab as f32);
+        self.shown_tab = self.tab;
     }
 
     pub(super) fn scroll_by(&mut self, delta: f32) {
@@ -163,6 +177,7 @@ impl ControlsState {
 }
 
 /// Everything one frame's drawing shares.
+#[derive(Clone, Copy)]
 struct Frame<'a> {
     p: &'a egui::Painter,
     ctx: &'a egui::Context,
@@ -177,6 +192,11 @@ struct Frame<'a> {
     touch: bool,
     /// The mouse, when it is over the window.
     hover: Option<Pos2>,
+    /// Seconds since this content came up (a page opening or another segment), the way it came
+    /// in (-1, 0, 1 along the segments) and whether motion is calmed.
+    age: f32,
+    dir: f32,
+    calm: bool,
 }
 
 /// The facts of a frame that do not depend on the area it draws into.
@@ -187,6 +207,9 @@ struct FrameBase {
     time: f64,
     keyboard: bool,
     touch: bool,
+    age: f32,
+    dir: f32,
+    calm: bool,
 }
 
 impl FrameBase {
@@ -208,6 +231,9 @@ impl FrameBase {
             keyboard: self.keyboard,
             touch: self.touch,
             hover: ctx.input(|i| i.pointer.hover_pos()),
+            age: self.age,
+            dir: self.dir,
+            calm: self.calm,
         }
     }
 }
@@ -231,6 +257,33 @@ impl Frame<'_> {
     /// Content y to screen y.
     fn sy(&self, y: f32) -> f32 {
         y - self.scroll
+    }
+
+    /// This frame with part `index` of the content revealed that far, and what is needed to
+    /// move the part's shapes into place afterwards (`motion::shift_since`): the parts arrive
+    /// one after another, sliding in along the way the content came.
+    fn part(&self, index: usize) -> (Self, motion::Mark, Vec2) {
+        let s = if self.calm {
+            1.0
+        } else {
+            motion::stage(self.age, index)
+        };
+        let k = 1.0 - s;
+        let by = if self.dir == 0.0 {
+            Vec2::new(0.0, k * 12.0 * self.u)
+        } else {
+            Vec2::new(self.dir * k * 24.0 * self.u, 0.0)
+        };
+        let shown = Self {
+            a: self.a * s,
+            ..*self
+        };
+        (shown, motion::mark(self.ctx, self.p), by)
+    }
+
+    /// Move what a part painted since `from` into its place in the slide.
+    fn settle(&self, from: motion::Mark, by: Vec2) {
+        motion::shift_since(self.ctx, self.p, from, by);
     }
 }
 
@@ -293,6 +346,9 @@ fn wrap_job(text: &str, font: FontId, col: Color32, max_w: f32) -> egui::text::L
     job.wrap.break_anywhere = false;
     job
 }
+
+/// What the keyboard card says while no keyboard has been used.
+const KEYBOARD_ABSENT: &str = "None attached. Press a key if you have one";
 
 /// What a device is, for its icon and its wording.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -362,11 +418,21 @@ fn cards<'a>(
     out.push(match keyboard {
         Some(info) => {
             let (line, active) = live(info, Kind::Keyboard);
+            // A phone has no keyboard until a key is pressed: say so, and how to find out.
+            let line = if f.keyboard {
+                line
+            } else {
+                KEYBOARD_ABSENT.to_string()
+            };
             Card {
                 kind: Kind::Keyboard,
                 title: "Keyboard".into(),
                 line,
-                chip: if f.keyboard { "Connected" } else { "Not found" },
+                chip: if f.keyboard {
+                    "Connected"
+                } else {
+                    "Not connected"
+                },
                 connected: f.keyboard,
                 active,
                 info: f.keyboard.then_some(info),
@@ -375,8 +441,8 @@ fn cards<'a>(
         None => Card {
             kind: Kind::Keyboard,
             title: "Keyboard".into(),
-            line: Kind::Keyboard.idle().into(),
-            chip: "Not found",
+            line: KEYBOARD_ABSENT.into(),
+            chip: "Not connected",
             connected: false,
             active: false,
             info: None,
@@ -396,7 +462,7 @@ fn cards<'a>(
             kind: Kind::Pad,
             title: "Controller".into(),
             line: "Plug in or pair, then press a button".into(),
-            chip: "Not found",
+            chip: "Not connected",
             connected: false,
             active: false,
             info: None,
@@ -537,6 +603,8 @@ pub(super) fn draw(
             LayoutKind::Portrait => 64.0 * u,
             LayoutKind::Landscape => 44.0 * u,
         };
+    let head = h.reveal(0);
+    let from = motion::mark(ctx, pc.painter);
     let title = pc.painter.text(
         Pos2::new(left, head_top),
         Align2::LEFT_TOP,
@@ -546,7 +614,7 @@ pub(super) fn draw(
         } else {
             tokens::TITLE_PHONE * u
         }),
-        fade(tokens::TEXT, a),
+        fade(tokens::TEXT, a * head),
     );
     let mut top = title.bottom() + 6.0 * u;
     if wide {
@@ -555,12 +623,13 @@ pub(super) fn draw(
             Align2::LEFT_TOP,
             "Everything here is live: plug something in and it appears.",
             FontId::proportional(tokens::BODY * u),
-            fade(tokens::MUTED, a),
+            fade(tokens::MUTED, a * head),
         );
         top = sub.bottom() + 14.0 * u;
     } else {
         top += 12.0 * u;
     }
+    motion::shift_since(ctx, pc.painter, from, h.slide(head, u));
     let bottom = lay.safe.bottom()
         - if desktop {
             18.0 * u + h.hint_reserve(lay)
@@ -595,27 +664,57 @@ pub(super) fn draw(
     let mut focus_rect: Option<Rect> = None;
     let mut view = full_view;
     let (keyboard, touch) = (h.feed.keyboard, h.feed.touch);
+    // The content arrives part by part: when the page opens, and again when another segment is
+    // picked (sliding in from the side the bar moved toward).
+    if h.controls.tab != h.controls.shown_tab {
+        h.controls.tab_dir = if h.controls.tab > h.controls.shown_tab {
+            1.0
+        } else {
+            -1.0
+        };
+        h.controls.shown_tab = h.controls.tab;
+        h.controls.tab_age = 0.0;
+    } else {
+        h.controls.tab_age = (h.controls.tab_age + h.frame_dt).min(10.0);
+    }
+    let (age, dir) = if h.controls.tab_age < h.page_age {
+        (h.controls.tab_age, h.controls.tab_dir)
+    } else {
+        (h.page_age, h.page_dir)
+    };
     let base = FrameBase {
         u,
         a,
         time: now,
         keyboard,
         touch,
+        age,
+        dir,
+        calm: h.calm(),
     };
     if !wide {
         let bar_h = (tokens::TOUCH_MIN * u).max(tokens::TOUCH_MIN);
         // A phone held sideways has no height to spare: the bar shares the title's row.
         let bar = if lay.kind == LayoutKind::Landscape {
             let x = (title.right() + 28.0 * u).min(left + width * 0.4);
+            // The shell's close button over a paused game sits at the header's right end.
+            let close = if h.pausing(ms) { 46.0 * u } else { 0.0 };
             Rect::from_min_max(
                 Pos2::new(x, title.center().y - bar_h / 2.0),
-                Pos2::new(left + width, title.center().y + bar_h / 2.0),
+                Pos2::new(left + width - close, title.center().y + bar_h / 2.0),
             )
         } else {
             Rect::from_min_size(Pos2::new(left, top), Vec2::new(width, bar_h))
         };
         let f = base.at(pc.painter, ctx, full_view, 0.0);
-        segmented_bar(h, &f, bar, &mut focus_rect);
+        let bar_part = h.reveal(1);
+        let from = motion::mark(ctx, pc.painter);
+        let shown = Frame {
+            a: a * bar_part,
+            ..f
+        };
+        segmented_bar(h, &shown, bar, &mut focus_rect);
+        motion::shift_since(ctx, pc.painter, from, h.slide(bar_part, u));
         view = Rect::from_min_max(
             Pos2::new(left - 8.0, bar.bottom() + 10.0 * u),
             full_view.max,
@@ -705,39 +804,56 @@ pub(super) fn draw(
     ctx.request_repaint_after(std::time::Duration::from_millis(60));
 }
 
-/// The three segments of the phone's bar.
+/// The three segments of the phone's bar: one pill that slides to the segment you pick, the same
+/// highlight as the shell's tab bar.
 fn segmented_bar(h: &mut HomeState, f: &Frame<'_>, bar: Rect, focus_rect: &mut Option<Rect>) {
     let (p, u, a) = (f.p, f.u, f.a);
-    let seg_w = bar.width() / TABS.len() as f32;
+    let n = TABS.len();
+    let seg_w = bar.width() / n as f32;
     let focused = h.push_stop(Item::Tab(h.controls.tab), 0, bar, f, focus_rect);
+    let (tab, dt, calm) = (h.controls.tab, h.frame_dt, h.calm());
+    h.controls.seg.step(tab as f32, dt, calm);
+    let round = bar.height() / 2.0;
+    p.rect_filled(
+        bar,
+        round,
+        fade(Color32::from_rgba_unmultiplied(12, 20, 28, 235), a),
+    );
+    p.rect_stroke(
+        bar,
+        round,
+        Stroke::new(1.0, fade(Color32::from_rgb(38, 58, 72), a)),
+        egui::StrokeKind::Inside,
+    );
+    let at = h.controls.seg.pos.clamp(0.0, (n - 1) as f32);
+    let pill = Rect::from_min_size(
+        Pos2::new(bar.left() + seg_w * at, bar.top()),
+        Vec2::new(seg_w, bar.height()),
+    )
+    .shrink2(Vec2::new(3.0 * u, 4.0 * u));
+    p.rect_filled(
+        pill,
+        pill.height() / 2.0,
+        fade(Color32::from_rgb(16, 52, 62), a),
+    );
+    p.rect_stroke(
+        pill,
+        pill.height() / 2.0,
+        Stroke::new(1.0, fade(tokens::ACCENT, a * 0.45)),
+        egui::StrokeKind::Inside,
+    );
     for (i, name) in TABS.iter().enumerate() {
         let r = Rect::from_min_size(
             Pos2::new(bar.left() + seg_w * i as f32, bar.top()),
             Vec2::new(seg_w, bar.height()),
         );
-        let on = i == h.controls.tab;
-        if on {
-            p.rect_filled(r, 0.0, fade(tokens::ACCENT, a));
-        }
-        p.rect_stroke(
-            r,
-            0.0,
-            Stroke::new(1.0, fade(if on { tokens::ACCENT } else { tokens::RING }, a)),
-            egui::StrokeKind::Inside,
-        );
+        let near = (1.0 - (h.controls.seg.pos - i as f32).abs()).clamp(0.0, 1.0);
         p.text(
             r.center(),
             Align2::CENTER_CENTER,
             *name,
             FontId::proportional(tokens::BODY_LARGE * u),
-            fade(
-                if on {
-                    tokens::ON_ACCENT
-                } else {
-                    tokens::TEXT_2
-                },
-                a,
-            ),
+            fade(mix(tokens::TEXT_2, tokens::ACCENT, near), a),
         );
         h.hits.push((r, Click::Ctl(Item::Tab(i))));
     }
@@ -772,10 +888,14 @@ fn devices_column(
 ) -> f32 {
     let _ = ms;
     let u = f.u;
-    let mut y = section_label(f, x, y, "Connected now");
+    let (fl, m, by) = f.part(0);
+    let mut y = section_label(&fl, x, y, "Connected now");
+    f.settle(m, by);
     let active_at = h.controls.active_at.clone();
-    for card in cards(devices, f, touch_off, &active_at) {
-        y = draw_card(h, f, &card, x, w, y, row, focus_rect) + 12.0 * u;
+    for (i, card) in cards(devices, f, touch_off, &active_at).iter().enumerate() {
+        let (fc, m, by) = f.part(i + 1);
+        y = draw_card(h, &fc, card, x, w, y, row, focus_rect) + 12.0 * u;
+        f.settle(m, by);
     }
     y
 }
@@ -1062,8 +1182,10 @@ fn keyboard_column(
     row: &mut u32,
     focus_rect: &mut Option<Rect>,
 ) -> f32 {
-    let (p, u, a) = (f.p, f.u, f.a);
-    let mut y = section_label(f, x, y, "Keyboard");
+    let (p, u) = (f.p, f.u);
+    let (fl, m0, by0) = f.part(0);
+    let a = fl.a;
+    let mut y = section_label(&fl, x, y, "Keyboard");
     // The hint is also the capture banner.
     let (hint, hint_col) = match ms.controls_capture {
         Some(t) => (
@@ -1084,10 +1206,13 @@ fn keyboard_column(
     let gh = g.size().y;
     p.galley(Pos2::new(x, f.sy(y)), g, hint_col);
     y += gh + 10.0 * u;
+    f.settle(m0, by0);
 
     let row_h = 56.0 * u;
     let label_w = (w * 0.30).clamp(92.0 * u, 124.0 * u);
-    for (label, targets) in MAP {
+    for (i, (label, targets)) in MAP.into_iter().enumerate() {
+        let (f, m, by) = f.part(i + 1);
+        let (f, a) = (&f, f.a);
         let r = Rect::from_min_size(Pos2::new(x, f.sy(y)), Vec2::new(w, row_h));
         p.line_segment(
             [r.left_bottom(), r.right_bottom()],
@@ -1116,7 +1241,11 @@ fn keyboard_column(
         }
         *row += 1;
         y += row_h;
+        f.settle(m, by);
     }
+    // The menu key and the reset button arrive with the last row.
+    let (f, m, by) = f.part(MAP.len() + 1);
+    let (f, a) = (&f, f.a);
     // The menu key is fixed.
     let r = Rect::from_min_size(Pos2::new(x, f.sy(y)), Vec2::new(w, row_h));
     p.line_segment(
@@ -1179,6 +1308,7 @@ fn keyboard_column(
     }
     h.hit(f, reset, Click::Ctl(Item::Reset));
     *row += 1;
+    f.settle(m, by);
     y + reset.height() + 8.0 * u
 }
 
@@ -1269,8 +1399,10 @@ fn touch_column(
     row: &mut u32,
     focus_rect: &mut Option<Rect>,
 ) -> f32 {
-    let (p, u, a) = (f.p, f.u, f.a);
-    let mut y = section_label(f, x, y, "Touch");
+    let (p, u) = (f.p, f.u);
+    let (fl, m, by) = f.part(0);
+    let mut y = section_label(&fl, x, y, "Touch");
+    f.settle(m, by);
     let rows = pages::visible_rows(ms, Page::Settings);
     let row_h = (if u > 0.0 && f.view.width() > 600.0 {
         tokens::ROW_DESKTOP
@@ -1300,12 +1432,16 @@ fn touch_column(
         }
         let rect = Rect::from_min_size(Pos2::new(x, f.sy(y)), Vec2::new(w, row_h - 4.0));
         let focused = h.push_stop(Item::Touch(i), *row, rect, f, focus_rect);
-        pages::draw_row(h, ms, f.ctx, p, rect, r, focused, u, a, i);
+        let (fr, m, by) = f.part(*row as usize);
+        pages::draw_row(h, ms, f.ctx, p, rect, r, focused, u, fr.a, i);
+        f.settle(m, by);
         *row += 1;
         y += row_h;
     }
     y += 12.0 * u;
-    y = draw_preview(f, x, w, y, opacity, size, left_handed);
+    let (fp, m, by) = f.part(*row as usize + 1);
+    y = draw_preview(&fp, x, w, y, opacity, size, left_handed);
+    f.settle(m, by);
     y + 8.0 * u
 }
 

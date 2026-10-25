@@ -39,6 +39,8 @@ use model::DeviceEvent;
 /// The single input entry point of the shell: owns the adapters and the hub,
 /// and is polled once per frame.
 pub(crate) struct InputRouter {
+    /// A key was pressed this session: a keyboard really is there.
+    keyboard_seen: bool,
     keyboard: KeyboardDevice,
     touch: TouchDevice,
     backends: Vec<Box<dyn DeviceBackend>>,
@@ -59,12 +61,25 @@ impl InputRouter {
     /// A router over explicit pad adapters.
     pub(crate) fn with_backends(backends: Vec<Box<dyn DeviceBackend>>) -> Self {
         Self {
+            keyboard_seen: false,
             keyboard: KeyboardDevice::default(),
             touch: TouchDevice::default(),
             backends,
             hub: InputHub::new(),
             epoch: Instant::now(),
         }
+    }
+
+    /// A key went down (any key, bound or not): a keyboard is attached.
+    pub(crate) fn note_key_event(&mut self) {
+        self.keyboard_seen = true;
+    }
+
+    /// Whether a keyboard is really there. A desktop always has one; a phone or tablet (a finger
+    /// is the primary pointer) has one only once a key has been pressed, so the Controls page
+    /// never claims a keyboard nobody has attached.
+    pub(crate) fn keyboard_present(&self) -> bool {
+        self.keyboard_seen || !self.touch.touch_primary()
     }
 
     /// Hand over what the keyboard holds right now (once per frame).
@@ -249,6 +264,46 @@ mod tests {
             0.016,
         );
         router
+    }
+
+    #[test]
+    fn a_phone_has_no_keyboard_until_a_key_is_pressed() {
+        // A finger is the primary pointer: no keyboard is claimed.
+        let mut phone = touch_router();
+        phone.touch_mut().set_coarse_pointer(true);
+        assert!(!phone.keyboard_present(), "a phone claimed a keyboard");
+        phone.note_key_event();
+        assert!(phone.keyboard_present(), "a key press proves one");
+        // A desktop browser or the native app always has one.
+        let desktop = InputRouter::with_backends(Vec::new());
+        assert!(desktop.keyboard_present());
+    }
+
+    #[test]
+    fn the_shell_over_a_game_takes_the_controllers_top_buttons_but_keeps_its_pad() {
+        use super::touch::layout::{Insets, LayoutParams};
+        let params = || LayoutParams {
+            size: egui::vec2(2556.0, 1179.0),
+            scale: 3.0,
+            safe: Insets::default(),
+            analog: false,
+            size_pct: 100,
+            left_handed: false,
+            fullscreen_button: true,
+            menu_open: true,
+        };
+        let mut router = touch_router();
+        router.touch_mut().update_layout(params(), 0, 0.016);
+        let before = router.touch().layout().expect("laid out").ui.len();
+        assert!(before >= 4, "pause, save, debug, menu: {before}");
+        router.touch_mut().set_shell_up(true);
+        router.touch_mut().update_layout(params(), 0, 0.016);
+        let layout = router.touch().layout().expect("the pad stays laid out");
+        assert!(layout.ui.is_empty(), "no button of the controller over the shell");
+        assert!(!layout.buttons.is_empty(), "the game keeps its panel");
+        router.touch_mut().set_shell_up(false);
+        router.touch_mut().update_layout(params(), 0, 0.016);
+        assert_eq!(router.touch().layout().expect("laid out").ui.len(), before);
     }
 
     /// Where a finger goes to hold exactly `mask` (one button or none).

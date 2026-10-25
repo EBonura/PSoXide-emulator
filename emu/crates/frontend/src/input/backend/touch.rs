@@ -55,6 +55,12 @@ pub(crate) struct TouchDevice {
     menu_open: bool,
     /// Only the shell is up (the home screen, no game behind it): the controller steps aside.
     shell_only: bool,
+    /// The shell is up over a game: the controller keeps its place (the game keeps its panel)
+    /// but its pause, save, debug, menu and fullscreen buttons step aside, so nothing of the
+    /// controller overlaps the shell's header.
+    shell_up: bool,
+    /// The layout the pad holds was made with the buttons hidden for the shell.
+    laid_for_shell: bool,
     /// Current fade, `DIM_LEVEL..=1`.
     fade: f32,
     now_ms: u64,
@@ -71,6 +77,8 @@ impl Default for TouchDevice {
             announced: false,
             menu_open: false,
             shell_only: false,
+            shell_up: false,
+            laid_for_shell: false,
             fade: 1.0,
             now_ms: 0,
         }
@@ -91,6 +99,12 @@ impl TouchDevice {
     /// A keyboard or gamepad did something at `now_ms`.
     pub(crate) fn note_other_input(&mut self, now_ms: u64) {
         self.presence.last_other_ms = Some(now_ms);
+    }
+
+    /// Whether this looks like a phone or tablet: the browser says the primary pointer is a
+    /// finger, or a touch has been seen. Such a device has no keyboard until one is used.
+    pub(crate) fn touch_primary(&self) -> bool {
+        self.presence.coarse || self.presence.touch_seen
     }
 
     /// Whether the controller is on screen.
@@ -141,7 +155,7 @@ impl TouchDevice {
             menu_open: self.menu_open,
             ..params
         };
-        if self.params != Some(params) {
+        if self.params != Some(params) || self.laid_for_shell != self.shell_up {
             let turned = self
                 .pad
                 .layout()
@@ -149,8 +163,13 @@ impl TouchDevice {
             if turned {
                 self.pad.release_all();
             }
-            self.pad.set_layout(Some(TouchLayout::compute(&params)));
+            let mut layout = TouchLayout::compute(&params);
+            if self.shell_up {
+                layout.ui.clear();
+            }
+            self.pad.set_layout(Some(layout));
             self.params = Some(params);
+            self.laid_for_shell = self.shell_up;
         }
         let idle = now_ms.saturating_sub(self.presence.last_touch_ms) > DIM_AFTER_MS
             && !self.pad.is_touching();
@@ -168,6 +187,12 @@ impl TouchDevice {
     /// screen shows its own header and nothing else.
     pub(crate) fn set_shell_only(&mut self, only: bool) {
         self.shell_only = only;
+    }
+
+    /// Whether the shell is up over a game: the controller's own buttons for the game (pause,
+    /// save, debug, menu, fullscreen) are not laid out, and the shell shows its own.
+    pub(crate) fn set_shell_up(&mut self, up: bool) {
+        self.shell_up = up;
     }
 
     /// Whether the menu is up: the pad controls step aside for taps on it.

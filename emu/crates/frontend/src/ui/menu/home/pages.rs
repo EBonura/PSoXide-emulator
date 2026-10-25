@@ -3,7 +3,7 @@
 use egui::{Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2};
 
 use super::scene::{fade, CYAN};
-use super::{tokens, Click, HomeState, LayoutKind, Page, PageCtx};
+use super::{motion, tokens, Click, HomeState, LayoutKind, Page, PageCtx};
 use crate::ui::menu::{MenuAction, MenuInput, MenuItem, MenuState, TouchSliderKind};
 
 /// What is on the public demo disc. Shown only when the visitor asks.
@@ -99,6 +99,11 @@ pub(super) fn visible_rows(ms: &MenuState, page: Page) -> Vec<Row> {
 
 fn percent(value: &str) -> Option<u32> {
     value.trim().trim_end_matches('%').parse().ok()
+}
+
+/// The face of a slider's number: the shell's own type, like every other word on the page.
+fn value_font(u: f32) -> FontId {
+    FontId::proportional(tokens::BAR_VALUE * u)
 }
 
 /// How a settings row is drawn and edited.
@@ -252,6 +257,7 @@ pub(super) fn draw_list(
     );
     // Over a paused game the list sits on the shell's panel, as Controls and Debug do, so the
     // rows are never read against the game picture.
+    let head = h.reveal(0);
     if h.pausing(ms) && h.launch.is_none() {
         let panel = Rect::from_min_max(
             Pos2::new(left - 24.0 * u, head_top - 18.0 * u),
@@ -260,14 +266,15 @@ pub(super) fn draw_list(
         .intersect(lay.full.shrink(2.0));
         p.add(Shape::convex_polygon(
             super::chamfer(panel, tokens::CHAMFER * u),
-            fade(Color32::from_rgba_unmultiplied(8, 16, 22, 242), a),
-            Stroke::new(1.0, fade(tokens::hairline(), a)),
+            fade(Color32::from_rgba_unmultiplied(8, 16, 22, 242), a * head),
+            Stroke::new(1.0, fade(tokens::hairline(), a * head)),
         ));
     }
     let title = match page {
         Page::Settings => "Settings",
         _ => "Game",
     };
+    let title_from = motion::mark(ctx, p);
     let t = p.text(
         Pos2::new(left, head_top),
         Align2::LEFT_TOP,
@@ -279,8 +286,9 @@ pub(super) fn draw_list(
                 tokens::TITLE_PHONE
             } * u,
         ),
-        fade(tokens::TEXT, a),
+        fade(tokens::TEXT, a * head),
     );
+    motion::shift_since(ctx, p, title_from, h.slide(head, u));
     let top = t.bottom() + 18.0 * u;
     let view = Rect::from_min_max(Pos2::new(left, top), Pos2::new(left + width, bottom));
     // Keep the focused row on screen when the focus moved by key.
@@ -303,7 +311,25 @@ pub(super) fn draw_list(
         }
         let r = Rect::from_min_size(Pos2::new(left, y), Vec2::new(width, row_h - 4.0));
         let focused = h.zone == super::Zone::Body && i == ms.item_index;
-        draw_row(h, ms, ctx, &clip, r, row, focused, u, a, i);
+        // The rows arrive one after another, sliding in along the way the page came.
+        let part = h.reveal(i + 1);
+        let from = motion::mark(ctx, &clip);
+        draw_row_with(h, ms, ctx, &clip, r, row, focused, u, a * part, i, false);
+        motion::shift_since(ctx, &clip, from, h.slide(part, u));
+    }
+    // The focus cage is one frame that glides from row to row (a small spring), not one that
+    // switches off on one row and on in the next.
+    let dt = h.frame_dt;
+    let snap = h.calm() || h.page_age < 0.05;
+    let target = ms.item_index.min(rows.len().saturating_sub(1)) as f32 * row_h;
+    h.row_cage.step(target, dt, snap);
+    if h.zone == super::Zone::Body && !rows.is_empty() {
+        let y = view.top() + h.row_cage.pos - h.list_scroll;
+        let cage = Rect::from_min_size(Pos2::new(left, y), Vec2::new(width, row_h - 4.0))
+            .intersect(clip.clip_rect());
+        if cage.height() > 8.0 {
+            super::focus_cage(&clip, cage, a * h.reveal(ms.item_index + 1), u);
+        }
     }
     // A scroll hint when more is below.
     if h.list_scroll < max_scroll - 1.0 {
@@ -339,12 +365,31 @@ pub(super) fn draw_row(
     a: f32,
     index: usize,
 ) {
+    draw_row_with(h, ms, ctx, p, r, row, focused, u, a, index, true);
+}
+
+/// A row. `cage` draws the focus frame on a focused row; the list pages pass false and glide one
+/// shared frame between rows instead.
+#[allow(clippy::too_many_arguments)]
+fn draw_row_with(
+    h: &mut HomeState,
+    ms: &MenuState,
+    ctx: &egui::Context,
+    p: &egui::Painter,
+    r: Rect,
+    row: &Row,
+    focused: bool,
+    u: f32,
+    a: f32,
+    index: usize,
+    cage: bool,
+) {
     // A flat list: a hairline between rows, and the focus cage on the row you are on.
     p.line_segment(
         [r.left_bottom(), r.right_bottom()],
         Stroke::new(1.0, fade(tokens::hairline(), a)),
     );
-    if focused {
+    if focused && cage {
         super::focus_cage(p, r, a, u);
     }
     h.hits.push((r.intersect(p.clip_rect()), Click::Row(index)));
@@ -524,7 +569,7 @@ fn draw_control(
                 Pos2::new(right, cy),
                 Align2::RIGHT_CENTER,
                 label,
-                FontId::monospace(tokens::SLIDER_VALUE * u),
+                value_font(u),
                 fade(tokens::TEXT_2, a),
             );
             let tw = (200.0 * u).min(r.width() * 0.4);
@@ -532,7 +577,7 @@ fn draw_control(
             let widest = p
                 .layout_no_wrap(
                     "150%".to_string(),
-                    FontId::monospace(tokens::SLIDER_VALUE * u),
+                    value_font(u),
                     tokens::TEXT,
                 )
                 .size()
@@ -603,12 +648,15 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
         } else {
             140.0 * u
         };
+    // Each part comes in after the one before it, sliding along the way the page turned.
+    let ctx = p.ctx();
+    let (head, from) = (h.reveal(0), motion::mark(ctx, p));
     p.text(
         Pos2::new(x, y),
         Align2::LEFT_TOP,
         format!("WELCOME  {} / {}", h.welcome + 1, WELCOME.len()),
         FontId::proportional(tokens::CAPTION * u.max(1.0)),
-        fade(CYAN, a),
+        fade(CYAN, a * head),
     );
     y += 28.0 * u;
     let title = p.layout(
@@ -618,38 +666,43 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
         } else {
             tokens::TITLE_PHONE * u
         }),
-        fade(tokens::TEXT, a),
+        fade(tokens::TEXT, a * head),
         width,
     );
     let th = title.size().y;
     p.add(Shape::galley(Pos2::new(x, y), title, tokens::TEXT));
     y += th + 16.0 * u;
-    for para in page.body {
+    motion::shift_since(ctx, p, from, h.slide(head, u));
+    for (i, para) in page.body.iter().enumerate() {
+        let (part, from) = (h.reveal(i + 1), motion::mark(ctx, p));
         let g = p.layout(
             (*para).to_string(),
             FontId::proportional(17.0 * u),
-            fade(tokens::TEXT_2, a),
+            fade(tokens::TEXT_2, a * part),
             width,
         );
         let gh = g.size().y;
         p.add(Shape::galley(Pos2::new(x, y), g, tokens::TEXT));
         y += gh + 12.0 * u;
+        motion::shift_since(ctx, p, from, h.slide(part, u));
     }
     for (label, url) in page.links {
+        let (part, from) = (h.reveal(page.body.len() + 1), motion::mark(ctx, p));
         let r = p.text(
             Pos2::new(x, y + 4.0 * u),
             Align2::LEFT_TOP,
             *label,
             FontId::proportional(16.0 * u),
-            fade(tokens::ACCENT, a),
+            fade(tokens::ACCENT, a * part),
         );
         p.line_segment(
             [r.left_bottom(), r.right_bottom()],
-            Stroke::new(1.0, fade(tokens::ACCENT, a * 0.5)),
+            Stroke::new(1.0, fade(tokens::ACCENT, a * part * 0.5)),
         );
         h.hits
             .push((r.expand2(Vec2::new(10.0, 10.0)), Click::Link(url)));
         y = r.bottom() + 14.0 * u;
+        motion::shift_since(ctx, p, from, h.slide(part, u));
     }
     // Dots and the two steps.
     let foot_y = (y + 36.0 * u)
@@ -763,4 +816,15 @@ pub(super) fn draw_toggle(
         fade(if on { tokens::TEXT } else { tokens::MUTED }, a),
     );
     track
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slider_numbers_use_the_shell_type_not_the_pixel_face() {
+        assert_eq!(value_font(1.0).family, egui::FontFamily::Proportional);
+        assert!((value_font(1.0).size - tokens::BAR_VALUE).abs() < 1e-3);
+    }
 }

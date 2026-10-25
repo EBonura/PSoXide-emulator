@@ -463,7 +463,7 @@ fn kpi_tiles(ui: &mut Ui, stats: &GuestStats, ctx: &Ctx, s: &Summary) {
                     rect.left_top() + egui::vec2(6.0, 16.0),
                     Align2::LEFT_TOP,
                     value,
-                    plot::mono(16.0),
+                    plot::figures(16.0),
                     *color,
                 );
                 response.on_hover_text(note.as_str());
@@ -664,7 +664,7 @@ fn frame_time_histogram(ui: &mut Ui, ctx: &Ctx, s: &Summary) {
                 interval as f64 * ctx.vblank_ms(),
                 ctx.refresh / interval as f64
             ),
-            plot::mono(10.5),
+            plot::figures(10.5),
             plot::TEXT_DIM,
         );
         let bar_area = Rect::from_min_max(
@@ -691,7 +691,7 @@ fn frame_time_histogram(ui: &mut Ui, ctx: &Ctx, s: &Summary) {
             Pos2::new(rect.right(), rect.center().y),
             Align2::RIGHT_CENTER,
             format!("{n}"),
-            plot::mono(10.5),
+            plot::figures(10.5),
             plot::TEXT,
         );
         response.on_hover_text(format!(
@@ -784,7 +784,7 @@ fn budget_meters(ui: &mut Ui, stats: &GuestStats, ctx: &Ctx) {
             Pos2::new(rect.right(), rect.center().y),
             Align2::RIGHT_CENTER,
             format!("{:.0}k  {:>3.0}%", total / 1000.0, total / budget * 100.0),
-            plot::mono(11.0),
+            plot::figures(11.0),
             plot::TEXT,
         );
         let tip: String = parts
@@ -1110,7 +1110,7 @@ fn cpu_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx) {
                     Pos2::new(rect.right() - 2.0, rect.center().y),
                     Align2::RIGHT_CENTER,
                     format!("{:.1}%", values[i]),
-                    plot::mono(10.0),
+                    plot::figures(10.0),
                     if hidden_now {
                         plot::TEXT_MUTED
                     } else {
@@ -1634,7 +1634,7 @@ fn sparkline_tile(
         Pos2::new(rect.right() - 5.0, rect.top() + 2.0),
         Align2::RIGHT_TOP,
         current.map_or("--".into(), |c| (series.format)(c, ctx.refresh)),
-        plot::mono(11.0),
+        plot::figures(11.0),
         plot::TEXT,
     );
     if peak > 0.0 && values.len() > 1 {

@@ -34,6 +34,15 @@ mod imp {
             .is_some_and(|query| query.matches())
     }
 
+    /// Whether the player sits in a frame of another page (itch.io embeds it, and puts its own
+    /// fullscreen button over the frame's bottom right corner).
+    pub(super) fn in_frame() -> bool {
+        window().is_some_and(|win| match win.top() {
+            Ok(Some(top)) => JsValue::from(top) != JsValue::from(win),
+            _ => false,
+        })
+    }
+
     /// CSS `env(safe-area-inset-*)` in CSS pixels, read through a hidden
     /// element whose padding uses them.
     pub(super) fn safe_insets_css() -> Insets {
@@ -335,6 +344,9 @@ mod imp {
     pub(super) fn coarse_pointer() -> bool {
         false
     }
+    pub(super) fn in_frame() -> bool {
+        false
+    }
     pub(super) fn safe_insets_css() -> Insets {
         Insets::default()
     }
@@ -381,6 +393,11 @@ mod imp {
 /// Whether the browser says the primary pointer is a finger.
 pub(crate) fn coarse_pointer() -> bool {
     imp::coarse_pointer()
+}
+
+/// Whether the player is shown inside a frame of another page.
+pub(crate) fn in_frame() -> bool {
+    imp::in_frame()
 }
 
 /// Safe-area insets in CSS pixels (notch, rounded corners, home indicator).

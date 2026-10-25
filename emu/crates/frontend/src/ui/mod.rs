@@ -164,7 +164,8 @@ pub fn draw_layout(
         .draw_controls(ctx, |ui| port_message = controller_ports(ui, input_router));
     // Debug is a section of the shell, drawn in the space it leaves.
     if let Some((_, rect)) = state.menu.home_section() {
-        debug_sidebar::draw_section(ctx, state, vram_tex, rect);
+        let reveal = state.menu.home_section_reveal();
+        debug_sidebar::draw_section(ctx, state, vram_tex, rect, reveal);
     }
     if let Some(message) = port_message {
         state.status_message_set(message);

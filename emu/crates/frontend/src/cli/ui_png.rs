@@ -228,7 +228,8 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
                 }
                 state.menu.draw(ctx, 0.1, None);
                 if let Some((_, rect)) = state.menu.home_section() {
-                    ui::debug_sidebar::draw_section(ctx, &mut state, vram.id(), rect);
+                    let reveal = state.menu.home_section_reveal();
+                    ui::debug_sidebar::draw_section(ctx, &mut state, vram.id(), rect, reveal);
                 }
                 ui::draw_recording_indicator(ctx, &state);
                 if args.view == View::Window {
