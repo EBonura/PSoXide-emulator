@@ -21,6 +21,9 @@ use super::socd::SocdFilter;
 
 /// The Select+Start menu chord.
 const CHORD_MASK: u16 = button::SELECT | button::START;
+/// Select held with one of these on a gamepad: R1 quick-saves, L1 quick-loads and R3 shows or
+/// hides the debug panel. The pressed button is the shortcut's and never reaches the guest.
+const SHORTCUT_MASK: u16 = button::L1 | button::R1 | button::R3;
 /// The four menu direction bits.
 const DIRECTIONS: u16 = button::UP | button::DOWN | button::LEFT | button::RIGHT;
 
@@ -158,6 +161,12 @@ pub(crate) struct InputFrame {
     pub(crate) port2: RoutedPadInput,
     /// Select+Start went down on some device (rising edge).
     pub(crate) toggle_menu: bool,
+    /// Select+R1 went down on a gamepad: quick save.
+    pub(crate) quick_save: bool,
+    /// Select+L1 went down on a gamepad: quick load.
+    pub(crate) quick_load: bool,
+    /// Select+R3 went down on a gamepad: show or hide the debug panel.
+    pub(crate) toggle_debug: bool,
     /// A device's Analog/Mode button went down.
     pub(crate) analog_button: bool,
     /// Menu: up (press or hold-repeat step).
@@ -245,6 +254,7 @@ pub(crate) struct InputHub {
     socd_port2_dpad: SocdFilter,
     previous_mask: u16,
     previous_chord: bool,
+    previous_shortcut: u16,
     pending_notices: Vec<InputNotice>,
 }
 
@@ -276,6 +286,7 @@ impl InputHub {
             socd_port2_dpad: SocdFilter::default(),
             previous_mask: 0,
             previous_chord: false,
+            previous_shortcut: 0,
             pending_notices: Vec::new(),
         }
     }
@@ -332,6 +343,8 @@ impl InputHub {
         }
 
         let mut merged = 0u16;
+        // What gamepads (not the keyboard or the screen) hold: the shortcut chords are theirs.
+        let mut pad_held = 0u16;
         for (id, state) in &mut self.devices {
             if !state.sampled {
                 continue;
@@ -382,6 +395,12 @@ impl InputHub {
             }
 
             merged |= live.buttons | live.stick_dpad;
+            if !matches!(
+                state.identity.backend,
+                BackendKind::Keyboard | BackendKind::Touch
+            ) {
+                pad_held |= live.buttons;
+            }
             frame.left_stick = merge_stick(frame.left_stick, live.left);
             frame.right_stick = merge_stick(frame.right_stick, live.right);
             match self.routing.port_for(id) {
@@ -413,6 +432,25 @@ impl InputHub {
             frame.port1.mask_with_stick_dpad &= !CHORD_MASK;
             frame.port2.mask &= !CHORD_MASK;
             frame.port2.mask_with_stick_dpad &= !CHORD_MASK;
+        }
+
+        // Select held with L1, R1 or R3 on a gamepad is a shortcut, not guest input.
+        let armed = if pad_held & button::SELECT != 0 {
+            pad_held & SHORTCUT_MASK
+        } else {
+            0
+        };
+        let fresh = armed & !self.previous_shortcut;
+        self.previous_shortcut = armed;
+        frame.quick_save = fresh & button::R1 != 0;
+        frame.quick_load = fresh & button::L1 != 0;
+        frame.toggle_debug = fresh & button::R3 != 0;
+        if armed != 0 {
+            merged &= !armed;
+            frame.port1.mask &= !armed;
+            frame.port1.mask_with_stick_dpad &= !armed;
+            frame.port2.mask &= !armed;
+            frame.port2.mask_with_stick_dpad &= !armed;
         }
 
         let resolved = self.socd_all.resolve(merged);
@@ -801,6 +839,50 @@ mod tests {
         let frame = hub.step(132, vec![sample(KEYBOARD_DEVICE_ID, button::DOWN)]);
         assert!(frame.menu_down);
         assert_eq!(frame.port1.mask, button::DOWN);
+    }
+
+    #[test]
+    fn select_with_a_shoulder_or_r3_is_a_pad_shortcut_the_guest_never_sees() {
+        let mut hub = hub_with_pad();
+        hub.step(100, vec![sample("pad", button::CROSS)]);
+        hub.step(116, vec![sample("pad", 0)]);
+        // Select alone is the guest's.
+        let frame = hub.step(132, vec![sample("pad", button::SELECT)]);
+        assert_eq!(frame.port1.mask, button::SELECT);
+        assert!(!frame.quick_save && !frame.quick_load && !frame.toggle_debug);
+        // Select then R1: one quick save, and R1 stays with the shortcut.
+        let held = button::SELECT | button::R1;
+        let frame = hub.step(148, vec![sample("pad", held)]);
+        assert!(frame.quick_save && !frame.quick_load && !frame.toggle_debug);
+        assert_eq!(frame.port1.mask & button::R1, 0);
+        assert_eq!(frame.mask & button::R1, 0);
+        // Holding it does not repeat.
+        let frame = hub.step(164, vec![sample("pad", held)]);
+        assert!(!frame.quick_save);
+        hub.step(180, vec![sample("pad", 0)]);
+        let frame = hub.step(196, vec![sample("pad", button::SELECT | button::L1)]);
+        assert!(frame.quick_load && !frame.quick_save);
+        hub.step(212, vec![sample("pad", 0)]);
+        let frame = hub.step(228, vec![sample("pad", button::SELECT | button::R3)]);
+        assert!(frame.toggle_debug);
+        hub.step(244, vec![sample("pad", 0)]);
+        // R1 without Select is the guest's.
+        let frame = hub.step(260, vec![sample("pad", button::R1)]);
+        assert!(!frame.quick_save);
+        assert_eq!(frame.port1.mask, button::R1);
+    }
+
+    #[test]
+    fn the_keyboard_never_triggers_the_pad_shortcuts() {
+        let mut hub = hub_with_pad();
+        hub.step(100, vec![sample("pad", button::CROSS)]);
+        hub.step(116, vec![sample("pad", 0)]);
+        let frame = hub.step(
+            132,
+            vec![sample(KEYBOARD_DEVICE_ID, button::SELECT | button::R1)],
+        );
+        assert!(!frame.quick_save && !frame.quick_load && !frame.toggle_debug);
+        assert_eq!(frame.port1.mask, button::SELECT | button::R1);
     }
 
     #[test]

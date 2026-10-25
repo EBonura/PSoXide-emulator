@@ -13,6 +13,7 @@ mod launch;
 mod motion;
 mod pages;
 mod scene;
+mod slots;
 pub(crate) mod tokens;
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2};
@@ -24,9 +25,6 @@ use scene::{fade, CoverKind, CYAN};
 
 pub(crate) use controls::Command as DeviceCommand;
 pub(crate) use covers::CoverState;
-
-/// Room a host page's fullscreen button takes at the bottom right of a frame, in design units.
-const CORNER_BUTTON: f32 = 46.0;
 
 /// Seconds of countdown before the demo disc starts on a first visit.
 const COUNTDOWN_SECS: f32 = 3.0;
@@ -57,8 +55,9 @@ pub(crate) enum Page {
     /// Controllers, keyboard and touch, inside the shell.
     Controls,
     Settings,
-    /// The debug section, a full page of the shell.
-    Debug,
+    /// The save-state slots: save into one, or load from one. Reached from the Game page, the
+    /// toolbar and the touch buttons; the Game tab stays lit while it is up.
+    Slots,
     Welcome,
 }
 
@@ -69,8 +68,16 @@ impl Page {
             Self::Game => "Game",
             Self::Controls => "Controls",
             Self::Settings => "Settings",
-            Self::Debug => "Debug",
+            Self::Slots => "Slots",
             Self::Welcome => "Welcome",
+        }
+    }
+
+    /// The page whose tab is lit while this one is up.
+    pub(crate) fn nav_page(self) -> Self {
+        match self {
+            Self::Slots => Self::Game,
+            other => other,
         }
     }
 }
@@ -89,7 +96,6 @@ enum NavItem {
     Game,
     Controls,
     Settings,
-    Debug,
 }
 
 impl NavItem {
@@ -99,7 +105,6 @@ impl NavItem {
             Self::Game => "Game",
             Self::Controls => "Controls",
             Self::Settings => "Settings",
-            Self::Debug => "Debug",
         }
     }
 
@@ -109,7 +114,6 @@ impl NavItem {
             Self::Game => Page::Game,
             Self::Controls => Page::Controls,
             Self::Settings => Page::Settings,
-            Self::Debug => Page::Debug,
         }
     }
 }
@@ -119,7 +123,7 @@ fn nav_items(in_game: bool) -> Vec<NavItem> {
     if in_game {
         items.push(NavItem::Game);
     }
-    items.extend([NavItem::Settings, NavItem::Controls, NavItem::Debug]);
+    items.extend([NavItem::Settings, NavItem::Controls]);
     items
 }
 
@@ -217,6 +221,9 @@ pub(crate) struct HomeState {
     last_row: usize,
     /// The shell was closed since it last opened: the next opening starts at the top.
     closed: bool,
+    /// Where Back goes from the slot sheet: the page it was opened from, or `None` to close the
+    /// shell over the game.
+    slots_return: Option<Page>,
     /// An input already cancelled the countdown this frame (a pad button or a
     /// stick, seen before the menu's own edges): that press only cancels.
     cancelled_this_frame: bool,
@@ -231,7 +238,7 @@ pub(crate) struct HomeState {
     /// or throttled page skips frames and still takes the same time.
     clock: Option<f64>,
     label_tex: Option<egui::TextureHandle>,
-    /// Where a Controls or Debug section is drawn this frame (by the shell around it).
+    /// Where the slot sheet is drawn this frame (by the shell around it).
     section: Option<Rect>,
     /// The compact grid instead of the big cases.
     compact: bool,
@@ -337,6 +344,7 @@ impl HomeState {
             first_visit,
             last_row: usize::MAX,
             closed: false,
+            slots_return: None,
             cancelled_this_frame: false,
             launch: None,
             launch_sent: false,
@@ -527,7 +535,7 @@ impl HomeState {
     fn tick_motion(&mut self, ms: &MenuState, dt: f32) {
         if self.page != self.shown_page {
             let items = nav_items(self.pausing(ms));
-            let at = |page: Page| items.iter().position(|i| i.page() == page);
+            let at = |page: Page| items.iter().position(|i| i.page() == page.nav_page());
             self.page_dir = match (at(self.shown_page), at(self.page)) {
                 (Some(from), Some(to)) if to > from => 1.0,
                 (Some(from), Some(to)) if to < from => -1.0,
@@ -805,7 +813,7 @@ impl MenuState {
         h.page = match page {
             "game" => Page::Game,
             "controls" | "controls-keyboard" | "controls-touch" => Page::Controls,
-            "debug" => Page::Debug,
+            "slots" => Page::Slots,
             "settings" => Page::Settings,
             "welcome" => Page::Welcome,
             _ => Page::Home,
@@ -848,7 +856,6 @@ impl MenuState {
             "Game" => NavItem::Game,
             "Controls" => NavItem::Controls,
             "Settings" => NavItem::Settings,
-            "Debug" => NavItem::Debug,
             _ => return false,
         };
         let mut shell = self.home.take().expect("home");
@@ -875,18 +882,18 @@ impl MenuState {
         }
     }
 
-    /// Where the shell wants a Controls or Debug section drawn this frame.
+    /// Where the shell wants the slot sheet drawn this frame.
     pub fn home_section(&self) -> Option<(&'static str, Rect)> {
         let h = self.home.as_ref()?;
         let rect = h.section?;
         match h.page {
-            Page::Debug if self.open => Some((h.page.name(), rect)),
+            Page::Slots if self.open => Some((h.page.name(), rect)),
             _ => None,
         }
     }
 
     /// How far the section's content has arrived, 0 to 1: the page's parts come in one after
-    /// another, and the egui content of the Debug section fades in with the rest.
+    /// another, and the egui content of the slot sheet fades in with the rest.
     pub fn home_section_reveal(&self) -> f32 {
         self.home.as_ref().map_or(1.0, |h| h.reveal(1))
     }
@@ -1329,11 +1336,6 @@ impl HomeState {
             }
             return None;
         }
-        // A panel that floats over the shell takes Back first.
-        if input.back && ms.save_states_open {
-            ms.close_top_panel();
-            return None;
-        }
         if (input.tab_prev || input.tab_next) && self.page != Page::Welcome {
             self.cycle_tab(ms, if input.tab_next { 1 } else { -1 });
             return None;
@@ -1343,7 +1345,7 @@ impl HomeState {
             Page::Home => self.update_home(ms, input),
             Page::Game | Page::Settings => self.update_list(ms, input),
             Page::Controls => self.update_controls(ms, input),
-            Page::Debug => self.update_section(ms, input),
+            Page::Slots => self.update_slots(ms, input),
         }
     }
 
@@ -1352,7 +1354,7 @@ impl HomeState {
         let items = nav_items(self.pausing(ms));
         let at = items
             .iter()
-            .position(|i| i.page() == self.page)
+            .position(|i| i.page() == self.page.nav_page())
             .unwrap_or(0) as i32;
         let next = (at + step).rem_euclid(items.len() as i32) as usize;
         self.nav = next;
@@ -1488,25 +1490,6 @@ impl HomeState {
         self.peek = false;
     }
 
-    /// Controls and Debug: the section draws itself; the shell gives Back and the nav.
-    fn update_section(&mut self, ms: &mut MenuState, input: &MenuInput) -> Option<MenuAction> {
-        if self.zone == Zone::Nav {
-            self.update_nav(ms, input);
-            return None;
-        }
-        if input.up {
-            self.zone = Zone::Nav;
-            self.nav = nav_items(self.pausing(ms))
-                .iter()
-                .position(|i| i.page() == self.page)
-                .unwrap_or(0);
-        }
-        if input.back {
-            self.page = Page::Home;
-        }
-        None
-    }
-
     /// Game and Settings: rows of the matching category.
     fn update_list(&mut self, ms: &mut MenuState, input: &MenuInput) -> Option<MenuAction> {
         let name = if self.page == Page::Settings {
@@ -1529,7 +1512,7 @@ impl HomeState {
                     self.zone = Zone::Nav;
                     self.nav = nav_items(self.pausing(ms))
                         .iter()
-                        .position(|i| i.page() == self.page)
+                        .position(|i| i.page() == self.page.nav_page())
                         .unwrap_or(0);
                 } else {
                     ms.item_index -= 1;
@@ -1556,17 +1539,6 @@ impl HomeState {
     }
 
     fn draw(&mut self, ms: &mut MenuState, ctx: &egui::Context, dt: f32, warning: Option<&str>) {
-        // The save-states panel floats over everything and owns its layer.
-        if ms.save_states_open {
-            super::save_states_panel(
-                ctx,
-                &mut ms.save_states_open,
-                &ms.save_rows,
-                &mut ms.pending_load_confirm,
-                &mut ms.save_thumb_cache,
-                &mut ms.pending_pointer_action,
-            );
-        }
         ms.about_open = false;
         // Elapsed time, not the frame step: the shell clamps that to 0.1 s for the emulator, which
         // would stretch the sequence on a page that gets a few frames a second.
@@ -1673,7 +1645,7 @@ impl HomeState {
                 Page::Home => self.draw_home(ms, ctx, &mut pc),
                 Page::Welcome => self.draw_welcome(ms, &mut pc),
                 Page::Controls => controls::draw(self, ms, ctx, &mut pc),
-                Page::Debug => self.draw_section_frame(&mut pc),
+                Page::Slots => self.draw_section_frame(ms, &mut pc),
                 Page::Game | Page::Settings => self.draw_list_page(ms, ctx, &mut pc),
             }
         }
@@ -2022,9 +1994,9 @@ impl HomeState {
         }
     }
 
-    /// The frame of a Controls or Debug section; the content comes from the
+    /// The frame of the slot sheet; the content comes from the
     /// app around the shell (it needs the emulator state).
-    fn draw_section_frame(&mut self, pc: &mut PageCtx<'_>) {
+    fn draw_section_frame(&mut self, ms: &MenuState, pc: &mut PageCtx<'_>) {
         let lay = pc.lay;
         let u = lay.u;
         let top = lay.safe.top()
@@ -2050,7 +2022,19 @@ impl HomeState {
                     },
             ),
         );
-        self.draw_page_hints(pc, &[(Btn::Circle, "Back")]);
+        let switch_to = match ms.slots.mode {
+            super::SlotsMode::Save => "Load view",
+            super::SlotsMode::Load => "Save view",
+        };
+        self.draw_page_hints(
+            pc,
+            &[
+                (Btn::Cross, "Choose"),
+                (Btn::Square, switch_to),
+                (Btn::Triangle, "Delete"),
+                (Btn::Circle, "Back"),
+            ],
+        );
         let outline = chamfer(rect.expand(6.0), tokens::CHAMFER * u);
         let head = self.reveal(0);
         pc.painter.add(Shape::convex_polygon(
@@ -2744,7 +2728,7 @@ impl HomeState {
         // While the shell is fading in the springs jump, so the highlight never travels
         // from where the last visit left it.
         let snap = self.calm() || shell_up < 0.6;
-        let active = items.iter().position(|i| i.page() == self.page);
+        let active = items.iter().position(|i| i.page() == self.page.nav_page());
         if let Some(at) = active {
             self.nav_hl.step(at as f32, dt, snap || self.nav_vis < 0.05);
         }
@@ -2869,18 +2853,12 @@ impl HomeState {
         }) * u;
         let style = self.hint_style(lay);
         let side = style.map_or(0.0, |st| hints::btn_width(p, u, st, Btn::L1) + 10.0 * u);
-        // A host page's own fullscreen button sits over the bottom right corner of a frame:
-        // on a phone the bar gives that corner up instead of running under it.
-        let corner = if self.feed.framed && lay.kind == LayoutKind::Portrait {
-            CORNER_BUTTON * u
-        } else {
-            0.0
-        };
-        let w = (items.len() as f32 * 76.0 * u)
-            .min(lay.safe.width() - 24.0 * u - 2.0 * side - corner);
+        // Always centred in the viewport, with the same margin either side. A host page's own
+        // fullscreen button (itch) may sit beside the bar in a frame; the bar does not move for it.
+        let w = (items.len() as f32 * 76.0 * u).min(lay.safe.width() - 24.0 * u - 2.0 * side);
         let bar = Rect::from_center_size(
             Pos2::new(
-                lay.safe.center().x - corner / 2.0,
+                lay.safe.center().x,
                 lay.safe.bottom() - h / 2.0 - 10.0 * u,
             ),
             Vec2::new(w, h),
@@ -3524,15 +3502,6 @@ fn draw_nav_icon(p: &egui::Painter, item: NavItem, c: Pos2, r: f32, col: Color32
                 col,
             );
         }
-        NavItem::Debug => {
-            p.text(
-                c,
-                Align2::CENTER_CENTER,
-                icons::BUG,
-                FontId::proportional(r * 2.2),
-                col,
-            );
-        }
     }
 }
 
@@ -3690,20 +3659,27 @@ mod tests {
     fn the_tab_highlight_slides_to_the_page_and_settles_there() {
         let mut ms = home(false, DemoStatus::Absent);
         step(&mut ms, 0.016);
-        assert!(ms.home_goto("Debug"));
+        assert!(ms.home_goto("Controls"));
         // The first frames after the change are on the way, not there.
         step(&mut ms, 0.016);
         let near = ms.home.as_ref().expect("home").nav_hl.pos;
-        assert!(near < 1.0, "the highlight jumped to Debug at once: {near}");
+        assert!(
+            near < 1.0,
+            "the highlight jumped to Controls at once: {near}"
+        );
         let mut peak = near;
         for _ in 0..90 {
             step(&mut ms, 1.0 / 60.0);
             peak = peak.max(ms.home.as_ref().expect("home").nav_hl.pos);
         }
         let h = ms.home.as_ref().expect("home");
-        // Home, Settings, Controls, Debug: Debug is the fourth tab.
-        assert!((h.nav_hl.pos - 3.0).abs() < 0.01, "settled at {}", h.nav_hl.pos);
-        assert!(peak < 3.4, "a small overshoot only: {peak}");
+        // Home, Settings, Controls: Controls is the third tab.
+        assert!(
+            (h.nav_hl.pos - 2.0).abs() < 0.01,
+            "settled at {}",
+            h.nav_hl.pos
+        );
+        assert!(peak < 2.4, "a small overshoot only: {peak}");
     }
 
     #[test]
@@ -3876,13 +3852,13 @@ mod tests {
         assert_eq!(ms.selection_probe().0, "Settings");
         press(&mut ms, key(|i| i.back = true));
         assert_eq!(ms.home_probe().0, "Home");
-        // Debug is a page of the shell like the others, and Back leaves it.
+        // Controls is a page of the shell like the others, and Back leaves it.
         press(&mut ms, key(|i| i.up = true));
-        for _ in 0..3 {
+        for _ in 0..2 {
             press(&mut ms, key(|i| i.right = true));
         }
         press(&mut ms, key(|i| i.confirm = true));
-        assert_eq!(ms.home_probe().0, "Debug");
+        assert_eq!(ms.home_probe().0, "Controls");
         press(&mut ms, key(|i| i.back = true));
         assert_eq!(ms.home_probe().0, "Home");
     }
@@ -3898,13 +3874,14 @@ mod tests {
             tab_prev: true,
             ..Default::default()
         };
-        for want in ["Settings", "Controls", "Debug", "Home", "Settings"] {
+        for want in ["Settings", "Controls", "Home", "Settings", "Controls"] {
             press(&mut ms, next);
             assert_eq!(ms.home_probe().0, want);
         }
         press(&mut ms, prev);
         press(&mut ms, prev);
-        assert_eq!(ms.home_probe().0, "Debug", "backwards wraps from Home");
+        press(&mut ms, prev);
+        assert_eq!(ms.home_probe().0, "Controls", "backwards wraps from Home");
         // Back from any section is Home.
         press(
             &mut ms,

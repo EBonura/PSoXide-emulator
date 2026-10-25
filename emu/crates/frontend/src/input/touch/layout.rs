@@ -38,11 +38,30 @@ const MENU_BUTTON: Vec2 = vec2(76.0, 36.0);
 /// Pause, Save and Debug button size, CSS px (the icons beside Menu).
 const ICON_BUTTON: Vec2 = vec2(40.0, 36.0);
 /// Width of the whole row of interface buttons, CSS px (without fullscreen).
-const UI_ROW: f32 = 3.0 * (40.0 + 6.0) + 76.0;
+const UI_ROW: f32 = 4.0 * (40.0 + 6.0) + 76.0;
 /// Fullscreen button size, CSS px.
 const FULLSCREEN_BUTTON: Vec2 = vec2(40.0, 36.0);
 /// Distance of a cluster centre from its screen edge, CSS px.
 const CLUSTER_INSET: f32 = 72.0;
+/// Width a landscape bar's contents need at full size, CSS px.
+const BAR_NEED: f32 = 150.0;
+/// Shoulder pill size in a landscape bar, CSS px.
+const SHOULDER_BAR: Vec2 = vec2(64.0, 38.0);
+const SHOULDER_GAP: f32 = 8.0;
+/// Gap between the icon buttons of a row, CSS px.
+const ICON_GAP: f32 = 6.0;
+/// Half the side of a stick's capture square in a landscape bar, CSS px.
+const STICK_BAR: f32 = 46.0;
+/// Width and height of a D-pad or face cluster's touch areas at full size, CSS px.
+const BLOCK: f32 = 2.0 * (FACE_REACH + FACE_HIT);
+/// Gap between the items of a landscape bar's stack, CSS px.
+const STACK_GAP: f32 = 8.0;
+/// Height of the whole stack of a landscape bar (shoulders, icons, cluster, stick, pill and the gaps
+/// and margins) at full size, CSS px.
+const STACK_ANALOG: f32 = 38.0 + 36.0 + BLOCK + 92.0 + 34.0 + 6.0 * STACK_GAP;
+const STACK_DIGITAL: f32 = 38.0 + 36.0 + BLOCK + 34.0 + 5.0 * STACK_GAP;
+/// Height of the portrait panel's first line (the interface buttons and their gap), CSS px.
+const UI_BAND: f32 = 36.0 + 12.0;
 
 /// Safe-area insets in window pixels (notch, rounded corners, home bar).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -73,6 +92,9 @@ pub(crate) struct LayoutParams {
     /// The emulator menu is open: its buttons move to the top-right corner,
     /// clear of the list, and only they stay live.
     pub(crate) menu_open: bool,
+    /// Pixels the debug panel takes from the right of a landscape window: the controls lay
+    /// themselves out in what is left beside it.
+    pub(crate) dock_right: f32,
 }
 
 /// Which way the window is wider.
@@ -201,9 +223,11 @@ pub(crate) struct StickPlan {
 pub(crate) enum UiId {
     /// Pause or resume the game.
     Pause,
-    /// Save the game's state.
+    /// Open the save-state sheet to save into a slot.
     Save,
-    /// Open the debug section.
+    /// Open the save-state sheet to load from a slot.
+    Load,
+    /// Show or hide the live debug panel beside or under the game.
     Debug,
     /// Open or close the emulator menu.
     Menu,
@@ -240,6 +264,14 @@ pub(crate) struct TouchLayout {
     /// Height of the panel under the game in portrait (includes the bottom
     /// inset); zero in landscape.
     pub(crate) reserved_bottom: f32,
+    /// Width of the black bar left of the game in landscape, not counting the
+    /// safe inset; zero in portrait.
+    pub(crate) bar_left: f32,
+    /// Width of the black bar right of the game in landscape; zero in portrait.
+    pub(crate) bar_right: f32,
+    /// Where the game picture sits (4:3, window pixels) when nothing else shares
+    /// the window. No control is ever drawn or touched inside it.
+    pub(crate) game: Rect,
 }
 
 fn pill(rect: Rect, inflate: Vec2, mask: u16, label: &'static str) -> PadButton {
@@ -260,74 +292,169 @@ impl TouchLayout {
         }
     }
 
+    /// Landscape: the game fills the middle at 4:3 and every control lives in the black bar on
+    /// its left or its right, so nothing is ever drawn over the picture. The bars are as wide as
+    /// the screen leaves (a 4:3 picture takes little of a wide phone), widened a little at the
+    /// picture's cost on a short one, and the controls shrink to fit them.
     fn landscape(p: &LayoutParams) -> Self {
         let (ox, oy) = (p.safe.left, p.safe.top);
-        let w_px = (p.size.x - p.safe.left - p.safe.right).max(1.0);
+        let w_px = (p.size.x - p.safe.left - p.safe.right - p.dock_right).max(1.0);
         let h_px = (p.size.y - p.safe.top - p.safe.bottom).max(1.0);
-        let (w_css, h_css) = (w_px / p.scale, h_px / p.scale);
-        let fit = (h_css / 340.0).min(w_css / if p.analog { 760.0 } else { 600.0 });
-        let cap = (h_css / 290.0).min(w_css / 620.0);
-        let k = (fit.clamp(0.62, 1.5) * f32::from(p.size_pct) / 100.0).min(cap.max(0.62));
+        // The game's own zone runs to the bottom edge of the window.
+        let zone_h = (p.size.y - oy).max(1.0);
+        let gw_nat = (zone_h * 4.0 / 3.0).min(w_px);
+        let stack = if p.analog {
+            STACK_ANALOG
+        } else {
+            STACK_DIGITAL
+        };
+        let pref = f32::from(p.size_pct) / 100.0;
+        let k_fit = (h_px / p.scale / stack).max(0.45);
+        let mut k = (k_fit.clamp(0.55, 1.4) * pref).min(k_fit);
+        let nat_bar = ((w_px - gw_nat) / 2.0).max(0.0);
+        // The picture may give up to a fifth of its width to the bars.
+        let bar_max = ((w_px - 0.82 * gw_nat) / 2.0).max(nat_bar);
+        k = k.min(bar_max / (BAR_NEED * p.scale)).max(0.4);
         let u = p.scale * k;
+        let bar = (BAR_NEED * u).max(nat_bar);
+        // The clusters shrink so their touch areas fit the bar.
+        let c = (bar / u / BLOCK).min(1.0);
+        let block = BLOCK * c;
 
-        let m = MARGIN * u;
-        let shoulder_y = oy + m;
-        let cx_mid = ox + w_px / 2.0;
+        let zone_w = w_px - 2.0 * bar;
+        let gh = zone_h.min(zone_w * 0.75);
+        let game = Rect::from_center_size(
+            pos2(ox + w_px / 2.0, oy + zone_h / 2.0),
+            vec2(gh * 4.0 / 3.0, gh),
+        );
+        let (cx_l, cx_r) = (ox + bar / 2.0, ox + w_px - bar / 2.0);
+        let (dpad_x, face_x) = if p.left_handed {
+            (cx_r, cx_l)
+        } else {
+            (cx_l, cx_r)
+        };
 
-        let mut cy = oy + h_px * 0.5 + 8.0 * u;
-        // Keep the grab circle of the D-pad below the shoulder row and the
-        // menu buttons under it.
-        cy = cy.max(shoulder_y + (SHOULDER.y + 14.0 + MENU_BUTTON.y + 9.0 + DPAD_ZONE) * u);
-        let (pad_x, face_x) = cluster_x(ox, w_px, u, 1.0, p.left_handed);
+        // The stack runs top to bottom; what height is left over is shared between the gaps.
+        let items = [
+            SHOULDER_BAR.y,
+            ICON_BUTTON.y,
+            block,
+            if p.analog { 2.0 * STICK_BAR } else { 0.0 },
+            SMALL_PILL.y,
+        ];
+        let shown: Vec<f32> = items.iter().copied().filter(|h| *h > 0.0).collect();
+        let gaps = (shown.len() - 1) as f32;
+        let total = shown.iter().sum::<f32>() + gaps * STACK_GAP + 2.0 * STACK_GAP;
+        let slack = (h_px / u - total).max(0.0);
+        let gap = STACK_GAP + (slack / (gaps + 2.0)).min(10.0);
+        let mut y =
+            oy + (STACK_GAP + (slack - (gap - STACK_GAP) * (gaps + 2.0)).max(0.0) / 2.0) * u;
         let mut layout = Self::base(
             Orientation::Landscape,
             u,
-            1.0,
-            pos2(pad_x, cy),
-            pos2(face_x, cy),
+            c,
+            pos2(dpad_x, 0.0),
+            pos2(face_x, 0.0),
         );
+        layout.bar_left = bar;
+        layout.bar_right = bar;
+        layout.game = game;
 
-        layout.shoulders(ox, w_px, shoulder_y, u);
-        layout.small_pills(cx_mid, oy + h_px - m - SMALL_PILL.y * u, u, 6.0);
-        // Under the left shoulders, out of the game picture; in the top-right
-        // corner while the menu list fills the screen.
-        let ui_at = if p.menu_open {
-            pos2(
-                ox + w_px - m - (UI_ROW + 8.0 + FULLSCREEN_BUTTON.x) * u,
-                oy + 8.0 * u,
+        // Shoulders: L2 L1 in the left bar, R1 R2 in the right.
+        let sh = SHOULDER_BAR * u;
+        let inflate = vec2((SHOULDER_GAP / 2.0 - 0.5) * u, 4.0 * u);
+        let pair = |cx: f32| {
+            (
+                cx - (SHOULDER_BAR.x + SHOULDER_GAP / 2.0) * u,
+                cx + SHOULDER_GAP / 2.0 * u,
             )
-        } else {
-            pos2(ox + m, shoulder_y + (SHOULDER.y + 14.0) * u)
         };
-        layout.ui_buttons(ui_at, u, p.fullscreen_button);
-        if p.analog {
-            let zone = STICK_ZONE * u;
-            let y = oy + h_px - m - zone;
-            let pill_edge = (SMALL_PILL.x + 6.0) * u;
-            let (left_pad_x, right_pad_x) = if p.left_handed {
-                (face_x, pad_x)
-            } else {
-                (pad_x, face_x)
-            };
-            let left_x = (ox + w_px * 0.30)
-                .max(left_pad_x + DPAD_ZONE * u + zone + 4.0 * u)
-                .min(cx_mid - pill_edge - zone - 4.0 * u);
-            let right_x = (ox + w_px * 0.70)
-                .min(right_pad_x - (FACE_REACH + FACE_HIT) * u - zone - 4.0 * u)
-                .max(cx_mid + pill_edge + zone + 4.0 * u);
-            layout.sticks(pos2(left_x, y), pos2(right_x, y), u);
+        let (l_outer, l_inner) = pair(cx_l);
+        let (r_inner, r_outer) = pair(cx_r);
+        for (mask, label, x) in [
+            (button::L2, "L2", l_outer),
+            (button::L1, "L1", l_inner),
+            (button::R1, "R1", r_inner),
+            (button::R2, "R2", r_outer),
+        ] {
+            layout.buttons.push(pill(
+                Rect::from_min_size(pos2(x, y), sh),
+                inflate,
+                mask,
+                label,
+            ));
         }
+        y += (SHOULDER_BAR.y + gap) * u;
+
+        // The interface buttons, three to a bar.
+        let row = 3.0 * ICON_BUTTON.x + 2.0 * ICON_GAP;
+        layout.ui_row(
+            &[UiId::Pause, UiId::Save, UiId::Load],
+            pos2(cx_l - row / 2.0 * u, y),
+            u,
+        );
+        let right_row: Vec<UiId> = if p.fullscreen_button {
+            vec![UiId::Debug, UiId::Menu, UiId::Fullscreen]
+        } else {
+            vec![UiId::Debug, UiId::Menu]
+        };
+        let right_w =
+            (right_row.len() as f32 * ICON_BUTTON.x + (right_row.len() - 1) as f32 * ICON_GAP) * u;
+        layout.ui_row(&right_row, pos2(cx_r - right_w / 2.0, y), u);
+        y += (ICON_BUTTON.y + gap) * u;
+
+        // The D-pad and the face buttons.
+        let cy = y + block / 2.0 * u;
+        layout.dpad.center = pos2(dpad_x, cy);
+        layout.move_face_cluster(pos2(face_x, cy), u, c);
+        y += (block + gap) * u;
+
+        if p.analog {
+            let zone = STICK_BAR * u;
+            let sy = y + zone;
+            let (left_x, right_x) = if p.left_handed {
+                (cx_r, cx_l)
+            } else {
+                (cx_l, cx_r)
+            };
+            layout.sticks(pos2(left_x, sy), pos2(right_x, sy), u);
+            for stick in &mut layout.sticks {
+                stick.zone = Rect::from_center_size(stick.rest, Vec2::splat(2.0 * zone));
+            }
+            y += (2.0 * STICK_BAR + gap) * u;
+        }
+
+        // SELECT under the left bar's stack, START under the right's.
+        let pill_inflate = vec2(3.0 * u, 3.0 * u);
+        let size = SMALL_PILL * u;
+        layout.buttons.push(pill(
+            Rect::from_center_size(pos2(cx_l, y + size.y / 2.0), size),
+            pill_inflate,
+            button::SELECT,
+            "SELECT",
+        ));
+        layout.buttons.push(pill(
+            Rect::from_center_size(pos2(cx_r, y + size.y / 2.0), size),
+            pill_inflate,
+            button::START,
+            "START",
+        ));
         layout
     }
 
+    /// Portrait: the game takes the top at 4:3 and everything else is in the panel under it. The
+    /// row of interface buttons is the panel's first line, right under the picture; the pad's
+    /// controls sit at the bottom of the panel, within the thumb's reach.
     fn portrait(p: &LayoutParams) -> Self {
         let (ox, oy) = (p.safe.left, p.safe.top);
         let w_px = (p.size.x - p.safe.left - p.safe.right).max(1.0);
         let w_css = w_px / p.scale;
-        let need_css = if p.analog { 378.0 } else { 234.0 };
-        let avail_css = (p.size.y - p.safe.top - p.safe.bottom - 0.75 * w_px).max(0.0) / p.scale;
+        let game_h = 0.75 * w_px;
+        let panel_top = oy + game_h;
+        let need_css = if p.analog { 378.0 } else { 234.0 } + UI_BAND;
+        let avail_css = (p.size.y - p.safe.bottom - panel_top).max(0.0) / p.scale;
         let k = (w_css / 380.0).clamp(0.7, 1.4) * f32::from(p.size_pct) / 100.0;
-        let k = k.min(avail_css / need_css).clamp(0.55, 1.5);
+        let k = k.min(avail_css / need_css).clamp(0.5, 1.5);
         let u = p.scale * k;
         // On a narrow screen the two clusters shrink so the Start / Select
         // column between them keeps a thumb-sized width.
@@ -335,10 +462,11 @@ impl TouchLayout {
             / (2.0 * DPAD_ZONE + 2.0 * (FACE_REACH + FACE_HIT)))
             .clamp(0.7, 1.0);
 
-        let panel_h = need_css * u;
-        let panel_top = p.size.y - p.safe.bottom - panel_h;
         let m = MARGIN * u;
-        let y0 = panel_top + m;
+        // The pad's block hangs from the bottom of the window's safe area.
+        let content_h = (need_css - UI_BAND) * u;
+        let content_top = (p.size.y - p.safe.bottom - content_h).max(panel_top + UI_BAND * u);
+        let y0 = content_top + m;
         let cy = y0 + (SHOULDER.y + 5.0 + (FACE_REACH + FACE_HIT) * c + 5.0) * u;
         let cx_mid = ox + w_px / 2.0;
         let (pad_x, face_x) = cluster_x(ox, w_px, u, c, p.left_handed);
@@ -349,18 +477,24 @@ impl TouchLayout {
             pos2(pad_x, cy),
             pos2(face_x, cy),
         );
-        layout.reserved_bottom = panel_h + p.safe.bottom;
+        layout.reserved_bottom = p.size.y - panel_top;
+        layout.game = Rect::from_min_size(pos2(ox, oy), vec2(w_px, game_h));
 
         layout.shoulders(ox, w_px, y0, u);
         // Between the D-pad and the face buttons: Select above Start.
         let column = (face_x - (FACE_REACH + FACE_HIT) * u * c) - (pad_x + DPAD_ZONE * u * c);
         let pill_w = (SMALL_PILL.x * u).min(column - 6.0 * u).max(40.0 * u);
         layout.stacked_pills(pos2(cx_mid, cy), pill_w, u);
+        // The interface row, centred, under the picture.
+        let row_w = (UI_ROW
+            + if p.fullscreen_button {
+                8.0 + FULLSCREEN_BUTTON.x
+            } else {
+                0.0
+            })
+            * u;
         layout.ui_buttons(
-            pos2(
-                ox + w_px - m - (UI_ROW + 8.0 + FULLSCREEN_BUTTON.x) * u,
-                oy + 8.0 * u,
-            ),
+            pos2(cx_mid - row_w / 2.0, panel_top + 6.0 * u),
             u,
             p.fullscreen_button,
         );
@@ -388,6 +522,9 @@ impl TouchLayout {
             sticks: Vec::new(),
             ui: Vec::new(),
             reserved_bottom: 0.0,
+            bar_left: 0.0,
+            bar_right: 0.0,
+            game: Rect::NOTHING,
         };
         for (mask, glyph, dx, dy) in [
             (button::TRIANGLE, Glyph::Triangle, 0.0, -FACE_REACH),
@@ -434,25 +571,6 @@ impl TouchLayout {
         }
     }
 
-    /// Select and Start side by side, centred on `cx`, top at `y`.
-    fn small_pills(&mut self, cx: f32, y: f32, u: f32, gap: f32) {
-        let size = SMALL_PILL * u;
-        let inflate = vec2((gap / 2.0 - 0.5) * u, 5.0 * u);
-        let half_gap = gap / 2.0 * u;
-        self.buttons.push(pill(
-            Rect::from_min_size(pos2(cx - half_gap - size.x, y), size),
-            inflate,
-            button::SELECT,
-            "SELECT",
-        ));
-        self.buttons.push(pill(
-            Rect::from_min_size(pos2(cx + half_gap, y), size),
-            inflate,
-            button::START,
-            "START",
-        ));
-    }
-
     /// Select above Start, centred on `center`.
     fn stacked_pills(&mut self, center: Pos2, width: f32, u: f32) {
         let size = vec2(width, SMALL_PILL.y * u);
@@ -472,10 +590,47 @@ impl TouchLayout {
         ));
     }
 
-    fn ui_buttons(&mut self, min: Pos2, u: f32, fullscreen: bool) {
-        // One pill of four icons: Pause, Save, Debug, Menu.
+    /// One row of the interface buttons, left to right from `min`. Icon buttons are square-ish;
+    /// the menu button is as wide as an icon in a narrow bar.
+    fn ui_row(&mut self, ids: &[UiId], min: Pos2, u: f32) {
         let mut x = min.x;
-        for id in [UiId::Pause, UiId::Save, UiId::Debug] {
+        for &id in ids {
+            let r = Rect::from_min_size(pos2(x, min.y), ICON_BUTTON * u);
+            self.ui.push(UiButton {
+                id,
+                draw: r,
+                hit: r.expand2(vec2(0.0, 5.0 * u)),
+            });
+            x += (ICON_BUTTON.x + ICON_GAP) * u;
+        }
+    }
+
+    /// Move the four face buttons to a new cluster centre.
+    fn move_face_cluster(&mut self, face: Pos2, u: f32, c: f32) {
+        for (mask, dx, dy) in [
+            (button::TRIANGLE, 0.0, -FACE_REACH),
+            (button::CROSS, 0.0, FACE_REACH),
+            (button::SQUARE, -FACE_REACH, 0.0),
+            (button::CIRCLE, FACE_REACH, 0.0),
+        ] {
+            let center = face + vec2(dx, dy) * u * c;
+            if let Some(b) = self.buttons.iter_mut().find(|b| b.mask == mask) {
+                b.draw = Region::Circle {
+                    center,
+                    radius: FACE_RADIUS * u * c,
+                };
+                b.hit = Region::Circle {
+                    center,
+                    radius: FACE_HIT * u * c,
+                };
+            }
+        }
+    }
+
+    /// The portrait row: Pause, Save, Load, Debug, Menu (and Fullscreen).
+    fn ui_buttons(&mut self, min: Pos2, u: f32, fullscreen: bool) {
+        let mut x = min.x;
+        for id in [UiId::Pause, UiId::Save, UiId::Load, UiId::Debug] {
             let r = Rect::from_min_size(pos2(x, min.y), ICON_BUTTON * u);
             self.ui.push(UiButton {
                 id,
@@ -621,6 +776,7 @@ pub(crate) mod tests {
             left_handed: false,
             fullscreen_button: true,
             menu_open: false,
+            dock_right: 0.0,
         }
     }
 
@@ -819,6 +975,135 @@ pub(crate) mod tests {
         }
         let landscape = TouchLayout::compute(&params(&DEVICES[1], true, true));
         assert_eq!(landscape.reserved_bottom, 0.0);
+    }
+
+    /// Nothing of the controller is drawn over the game picture, nor touchable inside it, in
+    /// either orientation, for both pad modes, both hands, every size preference and with the
+    /// debug panel taking its share of a landscape window.
+    #[test]
+    fn no_control_is_drawn_or_touched_over_the_game_picture() {
+        let mut windows: Vec<(String, LayoutParams)> = Vec::new();
+        for device in &DEVICES {
+            for landscape in [false, true] {
+                for analog in [false, true] {
+                    windows.push((
+                        format!(
+                            "{} {}",
+                            device.name,
+                            if landscape { "landscape" } else { "portrait" }
+                        ),
+                        params(device, landscape, analog),
+                    ));
+                }
+            }
+        }
+        // The sizes the journeys drive, including the short landscape phone.
+        for (w, h, dpr, insets) in [
+            (393.0, 852.0, 3.0, (47.0, 34.0, 0.0, 0.0)),
+            (375.0, 667.0, 2.0, (20.0, 0.0, 0.0, 0.0)),
+            (360.0, 640.0, 3.0, (0.0, 0.0, 0.0, 0.0)),
+            (852.0, 393.0, 3.0, (0.0, 21.0, 47.0, 47.0)),
+            (667.0, 375.0, 2.0, (0.0, 0.0, 0.0, 0.0)),
+            (640.0, 360.0, 3.0, (0.0, 0.0, 0.0, 0.0)),
+            (1280.0, 800.0, 1.0, (0.0, 0.0, 0.0, 0.0)),
+        ] {
+            for analog in [false, true] {
+                windows.push((
+                    format!("{w}x{h} analog={analog}"),
+                    LayoutParams {
+                        size: vec2(w, h) * dpr,
+                        scale: dpr,
+                        safe: Insets {
+                            top: insets.0 * dpr,
+                            bottom: insets.1 * dpr,
+                            left: insets.2 * dpr,
+                            right: insets.3 * dpr,
+                        },
+                        analog,
+                        size_pct: 100,
+                        left_handed: false,
+                        fullscreen_button: true,
+                        menu_open: false,
+                        dock_right: 0.0,
+                    },
+                ));
+            }
+        }
+        for (name, base) in windows {
+            for left_handed in [false, true] {
+                for size_pct in [70, 100, 150] {
+                    for dock in [0.0, 0.3] {
+                        let mut p = base;
+                        p.left_handed = left_handed;
+                        p.size_pct = size_pct;
+                        let landscape = p.size.x >= p.size.y;
+                        p.dock_right = if landscape { dock * p.size.x } else { 0.0 };
+                        let layout = TouchLayout::compute(&p);
+                        let game = layout.game;
+                        assert!(game.width() > 50.0, "{name}: no game rect {game:?}");
+                        let mut rects = hit_rects(&layout);
+                        rects.extend(
+                            layout
+                                .buttons
+                                .iter()
+                                .map(|b| (format!("drawn {:#x}", b.mask), b.draw.bounds())),
+                        );
+                        for (what, rect) in rects {
+                            assert!(
+                                !rect.shrink(0.5).intersects(game),
+                                "{name} lh={left_handed} size={size_pct} dock={dock}: {what} {rect:?} meets the game {game:?}"
+                            );
+                        }
+                        // The game stays 4:3.
+                        assert!(
+                            (game.width() / game.height() - 4.0 / 3.0).abs() < 0.01,
+                            "{name}: {game:?}"
+                        );
+                        // And in landscape the bars hold everything: left controls left of the
+                        // game, right ones right of it.
+                        if landscape {
+                            let safe = safe_rect(&p);
+                            assert!(
+                                (layout.bar_left + layout.bar_right) > 0.0
+                                    && game.left() >= safe.left() + layout.bar_left - 1.0,
+                                "{name}: bars {} {} game {game:?}",
+                                layout.bar_left,
+                                layout.bar_right
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The picture keeps most of its room: a bar never takes more than a fifth of its width.
+    #[test]
+    fn the_bars_leave_the_game_most_of_its_room() {
+        for (w, h, dpr) in [
+            (852.0, 393.0, 3.0),
+            (667.0, 375.0, 2.0),
+            (640.0, 360.0, 3.0),
+        ] {
+            let p = LayoutParams {
+                size: vec2(w, h) * dpr,
+                scale: dpr,
+                safe: Insets::default(),
+                analog: true,
+                size_pct: 100,
+                left_handed: false,
+                fullscreen_button: true,
+                menu_open: false,
+                dock_right: 0.0,
+            };
+            let layout = TouchLayout::compute(&p);
+            let natural = (h * dpr * 4.0 / 3.0).min(w * dpr);
+            assert!(
+                layout.game.width() >= 0.8 * natural,
+                "{w}x{h}: game {} of {natural}",
+                layout.game.width()
+            );
+        }
     }
 
     #[test]

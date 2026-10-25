@@ -39,9 +39,11 @@ pub(crate) enum Phase {
 pub(crate) enum UiAction {
     /// Pause or resume.
     Pause,
-    /// Save the state.
+    /// Open the save-state sheet in Save mode.
     Save,
-    /// Open Debug.
+    /// Open the save-state sheet in Load mode.
+    Load,
+    /// Show or hide the debug panel.
     Debug,
     /// The menu button.
     Menu,
@@ -257,6 +259,7 @@ impl TouchPad {
                 self.pending.push(match ui {
                     UiId::Pause => UiAction::Pause,
                     UiId::Save => UiAction::Save,
+                    UiId::Load => UiAction::Load,
                     UiId::Debug => UiAction::Debug,
                     UiId::Menu => UiAction::Menu,
                     UiId::Fullscreen => UiAction::Fullscreen,

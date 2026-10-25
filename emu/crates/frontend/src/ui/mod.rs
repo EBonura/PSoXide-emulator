@@ -97,19 +97,27 @@ pub fn draw_layout(
         toolbar::draw(ctx, state);
     }
 
-    // Always called: the sidebar animates itself open/closed from the
-    // `debug_sidebar` flag and early-returns when fully closed.
-    debug_sidebar::draw(ctx, state, vram_tex);
-
     // With the on-screen controller up, the game keeps clear of the notch
     // and, in portrait, of the controller's own panel under the picture.
     if !embed {
         draw_touch_reservations(ctx, input_router.touch());
     }
 
+    // The live debug panel docks inside those: beside the game on a wide window, between the
+    // game and the controller's panel on a tall one. Always called: it animates itself open or
+    // closed from the `debug_sidebar` flag and returns at once when fully closed.
+    debug_sidebar::draw(ctx, state, vram_tex);
+    if !embed {
+        draw_touch_right_bar(ctx, input_router.touch());
+    }
+
     // Zero-margin frame: the game screen gets every pixel between the
     // toolbar and the sidebar; the 4:3 letterbox bars are plain black,
     // CRT-bezel style, with no inset or border chrome.
+    let native_rows = state
+        .bus
+        .as_ref()
+        .map_or(240, |bus| u32::from(bus.gpu.display_area().height));
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
         .show(ctx, |ui| {
@@ -118,6 +126,9 @@ pub fn draw_layout(
                 display_tex,
                 display_uv,
                 &mut state.framebuffer_present_size_px,
+                &mut state.game_rect,
+                state.settings.video.integer_scale,
+                native_rows,
             );
         });
 
@@ -162,10 +173,13 @@ pub fn draw_layout(
     state
         .menu
         .draw_controls(ctx, |ui| port_message = controller_ports(ui, input_router));
-    // Debug is a section of the shell, drawn in the space it leaves.
+    // The slot sheet is a page of the shell, drawn in the space it leaves.
     if let Some((_, rect)) = state.menu.home_section() {
         let reveal = state.menu.home_section_reveal();
-        debug_sidebar::draw_section(ctx, state, vram_tex, rect, reveal);
+        let touch = state.menu.touch_mode();
+        if let Some(action) = state.menu.draw_slots(ctx, rect, reveal, touch) {
+            state.menu.queue_pointer_action(action);
+        }
     }
     if let Some(message) = port_message {
         state.status_message_set(message);
@@ -175,7 +189,12 @@ pub fn draw_layout(
     draw_freecam_indicator(ctx, state);
     if !embed {
         draw_status_toast(ctx, state);
-        touch_overlay::draw(ctx, input_router.touch(), state.menu.open);
+        touch_overlay::draw(
+            ctx,
+            input_router.touch(),
+            state.menu.open,
+            state.panels.debug_sidebar,
+        );
     }
 }
 
@@ -206,6 +225,18 @@ fn draw_touch_reservations(ctx: &egui::Context, touch: &crate::input::backend::t
         egui::SidePanel::right("touch-safe-right")
             .exact_width(reserved.right)
             .frame(black())
+            .show(ctx, |_| {});
+    }
+}
+
+/// The black bar of controls right of the game in landscape. It is declared after the debug
+/// panel, which docks between the notch and this bar.
+fn draw_touch_right_bar(ctx: &egui::Context, touch: &crate::input::backend::touch::TouchDevice) {
+    let reserved = touch_overlay::reserved(ctx, touch);
+    if reserved.right_bar > 0.5 {
+        egui::SidePanel::right("touch-bar-right")
+            .exact_width(reserved.right_bar)
+            .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
             .show(ctx, |_| {});
     }
 }
@@ -251,16 +282,28 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.replay_last_input();
             MenuOutcome::None
         }
-        SaveState => {
-            state.save_state();
+        SaveSlot(slot) => {
+            state.save_slot(slot);
             MenuOutcome::None
         }
-        LoadState(slot, start_paused) => {
-            state.load_state(slot, start_paused);
+        LoadSlot(slot) => {
+            state.load_slot(slot);
             MenuOutcome::None
         }
-        OpenSaveStates => {
-            state.menu.open_save_states();
+        DeleteSlot(slot) => {
+            state.delete_slot(slot);
+            MenuOutcome::None
+        }
+        ExportSlot(slot) => {
+            state.export_slot(slot);
+            MenuOutcome::None
+        }
+        ImportSlot => {
+            state.import_slot();
+            MenuOutcome::None
+        }
+        OpenSlots(mode) => {
+            state.open_slots(mode);
             MenuOutcome::None
         }
         OpenControls => {
@@ -277,10 +320,6 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             // bindings; it must throw that cache away or bits set
             // under the old mapping can never be released.
             MenuOutcome::ClearHostKeyboardInput
-        }
-        PinAsTop(slot) => {
-            state.pin_save_state_as_top(slot);
-            MenuOutcome::None
         }
         ToggleLibraryFolder(folder) => {
             state.menu.toggle_library_folder(&folder);
@@ -577,8 +616,17 @@ pub(crate) fn draw_status_toast(ctx: &egui::Context, state: &AppState) {
     if state.freelook.enabled {
         toast_y += 46.0;
     }
+    // Beside the debug panel, not over it.
+    let docked = debug_sidebar::right_dock_points(
+        ctx.screen_rect().size(),
+        state.sidebar_width,
+        state.debug_slide,
+    );
     egui::Area::new("status-toast".into())
-        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-18.0, toast_y))
+        .anchor(
+            egui::Align2::RIGHT_TOP,
+            egui::vec2(-(18.0 + docked), toast_y),
+        )
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::new()
@@ -637,11 +685,12 @@ pub(crate) fn draw_recording_indicator(ctx: &egui::Context, state: &AppState) {
         return;
     }
     // Sit left of the debug sidebar rather than over its buttons.
-    let x = if state.panels.debug_sidebar {
-        -(18.0 + state.sidebar_width)
-    } else {
-        -18.0
-    };
+    let docked = debug_sidebar::right_dock_points(
+        ctx.screen_rect().size(),
+        state.sidebar_width,
+        state.debug_slide,
+    );
+    let x = -(18.0 + docked);
     egui::Area::new("input-recording-indicator".into())
         .anchor(egui::Align2::RIGHT_TOP, egui::vec2(x, 48.0))
         .order(egui::Order::Foreground)

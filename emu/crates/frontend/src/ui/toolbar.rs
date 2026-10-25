@@ -1,7 +1,7 @@
 //! Top-of-window toolbar.
 //!
 //! Left: a status dot (green running, grey paused) and the game's frame
-//! rate. Right, in visual order: Play/Pause, Reset, Save states, Controls,
+//! rate. Right, in visual order: Play/Pause, Reset, Save, Load, Controls,
 //! volume/mute, the debug sidebar toggle, and Hide toolbar. Everything else
 //! lives in the menu (Settings) or the debug sidebar (Developer, and the
 //! detailed performance figures).
@@ -19,7 +19,7 @@ use egui::{Align, Button, Color32, Context, Label, Layout, Rect, RichText, TopBo
 use crate::app::AppState;
 use crate::icons;
 use crate::ui::menu::home::tokens;
-use crate::ui::menu::MenuAction;
+use crate::ui::menu::{MenuAction, SlotsMode};
 
 /// Icon font size in the button row.
 const ICON_SIZE: f32 = 16.0;
@@ -37,7 +37,7 @@ const TOOLBAR_LANE_GAP: f32 = 8.0;
 /// reachable before the frame rate is allowed to consume room.
 const TOOLBAR_GROUP_GAP: f32 = 8.0;
 /// Comfortable width for every toolbar control with the normal group spacing.
-const CONTROLS_PREFERRED_WIDTH: f32 = 430.0;
+const CONTROLS_PREFERRED_WIDTH: f32 = 470.0;
 /// Room for the status dot and the frame rate.
 const METRICS_MIN_WIDTH: f32 = 90.0;
 /// Slider width used in the toolbar.
@@ -278,12 +278,20 @@ fn draw_toolbar_controls(ui: &mut egui::Ui, state: &mut AppState, compact: bool)
     {
         action = Some(MenuAction::OpenControls);
     }
+    // Right to left: Load sits right of Save, so the pair reads Save, Load.
     if ui
-        .add(icon_button(icons::SAVE))
-        .on_hover_text("Save states (F5 save, F7 load)")
+        .add(icon_button(icons::FOLDER))
+        .on_hover_text("Load a saved state (F7 loads the quick save)")
         .clicked()
     {
-        action = Some(MenuAction::OpenSaveStates);
+        action = Some(MenuAction::OpenSlots(SlotsMode::Load));
+    }
+    if ui
+        .add(icon_button(icons::SAVE))
+        .on_hover_text("Save the game to a slot (F5 is a quick save)")
+        .clicked()
+    {
+        action = Some(MenuAction::OpenSlots(SlotsMode::Save));
     }
     group_break(ui, group_gap);
     if ui

@@ -1197,17 +1197,11 @@ impl ApplicationHandler for Shell {
                         }
                     );
                 }
-                // F5 / F7 -- quick-save (pushes a new save, and pins it
-                // as the new quick-load target) / quick-load whichever
-                // save is pinned "on top" (see `ConfigPaths::read_top_slot`),
-                // falling back to the most recent one. F7 stays running
-                // after loading (unlike the save-states panel's Load
-                // button, which defaults its "Resume paused" checkbox
-                // to on) -- it's meant as a fast, in-the-moment rewind,
-                // not a deliberate jump you'd want to stop and look
-                // around after. F9 is already the DualShock analog-mode
-                // toggle (see `key_is_analog_button`), so quick-save/-load
-                // land on F5/F7 instead of the more conventional F5/F9.
+                // F5 / F7 -- quick-save / quick-load: the quick slot of the
+                // save-state sheet, with a toast. F9 is already the DualShock
+                // analog-mode toggle (see `key_is_analog_button`), so
+                // quick-save/-load land on F5/F7 instead of the more
+                // conventional F5/F9.
                 // F6 toggles the texture filter (saved in settings.ron); F4
                 // replays the newest recording from a cold boot.
                 // F8 toggles a deterministic port-1 recording saved below the
@@ -1226,8 +1220,8 @@ impl ApplicationHandler for Shell {
                 if state == ElementState::Pressed && !repeat {
                     match &logical_key {
                         Key::Named(NamedKey::F3) => self.state.toggle_performance_panel(),
-                        Key::Named(NamedKey::F5) => self.state.save_state(),
-                        Key::Named(NamedKey::F7) => self.state.load_latest_state(false),
+                        Key::Named(NamedKey::F5) => self.state.quick_save(),
+                        Key::Named(NamedKey::F7) => self.state.quick_load(),
                         Key::Named(NamedKey::F6) => self.state.cycle_texture_filter(),
                         Key::Named(NamedKey::F4) => self.state.replay_last_input(),
                         Key::Named(NamedKey::F8) => self.state.toggle_input_recording(),
@@ -1298,6 +1292,19 @@ impl ApplicationHandler for Shell {
                 );
                 if std::mem::take(&mut self.touch_menu_pending) {
                     input.toggle_open = true;
+                }
+                // Gamepad shortcuts while a game is up and the shell is closed: Select+R1
+                // quick-saves, Select+L1 quick-loads, Select+R3 shows or hides the debug panel.
+                if !self.state.menu.open {
+                    if pad_frame.quick_save {
+                        self.state.quick_save();
+                    }
+                    if pad_frame.quick_load {
+                        self.state.quick_load();
+                    }
+                    if pad_frame.toggle_debug {
+                        self.state.toggle_performance_panel();
+                    }
                 }
                 if pad_frame.toggle_menu {
                     // Select+Start is the gamepad equivalent of
@@ -2105,21 +2112,6 @@ impl ApplicationHandler for Shell {
                     event_loop.exit();
                     return;
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                for path in state.take_pending_savestate_thumbnails() {
-                    let result = match state.bus.as_ref() {
-                        Some(bus) => {
-                            gfx.write_savestate_thumbnail(&bus.gpu, state.deinterlace, &path)
-                        }
-                        None => Err("emulator stopped after save".to_string()),
-                    };
-                    match result {
-                        Ok(()) => state.refresh_save_state_menu_rows(),
-                        Err(error) => {
-                            eprintln!("[frontend] save-state thumbnail: {error}");
-                        }
-                    }
-                }
                 #[cfg(feature = "editor")]
                 if let Some(request) = state.editor.take_playtest_request() {
                     state.handle_editor_playtest_request(request);
@@ -2290,8 +2282,9 @@ fn run_touch_actions(
                 state.running = !state.running;
                 state.menu.sync_run_label(state.running);
             }
-            input::touch::pad::UiAction::Save => state.save_state(),
-            input::touch::pad::UiAction::Debug => state.open_shell_page("Debug"),
+            input::touch::pad::UiAction::Save => state.open_slots(ui::menu::SlotsMode::Save),
+            input::touch::pad::UiAction::Load => state.open_slots(ui::menu::SlotsMode::Load),
+            input::touch::pad::UiAction::Debug => state.toggle_performance_panel(),
             input::touch::pad::UiAction::Fullscreen => web_touch::toggle_fullscreen(false),
         }
     }
@@ -2328,6 +2321,12 @@ fn update_touch_controller(
     let size = window.inner_size();
     let scale = window.scale_factor() as f32;
     let css = web_touch::safe_insets_css();
+    // The debug panel beside the game takes its share of a landscape window.
+    let dock_right_px = ui::debug_sidebar::right_dock_points(
+        egui::vec2(size.width as f32, size.height as f32) / scale,
+        state.sidebar_width,
+        state.debug_slide,
+    ) * scale;
     let params = input::touch::layout::LayoutParams {
         size: egui::vec2(size.width as f32, size.height as f32),
         scale,
@@ -2342,6 +2341,7 @@ fn update_touch_controller(
         left_handed: false,
         fullscreen_button: web_touch::fullscreen_available(),
         menu_open: false,
+        dock_right: dock_right_px,
     };
     let now_ms = input_router.now_ms();
     let menu_open = state.menu.open;

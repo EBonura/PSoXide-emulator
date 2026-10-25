@@ -303,7 +303,9 @@
       }
       body { position: fixed; inset: 0; width: 100%; }
       /* No text-selection highlight or focus ring around the game canvas. */
-      canvas { display: block; outline: none; touch-action: none; }
+      /* The backing store is the canvas's CSS size times the device pixel ratio, so nothing here
+         should ever be resampled; if a browser does scale it, it must not smooth PS1 pixels. */
+      canvas { display: block; outline: none; touch-action: none; image-rendering: pixelated; }
       canvas:focus, canvas:focus-visible { outline: none; }
 
       .psoxide-loader {

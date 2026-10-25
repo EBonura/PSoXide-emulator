@@ -259,6 +259,7 @@ mod tests {
                 left_handed: false,
                 fullscreen_button: false,
                 menu_open: false,
+                dock_right: 0.0,
             },
             0,
             0.016,
@@ -291,6 +292,7 @@ mod tests {
             left_handed: false,
             fullscreen_button: true,
             menu_open: true,
+            dock_right: 0.0,
         };
         let mut router = touch_router();
         router.touch_mut().update_layout(params(), 0, 0.016);
@@ -425,6 +427,7 @@ mod tests {
                 left_handed: false,
                 fullscreen_button: false,
                 menu_open: false,
+                dock_right: 0.0,
             },
             0,
             0.016,
@@ -444,6 +447,7 @@ mod tests {
                 left_handed: false,
                 fullscreen_button: false,
                 menu_open: false,
+                dock_right: 0.0,
             },
             0,
             0.016,

@@ -64,8 +64,12 @@ impl Space {
 pub(crate) struct Reserved {
     pub(crate) top: f32,
     pub(crate) bottom: f32,
+    /// The notch's side and, in landscape, the bar of controls left of the game.
     pub(crate) left: f32,
+    /// The notch's side only: the debug panel docks inside it.
     pub(crate) right: f32,
+    /// The bar of controls right of the game in landscape, inside the debug panel.
+    pub(crate) right_bar: f32,
 }
 
 /// What the controller takes from the game's area, in points.
@@ -78,13 +82,14 @@ pub(crate) fn reserved(ctx: &Context, touch: &TouchDevice) -> Reserved {
     Reserved {
         top: safe_px.top * inv,
         bottom: layout.reserved_bottom * inv,
-        left: safe_px.left * inv,
+        left: (safe_px.left + layout.bar_left) * inv,
         right: safe_px.right * inv,
+        right_bar: layout.bar_right * inv,
     }
 }
 
 /// Paint the controller above everything else.
-pub(crate) fn draw(ctx: &Context, touch: &TouchDevice, menu_open: bool) {
+pub(crate) fn draw(ctx: &Context, touch: &TouchDevice, menu_open: bool, debug_open: bool) {
     let show_pad = !menu_open;
     let Some(layout) = touch.layout() else {
         return;
@@ -121,7 +126,15 @@ pub(crate) fn draw(ctx: &Context, touch: &TouchDevice, menu_open: bool) {
         match ui.id {
             UiId::Pause => draw_icon_button(&painter, &space, ui.draw, icons::PAUSE, down, alpha),
             UiId::Save => draw_icon_button(&painter, &space, ui.draw, icons::SAVE, down, alpha),
-            UiId::Debug => draw_icon_button(&painter, &space, ui.draw, icons::BUG, down, alpha),
+            UiId::Load => draw_icon_button(&painter, &space, ui.draw, icons::FOLDER, down, alpha),
+            UiId::Debug => draw_icon_button(
+                &painter,
+                &space,
+                ui.draw,
+                icons::BUG,
+                down || debug_open,
+                alpha,
+            ),
             UiId::Menu => draw_menu_button(&painter, &space, ui.draw, down, menu_open, alpha),
             UiId::Fullscreen => draw_fullscreen_button(&painter, &space, ui.draw, down, alpha),
         }

@@ -80,6 +80,8 @@ psoxide-jit = { path = "../psoxide-jit", optional = true }
 cpal  = { workspace = true }
 gilrs = { workspace = true }
 rfd   = { workspace = true }
+# The local time zone, to say when a save was made ("Today 14:32").
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 egui-winit = { version = "0.31", default-features = false, features = ["links", "clipboard", "wayland", "x11"] }
 
 # MCP debug server (native, behind the `mcp` feature). Kept here so the wasm

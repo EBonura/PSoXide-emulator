@@ -93,6 +93,9 @@ pub(super) struct ControlsState {
     shown_tab: usize,
     tab_age: f32,
     tab_dir: f32,
+    /// Where the touch layout preview and its column were drawn, `[x0, x1, column x0, column x1]`
+    /// (the browser journeys check it is centred); `None` when it is off screen.
+    preview: Option<[f32; 4]>,
 }
 
 impl ControlsState {
@@ -149,7 +152,8 @@ impl ControlsState {
             .get(self.focus)
             .map_or(String::new(), |s| s.item.probe_name());
         format!(
-            "{{\"tab\":{},\"seg\":{:.3},\"focus\":\"{}\",\"stops\":{},\"scroll\":{:.0},\"view\":[{:.0},{:.0}],\"capture\":{},\"keys\":{{{}}},\"touch\":{{{}}},\"devices\":[{}]}}",
+            "{{\"preview\":{},\"tab\":{},\"seg\":{:.3},\"focus\":\"{}\",\"stops\":{},\"scroll\":{:.0},\"view\":[{:.0},{:.0}],\"capture\":{},\"keys\":{{{}}},\"touch\":{{{}}},\"devices\":[{}]}}",
+            self.preview.map_or("null".to_string(), |p| format!("[{:.1},{:.1},{:.1},{:.1}]", p[0], p[1], p[2], p[3])),
             self.tab,
             self.seg.pos,
             esc(&focus),
@@ -649,6 +653,7 @@ pub(super) fn draw(
     );
 
     h.controls.stops.clear();
+    h.controls.preview = None;
     let now = ctx.input(|i| i.time);
     let devices = std::mem::take(&mut h.controls.devices);
     for d in &devices {
@@ -1440,7 +1445,11 @@ fn touch_column(
     }
     y += 12.0 * u;
     let (fp, m, by) = f.part(*row as usize + 1);
-    y = draw_preview(&fp, x, w, y, opacity, size, left_handed);
+    let (end, rect) = draw_preview(&fp, x, w, y, opacity, size, left_handed);
+    y = end;
+    if rect.intersects(fp.view) {
+        h.controls.preview = Some([rect.left(), rect.right(), x, x + w]);
+    }
     f.settle(m, by);
     y + 8.0 * u
 }
@@ -1465,11 +1474,12 @@ fn draw_preview(
     opacity: f32,
     size: f32,
     left_handed: bool,
-) -> f32 {
+) -> (f32, Rect) {
     let (p, u, a) = (f.p, f.u, f.a);
     let pw = w.min(300.0 * u);
     let ph = pw * 0.46;
-    let r = Rect::from_min_size(Pos2::new(x, f.sy(y)), Vec2::new(pw, ph));
+    // Centred in its column, whatever the column's width.
+    let r = Rect::from_min_size(Pos2::new(x + (w - pw) / 2.0, f.sy(y)), Vec2::new(pw, ph));
     p.rect_filled(
         r,
         10.0 * u,
@@ -1526,13 +1536,13 @@ fn draw_preview(
         );
     }
     let cap = p.text(
-        Pos2::new(x, r.bottom() + 8.0 * u),
-        Align2::LEFT_TOP,
+        Pos2::new(r.center().x, r.bottom() + 8.0 * u),
+        Align2::CENTER_TOP,
         "Layout preview",
         FontId::proportional(tokens::CAPTION_LARGE * u.min(1.15)),
         fade(tokens::DIM, a),
     );
-    y + ph + 8.0 * u + cap.height()
+    (y + ph + 8.0 * u + cap.height(), r)
 }
 
 impl HomeState {

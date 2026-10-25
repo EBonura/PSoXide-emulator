@@ -56,6 +56,12 @@ pub struct UiPngArgs {
     /// With `--home`: the focused case.
     #[arg(long, default_value_t = 0)]
     pub case: usize,
+    /// Show the save-state sheet over a made-up game with some saves: `save` or `load`.
+    #[arg(long)]
+    pub sample_slots: Option<String>,
+    /// Draw for a touch screen (bigger targets, no key hints).
+    #[arg(long)]
+    pub touch: bool,
     /// Menu column to select: Library, Game or Settings.
     #[arg(long, default_value = "Game")]
     pub category: String,
@@ -163,6 +169,20 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
         }
     }
     state.menu.set_game_loaded(state.bus.is_some());
+    if args.touch {
+        state.menu.set_touch_mode(true);
+    }
+    if let Some(mode) = args.sample_slots.as_deref() {
+        state
+            .menu
+            .sync_slots("Crash Bandicoot", sample_slot_cards());
+        let mode = if mode == "save" {
+            ui::menu::SlotsMode::Save
+        } else {
+            ui::menu::SlotsMode::Load
+        };
+        state.menu.open_slots(mode, false);
+    }
     state.menu.sync_video_audio(
         true,
         state.texture_filter.label(),
@@ -229,7 +249,8 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
                 state.menu.draw(ctx, 0.1, None);
                 if let Some((_, rect)) = state.menu.home_section() {
                     let reveal = state.menu.home_section_reveal();
-                    ui::debug_sidebar::draw_section(ctx, &mut state, vram.id(), rect, reveal);
+                    let touch = state.menu.touch_mode();
+                    let _ = state.menu.draw_slots(ctx, rect, reveal, touch);
                 }
                 ui::draw_recording_indicator(ctx, &state);
                 if args.view == View::Window {
@@ -296,6 +317,56 @@ fn dump_ids(state: &AppState, games_root: &Path) {
         by_id.values().map(Vec::len).sum::<usize>(),
         by_id.len()
     );
+}
+
+/// A game's slots as a preview shows them: the quick slot and three numbered ones filled, one of
+/// them from another disc, the rest empty. The pictures are gradients of different hues.
+fn sample_slot_cards() -> Vec<ui::menu::SlotCard> {
+    use psoxide_settings::slots::{Thumb, SLOT_COUNT};
+    use ui::menu::slots::SavedInfo;
+    let picture = |hue: u8| {
+        let mut rgba = Vec::new();
+        for y in 0..240u32 {
+            for x in 0..320u32 {
+                let band = u32::from(hue) + x / 3;
+                rgba.extend([
+                    (band % 255) as u8,
+                    (y * 255 / 240) as u8,
+                    (255 - (x * 255 / 320)) as u8,
+                    255,
+                ]);
+            }
+        }
+        Thumb::from_rgba(&rgba, 320, 240)
+    };
+    let info = |when: &str, played: &str, stamp: u64, hue: u8| SavedInfo {
+        when: when.into(),
+        played: played.into(),
+        stamp,
+        thumb: picture(hue),
+        problem: None,
+        tag: None,
+        creator: "PSoXide/0.1.0".into(),
+        luma: 50,
+        sig: String::new(),
+    };
+    (0..SLOT_COUNT as u8)
+        .map(|slot| ui::menu::SlotCard {
+            slot,
+            saved: match slot {
+                0 => Some(info("Today 14:32", "12:04", 30, 20)),
+                1 => Some(info("Yesterday 21:10", "48:31", 20, 90)),
+                2 => {
+                    let mut other = info("Oct 22, 18:05", "3:07", 10, 160);
+                    other.problem = Some("Made on a different disc.".into());
+                    other.tag = Some("Other disc");
+                    Some(other)
+                }
+                4 => Some(info("Sep 3 2025, 09:41", "1:02:09", 5, 210)),
+                _ => None,
+            },
+        })
+        .collect()
 }
 
 /// A keyboard being used, a pad idle on port 2 and the touch screen: what the Controls page

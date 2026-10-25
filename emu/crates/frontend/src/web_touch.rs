@@ -494,6 +494,7 @@ pub(crate) fn layout_probe_json(
             let id = match u.id {
                 UiId::Pause => "pause",
                 UiId::Save => "save",
+                UiId::Load => "load",
                 UiId::Debug => "debug",
                 UiId::Menu => "menu",
                 UiId::Fullscreen => "fullscreen",

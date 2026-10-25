@@ -37,6 +37,7 @@ pub mod paths;
 pub mod redump;
 pub mod savestate;
 pub mod settings;
+pub mod slots;
 
 pub use library::{Library, LibraryEntry, LibraryError};
 pub use paths::{ConfigPaths, PathError};

@@ -15,9 +15,9 @@
 //! are read locally into wasm memory on demand. Single-threaded wasm, so the
 //! thread-local queues are sound.
 //!
-//! Quick-save payloads are separate from file handles and use IndexedDB in
-//! every supported browser. They survive tab/browser restarts and are keyed by
-//! game id under the page's origin; clearing that site's data removes them.
+//! Save slots are separate from file handles and use IndexedDB in every supported
+//! browser. They survive tab/browser restarts and are keyed by game id and slot under
+//! the page's origin; clearing that site's data removes them.
 
 use std::cell::{Cell, RefCell};
 
@@ -32,6 +32,8 @@ pub enum Upload {
     Game,
     /// A recorded input tape (browser CSV or native `.pxtape`).
     Tape,
+    /// A save-state file made by Export.
+    Save,
 }
 
 /// One game in the current list. `file` is `Some` for the `<input>` backend
@@ -56,30 +58,40 @@ pub struct LoadedFile {
     pub disc: Option<crate::web_disc::Opened>,
 }
 
-/// Completion from the browser quick-save store.
-pub enum QuickStateEvent {
-    Saved {
+/// Completion of a browser save-slot operation.
+pub enum SlotEvent {
+    /// The slots stored for a game: `(slot, metadata bytes)`. The bytes are a slot's trailer
+    /// metadata, or the start of a save that has none.
+    Listed {
         game_id: String,
-        created_at: u64,
-        cpu_tick: u64,
+        slots: Vec<(u8, Vec<u8>)>,
         result: Result<(), String>,
     },
+    /// A slot was written.
+    Saved {
+        game_id: String,
+        slot: u8,
+        result: Result<(), String>,
+    },
+    /// A slot's whole save was read; `None` when nothing is stored.
     Loaded {
         game_id: String,
-        start_paused: bool,
+        slot: u8,
         result: Result<Option<Vec<u8>>, String>,
     },
-    Inspected {
+    /// A slot was removed.
+    Deleted {
         game_id: String,
-        result: Result<Option<(u64, u64)>, String>,
+        slot: u8,
+        result: Result<(), String>,
     },
 }
 
 thread_local! {
     /// Bytes read and waiting for the shell to apply (game boot).
     static PENDING: RefCell<Vec<LoadedFile>> = const { RefCell::new(Vec::new()) };
-    /// IndexedDB quick-save operations completed since the last frame.
-    static QUICK_STATES: RefCell<Vec<QuickStateEvent>> = const { RefCell::new(Vec::new()) };
+    /// IndexedDB save-slot operations completed since the last frame.
+    static SLOT_EVENTS: RefCell<Vec<SlotEvent>> = const { RefCell::new(Vec::new()) };
     /// The current game list (from a pick or a reconnect).
     static SCANNED: RefCell<Vec<ScannedGame>> = const { RefCell::new(Vec::new()) };
     /// Set true the frame a scan finishes, so the shell rebuilds the menu.
@@ -244,19 +256,77 @@ export async function readGame(path) {
   const fh = await h.getFileHandle(parts[parts.length - 1]);
   return await fh.getFile();
 }
-export async function saveQuickState(gameId, bytes, createdAt, cpuTick) {
+// Save slots. A slot is two records written in one transaction: the whole save under
+// `slot:<game>:<n>` and its small metadata under `slotmeta:<game>:<n>`, so a listing never reads
+// megabytes. A quick-save from before slots (`quick:<game>`) still answers for slot 0.
+async function _persist() {
   // Best effort: supporting browsers can exempt this origin from automatic
   // storage-pressure eviction. A denial does not prevent the normal save.
   try { if (navigator.storage?.persist) await navigator.storage.persist(); } catch (e) {}
-  await _putState('quick:' + gameId, { bytes, createdAt, cpuTick });
 }
-export async function loadQuickState(gameId) {
-  const state = await _getState('quick:' + gameId);
+export async function slotPut(gameId, slot, bytes, meta) {
+  await _persist();
+  const db = await _idb();
+  await new Promise((res, rej) => {
+    const t = db.transaction('savestates', 'readwrite');
+    const s = t.objectStore('savestates');
+    s.put({ bytes }, 'slot:' + gameId + ':' + slot);
+    s.put(meta, 'slotmeta:' + gameId + ':' + slot);
+    t.oncomplete = () => res();
+    t.onerror = () => rej(t.error);
+    t.onabort = () => rej(t.error || new Error('the browser refused to store the save'));
+  });
+}
+export async function slotGet(gameId, slot) {
+  let state = await _getState('slot:' + gameId + ':' + slot);
+  if (!state && slot === 0) state = await _getState('quick:' + gameId);
   return state ? state.bytes : undefined;
 }
-export async function inspectQuickState(gameId) {
-  const state = await _getState('quick:' + gameId);
-  return state ? state.createdAt + '\n' + state.cpuTick : undefined;
+export async function slotList(gameId) {
+  const db = await _idb();
+  const prefix = 'slotmeta:' + gameId + ':';
+  const out = [];
+  await new Promise((res, rej) => {
+    const t = db.transaction('savestates', 'readonly');
+    const q = t.objectStore('savestates').openCursor(IDBKeyRange.bound(prefix, prefix + '\uffff'));
+    q.onsuccess = () => {
+      const c = q.result;
+      if (!c) return res();
+      const n = Number(String(c.key).slice(prefix.length));
+      if (Number.isInteger(n)) out.push(n, c.value);
+      c.continue();
+    };
+    q.onerror = () => rej(q.error);
+  });
+  if (!out.includes(0)) {
+    const old = await _getState('quick:' + gameId);
+    if (old && old.bytes) out.push(0, old.bytes.slice(0, 4096));
+  }
+  return out;
+}
+export async function slotDelete(gameId, slot) {
+  const db = await _idb();
+  await new Promise((res, rej) => {
+    const t = db.transaction('savestates', 'readwrite');
+    const s = t.objectStore('savestates');
+    s.delete('slot:' + gameId + ':' + slot);
+    s.delete('slotmeta:' + gameId + ':' + slot);
+    if (slot === 0) s.delete('quick:' + gameId);
+    t.oncomplete = () => res();
+    t.onerror = () => rej(t.error);
+  });
+}
+export function downloadBytes(name, bytes) {
+  const blob = new Blob([bytes], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = name;
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 export async function fetchOpen(url) {
   const r = await fetch(url);
@@ -294,17 +364,21 @@ extern "C" {
     fn fsa_reconnect_folder() -> js_sys::Promise;
     #[wasm_bindgen(js_name = readGame)]
     fn fsa_read_game(path: &str) -> js_sys::Promise;
-    #[wasm_bindgen(js_name = saveQuickState)]
-    fn idb_save_quick_state(
+    #[wasm_bindgen(js_name = slotPut)]
+    fn idb_slot_put(
         game_id: &str,
+        slot: u8,
         bytes: &js_sys::Uint8Array,
-        created_at: &str,
-        cpu_tick: &str,
+        meta: &js_sys::Uint8Array,
     ) -> js_sys::Promise;
-    #[wasm_bindgen(js_name = loadQuickState)]
-    fn idb_load_quick_state(game_id: &str) -> js_sys::Promise;
-    #[wasm_bindgen(js_name = inspectQuickState)]
-    fn idb_inspect_quick_state(game_id: &str) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = slotGet)]
+    fn idb_slot_get(game_id: &str, slot: u8) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = slotList)]
+    fn idb_slot_list(game_id: &str) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = slotDelete)]
+    fn idb_slot_delete(game_id: &str, slot: u8) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = downloadBytes)]
+    fn js_download_bytes(name: &str, bytes: &js_sys::Uint8Array);
     #[wasm_bindgen(js_name = fetchOpen)]
     fn js_fetch_open(url: &str) -> js_sys::Promise;
     #[wasm_bindgen(js_name = readerNext)]
@@ -364,9 +438,9 @@ pub fn drain() -> Vec<LoadedFile> {
     PENDING.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
-/// Drain completed IndexedDB quick-save operations.
-pub fn drain_quick_states() -> Vec<QuickStateEvent> {
-    QUICK_STATES.with(|q| std::mem::take(&mut *q.borrow_mut()))
+/// Drain completed IndexedDB save-slot operations.
+pub fn drain_slot_events() -> Vec<SlotEvent> {
+    SLOT_EVENTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
 /// `(id, title, subtitle)` for each game found, if a scan just finished.
@@ -403,6 +477,11 @@ pub fn pick_games() {
 /// is read once and never needs a persistent handle.
 pub fn pick_tape() {
     pick_input(Upload::Tape);
+}
+
+/// Pick a save-state file to import. The one-shot `<input>` picker, like a tape.
+pub fn pick_save() {
+    pick_input(Upload::Save);
 }
 
 /// Reconnect previously-saved handles (File System Access only). No-op
@@ -602,31 +681,26 @@ async fn fetch_stream(url: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Persist the current game's quick-save in origin-scoped IndexedDB.
-pub fn save_quick_state(game_id: String, bytes: Vec<u8>, created_at: u64, cpu_tick: u64) {
-    let array = js_sys::Uint8Array::from(bytes.as_slice());
-    let promise = idb_save_quick_state(
-        &game_id,
-        &array,
-        &created_at.to_string(),
-        &cpu_tick.to_string(),
-    );
+/// Store a save in a slot of a game, in origin-scoped IndexedDB.
+pub fn slot_save(game_id: String, slot: u8, bytes: &[u8], meta: &[u8]) {
+    let array = js_sys::Uint8Array::from(bytes);
+    let meta = js_sys::Uint8Array::from(meta);
+    let promise = idb_slot_put(&game_id, slot, &array, &meta);
     spawn_local(async move {
         let result = JsFuture::from(promise).await.map(|_| ()).map_err(js_error);
-        QUICK_STATES.with(|q| {
-            q.borrow_mut().push(QuickStateEvent::Saved {
+        SLOT_EVENTS.with(|q| {
+            q.borrow_mut().push(SlotEvent::Saved {
                 game_id,
-                created_at,
-                cpu_tick,
+                slot,
                 result,
             });
         });
     });
 }
 
-/// Load the current game's quick-save bytes from IndexedDB.
-pub fn load_quick_state(game_id: String, start_paused: bool) {
-    let promise = idb_load_quick_state(&game_id);
+/// Read a slot's whole save.
+pub fn slot_load(game_id: String, slot: u8) {
+    let promise = idb_slot_get(&game_id, slot);
     spawn_local(async move {
         let result = JsFuture::from(promise)
             .await
@@ -638,47 +712,64 @@ pub fn load_quick_state(game_id: String, start_paused: bool) {
                     Some(js_sys::Uint8Array::new(&value).to_vec())
                 }
             });
-        QUICK_STATES.with(|q| {
-            q.borrow_mut().push(QuickStateEvent::Loaded {
+        SLOT_EVENTS.with(|q| {
+            q.borrow_mut().push(SlotEvent::Loaded {
                 game_id,
-                start_paused,
+                slot,
                 result,
             });
         });
     });
 }
 
-/// Read just the quick-save metadata so the save-state panel can show a row
-/// after a page reload without decoding the multi-megabyte payload.
-pub fn inspect_quick_state(game_id: String) {
-    let promise = idb_inspect_quick_state(&game_id);
+/// Read the metadata of every slot a game has, without the saves themselves.
+pub fn slot_list(game_id: String) {
+    let promise = idb_slot_list(&game_id);
     spawn_local(async move {
+        let mut slots = Vec::new();
         let result = JsFuture::from(promise)
             .await
             .map_err(js_error)
-            .and_then(|value| {
-                if value.is_null() || value.is_undefined() {
-                    return Ok(None);
+            .map(|value| {
+                // A flat array: slot, metadata, slot, metadata, ...
+                let list = js_sys::Array::from(&value);
+                let mut at = 0;
+                while at + 1 < list.length() {
+                    if let Some(slot) = list.get(at).as_f64() {
+                        let meta = js_sys::Uint8Array::new(&list.get(at + 1)).to_vec();
+                        slots.push((slot as u8, meta));
+                    }
+                    at += 2;
                 }
-                let Some(metadata) = value.as_string() else {
-                    return Err("browser save metadata has an invalid type".to_string());
-                };
-                let Some((created_at, cpu_tick)) = metadata.split_once('\n') else {
-                    return Err("browser save metadata is malformed".to_string());
-                };
-                let created_at = created_at
-                    .parse::<u64>()
-                    .map_err(|_| "browser save creation time is invalid".to_string())?;
-                let cpu_tick = cpu_tick
-                    .parse::<u64>()
-                    .map_err(|_| "browser save CPU tick is invalid".to_string())?;
-                Ok(Some((created_at, cpu_tick)))
             });
-        QUICK_STATES.with(|q| {
-            q.borrow_mut()
-                .push(QuickStateEvent::Inspected { game_id, result });
+        SLOT_EVENTS.with(|q| {
+            q.borrow_mut().push(SlotEvent::Listed {
+                game_id,
+                slots,
+                result,
+            });
         });
     });
+}
+
+/// Remove a slot's save.
+pub fn slot_delete(game_id: String, slot: u8) {
+    let promise = idb_slot_delete(&game_id, slot);
+    spawn_local(async move {
+        let result = JsFuture::from(promise).await.map(|_| ()).map_err(js_error);
+        SLOT_EVENTS.with(|q| {
+            q.borrow_mut().push(SlotEvent::Deleted {
+                game_id,
+                slot,
+                result,
+            });
+        });
+    });
+}
+
+/// Hand a save to the player as a file download.
+pub fn download_bytes(name: &str, bytes: &[u8]) {
+    js_download_bytes(name, &js_sys::Uint8Array::from(bytes));
 }
 
 // ---- shared helpers -------------------------------------------------------
@@ -745,6 +836,7 @@ fn pick_input(kind: Upload) {
     let accept = match kind {
         Upload::Game => ".bin,.exe",
         Upload::Tape => ".csv,.pxtape",
+        Upload::Save => ".psxstate,.psx",
     };
     let Some(input) = make_file_input() else {
         return;

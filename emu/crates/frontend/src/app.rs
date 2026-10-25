@@ -9,11 +9,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 
-use emulator_core::{fast_boot_disc, Bus, Cpu, EmulatorState, EmulatorStateRef};
+use emulator_core::{fast_boot_disc, Bus, Cpu};
 use psoxide_settings::library::{GameKind, Region};
-#[cfg(not(target_arch = "wasm32"))]
-use psoxide_settings::savestate::peek_header;
-use psoxide_settings::savestate::SaveStateV1;
 use psoxide_settings::{ConfigPaths, Library, LibraryEntry, Settings};
 use psx_iso::{Disc, Exe, SECTOR_BYTES};
 use psx_trace::InstructionRecord;
@@ -33,8 +30,10 @@ use crate::playtest_disc::{
 };
 use crate::playtest_input::{PlaytestInputEvent, PlaytestInputTape, Port1PadSample};
 use crate::ui::memory::MemoryView;
-use crate::ui::menu::{LibraryItem as MenuLibraryItem, MenuState, PadBindTarget, SaveStateRow};
+use crate::ui::menu::{LibraryItem as MenuLibraryItem, MenuState, PadBindTarget};
 use crate::{paths_equivalent, repo_root_dir, ui};
+
+mod slots;
 
 /// Ring-buffer capacity for the execution-history panel. 16 rows is
 /// the "what just ran" context window -- enough to spot a tight loop
@@ -339,6 +338,14 @@ pub struct AppState {
     /// Last rendered debug-sidebar width, used as the slide-in animation
     /// target so a resized sidebar animates to its own width.
     pub sidebar_width: f32,
+    /// How far the debug panel has slid in, 0 (away) to 1 (open): the on-screen controller lays
+    /// itself out around it.
+    pub debug_slide: f32,
+    /// Where the debug panel was last drawn, `[left, top, right, bottom]` in points (the browser
+    /// journeys read it).
+    pub debug_rect: [f32; 4],
+    /// Where the game picture was last drawn, `[left, top, right, bottom]` in points.
+    pub game_rect: [f32; 4],
     /// Framebuffer mode -- shared HW renderer at native scale vs
     /// window-fitted high resolution. Toggled via the debug toolbar.
     pub scale_mode: ScaleMode,
@@ -437,20 +444,14 @@ pub struct AppState {
     /// Toolbar mute latch. Kept separate from `audio_volume` so
     /// unmuting restores the prior level.
     pub audio_muted: bool,
-    /// Native save-state thumbnails waiting for the shell to capture the
-    /// hardware-renderer display. AppState owns save files, but only the shell
-    /// has access to the wgpu texture that was actually presented.
-    #[cfg(not(target_arch = "wasm32"))]
-    pending_savestate_thumbnails: Vec<PathBuf>,
+    /// Save slots of the running game: the cards the sheet shows and the browser's saves in flight.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    slots: slots::SlotBook,
     /// Web build: games found by the last folder scan, as `(id, title,
     /// subtitle)`. Listed in the Library's games tree; launching one reads
     /// its file bytes on demand.
     #[cfg(target_arch = "wasm32")]
     web_games: Vec<(String, String, String)>,
-    /// Metadata for the current game's single persistent browser quick-save.
-    /// The payload itself stays in IndexedDB and is only read for F7/load.
-    #[cfg(target_arch = "wasm32")]
-    web_quick_save: Option<(String, u64, u64)>,
     /// Streamed CD-DA tracks waiting to be copied into the mounted disc, as
     /// `(track, pcm, bytes_copied)`. Copied a slice per frame: one 40 MB
     /// memcpy in a single frame underruns the CD audio, and the launcher's
@@ -645,6 +646,9 @@ impl AppState {
             burn: BurnState::default(),
             panels: PanelVisibility::startup(),
             sidebar_width: 430.0,
+            debug_slide: 0.0,
+            debug_rect: [0.0; 4],
+            game_rect: [0.0; 4],
             scale_mode: ScaleMode::default(),
             texture_filter: TextureFilter::default(),
             deinterlace: emulator_core::Deinterlace::default(),
@@ -675,12 +679,9 @@ impl AppState {
             status_message: None,
             audio_volume: 1.0,
             audio_muted: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            pending_savestate_thumbnails: Vec::new(),
+            slots: slots::SlotBook::default(),
             #[cfg(target_arch = "wasm32")]
             web_games: Vec::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_quick_save: None,
             #[cfg(target_arch = "wasm32")]
             web_track_patches: Vec::new(),
             #[cfg(target_arch = "wasm32")]
@@ -899,6 +900,27 @@ impl AppState {
         let (column, row, value, rows) = self.menu.selection_probe();
         let panel = self.menu.panel_probe();
         let home = self.menu.home_probe_json();
+        let slots = self.menu.slots.probe_json();
+        // How many sampled pixels of the picture on show are not black (diagnostic).
+        let display_lit = self.bus.as_ref().map_or(0, |bus| {
+            let a = bus.gpu.display_area();
+            let words = bus.gpu.vram.words();
+            let mut lit = 0;
+            for row in (0..usize::from(a.height)).step_by(8) {
+                for col in (0..usize::from(a.width)).step_by(8) {
+                    let w = words
+                        [((usize::from(a.y) + row) % 512) * 1024 + (usize::from(a.x) + col) % 1024];
+                    if w & 0x7fff != 0 {
+                        lit += 1;
+                    }
+                }
+            }
+            lit
+        });
+        let display = self.bus.as_ref().map_or([0u16; 4], |bus| {
+            let a = bus.gpu.display_area();
+            [a.x, a.y, a.width, a.height]
+        });
         #[cfg(target_arch = "wasm32")]
         let loading = self.web_loading.as_deref().map_or(String::new(), escape);
         #[cfg(not(target_arch = "wasm32"))]
@@ -906,11 +928,27 @@ impl AppState {
         format!(
             "{{\"running\":{},\"menu_open\":{},\"loaded_id\":\"{id}\",\"loading\":\"{loading}\",\
              \"machine\":{},\"port1_mode\":\"{mode}\",\"has_bus\":{},\"status\":\"{status}\",\
-             \"panel\":\"{panel}\",\"home\":{home},\"menu\":{{\"column\":\"{}\",\"row\":\"{}\",\"value\":\"{}\",\"rows\":{}}},\"touch\":{}}}",
+             \"panel\":\"{panel}\",\"home\":{home},\"slots\":{slots},\"game\":[{:.3},{:.3},{:.3},{:.3}],\"cpu_tick\":{},\"display\":[{},{},{},{}],\"display_lit\":{},\"debug\":{{\"open\":{},\"slide\":{:.3},\"rect\":[{:.1},{:.1},{:.1},{:.1}]}},\"menu\":{{\"column\":\"{}\",\"row\":\"{}\",\"value\":\"{}\",\"rows\":{}}},\"touch\":{}}}",
             self.running,
             self.menu.open,
             self.gpu_resync_generation,
             self.bus.is_some(),
+            self.game_rect[0],
+            self.game_rect[1],
+            self.game_rect[2],
+            self.game_rect[3],
+            self.cpu.tick(),
+            display[0],
+            display[1],
+            display[2],
+            display[3],
+            display_lit,
+            self.panels.debug_sidebar,
+            self.debug_slide,
+            self.debug_rect[0],
+            self.debug_rect[1],
+            self.debug_rect[2],
+            self.debug_rect[3],
             column,
             escape(row),
             escape(value),
@@ -1085,7 +1123,7 @@ impl AppState {
         self.current_game = Some(entry.clone());
         self.memcard_port1_path = memcard_port1_path;
         self.current_game_hash = game_hash;
-        self.refresh_save_state_menu_rows();
+        self.slot_game_changed(&entry.id);
         self.menu.sync_run_label(true);
         #[cfg(feature = "editor")]
         self.menu.sync_editor_label(false);
@@ -1094,340 +1132,6 @@ impl AppState {
             STATUS_MESSAGE_TTL_SECS,
         ));
         Ok(())
-    }
-
-    /// Push a new native save state for the running game to
-    /// `<config>/games/<id>/savestates/slot{N}.psx`, where `N` is one
-    /// past whatever the highest existing slot is (0 if this is the
-    /// first save). Saves are a history, not fixed named slots -- this
-    /// never overwrites a previous save; use [`AppState::load_state`]
-    /// to pick a specific past one or [`AppState::load_latest_state`]
-    /// for "undo to my last save." No-op (with a status toast) if no
-    /// game is currently running -- there's nothing meaningful to key
-    /// the save off of. The web build instead replaces one per-game
-    /// quick-save in origin-scoped IndexedDB.
-    #[cfg(target_arch = "wasm32")]
-    pub fn save_state(&mut self) {
-        let Some(game_id) = self.current_game.as_ref().map(|game| game.id.clone()) else {
-            self.status_message_set("Save state: no game running");
-            return;
-        };
-        let Some(bus) = self.bus.as_ref() else {
-            self.status_message_set("Save state: no game running");
-            return;
-        };
-        let tick = self.cpu.tick();
-        let created_at = unix_now_secs();
-        let state = SaveStateV1::new_at(
-            EmulatorStateRef {
-                cpu: &self.cpu,
-                bus,
-            },
-            game_id.clone(),
-            tick,
-            created_at,
-        );
-        let bytes = match state.to_bytes() {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                self.status_message_set(format!("Save state failed: {error}"));
-                return;
-            }
-        };
-        crate::web_files::save_quick_state(game_id, bytes, created_at, tick);
-        self.status_message_set("Saving browser quick-save...");
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn save_state(&mut self) {
-        let Some(game_id) = self.current_game.as_ref().map(|g| g.id.clone()) else {
-            self.status_message_set("Save state: no game running");
-            return;
-        };
-        if self.bus.is_none() {
-            self.status_message_set("Save state: no game running");
-            return;
-        }
-        if let Err(e) = self.paths.ensure_game_tree(&game_id) {
-            self.status_message_set(format!("Save state failed: {e}"));
-            return;
-        }
-        let existing = self.paths.list_savestate_slots(&game_id);
-        let Some(slot) = existing.last().map_or(Some(0u8), |&max| max.checked_add(1)) else {
-            self.status_message_set(
-                "Save state failed: 256 saves for this game already, delete some first".to_string(),
-            );
-            return;
-        };
-        let tick = self.cpu.tick();
-        let cpu = &self.cpu;
-        let bus = self.bus.as_ref().expect("checked above");
-        let path = self.paths.savestate_file(&game_id, slot);
-        let thumb_path = self.paths.savestate_thumbnail_file(&game_id, slot);
-        // The derive-generated (de)serialize walk over the emulator's
-        // nested state graph (Bus -> Gpu/Spu/CdRom/... -> further
-        // nested structs) adds enough stack depth that, stacked on top
-        // of wherever winit/egui/wgpu's own call chain happens to be
-        // when a key is pressed, it can exceed Windows' 1 MiB default
-        // main-thread stack (confirmed: the same encode/decode works
-        // fine standalone, only overflows when invoked from inside the
-        // real event-handling call stack). Run it on a dedicated thread
-        // with a generous stack instead of chasing the exact
-        // contributing frames.
-        let result = std::thread::scope(|scope| {
-            std::thread::Builder::new()
-                .stack_size(64 * 1024 * 1024)
-                .spawn_scoped(scope, || {
-                    let snapshot = EmulatorStateRef { cpu, bus };
-                    let state = SaveStateV1::new(snapshot, game_id.clone(), tick);
-                    state.write_to(&path)
-                })
-                .expect("spawn save-state thread")
-                .join()
-        });
-        match result {
-            Ok(Ok(())) => {
-                // A fresh save always becomes the new quick-load target --
-                // "undo to my last save" should mean *this* save until the
-                // user explicitly pins something else.
-                let _ = self.paths.write_top_slot(&game_id, slot);
-                // Defer readback until the UI render returns. The shell then
-                // captures the persistent HW target the user actually saw,
-                // rather than the independently rasterized CPU VRAM mirror.
-                self.pending_savestate_thumbnails.push(thumb_path);
-                self.status_message_set(format!("Saved slot {slot}"));
-                self.refresh_save_state_menu_rows();
-            }
-            Ok(Err(e)) => self.status_message_set(format!("Save state failed: {e}")),
-            Err(_) => self.status_message_set("Save state failed: internal error".to_string()),
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn take_pending_savestate_thumbnails(&mut self) -> Vec<PathBuf> {
-        std::mem::take(&mut self.pending_savestate_thumbnails)
-    }
-
-    /// Load whichever save is "on top" -- the pinned quick-load target
-    /// (see [`ConfigPaths::read_top_slot`]) if one is set and still
-    /// exists, otherwise the most recent (highest slot number) save --
-    /// "undo to my last save." Status-toasts "No save states yet"
-    /// rather than erroring if none exist. `start_paused` is forwarded
-    /// to [`AppState::load_state`].
-    #[cfg(target_arch = "wasm32")]
-    pub fn load_latest_state(&mut self, start_paused: bool) {
-        let Some(game_id) = self.current_game.as_ref().map(|game| game.id.clone()) else {
-            self.status_message_set("Load state: no game running");
-            return;
-        };
-        crate::web_files::load_quick_state(game_id, start_paused);
-        self.status_message_set("Loading browser quick-save...");
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn load_latest_state(&mut self, start_paused: bool) {
-        let Some(game_id) = self.current_game.as_ref().map(|g| g.id.clone()) else {
-            self.status_message_set("Load state: no game running");
-            return;
-        };
-        let slot = self
-            .paths
-            .read_top_slot(&game_id)
-            .or_else(|| self.paths.list_savestate_slots(&game_id).last().copied());
-        match slot {
-            Some(slot) => self.load_state(slot, start_paused),
-            None => self.status_message_set("No save states yet"),
-        }
-    }
-
-    /// Pin `slot` as the save history's "top" -- what
-    /// [`AppState::load_latest_state`] (and F7) target next -- without
-    /// touching slot numbering or any other save's position in the
-    /// chronological list. No-op (status toast) if the slot doesn't
-    /// exist, e.g. it was deleted out from under the menu.
-    #[cfg(target_arch = "wasm32")]
-    pub fn pin_save_state_as_top(&mut self, _slot: u8) {
-        self.status_message_set("The browser quick-save is already the F7 target");
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn pin_save_state_as_top(&mut self, slot: u8) {
-        let Some(game_id) = self.current_game.as_ref().map(|g| g.id.clone()) else {
-            return;
-        };
-        if !self.paths.list_savestate_slots(&game_id).contains(&slot) {
-            self.status_message_set(format!("Pin failed: slot {slot} no longer exists"));
-            return;
-        }
-        match self.paths.write_top_slot(&game_id, slot) {
-            Ok(()) => {
-                self.status_message_set(format!("Slot {slot} pinned as quick-load target"));
-                self.refresh_save_state_menu_rows();
-            }
-            Err(e) => self.status_message_set(format!("Pin failed: {e}")),
-        }
-    }
-
-    /// Load `<config>/games/<id>/savestates/slot{slot}.psx` back into
-    /// the running emulator.
-    ///
-    /// The save file deliberately omits the BIOS image and the
-    /// mounted disc (see [`Bus::restore_excluded_from`]) to keep save
-    /// files small, so this re-runs the normal boot path for the
-    /// current game first -- purely to obtain a correctly-configured
-    /// donor `Bus` (right BIOS, right disc, right memory card) -- and
-    /// then splices the restored CPU/Bus register state on top of it.
-    ///
-    /// `start_paused` leaves the emulator paused on the restored frame
-    /// instead of immediately resuming -- the sensible default when a
-    /// human just asked to jump back in time and probably wants to
-    /// look around before continuing.
-    #[cfg(target_arch = "wasm32")]
-    pub fn load_state(&mut self, _slot: u8, start_paused: bool) {
-        self.load_latest_state(start_paused);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn load_state(&mut self, slot: u8, start_paused: bool) {
-        let Some(game) = self.current_game.clone() else {
-            self.status_message_set("Load state: no game running");
-            return;
-        };
-        let path = self.paths.savestate_file(&game.id, slot);
-        // See the comment in `save_state`: decoding the full state
-        // graph back into owned `Cpu`/`Bus` values overflows Windows'
-        // default 1 MiB main-thread stack when invoked from deep
-        // inside the real winit/egui/wgpu event-handling call chain
-        // (reproduced: the identical on-disk save decodes fine
-        // standalone, only crashes from inside the running GUI). Same
-        // fix: run it on a dedicated large-stack thread.
-        let load_result = std::thread::scope(|scope| {
-            std::thread::Builder::new()
-                .stack_size(64 * 1024 * 1024)
-                .spawn_scoped(scope, || SaveStateV1::<EmulatorState>::read_from(&path))
-                .expect("spawn save-state thread")
-                .join()
-        });
-        let loaded = match load_result {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => {
-                self.status_message_set(format!("Load state failed: {e}"));
-                return;
-            }
-            Err(_) => {
-                self.status_message_set("Load state failed: internal error".to_string());
-                return;
-            }
-        };
-        // A save copied over from an older id of this same game still counts.
-        if loaded.header.game_id != game.id
-            && !self
-                .paths
-                .migrated_from(&game.id)
-                .contains(&loaded.header.game_id)
-        {
-            self.status_message_set("Load state failed: save is from a different game".to_string());
-            return;
-        }
-        if let Err(e) = self.launch_entry(&game) {
-            self.status_message_set(format!("Load state failed: could not remount game: {e}"));
-            return;
-        }
-        let mut payload = loaded.payload;
-        if let Some(fresh_bus) = self.bus.as_mut() {
-            payload.bus.restore_excluded_from(fresh_bus);
-        }
-        let mc_bytes = self
-            .memcard_port1_path
-            .as_ref()
-            .and_then(|path| std::fs::read(path).ok())
-            .unwrap_or_default();
-        payload.bus.attach_memcard_port1(mc_bytes);
-        self.cpu = payload.cpu;
-        crate::install_native_tier(&mut self.cpu);
-        self.bus = Some(payload.bus);
-        self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
-        if start_paused {
-            self.running = false;
-            self.menu.sync_run_label(false);
-        }
-        self.status_message_set(format!("Loaded slot {slot}"));
-        self.refresh_save_state_menu_rows();
-    }
-
-    /// Refresh the save-states panel's rows from whatever's
-    /// actually on disk for the running game. Call after anything
-    /// that could change the set of saves (a save, a load, launching
-    /// a different game) -- cheap (one directory listing plus a
-    /// header-only peek per file, no full-state decode) so there's no
-    /// need to cache this across frames.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn refresh_save_state_menu_rows(&mut self) {
-        let rows = match self.current_game.as_ref().map(|g| g.id.clone()) {
-            Some(game_id) => self.build_save_state_rows(&game_id),
-            None => Vec::new(),
-        };
-        self.menu.sync_save_states(&rows);
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn refresh_save_state_menu_rows(&mut self) {
-        let rows = self
-            .web_quick_save
-            .as_ref()
-            .filter(|(game_id, _, _)| {
-                self.current_game
-                    .as_ref()
-                    .is_some_and(|game| game.id == *game_id)
-            })
-            .map(|(_, created_at, cpu_tick)| {
-                vec![SaveStateRow {
-                    slot: 0,
-                    label: format!("{} -- tick {}", format_relative_time(*created_at), cpu_tick),
-                    thumbnail_path: None,
-                    is_top: true,
-                }]
-            })
-            .unwrap_or_default();
-        self.menu.sync_save_states(&rows);
-    }
-
-    /// Newest-first `SaveStateRow`s for `game_id`, each labeled with a
-    /// relative save time and the CPU tick it was taken at. Slots
-    /// whose header can't be read (corrupt/truncated file) are
-    /// silently dropped from the list rather than breaking the whole
-    /// menu -- the file still exists on disk if someone wants to poke
-    /// at it manually.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn build_save_state_rows(&self, game_id: &str) -> Vec<SaveStateRow> {
-        let mut slots = self.paths.list_savestate_slots(game_id);
-        slots.reverse();
-        // Fall back to "highest slot" for the top marker exactly the
-        // same way `load_latest_state` does, so the row the panel
-        // highlights as "Top (F7)" always agrees with what F7 will
-        // actually load.
-        let top = self
-            .paths
-            .read_top_slot(game_id)
-            .or_else(|| slots.first().copied());
-        slots
-            .into_iter()
-            .filter_map(|slot| {
-                let path = self.paths.savestate_file(game_id, slot);
-                let header = peek_header(&path).ok()?;
-                let thumbnail = self.paths.savestate_thumbnail_file(game_id, slot);
-                Some(SaveStateRow {
-                    slot,
-                    label: format!(
-                        "{} -- tick {}",
-                        format_relative_time(header.created_at),
-                        header.cpu_tick
-                    ),
-                    thumbnail_path: thumbnail.exists().then_some(thumbnail),
-                    is_top: Some(slot) == top,
-                })
-            })
-            .collect()
     }
 
     /// Convenience: look up an entry by menu launch token and launch
@@ -1517,9 +1221,7 @@ impl AppState {
             mtime: 0,
             diagnostic: None,
         });
-        self.web_quick_save = None;
-        self.refresh_save_state_menu_rows();
-        crate::web_files::inspect_quick_state(id);
+        self.slot_game_changed(&id);
     }
 
     /// Open the burn settings submenu for a launchable library entry.
@@ -2567,11 +2269,10 @@ impl AppState {
                 crate::web_files::Upload::Tape => {
                     self.load_web_replay(&loaded.name, &loaded.bytes);
                 }
+                crate::web_files::Upload::Save => self.import_bytes(&loaded.bytes),
             }
         }
-        for event in crate::web_files::drain_quick_states() {
-            self.apply_web_quick_state_event(event);
-        }
+        self.poll_web_slots();
         self.poll_pending_web_boot();
     }
 
@@ -2758,100 +2459,6 @@ impl AppState {
             None if all_done => self.status_message_set("All music tracks loaded"),
             None => {}
         }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn apply_web_quick_state_event(&mut self, event: crate::web_files::QuickStateEvent) {
-        use crate::web_files::QuickStateEvent;
-
-        match event {
-            QuickStateEvent::Saved {
-                game_id,
-                created_at,
-                cpu_tick,
-                result,
-            } => match result {
-                Ok(()) => {
-                    if self
-                        .current_game
-                        .as_ref()
-                        .is_some_and(|game| game.id == game_id)
-                    {
-                        self.web_quick_save = Some((game_id, created_at, cpu_tick));
-                        self.refresh_save_state_menu_rows();
-                        self.status_message_set("Browser quick-save stored");
-                    }
-                }
-                Err(error) => self.status_message_set(format!("Save state failed: {error}")),
-            },
-            QuickStateEvent::Inspected { game_id, result } => match result {
-                Ok(Some((created_at, cpu_tick))) => {
-                    if self
-                        .current_game
-                        .as_ref()
-                        .is_some_and(|game| game.id == game_id)
-                    {
-                        self.web_quick_save = Some((game_id, created_at, cpu_tick));
-                        self.refresh_save_state_menu_rows();
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    self.status_message_set(format!("Could not inspect browser save: {error}"));
-                }
-            },
-            QuickStateEvent::Loaded {
-                game_id,
-                start_paused,
-                result,
-            } => match result {
-                Ok(Some(bytes)) => self.restore_web_quick_state(&game_id, &bytes, start_paused),
-                Ok(None) => self.status_message_set("No browser quick-save yet"),
-                Err(error) => self.status_message_set(format!("Load state failed: {error}")),
-            },
-        }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn restore_web_quick_state(&mut self, game_id: &str, bytes: &[u8], start_paused: bool) {
-        let Some(current_game) = self.current_game.as_ref() else {
-            self.status_message_set("Load state: no game running");
-            return;
-        };
-        if current_game.id != game_id {
-            self.status_message_set("Load state cancelled: a different game is now running");
-            return;
-        }
-        let loaded = match SaveStateV1::<EmulatorState>::from_bytes(bytes) {
-            Ok(state) => state,
-            Err(error) => {
-                self.status_message_set(format!("Load state failed: {error}"));
-                return;
-            }
-        };
-        if loaded.header.game_id != game_id {
-            self.status_message_set("Load state failed: save is from a different game");
-            return;
-        }
-        let Some(donor_bus) = self.bus.as_mut() else {
-            self.status_message_set("Load state: no game running");
-            return;
-        };
-        let mut payload = loaded.payload;
-        payload.bus.restore_excluded_from(donor_bus);
-        self.cpu = payload.cpu;
-        crate::install_native_tier(&mut self.cpu);
-        self.bus = Some(payload.bus);
-        self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
-        self.running = !start_paused;
-        self.menu.sync_run_label(self.running);
-        self.web_quick_save = Some((
-            game_id.to_string(),
-            loaded.header.created_at,
-            loaded.header.cpu_tick,
-        ));
-        self.refresh_save_state_menu_rows();
-        self.status_message_set("Loaded browser quick-save");
     }
 
     /// Side-load a homebrew PS-EXE from bytes via the no-BIOS HLE path,
@@ -4491,34 +4098,13 @@ fn format_subtitle(e: &LibraryEntry) -> String {
     }
 }
 
-/// Format a Unix timestamp (seconds) as a short "N ago" string
-/// relative to now, for save-state menu row labels. No date/time
-/// crate needed for this -- it's one coarse bucket, not a calendar.
-/// Treats anything under 2 seconds as "just now" rather than showing
-/// "0s ago" or "1s ago" (also absorbs small clock skew).
-fn format_relative_time(unix_secs: u64) -> String {
-    let now = unix_now_secs();
-    let elapsed = now.saturating_sub(unix_secs);
-    if elapsed < 2 {
-        "just now".to_string()
-    } else if elapsed < 60 {
-        format!("{elapsed}s ago")
-    } else if elapsed < 3600 {
-        format!("{}m ago", elapsed / 60)
-    } else if elapsed < 86_400 {
-        format!("{}h ago", elapsed / 3600)
-    } else {
-        format!("{}d ago", elapsed / 86_400)
-    }
-}
-
 #[cfg(target_arch = "wasm32")]
-fn unix_now_secs() -> u64 {
+pub(crate) fn unix_now_secs() -> u64 {
     (js_sys::Date::now() / 1_000.0) as u64
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn unix_now_secs() -> u64 {
+pub(crate) fn unix_now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
