@@ -524,3 +524,27 @@ the pad-button step tells a stalled page (no frames drawn, retried once, logged)
   shell's palette and states (`theme.rs` palette, `toolbar.rs` shell style).
 - Journeys added: `*-hints`; the Controls device step now expects no keyboard toggle and an analog
   controller.
+
+## Motion and honesty pass (10-25, round 3)
+
+- The tab highlight is one pill (phone bar) or one diamond (desktop top nav) that slides to the
+  page you pick on a small spring (`home/motion.rs`: about 8 percent overshoot, settles in under half a
+  second). The Controls selector (Devices, Keyboard, Touch) is the same pill in a segmented bar. Reduced
+  motion snaps every spring. The probe carries `home.nav_hl`, `home.nav_vis` and `home.controls.seg`.
+- A page arrives part by part: the title, then each row or card in turn, sliding in along the way the
+  nav went (`motion::stage`, one clock per page: `home.page_age`). The Home text re-arrives when another
+  case takes focus. List pages have one focus frame that glides between rows. Anything pressed glows
+  under the finger while held (`home.press`), except cases, sliders and the letter rail.
+- Numbers (the slider values, the Debug summary and plot readouts, the toolbar FPS) are set in the
+  shell's own type. Only the CPU and Memory hex dumps keep the pixel face, where columns must line up.
+- A phone is not told it has a keyboard: `InputRouter::keyboard_present` is true on a desktop and, on a
+  device whose primary pointer is a finger, only after a key has been pressed. The card reads "Not
+  connected" and the probe's `home.keyboard` says which.
+- Over a paused game the touch controller's own pause, save, debug, menu and fullscreen buttons are
+  not laid out (`TouchDevice::set_shell_up`); the shell header carries a close button (hit `close`) that
+  resumes the game. The scrim over the game is about 84 percent. The running game is the first case on
+  Home with a RUNNING chip, Resume as the button and Start over under it.
+- Inside another page's frame (itch.io) the phone tab bar leaves the bottom right corner clear for the
+  host's own fullscreen button (`home.framed`).
+- Journeys added: `*-polish`, `*-polish-375`, `*-polish-small`, `*-polish-landscape`, `*-polish-iframe`,
+  `desktop-polish`, `desktop-polish-small`.

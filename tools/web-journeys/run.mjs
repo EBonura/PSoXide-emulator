@@ -799,7 +799,7 @@ async function journeyPhone(label, urlFor, size) {
     if (!(st.left_x > 0.5)) return `stick right gave left_x=${st.left_x}`;
     return Math.abs(after.left_x) < 0.1 ? true : `stick did not recentre: ${after.left_x}`;
   });
-  await step("the menu button opens the touch menu (paused), and again closes it (resumed)", async () => {
+  await step("the menu button opens the touch menu (paused), and the shell header closes it (resumed)", async () => {
     const t = await layout();
     const menu = t.ui.find((b) => b[0] === "menu");
     const before = await page.ux();
@@ -807,9 +807,9 @@ async function journeyPhone(label, urlFor, size) {
     await page.waitFor("menu open", (s) => s.menu_open && !s.running, 5000);
     await page.shot(`${label}-03-menu`);
     const open = await page.ux();
-    const menu2 = open.touch?.ui.find((b) => b[0] === "menu");
-    if (!menu2) return "the menu button vanished while the menu is open";
-    await page.tap(menu2[1] / dpr, menu2[2] / dpr);
+    // The controller's own buttons step aside while the shell is up: the shell header closes it.
+    if (open.touch?.ui.length) return "the controller's buttons are still over the shell";
+    await homeTap(page, "close");
     const s = await page.waitFor("menu closed", (x) => !x.menu_open && x.running, 5000);
     return s.machine === before.machine ? true : "machine changed";
   });
@@ -1162,7 +1162,7 @@ function insetsFor(size) {
 /** Named hit areas (not the cases, which tilt off the edges on purpose) lie inside the safe area and apart. */
 function homeLayoutProblem(u, size) {
   const [l, t, r, b] = insetsFor(size);
-  const named = u.home.hits.filter(([n]) => /^(nav|primary|peek|welcome|link|back|logo|row|welcome-step|dismiss)/.test(n) && !/^row/.test(n));
+  const named = u.home.hits.filter(([n]) => /^(nav|primary|peek|welcome|link|back|logo|row|welcome-step|dismiss|close|restart|ctl:tab)/.test(n) && !/^row/.test(n));
   for (const [n, x0, y0, x1, y1] of named) {
     if (x0 < l - 1 || y0 < t - 1 || x1 > size.w - r + 1 || y1 > size.h - b + 1) return `${n} [${x0},${y0},${x1},${y1}] is outside the safe area [${l},${t},${size.w - r},${size.h - b}]`;
   }
@@ -1816,30 +1816,196 @@ async function journeyShell(label, urlFor, size) {
     await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
     return sidebar ? "a sidebar" : true;
   });
-  if (mobile) await step("the on-screen menu button answers mouse clicks as it does taps: a click resumes, a click pauses into the shell", async () => {
+  if (mobile) await step("the on-screen menu button answers mouse clicks as it does taps: a click pauses into the shell, a click on the header's close resumes", async () => {
     // A phone emulator, or a desktop with Touch controls On, sends mouse events: the controller must not
     // need a finger.
-    const before = await page.ux();
-    const spot = (u) => { const t = u.touch?.ui.find((b) => b[0] === "menu"); return t ? [t[1] / size.dpr, t[2] / size.dpr] : null; };
-    const first = spot(before);
-    if (!first) return "no menu button while the shell is up over a game";
-    await page.click(...first);
+    await homeClick(page, "close");
     const resumed = await page.waitFor("resumed by a click", (s) => s.running && !s.menu_open, 5000).catch(() => null);
-    if (!resumed) return `a mouse click on the menu button did not resume: ${JSON.stringify(await page.ux())}`;
+    if (!resumed) return `a mouse click on the shell's close button did not resume: ${JSON.stringify(await page.ux())}`;
     await sleep(600);
-    const second = spot(await page.ux());
-    if (!second) return "no menu button while the game runs";
-    await page.click(...second);
+    const before = await page.ux();
+    const t = before.touch?.ui.find((b) => b[0] === "menu");
+    if (!t) return "no menu button while the game runs";
+    await page.click(t[1] / size.dpr, t[2] / size.dpr);
     await page.waitFor("the shell opened by a click", (s) => s.menu_open && !s.running, 5000);
     await page.shot(`${label}-menu-by-mouse`);
     return (await page.ux()).machine === before.machine ? true : "the machine changed";
   });
-  await step("Escape and the touch menu button leave the shell from Home and resume the same machine", async () => {
+  await step("Escape and the shell's close button leave the shell from Home and resume the same machine", async () => {
     const before = await page.ux();
-    if (mobile) { const t = before.touch?.ui.find((b) => b[0] === "menu"); await page.tap(t[1] / size.dpr, t[2] / size.dpr); }
+    if (mobile) await homeTap(page, "close");
     else await page.tapKey("Escape");
     const after = await page.waitFor("resumed", (s) => s.running && !s.menu_open, 5000);
     return after.machine === before.machine ? true : "the machine changed";
+  });
+  await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
+
+/**
+ * The motion and honesty pass on the shell (home-polish3): the tab highlight slides, the pages arrive part by
+ * part, every control answers a press, a phone does not claim a keyboard, the paused shell shows the running
+ * game as its hero with nothing of the touch controller over it, and Debug opens inside the shell.
+ */
+async function journeyPolish(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  const page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+  await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+  await page.goto(urlFor());
+  const activate = async (name) => (mobile ? homeTap(page, name) : homeClick(page, name));
+  /** Samples of `read(state)` every ~25 ms while `during()` runs and for `tail` ms after it. */
+  const sampled = async (read, during, tail = 700) => {
+    const out = [];
+    let live = true;
+    const loop = (async () => { while (live) { const u = await page.ux(); if (u?.home) out.push(read(u)); await sleep(25); } })();
+    await during();
+    await sleep(tail);
+    live = false;
+    await loop;
+    return out;
+  };
+  await page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 90000);
+  await step("a phone does not claim a keyboard until a key is pressed; a desktop has one", async () => {
+    await activate("nav:Controls");
+    await page.waitFor("Controls", (s) => s.home.page === "Controls", 4000);
+    await sleep(700);
+    await page.shot(`${label}-1-controls-devices`);
+    const u = await page.ux();
+    if (mobile && u.home.keyboard !== false) return `a phone claims a keyboard: ${u.home.keyboard}`;
+    if (!mobile && u.home.keyboard !== true) return "the desktop lost its keyboard";
+    if (mobile) {
+      await page.tapKey("x");
+      const after = await page.waitFor("a keyboard once a key was pressed", (s) => s.home.keyboard === true, 3000).catch(() => null);
+      if (!after) return "a key press did not make the keyboard connected";
+    }
+  });
+  await step("the tab highlight slides to the tab you pick, with a little spring, and settles", async () => {
+    await activate("nav:Home");
+    await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
+    await sleep(900);
+    const mid = sleep(150).then(() => page.shot(`${label}-2-nav-mid`));
+    const series = await sampled((u) => u.home.nav_hl, async () => { await activate("nav:Debug"); }, 900);
+    await mid;
+    await page.shot(`${label}-2-nav-settled`);
+    const end = series.at(-1);
+    const between = series.filter((v) => v > 0.2 && v < 2.8);
+    const peak = Math.max(...series);
+    if (Math.abs(end - 3) > 0.02) return `the highlight ended at ${end}, not on Debug (3)`;
+    if (between.length < 2) return `the highlight jumped instead of sliding: ${series.map((v) => v.toFixed(2)).join(" ")}`;
+    if (peak > 3.5) return `the spring overshoots too far (${peak.toFixed(2)})`;
+  });
+  await step("a page arrives part by part: its clock restarts on every page and runs on", async () => {
+    const mid = sleep(250).then(() => page.shot(`${label}-3-settings-arriving`));
+    const ages = await sampled((u) => u.home.page_age, async () => { await activate("nav:Settings"); }, 900);
+    await mid;
+    await page.shot(`${label}-3-settings`);
+    if (!ages.some((v) => v < 0.2) || ages.at(-1) < 0.6) return `no staged arrival: ${ages.map((v) => v.toFixed(2)).join(" ")}`;
+  });
+  await step("a control answers a press at once (a glow rises under it while it is held)", async () => {
+    await activate("nav:Home");
+    await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
+    await sleep(500);
+    const [x, y] = await homeHit(page, "nav:Settings");
+    if (mobile) await page.touch("touchStart", [[x, y]]);
+    else { await page.mouse("mouseMoved", x, y); await sleep(40); await page.mouse("mousePressed", x, y); }
+    await sleep(220);
+    const held = (await page.ux()).home.press;
+    await page.shot(`${label}-4-press`);
+    if (mobile) await page.touch("touchEnd", []);
+    else await page.mouse("mouseReleased", x, y);
+    await sleep(400);
+    const gone = (await page.ux()).home.press;
+    await page.waitFor("Settings after the press", (s) => s.home.page === "Settings", 4000);
+    if (!(held > 0.5)) return `no press feedback while held (${held})`;
+    if (!(gone < 0.05)) return `the glow did not drain (${gone})`;
+  });
+  if (mobile) await step("the Controls selector is a sliding segmented control", async () => {
+    await activate("nav:Controls");
+    await page.waitFor("Controls", (s) => s.home.page === "Controls", 4000);
+    await sleep(900);
+    const mid = sleep(150).then(() => page.shot(`${label}-5-controls-selector-mid`));
+    const series = await sampled((u) => u.home.controls.seg, async () => { await activate("ctl:tab:Touch"); }, 900);
+    await mid;
+    await page.shot(`${label}-5-controls-touch`);
+    const end = series.at(-1);
+    const between = series.filter((v) => v > 0.2 && v < 1.8);
+    if (Math.abs(end - 2) > 0.02) return `the selector ended at ${end}`;
+    if (between.length < 2) return `the selector jumped: ${series.map((v) => v.toFixed(2)).join(" ")}`;
+  });
+  await step("start the demo disc", async () => {
+    await activate("nav:Home");
+    await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
+    await sleep(500);
+    await activate("primary");
+    await waitDemoRunning(page, 90000);
+    await sleep(1500);
+  });
+  const openShell = async () => {
+    if (mobile) {
+      const t = (await page.ux()).touch?.ui.find((b) => b[0] === "menu");
+      if (!t) throw new Error("no touch menu button while the game runs");
+      await page.tap(t[1] / size.dpr, t[2] / size.dpr);
+    } else await page.tapKey("Escape");
+    await page.waitFor("the shell", (s) => s.menu_open && s.home.page === "Home", 5000);
+    await sleep(900);
+  };
+  await step("the paused shell: the game is the hero (Running, Resume, Start over) and nothing of the controller overlaps", async () => {
+    await openShell();
+    await page.shot(`${label}-6-shell-hero`);
+    const u = await page.ux();
+    const names = u.home.hits.map((h) => h[0]);
+    for (const need of ["primary", "restart", "nav:Game"]) if (!names.includes(need)) return `missing ${need}: ${names}`;
+    const hero = u.home.cases[0];
+    if (!hero || hero[0] !== "PSoXide Demo Disc") return `the first case is not the running game: ${JSON.stringify(hero)}`;
+    if (!/pick up where you left off/i.test(hero[1])) return `the hero line is "${hero[1]}"`;
+    if (u.home.case !== 0) return `the shell opened on case ${u.home.case}, not the running game`;
+    if (mobile) {
+      if ((u.touch?.ui ?? []).length) return `the controller's buttons are still laid out over the shell: ${JSON.stringify(u.touch.ui.map((b) => b[0]))}`;
+      if (!names.includes("close")) return `no way back to the game in the header: ${names}`;
+    }
+    const problem = homeLayoutProblem(u, size);
+    if (problem) return problem;
+    // The other pages over the game keep clear of the header's close button too.
+    for (const section of ["Controls", "Settings", "Debug"]) {
+      await activate(`nav:${section}`);
+      await page.waitFor(`${section}`, (s) => s.home.page === section, 4000);
+      await sleep(700);
+      const p2 = homeLayoutProblem(await page.ux(), size);
+      if (p2) return `${section}: ${p2}`;
+    }
+    await activate("nav:Home");
+    await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
+  });
+  if (size.framed) await step("framed by another page: the tab bar leaves the host's fullscreen corner clear", async () => {
+    const u = await page.ux();
+    if (!u.home.framed) return "the player does not know it is framed";
+    const debug = u.home.hits.find((h) => h[0] === "nav:Debug");
+    if (!debug || debug[3] > size.w - 40) return `the last tab runs under the corner: ${JSON.stringify(debug)}`;
+  });
+  /** Back to the game from the shell: the header's close button (a build before it had the controller's menu button). */
+  const closeShell = async () => {
+    const u = await page.ux();
+    if (u.home.hits.some((h) => h[0] === "close")) return homeTap(page, "close");
+    const t = u.touch?.ui.find((b) => b[0] === "menu");
+    if (t) await page.tap(t[1] / size.dpr, t[2] / size.dpr);
+  };
+  if (mobile) await step("Debug from the touch overlay opens inside the shell over the paused game, and one tap returns", async () => {
+    await closeShell();
+    await page.waitFor("the game running", (s) => s.running && !s.menu_open, 6000);
+    await sleep(1200);
+    const t = (await page.ux()).touch?.ui.find((b) => b[0] === "debug");
+    if (!t) return "no debug button on the touch overlay";
+    const pages = [];
+    const series = await sampled((u) => `${u.home.page}|${u.menu_open}|${u.home.launch >= 0}`, async () => { await page.tap(t[1] / size.dpr, t[2] / size.dpr); }, 1500);
+    pages.push(...new Set(series));
+    await page.shot(`${label}-7-debug`);
+    const wrong = series.filter((v) => v.split("|")[1] === "true" && (v.startsWith("Home") || v.endsWith("|true")));
+    if (wrong.length) return `the shell showed the home page or a launch on the way: ${[...new Set(series)].join(" ")}`;
+    if (!series.at(-1).startsWith("Debug|true")) return `Debug did not open in the shell: ${[...new Set(series)].join(" ")}`;
+    await closeShell();
+    await page.waitFor("back in the game in one tap", (s) => s.running && !s.menu_open, 6000);
   });
   await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
   await cdp.send("Target.closeTarget", { targetId: page.targetId });
@@ -2576,7 +2742,7 @@ async function main() {
   if (args.scenario === "spam") { await inChrome(1, scenarioSpam); siteServer?.close(); parentServer?.close(); process.exit(0); }
   const wanted = (name) => !ONLY || name.includes(ONLY);
   try {
-    if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu", "home", "covers", "shell", "throttled", "controls", "grouping", "selection", "cover-states", "hints"].some((k) => ONLY.includes(k))) {
+    if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu", "home", "covers", "shell", "throttled", "controls", "grouping", "selection", "cover-states", "hints", "polish"].some((k) => ONLY.includes(k))) {
       await inChrome(1, async () => {
         if (wanted("desktop-direct")) await journeyDesktop("desktop-direct", () => direct());
         if (wanted("desktop-home")) await journeyHome("desktop-home", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
@@ -2589,6 +2755,8 @@ async function main() {
         if (wanted("desktop-cover-states")) await journeyCoverStates("desktop-cover-states", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-selection")) await journeySelection("desktop-selection", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-hints")) await journeyHints("desktop-hints", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-polish")) await journeyPolish("desktop-polish", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-polish-small")) await journeyPolish("desktop-polish-small", () => direct("?countdown=12"), { w: 800, h: 600, dpr: 1, mobile: false });
         if (wanted("desktop-iframe")) await journeyDesktop("desktop-iframe", () => embedded(), { embeddedMode: true });
         if (wanted("desktop-menus")) await journeyMenus("desktop-menus", () => direct());
         if (wanted("desktop-nowebgpu")) await journeyNoWebgpu("desktop-nowebgpu", () => direct());
@@ -2596,7 +2764,7 @@ async function main() {
         if (wanted("desktop-gamepad-iframe")) await journeyGamepad("desktop-gamepad-iframe", () => embedded());
       });
     }
-    if (!ONLY || ONLY.includes("phone") || ONLY.includes("home") || ONLY.includes("shell") || ONLY.includes("throttled") || ONLY.includes("controls") || ONLY.includes("grouping") || ONLY.includes("hints") || ONLY.includes("selection") || ONLY.includes("cover-states")) {
+    if (!ONLY || ONLY.includes("phone") || ONLY.includes("home") || ONLY.includes("shell") || ONLY.includes("throttled") || ONLY.includes("controls") || ONLY.includes("grouping") || ONLY.includes("hints") || ONLY.includes("selection") || ONLY.includes("cover-states") || ONLY.includes("polish")) {
       await inChrome(3, async () => {
         if (wanted("phone-portrait")) await journeyPhone("phone-portrait", () => direct(), { w: 393, h: 852, dpr: 3 });
         if (wanted("phone-iframe")) await journeyPhone("phone-iframe", () => embedded(), { w: 393, h: 852, dpr: 3 });
@@ -2607,6 +2775,11 @@ async function main() {
         if (wanted("phone-cover-states")) await journeyCoverStates("phone-cover-states", () => direct(), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-selection")) await journeySelection("phone-selection", () => direct(), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-hints")) await journeyHints("phone-hints", () => direct(), { w: 393, h: 852, dpr: 3, mobile: true });
+        if (wanted("phone-polish")) await journeyPolish("phone-polish", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
+        if (wanted("phone-polish-375")) await journeyPolish("phone-polish-375", () => direct("?countdown=12"), { w: 375, h: 812, dpr: 3, mobile: true });
+        if (wanted("phone-polish-small")) await journeyPolish("phone-polish-small", () => direct("?countdown=12"), { w: 360, h: 640, dpr: 3, mobile: true });
+        if (wanted("phone-polish-landscape")) await journeyPolish("phone-polish-landscape", () => direct("?countdown=12"), { w: 852, h: 393, dpr: 3, mobile: true });
+        if (wanted("phone-polish-iframe")) await journeyPolish("phone-polish-iframe", () => embedded("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true, framed: true });
         if (wanted("phone-shell")) await journeyShell("phone-shell", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-shell-small")) await journeyShell("phone-shell-small", () => direct("?countdown=12"), { w: 360, h: 640, dpr: 3, mobile: true });
         if (wanted("phone-controls")) await journeyControls("phone-controls", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
