@@ -855,6 +855,9 @@ impl AppState {
         }
         let first_visit = ui::menu::first_visit();
         self.menu.enable_home(first_visit);
+        // Desktop: the Demo Disc is a disc on this computer, listed from the library.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.menu.set_local_demo(true);
         self.menu.set_box_art(self.settings.video.box_art);
         self.menu
             .set_reduce_motion(self.settings.video.reduce_motion);
@@ -1905,6 +1908,8 @@ impl AppState {
         merge_baked_examples(&mut examples, &built_examples);
 
         hoist_single_game_folders(&mut games);
+        #[cfg(not(target_arch = "wasm32"))]
+        add_demo_discs_beside_the_program(&mut games);
 
         // Pass 3: stable alphabetical order per column.
         games.sort_by_key(|a| a.title.to_lowercase());
@@ -4534,6 +4539,86 @@ fn group_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// Folders where the program's own download keeps the Demo Disc: next to the program and, for a
+/// macOS app bundle, next to the bundle.
+#[cfg(not(target_arch = "wasm32"))]
+fn program_dirs() -> Vec<PathBuf> {
+    let Ok(exe) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    let Some(dir) = exe.parent() else {
+        return Vec::new();
+    };
+    let mut dirs = vec![dir.to_path_buf()];
+    // `<name>.app/Contents/MacOS/<program>`
+    if let Some(parent) = dir
+        .ancestors()
+        .find(|p| p.extension().is_some_and(|e| e == "app"))
+        .and_then(Path::parent)
+    {
+        dirs.push(parent.to_path_buf());
+    }
+    dirs
+}
+
+/// The Demo Disc cue sheets directly inside `dir` whose disc images are all there. A sheet whose
+/// images were deleted is a leftover, not a disc.
+#[cfg(not(target_arch = "wasm32"))]
+fn demo_disc_sheets_in(dir: &Path) -> Vec<PathBuf> {
+    use psoxide_settings::demo_disc::DemoDisc;
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut sheets: Vec<PathBuf> = read
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("cue"))
+                && path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| DemoDisc::parse(s).is_some())
+        })
+        .filter(|path| {
+            psoxide_settings::library::cue_referenced_files(path)
+                .is_ok_and(|files| !files.is_empty() && files.iter().all(|f| f.is_file()))
+        })
+        .collect();
+    sheets.sort();
+    sheets
+}
+
+/// List the Demo Disc found next to the program, unless the games folder already has that very
+/// release (same name): the folder's copy stays.
+#[cfg(not(target_arch = "wasm32"))]
+fn add_demo_sheets(games: &mut Vec<MenuLibraryItem>, sheets: &[PathBuf]) {
+    for sheet in sheets {
+        let title = psoxide_settings::game_group::display_title(&group_path(sheet));
+        if games.iter().any(|g| g.title.eq_ignore_ascii_case(&title)) {
+            continue;
+        }
+        games.push(MenuLibraryItem {
+            folder: PathBuf::new(),
+            id: format!("{OPEN_LAUNCH_ID_PREFIX}{}", sheet.to_string_lossy()),
+            title,
+            subtitle: "Next to the program".into(),
+            burnable: false,
+            launchable: true,
+        });
+    }
+}
+
+/// The download package ships the Demo Disc next to the program: list it, so the shelf has it
+/// even before the games folder is chosen.
+#[cfg(not(target_arch = "wasm32"))]
+fn add_demo_discs_beside_the_program(games: &mut Vec<MenuLibraryItem>) {
+    for dir in program_dirs() {
+        add_demo_sheets(games, &demo_disc_sheets_in(&dir));
+    }
+}
+
 /// One menu row per game for a set of retail library entries: the cue sheet
 /// (or lone image) of the first disc, titled by its name without track or
 /// disc tags. Each row binds to its file, not to a disc identity shared by
@@ -5987,6 +6072,47 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_demo_disc_next_to_the_program_is_listed_only_when_its_images_are_there() {
+        let dir = std::env::temp_dir().join(format!("psoxide-beside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sheet = |name: &str| {
+            format!("FILE \"{name}.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n")
+        };
+        for name in [
+            "PSoXide Demo Disc v0.48",
+            "PSoXide Demo Disc v0.46",
+            "Quake (quake-psx)",
+        ] {
+            std::fs::write(dir.join(format!("{name}.cue")), sheet(name)).unwrap();
+        }
+        // Only v0.48 and the other game have their image; v0.46 is a leftover sheet.
+        std::fs::write(dir.join("PSoXide Demo Disc v0.48.bin"), b"x").unwrap();
+        std::fs::write(dir.join("Quake (quake-psx).bin"), b"x").unwrap();
+
+        let sheets = demo_disc_sheets_in(&dir);
+        assert_eq!(sheets, [dir.join("PSoXide Demo Disc v0.48.cue")]);
+
+        let mut games = vec![MenuLibraryItem {
+            folder: PathBuf::new(),
+            id: "path:/g/Quake.cue".into(),
+            title: "Quake (quake-psx)".into(),
+            subtitle: String::new(),
+            burnable: false,
+            launchable: true,
+        }];
+        add_demo_sheets(&mut games, &sheets);
+        assert_eq!(games.len(), 2);
+        assert_eq!(games[1].title, "PSoXide Demo Disc v0.48");
+        assert!(games[1].id.starts_with(OPEN_LAUNCH_ID_PREFIX));
+        // The games folder already has that release: its copy stays, nothing is added twice.
+        add_demo_sheets(&mut games, &sheets);
+        assert_eq!(games.len(), 2);
+        assert!(demo_disc_sheets_in(&dir.join("missing")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
