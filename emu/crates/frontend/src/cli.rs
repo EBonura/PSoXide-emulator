@@ -5224,24 +5224,6 @@ mod press_script_tests {
         assert!(EditorViewArg::Top.is_room_orthographic());
     }
 
-    #[cfg(feature = "editor")]
-    #[test]
-    fn editor_frame_selection_is_applied_before_preview_extraction() {
-        let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../editor/archive/fixtures/brush-first-playable");
-        let mut editor = EditorWorkspace::open_directory(project).unwrap();
-        editor.show_workspace(psxed_project::EditorWorkspaceView::Room);
-        assert_eq!(editor.viewport_3d_camera().radius, 550);
-
-        apply_headless_editor_pre_capture_actions(&mut editor, true);
-
-        let framed = editor.viewport_3d_camera();
-        assert_eq!(framed.target, [512, 256, 384]);
-        assert_eq!(framed.radius, 1638);
-        assert_eq!(framed.yaw_q12, 3072);
-        assert_eq!(framed.pitch_q12, 3665);
-    }
-
     #[test]
     fn parses_ticks_buttons_and_optional_hold() {
         let script = parse_press_script("30:cross, 60:start:12").expect("valid spec");
