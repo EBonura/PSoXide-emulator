@@ -1002,6 +1002,7 @@ impl HomeState {
                 burn: None,
                 launches: true,
                 shelf: false,
+                badge: None,
             },
             None => CaseItem {
                 kind: CoverKind::Demo,
@@ -1014,6 +1015,7 @@ impl HomeState {
                 burn: None,
                 launches: false,
                 shelf: false,
+                badge: None,
             },
         };
         let others = found
@@ -1029,6 +1031,7 @@ impl HomeState {
                 burn: None,
                 launches: true,
                 shelf: false,
+                badge: None,
             })
             .collect();
         LocalDemo {
