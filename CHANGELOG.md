@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- The shell moves. The tab highlight is one pill (phone bar) or marker (desktop) that
+  slides to the page you pick on a small spring, and the Controls selector slides the
+  same way. Pages arrive part by part (title, then rows or cards), a list's focus frame
+  glides between rows, and anything you press glows under your finger. Reduced motion
+  turns all of it into a plain switch. Slider values, the Debug summary and the plot
+  readouts use the interface type instead of the pixel face.
+- A phone no longer says it has a keyboard: the Controls card reads "Not connected"
+  until a key has been pressed. Over a paused game the controller's own buttons step
+  aside; the shell header has a close button, the running game is the first case with a
+  RUNNING chip, Resume and Start over, and the game behind is dimmed so the shell reads.
+  Inside another page's frame (itch.io) the phone tab bar leaves that host's fullscreen
+  corner clear.
+
 - The desktop home screen always shows the PSoXide Demo Disc as its first case, with the
   disc's own cover. The newest public release in your games folder (or next to the
   program) is the one that starts; older releases and the private and diagnostic builds
