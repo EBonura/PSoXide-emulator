@@ -1180,7 +1180,7 @@ const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42
 
 /** Answer requests to the cover collections: "hit", "miss" (404) or "offline", and log them. */
 async function stubCovers(page, mode) {
-  const state = { mode, urls: [] };
+  const state = { mode, urls: [], held: [] };
   await page.cdp.send("Fetch.enable", { patterns: [{ urlPattern: "https://raw.githubusercontent.com/*" }] }, page.top);
   page.cdp.on((msg) => {
     if (msg.method !== "Fetch.requestPaused" || msg.sessionId !== page.top) return;
@@ -1189,10 +1189,21 @@ async function stubCovers(page, mode) {
     const cors = [{ name: "Access-Control-Allow-Origin", value: "*" }];
     // A page that is already closed answers nothing: never let that reject unhandled.
     const quiet = (promise) => promise.catch(() => {});
+    if (state.mode === "hold") { state.held.push(id); return; }
     if (state.mode === "offline") quiet(page.cdp.send("Fetch.failRequest", { requestId: id, errorReason: "InternetDisconnected" }, page.top));
     else if (state.mode === "hit") quiet(page.cdp.send("Fetch.fulfillRequest", { requestId: id, responseCode: 200, responseHeaders: [...cors, { name: "Content-Type", value: "image/png" }], body: ONE_PIXEL_PNG }, page.top));
     else quiet(page.cdp.send("Fetch.fulfillRequest", { requestId: id, responseCode: 404, responseHeaders: cors, body: "" }, page.top));
   });
+  /** Answer every request held so far: "hit" or "miss", and answer later ones the same way. */
+  state.release = (kind) => {
+    const held = state.held.splice(0);
+    state.mode = kind;
+    const cors = [{ name: "Access-Control-Allow-Origin", value: "*" }];
+    for (const id of held) {
+      if (kind === "hit") page.cdp.send("Fetch.fulfillRequest", { requestId: id, responseCode: 200, responseHeaders: [...cors, { name: "Content-Type", value: "image/png" }], body: ONE_PIXEL_PNG }, page.top).catch(() => {});
+      else page.cdp.send("Fetch.fulfillRequest", { requestId: id, responseCode: 404, responseHeaders: cors, body: "" }, page.top).catch(() => {});
+    }
+  };
   return state;
 }
 
@@ -1522,6 +1533,151 @@ async function journeyCovers(label, urlFor) {
 }
 
 
+
+/** A folder of rips as they come off a drive: tracks beside a cue sheet, and a game over two discs. */
+const FAKE_RIPS = `
+  const track = (stem, n, pad) => stem + " (Track " + String(n).padStart(pad, "0") + ").bin";
+  const cue = (files) => files.map((f, i) => 'FILE "' + f + '" BINARY\\n  TRACK ' + String(i + 1).padStart(2, "0") + ' MODE2/2352\\n    INDEX 01 00:00:00').join("\\n");
+  const rip = (stem, count, pad) => {
+    const bins = [...Array(count)].map((_, i) => track(stem, i + 1, pad));
+    return { ...Object.fromEntries(bins.map((b) => [b, ""])), [stem + ".cue"]: cue(bins) };
+  };
+  const disc = (stem) => ({ [stem + ".bin"]: "", [stem + ".cue"]: cue([stem + ".bin"]) });
+  const tree = {
+    "WipEout (USA)": rip("WipEout (USA)", 9, 1),
+    "WipEout 2097 (Europe)": rip("WipEout 2097 (Europe)", 12, 2),
+    "Final Fantasy IX (USA) (Disc 1)": disc("Final Fantasy IX (USA) (Disc 1)"),
+    "Final Fantasy IX (USA) (Disc 2)": disc("Final Fantasy IX (USA) (Disc 2)"),
+    "Crash Bandicoot (USA).bin": "",
+    "notes.txt": "",
+  };
+  class Node {
+    constructor(name, v) { this.name = name; this.v = v; this.kind = typeof v === "string" ? "file" : "directory"; }
+    async *entries() { for (const [n, v] of Object.entries(this.v)) yield [n, new Node(n, v)]; }
+    async getFile() { const t = this.v; return { size: t.length, slice: () => ({ text: async () => t }) }; }
+  }
+  window.showDirectoryPicker = async () => new Node("games", tree);
+`;
+
+/** A games folder shows games, never tracks: one case per game, discs of one game together. */
+async function journeyGrouping(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  const page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+  await stubCovers(page, "miss");
+  await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+  await page.addInit(FAKE_RIPS);
+  await page.goto(urlFor());
+  const activate = async (name) => (mobile ? homeTap(page, name) : homeClick(page, name));
+  await step("a folder of rips lists one case per game: no tracks, discs together", async () => {
+    await page.waitFor("the home screen", (s) => s.home?.page === "Home" && s.has_bus, 90000);
+    await page.tapKey("x");
+    await activate("case:1");
+    await activate("primary");
+    await page.waitFor("the folder scanned", (s) => /Found \d+/.test(s.status), 15000);
+    await sleep(600);
+    const u = await page.ux();
+    const titles = u.home.cases.map(([t]) => t);
+    await page.shot(`${label}-grouped-shelf`);
+    const want = ["Crash Bandicoot (USA)", "Final Fantasy IX (USA)", "WipEout (USA)", "WipEout 2097 (Europe)"];
+    for (const w of want) if (!titles.includes(w)) return `missing the case "${w}": ${titles}`;
+    const bad = titles.filter((t) => /\(Track|\(Disc \d\)/.test(t));
+    if (bad.length) return `a track or disc is listed on its own: ${bad}`;
+    if (!/^Found 4 /.test(u.status)) return `expected 4 games, status says: ${u.status}`;
+    const ff = u.home.cases.find(([t]) => t === "Final Fantasy IX (USA)");
+    return /2 discs/.test(ff[1]) ? true : `the two-disc game does not say so: ${ff[1]}`;
+  });
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
+
+/** While a picture is being looked up the case says so; the picture fades in; a miss settles quietly. */
+async function journeyCoverStates(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  for (const outcome of ["hit", "miss"]) {
+    const page = await newPage(label);
+    await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+    const net = await stubCovers(page, "hold");
+    await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+    await page.addInit(FAKE_FOLDER);
+    await page.goto(urlFor());
+    const activate = async (name) => (mobile ? homeTap(page, name) : homeClick(page, name));
+    const crash = (u) => u.home.cases.find(([t]) => t === "Crash Bandicoot (USA)");
+    await step(`a cover being fetched shows a loading state on its case, then (${outcome}) settles`, async () => {
+      await page.waitFor("the home screen", (s) => s.home?.page === "Home" && s.has_bus, 90000);
+      await page.tapKey("x");
+      await activate("case:1");
+      await activate("primary");
+      await page.waitFor("the folder scanned", (s) => /Found \d+/.test(s.status), 15000);
+      // Walk the focus onto the disc so its case is drawn big.
+      for (let i = 0; i < 6; i++) {
+        const u = await page.ux();
+        if (u.home.cases[u.home.case]?.[0] === "Crash Bandicoot (USA)") break;
+        await page.tapKey("ArrowRight");
+        await sleep(150);
+      }
+      const loading = await page.waitFor("the case to show it is loading", (s) => {
+        const c = crash(s);
+        return c && c[2] === "loading" && c[4] > 0.5;
+      }, 8000);
+      await page.shot(`${label}-${outcome}-1-loading`);
+      // Navigation is never blocked by the lookup.
+      await page.tapKey("ArrowLeft");
+      await page.waitFor("the focus to move while loading", (s) => s.home.case !== loading.home.case, 3000);
+      await page.tapKey("ArrowRight");
+      await sleep(300);
+      net.release(outcome);
+      if (outcome === "hit") {
+        const u = await page.waitFor("the picture to fade in", (s) => { const c = crash(s); return c && c[2] === "ready" && c[5] > 0.95; }, 8000);
+        await page.shot(`${label}-hit-2-ready`);
+        return crash(u)[4] < 0.2 ? true : `the shimmer stayed on after the picture arrived: ${crash(u)}`;
+      }
+      const u = await page.waitFor("the lookup to settle on the placeholder", (s) => { const c = crash(s); return c && c[2] === "missing" && c[4] < 0.05; }, 8000);
+      await page.shot(`${label}-miss-2-settled`);
+      return crash(u)[5] === 0 ? true : `a picture is showing on a miss: ${crash(u)}`;
+    });
+    await cdp.send("Target.closeTarget", { targetId: page.targetId });
+  }
+}
+
+/** The focused case comes alive and the others settle back; reduced motion keeps only a scale and a glow. */
+async function journeySelection(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  const page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+  await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+  await page.goto(urlFor());
+  await step("moving the focus lifts the new case and settles the old one", async () => {
+    await page.waitFor("the home screen", (s) => s.home?.page === "Home" && s.has_bus, 90000);
+    await page.tapKey("x");
+    await sleep(900);
+    const before = await page.ux();
+    if (before.home.cases[0][3] < 0.9) return `the focused case is not at rest focused: ${before.home.cases[0]}`;
+    await page.tapKey("ArrowRight");
+    // Mid-move: the new case is rising, the old one is falling.
+    await sleep(120);
+    const mid = await page.ux();
+    await page.shot(`${label}-focus-mid`);
+    await sleep(900);
+    const after = await page.ux();
+    await page.shot(`${label}-focus-after`);
+    if (!(mid.home.cases[1][3] > 0.05 && mid.home.cases[1][3] < 1.05)) return `the new case is not easing in: ${mid.home.cases[1]}`;
+    if (after.home.cases[1][3] < 0.9 || after.home.cases[1][3] > 1.15) return `the new case did not settle focused: ${after.home.cases[1]}`;
+    if (after.home.cases[0][3] > 0.1) return `the old case did not settle back: ${after.home.cases[0]}`;
+    return true;
+  });
+  await step("Reduce motion in Settings is a switch and the shell reports it", async () => {
+    await menuSelect(page, "Settings", "Reduce motion", { enter: false });
+    await page.tapKey("ArrowRight");
+    await page.waitFor("the row to read On", (s) => s.menu.value === "On", 4000);
+    const u = await page.ux();
+    return u.home.calm === true ? true : `the shell is not calm: ${u.home.calm}`;
+  });
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
+
 /** The shell around a running game, at one size: the launch sequence, then every section by every way back. */
 async function journeyShell(label, urlFor, size) {
   current = label;
@@ -1536,7 +1692,7 @@ async function journeyShell(label, urlFor, size) {
   await step("Start disc plays the launch sequence (case opens, disc out, case recedes, tray, spin) and boots", async () => {
     await page.waitFor("the home screen", (s) => s.home.countdown === "cancelled", 5000);
     await activate("primary");
-    const marks = [0.4, 1.0, 1.7, 2.4, 3.2, 4.1];
+    const marks = [0.2, 0.5, 0.8, 1.1, 1.5, 2.0];
     let next = 0, seen = 0, brightest = 0;
     const start = Date.now();
     while (Date.now() - start < 40000) {
@@ -1545,12 +1701,12 @@ async function journeyShell(label, urlFor, size) {
       if (u.home.launch >= 0) {
         seen = Math.max(seen, u.home.launch);
         // The boot flash is a glow at the tray, never a wash over the whole screen.
-        if (u.home.launch >= 3.9) brightest = Math.max(brightest, await page.meanLuma());
+        if (u.home.launch >= 1.85) brightest = Math.max(brightest, await page.meanLuma());
         if (next < marks.length && u.home.launch >= marks[next]) { await page.shot(`${label}-launch-${next + 1}`); next++; }
       }
       await sleep(120);
     }
-    if (seen < 4.0) return `the sequence only reached ${seen} s`;
+    if (seen < 2.0) return `the sequence only reached ${seen} s`;
     if (args.trace) console.log("      brightest launch frame", brightest.toFixed(3));
     if (brightest > FLASH_LUMA_MAX) return `the boot flash washed the screen to ${brightest.toFixed(2)} (limit ${FLASH_LUMA_MAX})`;
     const u = await waitDemoRunning(page, 30000);
@@ -1821,7 +1977,7 @@ async function journeyThrottled(label, urlFor, size, fps = 4) {
     await page.waitFor("Home again", (s) => s.home.page === "Home", 6000);
   });
   await ready(page);
-  await step(`at ${fps} frames a second, Enter starts the focused disc and the launch takes about 4.6 s`, async () => {
+  await step(`at ${fps} frames a second, Enter starts the focused disc and the launch takes about 2.3 s`, async () => {
     const t0 = Date.now();
     await page.tapKey("Enter");
     const r = await watchLaunch(page, t0);
@@ -1831,7 +1987,7 @@ async function journeyThrottled(label, urlFor, size, fps = 4) {
     const seen = r.series.filter(([, t]) => t >= 1);
     if (!seen.length) return `the launch clock never moved: ${JSON.stringify(r.series.slice(0, 8))}`;
     const worst = Math.max(...seen.map(([ms, t]) => Math.abs(ms / 1000 - t)));
-    if (r.ms < 3800 || r.ms > 7000) return `the launch took ${r.ms} ms: ${JSON.stringify(r.series.filter((_, i) => i % 6 === 0))}`;
+    if (r.ms < 1700 || r.ms > 4500) return `the launch took ${r.ms} ms: ${JSON.stringify(r.series.filter((_, i) => i % 6 === 0))}`;
     if (worst > 1.6) return `the launch clock drifted ${worst.toFixed(2)} s from the wall clock`;
   });
   await close(page);
@@ -1845,11 +2001,11 @@ async function journeyThrottled(label, urlFor, size, fps = 4) {
     const t0 = Date.now();
     await activate(page, "primary");
     await page.waitFor("the launch under way", (s) => s.home.launch >= 0, 8000);
-    await sleep(1400);
+    await sleep(600);
     await page.tapKey("x");
     const r = await watchLaunch(page, t0);
     if (r.ms == null) return `the disc did not start: ${JSON.stringify(r.series.slice(-6))}`;
-    if (r.ms > 4200) return `skipping still took ${r.ms} ms`;
+    if (r.ms > 2300) return `skipping still took ${r.ms} ms`;
   });
   await close(page);
 
@@ -2262,7 +2418,7 @@ async function scenarioReview() {
       await sleep(400);
       await activate("primary");
       const t0 = Date.now();
-      const marks = [3.6, 4.1, 4.4, 4.7, 5.0, 5.4, 6.0];
+      const marks = [1.6, 1.9, 2.1, 2.3, 2.5, 2.8, 3.2];
       let next = 0;
       while (Date.now() - t0 < 40000) {
         const secs = (Date.now() - t0) / 1000;
@@ -2314,7 +2470,7 @@ async function scenarioLaunch() {
   // Only the sequence itself: up to the moment it hands over to the boot.
   while (Date.now() - t0 < 30000) {
     const u = await page.ux();
-    if ((u.running && !u.menu_open) || u.home?.launch >= 4.3) break;
+    if ((u.running && !u.menu_open) || u.home?.launch >= 2.1) break;
     await sleep(100);
   }
   const st = await page.bench();
@@ -2355,7 +2511,7 @@ async function main() {
   if (args.scenario === "spam") { await inChrome(1, scenarioSpam); siteServer?.close(); parentServer?.close(); process.exit(0); }
   const wanted = (name) => !ONLY || name.includes(ONLY);
   try {
-    if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu", "home", "covers", "shell", "throttled", "controls"].some((k) => ONLY.includes(k))) {
+    if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu", "home", "covers", "shell", "throttled", "controls", "grouping", "selection", "cover-states"].some((k) => ONLY.includes(k))) {
       await inChrome(1, async () => {
         if (wanted("desktop-direct")) await journeyDesktop("desktop-direct", () => direct());
         if (wanted("desktop-home")) await journeyHome("desktop-home", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
@@ -2364,6 +2520,9 @@ async function main() {
         if (wanted("desktop-controls-narrow")) await journeyControls("desktop-controls-narrow", () => direct("?countdown=12"), { w: 800, h: 700, dpr: 1, mobile: false });
         if (wanted("desktop-throttled")) await journeyThrottled("desktop-throttled", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-covers")) await journeyCovers("desktop-covers", () => direct());
+        if (wanted("desktop-grouping")) await journeyGrouping("desktop-grouping", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-cover-states")) await journeyCoverStates("desktop-cover-states", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-selection")) await journeySelection("desktop-selection", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-iframe")) await journeyDesktop("desktop-iframe", () => embedded(), { embeddedMode: true });
         if (wanted("desktop-menus")) await journeyMenus("desktop-menus", () => direct());
         if (wanted("desktop-nowebgpu")) await journeyNoWebgpu("desktop-nowebgpu", () => direct());
@@ -2371,13 +2530,16 @@ async function main() {
         if (wanted("desktop-gamepad-iframe")) await journeyGamepad("desktop-gamepad-iframe", () => embedded());
       });
     }
-    if (!ONLY || ONLY.includes("phone") || ONLY.includes("home") || ONLY.includes("shell") || ONLY.includes("throttled") || ONLY.includes("controls")) {
+    if (!ONLY || ONLY.includes("phone") || ONLY.includes("home") || ONLY.includes("shell") || ONLY.includes("throttled") || ONLY.includes("controls") || ONLY.includes("grouping") || ONLY.includes("selection") || ONLY.includes("cover-states")) {
       await inChrome(3, async () => {
         if (wanted("phone-portrait")) await journeyPhone("phone-portrait", () => direct(), { w: 393, h: 852, dpr: 3 });
         if (wanted("phone-iframe")) await journeyPhone("phone-iframe", () => embedded(), { w: 393, h: 852, dpr: 3 });
         if (wanted("phone-home")) await journeyHome("phone-home", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-home-small")) await journeyHome("phone-home-small", () => direct("?countdown=12"), { w: 360, h: 640, dpr: 3, mobile: true });
         if (wanted("phone-home-landscape")) await journeyHome("phone-home-landscape", () => direct("?countdown=12"), { w: 852, h: 393, dpr: 3, mobile: true });
+        if (wanted("phone-grouping")) await journeyGrouping("phone-grouping", () => direct(), { w: 393, h: 852, dpr: 3, mobile: true });
+        if (wanted("phone-cover-states")) await journeyCoverStates("phone-cover-states", () => direct(), { w: 393, h: 852, dpr: 3, mobile: true });
+        if (wanted("phone-selection")) await journeySelection("phone-selection", () => direct(), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-shell")) await journeyShell("phone-shell", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-shell-small")) await journeyShell("phone-shell-small", () => direct("?countdown=12"), { w: 360, h: 640, dpr: 3, mobile: true });
         if (wanted("phone-controls")) await journeyControls("phone-controls", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
