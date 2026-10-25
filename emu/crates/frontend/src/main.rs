@@ -2268,6 +2268,9 @@ impl Shell {
     }
 }
 
+/// CSS pixels of the portrait panel the debug strip asks for under the controls.
+const DEBUG_STRIP_CSS: f32 = 140.0;
+
 /// Act on what the on-screen controller's buttons reported: the menu, pause, save, debug and
 /// fullscreen taps, and the haptic tick for a fresh press.
 fn run_touch_actions(
@@ -2327,6 +2330,13 @@ fn update_touch_controller(
         state.sidebar_width,
         state.debug_slide,
     ) * scale;
+    // The debug strip under the controls in portrait: the panel keeps this much for it while it
+    // slides in.
+    let dock_bottom_px = if size.width < size.height {
+        DEBUG_STRIP_CSS * scale * state.debug_slide
+    } else {
+        0.0
+    };
     let params = input::touch::layout::LayoutParams {
         size: egui::vec2(size.width as f32, size.height as f32),
         scale,
@@ -2342,6 +2352,7 @@ fn update_touch_controller(
         fullscreen_button: web_touch::fullscreen_available(),
         menu_open: false,
         dock_right: dock_right_px,
+        dock_bottom: dock_bottom_px,
     };
     let now_ms = input_router.now_ms();
     let menu_open = state.menu.open;
@@ -2355,6 +2366,11 @@ fn update_touch_controller(
     let visible = touch.visible();
     let safe_top_px = touch.safe_px().top;
     state.toast_inset_top = if visible { safe_top_px / scale } else { 0.0 };
+    state.touch_bottom_inset = if visible {
+        touch.safe_px().bottom / scale
+    } else {
+        0.0
+    };
     state.menu.set_touch_mode(visible);
     if visible && !*chrome_applied {
         // The toolbar costs a phone a tenth of its height; the menu button and

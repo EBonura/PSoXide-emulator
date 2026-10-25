@@ -106,8 +106,14 @@ pub fn draw_layout(
     // The live debug panel docks inside those: beside the game on a wide window, between the
     // game and the controller's panel on a tall one. Always called: it animates itself open or
     // closed from the `debug_sidebar` flag and returns at once when fully closed.
-    debug_sidebar::draw(ctx, state, vram_tex);
+    let touch_strip = if embed {
+        None
+    } else {
+        touch_overlay::reserved(ctx, input_router.touch()).strip
+    };
+    debug_sidebar::draw(ctx, state, vram_tex, touch_strip);
     if !embed {
+        draw_touch_bottom_panel(ctx, input_router.touch());
         draw_touch_right_bar(ctx, input_router.touch());
     }
 
@@ -209,12 +215,6 @@ fn draw_touch_reservations(ctx: &egui::Context, touch: &crate::input::backend::t
             .frame(black())
             .show(ctx, |_| {});
     }
-    if reserved.bottom > 0.5 {
-        egui::TopBottomPanel::bottom("touch-controls-panel")
-            .exact_height(reserved.bottom)
-            .frame(black())
-            .show(ctx, |_| {});
-    }
     if reserved.left > 0.5 {
         egui::SidePanel::left("touch-safe-left")
             .exact_width(reserved.left)
@@ -225,6 +225,18 @@ fn draw_touch_reservations(ctx: &egui::Context, touch: &crate::input::backend::t
         egui::SidePanel::right("touch-safe-right")
             .exact_width(reserved.right)
             .frame(black())
+            .show(ctx, |_| {});
+    }
+}
+
+/// The black panel under the game in portrait that holds the controller's buttons. It is declared
+/// after the debug strip, which sits under it at the window's edge.
+fn draw_touch_bottom_panel(ctx: &egui::Context, touch: &crate::input::backend::touch::TouchDevice) {
+    let reserved = touch_overlay::reserved(ctx, touch);
+    if reserved.bottom > 0.5 {
+        egui::TopBottomPanel::bottom("touch-controls-panel")
+            .exact_height(reserved.bottom)
+            .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
             .show(ctx, |_| {});
     }
 }

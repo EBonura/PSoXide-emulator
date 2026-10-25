@@ -70,6 +70,9 @@ pub(crate) struct Reserved {
     pub(crate) right: f32,
     /// The bar of controls right of the game in landscape, inside the debug panel.
     pub(crate) right_bar: f32,
+    /// Where the debug strip goes in portrait, in points, down to the window's edge: the panel's
+    /// part under the controls. `None` while it was not asked for.
+    pub(crate) strip: Option<Rect>,
 }
 
 /// What the controller takes from the game's area, in points.
@@ -79,12 +82,19 @@ pub(crate) fn reserved(ctx: &Context, touch: &TouchDevice) -> Reserved {
     };
     let safe_px = touch.safe_px();
     let inv = 1.0 / ctx.pixels_per_point();
+    let strip = (layout.strip.width() > 0.0 && layout.strip.height() > 0.0).then_some(layout.strip);
     Reserved {
         top: safe_px.top * inv,
-        bottom: layout.reserved_bottom * inv,
+        bottom: (layout.reserved_bottom - strip.map_or(0.0, |s| s.height())) * inv,
         left: (safe_px.left + layout.bar_left) * inv,
         right: safe_px.right * inv,
         right_bar: layout.bar_right * inv,
+        strip: strip.map(|s| {
+            Rect::from_min_max(
+                pos2(s.min.x * inv, s.min.y * inv),
+                pos2(s.max.x * inv, s.max.y * inv),
+            )
+        }),
     }
 }
 

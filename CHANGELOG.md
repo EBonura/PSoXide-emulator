@@ -15,7 +15,9 @@
   the game on a tall one. The game keeps running at full speed with it open; summary readouts first, then the
   tabs. Toolbar button, F3, the phone's Debug button and Select+R3 on a pad toggle it.
 - The phone's controller no longer draws over the game. In portrait the interface buttons are the first line
-  of the panel under the picture and the controls sit lower; in landscape every control is in the black bar on
+  of the panel under the picture and the controls pack into one compact cluster right below them, leaving the
+  spare height at the bottom; with Debug open the picture keeps its full width and the panel takes that spare
+  height (the controls shrink only as far as they must); in landscape every control is in the black bar on
   its side of the picture and shrinks to fit. The tab bar is centred in the viewport, also inside another
   page's frame, and the Controls touch preview is centred in its column.
 - The picture sits on whole device pixels and the web canvas is drawn pixelated, so PS1 pixels stay sharp on a

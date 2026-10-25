@@ -78,7 +78,16 @@ pub(crate) fn right_dock_points(screen: Vec2, remembered_width: f32, open: f32) 
 /// The panel animates its extent to zero while the content stays anchored to the edge it slides
 /// from at full size, so the whole panel translates and clips off. A right-hand panel is
 /// resizable when fully open; its width is remembered as the animation target.
-pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId) {
+///
+/// `touch_strip` is where the controller's layout left room for the strip under its buttons in
+/// portrait; with it the strip fills that room and the game keeps the whole width, without it a tall
+/// window takes the strip's height from the game.
+pub fn draw(
+    ctx: &egui::Context,
+    state: &mut AppState,
+    vram_tex: egui::TextureId,
+    touch_strip: Option<Rect>,
+) {
     // 0.0 = closed, 1.0 = open.
     let t = ctx.animate_bool_with_time(
         egui::Id::new("debug_sidebar_slide"),
@@ -93,6 +102,10 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
     let screen = ctx.screen_rect().size();
     let free = ctx.available_rect();
     let touch = state.menu.touch_mode();
+    if let Some(strip) = touch_strip.filter(|_| screen.x < screen.y) {
+        draw_touch_strip(ctx, state, vram_tex, strip, t, touch);
+        return;
+    }
     match dock_for(screen, free.height(), state.sidebar_width) {
         Dock::Right(width) => draw_right(ctx, state, vram_tex, width, t, animating, touch),
         Dock::Bottom(height) => draw_bottom(ctx, state, vram_tex, height, t, animating, touch),
@@ -175,6 +188,53 @@ fn draw_right(
     if !animating && wide {
         state.sidebar_width = response.response.rect.width().clamp(min_w, max_w);
     }
+}
+
+/// The strip under a phone's controls: drawn in the room the controller's layout kept for it. It
+/// wipes down from its top edge as it opens, with its summary on the first frame it is shown.
+fn draw_touch_strip(
+    ctx: &egui::Context,
+    state: &mut AppState,
+    vram_tex: egui::TextureId,
+    strip: Rect,
+    t: f32,
+    touch: bool,
+) {
+    let (panel_fill, separator) = panel_colours(ctx);
+    let inset = state.touch_bottom_inset;
+    let response = TopBottomPanel::bottom("debug-strip")
+        .resizable(false)
+        .exact_height(strip.height())
+        .frame(egui::Frame::NONE.fill(Color32::BLACK))
+        .show(ctx, |ui| {
+            let panel_rect = ui.max_rect();
+            // The part that has opened so far, from the top edge down.
+            let shown = Rect::from_min_size(
+                panel_rect.min,
+                Vec2::new(panel_rect.width(), panel_rect.height() * t),
+            );
+            ui.painter().rect_filled(shown, 0.0, panel_fill);
+            ui.painter()
+                .hline(panel_rect.x_range(), panel_rect.top() + 0.5, separator);
+            // The contents are laid out at full size from the first frame and clipped to what has
+            // opened, so the summary is never missing from a frame.
+            let content = Rect::from_min_max(
+                panel_rect.min,
+                egui::pos2(panel_rect.right(), panel_rect.bottom() - inset),
+            );
+            ui.scope_builder(
+                UiBuilder::new()
+                    .max_rect(content.shrink(SIDEBAR_PAD))
+                    .layout(Layout::top_down(Align::Min)),
+                |ui| {
+                    ui.set_clip_rect(shown);
+                    draw_contents(ui, state, vram_tex, content.bottom() - SIDEBAR_PAD, touch);
+                },
+            );
+            panel_rect
+        });
+    let r = response.inner;
+    state.debug_rect = [r.left(), r.top(), r.right(), r.bottom()];
 }
 
 fn draw_bottom(
@@ -283,6 +343,7 @@ fn draw_contents(
             }
         }
     }
+    state.debug_contents_frames = state.debug_contents_frames.wrapping_add(1);
     // A summary that stays put while the tabs change: what is loaded, whether it runs, and how
     // fast, then the close button.
     summary(ui, state, touch);

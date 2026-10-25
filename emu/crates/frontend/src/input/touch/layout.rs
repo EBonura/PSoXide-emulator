@@ -54,6 +54,8 @@ const ICON_GAP: f32 = 6.0;
 const STICK_BAR: f32 = 46.0;
 /// Width and height of a D-pad or face cluster's touch areas at full size, CSS px.
 const BLOCK: f32 = 2.0 * (FACE_REACH + FACE_HIT);
+/// Half the side of a stick's capture square in the portrait panel, CSS px: the ring and a little.
+const PORTRAIT_STICK_ZONE: f32 = 50.0;
 /// Gap between the items of a landscape bar's stack, CSS px.
 const STACK_GAP: f32 = 8.0;
 /// Height of the whole stack of a landscape bar (shoulders, icons, cluster, stick, pill and the gaps
@@ -95,6 +97,9 @@ pub(crate) struct LayoutParams {
     /// Pixels the debug panel takes from the right of a landscape window: the controls lay
     /// themselves out in what is left beside it.
     pub(crate) dock_right: f32,
+    /// Pixels of the portrait panel the debug strip asks for under the controls: the controls
+    /// shrink as far as needed to leave them, and never past the strip.
+    pub(crate) dock_bottom: f32,
 }
 
 /// Which way the window is wider.
@@ -272,6 +277,9 @@ pub(crate) struct TouchLayout {
     /// Where the game picture sits (4:3, window pixels) when nothing else shares
     /// the window. No control is ever drawn or touched inside it.
     pub(crate) game: Rect,
+    /// Where the debug strip goes in portrait (window pixels, down to the window's edge): under the
+    /// controls. [`Rect::NOTHING`] when none was asked for.
+    pub(crate) strip: Rect,
 }
 
 fn pill(rect: Rect, inflate: Vec2, mask: u16, label: &'static str) -> PadButton {
@@ -443,18 +451,23 @@ impl TouchLayout {
     }
 
     /// Portrait: the game takes the top at 4:3 and everything else is in the panel under it. The
-    /// row of interface buttons is the panel's first line, right under the picture; the pad's
-    /// controls sit at the bottom of the panel, within the thumb's reach.
+    /// row of interface buttons is the panel's first line, right under the picture, and the pad's
+    /// controls are packed in one block right under it, like a real controller's. What the block
+    /// leaves of the panel is below it: empty, or the debug strip, for which the block shrinks as
+    /// far as it must and no further.
     fn portrait(p: &LayoutParams) -> Self {
         let (ox, oy) = (p.safe.left, p.safe.top);
         let w_px = (p.size.x - p.safe.left - p.safe.right).max(1.0);
         let w_css = w_px / p.scale;
         let game_h = 0.75 * w_px;
         let panel_top = oy + game_h;
-        let need_css = if p.analog { 378.0 } else { 234.0 } + UI_BAND;
+        let need_css = if p.analog { 342.0 } else { 234.0 } + UI_BAND;
         let avail_css = (p.size.y - p.safe.bottom - panel_top).max(0.0) / p.scale;
+        let strip_css = (p.dock_bottom / p.scale).max(0.0);
         let k = (w_css / 380.0).clamp(0.7, 1.4) * f32::from(p.size_pct) / 100.0;
-        let k = k.min(avail_css / need_css).clamp(0.5, 1.5);
+        let k = k
+            .min((avail_css - strip_css).max(0.0) / need_css)
+            .clamp(0.5, 1.5);
         let u = p.scale * k;
         // On a narrow screen the two clusters shrink so the Start / Select
         // column between them keeps a thumb-sized width.
@@ -463,9 +476,9 @@ impl TouchLayout {
             .clamp(0.7, 1.0);
 
         let m = MARGIN * u;
-        // The pad's block hangs from the bottom of the window's safe area.
-        let content_h = (need_css - UI_BAND) * u;
-        let content_top = (p.size.y - p.safe.bottom - content_h).max(panel_top + UI_BAND * u);
+        // The pad's block hangs right under the interface row.
+        let content_top = panel_top + UI_BAND * u;
+        let content_end = content_top + (need_css - UI_BAND) * u;
         let y0 = content_top + m;
         let cy = y0 + (SHOULDER.y + 5.0 + (FACE_REACH + FACE_HIT) * c + 5.0) * u;
         let cx_mid = ox + w_px / 2.0;
@@ -479,6 +492,13 @@ impl TouchLayout {
         );
         layout.reserved_bottom = p.size.y - panel_top;
         layout.game = Rect::from_min_size(pos2(ox, oy), vec2(w_px, game_h));
+        if p.dock_bottom > 0.0 {
+            // From the end of the block to the window's edge; the strip keeps the safe inset free.
+            layout.strip = Rect::from_min_max(
+                pos2(ox, content_end.min(p.size.y - p.safe.bottom)),
+                pos2(ox + w_px, p.size.y),
+            );
+        }
 
         layout.shoulders(ox, w_px, y0, u);
         // Between the D-pad and the face buttons: Select above Start.
@@ -499,11 +519,16 @@ impl TouchLayout {
             p.fullscreen_button,
         );
         if p.analog {
-            let zone = STICK_ZONE * u;
-            let y = cy + (75.0 + 12.0) * u + zone;
+            // The sticks sit right under the face buttons, their capture squares just clear of
+            // the buttons' touch circles.
+            let zone = PORTRAIT_STICK_ZONE * u;
+            let y = cy + ((FACE_REACH + FACE_HIT) * c + 2.0) * u + zone;
             let left_x = (ox + w_px * 0.27).max(ox + m + zone);
             let right_x = (ox + w_px * 0.73).min(ox + w_px - m - zone);
             layout.sticks(pos2(left_x, y), pos2(right_x, y), u);
+            for stick in &mut layout.sticks {
+                stick.zone = Rect::from_center_size(stick.rest, Vec2::splat(2.0 * zone));
+            }
         }
         layout
     }
@@ -525,6 +550,7 @@ impl TouchLayout {
             bar_left: 0.0,
             bar_right: 0.0,
             game: Rect::NOTHING,
+            strip: Rect::NOTHING,
         };
         for (mask, glyph, dx, dy) in [
             (button::TRIANGLE, Glyph::Triangle, 0.0, -FACE_REACH),
@@ -777,6 +803,7 @@ pub(crate) mod tests {
             fullscreen_button: true,
             menu_open: false,
             dock_right: 0.0,
+            dock_bottom: 0.0,
         }
     }
 
@@ -1025,6 +1052,7 @@ pub(crate) mod tests {
                         fullscreen_button: true,
                         menu_open: false,
                         dock_right: 0.0,
+                        dock_bottom: 0.0,
                     },
                 ));
             }
@@ -1038,6 +1066,12 @@ pub(crate) mod tests {
                         p.size_pct = size_pct;
                         let landscape = p.size.x >= p.size.y;
                         p.dock_right = if landscape { dock * p.size.x } else { 0.0 };
+                        // In portrait the debug strip asks for 140 CSS px under the controls.
+                        p.dock_bottom = if landscape || dock == 0.0 {
+                            0.0
+                        } else {
+                            140.0 * p.scale
+                        };
                         let layout = TouchLayout::compute(&p);
                         let game = layout.game;
                         assert!(game.width() > 50.0, "{name}: no game rect {game:?}");
@@ -1053,6 +1087,27 @@ pub(crate) mod tests {
                                 !rect.shrink(0.5).intersects(game),
                                 "{name} lh={left_handed} size={size_pct} dock={dock}: {what} {rect:?} meets the game {game:?}"
                             );
+                        }
+                        // The strip, when asked for, is clear of every control and tall enough to read.
+                        if p.dock_bottom > 0.0 {
+                            let strip = layout.strip;
+                            assert!(
+                                strip.height() >= 100.0 * p.scale,
+                                "{name} lh={left_handed} size={size_pct}: strip {strip:?}"
+                            );
+                            let mut all = hit_rects(&layout);
+                            all.extend(
+                                layout
+                                    .buttons
+                                    .iter()
+                                    .map(|b| (format!("drawn {:#x}", b.mask), b.draw.bounds())),
+                            );
+                            for (what, rect) in all {
+                                assert!(
+                                    !rect.shrink(0.5).intersects(strip),
+                                    "{name} lh={left_handed} size={size_pct}: {what} {rect:?} meets the strip {strip:?}"
+                                );
+                            }
                         }
                         // The game stays 4:3.
                         assert!(
@@ -1095,6 +1150,7 @@ pub(crate) mod tests {
                 fullscreen_button: true,
                 menu_open: false,
                 dock_right: 0.0,
+                dock_bottom: 0.0,
             };
             let layout = TouchLayout::compute(&p);
             let natural = (h * dpr * 4.0 / 3.0).min(w * dpr);

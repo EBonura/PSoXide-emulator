@@ -260,6 +260,7 @@ mod tests {
                 fullscreen_button: false,
                 menu_open: false,
                 dock_right: 0.0,
+                dock_bottom: 0.0,
             },
             0,
             0.016,
@@ -293,6 +294,7 @@ mod tests {
             fullscreen_button: true,
             menu_open: true,
             dock_right: 0.0,
+            dock_bottom: 0.0,
         };
         let mut router = touch_router();
         router.touch_mut().update_layout(params(), 0, 0.016);
@@ -301,7 +303,10 @@ mod tests {
         router.touch_mut().set_shell_up(true);
         router.touch_mut().update_layout(params(), 0, 0.016);
         let layout = router.touch().layout().expect("the pad stays laid out");
-        assert!(layout.ui.is_empty(), "no button of the controller over the shell");
+        assert!(
+            layout.ui.is_empty(),
+            "no button of the controller over the shell"
+        );
         assert!(!layout.buttons.is_empty(), "the game keeps its panel");
         router.touch_mut().set_shell_up(false);
         router.touch_mut().update_layout(params(), 0, 0.016);
@@ -428,6 +433,7 @@ mod tests {
                 fullscreen_button: false,
                 menu_open: false,
                 dock_right: 0.0,
+                dock_bottom: 0.0,
             },
             0,
             0.016,
@@ -448,6 +454,7 @@ mod tests {
                 fullscreen_button: false,
                 menu_open: false,
                 dock_right: 0.0,
+                dock_bottom: 0.0,
             },
             0,
             0.016,

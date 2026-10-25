@@ -575,11 +575,7 @@ fn draw_control(
             let tw = (200.0 * u).min(r.width() * 0.4);
             // Every track starts at the same place: room for the widest value, not this one.
             let widest = p
-                .layout_no_wrap(
-                    "150%".to_string(),
-                    value_font(u),
-                    tokens::TEXT,
-                )
+                .layout_no_wrap("150%".to_string(), value_font(u), tokens::TEXT)
                 .size()
                 .x;
             let track_right = right - widest - 16.0 * u;

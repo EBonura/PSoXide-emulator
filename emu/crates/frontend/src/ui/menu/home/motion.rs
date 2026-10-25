@@ -130,7 +130,10 @@ mod tests {
     #[test]
     fn parts_arrive_one_after_another_and_all_by_the_end() {
         assert_eq!(stage(0.0, 0), 0.0);
-        assert!(stage(0.1, 0) > stage(0.1, 3), "an earlier part is further along");
+        assert!(
+            stage(0.1, 0) > stage(0.1, 3),
+            "an earlier part is further along"
+        );
         assert!(stage(stage_total(), 99) > 0.999);
         assert_eq!(stage(10.0, 0), 1.0);
     }

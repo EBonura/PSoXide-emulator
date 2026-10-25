@@ -346,6 +346,12 @@ pub struct AppState {
     pub debug_rect: [f32; 4],
     /// Where the game picture was last drawn, `[left, top, right, bottom]` in points.
     pub game_rect: [f32; 4],
+    /// Points of the window's bottom edge the phone's home indicator covers: the debug strip keeps its
+    /// text clear of them.
+    pub touch_bottom_inset: f32,
+    /// Frames the debug panel's contents were laid out in (the browser journeys check the first frame
+    /// it shows is not blank).
+    pub debug_contents_frames: u32,
     /// Framebuffer mode -- shared HW renderer at native scale vs
     /// window-fitted high resolution. Toggled via the debug toolbar.
     pub scale_mode: ScaleMode,
@@ -649,6 +655,8 @@ impl AppState {
             debug_slide: 0.0,
             debug_rect: [0.0; 4],
             game_rect: [0.0; 4],
+            touch_bottom_inset: 0.0,
+            debug_contents_frames: 0,
             scale_mode: ScaleMode::default(),
             texture_filter: TextureFilter::default(),
             deinterlace: emulator_core::Deinterlace::default(),
@@ -928,7 +936,7 @@ impl AppState {
         format!(
             "{{\"running\":{},\"menu_open\":{},\"loaded_id\":\"{id}\",\"loading\":\"{loading}\",\
              \"machine\":{},\"port1_mode\":\"{mode}\",\"has_bus\":{},\"status\":\"{status}\",\
-             \"panel\":\"{panel}\",\"home\":{home},\"slots\":{slots},\"game\":[{:.3},{:.3},{:.3},{:.3}],\"cpu_tick\":{},\"display\":[{},{},{},{}],\"display_lit\":{},\"debug\":{{\"open\":{},\"slide\":{:.3},\"rect\":[{:.1},{:.1},{:.1},{:.1}]}},\"menu\":{{\"column\":\"{}\",\"row\":\"{}\",\"value\":\"{}\",\"rows\":{}}},\"touch\":{}}}",
+             \"panel\":\"{panel}\",\"home\":{home},\"slots\":{slots},\"game\":[{:.3},{:.3},{:.3},{:.3}],\"cpu_tick\":{},\"display\":[{},{},{},{}],\"display_lit\":{},\"debug\":{{\"open\":{},\"slide\":{:.3},\"contents\":{},\"rect\":[{:.1},{:.1},{:.1},{:.1}]}},\"menu\":{{\"column\":\"{}\",\"row\":\"{}\",\"value\":\"{}\",\"rows\":{}}},\"touch\":{}}}",
             self.running,
             self.menu.open,
             self.gpu_resync_generation,
@@ -945,6 +953,7 @@ impl AppState {
             display_lit,
             self.panels.debug_sidebar,
             self.debug_slide,
+            self.debug_contents_frames,
             self.debug_rect[0],
             self.debug_rect[1],
             self.debug_rect[2],

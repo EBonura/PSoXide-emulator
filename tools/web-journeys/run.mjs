@@ -2190,13 +2190,27 @@ async function journeyDebug(label, urlFor, size) {
   /** The controller's drawn rects in css px; `padOnly` leaves out the pause, save, load, debug and menu buttons. */
   const padRects = async (padOnly = false) => ((await page.ux()).touch?.rects ?? []).filter((r) => !padOnly || r[0] !== 0).map((r) => r.slice(1).map((v) => v / size.dpr));
   const before = await page.ux();
+  const gameBefore = before.game;
   const padBefore = mobile ? JSON.stringify(await padRects()) : "";
   await page.shot(`${label}-1-closed`);
+  if (mobile && size.w < size.h) await step("portrait: the controls are one packed block right under the interface row, the room left is below them", async () => {
+    const rects = (await page.ux()).touch.rects.map((r) => [r[0], ...r.slice(1).map((v) => v / size.dpr)]);
+    const uiBottom = Math.max(...rects.filter((r) => r[0] === 0).map((r) => r[4]));
+    const shoulder = rects.find((r) => r[0] === PS1.L1);
+    if (!shoulder) return "no L1";
+    if (shoulder[2] - uiBottom > 30) return `L1 starts ${(shoulder[2] - uiBottom).toFixed(0)} px under the interface row`;
+    if (shoulder[2] < uiBottom) return "the shoulders are over the interface row";
+  });
   await step("the debug button opens the panel and the game keeps running at full speed", async () => {
     const a = await page.ux();
     await sleep(900);
     const rate0 = (await page.ux()).cpu_tick - a.cpu_tick;
+    const contents0 = a.debug.contents;
     await toggle();
+    // Every frame the panel shows has its contents laid out: the first one with any of it showing
+    // is not a blank box.
+    const first = await page.waitFor("the panel starting to show", (s) => s.debug.slide > 0.001, 4000);
+    if (first.debug.contents <= contents0) return `the panel showed (slide ${first.debug.slide}) before its contents were laid out`;
     const open = await page.waitFor("the panel open", (s) => s.debug.open && s.debug.slide > 0.99, 4000);
     await sleep(900);
     await page.shot(`${label}-2-open`);
@@ -2218,14 +2232,23 @@ async function journeyDebug(label, urlFor, size) {
       if (x1 - x0 < 240 || x1 - x0 > size.w * 0.6) return `the panel is ${x1 - x0} wide in a ${size.w} window`;
       if (mobile) for (const [rx0, ry0, rx1] of (await padRects()).map((r) => [r[0], r[1], r[2]])) if (rx1 > x0 + 1) return `a control reaches ${rx1} into the panel at ${x0}`;
     } else {
-      if (y1 < size.h - 120 && !mobile) return `the strip is not at the bottom: ${u.debug.rect}`;
       if (y1 - y0 < 110) return `the strip is only ${y1 - y0} tall`;
+      if (y1 < size.h - 2) return `the strip does not reach the bottom of the window: ${u.debug.rect}`;
       if (mobile) {
-        const pads = await padRects(true);
-        const top = Math.min(...pads.map((r) => r[1]));
-        if (y1 > top + 1) return `the strip (to ${y1}) runs into the controls (from ${top})`;
-        if (y0 < 140) return `the game has only ${y0} px above the strip`;
+        // Under the controls, in the room the pad panel leaves: never over a button.
+        const pads = await padRects();
+        const lowest = Math.max(...pads.map((r) => r[3]));
+        if (y0 < lowest - 1) return `the strip (from ${y0}) runs into the controls (down to ${lowest})`;
       }
+    }
+    // The picture keeps its whole width and place with the strip open (portrait) or gives up only the
+    // column's share (landscape).
+    if (!landscape) {
+      const g = u.game;
+      if (Math.abs((g[2] - g[0]) - (gameBefore[2] - gameBefore[0])) > 0.6 || Math.abs(g[1] - gameBefore[1]) > 0.6) {
+        return `the picture changed from [${gameBefore}] to [${g}] when the strip opened`;
+      }
+      if (g[2] - g[0] < size.w * 0.97) return `the picture is only ${g[2] - g[0]} wide in a ${size.w} window`;
     }
   });
   if (mobile) await step("the controller still plays the game while the panel is open", async () => {

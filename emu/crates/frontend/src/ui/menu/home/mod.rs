@@ -549,7 +549,11 @@ impl HomeState {
             self.home_age += dt;
         }
         if self.welcome != self.last_welcome {
-            self.page_dir = if self.welcome > self.last_welcome { 1.0 } else { -1.0 };
+            self.page_dir = if self.welcome > self.last_welcome {
+                1.0
+            } else {
+                -1.0
+            };
             self.last_welcome = self.welcome;
             self.page_age = 0.0;
         }
@@ -1661,7 +1665,9 @@ impl HomeState {
     /// while it is held and drains when it is let go. One rule for every control; things that
     /// would look wrong lit (the cases, the sliders, a scroll) are left out.
     fn draw_press_feedback(&mut self, ctx: &egui::Context, dt: f32) {
-        let held = self.press.filter(|p| !p.scrolled && p.on_slider.is_none() && p.travel < 10.0);
+        let held = self
+            .press
+            .filter(|p| !p.scrolled && p.on_slider.is_none() && p.travel < 10.0);
         let full = ctx.screen_rect();
         let target = held.and_then(|press| {
             self.hits
@@ -2039,7 +2045,10 @@ impl HomeState {
         let head = self.reveal(0);
         pc.painter.add(Shape::convex_polygon(
             outline.clone(),
-            fade(Color32::from_rgba_unmultiplied(8, 16, 22, 184), pc.appear * head),
+            fade(
+                Color32::from_rgba_unmultiplied(8, 16, 22, 184),
+                pc.appear * head,
+            ),
             Stroke::new(1.0, fade(tokens::hairline(), pc.appear * head)),
         ));
         self.section = Some(rect);
@@ -2138,7 +2147,11 @@ impl HomeState {
         };
         // The page's own words arrive in turn: title and line, then the button, then the
         // quiet actions, each sliding up a little as it fades in.
-        let (rt, rb, rq) = (self.home_reveal(0), self.home_reveal(2), self.home_reveal(3));
+        let (rt, rb, rq) = (
+            self.home_reveal(0),
+            self.home_reveal(2),
+            self.home_reveal(3),
+        );
         let (ta, ba, qa) = (a * rt, a * rb, a * rq);
         let m0 = motion::mark(ctx, p);
         let text_col = tokens::TEXT;
@@ -2186,7 +2199,11 @@ impl HomeState {
                 _ => tx - cw / 2.0,
             };
             let chip = Rect::from_min_size(Pos2::new(left, sub_y), Vec2::new(cw, ch));
-            p.rect_filled(chip, ch / 2.0, fade(Color32::from_rgb(10, 34, 40), ta * 0.9));
+            p.rect_filled(
+                chip,
+                ch / 2.0,
+                fade(Color32::from_rgb(10, 34, 40), ta * 0.9),
+            );
             p.rect_stroke(
                 chip,
                 ch / 2.0,
@@ -2202,7 +2219,10 @@ impl HomeState {
             let dot = Pos2::new(chip.left() + 13.0 * u, chip.center().y);
             p.circle_filled(dot, 3.2 * u, fade(tokens::OK, ta * pulse));
             p.galley(
-                Pos2::new(chip.left() + 24.0 * u, chip.center().y - galley.size().y / 2.0),
+                Pos2::new(
+                    chip.left() + 24.0 * u,
+                    chip.center().y - galley.size().y / 2.0,
+                ),
                 galley,
                 tokens::TEXT_2,
             );
@@ -2744,7 +2764,8 @@ impl HomeState {
         } else {
             self.nav_hl.pos
         };
-        self.nav_ring.step(ring_at, dt, snap || self.ring_vis < 0.05);
+        self.nav_ring
+            .step(ring_at, dt, snap || self.ring_vis < 0.05);
         self.ring_vis = if snap {
             f32::from(focused)
         } else {
@@ -2784,7 +2805,9 @@ impl HomeState {
         let mut centres: Vec<(f32, f32)> = Vec::with_capacity(items.len());
         let mut bottom = ny;
         for (i, item) in items.iter().enumerate() {
-            let near = self.tab_near(i).max(self.ring_vis * (1.0 - (self.nav_ring.pos - i as f32).abs()).clamp(0.0, 1.0));
+            let near = self
+                .tab_near(i)
+                .max(self.ring_vis * (1.0 - (self.nav_ring.pos - i as f32).abs()).clamp(0.0, 1.0));
             let col = scene::mix(tokens::DIM, tokens::TEXT, near);
             let r = p.text(
                 Pos2::new(x, ny),
@@ -2810,7 +2833,10 @@ impl HomeState {
                 centres[i].0 + (centres[j].0 - centres[i].0) * (t - i as f32)
             };
             let vis = (self.nav_vis + self.ring_vis).min(1.0);
-            let c = Pos2::new(at(pos).clamp(first.0 - 6.0 * u, last.0 + 6.0 * u), bottom + 5.0 * u);
+            let c = Pos2::new(
+                at(pos).clamp(first.0 - 6.0 * u, last.0 + 6.0 * u),
+                bottom + 5.0 * u,
+            );
             let d = 3.0 * u;
             let col = scene::mix(CYAN, tokens::FOCUS, self.ring_vis);
             p.add(Shape::convex_polygon(
@@ -2857,10 +2883,7 @@ impl HomeState {
         // fullscreen button (itch) may sit beside the bar in a frame; the bar does not move for it.
         let w = (items.len() as f32 * 76.0 * u).min(lay.safe.width() - 24.0 * u - 2.0 * side);
         let bar = Rect::from_center_size(
-            Pos2::new(
-                lay.safe.center().x,
-                lay.safe.bottom() - h / 2.0 - 10.0 * u,
-            ),
+            Pos2::new(lay.safe.center().x, lay.safe.bottom() - h / 2.0 - 10.0 * u),
             Vec2::new(w, h),
         );
         p.rect_filled(
@@ -2897,7 +2920,8 @@ impl HomeState {
         // small bounce) instead of switching on in the new cell.
         if self.nav_vis > 0.01 {
             let x = bar.left() + cell * self.nav_hl.pos.clamp(0.0, last);
-            let pill = Rect::from_min_size(Pos2::new(x, bar.top()), Vec2::new(cell, h)).shrink2(inset);
+            let pill =
+                Rect::from_min_size(Pos2::new(x, bar.top()), Vec2::new(cell, h)).shrink2(inset);
             p.rect_filled(
                 pill,
                 pill_r,
@@ -2906,7 +2930,8 @@ impl HomeState {
         }
         if self.ring_vis > 0.01 {
             let x = bar.left() + cell * self.nav_ring.pos.clamp(0.0, last);
-            let ring = Rect::from_min_size(Pos2::new(x, bar.top()), Vec2::new(cell, h)).shrink2(inset);
+            let ring =
+                Rect::from_min_size(Pos2::new(x, bar.top()), Vec2::new(cell, h)).shrink2(inset);
             p.rect_stroke(
                 ring,
                 pill_r,
@@ -3048,8 +3073,13 @@ impl HomeState {
         // way back to the game lives in the header: one tap on the X.
         if self.pausing(ms) && !desktop {
             let side = 34.0 * u;
-            let b = Rect::from_center_size(Pos2::new(right_edge - side / 2.0, iy), Vec2::splat(side));
-            p.circle_filled(b.center(), side / 2.0, fade(Color32::from_rgba_unmultiplied(8, 16, 22, 200), a));
+            let b =
+                Rect::from_center_size(Pos2::new(right_edge - side / 2.0, iy), Vec2::splat(side));
+            p.circle_filled(
+                b.center(),
+                side / 2.0,
+                fade(Color32::from_rgba_unmultiplied(8, 16, 22, 200), a),
+            );
             p.circle_stroke(
                 b.center(),
                 side / 2.0,
@@ -3063,10 +3093,7 @@ impl HomeState {
             self.hits.push((b.expand(7.0 * u), Click::Close));
             right_edge -= side + 14.0 * u;
         }
-        let mut ix = self
-            .feed
-            .touch_ui_left
-            .map_or(right_edge, |x| x - 10.0 * u);
+        let mut ix = self.feed.touch_ui_left.map_or(right_edge, |x| x - 10.0 * u);
         let touch_on = self.feed.touch;
         let states = [
             (self.feed.touch || ms.touch_mode, 2),
