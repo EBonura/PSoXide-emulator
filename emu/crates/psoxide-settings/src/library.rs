@@ -648,23 +648,37 @@ pub fn boot_serial_of_prefix(prefix: Vec<u8>) -> Option<String> {
     } else {
         return None;
     };
-    let image: crate::disc_image::SharedImage = std::sync::Arc::new(prefix);
-    boot_serial_of_reader(&SectorReader {
-        image,
-        stride,
-        user_offset,
-    })
+    let user = |lba: u64| -> Option<Vec<u8>> {
+        let start = usize::try_from(lba * stride + user_offset).ok()?;
+        prefix
+            .get(start..start + psx_iso::SECTOR_USER_DATA_BYTES)
+            .map(<[u8]>::to_vec)
+    };
+    boot_serial_with(&user)
 }
 
 fn boot_serial_of_reader(reader: &SectorReader) -> Option<String> {
-    let pvd = reader.user(16)?;
+    boot_serial_with(&|lba| reader.user(lba))
+}
+
+/// The boot serial of a disc whose 2048-byte user sectors `user` reads.
+fn boot_serial_with(user: &dyn Fn(u64) -> Option<Vec<u8>>) -> Option<String> {
+    let extent = |lba: u64, count: u64, len: usize| -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(len.min(1 << 20));
+        for i in 0..count {
+            out.extend_from_slice(&user(lba.checked_add(i)?)?);
+        }
+        out.truncate(len);
+        Some(out)
+    };
+    let pvd = user(16)?;
     if pvd[0] != 1 || &pvd[1..6] != b"CD001" {
         return None;
     }
     let sector = psx_iso::SECTOR_USER_DATA_BYTES as u64;
     let root_lba = le_u32(&pvd, 158)? as u64;
     let root_size = le_u32(&pvd, 166)? as usize;
-    let root = reader.extent(
+    let root = extent(
         root_lba,
         (root_size as u64).div_ceil(sector).min(32),
         root_size,
@@ -672,7 +686,7 @@ fn boot_serial_of_reader(reader: &SectorReader) -> Option<String> {
     let cnf = iso_records(&root)
         .into_iter()
         .find(|r| !r.is_dir && r.name.to_ascii_uppercase().starts_with("SYSTEM.CNF"))
-        .and_then(|r| reader.extent(r.lba, r.size.div_ceil(sector).min(2), r.size as usize))?;
+        .and_then(|r| extent(r.lba, r.size.div_ceil(sector).min(2), r.size as usize))?;
     boot_serial_of_cnf(&cnf)
 }
 
@@ -1736,6 +1750,31 @@ fn synth_sector(user_data: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// A raw image with the retail serial in its `SYSTEM.CNF`.
+    fn serial_disc() -> Vec<u8> {
+        let mut builder = psx_iso::IsoBuilder::new();
+        builder.add_file("SYSTEM.CNF", b"BOOT = cdrom:\\SCUS_949.00;1\r\n".to_vec());
+        builder.add_file("SCUS_949.00", vec![0u8; 64]);
+        builder.build_bin()
+    }
+
+    #[test]
+    fn the_boot_serial_reads_from_a_prefix_of_the_image() {
+        let disc = serial_disc();
+        let prefix = disc.clone();
+        assert_eq!(boot_serial_of_prefix(prefix).as_deref(), Some("SCUS-94900"));
+        // The whole image gives the same answer through the file path.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = dir.path().join("g.bin");
+        std::fs::write(&bin, &disc).expect("write");
+        assert_eq!(disc_boot_serial(&bin).as_deref(), Some("SCUS-94900"));
+        // A prefix too short to reach the root directory is no answer.
+        assert_eq!(
+            boot_serial_of_prefix(disc[..psx_iso::SECTOR_BYTES * 18].to_vec()),
+            None
+        );
+    }
+
     /// Run with `PSOXIDE_SERIAL_IMAGE=<.bin/.cue>` to read a real disc's serial.
     #[test]
     #[ignore]

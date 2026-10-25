@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 /// One game of the catalogue.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DatGame {
     /// The exact Redump name, e.g. `Wipeout (USA)`.
     pub name: String,
@@ -237,6 +238,7 @@ impl Crc32 {
 /// The data track of a disc image, as the catalogue hashes it: a file and
 /// how many of its bytes belong to track 1.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DataTrack {
     /// The image file.
     pub path: PathBuf,

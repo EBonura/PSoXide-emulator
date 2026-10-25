@@ -23,13 +23,11 @@
 //! machine ([`CoverState`]) over an [`Io`] that does the file and network
 //! work off the UI thread, so the logic is tested without either.
 
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::Arc;
-
 use egui::{ColorImage, TextureHandle, TextureId, TextureOptions};
 use psoxide_settings::game_group::strip_track;
 use psoxide_settings::redump::RedumpDat;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 /// Seconds a remembered miss is believed.
 pub(crate) const MISS_TTL_SECS: u64 = 7 * 24 * 3600;
@@ -77,7 +75,7 @@ pub(crate) enum Done {
         track: Option<(u64, u32)>,
     },
     /// The Redump catalogue arrived (`None`: it could not be had).
-    Dat(Option<Arc<RedumpDat>>),
+    Dat(Option<Box<RedumpDat>>),
 }
 
 /// libretro writes names with `&*/:`<>?\|` replaced by `_`.
@@ -190,11 +188,10 @@ struct Job {
     asked: HashSet<String>,
 }
 
-#[derive(Clone)]
 enum DatState {
     Unrequested,
     Loading,
-    Ready(Arc<RedumpDat>),
+    Ready(Box<RedumpDat>),
     Failed,
 }
 
@@ -376,14 +373,13 @@ impl CoverState {
                     }
                     // The catalogue only helps from here on; without a serial
                     // the hash step is next anyway.
-                    match self.dat.clone() {
+                    match &self.dat {
                         DatState::Ready(dat) => {
-                            let job = self.jobs.get_mut(id).expect("job");
-                            job.step = Step::Hash;
                             let name = serial
                                 .as_deref()
                                 .and_then(|s| dat.by_serial(s))
                                 .and_then(|g| name_candidate(&g.name));
+                            job.step = Step::Hash;
                             if let Some(c) = name {
                                 if self.ask(id, &[c]) {
                                     return;
@@ -410,18 +406,24 @@ impl CoverState {
                 Step::AfterHash => {
                     job.step = Step::Name;
                     let serial = job.source.serial.clone();
-                    let crc = job.crc;
-                    let DatState::Ready(dat) = self.dat.clone() else {
+                    let list = match (&self.dat, job.crc) {
+                        (DatState::Ready(dat), Some((size, crc))) => {
+                            dat.by_track(size, crc).map(|game| {
+                                let mut list = Vec::new();
+                                if !game.serial.is_empty()
+                                    && serial.as_deref() != Some(game.serial.as_str())
+                                {
+                                    list.push(serial_candidate(&game.serial));
+                                }
+                                list.extend(name_candidate(&game.name));
+                                list
+                            })
+                        }
+                        _ => None,
+                    };
+                    let Some(list) = list else {
                         continue;
                     };
-                    let Some(game) = crc.and_then(|(size, crc)| dat.by_track(size, crc)) else {
-                        continue;
-                    };
-                    let mut list = Vec::new();
-                    if !game.serial.is_empty() && serial.as_deref() != Some(game.serial.as_str()) {
-                        list.push(serial_candidate(&game.serial));
-                    }
-                    list.extend(name_candidate(&game.name));
                     if self.ask(id, &list) {
                         return;
                     }
@@ -896,7 +898,7 @@ mod io {
                 .ok()
                 .map(|text| RedumpDat::parse(&text))
                 .filter(|d| !d.is_empty())
-                .map(std::sync::Arc::new);
+                .map(Box::new);
             Done::Dat(dat)
         });
     }
@@ -913,10 +915,8 @@ mod io {
     //! the picked folder's files read a slice at a time for the serial and the
     //! hash.
 
-    use std::cell::RefCell;
-    use std::sync::Arc;
-
     use psoxide_settings::redump::{Crc32, RedumpDat};
+    use std::cell::RefCell;
     use wasm_bindgen::prelude::wasm_bindgen;
     use wasm_bindgen_futures::{spawn_local, JsFuture};
 
@@ -1141,7 +1141,7 @@ export function cvIdentPut(key, size, crc) { return _put('ident:' + key, { size,
             let dat = text
                 .map(|t| RedumpDat::parse(&t))
                 .filter(|d| !d.is_empty())
-                .map(Arc::new);
+                .map(Box::new);
             finish(Done::Dat(dat));
         });
     }
@@ -1227,8 +1227,8 @@ mod tests {
     const ID: &str = "path:/g/WipEout (USA).cue";
     const DAT: &str = "game (\n\tname \"Wipeout (USA)\"\n\tregion \"USA\"\n\tserial \"SCUS-94301\"\n\trom ( name \"Wipeout (USA) (Track 1).bin\" size 100 crc 0000ABCD md5 1 sha1 2 serial \"SCUS-94301\" )\n)\n";
 
-    fn dat() -> Arc<RedumpDat> {
-        Arc::new(RedumpDat::parse(DAT))
+    fn dat() -> Box<RedumpDat> {
+        Box::new(RedumpDat::parse(DAT))
     }
 
     fn keys(log: &Rc<RefCell<Log>>) -> Vec<Vec<String>> {

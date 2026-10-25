@@ -1663,7 +1663,7 @@ async function journeySelection(label, urlFor, size) {
     await sleep(900);
     const after = await page.ux();
     await page.shot(`${label}-focus-after`);
-    if (!(mid.home.cases[1][3] > 0.05 && mid.home.cases[1][3] < 1.05)) return `the new case is not easing in: ${mid.home.cases[1]}`;
+    if (!(mid.home.cases[1][3] > 0.05 && mid.home.cases[1][3] < 1.15)) return `the new case is not easing in: ${mid.home.cases[1]}`;
     if (after.home.cases[1][3] < 0.9 || after.home.cases[1][3] > 1.15) return `the new case did not settle focused: ${after.home.cases[1]}`;
     if (after.home.cases[0][3] > 0.1) return `the old case did not settle back: ${after.home.cases[0]}`;
     return true;

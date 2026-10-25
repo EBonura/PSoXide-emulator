@@ -26,6 +26,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// One file the scan found.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FoundFile {
     /// Path with `/` separators (relative to the scanned folder, or absolute).
     pub path: String,
@@ -56,6 +57,7 @@ impl FoundFile {
 
 /// One game to show.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Game {
     /// The file that starts the game where discs are opened through sheets
     /// (the desktop): the cue, playlist, `.ccd`, `.iso`, `.bin` or `.exe` of
