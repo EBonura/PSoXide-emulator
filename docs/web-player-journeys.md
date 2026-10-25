@@ -505,3 +505,22 @@ the pad-button step tells a stalled page (no frames drawn, retried once, logged)
 - The launch is 2.3 s: the disc and the tray share one tilted frame, so the disc ends flat in the
   recess; discs are drawn 96-sided with label and hub rings; the spin goes on while the game loads.
 - Journeys added: `*-grouping`, `*-cover-states`, `*-selection`; the launch ones now expect 2.3 s.
+
+## Hints, analog and the toolbar (10-25, round 2)
+
+- Every control that has a button shows it. `home/hints.rs` draws the four face glyphs (cross,
+  circle, triangle, square) and the L1/R1/L2/R2 pills; a controller shows glyphs, a desktop
+  keyboard shows key caps (Enter, Esc, Tab, H, Q, E), a touch screen shows none. Where: Triangle
+  beside the view switch; L1 and R1 at the two ends of the tab bar (top nav and phone bar, clickable
+  and lit for a moment by the press); Cross on Start/Play; Square beside What's on it, Start over and
+  Burn (Square is the focused case's second action); L2/R2 "A to Z" when the shelf has letters; a
+  row at the foot of Settings, Game, Controls, Debug and Welcome; "Any button skips" under the launch.
+- Analog: a controller that reports sticks starts in analog mode, and the player's choice is saved
+  by controller name (`input.analog_choice`). The keyboard is never analog: no toggle on its card, no
+  Analog or stick-key rows in its map, its mode key does nothing, and `set_profile` refuses it. It
+  presents a DualShock that is digital until a game asks, so the demo disc still reaches analog by
+  its own handshake. (A game asking is not a setting.)
+- The toolbar over a game, the touch buttons around it, the toast and the debug panels use the
+  shell's palette and states (`theme.rs` palette, `toolbar.rs` shell style).
+- Journeys added: `*-hints`; the Controls device step now expects no keyboard toggle and an analog
+  controller.
