@@ -8,15 +8,17 @@
 mod controls;
 mod covers;
 mod grid;
+mod hints;
 mod launch;
 mod pages;
 mod scene;
-mod tokens;
+pub(crate) mod tokens;
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2};
 
 use super::{LibraryItem, MenuAction, MenuInput, MenuState};
 use crate::icons;
+use hints::{Btn, HintStyle};
 use scene::{fade, CoverKind, CYAN};
 
 pub(crate) use controls::Command as DeviceCommand;
@@ -166,6 +168,8 @@ enum Click {
     Restart,
     Burn,
     SizeToggle,
+    /// A shoulder glyph beside the tabs: step to the previous (-1) or next (1) section.
+    TabStep(i32),
     Rail,
     Act(MenuAction),
     Link(&'static str),
@@ -233,6 +237,11 @@ pub(crate) struct HomeState {
     anim: std::collections::HashMap<String, CaseAnim>,
     /// Seconds of the last frame (elapsed time, not the clamped step).
     frame_dt: f32,
+    /// How lit each hint glyph is from a press (L1, R1, Triangle, Square): 1 at the press,
+    /// easing to 0.
+    pad_press: [f32; 4],
+    /// How many first letters the shelf has (the L2/R2 hint shows when there is a jump to make).
+    letters: usize,
     /// The reduce-motion setting.
     calm_setting: bool,
     /// The browser asked for reduced motion.
@@ -306,6 +315,8 @@ impl HomeState {
             btn_bottom: 0.0,
             anim: std::collections::HashMap::new(),
             frame_dt: 0.0,
+            pad_press: [0.0; 4],
+            letters: 0,
             calm_setting: false,
             calm_browser: prefers_reduced_motion(),
         }
@@ -318,6 +329,61 @@ impl HomeState {
     /// Whether motion is calmed (the setting, or the browser's preference).
     pub(super) fn calm(&self) -> bool {
         self.calm_setting || self.calm_browser
+    }
+
+    /// The Square hint just left of a second action's words.
+    fn square_glyph(&self, p: &egui::Painter, lay: &Layout, words: Rect, a: f32) {
+        let Some(style) = self.hint_style(lay) else {
+            return;
+        };
+        let u = lay.u;
+        let w = hints::btn_width(p, u, style, Btn::Square);
+        let c = Pos2::new(words.left() - 12.0 * u - w / 2.0, words.center().y);
+        hints::draw_btn(p, c, u, a, style, Btn::Square, self.pad_press[3]);
+    }
+
+    /// What kind of button hints to draw: glyphs when a controller is connected, key caps
+    /// beside a keyboard on a desktop, none on a touch screen.
+    fn hint_style(&self, lay: &Layout) -> Option<HintStyle> {
+        if self.feed.gamepads > 0 {
+            Some(HintStyle::Pad)
+        } else if self.feed.touch || lay.kind != LayoutKind::Desktop {
+            None
+        } else {
+            Some(HintStyle::Keys)
+        }
+    }
+
+    /// Room a row of hints at the bottom of a page takes (desktop only).
+    fn hint_reserve(&self, lay: &Layout) -> f32 {
+        if lay.kind == LayoutKind::Desktop && self.hint_style(lay).is_some() {
+            38.0 * lay.u
+        } else {
+            0.0
+        }
+    }
+
+    /// The hint row at the bottom of a page of the shell.
+    fn draw_page_hints(&self, pc: &PageCtx<'_>, items: &[(Btn, &str)]) {
+        let lay = pc.lay;
+        let Some(style) = self.hint_style(lay) else {
+            return;
+        };
+        if lay.kind != LayoutKind::Desktop {
+            return;
+        }
+        let u = lay.u;
+        let y = lay.safe.bottom() - 22.0 * u;
+        hints::hint_row(
+            pc.painter,
+            lay.safe.left() + 48.0 * u,
+            y,
+            u,
+            pc.appear,
+            style,
+            items,
+            13.0 * u,
+        );
     }
 
     /// Step one case's animation and return its picture and effects.
@@ -503,6 +569,7 @@ impl MenuState {
                     Click::Act(action) => format!("act:{action:?}"),
                     Click::Restart => "restart".into(),
                     Click::SizeToggle => "size".into(),
+                    Click::TabStep(n) => format!("tab-step:{n}"),
                     Click::Rail => "rail".into(),
                     Click::Burn => "burn".into(),
                     Click::Link(url) => format!("link:{url}"),
@@ -560,7 +627,7 @@ impl MenuState {
             _ => -1.0,
         };
         format!(
-            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"controls\":{},\"cases\":[{}],\"hits\":[{}]}}",
+            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"controls\":{},\"cases\":[{}],\"hits\":[{}]}}",
             h.page.name(),
             if h.zone == Zone::Nav { "nav" } else { "body" },
             self.home_probe().1,
@@ -576,6 +643,7 @@ impl MenuState {
             h.first_visit,
             h.covers.loaded(),
             h.calm(),
+            h.compact,
             h.controls.probe_json(self),
             cases.join(","),
             hits.join(",")
@@ -657,6 +725,14 @@ impl MenuState {
         shell.open_nav(self, item);
         self.home = Some(shell);
         true
+    }
+
+    /// Preview with a controller connected (the hints show glyphs).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn home_preview_pad(&mut self, on: bool) {
+        if let Some(h) = self.home.as_mut() {
+            h.feed.gamepads = usize::from(on);
+        }
     }
 
     /// Preview the compact grid.
@@ -968,8 +1044,22 @@ impl HomeState {
             || input.tab_prev
             || input.tab_next
             || input.options
+            || input.secondary
             || input.letter_prev
             || input.letter_next;
+        for (i, pressed) in [
+            input.tab_prev,
+            input.tab_next,
+            input.options,
+            input.secondary,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if pressed {
+                self.pad_press[i] = 1.0;
+            }
+        }
         if playing {
             // Any input skips the sequence to the boot (not the press that began it).
             if any || input.toggle_open {
@@ -1080,6 +1170,21 @@ impl HomeState {
         if input.options {
             self.compact = !self.compact;
             return None;
+        }
+        if input.secondary {
+            // The second action of the focused case, whichever it has.
+            let click = cases.get(self.case_focus).and_then(|c| {
+                if matches!(c.kind, CoverKind::Demo) {
+                    Some(Click::Peek)
+                } else if c.restart.is_some() {
+                    Some(Click::Restart)
+                } else if c.burn.is_some() {
+                    Some(Click::Burn)
+                } else {
+                    None
+                }
+            });
+            return click.and_then(|click| self.apply_click(ms, click));
         }
         if input.letter_prev || input.letter_next {
             self.jump_letter(&cases, if input.letter_next { 1 } else { -1 });
@@ -1238,6 +1343,9 @@ impl HomeState {
             .clamp(0.0, 1.5);
         self.clock = Some(now);
         self.frame_dt = dt;
+        for v in &mut self.pad_press {
+            *v = (*v - dt * 4.5).max(0.0);
+        }
         // The sequence keeps the shell up while the game boots behind it.
         let playing = self.launch.is_some() && !self.launch_done;
         let target = if ms.open || playing { 1.0 } else { 0.0 };
@@ -1541,8 +1649,61 @@ impl HomeState {
             .and_then(|k| self.covers.texture(ctx, k));
         let label = self.label_tex.as_ref().map(egui::TextureHandle::id);
         launch::draw(pc.painter, pc.lay, l, art, label, pc.appear);
+        let (t, skipping) = (l.t, l.skipping);
+        if !skipping && !self.launch_done {
+            self.draw_skip_hint(pc, t);
+        }
         if let Some(action) = self.pending_launch.take() {
             ms.pending_pointer_action = Some(action);
+        }
+    }
+
+    /// "Any button skips", quietly under the launch's title once it is under way.
+    fn draw_skip_hint(&self, pc: &PageCtx<'_>, t: f32) {
+        let lay = pc.lay;
+        let u = lay.u;
+        let a = pc.appear * (((t - 0.5) / 0.3).clamp(0.0, 1.0)) * 0.9;
+        if a <= 0.01 {
+            return;
+        }
+        let p = pc.painter;
+        let y = lay.safe.bottom() - 16.0 * u;
+        let x = lay.full.center().x;
+        let size = 12.0 * u.max(0.9);
+        match self.hint_style(lay) {
+            Some(HintStyle::Pad) => {
+                let words = "Any button skips";
+                let g = p.layout_no_wrap(words.into(), FontId::proportional(size), tokens::DIM);
+                let r = hints::face_radius(u) * 0.9;
+                let total = r * 2.0 + 8.0 * u + g.size().x;
+                let left = x - total / 2.0;
+                hints::draw_face(p, Pos2::new(left + r, y), r, Btn::Cross, a, 0.0);
+                p.text(
+                    Pos2::new(left + r * 2.0 + 8.0 * u, y),
+                    Align2::LEFT_CENTER,
+                    words,
+                    FontId::proportional(size),
+                    fade(tokens::DIM, a),
+                );
+            }
+            Some(HintStyle::Keys) => {
+                p.text(
+                    Pos2::new(x, y),
+                    Align2::CENTER_CENTER,
+                    "Any key skips",
+                    FontId::proportional(size),
+                    fade(tokens::DIM, a),
+                );
+            }
+            None => {
+                p.text(
+                    Pos2::new(x, y),
+                    Align2::CENTER_CENTER,
+                    "Tap to skip",
+                    FontId::proportional(size),
+                    fade(tokens::DIM, a),
+                );
+            }
         }
     }
 
@@ -1568,12 +1729,13 @@ impl HomeState {
                 lay.safe.right() - side,
                 lay.safe.bottom()
                     - if lay.kind == LayoutKind::Desktop {
-                        12.0 * u
+                        12.0 * u + self.hint_reserve(lay)
                     } else {
                         lay.bar_reserve() + 4.0 * u
                     },
             ),
         );
+        self.draw_page_hints(pc, &[(Btn::Circle, "Back")]);
         let outline = chamfer(rect.expand(6.0), tokens::CHAMFER * u);
         pc.painter.add(Shape::convex_polygon(
             outline.clone(),
@@ -1590,6 +1752,7 @@ impl HomeState {
         let u = lay.u;
         let cases = self.cases(ms);
         self.case_focus = self.case_focus.min(cases.len().saturating_sub(1));
+        self.letters = grid::letter_groups(&cases).len();
         let f = self.case_focus;
         if self.compact {
             self.draw_compact(ms, ctx, pc, &cases);
@@ -1735,6 +1898,7 @@ impl HomeState {
             );
             self.hits
                 .push((wio.expand2(Vec2::new(10.0, 8.0)), Click::Peek));
+            self.square_glyph(p, &lay, wio, a);
             below = wio.bottom();
         }
         // The countdown line, or the loading line, or nothing.
@@ -1747,7 +1911,9 @@ impl HomeState {
         }
         // The one button.
         let label = item.button.to_uppercase();
-        let bw = (label.chars().count() as f32 * 9.0 + 64.0) * u;
+        let pad_glyph = self.hint_style(&lay) == Some(HintStyle::Pad);
+        let bw =
+            (label.chars().count() as f32 * 9.0 + 64.0 + if pad_glyph { 30.0 } else { 0.0 }) * u;
         let bh = 44.0 * u;
         let btn_y = cd_y.max(match lay.kind {
             LayoutKind::Desktop => h * 0.855,
@@ -1768,8 +1934,20 @@ impl HomeState {
                 egui::StrokeKind::Outside,
             );
         }
+        let label_at = if pad_glyph {
+            hints::draw_face_on_accent(
+                p,
+                Pos2::new(btn.left() + 24.0 * u, btn.center().y),
+                hints::face_radius(u) * 0.9,
+                Btn::Cross,
+                a,
+            );
+            btn.center() + Vec2::new(12.0 * u, 0.0)
+        } else {
+            btn.center()
+        };
         p.text(
-            btn.center(),
+            label_at,
             Align2::CENTER_CENTER,
             label,
             FontId::proportional(13.0 * u),
@@ -1801,12 +1979,17 @@ impl HomeState {
             let r = quiet(p, "Start over", qy);
             self.hits
                 .push((r.expand2(Vec2::new(12.0, 8.0)), Click::Restart));
+            self.square_glyph(p, &lay, r, a);
             qy = r.bottom() + 6.0 * u;
         }
         if item.burn.is_some() {
             let r = quiet(p, "Burn to CD", qy);
             self.hits
                 .push((r.expand2(Vec2::new(12.0, 8.0)), Click::Burn));
+            // Square is the first of Start over and Burn that the case has.
+            if item.restart.is_none() && !matches!(item.kind, CoverKind::Demo) {
+                self.square_glyph(p, &lay, r, a);
+            }
         }
         // Quiet links at the bottom.
         self.draw_footer(pc);
@@ -1834,7 +2017,9 @@ impl HomeState {
         let desktop = lay.kind == LayoutKind::Desktop;
         let wide = lay.kind != LayoutKind::Portrait;
         let label = item.button.to_uppercase();
-        let bw = (label.chars().count() as f32 * 8.5 + 56.0) * u;
+        let pad_glyph = self.hint_style(&lay) == Some(HintStyle::Pad);
+        let bw =
+            (label.chars().count() as f32 * 8.5 + 56.0 + if pad_glyph { 28.0 } else { 0.0 }) * u;
         let bh = 40.0 * u;
         let (tx, ty) = if wide {
             (info.left() + 48.0 * u, info.center().y - 22.0 * u)
@@ -1893,8 +2078,20 @@ impl HomeState {
                 egui::StrokeKind::Outside,
             );
         }
+        let label_at = if pad_glyph {
+            hints::draw_face_on_accent(
+                p,
+                Pos2::new(btn.left() + 22.0 * u, btn.center().y),
+                hints::face_radius(u) * 0.85,
+                Btn::Cross,
+                a,
+            );
+            btn.center() + Vec2::new(11.0 * u, 0.0)
+        } else {
+            btn.center()
+        };
         p.text(
-            btn.center(),
+            label_at,
             Align2::CENTER_CENTER,
             label,
             FontId::proportional(12.5 * u),
@@ -2053,32 +2250,59 @@ impl HomeState {
         );
         self.hits
             .push((what.expand2(Vec2::new(8.0, 10.0)), Click::Welcome));
-        // Controller hints on the desktop shell; touch and phones go without.
-        if lay.kind == LayoutKind::Desktop && !self.feed.touch {
+        // Button hints on the desktop shell: glyphs for a controller, key caps for a keyboard;
+        // touch and phones go without.
+        if lay.kind == LayoutKind::Desktop {
             let mut x = what.right() + 40.0 * u;
-            let mut hint = |cross: bool, label: &str| {
-                let c = Pos2::new(x + 9.0 * u, y);
-                let ring = Stroke::new(1.2, fade(tokens::RING, a));
-                p.circle_stroke(c, 9.0 * u, ring);
-                let g = Stroke::new(1.3, dim);
-                if cross {
-                    let d = 3.4 * u;
-                    p.line_segment([c + Vec2::new(-d, -d), c + Vec2::new(d, d)], g);
-                    p.line_segment([c + Vec2::new(-d, d), c + Vec2::new(d, -d)], g);
-                } else {
-                    p.circle_stroke(c, 3.6 * u, g);
+            if let Some(style) = self.hint_style(lay) {
+                let back = if self.started { "Resume" } else { "Back" };
+                for (btn, label) in [
+                    (Btn::Cross, "Select"),
+                    (Btn::Circle, back),
+                    (Btn::Triangle, "View"),
+                ] {
+                    let press = if btn == Btn::Triangle {
+                        self.pad_press[2]
+                    } else {
+                        0.0
+                    };
+                    let w = hints::btn_width(p, u, style, btn);
+                    let g = hints::draw_btn(p, Pos2::new(x + w / 2.0, y), u, a, style, btn, press);
+                    let r = p.text(
+                        Pos2::new(g.right() + 8.0 * u, y),
+                        Align2::LEFT_CENTER,
+                        label,
+                        FontId::proportional(13.0 * u),
+                        dim,
+                    );
+                    if btn == Btn::Triangle {
+                        self.hits.push((g.union(r).expand(6.0), Click::SizeToggle));
+                    }
+                    x = r.right() + 22.0 * u;
                 }
-                let r = p.text(
-                    Pos2::new(x + 24.0 * u, y),
-                    Align2::LEFT_CENTER,
-                    label,
-                    FontId::proportional(13.0 * u),
-                    dim,
-                );
-                x = r.right() + 24.0 * u;
-            };
-            hint(true, "Select");
-            hint(false, "Back");
+                // L2 and R2 jump by letter, when the shelf has letters to jump between.
+                if self.letters > 1 {
+                    for btn in [Btn::L2, Btn::R2] {
+                        let w = hints::btn_width(p, u, style, btn);
+                        hints::draw_btn(p, Pos2::new(x + w / 2.0, y), u, a, style, btn, 0.0);
+                        x += w + 6.0 * u;
+                    }
+                    let r = p.text(
+                        Pos2::new(x + 2.0 * u, y),
+                        Align2::LEFT_CENTER,
+                        "A to Z",
+                        FontId::proportional(13.0 * u),
+                        dim,
+                    );
+                    // The links after the hints are desktop-only.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        x = r.right() + 22.0 * u;
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = r;
+                }
+            }
             // Desktop only: a disc that is not in the games folder, and a rescan.
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -2148,9 +2372,29 @@ impl HomeState {
     }
 
     /// The desktop nav: plain text along the top, the active one marked.
-    fn draw_top_nav(&mut self, p: &egui::Painter, items: &[NavItem], logo: Rect, u: f32, a: f32) {
+    fn draw_top_nav(
+        &mut self,
+        p: &egui::Painter,
+        lay: &Layout,
+        items: &[NavItem],
+        logo: Rect,
+        u: f32,
+        a: f32,
+    ) {
         let mut x = logo.right() + 34.0 * u;
         let ny = logo.center().y;
+        let style = self.hint_style(lay);
+        // L1 at the left end of the tabs.
+        if let Some(style) = style {
+            let w = hints::btn_width(p, u, style, Btn::L1);
+            let c = Pos2::new(x + w / 2.0, ny);
+            hints::draw_btn(p, c, u, a, style, Btn::L1, self.pad_press[0]);
+            self.hits.push((
+                Rect::from_center_size(c, Vec2::new(w + 10.0, 30.0 * u)),
+                Click::TabStep(-1),
+            ));
+            x += w + 18.0 * u;
+        }
         for (i, item) in items.iter().enumerate() {
             let focused = self.zone == Zone::Nav && self.nav == i;
             let on = item.page() == self.page || focused;
@@ -2180,6 +2424,16 @@ impl HomeState {
                 .push((r.expand2(Vec2::new(10.0, 12.0)), Click::Nav(*item)));
             x = r.right() + 26.0 * u;
         }
+        // R1 at the right end.
+        if let Some(style) = style {
+            let w = hints::btn_width(p, u, style, Btn::R1);
+            let c = Pos2::new(x - 8.0 * u + w / 2.0, ny);
+            hints::draw_btn(p, c, u, a, style, Btn::R1, self.pad_press[1]);
+            self.hits.push((
+                Rect::from_center_size(c, Vec2::new(w + 10.0, 30.0 * u)),
+                Click::TabStep(1),
+            ));
+        }
     }
 
     /// The phone nav: a floating pill at the bottom, clear of the touch
@@ -2197,7 +2451,9 @@ impl HomeState {
         } else {
             56.0
         }) * u;
-        let w = (items.len() as f32 * 76.0 * u).min(lay.safe.width() - 24.0 * u);
+        let style = self.hint_style(lay);
+        let side = style.map_or(0.0, |st| hints::btn_width(p, u, st, Btn::L1) + 10.0 * u);
+        let w = (items.len() as f32 * 76.0 * u).min(lay.safe.width() - 24.0 * u - 2.0 * side);
         let bar = Rect::from_center_size(
             Pos2::new(lay.safe.center().x, lay.safe.bottom() - h / 2.0 - 10.0 * u),
             Vec2::new(w, h),
@@ -2213,6 +2469,21 @@ impl HomeState {
             Stroke::new(1.0, fade(Color32::from_rgb(38, 58, 72), a)),
             egui::StrokeKind::Inside,
         );
+        // L1 and R1 at the two ends of the bar.
+        if let Some(st) = style {
+            for (btn, step, x) in [
+                (Btn::L1, -1, bar.left() - 6.0 * u - side / 2.0 - 2.0 * u),
+                (Btn::R1, 1, bar.right() + 6.0 * u + side / 2.0 + 2.0 * u),
+            ] {
+                let c = Pos2::new(x, bar.center().y);
+                let press = self.pad_press[if step < 0 { 0 } else { 1 }];
+                hints::draw_btn(p, c, u, a, st, btn, press);
+                self.hits.push((
+                    Rect::from_center_size(c, Vec2::new(side, 40.0 * u)),
+                    Click::TabStep(step),
+                ));
+            }
+        }
         let cell = w / items.len() as f32;
         for (i, item) in items.iter().enumerate() {
             let focused = self.zone == Zone::Nav && self.nav == i;
@@ -2336,10 +2607,24 @@ impl HomeState {
                 }
             }
             self.hits.push((b.expand(4.0), Click::SizeToggle));
+            // The button that does the same: Triangle, or Tab on a keyboard.
+            if let Some(style) = self.hint_style(lay) {
+                let w = hints::btn_width(p, u, style, Btn::Triangle);
+                let gc = if desktop {
+                    Pos2::new(b.left() - 10.0 * u - w / 2.0, b.center().y)
+                } else {
+                    Pos2::new(b.right() + 10.0 * u + w / 2.0, b.center().y)
+                };
+                hints::draw_btn(p, gc, u, a, style, Btn::Triangle, self.pad_press[2]);
+                self.hits.push((
+                    Rect::from_center_size(gc, Vec2::new(w + 8.0, 30.0 * u)),
+                    Click::SizeToggle,
+                ));
+            }
         }
         let items = nav_items(self.pausing(ms));
         if desktop {
-            self.draw_top_nav(p, &items, logo_rect, u, a);
+            self.draw_top_nav(p, lay, &items, logo_rect, u, a);
         } else {
             self.draw_bottom_bar(p, lay, &items, u, a);
         }
@@ -2564,6 +2849,7 @@ impl HomeState {
             }
             Click::Act(action) => return Some(action),
             Click::SizeToggle => self.compact = !self.compact,
+            Click::TabStep(step) => self.cycle_tab(ms, step),
             Click::Rail => {}
             Click::Burn => {
                 let cases = self.cases(ms);

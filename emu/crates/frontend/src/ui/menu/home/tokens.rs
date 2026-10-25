@@ -7,85 +7,85 @@ use egui::Color32;
 
 // ---- Colour (on ground #05090d) --------------------------------------------
 
-pub(super) const GROUND: Color32 = Color32::from_rgb(5, 9, 13);
+pub(crate) const GROUND: Color32 = Color32::from_rgb(5, 9, 13);
 /// Titles and primary text (18:1).
-pub(super) const TEXT: Color32 = Color32::from_rgb(244, 248, 251);
+pub(crate) const TEXT: Color32 = Color32::from_rgb(244, 248, 251);
 /// Row labels (13:1).
-pub(super) const TEXT_2: Color32 = Color32::from_rgb(196, 211, 222);
+pub(crate) const TEXT_2: Color32 = Color32::from_rgb(196, 211, 222);
 /// Support text and hints (8.9:1).
-pub(super) const MUTED: Color32 = Color32::from_rgb(157, 176, 190);
+pub(crate) const MUTED: Color32 = Color32::from_rgb(157, 176, 190);
 /// Section labels, inactive nav (6.5:1).
-pub(super) const DIM: Color32 = Color32::from_rgb(129, 150, 166);
+pub(crate) const DIM: Color32 = Color32::from_rgb(129, 150, 166);
 /// Inactive icons (6.1:1).
-pub(super) const ICON_REST: Color32 = Color32::from_rgb(125, 144, 160);
+pub(crate) const ICON_REST: Color32 = Color32::from_rgb(125, 144, 160);
 /// Glyph rings and borders that carry meaning (4.8:1).
-pub(super) const RING: Color32 = Color32::from_rgb(108, 127, 143);
+pub(crate) const RING: Color32 = Color32::from_rgb(108, 127, 143);
 /// Row separators: rgba(160,225,240,.10).
-pub(super) fn hairline() -> Color32 {
+pub(crate) fn hairline() -> Color32 {
     Color32::from_rgba_unmultiplied(160, 225, 240, 26)
 }
 /// A border that has to be seen: rgba(160,225,240,.22).
-pub(super) fn hairline_strong() -> Color32 {
+pub(crate) fn hairline_strong() -> Color32 {
     Color32::from_rgba_unmultiplied(160, 225, 240, 56)
 }
 /// The only accent: active, primary, fills (9.95:1).
-pub(super) const ACCENT: Color32 = Color32::from_rgb(34, 200, 229);
+pub(crate) const ACCENT: Color32 = Color32::from_rgb(34, 200, 229);
 /// Focus outline and corner brackets.
-pub(super) const FOCUS: Color32 = Color32::from_rgb(128, 239, 255);
+pub(crate) const FOCUS: Color32 = Color32::from_rgb(128, 239, 255);
 /// The connected dot, nothing else.
-pub(super) const OK: Color32 = Color32::from_rgb(82, 208, 138);
+pub(crate) const OK: Color32 = Color32::from_rgb(82, 208, 138);
 /// Text on the accent (9:1).
-pub(super) const ON_ACCENT: Color32 = Color32::from_rgb(3, 24, 32);
+pub(crate) const ON_ACCENT: Color32 = Color32::from_rgb(3, 24, 32);
 
 // ---- Type scale (px) ---------------------------------------------------------
 
-pub(super) const DISPLAY: f32 = 34.0;
-pub(super) const TITLE_DESKTOP: f32 = 26.0;
-pub(super) const TITLE_PHONE: f32 = 20.0;
-pub(super) const LABEL: f32 = 12.0;
-pub(super) const ROW_LABEL: f32 = 16.0;
-pub(super) const BODY: f32 = 14.0;
-pub(super) const BODY_LARGE: f32 = 16.0;
+pub(crate) const DISPLAY: f32 = 34.0;
+pub(crate) const TITLE_DESKTOP: f32 = 26.0;
+pub(crate) const TITLE_PHONE: f32 = 20.0;
+pub(crate) const LABEL: f32 = 12.0;
+pub(crate) const ROW_LABEL: f32 = 16.0;
+pub(crate) const BODY: f32 = 14.0;
+pub(crate) const BODY_LARGE: f32 = 16.0;
 /// Nothing is smaller than this.
-pub(super) const CAPTION: f32 = 12.0;
-pub(super) const CAPTION_LARGE: f32 = 14.0;
-pub(super) const METRIC: f32 = 36.0;
-pub(super) const SLIDER_VALUE: f32 = 26.0;
-pub(super) const BAR_VALUE: f32 = 22.0;
+pub(crate) const CAPTION: f32 = 12.0;
+pub(crate) const CAPTION_LARGE: f32 = 14.0;
+pub(crate) const METRIC: f32 = 36.0;
+pub(crate) const SLIDER_VALUE: f32 = 26.0;
+pub(crate) const BAR_VALUE: f32 = 22.0;
 
 // ---- Spacing and sizes (px) ---------------------------------------------------
 
-pub(super) const MARGIN_DESKTOP: f32 = 48.0;
-pub(super) const MARGIN_PHONE: f32 = 20.0;
-pub(super) const MARGIN_SMALL_PHONE: f32 = 14.0;
-pub(super) const ROW_DESKTOP: f32 = 52.0;
-pub(super) const ROW_PHONE: f32 = 56.0;
-pub(super) const TOUCH_MIN: f32 = 44.0;
-pub(super) const SECTION_GAP: f32 = 24.0;
+pub(crate) const MARGIN_DESKTOP: f32 = 48.0;
+pub(crate) const MARGIN_PHONE: f32 = 20.0;
+pub(crate) const MARGIN_SMALL_PHONE: f32 = 14.0;
+pub(crate) const ROW_DESKTOP: f32 = 52.0;
+pub(crate) const ROW_PHONE: f32 = 56.0;
+pub(crate) const TOUCH_MIN: f32 = 44.0;
+pub(crate) const SECTION_GAP: f32 = 24.0;
 /// The panel's one chamfered corner (top right).
-pub(super) const CHAMFER: f32 = 16.0;
-pub(super) const TAB_BAR_HEIGHT: f32 = 64.0;
-pub(super) const TAB_BAR_ABOVE_EDGE: f32 = 26.0;
-pub(super) const TAB_BAR_SIDE: f32 = 24.0;
-pub(super) const TAB_ITEM_WIDTH: f32 = 70.0;
+pub(crate) const CHAMFER: f32 = 16.0;
+pub(crate) const TAB_BAR_HEIGHT: f32 = 64.0;
+pub(crate) const TAB_BAR_ABOVE_EDGE: f32 = 26.0;
+pub(crate) const TAB_BAR_SIDE: f32 = 24.0;
+pub(crate) const TAB_ITEM_WIDTH: f32 = 70.0;
 /// A focused case or card lifts this far.
-pub(super) const FOCUS_LIFT: f32 = 4.0;
-pub(super) const BRACKET: f32 = 9.0;
-pub(super) const FOCUS_STROKE: f32 = 2.0;
-pub(super) const FOCUS_TINT: f32 = 0.12;
+pub(crate) const FOCUS_LIFT: f32 = 4.0;
+pub(crate) const BRACKET: f32 = 9.0;
+pub(crate) const FOCUS_STROKE: f32 = 2.0;
+pub(crate) const FOCUS_TINT: f32 = 0.12;
 
 // ---- Motion -------------------------------------------------------------------
 
 /// Seconds.
-pub(super) const FEEDBACK: f32 = 0.120;
-pub(super) const ROW_FOCUS_MOVE: f32 = 0.160;
-pub(super) const SHEET: f32 = 0.320;
-pub(super) const NAV_SWITCH: f32 = 0.200;
+pub(crate) const FEEDBACK: f32 = 0.120;
+pub(crate) const ROW_FOCUS_MOVE: f32 = 0.160;
+pub(crate) const SHEET: f32 = 0.320;
+pub(crate) const NAV_SWITCH: f32 = 0.200;
 /// The whole launch sequence.
-pub(super) const LAUNCH: f32 = 2.3;
+pub(crate) const LAUNCH: f32 = 2.3;
 
 /// A CSS `cubic-bezier(x1, y1, x2, y2)` easing.
-pub(super) fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
+pub(crate) fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     let cx = 3.0 * x1;
     let bx = 3.0 * (x2 - x1) - cx;
@@ -124,12 +124,12 @@ pub(super) fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
 }
 
 /// Enter, open, lift: exponential ease-out.
-pub(super) fn ease_out_expo(t: f32) -> f32 {
+pub(crate) fn ease_out_expo(t: f32) -> f32 {
     bezier(0.16, 1.0, 0.3, 1.0, t)
 }
 
 /// Recede, slide.
-pub(super) fn ease_in_out(t: f32) -> f32 {
+pub(crate) fn ease_in_out(t: f32) -> f32 {
     bezier(0.65, 0.0, 0.35, 1.0, t)
 }
 

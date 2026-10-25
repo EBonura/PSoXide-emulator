@@ -18,7 +18,7 @@ use egui::{Align2, FontId, Pos2, Rect, Vec2};
 
 use crate::{icons, theme};
 
-mod home;
+pub(crate) mod home;
 
 pub(crate) use home::{is_first_visit as first_visit, DemoStatus, DeviceCommand, HomeFeed};
 
@@ -282,6 +282,8 @@ pub struct MenuInput {
     pub letter_next: bool,
     /// Triangle or Tab: swap big cases and the compact grid.
     pub options: bool,
+    /// Square: the focused case's second action (What's on it, Start over, Burn).
+    pub secondary: bool,
     pub toggle_open: bool,
 }
 

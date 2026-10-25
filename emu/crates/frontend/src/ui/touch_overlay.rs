@@ -21,6 +21,21 @@ const CIRCLE: Color32 = Color32::from_rgb(232, 86, 96);
 const CROSS: Color32 = Color32::from_rgb(96, 140, 232);
 const SQUARE: Color32 = Color32::from_rgb(222, 140, 190);
 
+/// The shell's own colours for the buttons around the game (pause, save, debug, menu,
+/// fullscreen): its near-black ground, a hairline edge, grey icons that light up cyan on press.
+const SHELL_GROUND: Color32 = Color32::from_rgb(5, 9, 13);
+const SHELL_ICON: Color32 = Color32::from_rgb(196, 211, 222);
+const SHELL_FOCUS: Color32 = Color32::from_rgb(128, 239, 255);
+
+fn shell_edge(down: bool, alpha: f32) -> Color32 {
+    if down {
+        with_alpha(SHELL_FOCUS, alpha)
+    } else {
+        // The shell's strong hairline, rgba(160, 225, 240, .22), a little stronger over a game.
+        with_alpha(Color32::from_rgb(160, 225, 240), alpha * 0.4)
+    }
+}
+
 fn with_alpha(color: Color32, alpha: f32) -> Color32 {
     let [r, g, b, _] = color.to_array();
     Color32::from_rgba_unmultiplied(r, g, b, (alpha.clamp(0.0, 1.0) * 255.0).round() as u8)
@@ -331,14 +346,14 @@ fn draw_icon_button(painter: &Painter, s: &Space, rect: Rect, glyph: char, down:
         r,
         round,
         with_alpha(
-            if down { ACCENT } else { BODY },
-            alpha * if down { 0.9 } else { 0.62 },
+            if down { ACCENT } else { SHELL_GROUND },
+            alpha * if down { 0.34 } else { 0.78 },
         ),
     );
     painter.rect_stroke(
         r,
         round,
-        Stroke::new(1.2, with_alpha(INK, alpha * 0.75)),
+        Stroke::new(1.2, shell_edge(down, alpha)),
         egui::StrokeKind::Inside,
     );
     painter.text(
@@ -346,7 +361,10 @@ fn draw_icon_button(painter: &Painter, s: &Space, rect: Rect, glyph: char, down:
         egui::Align2::CENTER_CENTER,
         glyph,
         egui::FontId::proportional(r.height() * 0.5),
-        with_alpha(if down { BODY } else { INK }, (alpha + 0.2).min(1.0)),
+        with_alpha(
+            if down { SHELL_FOCUS } else { SHELL_ICON },
+            (alpha + 0.2).min(1.0),
+        ),
     );
 }
 
@@ -357,18 +375,21 @@ fn draw_menu_button(painter: &Painter, s: &Space, rect: Rect, down: bool, close:
         r,
         round,
         with_alpha(
-            if down { ACCENT } else { BODY },
-            alpha * if down { 0.9 } else { 0.62 },
+            if down { ACCENT } else { SHELL_GROUND },
+            alpha * if down { 0.34 } else { 0.78 },
         ),
     );
     painter.rect_stroke(
         r,
         round,
-        Stroke::new(1.2, with_alpha(INK, alpha * 0.75)),
+        Stroke::new(1.2, shell_edge(down, alpha)),
         egui::StrokeKind::Inside,
     );
     let c = r.center();
-    let ink = with_alpha(if down { BODY } else { INK }, (alpha + 0.2).min(1.0));
+    let ink = with_alpha(
+        if down { SHELL_FOCUS } else { SHELL_ICON },
+        (alpha + 0.2).min(1.0),
+    );
     let w = r.height() * 0.5;
     if close {
         let h = r.height() * 0.17;
@@ -393,17 +414,20 @@ fn draw_fullscreen_button(painter: &Painter, s: &Space, rect: Rect, down: bool, 
         r,
         round,
         with_alpha(
-            if down { ACCENT } else { BODY },
-            alpha * if down { 0.9 } else { 0.62 },
+            if down { ACCENT } else { SHELL_GROUND },
+            alpha * if down { 0.34 } else { 0.78 },
         ),
     );
     painter.rect_stroke(
         r,
         round,
-        Stroke::new(1.2, with_alpha(INK, alpha * 0.75)),
+        Stroke::new(1.2, shell_edge(down, alpha)),
         egui::StrokeKind::Inside,
     );
-    let ink = with_alpha(if down { BODY } else { INK }, (alpha + 0.2).min(1.0));
+    let ink = with_alpha(
+        if down { SHELL_FOCUS } else { SHELL_ICON },
+        (alpha + 0.2).min(1.0),
+    );
     let stroke = Stroke::new(r.height() * 0.07, ink);
     let c = r.center();
     let h = r.height() * 0.24;

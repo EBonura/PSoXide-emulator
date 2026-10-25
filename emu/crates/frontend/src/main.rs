@@ -451,6 +451,7 @@ impl Shell {
         };
         let mut state = AppState::with_config_dir(config_dir);
         state.enable_home_screen();
+        input.set_remembered_analog(state.settings.input.analog_choice.clone());
         #[cfg(feature = "editor")]
         let state = {
             let mut state = state;
@@ -1443,6 +1444,7 @@ impl ApplicationHandler for Shell {
                 input.letter_prev |= pad_frame.menu_letter_prev;
                 input.letter_next |= pad_frame.menu_letter_next;
                 input.options |= pad_frame.menu_options;
+                input.secondary |= pad_frame.menu_secondary;
 
                 // Escape is the "PS button" -- it toggles between
                 // "game running" and "game paused + menu open".

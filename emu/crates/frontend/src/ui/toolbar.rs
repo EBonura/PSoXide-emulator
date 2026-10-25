@@ -8,11 +8,17 @@
 //!
 //! The left and right halves are laid out into separate clipped
 //! rectangles; on a narrow window the frame rate yields before any button.
+//!
+//! The bar is dressed like the rest of the shell (the home screen and its tabs):
+//! the near-black ground, hairline borders, Jost type, the pixel face for the
+//! number, Phosphor icons that rest grey and go white on hover, and a cyan
+//! press, with the same six-point corners as the shell's chips.
 
 use egui::{Align, Button, Color32, Context, Label, Layout, Rect, RichText, TopBottomPanel};
 
 use crate::app::AppState;
 use crate::icons;
+use crate::ui::menu::home::tokens;
 use crate::ui::menu::MenuAction;
 
 /// Icon font size in the button row.
@@ -40,11 +46,56 @@ const AUDIO_SLIDER_WIDTH: f32 = 72.0;
 /// Text size for the left-hand frame rate.
 const METRIC_TEXT_SIZE: f32 = 12.0;
 
-/// Running / paused status colours.
-const STATUS_RUNNING: Color32 = Color32::from_rgb(80, 200, 120);
-const STATUS_PAUSED: Color32 = Color32::from_rgb(153, 153, 166);
-const METRIC_TEXT: Color32 = Color32::from_rgb(204, 204, 217);
-const METRIC_LABEL: Color32 = Color32::from_rgb(102, 102, 115);
+/// The bar's ground over the game: the shell's near-black, a touch see-through.
+fn bar_fill() -> Color32 {
+    Color32::from_rgba_unmultiplied(5, 9, 13, 240)
+}
+
+/// Corner radius of a button, as the shell's chips.
+const CHIP_RADIUS: u8 = 6;
+
+/// Give a toolbar region the shell's widget look: no frame at rest, a cyan tint and hairline on
+/// hover, a deeper tint and the focus colour on press, icons that rest grey.
+fn shell_style(ui: &mut egui::Ui) {
+    let v = ui.visuals_mut();
+    let round = egui::CornerRadius::same(CHIP_RADIUS);
+    let accent = |alpha: u8| {
+        Color32::from_rgba_unmultiplied(
+            tokens::ACCENT.r(),
+            tokens::ACCENT.g(),
+            tokens::ACCENT.b(),
+            alpha,
+        )
+    };
+    for (w, fill, stroke, ink) in [
+        (
+            &mut v.widgets.inactive,
+            Color32::TRANSPARENT,
+            egui::Stroke::NONE,
+            tokens::ICON_REST,
+        ),
+        (
+            &mut v.widgets.hovered,
+            accent(30),
+            egui::Stroke::new(1.0, tokens::hairline_strong()),
+            tokens::TEXT,
+        ),
+        (
+            &mut v.widgets.active,
+            accent(72),
+            egui::Stroke::new(1.0, tokens::FOCUS),
+            tokens::FOCUS,
+        ),
+    ] {
+        w.weak_bg_fill = fill;
+        w.bg_fill = fill;
+        w.bg_stroke = stroke;
+        w.fg_stroke = egui::Stroke::new(1.5, ink);
+        w.corner_radius = round;
+        w.expansion = 0.0;
+    }
+    ui.spacing_mut().button_padding = egui::vec2(4.0, 3.0);
+}
 
 /// Paint the top toolbar. Called once per frame before the central
 /// panel so the framebuffer clips underneath it.
@@ -64,8 +115,8 @@ pub fn draw(ctx: &Context, state: &mut AppState) {
         // the fill/separator ourselves and place the row by hand. With the
         // default frame's inner margin the bottom-anchored row math would be
         // off by the margin and the buttons would sit too high.
-        let panel_fill = ctx.style().visuals.panel_fill;
-        let separator = ctx.style().visuals.widgets.noninteractive.bg_stroke;
+        let panel_fill = bar_fill();
+        let separator = egui::Stroke::new(1.0, tokens::hairline_strong());
         TopBottomPanel::top("toolbar")
             .resizable(false)
             .exact_height(height)
@@ -148,10 +199,12 @@ fn draw_restore_tab(ctx: &Context, state: &mut AppState, opacity: f32) {
         .show(ctx, |ui| {
             ui.set_opacity(opacity);
             egui::Frame::new()
-                .fill(ui.visuals().panel_fill)
+                .fill(bar_fill())
+                .stroke(egui::Stroke::new(1.0, tokens::hairline_strong()))
                 .corner_radius(6.0)
                 .inner_margin(egui::Margin::symmetric(2, 0))
                 .show(ui, |ui| {
+                    shell_style(ui);
                     let btn = icon_button(icons::CARET_DOWN);
                     if ui.add(btn).on_hover_text("Show toolbar").clicked() {
                         state.toolbar_hidden = false;
@@ -190,6 +243,7 @@ fn toolbar_lanes(row_width: f32) -> ToolbarLanes {
 }
 
 fn draw_toolbar_controls(ui: &mut egui::Ui, state: &mut AppState, compact: bool) {
+    shell_style(ui);
     if compact {
         // The icon buttons retain their hit targets; only whitespace yields.
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -205,7 +259,7 @@ fn draw_toolbar_controls(ui: &mut egui::Ui, state: &mut AppState, compact: bool)
     {
         state.toolbar_hidden = true;
     }
-    ui.add_space(group_gap);
+    group_break(ui, group_gap);
     let sidebar = toggle_button(icons::BUG, state.panels.debug_sidebar);
     if ui
         .add(sidebar)
@@ -214,9 +268,9 @@ fn draw_toolbar_controls(ui: &mut egui::Ui, state: &mut AppState, compact: bool)
     {
         state.panels.debug_sidebar = !state.panels.debug_sidebar;
     }
-    ui.add_space(group_gap);
+    group_break(ui, group_gap);
     draw_audio_controls(ui, state);
-    ui.add_space(group_gap);
+    group_break(ui, group_gap);
     if ui
         .add(icon_button(icons::GAMEPAD_2))
         .on_hover_text("Controls: controller ports and keyboard keys")
@@ -231,7 +285,7 @@ fn draw_toolbar_controls(ui: &mut egui::Ui, state: &mut AppState, compact: bool)
     {
         action = Some(MenuAction::OpenSaveStates);
     }
-    ui.add_space(group_gap);
+    group_break(ui, group_gap);
     if ui
         .add(icon_button(icons::ROTATE_CCW))
         .on_hover_text("Reset")
@@ -250,6 +304,17 @@ fn draw_toolbar_controls(ui: &mut egui::Ui, state: &mut AppState, compact: bool)
     if let Some(action) = action {
         let _ = super::apply_menu_action(state, action);
     }
+}
+
+/// A hairline between two groups of buttons (none in the compact arrangement).
+fn group_break(ui: &mut egui::Ui, gap: f32) {
+    if gap <= 0.0 {
+        return;
+    }
+    ui.add_space(gap / 2.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, tokens::hairline());
+    ui.add_space(gap / 2.0);
 }
 
 /// Volume control: mute button plus gain slider.
@@ -273,31 +338,71 @@ fn draw_audio_controls(ui: &mut egui::Ui, state: &mut AppState) {
     }
 
     let before = state.audio_volume;
-    let slider = egui::Slider::new(&mut state.audio_volume, 0.0..=1.5)
-        .show_value(false)
-        .clamping(egui::SliderClamping::Always);
-    let response = ui
-        .add_sized([AUDIO_SLIDER_WIDTH, 18.0], slider)
-        .on_hover_text("Volume");
-    if response.changed() {
-        state.audio_volume = state.audio_volume.clamp(0.0, 1.5);
+    let t = state.audio_volume / MAX_VOLUME;
+    let (response, set) = shell_slider(ui, t);
+    response.on_hover_text("Volume");
+    if let Some(t) = set {
+        state.audio_volume = (t * MAX_VOLUME).clamp(0.0, MAX_VOLUME);
         if state.audio_volume > 0.0 && before <= 0.0 {
             state.audio_muted = false;
         }
     }
 }
 
+/// The loudest the volume slider goes (150 percent).
+const MAX_VOLUME: f32 = 1.5;
+
+/// The shell's slider, small: a hairline track, a cyan fill and a round white knob that grows
+/// under the pointer. Returns the response and the new position (0 to 1) when it was set.
+fn shell_slider(ui: &mut egui::Ui, t: f32) -> (egui::Response, Option<f32>) {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(AUDIO_SLIDER_WIDTH, 18.0),
+        egui::Sense::click_and_drag(),
+    );
+    let mut set = None;
+    if response.is_pointer_button_down_on() || response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            set = Some(((pos.x - rect.left() - 6.0) / (rect.width() - 12.0)).clamp(0.0, 1.0));
+        }
+    }
+    let t = set.unwrap_or(t).clamp(0.0, 1.0);
+    let track = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 6.0, rect.center().y - 1.5),
+        egui::pos2(rect.right() - 6.0, rect.center().y + 1.5),
+    );
+    let knob_x = track.left() + track.width() * t;
+    let painter = ui.painter();
+    painter.rect_filled(track, 1.5, Color32::from_rgb(48, 59, 74));
+    painter.rect_filled(
+        egui::Rect::from_min_max(track.min, egui::pos2(knob_x, track.bottom())),
+        1.5,
+        tokens::ACCENT,
+    );
+    let grow = ui.ctx().animate_bool_with_time(
+        response.id.with("knob"),
+        response.hovered() || response.dragged(),
+        tokens::FEEDBACK,
+    );
+    painter.circle_filled(
+        egui::pos2(knob_x, rect.center().y),
+        5.0 + 1.5 * grow,
+        tokens::TEXT,
+    );
+    (response, set)
+}
+
 /// Build a Button at the shared icon size, tinted to indicate active
 /// vs. inactive state. Keeps the toggle cluster visually coherent.
 fn toggle_button(icon: char, active: bool) -> Button<'static> {
-    let color = if active { STATUS_RUNNING } else { METRIC_LABEL };
-    // Active toggles use the solid (fill) weight, inactive the outline.
-    let icon_font = if active {
-        icons::font_fill(ICON_SIZE)
+    // Active toggles use the solid (fill) weight and the accent; inactive ones the outline and
+    // the resting grey of the widget style.
+    let label = if active {
+        RichText::new(icon.to_string())
+            .font(icons::font_fill(ICON_SIZE))
+            .color(tokens::ACCENT)
     } else {
-        icons::font(ICON_SIZE)
+        RichText::new(icon.to_string()).font(icons::font(ICON_SIZE))
     };
-    let label = RichText::new(icon.to_string()).font(icon_font).color(color);
     // `Extend` stops egui truncating/clipping the glyph to its advance width;
     // some Lucide icons (e.g. DISC) have ink that overruns the advance and
     // would otherwise render with the right edge sliced off in the tight button.
@@ -319,16 +424,21 @@ fn icon_button(icon: char) -> Button<'static> {
 /// else (emulation speed, host frame time, audio gaps) is in the debug
 /// sidebar's performance panel.
 fn draw_metrics(ui: &mut egui::Ui, state: &AppState) {
-    ui.add_space(2.0);
-    let (dot_color, status) = if state.running {
-        (STATUS_RUNNING, "Running")
+    ui.add_space(6.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+    // Running is the accent, paused an empty ring: the green dot is the shell's "connected".
+    if state.running {
+        ui.painter()
+            .circle_filled(rect.center(), 3.5, tokens::ACCENT);
     } else {
-        (STATUS_PAUSED, "Paused")
-    };
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), 4.0, dot_color);
-    response.on_hover_text(status);
-    ui.add_space(10.0);
+        ui.painter().circle_stroke(
+            rect.center(),
+            3.5,
+            egui::Stroke::new(1.3, tokens::ICON_REST),
+        );
+    }
+    response.on_hover_text(if state.running { "Running" } else { "Paused" });
+    ui.add_space(8.0);
     let fps = state
         .guest_stats
         .recent_fps()
@@ -336,7 +446,7 @@ fn draw_metrics(ui: &mut egui::Ui, state: &AppState) {
     ui.add(
         Label::new(
             RichText::new("FPS")
-                .color(METRIC_LABEL)
+                .color(tokens::DIM)
                 .size(METRIC_TEXT_SIZE),
         )
         .truncate(),
@@ -345,9 +455,9 @@ fn draw_metrics(ui: &mut egui::Ui, state: &AppState) {
     ui.add(
         Label::new(
             RichText::new(fps)
-                .color(METRIC_TEXT)
+                .color(tokens::TEXT_2)
                 .monospace()
-                .size(METRIC_TEXT_SIZE),
+                .size(METRIC_TEXT_SIZE + 3.0),
         )
         .truncate(),
     );

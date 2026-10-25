@@ -143,6 +143,14 @@ pub fn draw_layout(
             state.status_message_set(message);
         }
     }
+    // A controller's analog mode the player changed (on the Controls page or the
+    // Analog button) is saved, so the next visit starts the same way.
+    if let Some(choices) = input_router.take_remembered_analog() {
+        state.settings.input.analog_choice = choices;
+        if let Err(error) = state.save_settings() {
+            eprintln!("[frontend] {error}");
+        }
+    }
     if let Some((kind, pct)) = state.menu.take_touch_slider() {
         use crate::ui::menu::TouchSliderKind;
         state.edit_touch_prefs(|p| match kind {
@@ -486,10 +494,12 @@ fn controller_ports(ui: &mut egui::Ui, input_router: &mut InputRouter) -> Option
                 message = Some(format!("{name}: {}", choice.label()));
             }
 
-            if ui
-                .add_sized([78.0, 26.0], egui::Button::new(device.profile.label()))
-                .on_hover_text(device.profile.description())
-                .clicked()
+            // A keyboard has no sticks: it never offers analog mode.
+            if device.identity.backend != crate::input::model::BackendKind::Keyboard
+                && ui
+                    .add_sized([78.0, 26.0], egui::Button::new(device.profile.label()))
+                    .on_hover_text(device.profile.description())
+                    .clicked()
                 && input_router.set_device_profile(&device.identity.id, device.profile.next())
             {
                 message = Some(format!(
@@ -550,12 +560,12 @@ pub(crate) fn draw_status_toast(ctx: &egui::Context, state: &AppState) {
         return;
     };
     let alpha = (*ttl / 0.35).clamp(0.0, 1.0);
-    let bg = egui::Color32::from_rgba_premultiplied(16, 18, 22, (230.0 * alpha) as u8);
+    let bg = egui::Color32::from_rgba_premultiplied(5, 9, 13, (240.0 * alpha) as u8);
     let stroke = egui::Stroke::new(
         1.0,
-        egui::Color32::from_rgba_premultiplied(0, 191, 230, (180.0 * alpha) as u8),
+        egui::Color32::from_rgba_premultiplied(34, 200, 229, (170.0 * alpha) as u8),
     );
-    let text = egui::Color32::from_rgba_premultiplied(235, 238, 242, (255.0 * alpha) as u8);
+    let text = egui::Color32::from_rgba_premultiplied(244, 248, 251, (255.0 * alpha) as u8);
 
     // Sit below whichever persistent indicators are up, so a toast never
     // lands on top of the freecam or recording badge.
