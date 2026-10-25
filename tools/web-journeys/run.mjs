@@ -1678,6 +1678,60 @@ async function journeySelection(label, urlFor, size) {
   await cdp.send("Target.closeTarget", { targetId: page.targetId });
 }
 
+/** Button hints: the view switch and the tab bar's L1/R1 answer the pad, and show for what is in use. */
+async function journeyHints(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  const page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+  await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+  await page.goto(urlFor());
+  const names = async () => (await page.ux()).home.hits.map((h) => h[0]);
+  await page.waitFor("the home screen", (s) => s.home?.page === "Home" && s.has_bus, 90000);
+  await page.tapKey("x");
+  await sleep(500);
+  if (!mobile) await step("on a desktop the tab bar has L1 and R1 key caps for a keyboard, and the view switch is reachable", async () => {
+    const n = await names();
+    await page.shot(`${label}-hints-keyboard`);
+    for (const need of ["tab-step:-1", "tab-step:1", "size"]) if (!n.includes(need)) return `missing ${need}: ${n}`;
+    return true;
+  });
+  if (mobile) await step("a touch phone shows no pad hints until a controller is connected", async () => {
+    const n = await names();
+    return n.includes("tab-step:-1") ? "pad hints on a touch phone with no controller" : true;
+  });
+  await page.padConnect();
+  await sleep(500);
+  await page.padSet({ 4: false });
+  await step("with a controller the tab bar ends carry L1 and R1, and Triangle switches cases and grid", async () => {
+    await page.padSet({ 2: false });
+    await sleep(200);
+    const n = await names();
+    await page.shot(`${label}-hints-pad`);
+    for (const need of ["tab-step:-1", "tab-step:1"]) if (!n.includes(need)) return `missing ${need}: ${n}`;
+    const c0 = (await page.ux()).home.compact;
+    await page.padSet({ 3: true });
+    await sleep(120);
+    await page.padSet({});
+    const on = await page.waitFor("the grid", (s) => s.home.compact !== c0, 3000);
+    await page.shot(`${label}-hints-grid`);
+    await page.padSet({ 3: true });
+    await sleep(120);
+    await page.padSet({});
+    const back = await page.waitFor("the cases again", (s) => s.home.compact === c0, 3000);
+    return on.home.compact !== back.home.compact ? true : "Triangle did not toggle both ways";
+  });
+  await step("R1 on the pad steps to the next section, and its glyph is lit by the press", async () => {
+    await page.padSet({ 5: true });
+    await sleep(60);
+    await page.padSet({});
+    await page.waitFor("the next section", (s) => s.home.page !== "Home", 3000);
+    await page.shot(`${label}-hints-r1`);
+    return true;
+  });
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
+
 /** The shell around a running game, at one size: the launch sequence, then every section by every way back. */
 async function journeyShell(label, urlFor, size) {
   current = label;
@@ -2103,7 +2157,7 @@ async function journeyControls(label, urlFor, size) {
       await showGroup(group);
       await page.shot(`${label}-controls-${group.toLowerCase()}`);
       const names = (await page.ux()).home.hits.map((h) => h[0]);
-      const need = { Devices: ["ctl:port:", "ctl:mode:"], Keyboard: ["ctl:key:Cross", "ctl:key:L1", "ctl:reset"], Touch: ["slider:Touch opacity", "row:Touch haptics"] }[group];
+      const need = { Devices: ["ctl:port:"], Keyboard: ["ctl:key:Cross", "ctl:key:L1", "ctl:reset"], Touch: ["slider:Touch opacity", "row:Touch haptics"] }[group];
       for (const n of need) {
         // Scrolling brings anything below the fold on a small screen; a prefix is a device id.
         if (!n.endsWith(":")) await reveal(n);
@@ -2117,15 +2171,26 @@ async function journeyControls(label, urlFor, size) {
     if (mobile && !names.includes("ctl:tab:Keyboard")) return "no segmented bar on a phone";
     if (!mobile && size.w >= 900 && !names.some((x) => x.startsWith("ctl:key:"))) return "a wide window should show all three groups";
   });
-  await step("a device's port and analog toggle change the routing, and change back", async () => {
+  await step("a keyboard has no analog toggle; a controller does, and it starts analog and changes back", async () => {
     await showGroup("Devices");
     const c0 = await ctl();
-    const dev = c0.devices.find((d) => /key/i.test(d[0])) ?? c0.devices[0];
-    if (!dev) return `no devices: ${JSON.stringify(c0.devices)}`;
+    const kb = c0.devices.find((d) => /key/i.test(d[0]));
+    if (!kb) return `no keyboard card: ${JSON.stringify(c0.devices)}`;
+    const names = (await page.ux()).home.hits.map((h) => h[0]);
+    if (names.includes(`ctl:mode:${kb[0]}`)) return "the keyboard card offers an analog toggle";
+    if (/analog/i.test(String(kb[2]))) return `the keyboard is ${kb[2]}`;
+    await page.padConnect();
+    await sleep(400);
+    await page.padSet({ 0: true });
+    await sleep(150);
+    await page.padSet({});
+    const c1 = (await page.waitFor("a controller card", (s) => s.home.controls.devices.some((d) => !/key|touch/i.test(d[0])), 6000)).home.controls;
+    const dev = c1.devices.find((d) => !/key|touch/i.test(d[0]));
+    if (!/analog/i.test(String(dev[2]))) return `a controller with sticks does not start analog: ${JSON.stringify(dev)}`;
     await activate(`ctl:mode:${dev[0]}`);
-    const c1 = (await page.waitFor("the profile changed", (s) => s.home.controls.devices.find((d) => d[0] === dev[0])?.[2] !== dev[2], 4000)).home.controls;
+    const c2 = (await page.waitFor("the profile changed", (s) => s.home.controls.devices.find((d) => d[0] === dev[0])?.[2] !== dev[2], 4000)).home.controls;
     await activate(`ctl:mode:${dev[0]}`);
-    await page.waitFor("the profile toggled again", (s) => s.home.controls.devices.find((d) => d[0] === dev[0])?.[2] !== c1.devices.find((d) => d[0] === dev[0])?.[2], 4000);
+    await page.waitFor("the profile toggled again", (s) => s.home.controls.devices.find((d) => d[0] === dev[0])?.[2] !== c2.devices.find((d) => d[0] === dev[0])?.[2], 4000);
     await activate(`ctl:port:${dev[0]}`);
     await page.waitFor("the port changed", (s) => s.home.controls.devices.find((d) => d[0] === dev[0])?.[1] !== dev[1], 4000);
   });
@@ -2511,7 +2576,7 @@ async function main() {
   if (args.scenario === "spam") { await inChrome(1, scenarioSpam); siteServer?.close(); parentServer?.close(); process.exit(0); }
   const wanted = (name) => !ONLY || name.includes(ONLY);
   try {
-    if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu", "home", "covers", "shell", "throttled", "controls", "grouping", "selection", "cover-states"].some((k) => ONLY.includes(k))) {
+    if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu", "home", "covers", "shell", "throttled", "controls", "grouping", "selection", "cover-states", "hints"].some((k) => ONLY.includes(k))) {
       await inChrome(1, async () => {
         if (wanted("desktop-direct")) await journeyDesktop("desktop-direct", () => direct());
         if (wanted("desktop-home")) await journeyHome("desktop-home", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
@@ -2523,6 +2588,7 @@ async function main() {
         if (wanted("desktop-grouping")) await journeyGrouping("desktop-grouping", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-cover-states")) await journeyCoverStates("desktop-cover-states", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-selection")) await journeySelection("desktop-selection", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-hints")) await journeyHints("desktop-hints", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-iframe")) await journeyDesktop("desktop-iframe", () => embedded(), { embeddedMode: true });
         if (wanted("desktop-menus")) await journeyMenus("desktop-menus", () => direct());
         if (wanted("desktop-nowebgpu")) await journeyNoWebgpu("desktop-nowebgpu", () => direct());
@@ -2530,7 +2596,7 @@ async function main() {
         if (wanted("desktop-gamepad-iframe")) await journeyGamepad("desktop-gamepad-iframe", () => embedded());
       });
     }
-    if (!ONLY || ONLY.includes("phone") || ONLY.includes("home") || ONLY.includes("shell") || ONLY.includes("throttled") || ONLY.includes("controls") || ONLY.includes("grouping") || ONLY.includes("selection") || ONLY.includes("cover-states")) {
+    if (!ONLY || ONLY.includes("phone") || ONLY.includes("home") || ONLY.includes("shell") || ONLY.includes("throttled") || ONLY.includes("controls") || ONLY.includes("grouping") || ONLY.includes("hints") || ONLY.includes("selection") || ONLY.includes("cover-states")) {
       await inChrome(3, async () => {
         if (wanted("phone-portrait")) await journeyPhone("phone-portrait", () => direct(), { w: 393, h: 852, dpr: 3 });
         if (wanted("phone-iframe")) await journeyPhone("phone-iframe", () => embedded(), { w: 393, h: 852, dpr: 3 });
@@ -2540,6 +2606,7 @@ async function main() {
         if (wanted("phone-grouping")) await journeyGrouping("phone-grouping", () => direct(), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-cover-states")) await journeyCoverStates("phone-cover-states", () => direct(), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-selection")) await journeySelection("phone-selection", () => direct(), { w: 393, h: 852, dpr: 3, mobile: true });
+        if (wanted("phone-hints")) await journeyHints("phone-hints", () => direct(), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-shell")) await journeyShell("phone-shell", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-shell-small")) await journeyShell("phone-shell-small", () => direct("?countdown=12"), { w: 360, h: 640, dpr: 3, mobile: true });
         if (wanted("phone-controls")) await journeyControls("phone-controls", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
