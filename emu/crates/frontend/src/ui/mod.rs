@@ -437,6 +437,10 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.toggle_box_art();
             MenuOutcome::None
         }
+        ToggleReduceMotion => {
+            state.toggle_reduce_motion();
+            MenuOutcome::None
+        }
         Quit => MenuOutcome::Quit,
     }
 }

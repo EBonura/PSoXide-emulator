@@ -160,6 +160,8 @@ pub enum MenuAction {
     SetVolume(u8),
     /// Turn box art fetching on or off.
     ToggleBoxArt,
+    /// Calm the shell's motion (focus, loading, launch).
+    ToggleReduceMotion,
     /// Quit the application.
     Quit,
 }
@@ -914,6 +916,17 @@ impl MenuState {
         );
         if let Some(covers) = self.covers() {
             covers.set_enabled(on);
+        }
+    }
+
+    /// Reflect the reduce-motion setting in its row and in the home screen.
+    pub fn set_reduce_motion(&mut self, on: bool) {
+        self.set_value(
+            &MenuAction::ToggleReduceMotion,
+            if on { "On" } else { "Off" }.into(),
+        );
+        if let Some(home) = self.home.as_mut() {
+            home.set_reduce_motion(on);
         }
     }
 
@@ -2968,6 +2981,7 @@ fn build_settings_category() -> Category {
             MenuAction::ToggleBoxArt,
             Some("On"),
         ),
+        row("Reduce motion", MenuAction::ToggleReduceMotion, Some("Off")),
         row("Fullscreen", MenuAction::ToggleFullscreen, None),
         row("About", MenuAction::ShowAbout, None),
     ];
@@ -3730,6 +3744,7 @@ mod tests {
                 "Touch haptics",
                 "Left-handed layout",
                 "Box art from the internet",
+                "Reduce motion",
                 "Fullscreen",
                 "About",
                 "Quit PSoXide"

@@ -30,8 +30,10 @@
 
 pub mod disc_image;
 mod ecm;
+pub mod game_group;
 pub mod library;
 pub mod paths;
+pub mod redump;
 pub mod savestate;
 pub mod settings;
 

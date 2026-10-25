@@ -21,6 +21,7 @@
 
 use std::cell::{Cell, RefCell};
 
+use psoxide_settings::game_group::{group_games, FoundFile};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
@@ -155,13 +156,36 @@ function _getState(k) {
     q.onerror = () => rej(q.error);
   }));
 }
+// The names a cue sheet or an m3u playlist lists, so the Rust side can tell a
+// game from the track files that belong to it.
+function _refs(name, text) {
+  const out = [];
+  if (name.endsWith('.cue')) {
+    const re = /^\s*FILE\s+(?:"([^"]+)"|(\S+))/gim;
+    let m;
+    while ((m = re.exec(text))) out.push(m[1] || m[2]);
+  } else {
+    for (const line of text.split(/\r?\n/)) {
+      const t = line.trim();
+      if (t && !t.startsWith('#')) out.push(t);
+    }
+  }
+  return out;
+}
 async function _list(dh) {
   const out = [];
   async function walk(h, pfx) {
     for await (const [name, ch] of h.entries()) {
       if (ch.kind === 'file') {
         const l = name.toLowerCase();
-        if (l.endsWith('.bin') || l.endsWith('.exe')) out.push(pfx + name);
+        if (l.endsWith('.bin') || l.endsWith('.exe')) {
+          out.push(pfx + name);
+        } else if (l.endsWith('.cue') || l.endsWith('.m3u')) {
+          try {
+            const text = await (await ch.getFile()).slice(0, 65536).text();
+            out.push([pfx + name, ..._refs(l, text)].join('\t'));
+          } catch (e) { out.push(pfx + name); }
+        }
       } else if (ch.kind === 'directory') {
         await walk(ch, pfx + name + '/');
       }
@@ -429,6 +453,28 @@ pub fn read_game(id: &str) {
     }
 }
 
+/// The file behind a `web:` launch id (the picked folder's file), for reading
+/// a slice of it. `None` when the folder is not connected right now.
+pub async fn blob_for_id(id: &str) -> Option<web_sys::Blob> {
+    let file = SCANNED.with(|g| {
+        g.borrow()
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.file.clone())
+    });
+    if let Some(file) = file {
+        return Some(file.into());
+    }
+    let path = id.strip_prefix("web:")?;
+    // Reading a handle needs no gesture once permission is granted; a folder
+    // that still has to be reconnected has no file to give yet.
+    JsFuture::from(fsa_read_game(path))
+        .await
+        .ok()?
+        .dyn_into::<web_sys::Blob>()
+        .ok()
+}
+
 /// Fetch a game served next to the page and queue it like a picked file
 /// (the `?disc=` measurement hook, see [`crate::web_bench`]). The body is
 /// streamed straight into wasm memory, so no disc-sized buffer exists on
@@ -642,29 +688,48 @@ fn js_error(value: JsValue) -> String {
 }
 
 /// Build the scan list from newline-separated relative paths (FS Access path).
+/// A cue sheet or playlist line carries the names it lists after tabs.
 fn set_scanned_from_paths(list: &str) {
-    let mut scanned: Vec<ScannedGame> = list
+    let found: Vec<FoundFile> = list
         .lines()
         .filter(|l| !l.is_empty())
-        .map(|path| ScannedGame {
-            id: format!("web:{path}"),
-            title: title_of(path),
-            subtitle: subfolder_of(path),
-            file: None,
+        .map(|line| {
+            let mut parts = line.split('\t');
+            let path = parts.next().unwrap_or_default().to_string();
+            FoundFile::sheet(path, parts.map(str::to_string).collect())
         })
         .collect();
-    scanned.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
-    SCANNED.with(|g| *g.borrow_mut() = scanned);
-    SCAN_READY.with(|r| r.set(true));
+    finish_scan(&found, &[]);
 }
 
-/// Filename without extension.
-fn title_of(path: &str) -> String {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    name.rsplit_once('.')
-        .map(|(s, _)| s)
-        .unwrap_or(name)
-        .to_string()
+/// Group the files found into games and publish them for the shell.
+/// `files` holds the `File` of each path on the `<input>` backend.
+fn finish_scan(found: &[FoundFile], files: &[(String, web_sys::File)]) {
+    let scanned: Vec<ScannedGame> = group_games(found)
+        .into_iter()
+        .map(|game| {
+            let mut subtitle = subfolder_of(&game.data);
+            if game.discs.len() > 1 {
+                let discs = format!("{} discs", game.discs.len());
+                subtitle = if subtitle.is_empty() {
+                    discs
+                } else {
+                    format!("{discs} \u{b7} {subtitle}")
+                };
+            }
+            ScannedGame {
+                id: format!("web:{}", game.data),
+                title: game.title,
+                subtitle,
+                file: files
+                    .iter()
+                    .find(|(path, _)| *path == game.data)
+                    .map(|(_, f)| f.clone()),
+            }
+        })
+        .collect();
+    SCANNED.with(|g| *g.borrow_mut() = scanned);
+    SCAN_READY.with(|r| r.set(true));
 }
 
 /// Immediate parent folder of a relative path (empty if top-level).
@@ -706,35 +771,78 @@ fn pick_folder_input() {
         let Some(files) = input_for_change.files() else {
             return;
         };
-        let mut scanned: Vec<ScannedGame> = Vec::new();
+        let mut picked: Vec<(String, web_sys::File)> = Vec::new();
         for i in 0..files.length() {
             let Some(file) = files.get(i) else {
                 continue;
             };
             let name = file.name();
             let lower = name.to_ascii_lowercase();
-            if !(lower.ends_with(".bin") || lower.ends_with(".exe")) {
+            if ![".bin", ".exe", ".cue", ".m3u"]
+                .iter()
+                .any(|ext| lower.ends_with(ext))
+            {
                 continue;
             }
             let rel = js_sys::Reflect::get(file.as_ref(), &JsValue::from_str("webkitRelativePath"))
                 .ok()
                 .and_then(|v| v.as_string())
                 .unwrap_or_default();
-            let path = if rel.is_empty() { name.clone() } else { rel };
-            scanned.push(ScannedGame {
-                id: format!("web:{path}"),
-                title: title_of(&path),
-                subtitle: subfolder_of(&path),
-                file: Some(file),
-            });
+            picked.push((if rel.is_empty() { name } else { rel }, file));
         }
-        scanned.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
-        SCANNED.with(|g| *g.borrow_mut() = scanned);
-        SCAN_READY.with(|r| r.set(true));
+        spawn_local(async move {
+            let mut found: Vec<FoundFile> = Vec::new();
+            for (path, file) in &picked {
+                let lower = path.to_ascii_lowercase();
+                if lower.ends_with(".cue") || lower.ends_with(".m3u") {
+                    let text = match file
+                        .slice_with_f64_and_f64(0.0, 65536.0)
+                        .map(|blob| blob.text())
+                    {
+                        Ok(promise) => JsFuture::from(promise)
+                            .await
+                            .ok()
+                            .and_then(|v| v.as_string())
+                            .unwrap_or_default(),
+                        Err(_) => String::new(),
+                    };
+                    found.push(FoundFile::sheet(path.clone(), sheet_refs(&lower, &text)));
+                } else {
+                    found.push(FoundFile::plain(path.clone()));
+                }
+            }
+            finish_scan(&found, &picked);
+        });
     });
     input.set_onchange(Some(on_change.as_ref().unchecked_ref()));
     on_change.forget();
     input.click();
+}
+
+/// The names a cue sheet (`FILE "name" BINARY`) or an m3u playlist lists.
+fn sheet_refs(path_lower: &str, text: &str) -> Vec<String> {
+    if path_lower.ends_with(".cue") {
+        text.lines()
+            .filter_map(|line| {
+                let line = line.trim_start();
+                let head = line.get(..4)?;
+                if !head.eq_ignore_ascii_case("FILE") {
+                    return None;
+                }
+                let rest = line[4..].trim_start();
+                match rest.strip_prefix('"') {
+                    Some(quoted) => Some(quoted.split('"').next()?.to_string()),
+                    None => Some(rest.split_whitespace().next()?.to_string()),
+                }
+            })
+            .collect()
+    } else {
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect()
+    }
 }
 
 fn make_file_input() -> Option<web_sys::HtmlInputElement> {

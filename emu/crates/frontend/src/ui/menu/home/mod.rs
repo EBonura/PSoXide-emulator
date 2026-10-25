@@ -228,7 +228,35 @@ pub(crate) struct HomeState {
     rail: Option<(Rect, Vec<char>)>,
     /// Where the primary button ended last frame.
     btn_bottom: f32,
+    /// The animation state of each case that has been drawn: focus spring,
+    /// picture fade and loading shimmer, by cover key (or title).
+    anim: std::collections::HashMap<String, CaseAnim>,
+    /// Seconds of the last frame (elapsed time, not the clamped step).
+    frame_dt: f32,
+    /// The reduce-motion setting.
+    calm_setting: bool,
+    /// The browser asked for reduced motion.
+    calm_browser: bool,
 }
+
+/// The animation of one case: how focused it is (a spring, so it settles with
+/// a hint of overshoot), how far its picture has faded in, and the loading
+/// shimmer.
+#[derive(Clone, Copy, Debug, Default)]
+struct CaseAnim {
+    focus: f32,
+    vel: f32,
+    art: f32,
+    load: f32,
+    /// Seconds the picture has been loading (the shimmer waits a moment so a
+    /// cached picture never flashes it).
+    loading_for: f32,
+}
+
+/// Seconds a picture must be loading before the shimmer shows.
+const SHIMMER_DELAY: f32 = 0.15;
+/// Seconds the picture takes to fade in.
+const ART_FADE_SECS: f32 = 0.35;
 
 /// A pointer press being tracked, to tell a tap from a scroll.
 #[derive(Clone, Copy, Debug)]
@@ -276,7 +304,74 @@ impl HomeState {
             grid_cols: 3,
             rail: None,
             btn_bottom: 0.0,
+            anim: std::collections::HashMap::new(),
+            frame_dt: 0.0,
+            calm_setting: false,
+            calm_browser: prefers_reduced_motion(),
         }
+    }
+
+    pub(super) fn set_reduce_motion(&mut self, on: bool) {
+        self.calm_setting = on;
+    }
+
+    /// Whether motion is calmed (the setting, or the browser's preference).
+    pub(super) fn calm(&self) -> bool {
+        self.calm_setting || self.calm_browser
+    }
+
+    /// Step one case's animation and return its picture and effects.
+    fn case_fx(
+        &mut self,
+        ctx: &egui::Context,
+        item: &CaseItem,
+        focused: bool,
+    ) -> (Option<egui::TextureId>, scene::CaseFx) {
+        let art = item
+            .cover_key
+            .as_deref()
+            .and_then(|k| self.covers.texture(ctx, k));
+        let loading = item
+            .cover_key
+            .as_deref()
+            .is_some_and(|k| self.covers.status(k) == covers::CoverStatus::Loading);
+        let key = item.cover_key.clone().unwrap_or_else(|| item.title.clone());
+        let dt = self.frame_dt;
+        let a = self.anim.entry(key).or_default();
+        // A spring toward 0 or 1: about 0.4 s to settle, a little overshoot.
+        let target = if focused { 1.0 } else { 0.0 };
+        let steps = ((dt / 0.01).ceil() as usize).clamp(1, 12);
+        let h = dt.min(0.12) / steps as f32;
+        for _ in 0..steps {
+            let force = 190.0 * (target - a.focus) - 17.0 * a.vel;
+            a.vel += force * h;
+            a.focus += a.vel * h;
+        }
+        a.focus = a.focus.clamp(0.0, 1.12);
+        if loading {
+            a.loading_for += dt;
+        } else {
+            a.loading_for = 0.0;
+        }
+        let want_load = if a.loading_for > SHIMMER_DELAY {
+            1.0
+        } else {
+            0.0
+        };
+        a.load += (want_load - a.load) * (dt * 8.0).min(1.0);
+        a.art = if art.is_some() {
+            (a.art + dt / ART_FADE_SECS).min(1.0)
+        } else {
+            0.0
+        };
+        let fx = scene::CaseFx {
+            loading: a.load,
+            art_fade: tokens::ease_out_expo(a.art),
+            focus: a.focus,
+            time: self.time,
+            calm: self.calm(),
+        };
+        (art, fx)
     }
 
     /// Reopening the shell starts at its top: the pause list of a started
@@ -439,14 +534,33 @@ impl MenuState {
             .cases(self)
             .iter()
             .take(16)
-            .map(|c| format!("[\"{}\",\"{}\"]", escape(&c.title), escape(&c.line)))
+            .map(|c| {
+                let key = c.cover_key.clone().unwrap_or_else(|| c.title.clone());
+                let anim = h.anim.get(&key).copied().unwrap_or_default();
+                let cover = match c.cover_key.as_deref().map(|k| h.covers.status(k)) {
+                    Some(covers::CoverStatus::Loading) => "loading",
+                    Some(covers::CoverStatus::Ready) => "ready",
+                    Some(covers::CoverStatus::Missing) => "missing",
+                    Some(covers::CoverStatus::Idle) => "idle",
+                    None => "none",
+                };
+                format!(
+                    "[\"{}\",\"{}\",\"{}\",{:.2},{:.2},{:.2}]",
+                    escape(&c.title),
+                    escape(&c.line),
+                    cover,
+                    anim.focus,
+                    anim.load,
+                    anim.art
+                )
+            })
             .collect();
         let left = match h.countdown {
             Countdown::Running(l) => l,
             _ => -1.0,
         };
         format!(
-            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"controls\":{},\"cases\":[{}],\"hits\":[{}]}}",
+            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"controls\":{},\"cases\":[{}],\"hits\":[{}]}}",
             h.page.name(),
             if h.zone == Zone::Nav { "nav" } else { "body" },
             self.home_probe().1,
@@ -461,6 +575,7 @@ impl MenuState {
             nav_items(h.pausing(self)).len(),
             h.first_visit,
             h.covers.loaded(),
+            h.calm(),
             h.controls.probe_json(self),
             cases.join(","),
             hits.join(",")
@@ -513,6 +628,7 @@ impl MenuState {
         if let Some(t) = launch {
             h.launch = Some(launch::Launch {
                 t,
+                skipping: false,
                 action: MenuAction::StartDemoDisc,
                 kind: CoverKind::Demo,
                 title: "PSoXide Demo Disc".into(),
@@ -800,6 +916,7 @@ impl HomeState {
         if launches && self.launch.is_none() {
             self.launch = Some(launch::Launch {
                 t: 0.0,
+                skipping: false,
                 action: action.clone(),
                 kind: case.kind,
                 title: case.title.clone(),
@@ -1120,6 +1237,7 @@ impl HomeState {
             .map_or(dt, |before| (now - before) as f32)
             .clamp(0.0, 1.5);
         self.clock = Some(now);
+        self.frame_dt = dt;
         // The sequence keeps the shell up while the game boots behind it.
         let playing = self.launch.is_some() && !self.launch_done;
         let target = if ms.open || playing { 1.0 } else { 0.0 };
@@ -1332,6 +1450,22 @@ pub(super) struct PageCtx<'a> {
     pub appear: f32,
 }
 
+/// Whether the browser asks for reduced motion (never on the desktop).
+fn prefers_reduced_motion() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        return web_sys::window()
+            .and_then(|w| {
+                w.match_media("(prefers-reduced-motion: reduce)")
+                    .ok()
+                    .flatten()
+            })
+            .is_some_and(|q| q.matches());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    false
+}
+
 fn remember_visit() {
     #[cfg(target_arch = "wasm32")]
     {
@@ -1368,17 +1502,18 @@ fn decode_label(ctx: &egui::Context) -> Option<egui::TextureHandle> {
 }
 
 impl HomeState {
-    /// Jump the sequence to its end. The press that started it does not count.
+    /// Skip the sequence: it plays out fast on its own curves, so the hand-off
+    /// stays continuous. The press that started it does not count.
     fn skip_launch(&mut self) {
         if let Some(l) = self.launch.as_mut() {
             if !self.launch_done && !l.frozen && l.t > launch::SKIP_AFTER {
-                l.t = launch::DURATION;
+                l.skipping = true;
             }
         }
     }
 
     /// Advance the launch sequence by elapsed time. At its end the game gets its action if it
-    /// has not had it yet, and the last moment holds until the game's boot closes the shell.
+    /// has not had it yet; the disc goes on spinning until the game's boot closes the shell.
     fn tick_launch(&mut self, dt: f32) {
         let Some(l) = self.launch.as_mut() else {
             return;
@@ -1386,15 +1521,9 @@ impl HomeState {
         if l.frozen {
             return;
         }
-        if self.launch_done {
-            // Holding on the spinning disc while the game loads.
-            l.t = launch::DURATION - 0.1;
-            return;
-        }
-        l.t += dt;
-        if l.t >= launch::DURATION {
+        l.t += dt * if l.skipping { launch::SKIP_SPEED } else { 1.0 };
+        if !self.launch_done && l.t >= launch::DURATION {
             self.launch_done = true;
-            l.t = launch::DURATION - 0.1;
             if !self.launch_sent {
                 self.launch_sent = true;
                 self.pending_launch = Some(l.action.clone());
@@ -1484,7 +1613,7 @@ impl HomeState {
             let dy = (y as f32 - self.case_pos).abs();
             dy.total_cmp(&dx)
         });
-        let sway = (self.time * 0.57).sin() * 0.13;
+        let time = self.time;
         for i in order {
             let item = &cases[i];
             let d = i as f32 - self.case_pos;
@@ -1498,36 +1627,48 @@ impl HomeState {
             } else {
                 scene::V3::new(150.0, 134.0, 12.0)
             };
-            let scale = base * (1.0 + 0.14 * near);
-            let art = item
-                .cover_key
-                .as_deref()
-                .and_then(|k| self.covers.texture(ctx, k));
+            let (art, fx) = self.case_fx(ctx, item, i == f);
+            let lit = fx.focus;
             let kind = if art.is_some() {
                 CoverKind::Art
             } else {
                 item.kind
             };
-            let center = scene::V3::new(cx + d * step, cy - near * 10.0 * u, -d.abs() * 90.0 * u);
+            // The focused case comes alive: it lifts toward you, turns slowly
+            // to show its depth and stands in its own light. Reduced motion
+            // keeps only a slightly larger case and the glow.
+            let moving = if fx.calm { 0.0 } else { lit };
+            let scale =
+                base * (1.0 + 0.14 * near + if fx.calm { 0.05 } else { 0.03 } * lit.min(1.0));
+            let center = scene::V3::new(
+                cx + d * step,
+                cy - near * 10.0 * u - 18.0 * u * moving,
+                -d.abs() * 90.0 * u + 90.0 * u * moving,
+            );
+            let turn = moving * (0.2 * (time * 0.55).sin() + 0.1 * (time * 0.31 + 1.3).sin());
             let draw = scene::CaseDraw {
                 kind,
                 title: &item.title,
                 art,
                 size,
                 center,
-                yaw: sway * near - d.clamp(-1.5, 1.5) * 0.30,
-                pitch: -0.07,
+                yaw: turn - d.clamp(-1.5, 1.5) * 0.30,
+                pitch: -0.07 + 0.025 * moving * (time * 0.43).sin(),
                 lid: 0.0,
                 scale,
                 opacity: a * (0.38 + 0.62 * near),
                 seed: hash_str(&item.title),
+                fx,
             };
             scene::draw_case(p, &cam, &draw);
             // Hit area for a click on the case.
             let half = Vec2::new(size.x, size.y) * scale * 0.5 + Vec2::splat(6.0);
             let at = cam.project(center);
-            self.hits
-                .push((Rect::from_center_size(at, half * 2.0), Click::Case(i)));
+            let hit = Rect::from_center_size(at, half * 2.0);
+            self.hits.push((hit, Click::Case(i)));
+            if lit > 0.02 {
+                case_brackets(p, hit.expand(5.0 * u), lit, a, u, fx.calm);
+            }
         }
         let Some(item) = cases.get(f) else {
             return;
@@ -2518,7 +2659,39 @@ fn draw_device_icon(p: &egui::Painter, c: Pos2, r: f32, which: u8, col: Color32)
 
 /// The focus cage: a 2 px outline, 9 px brackets on the corners and a faint
 /// tint, so focus is never colour alone.
+/// The four corner brackets of the focused case: they start wider and dimmer
+/// and ease in to the case as it takes focus (`e` is its focus, 0 to 1 and a
+/// little over while it settles).
+pub(super) fn case_brackets(p: &egui::Painter, r: Rect, e: f32, a: f32, u: f32, calm: bool) {
+    let k = tokens::ease_out_expo(e.clamp(0.0, 1.0));
+    let r = if calm {
+        r
+    } else {
+        r.expand((1.0 - k) * 16.0 * u)
+    };
+    let alpha = a * k;
+    let b = tokens::BRACKET * 1.5 * u;
+    let s = Stroke::new(tokens::FOCUS_STROKE + 0.5, fade(tokens::FOCUS, alpha));
+    for (corner, dx, dy) in [
+        (r.left_top(), 1.0, 1.0),
+        (r.right_top(), -1.0, 1.0),
+        (r.left_bottom(), 1.0, -1.0),
+        (r.right_bottom(), -1.0, -1.0),
+    ] {
+        p.line_segment([corner, corner + Vec2::new(dx * b, 0.0)], s);
+        p.line_segment([corner, corner + Vec2::new(0.0, dy * b)], s);
+    }
+}
+
 pub(super) fn focus_cage(p: &egui::Painter, r: Rect, a: f32, u: f32) {
+    focus_cage_eased(p, r, a, u, 1.0, false);
+}
+
+/// [`focus_cage`] while it eases in: `e` runs 0 to 1, the frame and its fill
+/// fade up and the corner brackets close in from a little outside.
+pub(super) fn focus_cage_eased(p: &egui::Painter, r: Rect, a: f32, u: f32, e: f32, calm: bool) {
+    let k = tokens::ease_out_expo(e.clamp(0.0, 1.0));
+    let a = a * k;
     p.rect_filled(r, 0.0, fade(tokens::ACCENT, tokens::FOCUS_TINT * a));
     p.rect_stroke(
         r,
@@ -2528,7 +2701,7 @@ pub(super) fn focus_cage(p: &egui::Painter, r: Rect, a: f32, u: f32) {
     );
     let b = tokens::BRACKET * u;
     let s = Stroke::new(tokens::FOCUS_STROKE + 0.5, fade(tokens::FOCUS, a));
-    let o = 3.0;
+    let o = 3.0 + if calm { 0.0 } else { (1.0 - k) * 10.0 * u };
     for (corner, dx, dy) in [
         (r.left_top(), 1.0, 1.0),
         (r.right_top(), -1.0, 1.0),

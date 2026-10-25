@@ -82,7 +82,7 @@ pub(super) const ROW_FOCUS_MOVE: f32 = 0.160;
 pub(super) const SHEET: f32 = 0.320;
 pub(super) const NAV_SWITCH: f32 = 0.200;
 /// The whole launch sequence.
-pub(super) const LAUNCH: f32 = 4.6;
+pub(super) const LAUNCH: f32 = 2.3;
 
 /// A CSS `cubic-bezier(x1, y1, x2, y2)` easing.
 pub(super) fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {

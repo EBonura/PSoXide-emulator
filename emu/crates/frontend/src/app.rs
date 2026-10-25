@@ -856,6 +856,8 @@ impl AppState {
         let first_visit = ui::menu::first_visit();
         self.menu.enable_home(first_visit);
         self.menu.set_box_art(self.settings.video.box_art);
+        self.menu
+            .set_reduce_motion(self.settings.video.reduce_motion);
         // The library was listed before the shell existed: describe its discs to it now.
         self.refresh_menu_library();
         #[cfg(target_arch = "wasm32")]
@@ -1767,28 +1769,17 @@ impl AppState {
     /// Path-qualified launch tokens distinguish copies with the same disc ID,
     /// while saves continue to use the underlying library entry's stable ID.
     pub fn refresh_menu_library(&mut self) {
-        use std::collections::{HashMap, HashSet};
+        use std::collections::HashSet;
 
         let sdk_examples_root = self.resolve_sdk_examples_dir().filter(|p| p.exists());
         let game_root = PathBuf::from(self.settings.paths.game_library.trim());
-
-        // Keep each disc under its CUE directory, even when its BIN is elsewhere.
-        let mut cue_owns_bin: HashMap<PathBuf, (String, PathBuf)> = HashMap::new();
-        for e in &self.library.entries {
-            if e.kind != GameKind::DiscCue {
-                continue;
-            }
-            if let Some(bin) = psoxide_settings::library::primary_bin_from_cue(&e.path) {
-                cue_owns_bin.insert(bin, (e.title.clone(), e.path.clone()));
-            }
-        }
 
         // Pass 2: project menu entries, applying dedup + title overrides.
         let mut games: Vec<MenuLibraryItem> = Vec::new();
         let mut examples: Vec<MenuLibraryItem> = Vec::new();
         let mut projects: Vec<MenuLibraryItem> = Vec::new();
-        let mut cue_already_listed: std::collections::HashSet<PathBuf> =
-            std::collections::HashSet::new();
+        // Retail discs are collected here and listed once per game below.
+        let mut retail: Vec<&LibraryEntry> = Vec::new();
         let project_root = self.resolve_editor_projects_dir().filter(|p| p.exists());
 
         for e in &self.library.entries {
@@ -1808,10 +1799,11 @@ impl AppState {
                 continue;
             }
 
-            // Audio tracks: any "(Track N)" filename where N != 1.
-            // Multi-track CUE rips leave each audio track as a
-            // standalone BIN; none of those boot, so hide them.
-            if label.contains("(Track ")
+            // Audio tracks of an SDK example build: any "(Track N)" file
+            // where N != 1 is not a program. (Retail rips are grouped into
+            // games below.)
+            if is_sdk_example
+                && label.contains("(Track ")
                 && !label.contains("(Track 01)")
                 && !label.contains("(Track 1)")
             {
@@ -1864,11 +1856,10 @@ impl AppState {
                         }
                     }
                 }
-                // Retail CUEs are not shown directly -- their BIN is.
-                // CCDs are shown directly because their `.img`
-                // sidecar is not a separate library entry.
-                GameKind::DiscCue => continue,
-                GameKind::DiscBin | GameKind::DiscIso | GameKind::DiscCcd => {
+                // Retail discs: one case per game, whatever pieces the rip is
+                // made of (see `group_games`). CCDs are their own game because
+                // their `.img` sidecar is not a library entry.
+                GameKind::DiscCue | GameKind::DiscBin | GameKind::DiscIso | GameKind::DiscCcd => {
                     if project_root
                         .as_ref()
                         .is_some_and(|root| path_is_under(&e.path, root))
@@ -1880,11 +1871,7 @@ impl AppState {
                     if e.kind == GameKind::DiscBin && !is_raw_sector_image(e.size) {
                         continue;
                     }
-                    if let Some(item) =
-                        game_menu_item(e, &cue_owns_bin, &mut cue_already_listed, &game_root)
-                    {
-                        games.push(item);
-                    }
+                    retail.push(e);
                 }
                 GameKind::Exe => {
                     if project_root
@@ -1906,6 +1893,8 @@ impl AppState {
                 GameKind::Unknown => {}
             }
         }
+
+        games.extend(retail_game_items(&retail, &game_root));
 
         let built_examples: HashSet<String> = examples
             .iter()
@@ -3281,6 +3270,16 @@ impl AppState {
         }
     }
 
+    /// Turn the calmer shell motion on or off and persist the choice.
+    pub fn toggle_reduce_motion(&mut self) {
+        let on = !self.settings.video.reduce_motion;
+        self.settings.video.reduce_motion = on;
+        self.menu.set_reduce_motion(on);
+        if let Err(error) = self.save_settings() {
+            eprintln!("[frontend] {error}");
+        }
+    }
+
     /// Cycle the DPI-aware host UI scale, update its Settings row, and persist
     /// it immediately. The renderer applies the new zoom on its next frame.
     pub fn cycle_ui_scale(&mut self) {
@@ -4530,35 +4529,62 @@ fn display_size_bytes(e: &LibraryEntry) -> u64 {
     e.size
 }
 
-/// Bind a Games row to its file, not a disc identity shared by distinct builds.
-/// Content IDs remain on LibraryEntry for saves and input-tape storage.
-fn game_menu_item(
-    entry: &LibraryEntry,
-    cue_owns_bin: &std::collections::HashMap<PathBuf, (String, PathBuf)>,
-    cue_already_listed: &mut std::collections::HashSet<PathBuf>,
-    game_root: &Path,
-) -> Option<MenuLibraryItem> {
-    let (title, launch_path) = if let Some((title, cue_path)) = cue_owns_bin.get(&entry.path) {
-        if !cue_already_listed.insert(cue_path.clone()) {
-            return None;
-        }
-        (title.clone(), cue_path)
-    } else {
-        (entry.title.clone(), &entry.path)
-    };
-    Some(MenuLibraryItem {
-        // Keep each disc under its CUE directory, even when its BIN is elsewhere.
-        folder: launch_path
-            .parent()
-            .and_then(|parent| parent.strip_prefix(game_root).ok())
-            .unwrap_or_else(|| Path::new(""))
-            .to_path_buf(),
-        id: path_launch_id(launch_path),
-        title,
-        subtitle: format_subtitle(entry),
-        burnable: false,
-        launchable: true,
-    })
+/// Library paths as the grouping sees them: `/` separators.
+fn group_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+/// One menu row per game for a set of retail library entries: the cue sheet
+/// (or lone image) of the first disc, titled by its name without track or
+/// disc tags. Each row binds to its file, not to a disc identity shared by
+/// distinct builds; content IDs remain on `LibraryEntry` for saves and input
+/// tape storage.
+fn retail_game_items(retail: &[&LibraryEntry], game_root: &Path) -> Vec<MenuLibraryItem> {
+    use psoxide_settings::game_group::{group_games, FoundFile};
+    let found: Vec<FoundFile> = retail
+        .iter()
+        .map(|e| {
+            let path = group_path(&e.path);
+            if e.kind == GameKind::DiscCue {
+                let refs = psoxide_settings::library::cue_referenced_files(&e.path)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|p| group_path(p))
+                    .collect();
+                FoundFile::sheet(path, refs)
+            } else {
+                FoundFile::plain(path)
+            }
+        })
+        .collect();
+    let by_path: std::collections::HashMap<String, &LibraryEntry> = retail
+        .iter()
+        .map(|e| (group_path(&e.path).to_ascii_lowercase(), *e))
+        .collect();
+    group_games(&found)
+        .into_iter()
+        .filter_map(|game| {
+            let entry = by_path.get(&game.entry.to_ascii_lowercase())?;
+            let mut subtitle = format_subtitle(entry);
+            if game.discs.len() > 1 {
+                subtitle = format!("{} discs · {subtitle}", game.discs.len());
+            }
+            Some(MenuLibraryItem {
+                // Keep each disc under its CUE directory, even when its BIN is elsewhere.
+                folder: entry
+                    .path
+                    .parent()
+                    .and_then(|parent| parent.strip_prefix(game_root).ok())
+                    .unwrap_or_else(|| Path::new(""))
+                    .to_path_buf(),
+                id: path_launch_id(&entry.path),
+                title: game.title,
+                subtitle,
+                burnable: false,
+                launchable: true,
+            })
+        })
+        .collect()
 }
 
 const PATH_LAUNCH_ID_PREFIX: &str = "path:";
@@ -5535,8 +5561,9 @@ mod tests {
             .map(|(_, label)| label.as_str())
             .collect();
         // Folders (two or more games) come first; Crash has its own folder
-        // on disk but is a plain row, as is the flat quake-psx.
-        assert_eq!(top, ["Pack", "Saga", "Crash (USA)", "quake-psx"]);
+        // on disk but is a plain row, as is the flat quake-psx, and the two
+        // discs of Saga are one game, one row.
+        assert_eq!(top, ["Pack", "Crash (USA)", "quake-psx", "Saga"]);
         assert!(!rows
             .iter()
             .any(|(_, l)| l.contains("graybox") || l == "final-ram"));
@@ -5964,10 +5991,23 @@ mod tests {
 
     #[test]
     fn games_rows_with_shared_disc_ids_launch_the_selected_file() {
-        // In-memory fixtures: telemetry's CUE precedes the normal CUE in the
-        // library, while the normal BIN appears first in the Games projection.
+        // Telemetry's CUE precedes the normal CUE in the library, while the
+        // normal BIN appears first in the Games projection.
+        let dir = std::env::temp_dir().join(format!("psoxide-rows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["normal", "telemetry"] {
+            std::fs::write(dir.join(format!("{name}.bin")), b"x").unwrap();
+            std::fs::write(
+                dir.join(format!("{name}.cue")),
+                format!(
+                    "FILE \"{name}.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n"
+                ),
+            )
+            .unwrap();
+        }
         let entry = |name: &str, kind, title: &str, id: &str| LibraryEntry {
-            path: PathBuf::from("/synthetic-games").join(name),
+            path: dir.join(name),
             id: id.to_string(),
             kind,
             title: title.to_string(),
@@ -6000,40 +6040,20 @@ mod tests {
             entries[1].path,
             "the old bare-ID lookup selects the telemetry CUE first",
         );
-        let owners = std::collections::HashMap::from([
-            (
-                entries[0].path.clone(),
-                (entries[3].title.clone(), entries[3].path.clone()),
-            ),
-            (
-                entries[2].path.clone(),
-                (entries[1].title.clone(), entries[1].path.clone()),
-            ),
-        ]);
-        let mut listed = std::collections::HashSet::new();
-        let rows: Vec<_> = [0, 2, 4]
-            .into_iter()
-            .map(|i| {
-                game_menu_item(
-                    &entries[i],
-                    &owners,
-                    &mut listed,
-                    Path::new("/synthetic-games"),
-                )
-                .unwrap()
-            })
-            .collect();
+        let retail: Vec<&LibraryEntry> = entries.iter().collect();
+        let rows = retail_game_items(&retail, &dir);
+        let mut titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
+        titles.sort_unstable();
         assert_eq!(
-            rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(),
-            ["Normal", "Telemetry", "Standalone"]
+            titles,
+            ["normal", "standalone", "telemetry"],
+            "a CUE is the game; its BIN is not a second row"
         );
-        assert!(game_menu_item(
-            &entries[0],
-            &owners,
-            &mut listed,
-            Path::new("/synthetic-games")
-        )
-        .is_none());
+        let rows: Vec<_> = {
+            let mut rows = rows;
+            rows.sort_by_key(|r| r.title.clone());
+            rows
+        };
         let mut menu = ui::menu::MenuState::new();
         menu.set_library(&rows, &[], &[]);
         menu.select_category("Library");
@@ -6041,9 +6061,9 @@ mod tests {
         // The Library lists rows in its own order; each must launch the file
         // its title names.
         let by_title = |title: &str| match title {
-            "Normal" => &entries[3],
-            "Telemetry" => &entries[1],
-            "Standalone" => &entries[4],
+            "normal" => &entries[3],
+            "telemetry" => &entries[1],
+            "standalone" => &entries[4],
             other => panic!("unexpected row {other}"),
         };
         let mut launched = Vec::new();
@@ -6065,7 +6085,8 @@ mod tests {
             });
         }
         launched.sort();
-        assert_eq!(launched, ["Normal", "Standalone", "Telemetry"]);
+        assert_eq!(launched, ["normal", "standalone", "telemetry"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A tiny bootable disc: SYSTEM.CNF plus a 4-byte PSX-EXE.

@@ -105,6 +105,11 @@ pub struct VideoSettings {
     /// collections. On by default; the pictures are never bundled.
     #[serde(default = "default_box_art")]
     pub box_art: bool,
+    /// Calmer shell motion: the focused case scales and glows instead of
+    /// lifting and turning, and nothing sweeps. Off by default; the browser's
+    /// own reduced-motion preference also turns it on.
+    #[serde(default)]
+    pub reduce_motion: bool,
 }
 
 fn default_box_art() -> bool {
@@ -138,6 +143,7 @@ impl Default for VideoSettings {
             texture_filter: default_texture_filter(),
             deinterlace: default_deinterlace(),
             box_art: default_box_art(),
+            reduce_motion: false,
         }
     }
 }

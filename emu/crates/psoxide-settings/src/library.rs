@@ -610,16 +610,53 @@ fn boot_exe_name(system_cnf: &[u8]) -> Option<String> {
 pub fn disc_boot_serial(path: &Path) -> Option<String> {
     // A cue sheet names the image that holds the first track.
     let bin;
-    let path = if path
+    let ext = path
         .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("cue"))
-    {
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
+    let path = if ext.eq_ignore_ascii_case("cue") {
         bin = primary_bin_from_cue(path)?;
+        bin.as_path()
+    } else if ext.eq_ignore_ascii_case("ccd") {
+        // A CloneCD set keeps its sectors in the `.img` beside the sheet.
+        bin = ccd_decoded_img_path(path);
         bin.as_path()
     } else {
         path
     };
-    let reader = SectorReader::open(path)?;
+    boot_serial_of_reader(&SectorReader::open(path)?)
+}
+
+/// [`disc_boot_serial`] for the first bytes of a data-track image held in
+/// memory (the browser reads a slice of the file and passes it here). The
+/// slice has to reach the root directory and `SYSTEM.CNF`: 512 sectors of
+/// 2352 bytes do for every retail disc.
+#[must_use]
+pub fn boot_serial_of_prefix(prefix: Vec<u8>) -> Option<String> {
+    use psx_iso::{SECTOR_BYTES, SECTOR_USER_DATA_BYTES, SECTOR_USER_DATA_OFFSET};
+    // Raw 2352-byte sectors keep the volume descriptor 24 bytes into LBA 16;
+    // a cooked 2048-byte image keeps it at the start.
+    let at = |stride: usize, offset: usize| {
+        prefix
+            .get(stride * 16 + offset..stride * 16 + offset + 6)
+            .is_some_and(|d| d[0] == 1 && &d[1..6] == b"CD001")
+    };
+    let (stride, user_offset) = if at(SECTOR_BYTES, SECTOR_USER_DATA_OFFSET) {
+        (SECTOR_BYTES as u64, SECTOR_USER_DATA_OFFSET as u64)
+    } else if at(SECTOR_USER_DATA_BYTES, 0) {
+        (SECTOR_USER_DATA_BYTES as u64, 0)
+    } else {
+        return None;
+    };
+    let image: crate::disc_image::SharedImage = std::sync::Arc::new(prefix);
+    boot_serial_of_reader(&SectorReader {
+        image,
+        stride,
+        user_offset,
+    })
+}
+
+fn boot_serial_of_reader(reader: &SectorReader) -> Option<String> {
     let pvd = reader.user(16)?;
     if pvd[0] != 1 || &pvd[1..6] != b"CD001" {
         return None;
@@ -1020,16 +1057,21 @@ fn pvd_volume_identifier(user_data: &[u8]) -> Option<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CueTrackSpec {
-    number: u8,
-    track_type: psx_iso::TrackType,
-    path: PathBuf,
+pub(crate) struct CueTrackSpec {
+    pub(crate) number: u8,
+    pub(crate) track_type: psx_iso::TrackType,
+    pub(crate) path: PathBuf,
     /// Pregap sectors in disc space before INDEX 01.
-    pregap: u32,
+    pub(crate) pregap: u32,
     /// Pregap sectors physically present at the start of the track file.
-    file_pregap: u32,
+    pub(crate) file_pregap: u32,
     /// File-relative sector where this track's physical data begins.
-    file_start_sector: u32,
+    pub(crate) file_start_sector: u32,
+}
+
+/// The tracks of a cue sheet (for the data-track hash in [`crate::redump`]).
+pub(crate) fn cue_track_files(cue_path: &Path) -> Result<Vec<CueTrackSpec>, String> {
+    parse_cue_tracks(cue_path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
