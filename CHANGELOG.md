@@ -2,12 +2,6 @@
 
 ## Unreleased
 
-- The desktop home screen always shows the PSoXide Demo Disc as its first case, with the
-  disc's own cover. The newest public release in your games folder (or next to the
-  program) is the one that starts; older releases and the private and diagnostic builds
-  are cases of their own after "Open a games folder", newest first, and a cue sheet whose
-  images are gone is not listed. With no public release it points at the download.
-
 - Stall-budget tooling. Two data-address limit oracles (`PSOXIDE_RAM_DATA_LOG`,
   `PSOXIDE_LIMIT_FAST_DATA`) rank main-RAM lines by load stall and price
   "these bytes live in the scratchpad", and `tools/stall-tools` (no

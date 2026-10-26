@@ -42,26 +42,6 @@ const MAX_EDGE: u32 = 256;
 /// Seconds a failed network answer waits before the same disc asks again.
 const OFFLINE_RETRY_SECS: f64 = 20.0;
 
-/// Ids that start with this are the Demo Disc's own cover, which ships inside the
-/// program: no lookup, no network, and it does not depend on the box-art setting.
-pub(crate) const DEMO_COVER_PREFIX: &str = "embedded:demo-cover";
-/// The Demo Disc's cover. Desktop only: the web build's Demo Disc keeps its drawn cover.
-#[cfg(not(target_arch = "wasm32"))]
-const DEMO_COVER_PNG: &[u8] =
-    include_bytes!("../../../../../../../assets/branding/demo-disc-cover.png");
-/// Edge length the shipped cover is kept at: it is the hero case, drawn larger than the rest.
-const EMBEDDED_EDGE: u32 = 512;
-
-/// The picture that ships inside the program for an id, if it is one of those.
-fn embedded_art(id: &str) -> Option<&'static [u8]> {
-    #[cfg(not(target_arch = "wasm32"))]
-    if id.starts_with(DEMO_COVER_PREFIX) {
-        return Some(DEMO_COVER_PNG);
-    }
-    let _ = id;
-    None
-}
-
 /// Where a picture can come from, tried in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Candidate {
@@ -288,7 +268,7 @@ impl CoverState {
     pub(crate) fn status(&self, id: &str) -> CoverStatus {
         if self.textures.contains_key(id) {
             CoverStatus::Ready
-        } else if self.missing.contains(id) || (!self.enabled && embedded_art(id).is_none()) {
+        } else if self.missing.contains(id) || !self.enabled {
             CoverStatus::Missing
         } else if self.jobs.contains_key(id) || self.ready.iter().any(|(r, _)| r == id) {
             CoverStatus::Loading
@@ -499,7 +479,7 @@ impl CoverState {
         if let Some(tex) = self.textures.get(id) {
             return Some(tex.id());
         }
-        if !self.enabled && embedded_art(id).is_none() {
+        if !self.enabled {
             return None;
         }
         // Decode what has arrived, a picture or two per frame.
@@ -511,12 +491,7 @@ impl CoverState {
             let (rid, bytes) = self.ready.swap_remove(at);
             decoded += 1;
             self.jobs.remove(&rid);
-            let edge = if embedded_art(&rid).is_some() {
-                EMBEDDED_EDGE
-            } else {
-                MAX_EDGE
-            };
-            match decode(&bytes, edge) {
+            match decode(&bytes) {
                 Some(image) => {
                     let tex =
                         ctx.load_texture(format!("cover-{rid}"), image, TextureOptions::LINEAR);
@@ -544,11 +519,6 @@ impl CoverState {
             return;
         }
         self.offline_until.remove(id);
-        if let Some(bytes) = embedded_art(id) {
-            // Nothing to look up: it is already here, and only needs decoding.
-            self.ready.push((id.to_string(), bytes.to_vec()));
-            return;
-        }
         let Some(source) = self.source_of(id) else {
             // Not a disc we can name (a web id before its folder is known).
             self.missing.insert(id.to_string());
@@ -627,11 +597,11 @@ impl CoverState {
     }
 }
 
-/// Decode a PNG or JPEG and cut it down to `edge` pixels on its long side.
-fn decode(bytes: &[u8], edge: u32) -> Option<ColorImage> {
+/// Decode a PNG or JPEG and cut it down to [`MAX_EDGE`].
+fn decode(bytes: &[u8]) -> Option<ColorImage> {
     let img = image::load_from_memory(bytes).ok()?;
-    let img = if img.width().max(img.height()) > edge {
-        img.thumbnail(edge, edge)
+    let img = if img.width().max(img.height()) > MAX_EDGE {
+        img.thumbnail(MAX_EDGE, MAX_EDGE)
     } else {
         img
     };
@@ -1263,29 +1233,6 @@ mod tests {
 
     fn keys(log: &Rc<RefCell<Log>>) -> Vec<Vec<String>> {
         log.borrow().fetches.iter().map(|f| f.1.clone()).collect()
-    }
-
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn the_demo_disc_cover_ships_inside_and_asks_nobody() {
-        let (mut s, log) = state(true);
-        s.set_enabled(false);
-        let id = format!("{DEMO_COVER_PREFIX}:PSoXide Demo Disc v0.47");
-        assert_eq!(
-            s.status(&id),
-            CoverStatus::Idle,
-            "not switched off with box art"
-        );
-        let ctx = egui::Context::default();
-        assert!(s.texture(&ctx, &id).is_none(), "decoded on a later call");
-        assert_eq!(s.status(&id), CoverStatus::Loading);
-        assert!(s.texture(&ctx, &id).is_some());
-        assert_eq!(s.status(&id), CoverStatus::Ready);
-        let log = log.borrow();
-        assert!(
-            log.fetches.is_empty() && log.probes == 0 && log.hashes == 0 && log.dats == 0,
-            "no lookup of any kind"
-        );
     }
 
     #[test]

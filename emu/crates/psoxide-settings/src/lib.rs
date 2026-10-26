@@ -28,7 +28,6 @@
 
 #![warn(missing_docs)]
 
-pub mod demo_disc;
 pub mod disc_image;
 mod ecm;
 pub mod game_group;

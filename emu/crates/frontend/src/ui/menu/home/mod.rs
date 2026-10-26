@@ -39,8 +39,6 @@ fn countdown_secs() -> f32 {
 pub(super) const SITE_URL: &str = "https://ebonura.github.io/PSoXide/";
 /// Where the free builds, and the optional donation, live.
 const ITCH_URL: &str = "https://bonnie-studios.itch.io/psoxide";
-/// Where the Demo Disc download lives (shown when no copy is on this computer).
-const DEMO_DISC_URL: &str = "https://bonnie-studios.itch.io/psoxide-demo-disc";
 pub(super) const SOURCE_URL: &str = "https://github.com/EBonura/PSoXide";
 
 /// The pages the shell can show.
@@ -248,9 +246,6 @@ pub(crate) struct HomeState {
     calm_setting: bool,
     /// The browser asked for reduced motion.
     calm_browser: bool,
-    /// Desktop: the Demo Disc is a disc in the games folder (or beside the program), found by
-    /// name, not one the page streams in.
-    local_demo: bool,
 }
 
 /// The animation of one case: how focused it is (a spring, so it settles with
@@ -324,7 +319,6 @@ impl HomeState {
             letters: 0,
             calm_setting: false,
             calm_browser: prefers_reduced_motion(),
-            local_demo: false,
         }
     }
 
@@ -505,15 +499,6 @@ impl MenuState {
             self.appear
         } else {
             0.0
-        }
-    }
-
-    /// Desktop builds: the shelf always has the Demo Disc as its first case, taken from the
-    /// discs the library lists (see `HomeState::local_demo_cases`).
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub fn set_local_demo(&mut self, on: bool) {
-        if let Some(h) = self.home.as_mut() {
-            h.local_demo = on;
         }
     }
 
@@ -847,83 +832,13 @@ impl HomeState {
         }
     }
 
-    /// Desktop: the Demo Disc case and the other builds of it, from the discs the library lists.
-    ///
-    /// The newest public release is the Demo Disc (the hero case, whatever else is around). Every
-    /// other build in the folder (an older release, the private builds, the diagnostic ones) is a
-    /// case of its own right after the shelf's first cases, newest first. Only discs that exist
-    /// reach this list, so a cue sheet whose images are gone never shows up. With no public
-    /// release at all the hero stays and points at the download.
-    fn local_demo_cases(&self, ms: &MenuState) -> LocalDemo {
-        use psoxide_settings::demo_disc::DemoDisc;
-        let mut found: Vec<(DemoDisc, &LibraryItem)> = ms
-            .games
-            .iter()
-            .filter_map(|g| DemoDisc::parse(&g.title).map(|d| (d, g)))
-            .collect();
-        found.sort_by(|a, b| a.0.newest_first(&b.0));
-        let claimed: Vec<String> = found.iter().map(|(_, g)| g.id.clone()).collect();
-        let hero_at = found.iter().position(|(d, _)| d.is_public());
-        let hero = match hero_at.map(|i| found.remove(i)) {
-            Some((disc, item)) => CaseItem {
-                kind: CoverKind::Demo,
-                title: "PSoXide Demo Disc".into(),
-                line: match disc.version {
-                    Some((major, minor)) => format!("Seven games and demos · v{major}.{minor}"),
-                    None => "Seven games and demos".into(),
-                },
-                action: MenuAction::LaunchGame(item.id.clone()),
-                button: "Start disc",
-                cover_key: Some(demo_cover_key("hero")),
-                restart: None,
-                burn: None,
-                launches: true,
-                shelf: false,
-            },
-            None => CaseItem {
-                kind: CoverKind::Demo,
-                title: "PSoXide Demo Disc".into(),
-                line: "Not on this computer yet. Put it in your games folder".into(),
-                action: MenuAction::OpenUrl(DEMO_DISC_URL.into()),
-                button: "Get the disc",
-                cover_key: Some(demo_cover_key("hero")),
-                restart: None,
-                burn: None,
-                launches: false,
-                shelf: false,
-            },
-        };
-        let others = found
-            .iter()
-            .map(|(disc, item)| CaseItem {
-                kind: CoverKind::Plain,
-                title: disc.short_title().unwrap_or_else(|| item.title.clone()),
-                line: disc.describe(),
-                action: MenuAction::LaunchGame(item.id.clone()),
-                button: "Play",
-                cover_key: Some(demo_cover_key(&item.id)),
-                restart: None,
-                burn: None,
-                launches: true,
-                shelf: false,
-            })
-            .collect();
-        LocalDemo {
-            hero,
-            others,
-            claimed,
-        }
-    }
-
     /// The shelf: the game you left, the demo disc, your own discs.
     fn cases(&self, ms: &MenuState) -> Vec<CaseItem> {
         let mut out = Vec::new();
         let current = self.feed.current.as_ref().filter(|_| self.pausing(ms));
         let demo_id = crate::app::DEMO_DISC_ID;
-        let local = self.local_demo.then(|| self.local_demo_cases(ms));
-        let has_demo = local.is_none()
-            && (ms.homebrew.iter().any(|e| e.id == demo_id)
-                || self.feed.demo != DemoStatus::Absent);
+        let has_demo =
+            ms.homebrew.iter().any(|e| e.id == demo_id) || self.feed.demo != DemoStatus::Absent;
         if let Some((id, title)) = current {
             let is_demo = id == demo_id;
             out.push(CaseItem {
@@ -940,21 +855,12 @@ impl HomeState {
                 line: "Paused. Pick up where you left off".into(),
                 action: MenuAction::ResumeGame,
                 button: "Resume",
-                cover_key: if local.is_some()
-                    && psoxide_settings::demo_disc::DemoDisc::parse(title).is_some()
-                {
-                    Some(demo_cover_key("current"))
-                } else {
-                    (!is_demo).then(|| id.clone())
-                },
+                cover_key: (!is_demo).then(|| id.clone()),
                 restart: Some(MenuAction::LaunchGame(id.clone())),
                 burn: None,
                 launches: false,
                 shelf: false,
             });
-        }
-        if let Some(local) = local.as_ref() {
-            out.push(local.hero.clone());
         }
         if has_demo && current.is_none_or(|(id, _)| id != demo_id) {
             out.push(CaseItem {
@@ -1002,10 +908,6 @@ impl HomeState {
         if let Some((id, _)) = current {
             shown.insert(id.as_str());
         }
-        if let Some(local) = local.as_ref() {
-            // The Demo Disc builds have their own cases: never again as a plain game or a recent.
-            shown.extend(local.claimed.iter().map(String::as_str));
-        }
         // Real recents first: discs this browser or this machine really played.
         for item in ms.recent_discs.iter().take(5) {
             if shown.insert(item.id.as_str()) {
@@ -1022,9 +924,6 @@ impl HomeState {
                     shelf: false,
                 });
             }
-        }
-        if let Some(local) = local.as_ref() {
-            out.extend(local.others.iter().cloned());
         }
         // Then the rest of the shelf: your games folder and the SDK examples.
         let mut rest: Vec<&LibraryItem> = ms.games.iter().collect();
@@ -1581,23 +1480,6 @@ impl HomeState {
     }
 }
 
-/// The Demo Disc and its sibling builds on the desktop shelf.
-struct LocalDemo {
-    /// The first case: the newest public release (or the way to get it).
-    hero: CaseItem,
-    /// Every other build, newest first.
-    others: Vec<CaseItem>,
-    /// Launch ids of all the demo discs found, for keeping them off the alphabetical shelf.
-    claimed: Vec<String>,
-}
-
-/// The cover key of a demo disc case: each case has its own, so each keeps its own motion, while
-/// all of them draw the same shipped picture.
-fn demo_cover_key(case: &str) -> String {
-    format!("{}:{case}", covers::DEMO_COVER_PREFIX)
-}
-
-#[derive(Clone)]
 struct CaseItem {
     kind: CoverKind,
     title: String,
@@ -3223,121 +3105,6 @@ mod tests {
         let mut h = ms.home.take().expect("home");
         h.tick_countdown(secs);
         ms.home = Some(h);
-    }
-
-    fn item(title: &str) -> LibraryItem {
-        LibraryItem {
-            folder: std::path::PathBuf::new(),
-            id: format!("path:/games/{title}.cue"),
-            title: title.into(),
-            subtitle: String::new(),
-            burnable: false,
-            launchable: true,
-        }
-    }
-
-    /// The desktop shelf for these game titles: (title, line, action, cover key) per case.
-    fn desktop_shelf(titles: &[&str]) -> Vec<(String, String, MenuAction, Option<String>)> {
-        let mut ms = MenuState::new();
-        ms.enable_home(false);
-        ms.set_local_demo(true);
-        let games: Vec<LibraryItem> = titles.iter().map(|t| item(t)).collect();
-        ms.set_library(&games, &[], &[]);
-        let h = ms.home.take().expect("home");
-        let cases = h.cases(&ms);
-        ms.home = Some(h);
-        cases
-            .into_iter()
-            .map(|c| (c.title, c.line, c.action, c.cover_key))
-            .collect()
-    }
-
-    #[test]
-    fn the_desktop_shelf_starts_with_the_newest_public_demo_disc() {
-        let shelf = desktop_shelf(&[
-            "Quake (quake-psx)",
-            "PSoXide Demo Disc v0.48 Private DIAG",
-            "PSoXide Demo Disc v0.47",
-            "PSoXide Demo Disc v0.45",
-            "PSoXide Demo Disc v0.47 Private DIAG",
-            "WipEout (USA)",
-        ]);
-        let titles: Vec<&str> = shelf.iter().map(|c| c.0.as_str()).collect();
-        assert_eq!(
-            titles,
-            [
-                "PSoXide Demo Disc",
-                "Open a games folder",
-                "Demo Disc v0.48 DIAG",
-                "Demo Disc v0.47 DIAG",
-                "Demo Disc v0.45",
-                "Quake (quake-psx)",
-                "WipEout (USA)",
-            ],
-            "the hero, then the other builds newest first, then the alphabetical shelf"
-        );
-        assert_eq!(
-            shelf[0].2,
-            MenuAction::LaunchGame("path:/games/PSoXide Demo Disc v0.47.cue".into()),
-            "Start disc starts the newest public release"
-        );
-        assert!(shelf[0].1.contains("v0.47"));
-        for demo in [&shelf[0], &shelf[2], &shelf[3], &shelf[4]] {
-            let key = demo.3.as_deref().expect("a cover key");
-            assert!(
-                key.starts_with(covers::DEMO_COVER_PREFIX),
-                "own cover: {key}"
-            );
-        }
-        let keys: std::collections::HashSet<_> =
-            [0, 2, 3, 4].iter().map(|i| &shelf[*i].3).collect();
-        assert_eq!(keys.len(), 4, "each case moves on its own");
-        assert!(
-            shelf[5]
-                .3
-                .as_deref()
-                .is_some_and(|k| !k.starts_with("embedded:")),
-            "other games look their art up as before"
-        );
-    }
-
-    #[test]
-    fn with_only_private_builds_the_hero_points_at_the_download() {
-        let shelf = desktop_shelf(&["PSoXide Demo Disc v0.48 Private DIAG"]);
-        assert_eq!(shelf[0].0, "PSoXide Demo Disc");
-        assert!(
-            matches!(shelf[0].2, MenuAction::OpenUrl(_)),
-            "{:?}",
-            shelf[0].2
-        );
-        assert_eq!(shelf[2].0, "Demo Disc v0.48 DIAG");
-        let nothing = desktop_shelf(&["Quake (quake-psx)"]);
-        assert_eq!(nothing[0].0, "PSoXide Demo Disc");
-        assert!(matches!(nothing[0].2, MenuAction::OpenUrl(_)));
-        assert_eq!(nothing[1].0, "Open a games folder");
-        assert_eq!(nothing[2].0, "Quake (quake-psx)");
-    }
-
-    #[test]
-    fn the_web_shelf_is_untouched_by_the_desktop_rules() {
-        let mut ms = home(false, DemoStatus::Ready);
-        ms.set_library(
-            &[item("PSoXide Demo Disc v0.47"), item("Quake (quake-psx)")],
-            &[],
-            &[],
-        );
-        let h = ms.home.take().expect("home");
-        let titles: Vec<String> = h.cases(&ms).into_iter().map(|c| c.title).collect();
-        ms.home = Some(h);
-        assert_eq!(
-            titles,
-            [
-                "PSoXide Demo Disc",
-                "Open a games folder",
-                "PSoXide Demo Disc v0.47",
-                "Quake (quake-psx)"
-            ]
-        );
     }
 
     #[test]
