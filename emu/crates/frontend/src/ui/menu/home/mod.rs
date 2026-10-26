@@ -21,6 +21,7 @@ use egui::{Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2};
 use super::{LibraryItem, MenuAction, MenuInput, MenuState};
 use crate::icons;
 use crate::ui::momentum::Momentum;
+use crate::ui_sound::UiSound;
 use hints::{Btn, HintStyle};
 use scene::{fade, CoverKind, CYAN};
 
@@ -178,7 +179,6 @@ enum Click {
     Logo,
     Case(usize),
     Primary,
-    Peek,
     Restart,
     Burn,
     SizeToggle,
@@ -207,11 +207,26 @@ pub(crate) struct HomeState {
     case_pos: f32,
     time: f32,
     countdown: Countdown,
-    peek: bool,
     welcome: usize,
+    /// The "What is this?" pages are showing because this is the first run: the first-visit
+    /// countdown waits behind them and the pages' own taps and keys never cancel it.
+    explainer: bool,
+    /// The explainer was dismissed; the app takes this once, to remember it in the saved settings.
+    explainer_seen: bool,
+    /// Sounds asked for since the app last took them (see `MenuState::take_sounds`).
+    pub(super) sounds: Vec<UiSound>,
+    /// What the last frame looked like, to hear what changed.
+    watch: Option<SoundWatch>,
+    /// A confirm or a back was pressed or tapped this frame.
+    snd_confirm: bool,
+    snd_back: bool,
     started: bool,
     feed: HomeFeed,
     dither: Option<egui::TextureHandle>,
+    /// The small pictures of the demo disc's games, loaded when the home screen first shows them.
+    disc_tiles: Option<Vec<egui::TextureHandle>>,
+    /// Where the contents chips were drawn this frame, `[x0, y0, x1, y1, chips, style]` (journeys).
+    contents: Option<[f32; 6]>,
     list_scroll: f32,
     /// The motion of the list or controls page under a finger: coasting, stretch, tap-to-stop.
     kin: Momentum,
@@ -330,20 +345,27 @@ struct Press {
 }
 
 impl HomeState {
-    pub(super) fn new(first_visit: bool) -> Self {
+    pub(super) fn new(first_visit: bool, explainer: bool) -> Self {
         Self {
-            page: Page::Home,
+            page: if explainer { Page::Welcome } else { Page::Home },
+            explainer,
+            explainer_seen: false,
+            sounds: Vec::new(),
+            watch: None,
+            snd_confirm: false,
+            snd_back: false,
             zone: Zone::Body,
             nav: 0,
             case_focus: 0,
             case_pos: 0.0,
             time: 0.0,
             countdown: Countdown::Off,
-            peek: false,
             welcome: 0,
             started: false,
             feed: HomeFeed::default(),
             dither: None,
+            disc_tiles: None,
+            contents: None,
             list_scroll: 0.0,
             kin: Momentum::default(),
             kin_page: Page::Home,
@@ -524,7 +546,6 @@ impl HomeState {
         } else if std::mem::take(&mut self.closed) {
             self.page = Page::Home;
             self.zone = Zone::Body;
-            self.peek = false;
             self.list_scroll = 0.0;
             self.last_row = usize::MAX;
             self.launch = None;
@@ -612,9 +633,18 @@ impl HomeState {
 
 impl MenuState {
     /// Turn the home screen on, replacing the cross media bar. `first_visit`
-    /// arms the demo-disc countdown.
-    pub fn enable_home(&mut self, first_visit: bool) {
-        self.home = Some(Box::new(HomeState::new(first_visit)));
+    /// arms the demo-disc countdown; `explainer` opens on the "What is this?" pages first, and the
+    /// countdown starts when they are dismissed.
+    pub fn enable_home(&mut self, first_visit: bool, explainer: bool) {
+        self.home = Some(Box::new(HomeState::new(first_visit, explainer)));
+    }
+
+    /// Whether the first-run explainer was dismissed since the last call: the app remembers it
+    /// (native: the saved settings; the web remembers it in local storage itself).
+    pub fn take_explainer_seen(&mut self) -> bool {
+        self.home
+            .as_mut()
+            .is_some_and(|h| std::mem::take(&mut h.explainer_seen))
     }
 
     /// Whether the home screen is the shell.
@@ -713,7 +743,6 @@ impl MenuState {
                     Click::Logo => "logo".into(),
                     Click::Case(i) => format!("case:{i}"),
                     Click::Primary => "primary".into(),
-                    Click::Peek => "peek".into(),
                     Click::Act(action) => format!("act:{action:?}"),
                     Click::Restart => "restart".into(),
                     Click::SizeToggle => "size".into(),
@@ -776,14 +805,13 @@ impl MenuState {
             _ => -1.0,
         };
         format!(
-            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"nav_hl\":{:.3},\"nav_vis\":{:.2},\"page_age\":{:.2},\"keyboard\":{},\"framed\":{},\"press\":{:.2},\"controls\":{},\"list\":[{:.1},{:.1},{:.1},{:.1},{}],\"cases\":[{}],\"hits\":[{}]}}",
+            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"nav_hl\":{:.3},\"nav_vis\":{:.2},\"page_age\":{:.2},\"keyboard\":{},\"framed\":{},\"press\":{:.2},\"controls\":{},\"list\":[{:.1},{:.1},{:.1},{:.1},{}],\"contents\":{},\"explainer\":{},\"welcome\":{},\"cases\":[{}],\"hits\":[{}]}}",
             h.page.name(),
             if h.zone == Zone::Nav { "nav" } else { "body" },
             self.home_probe().1,
             left,
             h.case_focus,
             h.nav,
-            h.peek,
             h.started,
             h.pausing(self),
             h.launch.as_ref().map_or(-1.0, |l| l.t),
@@ -805,6 +833,12 @@ impl MenuState {
             h.list_view[2],
             h.list_view[3],
             i32::from(h.kin.is_active()),
+            h.contents.map_or("null".to_string(), |c| format!(
+                "[{:.1},{:.1},{:.1},{:.1},{},{}]",
+                c[0], c[1], c[2], c[3], c[4] as i32, c[5] as i32
+            )),
+            h.explainer,
+            h.welcome,
             cases.join(","),
             hits.join(",")
         )
@@ -986,7 +1020,16 @@ impl MenuState {
 }
 
 impl HomeState {
+    /// The first-run explainer is on screen.
+    fn explainer_up(&self) -> bool {
+        self.explainer && self.page == Page::Welcome
+    }
+
     fn cancel_countdown(&mut self) {
+        // Reading the pages is not a choice: the countdown waits behind them.
+        if self.explainer_up() {
+            return;
+        }
         match self.countdown {
             Countdown::Armed | Countdown::Running(_) => {
                 self.countdown = Countdown::Cancelled;
@@ -1262,7 +1305,6 @@ impl HomeState {
             });
             self.launch_sent = false;
             self.launch_done = false;
-            self.peek = false;
             // A disc that has to load starts loading with the sequence. The demo disc waiting
             // behind the shell is already booted: it resumes when the sequence ends.
             if !(matches!(action, MenuAction::StartDemoDisc) && self.feed.demo == DemoStatus::Ready)
@@ -1308,6 +1350,8 @@ impl HomeState {
             || input.secondary
             || input.letter_prev
             || input.letter_next;
+        self.snd_confirm |= input.confirm;
+        self.snd_back |= input.back;
         for (i, pressed) in [
             input.tab_prev,
             input.tab_next,
@@ -1334,8 +1378,9 @@ impl HomeState {
         if any {
             // The press that cancels the countdown only cancels it: it does not
             // also press Start disc.
-            let counting = matches!(self.countdown, Countdown::Armed | Countdown::Running(_))
-                || self.cancelled_this_frame;
+            let counting = !self.explainer_up()
+                && (matches!(self.countdown, Countdown::Armed | Countdown::Running(_))
+                    || self.cancelled_this_frame);
             self.cancel_countdown();
             self.cancelled_this_frame = false;
             if counting {
@@ -1430,9 +1475,7 @@ impl HomeState {
         if input.secondary {
             // The second action of the focused case, whichever it has.
             let click = cases.get(self.case_focus).and_then(|c| {
-                if matches!(c.kind, CoverKind::Demo) && c.badge.is_none() {
-                    Some(Click::Peek)
-                } else if c.restart.is_some() {
+                if c.restart.is_some() {
                     Some(Click::Restart)
                 } else if c.burn.is_some() {
                     Some(Click::Burn)
@@ -1480,9 +1523,7 @@ impl HomeState {
             }
         }
         if input.back {
-            if self.peek {
-                self.peek = false;
-            } else if self.pausing(ms) {
+            if self.pausing(ms) {
                 // Back from a game's shell resumes it.
                 ms.open = false;
             }
@@ -1507,7 +1548,6 @@ impl HomeState {
         self.zone = Zone::Body;
         self.list_scroll = 0.0;
         self.last_row = usize::MAX;
-        self.peek = false;
     }
 
     /// Game and Settings: rows of the matching category.
@@ -1679,6 +1719,74 @@ impl HomeState {
         }
         self.handle_pointer(ms, ctx);
         self.draw_press_feedback(ctx, dt);
+        self.emit_sounds(ms);
+    }
+
+    /// Ask for the sound of whatever changed this frame: the shell or a sheet opening or closing,
+    /// a page, the cursor, a value, a confirm or a back. One sound per frame at most.
+    fn emit_sounds(&mut self, ms: &MenuState) {
+        let list_page = matches!(self.page, Page::Game | Page::Settings);
+        let (row_value, row_plain) = if list_page {
+            pages::visible_rows(ms, self.page)
+                .get(ms.item_index)
+                .map_or((String::new(), true), |r| {
+                    (r.value.clone(), pages::is_plain(r))
+                })
+        } else {
+            (String::new(), true)
+        };
+        let now = SoundWatch {
+            open: ms.open,
+            page: self.page,
+            case: self.case_focus,
+            nav: (self.zone == Zone::Nav).then_some(self.nav),
+            row: ms.item_index,
+            row_value,
+            welcome: self.welcome,
+            slot: ms.slots.sel,
+        };
+        let confirmed = std::mem::take(&mut self.snd_confirm);
+        let backed = std::mem::take(&mut self.snd_back);
+        let Some(before) = self.watch.replace(now.clone()) else {
+            return;
+        };
+        let sound = if !before.open && now.open {
+            Some(UiSound::Open)
+        } else if before.open && !now.open {
+            Some(UiSound::Close)
+        } else if !now.open {
+            None
+        } else if backed {
+            Some(UiSound::Back)
+        } else if before.page != now.page {
+            Some(match (before.page, now.page) {
+                (_, Page::Slots | Page::Welcome) => UiSound::Open,
+                (Page::Slots | Page::Welcome, _) => UiSound::Close,
+                _ => UiSound::Tab,
+            })
+        } else if list_page && before.row == now.row && before.row_value != now.row_value {
+            // A value changed under the cursor: a switch, a step or just a new word.
+            Some(match now.row_value.as_str() {
+                "On" => UiSound::On,
+                "Off" => UiSound::Off,
+                _ if row_plain => UiSound::Confirm,
+                _ => UiSound::Step,
+            })
+        } else if confirmed && !(list_page && !row_plain) {
+            Some(UiSound::Confirm)
+        } else if before.case != now.case
+            || before.nav != now.nav
+            || before.row != now.row
+            || before.welcome != now.welcome
+            || before.slot != now.slot
+        {
+            Some(UiSound::Move)
+        } else {
+            None
+        };
+        if let Some(sound) = sound {
+            self.sounds.push(sound);
+        }
     }
 
     /// The control under a finger or the mouse button answers at once: a soft glow rises under it
@@ -1698,11 +1806,7 @@ impl HomeState {
                     r.width() * r.height() < full.width() * full.height() * 0.25
                         && !matches!(
                             click,
-                            Click::Case(_)
-                                | Click::Slider(..)
-                                | Click::Rail
-                                | Click::Dismiss
-                                | Click::Peek
+                            Click::Case(_) | Click::Slider(..) | Click::Rail | Click::Dismiss
                         )
                 })
                 .map(|(r, _)| *r)
@@ -1741,12 +1845,18 @@ impl HomeState {
     }
 
     fn tick_countdown(&mut self, dt: f32) {
+        if self.explainer && self.page != Page::Welcome {
+            // Dismissed, by any way out of the pages: never shown by itself again.
+            self.explainer = false;
+            self.explainer_seen = true;
+            remember_explainer();
+        }
         self.case_pos += (self.case_focus as f32 - self.case_pos) * (1.0 - (-9.0 * dt).exp());
         if (self.case_pos - self.case_focus as f32).abs() < 0.002 {
             self.case_pos = self.case_focus as f32;
         }
         match self.countdown {
-            Countdown::Armed if self.feed.demo == DemoStatus::Ready => {
+            Countdown::Armed if self.feed.demo == DemoStatus::Ready && !self.explainer_up() => {
                 self.countdown = Countdown::Running(countdown_secs());
             }
             Countdown::Running(left) => {
@@ -1887,6 +1997,32 @@ fn prefers_reduced_motion() -> bool {
     false
 }
 
+/// Remember in this browser that the first-run explainer was seen (local storage, never fatal).
+fn remember_explainer() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+            let _ = storage.set_item(EXPLAINER_KEY, "1");
+        }
+    }
+}
+
+/// Whether the web player should open on the explainer: a first visit that has not seen it.
+/// (Native keeps this in the saved settings instead, see `EmulatorSettings::welcome_seen`.)
+#[allow(dead_code)]
+pub(crate) fn explainer_unseen() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let seen = web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item(EXPLAINER_KEY).ok().flatten())
+            .is_some();
+        return !seen && is_first_visit();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    false
+}
+
 fn remember_visit() {
     #[cfg(target_arch = "wasm32")]
     {
@@ -1912,6 +2048,22 @@ pub(crate) fn is_first_visit() -> bool {
 
 #[cfg(target_arch = "wasm32")]
 const VISIT_KEY: &str = "psoxide.home.visited";
+#[cfg(target_arch = "wasm32")]
+const EXPLAINER_KEY: &str = "psoxide.home.explainer";
+
+/// The pictures of `pages::DISC_GAMES`, in order.
+fn load_disc_tiles(ctx: &egui::Context) -> Vec<egui::TextureHandle> {
+    pages::DISC_GAMES
+        .iter()
+        .filter_map(|(name, png)| {
+            let rgba = image::load_from_memory(png).ok()?.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            let img =
+                egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw());
+            Some(ctx.load_texture(format!("disc-{name}"), img, egui::TextureOptions::LINEAR))
+        })
+        .collect()
+}
 
 fn decode_label(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     const LABEL_PNG: &[u8] =
@@ -2080,6 +2232,7 @@ impl HomeState {
         let a = pc.appear;
         let u = lay.u;
         let cases = self.cases(ms);
+        self.contents = None;
         self.case_focus = self.case_focus.min(cases.len().saturating_sub(1));
         self.letters = grid::letter_groups(&cases).len();
         let f = self.case_focus;
@@ -2261,28 +2414,34 @@ impl HomeState {
                 fade(sub_col, ta),
             )
         };
-        // "What's on it", only on the demo disc and only on demand (not while it is running).
+        // What is on the demo disc, always in view: one chip per game (a small picture and the name),
+        // wrapped to the width. Not while the disc runs.
         let mut below = sub.bottom();
         if matches!(item.kind, CoverKind::Demo) && item.badge.is_none() {
-            let wio_pos = match align {
-                Align2::LEFT_TOP => Pos2::new(sub.left(), below + 8.0 * u),
-                _ => Pos2::new(tx, below + 8.0 * u),
+            // What the rest of the page needs under it: the countdown line, the button, the quiet
+            // links and the bar; the chips take what is left.
+            let counting = self.progress_line().is_some();
+            // The button, the countdown line above it and, on a phone held upright, the links
+            // under it are placed from the chips down: the chips may not push them over the bar.
+            let after_chips = 16.0 + if counting { 22.0 } else { 0.0 };
+            let floor = match lay.kind {
+                LayoutKind::Desktop => h * 0.855 - after_chips * u,
+                LayoutKind::Portrait => {
+                    lay.safe.bottom()
+                        - lay.bar_reserve()
+                        - (4.0 + 48.0 + 44.0 + 6.0 + after_chips) * u
+                }
+                LayoutKind::Landscape => {
+                    lay.safe.bottom() - lay.bar_reserve() - (4.0 + 44.0 + 6.0 + after_chips) * u
+                }
             };
-            let wio = p.text(
-                wio_pos,
-                align,
-                "What's on it",
-                FontId::proportional(line_px * 0.92),
-                fade(tokens::ACCENT, ta),
-            );
-            p.line_segment(
-                [wio.left_bottom(), wio.right_bottom()],
-                Stroke::new(1.0, fade(tokens::ACCENT, ta * 0.45)),
-            );
-            self.hits
-                .push((wio.expand2(Vec2::new(10.0, 8.0)), Click::Peek));
-            self.square_glyph(p, &lay, wio, ta);
-            below = wio.bottom();
+            let max_w = match align {
+                Align2::LEFT_TOP => (w - tx - 24.0 * u).max(120.0 * u),
+                _ => (w - 40.0 * u).min(720.0 * u),
+            };
+            let top = below + 12.0 * u;
+            below =
+                self.draw_disc_chips(ctx, p, Pos2::new(tx, top), align, max_w, floor - top, u, ta);
         }
         // The countdown line, or the loading line, or nothing.
         let mut cd_y = below + 16.0 * u;
@@ -2384,9 +2543,175 @@ impl HomeState {
         motion::shift_since(ctx, p, m2, self.slide(rq, u));
         // Quiet links at the bottom.
         self.draw_footer(pc);
-        if self.peek && matches!(item.kind, CoverKind::Demo) {
-            self.draw_peek(pc);
+    }
+
+    /// The games on the demo disc as chips under the title: a small picture and the name, wrapped
+    /// to `max_w` and centred or left on `at` as `align` says. When the room (`budget`, points)
+    /// is short the pictures go, then the chips: the names never go. Returns the bottom.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_disc_chips(
+        &mut self,
+        ctx: &egui::Context,
+        p: &egui::Painter,
+        at: Pos2,
+        align: Align2,
+        max_w: f32,
+        budget: f32,
+        u: f32,
+        a: f32,
+    ) -> f32 {
+        let tiles = self.disc_tiles.get_or_insert_with(|| load_disc_tiles(ctx));
+        let font_for =
+            |style: usize| FontId::proportional(if style == 0 { 12.0 } else { 11.5 } * u.max(0.95));
+        let gap = 6.0 * u;
+        let row_gap = |style: usize| if style == 0 { 6.0 * u } else { 4.5 * u };
+        let names = pages::DISC_GAMES;
+        // Style 0 has pictures, 1 only the names in chips, 2 one wrapped line of names.
+        let measure = |style: usize| -> (Vec<(f32, f32)>, f32) {
+            let (ch, pic) = match style {
+                0 => (26.0 * u, 28.0 * u),
+                _ => (20.0 * u, 0.0),
+            };
+            let font = font_for(style);
+            let mut rows: Vec<(f32, f32)> = Vec::new(); // (x offset of the row's start, row width)
+            let mut widths: Vec<f32> = Vec::new();
+            let mut cur = 0.0_f32;
+            let mut count = 0;
+            for (name, _) in names {
+                let tw = p
+                    .layout_no_wrap((*name).to_string(), font.clone(), tokens::TEXT)
+                    .size()
+                    .x;
+                let cw = tw
+                    + if pic > 0.0 {
+                        18.0 * u + pic + 6.0 * u
+                    } else {
+                        14.0 * u
+                    };
+                if count > 0 && cur + gap + cw > max_w {
+                    widths.push(cur);
+                    cur = 0.0;
+                    count = 0;
+                }
+                cur += if count > 0 { gap } else { 0.0 } + cw;
+                count += 1;
+            }
+            widths.push(cur);
+            for w in widths {
+                rows.push((0.0, w));
+            }
+            let rg = row_gap(style);
+            let height = rows.len() as f32 * (ch + rg) - rg;
+            (rows, height)
+        };
+        let mut style = 0;
+        while style < 1 && measure(style).1 > budget {
+            style += 1;
         }
+        let top = at.y;
+        if measure(style).1 > budget {
+            // Still too tall: the names as plain wrapped text.
+            let text = names
+                .iter()
+                .map(|(n, _)| *n)
+                .collect::<Vec<_>>()
+                .join("  \u{b7}  ");
+            let galley = p.layout(text, font_for(2), fade(tokens::TEXT_2, a), max_w);
+            let x = match align {
+                Align2::LEFT_TOP => at.x,
+                _ => at.x - galley.size().x / 2.0,
+            };
+            let bottom = top + galley.size().y;
+            let width = galley.size().x;
+            p.galley(Pos2::new(x, top), galley, tokens::TEXT_2);
+            self.contents = Some([x, top, x + width, bottom, names.len() as f32, 2.0]);
+            return bottom;
+        }
+        let (ch, pic) = if style == 0 {
+            (26.0 * u, 28.0 * u)
+        } else {
+            (20.0 * u, 0.0)
+        };
+        let (rows, height) = measure(style);
+        let _ = rows;
+        let font = font_for(style);
+        // Lay the chips out again, now drawing.
+        let mut y = top;
+        let mut line: Vec<(&str, usize, f32)> = Vec::new();
+        let mut line_w = 0.0_f32;
+        let flush = |line: &mut Vec<(&str, usize, f32)>, line_w: f32, y: f32| {
+            let mut x = match align {
+                Align2::LEFT_TOP => at.x,
+                _ => at.x - line_w / 2.0,
+            };
+            for (name, i, cw) in line.drain(..) {
+                let chip = Rect::from_min_size(Pos2::new(x, y), Vec2::new(cw, ch));
+                p.rect_filled(chip, ch / 2.0, fade(Color32::from_rgb(10, 24, 32), a * 0.9));
+                p.rect_stroke(
+                    chip,
+                    ch / 2.0,
+                    Stroke::new(1.0, fade(tokens::hairline(), a)),
+                    egui::StrokeKind::Inside,
+                );
+                let mut tx = chip.left() + 7.0 * u;
+                if pic > 0.0 {
+                    if let Some(tex) = tiles.get(i) {
+                        let r = Rect::from_min_size(
+                            Pos2::new(chip.left() + 3.0 * u, chip.center().y - pic * 0.375),
+                            Vec2::new(pic, pic * 0.75),
+                        );
+                        p.image(
+                            tex.id(),
+                            r,
+                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                            fade(Color32::WHITE, a),
+                        );
+                    }
+                    tx = chip.left() + 3.0 * u + pic + 6.0 * u;
+                }
+                p.text(
+                    Pos2::new(tx, chip.center().y),
+                    Align2::LEFT_CENTER,
+                    name,
+                    font.clone(),
+                    fade(tokens::TEXT_2, a),
+                );
+                x += cw + gap;
+            }
+        };
+        for (i, (name, _)) in names.iter().enumerate() {
+            let tw = p
+                .layout_no_wrap((*name).to_string(), font.clone(), tokens::TEXT)
+                .size()
+                .x;
+            let cw = tw
+                + if pic > 0.0 {
+                    18.0 * u + pic + 6.0 * u
+                } else {
+                    14.0 * u
+                };
+            if !line.is_empty() && line_w + gap + cw > max_w {
+                flush(&mut line, line_w, y);
+                y += ch + row_gap(style);
+                line_w = 0.0;
+            }
+            line_w += if line.is_empty() { 0.0 } else { gap } + cw;
+            line.push((name, i, cw));
+        }
+        flush(&mut line, line_w, y);
+        let left = match align {
+            Align2::LEFT_TOP => at.x,
+            _ => at.x - max_w.min(widest(&measure(style).0)) / 2.0,
+        };
+        self.contents = Some([
+            left,
+            top,
+            left + widest(&measure(style).0),
+            top + height,
+            names.len() as f32,
+            style as f32,
+        ]);
+        top + height
     }
 
     /// The compact grid with the focused case's title and button under it.
@@ -2715,51 +3040,6 @@ impl HomeState {
                 }
             }
         }
-    }
-
-    fn draw_peek(&mut self, pc: &mut PageCtx<'_>) {
-        let lay = pc.lay;
-        let p = pc.painter;
-        let a = pc.appear;
-        let u = lay.u;
-        let (x, y, wd) = match lay.kind {
-            LayoutKind::Desktop => (
-                lay.safe.left() + 48.0 * u,
-                lay.safe.top() + 110.0 * u,
-                250.0 * u,
-            ),
-            _ => (
-                lay.safe.center().x - 130.0 * u,
-                lay.safe.top() + 120.0 * u,
-                260.0 * u,
-            ),
-        };
-        let rows = pages::DISC_CONTENTS;
-        let hgt = (rows.len() as f32 * 26.0 + 52.0) * u;
-        let r = Rect::from_min_size(Pos2::new(x, y), Vec2::new(wd, hgt));
-        p.rect_filled(r, 2.0, fade(Color32::from_rgb(9, 21, 28), a * 0.92));
-        p.rect_filled(
-            Rect::from_min_size(r.min, Vec2::new(2.0, r.height())),
-            0.0,
-            fade(CYAN, a),
-        );
-        p.text(
-            r.min + Vec2::new(18.0 * u, 18.0 * u),
-            Align2::LEFT_CENTER,
-            "WHAT'S ON THE DISC",
-            FontId::proportional(tokens::CAPTION * u.max(1.0)),
-            fade(tokens::MUTED, a),
-        );
-        for (i, name) in rows.iter().enumerate() {
-            p.text(
-                r.min + Vec2::new(18.0 * u, 46.0 * u + i as f32 * 26.0 * u),
-                Align2::LEFT_CENTER,
-                *name,
-                FontId::proportional(14.5 * u),
-                fade(tokens::TEXT_2, a),
-            );
-        }
-        self.hits.push((r, Click::Peek));
     }
 
     /// Move the tab highlight and the focus ring toward their tabs, once per frame.
@@ -3304,8 +3584,6 @@ impl HomeState {
                 if let Some(action) = self.apply_click(ms, click) {
                     ms.pending_pointer_action = Some(action);
                 }
-            } else if self.peek {
-                self.peek = false;
             }
         }
     }
@@ -3316,6 +3594,12 @@ impl HomeState {
     }
 
     fn apply_click(&mut self, ms: &mut MenuState, click: Click) -> Option<MenuAction> {
+        match &click {
+            Click::Dismiss | Click::Close | Click::WelcomeStep(-1) => self.snd_back = true,
+            // A page change speaks for itself; a slider and a drag have their own sounds.
+            Click::Nav(_) | Click::TabStep(_) | Click::Slider(..) | Click::Rail | Click::Logo => {}
+            _ => self.snd_confirm = true,
+        }
         match click {
             Click::Nav(item) => {
                 self.open_nav(ms, item);
@@ -3354,7 +3638,6 @@ impl HomeState {
                 let cases = self.cases(ms);
                 return cases.get(self.case_focus).and_then(|c| c.burn.clone());
             }
-            Click::Peek => self.peek = !self.peek,
             Click::Link(url) => return Some(MenuAction::OpenUrl(url.to_string())),
             Click::Welcome => {
                 self.page = Page::Welcome;
@@ -3388,6 +3671,24 @@ impl HomeState {
         }
         None
     }
+}
+
+/// The widest row of a chip flow, from `(start, width)` pairs.
+fn widest(rows: &[(f32, f32)]) -> f32 {
+    rows.iter().map(|r| r.1).fold(0.0, f32::max)
+}
+
+/// What `HomeState::emit_sounds` compares from one frame to the next.
+#[derive(Clone, PartialEq)]
+struct SoundWatch {
+    open: bool,
+    page: Page,
+    case: usize,
+    nav: Option<usize>,
+    row: usize,
+    row_value: String,
+    welcome: usize,
+    slot: usize,
 }
 
 enum ProgressLine {
@@ -3588,7 +3889,7 @@ mod tests {
 
     fn home(first_visit: bool, demo: DemoStatus) -> MenuState {
         let mut ms = MenuState::new();
-        ms.enable_home(first_visit);
+        ms.enable_home(first_visit, false);
         ms.set_home_feed(HomeFeed {
             demo,
             keyboard: true,
@@ -3621,7 +3922,7 @@ mod tests {
     /// The desktop shelf for these game titles: (title, line, action, cover key) per case.
     fn desktop_shelf(titles: &[&str]) -> Vec<(String, String, MenuAction, Option<String>)> {
         let mut ms = MenuState::new();
-        ms.enable_home(false);
+        ms.enable_home(false, false);
         ms.set_local_demo(true);
         let games: Vec<LibraryItem> = titles.iter().map(|t| item(t)).collect();
         ms.set_library(&games, &[], &[]);
@@ -3813,6 +4114,79 @@ mod tests {
             ms.home.as_ref().expect("home").launch.is_some(),
             "the launch sequence starts"
         );
+    }
+
+    #[test]
+    fn the_first_run_opens_on_the_explainer_and_the_countdown_waits_behind_it() {
+        let mut ms = MenuState::new();
+        ms.enable_home(true, true);
+        ms.set_home_feed(HomeFeed {
+            demo: DemoStatus::Ready,
+            keyboard: true,
+            ..HomeFeed::default()
+        });
+        tick(&mut ms, 5.0);
+        assert_eq!(
+            ms.home_probe(),
+            ("Welcome", "armed"),
+            "no countdown while it is read"
+        );
+        ms.note_input();
+        assert_eq!(ms.home_probe().1, "armed", "reading is not a choice");
+        for _ in 0..2 {
+            assert_eq!(
+                press(
+                    &mut ms,
+                    MenuInput {
+                        confirm: true,
+                        ..Default::default()
+                    }
+                ),
+                None
+            );
+            assert_eq!(
+                ms.home_probe().1,
+                "armed",
+                "turning a page does not cancel it"
+            );
+        }
+        assert_eq!(ms.home_probe().0, "Welcome");
+        assert!(!ms.take_explainer_seen(), "not dismissed yet");
+        press(
+            &mut ms,
+            MenuInput {
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(ms.home_probe().0, "Home", "the last page closes it");
+        tick(&mut ms, 0.1);
+        assert_eq!(ms.home_probe().1, "running", "then the countdown starts");
+        assert!(ms.take_explainer_seen(), "dismissed, once");
+        assert!(!ms.take_explainer_seen());
+    }
+
+    #[test]
+    fn skipping_the_explainer_also_starts_the_countdown_and_marks_it_seen() {
+        let mut ms = MenuState::new();
+        ms.enable_home(true, true);
+        ms.set_home_feed(HomeFeed {
+            demo: DemoStatus::Ready,
+            keyboard: true,
+            ..HomeFeed::default()
+        });
+        tick(&mut ms, 0.1);
+        press(
+            &mut ms,
+            MenuInput {
+                back: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(ms.home_probe().0, "Home");
+        tick(&mut ms, 0.1);
+        assert_eq!(ms.home_probe().1, "running");
+        assert!(ms.take_explainer_seen());
     }
 
     #[test]

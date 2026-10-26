@@ -36,7 +36,6 @@ impl HomeState {
         self.zone = Zone::Body;
         self.list_scroll = 0.0;
         self.last_row = usize::MAX;
-        self.peek = false;
     }
 
     /// The sheet's keys and pad: the grid and its questions are the sheet's own; Back and Up from

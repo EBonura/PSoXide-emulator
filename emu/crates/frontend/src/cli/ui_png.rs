@@ -238,7 +238,7 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
             |ctx| {
                 if args.view == View::Window {
                     ui::toolbar::draw(ctx, &mut state);
-                    ui::debug_sidebar::draw(ctx, &mut state, vram.id(), None);
+                    ui::debug_sidebar::draw(ctx, &mut state, vram.id());
                 }
                 if let Some(covers) = state.menu.covers() {
                     covers.pump();

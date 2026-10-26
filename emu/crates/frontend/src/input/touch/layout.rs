@@ -97,13 +97,6 @@ pub(crate) struct LayoutParams {
     /// Pixels the debug panel takes from the right of a landscape window: the controls lay
     /// themselves out in what is left beside it.
     pub(crate) dock_right: f32,
-    /// Pixels of the portrait panel the debug strip asks for under the controls: the controls
-    /// shrink as far as needed to leave them, and never past the strip.
-    pub(crate) dock_bottom: f32,
-    /// How far the debug sheet has been pulled up over the controls in portrait, 0 (the strip
-    /// under them) to 1 (the sheet fills the panel under the interface row). While it is above 0
-    /// the pad's own controls are away: only the interface row stays.
-    pub(crate) sheet: f32,
 }
 
 /// Which way the window is wider.
@@ -281,14 +274,6 @@ pub(crate) struct TouchLayout {
     /// Where the game picture sits (4:3, window pixels) when nothing else shares
     /// the window. No control is ever drawn or touched inside it.
     pub(crate) game: Rect,
-    /// Where the debug strip goes in portrait (window pixels, down to the window's edge): under the
-    /// controls. [`Rect::NOTHING`] when none was asked for.
-    pub(crate) strip: Rect,
-    /// The debug sheet covers the pad's controls (none of them is drawn or takes a touch).
-    pub(crate) pad_hidden: bool,
-    /// Where the strip's top edge sits with the sheet down and fully up, window pixels, for the
-    /// sheet's drag handle to map a finger's travel to the sheet.
-    pub(crate) sheet_span: [f32; 2],
 }
 
 fn pill(rect: Rect, inflate: Vec2, mask: u16, label: &'static str) -> PadButton {
@@ -461,22 +446,19 @@ impl TouchLayout {
 
     /// Portrait: the game takes the top at 4:3 and everything else is in the panel under it. The
     /// row of interface buttons is the panel's first line, right under the picture, and the pad's
-    /// controls are packed in one block right under it, like a real controller's. What the block
-    /// leaves of the panel is below it: empty, or the debug strip, for which the block shrinks as
-    /// far as it must and no further.
+    /// controls are packed in one block right under it, like a real controller's. With the debug
+    /// panel open it takes a column at the right of the window and the picture and the controls
+    /// share what is left.
     fn portrait(p: &LayoutParams) -> Self {
         let (ox, oy) = (p.safe.left, p.safe.top);
-        let w_px = (p.size.x - p.safe.left - p.safe.right).max(1.0);
+        let w_px = (p.size.x - p.safe.left - p.safe.right - p.dock_right).max(1.0);
         let w_css = w_px / p.scale;
         let game_h = 0.75 * w_px;
         let panel_top = oy + game_h;
         let need_css = if p.analog { 342.0 } else { 234.0 } + UI_BAND;
         let avail_css = (p.size.y - p.safe.bottom - panel_top).max(0.0) / p.scale;
-        let strip_css = (p.dock_bottom / p.scale).max(0.0);
         let k = (w_css / 380.0).clamp(0.7, 1.4) * f32::from(p.size_pct) / 100.0;
-        let k = k
-            .min((avail_css - strip_css).max(0.0) / need_css)
-            .clamp(0.5, 1.5);
+        let k = k.min(avail_css / need_css).clamp(0.5, 1.5);
         let u = p.scale * k;
         // On a narrow screen the two clusters shrink so the Start / Select
         // column between them keeps a thumb-sized width.
@@ -487,7 +469,6 @@ impl TouchLayout {
         let m = MARGIN * u;
         // The pad's block hangs right under the interface row.
         let content_top = panel_top + UI_BAND * u;
-        let content_end = content_top + (need_css - UI_BAND) * u;
         let y0 = content_top + m;
         let cy = y0 + (SHOULDER.y + 5.0 + (FACE_REACH + FACE_HIT) * c + 5.0) * u;
         let cx_mid = ox + w_px / 2.0;
@@ -501,19 +482,6 @@ impl TouchLayout {
         );
         layout.reserved_bottom = p.size.y - panel_top;
         layout.game = Rect::from_min_size(pos2(ox, oy), vec2(w_px, game_h));
-        if p.dock_bottom > 0.0 {
-            // From the end of the block to the window's edge; the strip keeps the safe inset free.
-            // Pulled up (`sheet`), its top edge rises to just under the interface row.
-            let down = content_end.min(p.size.y - p.safe.bottom);
-            let up = content_top.min(down);
-            let sheet = p.sheet.clamp(0.0, 1.0);
-            layout.strip = Rect::from_min_max(
-                pos2(ox, down + (up - down) * sheet),
-                pos2(ox + w_px, p.size.y),
-            );
-            layout.sheet_span = [down, up];
-            layout.pad_hidden = sheet > 0.0;
-        }
 
         layout.shoulders(ox, w_px, y0, u);
         // Between the D-pad and the face buttons: Select above Start.
@@ -545,11 +513,6 @@ impl TouchLayout {
                 stick.zone = Rect::from_center_size(stick.rest, Vec2::splat(2.0 * zone));
             }
         }
-        if layout.pad_hidden {
-            layout.buttons.clear();
-            layout.sticks.clear();
-            layout.dpad.zone = 0.0;
-        }
         layout
     }
 
@@ -570,9 +533,6 @@ impl TouchLayout {
             bar_left: 0.0,
             bar_right: 0.0,
             game: Rect::NOTHING,
-            strip: Rect::NOTHING,
-            pad_hidden: false,
-            sheet_span: [0.0; 2],
         };
         for (mask, glyph, dx, dy) in [
             (button::TRIANGLE, Glyph::Triangle, 0.0, -FACE_REACH),
@@ -825,8 +785,6 @@ pub(crate) mod tests {
             fullscreen_button: true,
             menu_open: false,
             dock_right: 0.0,
-            dock_bottom: 0.0,
-            sheet: 0.0,
         }
     }
 
@@ -1075,8 +1033,6 @@ pub(crate) mod tests {
                         fullscreen_button: true,
                         menu_open: false,
                         dock_right: 0.0,
-                        dock_bottom: 0.0,
-                        sheet: 0.0,
                     },
                 ));
             }
@@ -1084,18 +1040,13 @@ pub(crate) mod tests {
         for (name, base) in windows {
             for left_handed in [false, true] {
                 for size_pct in [70, 100, 150] {
-                    for dock in [0.0, 0.3] {
+                    // The debug panel takes a third of the window at the right, either way up.
+                    for dock in [0.0, 0.33] {
                         let mut p = base;
                         p.left_handed = left_handed;
                         p.size_pct = size_pct;
                         let landscape = p.size.x >= p.size.y;
-                        p.dock_right = if landscape { dock * p.size.x } else { 0.0 };
-                        // In portrait the debug strip asks for 140 CSS px under the controls.
-                        p.dock_bottom = if landscape || dock == 0.0 {
-                            0.0
-                        } else {
-                            140.0 * p.scale
-                        };
+                        p.dock_right = dock * p.size.x;
                         let layout = TouchLayout::compute(&p);
                         let game = layout.game;
                         assert!(game.width() > 50.0, "{name}: no game rect {game:?}");
@@ -1111,27 +1062,6 @@ pub(crate) mod tests {
                                 !rect.shrink(0.5).intersects(game),
                                 "{name} lh={left_handed} size={size_pct} dock={dock}: {what} {rect:?} meets the game {game:?}"
                             );
-                        }
-                        // The strip, when asked for, is clear of every control and tall enough to read.
-                        if p.dock_bottom > 0.0 {
-                            let strip = layout.strip;
-                            assert!(
-                                strip.height() >= 100.0 * p.scale,
-                                "{name} lh={left_handed} size={size_pct}: strip {strip:?}"
-                            );
-                            let mut all = hit_rects(&layout);
-                            all.extend(
-                                layout
-                                    .buttons
-                                    .iter()
-                                    .map(|b| (format!("drawn {:#x}", b.mask), b.draw.bounds())),
-                            );
-                            for (what, rect) in all {
-                                assert!(
-                                    !rect.shrink(0.5).intersects(strip),
-                                    "{name} lh={left_handed} size={size_pct}: {what} {rect:?} meets the strip {strip:?}"
-                                );
-                            }
                         }
                         // The game stays 4:3.
                         assert!(
@@ -1174,8 +1104,6 @@ pub(crate) mod tests {
                 fullscreen_button: true,
                 menu_open: false,
                 dock_right: 0.0,
-                dock_bottom: 0.0,
-                sheet: 0.0,
             };
             let layout = TouchLayout::compute(&p);
             let natural = (h * dpr * 4.0 / 3.0).min(w * dpr);
@@ -1230,50 +1158,6 @@ pub(crate) mod tests {
         let safe = safe_rect(&p).expand(1.0);
         for (name, rect) in hit_rects(&big) {
             assert!(safe.contains_rect(rect), "{name} {rect:?}");
-        }
-    }
-
-    #[test]
-    fn the_debug_sheet_takes_the_pad_panel_and_leaves_the_interface_row() {
-        for device in &DEVICES {
-            let mut p = params(device, false, true);
-            p.dock_bottom = 140.0 * p.scale;
-            let down = TouchLayout::compute(&p);
-            assert!(
-                !down.pad_hidden && !down.buttons.is_empty(),
-                "{}",
-                device.name
-            );
-            p.sheet = 1.0;
-            let up = TouchLayout::compute(&p);
-            assert!(up.pad_hidden, "{}", device.name);
-            assert!(
-                up.buttons.is_empty() && up.sticks.is_empty() && up.dpad.zone == 0.0,
-                "{}: nothing of the pad is left to draw or touch",
-                device.name
-            );
-            assert!(
-                !up.ui.is_empty(),
-                "{}: the interface row stays",
-                device.name
-            );
-            let row_bottom = up.ui.iter().map(|u| u.draw.max.y).fold(0.0, f32::max);
-            assert!(
-                up.strip.min.y >= row_bottom && up.strip.min.y < down.strip.min.y,
-                "{}: the sheet starts under the row ({row_bottom}) and above the strip ({:?})",
-                device.name,
-                down.strip
-            );
-            assert_eq!(
-                up.strip.max.y, p.size.y,
-                "{}: it runs to the window's edge",
-                device.name
-            );
-            // Half way up, the pad is already away (it would show through the sheet).
-            p.sheet = 0.3;
-            assert!(TouchLayout::compute(&p).pad_hidden, "{}", device.name);
-            // The sheet never moves the picture.
-            assert_eq!(up.game, down.game, "{}", device.name);
         }
     }
 }

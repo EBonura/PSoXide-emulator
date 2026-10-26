@@ -277,7 +277,7 @@ fn toolbar(ui: &mut Ui, stats: &mut GuestStats, action: &mut Option<PanelAction>
     ui.label(
         RichText::new("Emulated PS1 only. Hover for values, drag to scrub, scroll to zoom, double-click for live.")
             .color(plot::TEXT_MUTED)
-            .size(10.5),
+            .size(plot::px(10.5)),
     );
 }
 
@@ -299,7 +299,11 @@ fn legend_row(ui: &mut Ui, items: &[(Color32, &str, bool)]) {
                     Stroke::new(2.0, color),
                 );
             }
-            ui.label(RichText::new(text).color(plot::TEXT_DIM).size(10.5));
+            ui.label(
+                RichText::new(text)
+                    .color(plot::TEXT_DIM)
+                    .size(plot::px(10.5)),
+            );
             ui.add_space(6.0);
         }
     });
@@ -338,7 +342,7 @@ fn host_line(ui: &mut Ui, stats: &GuestStats) {
             } else {
                 plot::TEXT_MUTED
             })
-            .size(10.5),
+            .size(plot::px(10.5)),
     );
 }
 
@@ -484,8 +488,10 @@ fn kpi_tiles(ui: &mut Ui, stats: &GuestStats, ctx: &Ctx, s: &Summary) {
         5
     } else if avail > 340.0 {
         3
-    } else {
+    } else if avail > 200.0 {
         2
+    } else {
+        1
     };
     let width = ((avail - spacing * (columns as f32 - 1.0)) / columns as f32).floor();
     for row in tiles.chunks(columns) {
@@ -684,7 +690,7 @@ fn frame_time_histogram(ui: &mut Ui, ctx: &Ctx, s: &Summary) {
     ui.label(
         RichText::new("Frame-time distribution")
             .color(plot::TEXT_DIM)
-            .size(11.0),
+            .size(plot::px(11.0)),
     );
     let rows = 6usize;
     let mut counts = [0u32; 6];
@@ -791,7 +797,7 @@ fn budget_meters(ui: &mut Ui, stats: &GuestStats, ctx: &Ctx) {
             emulator_core::guest_stats::MASTER_CLOCK_HZ as f64 / 1e6
         ))
         .color(plot::TEXT_DIM)
-        .size(11.0),
+        .size(plot::px(11.0)),
     );
     let meter = |ui: &mut Ui, name: &str, parts: &[(f64, Color32, &str)], note: String| {
         let width = ui.available_width();
@@ -1108,7 +1114,7 @@ fn cpu_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx) {
             "{focus_text}, % of the vblank budget. Click a class to hide it."
         ))
         .color(plot::TEXT_MUTED)
-        .size(10.5),
+        .size(plot::px(10.5)),
     );
     let columns_n = if width > 460.0 { 3 } else { 2 };
     let chip_w = ((width - 4.0 * (columns_n as f32 - 1.0)) / columns_n as f32).floor();
@@ -1353,7 +1359,7 @@ fn limiter_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx, _s: &Summar
             ui.label(
                 RichText::new(format!("{} {}", limit.label(), counts[limit as usize]))
                     .color(plot::TEXT_DIM)
-                    .size(10.5),
+                    .size(plot::px(10.5)),
             );
         }
     })
@@ -1572,7 +1578,7 @@ fn sparklines(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx) {
         ui.label(
             RichText::new("Per vblank. Numbers are 1 s means at the cursor (else now).")
                 .color(plot::TEXT_MUTED)
-                .size(10.5),
+                .size(plot::px(10.5)),
         );
         ui.menu_button("Series", |ui| {
             for (i, series) in SERIES.iter().enumerate() {
@@ -1603,7 +1609,7 @@ fn sparklines(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx) {
             ui.label(
                 RichText::new(group)
                     .color(plot::TEXT_DIM)
-                    .size(11.0)
+                    .size(plot::px(11.0))
                     .strong(),
             );
         }
@@ -1839,6 +1845,6 @@ fn texpage_heat(ui: &mut Ui, stats: &GuestStats, vram: Option<egui::TextureId>) 
     ui.label(
         RichText::new("Share of textured pixels sampled from each 64x256 texture page, decaying over about half a second.")
             .color(plot::TEXT_MUTED)
-            .size(10.5),
+            .size(plot::px(10.5)),
     );
 }

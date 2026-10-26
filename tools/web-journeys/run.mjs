@@ -442,7 +442,10 @@ async function launch(hostDpr = 1) {
   throw new Error("Chrome did not start");
 }
 
-async function newPage(label) {
+/** Marks the first-run explainer as seen in a page's storage: every journey but the explainer's own starts past it. */
+const EXPLAINER_SEEN = `try { localStorage.setItem("psoxide.home.explainer", "1"); } catch (e) {}`;
+
+async function newPage(label, { explainer = false } = {}) {
   // Each journey is its own visitor: a fresh browser context has empty storage, so the first-visit
   // countdown is the first visit unless the journey itself reloads.
   const { browserContextId } = await cdp.send("Target.createBrowserContext");
@@ -453,6 +456,7 @@ async function newPage(label) {
   cdp.contexts.set(targetId, browserContextId);
   activePage = page;
   await page.setup();
+  if (!explainer) await page.addInit(EXPLAINER_SEEN);
   return page;
 }
 
@@ -1228,6 +1232,361 @@ async function journeyMenus(label, urlFor) {
 
 
 
+// ---------------------------------------------------------------- interaction matrix
+
+/**
+ * Many small interactions at once: the pieces of the phone's screen that depend on each other (the top bar,
+ * the touch controls, the debug sidebar, the menu, pause, a physical pad, the orientation) walked through in
+ * sequences, and after every step each visible piece is checked against a small model of what the player did.
+ * Nothing may flip by itself: hiding the bar never changes the controls, a touch on a control never brings the
+ * bar back, a pad button hides the controls (Auto) without touching the bar, and so on.
+ *
+ * `mode` is the Touch controls setting (auto, on, off); the sequence runs in portrait and in landscape.
+ */
+async function journeyMatrix(label, urlFor, size, mode) {
+  current = label;
+  const page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile: true });
+  await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); localStorage.setItem("psoxide.touch.v1", "mode=${mode}"); } catch (e) {}`);
+  await page.goto(urlFor());
+  await bootDemo(page, { ...size, mobile: true });
+  let dims = { w: size.w, h: size.h, dpr: size.dpr };
+  // What the player has done, in the model's words.
+  const m = { bar: null, sidebar: false, menu: false, paused: false, touchNewer: true, orientation: size.w >= size.h ? "landscape" : "portrait" };
+  let live = mode;
+  const overlayExpected = () => (live === "on" ? true : live === "off" ? false : m.touchNewer);
+  const observe = async () => {
+    const u = await page.ux();
+    return { u, overlay: !!u.touch, pad: (u.touch?.buttons?.length ?? 0) > 0, ui: (u.touch?.ui?.length ?? 0) > 0, bar: u.chrome.toolbar_hidden ? "hidden" : "shown", sidebar: !!u.debug.open && u.debug.slide > 0.99, menu: !!u.menu_open, running: !!u.running };
+  };
+  /** What every visible piece should be, from the model. */
+  const expected = () => {
+    const overlay = overlayExpected();
+    return { overlay, pad: overlay, ui: overlay && !m.menu, bar: m.bar, sidebar: m.sidebar, menu: m.menu, running: !m.menu && !m.paused };
+  };
+  const problems = (o, e) => {
+    const out = [];
+    for (const k of ["overlay", "pad", "ui", "bar", "sidebar", "menu", "running"]) if (o[k] !== e[k]) out.push(`${k} is ${o[k]}, expected ${e[k]}`);
+    if (o.overlay && !o.menu) { const p = gameProblems(o.u, size.dpr); if (p) out.push(p); }
+    return out;
+  };
+  const settle = async () => { await sleep(700); };
+  let first = true;
+  /** One step: do `act`, then update the model by `after` and check everything. */
+  const stepOf = async (name, act, after, applicable = () => true) => {
+    if (!applicable()) return;
+    await step(`${label}: ${name}`, async () => {
+      if (first) {
+        // The bar starts shown, and hides itself once when the controls first show.
+        const o0 = await observe();
+        m.bar = o0.bar;
+        first = false;
+      }
+      await act();
+      after?.();
+      await settle();
+      const o = await observe();
+      const wrong = problems(o, expected());
+      if (wrong.length) { await page.shot(`${label}-FLIP-${name.replace(/\W+/g, "-")}`); return wrong.join("; "); }
+    });
+  };
+  const gameCentre = async () => { const g = (await page.ux()).game; return [(g[0] + g[2]) / 2, (g[1] + g[3]) / 2]; };
+  const tapPad = async () => { const u = await page.ux(); const b = u.touch.buttons.find((x) => x[0] === 0x4000); await page.tap(b[1] / size.dpr, b[2] / size.dpr); };
+  const tapScreen = async () => { const [x, y] = await gameCentre(); await page.tap(x, y); };
+  const tapUi = async (name) => { const [x, y] = await touchButton(page, dims, name); await page.tap(x, y); };
+  const padPress = async (button = 0) => { await page.padConnect(); await sleep(250); await page.padSet({ [button]: true }); await sleep(200); await page.padSet({}); };
+  const hit = async () => (await page.ux()).chrome.toolbar_hit;
+  const hasOverlayUi = () => overlayExpected() && !m.menu;
+  const turn = async () => {
+    dims = { w: dims.h, h: dims.w, dpr: size.dpr };
+    await page.viewport(dims.w, dims.h, { dpr: size.dpr, mobile: true });
+    await sleep(500);
+  };
+  const flipOrientation = () => { m.orientation = m.orientation === "portrait" ? "landscape" : "portrait"; };
+  const pointerOnPage = async () => {};
+
+  await stepOf("the start", async () => {}, () => {});
+  await stepOf("press a touch control", tapPad, () => { m.touchNewer = true; }, () => overlayExpected());
+  await stepOf("open the debug sidebar by touch", () => tapUi("debug"), () => { m.sidebar = true; m.touchNewer = true; }, hasOverlayUi);
+  await stepOf("press a touch control with the sidebar open", tapPad, () => { m.touchNewer = true; }, () => overlayExpected());
+  await stepOf("turn the phone with the sidebar open", turn, flipOrientation, () => m.sidebar);
+  await stepOf("turn it back with the sidebar open", turn, flipOrientation, () => m.sidebar);
+  await stepOf("a pad connects", async () => { await page.padConnect(); await sleep(400); }, () => {});
+  await stepOf("press a pad button", () => padPress(0), () => { m.touchNewer = false; });
+  await stepOf("press a pad button again", () => padPress(0), () => { m.touchNewer = false; });
+  await stepOf("tap the screen", tapScreen, () => { m.touchNewer = true; });
+  // The bar leaves with its chevron; the tab that brings it back is there only while the controls are not.
+  await stepOf("hide the bar with its chevron", async () => {
+    const r = await hit();
+    await page.tap(r[2] - 22, r[1] + 18);
+  }, () => { m.bar = "hidden"; }, () => m.bar === "shown");
+  await stepOf("press a pad button, then show the bar from its tab", async () => {
+    await padPress(0);
+    await sleep(500);
+    const r = await hit();
+    await page.tap((r[0] + r[2]) / 2, (r[1] + r[3]) / 2);
+  }, () => { m.touchNewer = false; m.bar = "shown"; }, () => m.bar === "hidden" && mode !== "on");
+  await stepOf("hide the bar again with its chevron", async () => {
+    const r = await hit();
+    await page.tap(r[2] - 22, r[1] + 18);
+  }, () => { m.bar = "hidden"; }, () => m.bar === "shown");
+  await stepOf("press a pad button with the bar hidden", () => padPress(0), () => { m.touchNewer = false; });
+  await stepOf("tap the screen again", tapScreen, () => { m.touchNewer = true; });
+  await stepOf("close the debug sidebar by touch", () => tapUi("debug"), () => { m.sidebar = false; m.touchNewer = true; }, () => hasOverlayUi() && m.sidebar);
+  await stepOf("turn the phone", async () => {
+    dims = { w: dims.h, h: dims.w, dpr: size.dpr };
+    await page.viewport(dims.w, dims.h, { dpr: size.dpr, mobile: true });
+    await sleep(500);
+  }, () => { m.orientation = m.orientation === "portrait" ? "landscape" : "portrait"; });
+  await stepOf("press a touch control after turning", tapPad, () => { m.touchNewer = true; }, () => overlayExpected());
+  await stepOf("press a pad button after turning", () => padPress(0), () => { m.touchNewer = false; });
+  await stepOf("tap the screen after turning", tapScreen, () => { m.touchNewer = true; });
+  await stepOf("press a key on a keyboard", () => page.tapKey("f"), () => { m.touchNewer = false; });
+  await stepOf("tap the screen after the key", tapScreen, () => { m.touchNewer = true; });
+  await stepOf("open the menu by touch", () => tapUi("menu"), () => { m.menu = true; m.touchNewer = true; }, hasOverlayUi);
+  await stepOf("turn the phone with the menu open", turn, flipOrientation, () => m.menu);
+  await stepOf("turn it back with the menu open", turn, flipOrientation, () => m.menu);
+  await stepOf("press a pad direction in the menu", () => padPress(15), () => { m.touchNewer = false; }, () => m.menu);
+  await stepOf("close the menu", async () => { await homeTap(page, "close"); }, () => { m.menu = false; m.touchNewer = true; }, () => m.menu);
+  // The Touch controls setting changed while playing: Auto to On to Off and back, from Settings.
+  const setTouchMode = async (times, byTouch) => {
+    if (byTouch) await tapUi("menu"); else await page.tapKey("Escape");
+    await page.waitFor("the menu", (v) => v.menu_open, 4000);
+    await sleep(500);
+    await homeTap(page, "nav:Settings");
+    await page.waitFor("Settings", (v) => v.home.page === "Settings", 4000);
+    await sleep(600);
+    // Touch controls is the ninth row; Right cycles Auto, On, Off.
+    for (let i = 0; i < 8; i++) await page.tapKey("ArrowDown");
+    for (let i = 0; i < times; i++) { await page.tapKey("ArrowRight"); await sleep(250); }
+    await homeTap(page, "close");
+    await page.waitFor("the game", (v) => !v.menu_open && v.running, 4000);
+  };
+  await stepOf("switch Touch controls to Off in Settings", () => setTouchMode(2, true), () => { live = "off"; m.touchNewer = true; }, () => mode === "auto" && hasOverlayUi() && !m.sidebar);
+  await stepOf("tap the screen with the controls Off", tapScreen, () => {}, () => live === "off");
+  await stepOf("press a pad button with the controls Off", () => padPress(0), () => {}, () => live === "off");
+  await stepOf("switch Touch controls back to Auto", () => setTouchMode(1, false), () => { live = "auto"; }, () => live === "off");
+  await stepOf("tap the screen: the controls are back", tapScreen, () => { m.touchNewer = true; }, () => live === "auto" && mode === "auto");
+  await stepOf("pause by touch", () => tapUi("pause"), () => { m.paused = true; m.touchNewer = true; }, hasOverlayUi);
+  await stepOf("press a touch control while paused", tapPad, () => { m.touchNewer = true; }, () => overlayExpected() && m.paused);
+  await stepOf("resume by touch", () => tapUi("pause"), () => { m.paused = false; m.touchNewer = true; }, () => hasOverlayUi() && m.paused);
+  await stepOf("the pad disconnects", async () => { await page.eval(`window.__fakePad.on = false`); await sleep(400); }, () => {});
+  await stepOf("press a touch control after the pad left", tapPad, () => { m.touchNewer = true; }, () => overlayExpected());
+  await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
+
+// ---------------------------------------------------------------- first-run explainer
+
+/**
+ * The "What is this?" pages open by themselves on the first run, with the countdown waiting behind them; they
+ * are remembered once dismissed and never come back by themselves; a return visit goes straight to Home.
+ */
+async function journeyExplainer(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  const open = async (init) => {
+    const page = await newPage(label, { explainer: true });
+    await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+    await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+    if (init) await page.addInit(init);
+    await page.goto(urlFor());
+    return page;
+  };
+  const act = async (page, name) => (mobile ? homeTap(page, name) : homeClick(page, name));
+  const done = (page) => cdp.send("Target.closeTarget", { targetId: page.targetId });
+  const home = (u) => u.home;
+
+  let page = await open();
+  await step("first run: the pages open at once on page 1, and the countdown waits while the disc loads behind them", async () => {
+    const u = await page.waitFor("the explainer", (s) => s.home?.page === "Welcome" && s.home.explainer, 90000);
+    await page.waitFor("the disc loaded behind it", (s) => !!s.loaded_id, 90000);
+    await sleep(3500);
+    const v = await page.ux();
+    if (v.home.page !== "Welcome" || v.home.welcome !== 0) return `not on page 1: ${JSON.stringify({ p: v.home.page, w: v.home.welcome })}`;
+    if (v.home.countdown !== "armed") return `the countdown is ${v.home.countdown}, it should wait (armed)`;
+    if (v.running) return "the game started under the pages";
+    await page.shot(`${label}-01-page-1`);
+    return homeLayoutProblem(v, size) ?? true;
+  });
+  await step("Next turns the pages one by one: three pages, all inside the screen, and nothing starts or is cancelled", async () => {
+    for (const n of [1, 2]) {
+      await act(page, "welcome-step:1");
+      const u = await page.waitFor(`page ${n + 1}`, (s) => s.home.welcome === n, 4000);
+      await sleep(900);
+      await page.shot(`${label}-0${n + 1}-page-${n + 1}`);
+      const v = await page.ux();
+      if (v.home.page !== "Welcome") return `left the pages at ${n + 1}`;
+      if (v.home.countdown !== "armed" || v.running) return `page ${n + 1}: countdown ${v.home.countdown}, running ${v.running}`;
+      const p = homeLayoutProblem(v, size);
+      if (p) return `page ${n + 1}: ${p}`;
+    }
+  });
+  await step("Done on the last page closes it: Home shows and the countdown starts", async () => {
+    await act(page, "welcome-step:1");
+    await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
+    const u = await page.waitFor("the countdown", (s) => s.home.countdown === "running", 8000);
+    await page.shot(`${label}-04-home-after`);
+    return u.home.explainer ? "still flagged as the explainer" : true;
+  });
+  await step("a tap now cancels the countdown as before, and the visitor stays on Home", async () => {
+    const [x, y] = mobile ? await emptyPoint(page, size) : [0, 0];
+    if (mobile) await page.tap(x, y); else await page.tapKey("x");
+    await page.waitFor("a cancelled countdown", (s) => s.home.countdown === "cancelled", 5000);
+  });
+  await step("a reload does not show the pages again", async () => {
+    await page.goto(urlFor());
+    const u = await page.waitFor("Home", (s) => s.home?.page === "Home", 90000);
+    await sleep(1500);
+    const v = await page.ux();
+    return v.home.page === "Home" && !v.home.explainer ? true : `the pages came back: ${v.home.page}`;
+  });
+  await step("they are still one tap away from Home (the What is this link), and opening them by hand starts nothing", async () => {
+    await page.waitFor("the disc ready", (s) => s.loaded_id && !s.running, 90000);
+    await act(page, "welcome");
+    const u = await page.waitFor("the pages", (s) => s.home.page === "Welcome", 4000);
+    if (u.home.explainer) return "opened by hand it is flagged as the first-run explainer";
+    if (u.running) return "the disc started";
+    await act(page, "dismiss");
+    await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
+  });
+  await done(page);
+
+  page = await open();
+  await step("Skip closes the pages at once, starts the countdown, and is remembered across a reload", async () => {
+    await page.waitFor("the explainer", (s) => s.home?.page === "Welcome" && s.home.explainer, 90000);
+    await act(page, "dismiss");
+    await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
+    const u = await page.waitFor("the countdown", (s) => s.home.countdown === "running" || s.home.countdown === "armed", 8000);
+    await page.goto(urlFor());
+    await page.waitFor("Home", (s) => s.home?.page === "Home", 90000);
+    await sleep(1200);
+    const v = await page.ux();
+    return v.home.page === "Home" && !v.home.explainer ? true : "the pages came back after Skip";
+  });
+  await done(page);
+
+  page = await open(`try { localStorage.setItem("psoxide.home.visited", "1"); } catch (e) {}`);
+  await step("a visitor who came before this existed goes straight to Home, with no pages and no countdown", async () => {
+    const u = await page.waitFor("Home with the disc", (s) => s.home?.page === "Home" && s.loaded_id, 90000);
+    await sleep(1500);
+    const v = await page.ux();
+    if (v.home.explainer || v.home.page !== "Home") return `explainer ${v.home.explainer}, page ${v.home.page}`;
+    return v.home.countdown === "off" ? true : `countdown ${v.home.countdown}`;
+  });
+  await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
+  await done(page);
+}
+
+// ---------------------------------------------------------------- menu sounds
+
+/**
+ * The shell's menu sounds, read from the player's counters (what it asked the output to play): nothing before the
+ * page was used, a sound for each kind of move in the menu, none over a running game, none with the setting off.
+ */
+async function journeySounds(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  const sounds = async () => (await page.ux()).sounds;
+  let page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+  await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+  await page.goto(urlFor("?countdown=3"));
+  await step("before the page was used nothing is played: the countdown starts the disc and the shell closes in silence", async () => {
+    await waitDemoRunning(page, 90000);
+    const s = await sounds();
+    if (s.armed) return "armed before any input";
+    return s.total === 0 ? true : `${s.total} sounds played before a first input: ${JSON.stringify(s.counts)}`;
+  });
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+
+  page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+  await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+  await page.goto(urlFor("?countdown=12"));
+  await bootDemo(page, { ...size, mobile });
+  const count = async (kind) => (await sounds()).counts[kind];
+  const act = async (name) => (mobile ? homeTap(page, name) : homeClick(page, name));
+  const openMenu = async () => {
+    if (mobile) { const [x, y] = await touchButton(page, size, "menu"); await page.tap(x, y); } else await page.tapKey("Escape");
+    await page.waitFor("the menu", (s) => s.menu_open, 4000);
+    await sleep(500);
+  };
+  await step("the game itself makes no menu sounds: playing for a second adds nothing", async () => {
+    const before = (await sounds()).total;
+    if (mobile) {
+      const u = await page.ux();
+      const b = u.touch.buttons.find((x) => x[0] === 0x4000);
+      await page.tap(b[1] / size.dpr, b[2] / size.dpr);
+    } else for (const k of ["f", "g", "ArrowUp"]) await page.tapKey(k);
+    await sleep(900);
+    const s = await sounds();
+    return s.total === before ? true : `the total went from ${before} to ${s.total} while playing`;
+  });
+  await step("opening the menu over the game is heard, and so is a tab change to Settings", async () => {
+    const open0 = await count("open"), tab0 = await count("tab");
+    await openMenu();
+    if ((await count("open")) <= open0) return `no open sound (${JSON.stringify((await sounds()).counts)})`;
+    await act("nav:Settings");
+    await page.waitFor("Settings", (s) => s.home.page === "Settings", 4000);
+    await sleep(500);
+    return (await count("tab")) > tab0 ? true : "no tab sound for the page change";
+  });
+  if (!mobile) await step("the cursor moving down the rows is heard", async () => {
+    const m0 = await count("move");
+    for (let i = 0; i < 3; i++) { await page.tapKey("ArrowDown"); await sleep(120); }
+    return (await count("move")) > m0 ? true : "no move sound for ArrowDown";
+  });
+  await step("a switch going on and off is heard as on and off", async () => {
+    const [on0, off0] = [await count("on"), await count("off")];
+    // Mute is a switch that is always on screen.
+    await act("row:Mute");
+    await sleep(700);
+    await act("row:Mute");
+    await sleep(700);
+    const [on1, off1] = [await count("on"), await count("off")];
+    return on1 > on0 && off1 > off0 ? true : `on ${on0}->${on1}, off ${off0}->${off1}`;
+  });
+  if (!mobile) await step("Menu sounds off silences the menu, on brings it back", async () => {
+    // Menu sounds is the sixteenth row: go to the top, walk down to it and press confirm.
+    for (let i = 0; i < 25; i++) { await page.tapKey("ArrowUp"); await sleep(30); }
+    for (let i = 0; i < 30 && (await page.ux()).menu.row !== "Menu sounds"; i++) { await page.tapKey("ArrowDown"); await sleep(60); }
+    if ((await page.ux()).menu.row !== "Menu sounds") return `the cursor is on ${(await page.ux()).menu.row}`;
+    await page.tapKey("Enter");
+    await sleep(700);
+    const off = await sounds();
+    if (off.enabled) return "still enabled after switching off";
+    const total = off.total;
+    for (let i = 0; i < 3; i++) { await page.tapKey("ArrowDown"); await sleep(150); }
+    const after = await sounds();
+    if (after.total !== total) return `${after.total - total} sounds with the setting off`;
+    if (after.held <= off.held) return "the asks were not counted as held back";
+    for (let i = 0; i < 25; i++) { await page.tapKey("ArrowUp"); await sleep(30); }
+    for (let i = 0; i < 30 && (await page.ux()).menu.row !== "Menu sounds"; i++) { await page.tapKey("ArrowDown"); await sleep(60); }
+    await page.tapKey("Enter");
+    await sleep(700);
+    const on = await sounds();
+    if (!on.enabled) return "not enabled again";
+    await page.tapKey("ArrowUp"); await sleep(200);
+    return (await sounds()).total > on.total ? true : "no sound after switching back on";
+  });
+  await step("leaving the menu is heard, and the running game is silent again", async () => {
+    const close0 = await count("close");
+    if (mobile) await act("close");
+    else for (let i = 0; i < 4 && (await page.ux()).menu_open; i++) { await page.tapKey("Escape"); await sleep(400); }
+    await page.waitFor("the game", (s) => !s.menu_open && s.running, 4000);
+    await sleep(600);
+    if ((await count("close")) <= close0) return "no close sound";
+    const total = (await sounds()).total;
+    if (mobile) { const u = await page.ux(); const b = u.touch.buttons.find((x) => x[0] === 0x4000); await page.tap(b[1] / size.dpr, b[2] / size.dpr); }
+    else for (const k of ["f", "g"]) await page.tapKey(k);
+    await sleep(900);
+    return (await sounds()).total === total ? true : "sounds over the running game";
+  });
+  await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
+
 // ---------------------------------------------------------------- momentum scrolling of the shell's lists
 
 /**
@@ -1511,7 +1870,7 @@ function insetsFor(size) {
 /** Named hit areas (not the cases, which tilt off the edges on purpose) lie inside the safe area and apart. */
 function homeLayoutProblem(u, size) {
   const [l, t, r, b] = insetsFor(size);
-  const named = u.home.hits.filter(([n]) => /^(nav|primary|peek|welcome|link|back|logo|row|welcome-step|dismiss|close|restart|ctl:tab)/.test(n) && !/^row/.test(n));
+  const named = u.home.hits.filter(([n]) => /^(nav|primary|welcome|link|back|logo|row|welcome-step|dismiss|close|restart|ctl:tab)/.test(n) && !/^row/.test(n));
   for (const [n, x0, y0, x1, y1] of named) {
     if (x0 < l - 1 || y0 < t - 1 || x1 > size.w - r + 1 || y1 > size.h - b + 1) return `${n} [${x0},${y0},${x1},${y1}] is outside the safe area [${l},${t},${size.w - r},${size.h - b}]`;
   }
@@ -1584,7 +1943,7 @@ async function journeyHome(label, urlFor, size) {
     const u = await countdown(page);
     await page.shot(`${label}-01-first-visit`);
     const names = u.home.hits.map((h) => h[0]);
-    for (const need of ["case:0", "primary", "nav:Home", "nav:Controls", "nav:Settings", "peek", "welcome"]) if (!names.includes(need)) return `missing ${need}: ${names}`;
+    for (const need of ["case:0", "primary", "nav:Home", "nav:Controls", "nav:Settings", "welcome"]) if (!names.includes(need)) return `missing ${need}: ${names}`;
     if (u.home.page !== "Home" || u.running || !u.menu_open) return JSON.stringify(u.home);
     return homeLayoutProblem(u, size) ?? true;
   });
@@ -1592,13 +1951,19 @@ async function journeyHome(label, urlFor, size) {
     const u = await page.ux();
     return u.touch ? `the touch controller is drawn on the home screen: ${JSON.stringify(u.touch.ui)}` : true;
   });
-  await step("'What is on it' opens on demand and closes again", async () => {
-    await activate(page, "peek");
-    const on = await page.waitFor("the peek", (s) => s.home.peek, 4000);
-    await page.shot(`${label}-02-peek`);
-    await activate(page, "peek");
-    await page.waitFor("peek closed", (s) => !s.home.peek, 4000);
-    return on.home.peek ? true : "no peek";
+  await step("what is on the disc is in view without a tap: seven chips under the title, clear of the button and the safe area", async () => {
+    const u = await page.ux();
+    const c = u.home.contents;
+    if (!c) return "no contents row on the demo disc's page";
+    const [x0, y0, x1, y1, n, style] = c;
+    if (n !== 7) return `${n} chips, the disc has seven games`;
+    const [l, t, r, b] = insetsFor(size);
+    if (x0 < l - 1 || x1 > size.w - r + 1 || y0 < t || y1 > size.h - b) return `the row [${c.slice(0, 4)}] is outside the safe area`;
+    const primary = u.home.hits.find((h) => h[0] === "primary");
+    if (primary && y1 > primary[2] - 4 && Math.min(x1, primary[3]) - Math.max(x0, primary[1]) > 0) return `the row ends at ${y1}, over the button at ${primary[2]}`;
+    if (u.home.hits.some((h) => h[0] === "peek")) return "there is still a What's on it link";
+    await page.shot(`${label}-02-contents`);
+    return true;
   });
   await close(page);
 
@@ -2492,25 +2857,25 @@ async function journeyDebug(label, urlFor, size) {
     const u = await page.ux();
     if (mobile) { const problem = gameProblems(u, size.dpr); if (problem) return problem; }
     const [x0, y0, x1, y1] = u.debug.rect;
-    const landscape = size.w >= size.h;
+    // A phone docks the panel as a third of the width at the right edge, held either way up; a
+    // desktop window wider than tall docks it at the right, a taller one under the game.
+    const beside = mobile || size.w >= size.h;
     if (x0 < -0.5 || y0 < -0.5 || x1 > size.w + 0.5 || y1 > size.h + 0.5) return `the panel is off screen: ${u.debug.rect}`;
-    if (landscape) {
+    if (beside) {
       if (x1 < size.w - 60) return `the panel is not at the right edge: ${u.debug.rect}`;
-      if (x1 - x0 < 240 || x1 - x0 > size.w * 0.6) return `the panel is ${x1 - x0} wide in a ${size.w} window`;
+      if (mobile) {
+        if (Math.abs((x1 - x0) / size.w - 0.33) > 0.05) return `the panel is ${x1 - x0} wide in a ${size.w} window, not about a third`;
+        if (y1 - y0 < size.h * 0.6) return `the panel is only ${y1 - y0} tall in a ${size.h} window`;
+        const g = u.game;
+        if (g[2] > x0 + 1) return `the picture reaches ${g[2]} into the panel at ${x0}`;
+        if (Math.abs((g[2] - g[0]) / (g[3] - g[1]) - 4 / 3) > 0.05 && (g[2] - g[0]) < (x0 - 4) * 0.9) return `the picture ${g} does not use the width left of the panel (${x0})`;
+        await page.shot(`${label}-4-sidebar`);
+      } else if (x1 - x0 < 240 || x1 - x0 > size.w * 0.6) return `the panel is ${x1 - x0} wide in a ${size.w} window`;
       if (mobile) for (const [rx0, ry0, rx1] of (await padRects()).map((r) => [r[0], r[1], r[2]])) if (rx1 > x0 + 1) return `a control reaches ${rx1} into the panel at ${x0}`;
     } else {
       if (y1 - y0 < 110) return `the strip is only ${y1 - y0} tall`;
       if (y1 < size.h - 2) return `the strip does not reach the bottom of the window: ${u.debug.rect}`;
-      if (mobile) {
-        // Under the controls, in the room the pad panel leaves: never over a button.
-        const pads = await padRects();
-        const lowest = Math.max(...pads.map((r) => r[3]));
-        if (y0 < lowest - 1) return `the strip (from ${y0}) runs into the controls (down to ${lowest})`;
-      }
-    }
-    // The picture keeps its whole width and place with the strip open (portrait) or gives up only the
-    // column's share (landscape).
-    if (!landscape) {
+      // The picture keeps its whole width and place with the strip open.
       const g = u.game;
       if (Math.abs((g[2] - g[0]) - (gameBefore[2] - gameBefore[0])) > 0.6 || Math.abs(g[1] - gameBefore[1]) > 0.6) {
         return `the picture changed from [${gameBefore}] to [${g}] when the strip opened`;
@@ -2518,17 +2883,6 @@ async function journeyDebug(label, urlFor, size) {
       if (g[2] - g[0] < size.w * 0.97) return `the picture is only ${g[2] - g[0]} wide in a ${size.w} window`;
     }
   });
-  const portrait = mobile && size.w < size.h;
-  /** Drag the sheet's handle (portrait) by `dy` css px and let go after a rest. */
-  const dragHandle = async (dy) => {
-    const u = await page.ux();
-    const x = size.w / 2, y0 = u.debug.rect[1] + 9;
-    await page.touch("touchStart", [[x, y0]]);
-    for (let i = 1; i <= 10; i++) { await sleep(16); await page.touch("touchMove", [[x, y0 + (dy * i) / 10]]); }
-    await sleep(160);
-    await page.touch("touchEnd", []);
-    await sleep(500);
-  };
   await step("the summary is one line and the tabs and content get the panel", async () => {
     const u = await page.ux();
     const [top, bottom] = [u.debug.scroll[3], u.debug.scroll[4]];
@@ -2536,22 +2890,9 @@ async function journeyDebug(label, urlFor, size) {
     if (!(bottom > top)) return `no content view: ${u.debug.scroll}`;
     const share = (bottom - top) / (y1 - y0);
     await page.shot(`${label}-4-compact`);
-    // The phone's panel keeps one 32 px line for the readings; a desktop sidebar keeps its big numbers.
-    if (mobile && (share < 0.4 || bottom - top < 125)) return `the content view is ${(share * 100).toFixed(0)}% of the panel (${bottom - top} of ${y1 - y0} px)`;
+    // A phone panel is a third-width column in small type; a desktop sidebar keeps its big numbers.
+    if (mobile && (share < 0.55 || bottom - top < 200)) return `the content view is ${(share * 100).toFixed(0)}% of the panel (${bottom - top} of ${y1 - y0} px)`;
     if (!mobile && bottom - top < 150) return `the content view is only ${bottom - top} px`;
-  });
-  if (portrait) await step("portrait: the sheet is up over the controller, under the interface row, the picture whole above it", async () => {
-    await page.waitFor("the sheet up", (s) => s.debug.sheet > 0.99, 4000);
-    const u = await page.ux();
-    if (u.touch.buttons.length || u.touch.sticks.length) return "the pad's controls are still there under the sheet";
-    if (u.touch.ui.length < 5) return "the interface row is gone";
-    const uiBottom = Math.max(...u.touch.rects.filter((r) => r[0] === 0).map((r) => r[4] / size.dpr));
-    const [, y0, , y1] = u.debug.rect;
-    if (y0 < uiBottom - 1 || y0 > uiBottom + 16) return `the sheet starts at ${y0}, the interface row ends at ${uiBottom}`;
-    if (y1 - y0 < size.h * 0.3) return `the sheet is only ${y1 - y0} px of a ${size.h} px window`;
-    const problem = gameProblems(u, size.dpr);
-    if (problem) return problem;
-    await page.shot(`${label}-5-sheet-up`);
   });
   // Momentum scrolling of the panel's content (the shell's lists have their own journey, journeyMomentum).
   const scrollNow = async () => (await page.ux()).debug.scroll;
@@ -2650,23 +2991,6 @@ async function journeyDebug(label, urlFor, size) {
     await sleep(600);
     const top = await scrollNow();
     if (top[0] !== 0) return `scrolling up for a long time left it at ${top[0]}`;
-  });
-  if (portrait) await step("portrait: dragging the handle down brings the controller back under a short strip, dragging up covers it again", async () => {
-    await dragHandle(260);
-    const down = await page.waitFor("the sheet down", (s) => s.debug.sheet < 0.01, 4000);
-    if (!down.touch.buttons.length) return "the controller did not come back";
-    await page.shot(`${label}-6-sheet-down`);
-    await dragHandle(-260);
-    await page.waitFor("the sheet up again", (s) => s.debug.sheet > 0.99, 4000);
-    if ((await page.ux()).touch.buttons.length) return "the pad shows through the sheet";
-    // A tap on the handle flips it.
-    const u = await page.ux();
-    await page.tap(size.w / 2, u.debug.rect[1] + 9);
-    await page.waitFor("the sheet down by a tap", (s) => s.debug.sheet < 0.01, 4000);
-    await page.tap(size.w / 2, (await page.ux()).debug.rect[1] + 9);
-    await page.waitFor("the sheet up by a tap", (s) => s.debug.sheet > 0.99, 4000);
-    await dragHandle(260);
-    await page.waitFor("the sheet down for the controller", (s) => s.debug.sheet < 0.01, 4000);
   });
   if (mobile) await step("the controller still plays the game while the panel is open", async () => {
     const u = await page.ux();
@@ -3819,6 +4143,8 @@ async function main() {
         if (wanted("desktop-list")) await journeyList("desktop-list", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-list-small")) await journeyList("desktop-list-small", () => direct("?countdown=12"), { w: 800, h: 600, dpr: 1, mobile: false });
         if (wanted("desktop-momentum")) await journeyMomentum("desktop-momentum", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-explainer")) await journeyExplainer("desktop-explainer", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-sounds")) await journeySounds("desktop-sounds", (q) => direct(q), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-menus")) await journeyMenus("desktop-menus", () => direct());
         if (wanted("desktop-nowebgpu")) await journeyNoWebgpu("desktop-nowebgpu", () => direct());
         if (wanted("desktop-gamepad")) await journeyGamepad("desktop-gamepad", () => direct());
@@ -3835,6 +4161,14 @@ async function main() {
         for (const [name, w, h] of [["phone-momentum", 393, 852], ["phone-momentum-375", 375, 667], ["phone-momentum-small", 360, 640], ["phone-momentum-landscape", 852, 393]]) {
           if (wanted(name)) await journeyMomentum(name, () => direct("?countdown=12"), { w, h, dpr: 3, mobile: true });
         }
+        for (const mode of ["auto", "on", "off"]) {
+          if (wanted(`phone-matrix-${mode}-portrait`)) await journeyMatrix(`phone-matrix-${mode}-portrait`, () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3 }, mode);
+          if (wanted(`phone-matrix-${mode}-landscape`)) await journeyMatrix(`phone-matrix-${mode}-landscape`, () => direct("?countdown=12"), { w: 852, h: 393, dpr: 3 }, mode);
+        }
+        for (const [name, w, h] of [["phone-explainer", 393, 852], ["phone-explainer-small", 360, 640], ["phone-explainer-landscape", 852, 393]]) {
+          if (wanted(name)) await journeyExplainer(name, () => direct("?countdown=12"), { w, h, dpr: 3, mobile: true });
+        }
+        if (wanted("phone-sounds")) await journeySounds("phone-sounds", (q) => direct(q), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-home")) await journeyHome("phone-home", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-home-small")) await journeyHome("phone-home-small", () => direct("?countdown=12"), { w: 360, h: 640, dpr: 3, mobile: true });
         if (wanted("phone-home-landscape")) await journeyHome("phone-home-landscape", () => direct("?countdown=12"), { w: 852, h: 393, dpr: 3, mobile: true });

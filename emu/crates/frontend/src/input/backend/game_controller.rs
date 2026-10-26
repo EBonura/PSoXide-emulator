@@ -14,7 +14,7 @@ use emulator_core::button;
 
 use crate::input::model::{BackendKind, DeviceEvent, DeviceIdentity, PadSnapshot, StickDpad};
 
-use super::DeviceBackend;
+use super::{face_by_position, is_nintendo_layout, DeviceBackend};
 
 /// Trigger travel that counts as a press when the framework reports no
 /// digital state of its own.
@@ -96,7 +96,9 @@ impl GcReading {
     }
 }
 
-fn read(pad: &GCExtendedGamepad) -> GcReading {
+/// Read the controller. `nintendo`: its face buttons are reported by label (A is the right one),
+/// so they are turned into positions first.
+fn read(pad: &GCExtendedGamepad, nintendo: bool) -> GcReading {
     // SAFETY: plain property reads on live framework objects.
     unsafe {
         let pressed = |b: &objc2_game_controller::GCControllerButtonInput| b.isPressed();
@@ -108,11 +110,18 @@ fn read(pad: &GCExtendedGamepad) -> GcReading {
         let right = pad.rightThumbstick();
         let left_trigger = pad.leftTrigger();
         let right_trigger = pad.rightTrigger();
+        let face = face_by_position(
+            pressed(&pad.buttonA()),
+            pressed(&pad.buttonB()),
+            pressed(&pad.buttonX()),
+            pressed(&pad.buttonY()),
+            nintendo,
+        );
         GcReading {
-            south: pressed(&pad.buttonA()),
-            east: pressed(&pad.buttonB()),
-            west: pressed(&pad.buttonX()),
-            north: pressed(&pad.buttonY()),
+            south: face.south,
+            east: face.east,
+            west: face.west,
+            north: face.north,
             left_shoulder: pressed(&pad.leftShoulder()),
             right_shoulder: pressed(&pad.rightShoulder()),
             left_trigger: left_trigger.value(),
@@ -136,6 +145,8 @@ fn read(pad: &GCExtendedGamepad) -> GcReading {
 
 struct Known {
     id: String,
+    /// A Switch Pro, Joy-Con or look-alike: face buttons are labelled, not positional.
+    nintendo: bool,
     stick: StickDpad,
     controller: Retained<GCController>,
 }
@@ -201,16 +212,28 @@ impl DeviceBackend for GameControllerBackend {
                             controller.productCategory().to_string(),
                         )
                     };
+                    let nintendo = is_nintendo_layout(&[
+                        category.as_str(),
+                        name.as_deref().unwrap_or_default(),
+                    ]);
                     out.push(DeviceEvent::Connected(DeviceIdentity {
                         id: id.clone(),
                         name: name.unwrap_or_else(|| "Game controller".to_string()),
                         backend: BackendKind::GameController,
                         vid_pid: None,
-                        mapping: format!("GameController standard layout, {category}"),
+                        mapping: format!(
+                            "GameController standard layout, {category}{}",
+                            if nintendo {
+                                "; Nintendo face buttons read by position"
+                            } else {
+                                ""
+                            }
+                        ),
                         mapped: true,
                     }));
                     self.known.push(Known {
                         id,
+                        nintendo,
                         stick: StickDpad::default(),
                         controller: controller.clone(),
                     });
@@ -220,7 +243,7 @@ impl DeviceBackend for GameControllerBackend {
             let known = &mut self.known[index];
             out.push(DeviceEvent::Sample {
                 id: known.id.clone(),
-                snapshot: read(&pad).to_snapshot(&mut known.stick),
+                snapshot: read(&pad, known.nintendo).to_snapshot(&mut known.stick),
             });
         }
     }

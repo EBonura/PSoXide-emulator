@@ -349,18 +349,11 @@ pub struct AppState {
     /// Points of the window's bottom edge the phone's home indicator covers: the debug strip keeps its
     /// text clear of them.
     pub touch_bottom_inset: f32,
-    /// How far the phone's debug sheet is pulled up over the controller in portrait, 0 (a short
-    /// strip under the controls) to 1 (the sheet fills the panel). It opens fully up.
-    pub debug_sheet: f32,
-    /// Where the sheet is settling to, 0 or 1 (or the finger's place while it is dragged).
-    pub debug_sheet_goal: f32,
-    /// A finger is dragging the sheet's handle.
-    pub debug_sheet_drag: bool,
-    /// The strip's top edge with the sheet down and fully up, points.
-    pub debug_sheet_span: [f32; 2],
     /// The debug panel's scroll: position, furthest position, 1 while it coasts (the browser
     /// journeys read it).
     pub debug_scroll: [f32; 5],
+    /// The shell's menu sounds: what is playing and what has been asked for.
+    pub(crate) ui_sound: crate::ui_sound::UiSynth,
     /// Frames the debug panel's contents were laid out in (the browser journeys check the first frame
     /// it shows is not blank).
     pub debug_contents_frames: u32,
@@ -375,6 +368,8 @@ pub struct AppState {
     /// When true the top toolbar is slid up out of view, leaving only a
     /// small floating restore tab at the top-right.
     pub toolbar_hidden: bool,
+    /// The screen area the toolbar (or its restore tab) holds, in points: a touch there is not play.
+    pub toolbar_hit: egui::Rect,
     /// The on-screen controller's preferences, kept per device.
     pub touch_prefs: crate::input::touch::prefs::TouchPrefs,
     /// The preferences changed and the shell should hand them on and save.
@@ -666,11 +661,8 @@ impl AppState {
             sidebar_width: 430.0,
             debug_slide: 0.0,
             debug_rect: [0.0; 4],
-            debug_sheet: 1.0,
-            debug_sheet_goal: 1.0,
-            debug_sheet_drag: false,
-            debug_sheet_span: [0.0; 2],
             debug_scroll: [0.0; 5],
+            ui_sound: crate::ui_sound::UiSynth::default(),
             game_rect: [0.0; 4],
             touch_bottom_inset: 0.0,
             debug_contents_frames: 0,
@@ -678,6 +670,7 @@ impl AppState {
             texture_filter: TextureFilter::default(),
             deinterlace: emulator_core::Deinterlace::default(),
             toolbar_hidden: false,
+            toolbar_hit: egui::Rect::NOTHING,
             touch_prefs: crate::web_touch::load_prefs(),
             touch_prefs_dirty: true,
             fullscreen_requested: false,
@@ -880,13 +873,23 @@ impl AppState {
             return;
         }
         let first_visit = ui::menu::first_visit();
-        self.menu.enable_home(first_visit);
+        // The first run opens on the "What is this?" pages: the web remembers it in local
+        // storage, the desktop in the saved settings.
+        #[cfg(target_arch = "wasm32")]
+        let explainer = ui::menu::explainer_unseen();
+        #[cfg(not(target_arch = "wasm32"))]
+        let explainer = !self.settings.emulator.welcome_seen;
+        self.menu.enable_home(first_visit, explainer);
         // Desktop: the Demo Disc is a disc on this computer, listed from the library.
         #[cfg(not(target_arch = "wasm32"))]
         self.menu.set_local_demo(true);
         self.menu.set_box_art(self.settings.video.box_art);
         self.menu
             .set_reduce_motion(self.settings.video.reduce_motion);
+        self.ui_sound
+            .set_enabled(self.settings.emulator.menu_sounds);
+        self.menu
+            .set_menu_sounds(self.settings.emulator.menu_sounds);
         // The library was listed before the shell existed: describe its discs to it now.
         self.refresh_menu_library();
         #[cfg(target_arch = "wasm32")]
@@ -953,7 +956,7 @@ impl AppState {
         format!(
             "{{\"running\":{},\"menu_open\":{},\"loaded_id\":\"{id}\",\"loading\":\"{loading}\",\
              \"machine\":{},\"port1_mode\":\"{mode}\",\"has_bus\":{},\"status\":\"{status}\",\
-             \"panel\":\"{panel}\",\"home\":{home},\"slots\":{slots},\"game\":[{:.3},{:.3},{:.3},{:.3}],\"cpu_tick\":{},\"display\":[{},{},{},{}],\"display_lit\":{},\"debug\":{{\"open\":{},\"slide\":{:.3},\"contents\":{},\"rect\":[{:.1},{:.1},{:.1},{:.1}],\"sheet\":{:.3},\"scroll\":[{:.1},{:.1},{:.0},{:.1},{:.1}]}},\"menu\":{{\"column\":\"{}\",\"row\":\"{}\",\"value\":\"{}\",\"rows\":{}}},\"touch\":{}}}",
+             \"panel\":\"{panel}\",\"home\":{home},\"slots\":{slots},\"game\":[{:.3},{:.3},{:.3},{:.3}],\"cpu_tick\":{},\"display\":[{},{},{},{}],\"display_lit\":{},\"debug\":{{\"open\":{},\"slide\":{:.3},\"contents\":{},\"rect\":[{:.1},{:.1},{:.1},{:.1}],\"scroll\":[{:.1},{:.1},{:.0},{:.1},{:.1}]}},\"menu\":{{\"column\":\"{}\",\"row\":\"{}\",\"value\":\"{}\",\"rows\":{}}},\"touch\":{},\"sounds\":{},\"chrome\":{{\"toolbar_hidden\":{},\"toolbar_hit\":[{:.0},{:.0},{:.0},{:.0}],\"touch_mode\":{}}}}}",
             self.running,
             self.menu.open,
             self.gpu_resync_generation,
@@ -975,7 +978,6 @@ impl AppState {
             self.debug_rect[1],
             self.debug_rect[2],
             self.debug_rect[3],
-            self.debug_sheet,
             self.debug_scroll[0],
             self.debug_scroll[1],
             self.debug_scroll[2],
@@ -986,6 +988,13 @@ impl AppState {
             escape(value),
             rows,
             touch_layout.unwrap_or("null"),
+            self.ui_sound.probe_json(),
+            self.toolbar_hidden,
+            self.toolbar_hit.min.x.max(-1.0),
+            self.toolbar_hit.min.y.max(-1.0),
+            self.toolbar_hit.max.x.min(99999.0),
+            self.toolbar_hit.max.y.min(99999.0),
+            self.menu.touch_mode(),
         )
     }
 
@@ -2787,6 +2796,13 @@ impl AppState {
         if !self.menu.home_enabled() {
             return;
         }
+        // The explainer was dismissed: the desktop remembers it in the saved settings.
+        if self.menu.take_explainer_seen() && !self.settings.emulator.welcome_seen {
+            self.settings.emulator.welcome_seen = true;
+            if let Err(e) = self.save_settings() {
+                eprintln!("[frontend] settings save after the welcome pages: {e}");
+            }
+        }
         use crate::input::model::BackendKind;
         // "Launched: ..." means nothing while the home screen hides the game.
         if self.menu.open
@@ -2911,6 +2927,17 @@ impl AppState {
         let on = !self.settings.video.box_art;
         self.settings.video.box_art = on;
         self.menu.set_box_art(on);
+        if let Err(error) = self.save_settings() {
+            eprintln!("[frontend] {error}");
+        }
+    }
+
+    /// Turn the shell's menu sounds on or off and persist the choice.
+    pub fn toggle_menu_sounds(&mut self) {
+        let on = !self.settings.emulator.menu_sounds;
+        self.settings.emulator.menu_sounds = on;
+        self.ui_sound.set_enabled(on);
+        self.menu.set_menu_sounds(on);
         if let Err(error) = self.save_settings() {
             eprintln!("[frontend] {error}");
         }
@@ -4039,19 +4066,6 @@ impl AppState {
                 && self.editor.play_performance_panel_visible();
         }
         self.panels.debug_sidebar
-    }
-
-    /// Move the phone's debug sheet a frame towards the side it is settling on (not while a
-    /// finger holds it).
-    pub fn step_debug_sheet(&mut self, dt: f32) {
-        if self.debug_sheet_drag {
-            return;
-        }
-        let goal = self.debug_sheet_goal;
-        self.debug_sheet += (goal - self.debug_sheet) * (dt * 16.0).min(1.0);
-        if (self.debug_sheet - goal).abs() < 0.002 {
-            self.debug_sheet = goal;
-        }
     }
 
     /// F3: show or hide the guest performance panel where the user is.

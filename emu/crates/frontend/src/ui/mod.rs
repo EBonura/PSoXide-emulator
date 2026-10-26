@@ -107,14 +107,7 @@ pub fn draw_layout(
     // The live debug panel docks inside those: beside the game on a wide window, between the
     // game and the controller's panel on a tall one. Always called: it animates itself open or
     // closed from the `debug_sidebar` flag and returns at once when fully closed.
-    let touch_strip = if embed {
-        None
-    } else {
-        let reserved = touch_overlay::reserved(ctx, input_router.touch());
-        state.debug_sheet_span = reserved.sheet_span;
-        reserved.strip
-    };
-    debug_sidebar::draw(ctx, state, vram_tex, touch_strip);
+    debug_sidebar::draw(ctx, state, vram_tex);
     if !embed {
         draw_touch_bottom_panel(ctx, input_router.touch());
         draw_touch_right_bar(ctx, input_router.touch());
@@ -505,6 +498,10 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.toggle_reduce_motion();
             MenuOutcome::None
         }
+        ToggleMenuSounds => {
+            state.toggle_menu_sounds();
+            MenuOutcome::None
+        }
         Quit => MenuOutcome::Quit,
     }
 }
@@ -637,6 +634,7 @@ pub(crate) fn draw_status_toast(ctx: &egui::Context, state: &AppState) {
         ctx.screen_rect().size(),
         state.sidebar_width,
         state.debug_slide,
+        state.menu.touch_mode(),
     );
     egui::Area::new("status-toast".into())
         .anchor(
@@ -705,6 +703,7 @@ pub(crate) fn draw_recording_indicator(ctx: &egui::Context, state: &AppState) {
         ctx.screen_rect().size(),
         state.sidebar_width,
         state.debug_slide,
+        state.menu.touch_mode(),
     );
     let x = -(18.0 + docked);
     egui::Area::new("input-recording-indicator".into())

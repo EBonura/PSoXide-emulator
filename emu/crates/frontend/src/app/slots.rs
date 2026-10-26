@@ -295,6 +295,8 @@ impl AppState {
         let meta = match read_meta(bytes) {
             Ok(meta) => meta,
             Err(refusal) => {
+                self.ui_sound
+                    .trigger(crate::ui_sound::UiSound::Refused, 1.0);
                 self.status_message_set(refusal.message());
                 return;
             }
@@ -302,6 +304,8 @@ impl AppState {
         let known_as = self.earlier_ids(&game.id);
         let same_game = |id: &str| id == game.id || known_as.iter().any(|old| old == id);
         if let Err(refusal) = check_loadable(&meta, same_game, self.current_game_hash) {
+            self.ui_sound
+                .trigger(crate::ui_sound::UiSound::Refused, 1.0);
             self.status_message_set(refusal.message());
             return;
         }
@@ -416,6 +420,8 @@ impl AppState {
                 self.status_message_set(loaded_message(slot));
             }
             Err(refusal) => {
+                self.ui_sound
+                    .trigger(crate::ui_sound::UiSound::Refused, 1.0);
                 self.status_message_set(refusal.message());
                 self.refresh_slot_cards();
             }

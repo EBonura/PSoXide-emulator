@@ -2,11 +2,27 @@
 
 ## Unreleased
 
-- The debug panel on a phone is usable. Its header is one line of small type (status dot, fps, ms, % of real
-  time, the disc name when it fits, close) instead of the big numbers, the tabs are smaller, and the content
-  gets the rest. Held sideways it stays a compact sidebar; held upright it is a sheet that opens fully up over
-  the controller (the picture stays whole above it) and a grab bar on its top edge drags it down to a short
-  strip with the controller back, or up again. A finger that starts on a chart scrolls the panel.
+- The debug panel on a phone is a sidebar about a third of the screen's width at the right, held either way up,
+  and the picture and the controller take the other two thirds. Its type is small across the whole panel (the
+  smallest text is 9.5 points; a desktop keeps its sizes), the header is a dot and the readings in two short
+  lines, the tabs are short labels, and the content gets the rest. A finger that starts on a chart scrolls the
+  panel.
+- The first run opens on the "What is this?" pages (the browser remembers in local storage, the desktop in the
+  saved settings, once they are dismissed). The disc loads behind them and the first-visit countdown starts
+  when they close; a return visit goes straight to Home. The pages now say that the demo disc is built in, that
+  you open a folder of your own PS1 disc images, and that the project has bigger ports like Half-Life you build
+  from your own Steam copy.
+- The demo disc's contents are on the home screen as chips under the title (a picture and the name of each of
+  the seven games, names only on a short phone) instead of behind a What's on it link.
+- The shell's menus make quiet sounds, synthesised in the player (no samples): cursor move, confirm, back, a
+  page change, a switch on or off, a slider step, a sheet or the menu opening and closing, and a refusal. They
+  follow Volume and Mute, play only while a menu is on screen, wait for the first key, click or touch in a
+  browser, and have a Menu sounds switch in Settings (on by default).
+- A Nintendo Switch Pro Controller or Joy-Con through macOS GameController (and SDL-mapped Nintendo pads through
+  gilrs) now maps its face buttons by position: top is Triangle, left Square, bottom Cross, right Circle.
+- The toolbar and the touch controls no longer follow each other: hiding the toolbar does not bring the controls
+  back, a pad button hides the controls without bringing the toolbar back, and a tap on the toolbar or its tab
+  does not count as touching the game.
 - Lists scroll like on iOS: momentum after a flick that slows smoothly, a rubber band at the ends, a touch
   stops a coasting list without pressing a row, and sliders and row taps are left alone. Settings, Game,
   Controls, the save-state sheet and the debug panel share one motion model (`ui/momentum.rs`).

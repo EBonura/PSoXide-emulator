@@ -109,6 +109,18 @@ pub fn draw(ctx: &Context, state: &mut AppState) {
     let t = ctx.animate_bool_with_time(egui::Id::new("toolbar_slide"), state.toolbar_hidden, 0.22);
     let height = (BAR_HEIGHT * (1.0 - t)).max(0.0);
     let cover = state.menu.shell_cover();
+    // Where a finger is on the bar, or on the tab that brings it back: not play.
+    let screen = ctx.screen_rect();
+    state.toolbar_hit = if height >= 0.5 {
+        Rect::from_min_size(screen.min, egui::vec2(screen.width(), height))
+    } else if t > 0.5 {
+        Rect::from_min_max(
+            egui::pos2(screen.right() - 64.0, screen.top()),
+            egui::pos2(screen.right(), screen.top() + 44.0),
+        )
+    } else {
+        Rect::NOTHING
+    };
 
     if height >= 0.5 {
         // Zero-margin frame so `max_rect()` is exactly [0, height]; we paint

@@ -112,9 +112,18 @@ impl TouchDevice {
         self.presence.visible(self.prefs.mode)
     }
 
-    /// Feed a touch from the window. Returns whether the controller owns it.
-    pub(crate) fn handle_touch(&mut self, id: u64, phase: Phase, pos: Pos2, now_ms: u64) -> bool {
-        if phase == Phase::Down {
+    /// Feed a touch from the window. Returns whether the controller owns it. A touch that lands
+    /// on the player's own chrome (`on_chrome`: the toolbar, its restore tab) is not play: it is
+    /// no sign that the controller should come or go.
+    pub(crate) fn handle_touch(
+        &mut self,
+        id: u64,
+        phase: Phase,
+        pos: Pos2,
+        now_ms: u64,
+        on_chrome: bool,
+    ) -> bool {
+        if phase == Phase::Down && !on_chrome {
             self.presence.touch_seen = true;
             self.presence.last_touch_ms = now_ms;
         }

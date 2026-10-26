@@ -6,16 +6,37 @@ use super::scene::{fade, CYAN};
 use super::{motion, tokens, Click, HomeState, LayoutKind, Page, PageCtx};
 use crate::ui::menu::{MenuAction, MenuInput, MenuItem, MenuState, TouchSliderKind};
 
-/// What is on the public demo disc. Shown only when the visitor asks.
-pub(super) const DISC_CONTENTS: [&str; 8] = [
-    "PSoXide Arcade",
-    "Celeste Collection",
-    "NitroXide",
-    "VoXide",
-    "Quake (shareware)",
-    "Cortex Ignition",
-    "PSXcel",
-    "Credits and links",
+/// The games on the public demo disc, with the small picture each shows on the home screen.
+/// The count is the one the welcome pages and the home line give ("seven").
+pub(super) const DISC_GAMES: [(&str, &[u8]); 7] = [
+    (
+        "PSoXide Arcade",
+        include_bytes!("../../../../../../../assets/home/disc/arcade.png"),
+    ),
+    (
+        "Celeste Collection",
+        include_bytes!("../../../../../../../assets/home/disc/celeste.png"),
+    ),
+    (
+        "NitroXide",
+        include_bytes!("../../../../../../../assets/home/disc/nitroxide.png"),
+    ),
+    (
+        "VoXide",
+        include_bytes!("../../../../../../../assets/home/disc/voxide.png"),
+    ),
+    (
+        "Quake (shareware)",
+        include_bytes!("../../../../../../../assets/home/disc/quake.png"),
+    ),
+    (
+        "Cortex Ignition",
+        include_bytes!("../../../../../../../assets/home/disc/cortex.png"),
+    ),
+    (
+        "PSXcel",
+        include_bytes!("../../../../../../../assets/home/disc/psxcel.png"),
+    ),
 ];
 
 /// One welcome page: a title and a few short paragraphs.
@@ -27,25 +48,30 @@ pub(super) struct WelcomePage {
 
 pub(super) const WELCOME: [WelcomePage; 3] = [
     WelcomePage {
-        title: "A PlayStation, in your browser",
+        title: if cfg!(target_arch = "wasm32") {
+            "A PlayStation, in your browser"
+        } else {
+            "A PlayStation, on your computer"
+        },
         body: &[
-            "PSoXide is a free PlayStation emulator. It runs homebrew with no BIOS file.",
+            "PSoXide is a free PlayStation emulator. It comes with a built-in demo disc: seven homebrew games and demos made for the original PlayStation, from arcade classics to Shareware Quake.",
             "It is independent and not affiliated with Sony.",
         ],
         links: &[],
     },
     WelcomePage {
-        title: "Your games stay on your device",
+        title: "Play your own PS1 games",
         body: &[
-            "Open a folder of your own disc images or programs and play them here. Files are read in place and never uploaded.",
+            "Got PlayStation discs of your own? Open a folder of your PS1 game disc images (CUE/BIN, ISO, CCD/IMG and M3U) and play them here. Files are read in place on your device and never uploaded.",
             "PSoXide fetches cover pictures for your discs from community collections (xlenore/psx-covers and libretro-thumbnails) and names your discs with the Redump list from libretro-database (CC BY-SA 4.0). Both are kept on this device. You can turn this off in Settings.",
         ],
         links: &[],
     },
     WelcomePage {
-        title: "Free to play",
+        title: "Even more games",
         body: &[
-            "The demo disc is homebrew made with the PSoXide tools, and the source is on GitHub. You can support the project with an optional donation on itch.io.",
+            "The PSoXide project also has bigger PlayStation ports, like Half-Life, that you build yourself from your own Steam copy of the original game. Everything is on GitHub.",
+            "You can support the project with an optional donation on itch.io.",
             concat!(
                 "Version ",
                 env!("CARGO_PKG_VERSION"),
@@ -115,12 +141,18 @@ enum Control {
     Stepper,
 }
 
+/// Whether a row is a plain action (no switch, slider or stepper to change under the cursor).
+pub(super) fn is_plain(row: &Row) -> bool {
+    matches!(control_for(row), Control::Plain)
+}
+
 fn control_for(row: &Row) -> Control {
     let on = row.value == "On";
     match &row.action {
         MenuAction::ToggleMute
         | MenuAction::ToggleTouchHaptics
-        | MenuAction::ToggleTouchLeftHanded => Control::Toggle(on),
+        | MenuAction::ToggleTouchLeftHanded
+        | MenuAction::ToggleMenuSounds => Control::Toggle(on),
         MenuAction::ToggleSmoothSlowHost => Control::Choice(
             &["Skip frames", "Slow the game"],
             usize::from(row.value == "Slow the game"),
@@ -659,12 +691,51 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
     let page = &WELCOME[h.welcome.min(WELCOME.len() - 1)];
     let width = (560.0 * u).min(s.width() - 40.0 * u);
     let x = s.center().x - width / 2.0;
-    let mut y = s.top()
+    let top = s.top()
         + if lay.kind == LayoutKind::Landscape {
             64.0 * u
         } else {
             140.0 * u
         };
+    let title_px = if lay.kind == LayoutKind::Desktop {
+        tokens::TITLE_DESKTOP
+    } else {
+        tokens::TITLE_PHONE
+    };
+    // The words get what the footer leaves. A page that does not fit at full size is set smaller
+    // (down to 0.74), and a short screen starts it higher, so no line meets the buttons.
+    let limit = s.bottom() - lay.bar_reserve() - 48.0 * u - 28.0 * u;
+    let height_at = |k: f32, top: f32| -> f32 {
+        let uk = u * k;
+        let mut y = top + 28.0 * uk;
+        let title = p.layout(
+            page.title.to_string(),
+            crate::theme::title_font(title_px * uk),
+            tokens::TEXT,
+            width,
+        );
+        y += title.size().y + 16.0 * uk;
+        for para in page.body {
+            let g = p.layout(
+                (*para).to_string(),
+                FontId::proportional(17.0 * uk),
+                tokens::TEXT_2,
+                width,
+            );
+            y += g.size().y + 12.0 * uk;
+        }
+        y += page.links.len() as f32 * (16.0 * uk * 1.25 + 4.0 * uk + 14.0 * uk);
+        y
+    };
+    let mut k = 1.0_f32;
+    let mut y = top;
+    while height_at(k, y) > limit && k > 0.74 {
+        k -= 0.04;
+        if k < 0.9 {
+            y = y.min(top - (140.0 - 96.0) * u * (1.0 - k) / 0.26);
+        }
+    }
+    let uk = u * k;
     // Each part comes in after the one before it, sliding along the way the page turned.
     let ctx = p.ctx();
     let (head, from) = (h.reveal(0), motion::mark(ctx, p));
@@ -675,41 +746,37 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
         FontId::proportional(tokens::CAPTION * u.max(1.0)),
         fade(CYAN, a * head),
     );
-    y += 28.0 * u;
+    y += 28.0 * uk;
     let title = p.layout(
         page.title.to_string(),
-        crate::theme::title_font(if lay.kind == LayoutKind::Desktop {
-            tokens::TITLE_DESKTOP * u
-        } else {
-            tokens::TITLE_PHONE * u
-        }),
+        crate::theme::title_font(title_px * uk),
         fade(tokens::TEXT, a * head),
         width,
     );
     let th = title.size().y;
     p.add(Shape::galley(Pos2::new(x, y), title, tokens::TEXT));
-    y += th + 16.0 * u;
+    y += th + 16.0 * uk;
     motion::shift_since(ctx, p, from, h.slide(head, u));
     for (i, para) in page.body.iter().enumerate() {
         let (part, from) = (h.reveal(i + 1), motion::mark(ctx, p));
         let g = p.layout(
             (*para).to_string(),
-            FontId::proportional(17.0 * u),
+            FontId::proportional(17.0 * uk),
             fade(tokens::TEXT_2, a * part),
             width,
         );
         let gh = g.size().y;
         p.add(Shape::galley(Pos2::new(x, y), g, tokens::TEXT));
-        y += gh + 12.0 * u;
+        y += gh + 12.0 * uk;
         motion::shift_since(ctx, p, from, h.slide(part, u));
     }
     for (label, url) in page.links {
         let (part, from) = (h.reveal(page.body.len() + 1), motion::mark(ctx, p));
         let r = p.text(
-            Pos2::new(x, y + 4.0 * u),
+            Pos2::new(x, y + 4.0 * uk),
             Align2::LEFT_TOP,
             *label,
-            FontId::proportional(16.0 * u),
+            FontId::proportional(16.0 * uk),
             fade(tokens::ACCENT, a * part),
         );
         p.line_segment(
@@ -718,7 +785,7 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
         );
         h.hits
             .push((r.expand2(Vec2::new(10.0, 10.0)), Click::Link(url)));
-        y = r.bottom() + 14.0 * u;
+        y = r.bottom() + 14.0 * uk;
         motion::shift_since(ctx, p, from, h.slide(part, u));
     }
     // Dots and the two steps.
@@ -838,6 +905,26 @@ pub(super) fn draw_toggle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_welcome_pages_say_what_the_demo_disc_and_the_project_hold() {
+        let words = [
+            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        ];
+        let count = words[DISC_GAMES.len()];
+        assert!(
+            WELCOME[0].body[0].contains(&format!("{count} homebrew games")),
+            "page 1 gives the demo disc's {count} games: {}",
+            WELCOME[0].body[0]
+        );
+        assert!(WELCOME[0].body[0].contains("built-in demo disc"));
+        assert!(WELCOME[0].body[0].ends_with("Shareware Quake."));
+        assert!(WELCOME[1].body[0].contains("PS1 game disc images"));
+        assert!(WELCOME[1].body[0].contains("CUE/BIN"));
+        assert!(WELCOME[2].body[0].contains("Half-Life"));
+        assert!(WELCOME[2].body[0].contains("your own Steam copy"));
+        assert_eq!(WELCOME[2].links.len(), 3, "the links stay");
+    }
 
     #[test]
     fn slider_numbers_use_the_shell_type_not_the_pixel_face() {

@@ -7,7 +7,7 @@ use gilrs::{Axis, Button, Event, EventType, Gamepad, GamepadId, Gilrs};
 
 use crate::input::model::{BackendKind, DeviceEvent, DeviceIdentity, PadSnapshot, StickDpad};
 
-use super::DeviceBackend;
+use super::{face_by_position, is_nintendo_layout, DeviceBackend};
 
 /// Analog trigger activation threshold.
 const TRIGGER_THRESHOLD: f32 = 0.5;
@@ -16,7 +16,7 @@ const TRIGGER_THRESHOLD: f32 = 0.5;
 pub(crate) struct GilrsBackend {
     gilrs: Option<Gilrs>,
     /// Router id of every pad announced so far.
-    pads: HashMap<GamepadId, (String, StickDpad)>,
+    pads: HashMap<GamepadId, (String, StickDpad, bool)>,
 }
 
 impl GilrsBackend {
@@ -43,8 +43,11 @@ impl GilrsBackend {
         };
         let gamepad = gilrs.gamepad(id);
         let route_id = format!("gilrs:{id}");
+        // An SDL-mapped Nintendo pad names its face buttons by label (A is the right one).
+        let nintendo = gamepad.mapping_source() != gilrs::MappingSource::None
+            && is_nintendo_layout(&[gamepad.name(), gamepad.os_name()]);
         self.pads
-            .insert(id, (route_id.clone(), StickDpad::default()));
+            .insert(id, (route_id.clone(), StickDpad::default(), nintendo));
         out.push(DeviceEvent::Connected(identity(&route_id, &gamepad)));
     }
 }
@@ -73,7 +76,7 @@ impl DeviceBackend for GilrsBackend {
             );
         }
         for id in disconnected {
-            if let Some((route_id, _)) = self.pads.remove(&id) {
+            if let Some((route_id, _, _)) = self.pads.remove(&id) {
                 out.push(DeviceEvent::Disconnected(route_id));
             }
         }
@@ -85,12 +88,12 @@ impl DeviceBackend for GilrsBackend {
         let Some(gilrs) = self.gilrs.as_ref() else {
             return;
         };
-        for (id, (route_id, stick)) in &mut self.pads {
+        for (id, (route_id, stick, nintendo)) in &mut self.pads {
             let gamepad = gilrs.gamepad(*id);
             if gamepad.is_connected() {
                 out.push(DeviceEvent::Sample {
                     id: route_id.clone(),
-                    snapshot: snapshot(&gamepad, stick),
+                    snapshot: snapshot(&gamepad, stick, *nintendo),
                 });
             }
         }
@@ -115,13 +118,21 @@ fn identity(route_id: &str, gamepad: &Gamepad<'_>) -> DeviceIdentity {
     }
 }
 
-fn snapshot(gamepad: &Gamepad<'_>, stick: &mut StickDpad) -> PadSnapshot {
+fn snapshot(gamepad: &Gamepad<'_>, stick: &mut StickDpad, nintendo: bool) -> PadSnapshot {
     let mut buttons = 0;
+    // `South` is the SDL mapping's `a`: the bottom button on an Xbox pad, the right one on a Nintendo pad.
+    let face = face_by_position(
+        gamepad.is_pressed(Button::South),
+        gamepad.is_pressed(Button::East),
+        gamepad.is_pressed(Button::West),
+        gamepad.is_pressed(Button::North),
+        nintendo,
+    );
     for (pressed, bit) in [
-        (gamepad.is_pressed(Button::South), button::CROSS),
-        (gamepad.is_pressed(Button::East), button::CIRCLE),
-        (gamepad.is_pressed(Button::West), button::SQUARE),
-        (gamepad.is_pressed(Button::North), button::TRIANGLE),
+        (face.south, button::CROSS),
+        (face.east, button::CIRCLE),
+        (face.west, button::SQUARE),
+        (face.north, button::TRIANGLE),
         (gamepad.is_pressed(Button::LeftTrigger), button::L1),
         (gamepad.is_pressed(Button::RightTrigger), button::R1),
         (

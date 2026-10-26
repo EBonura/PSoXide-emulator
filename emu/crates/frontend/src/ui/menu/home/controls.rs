@@ -1782,8 +1782,8 @@ mod tests {
 
     fn page_with_stops() -> (MenuState, HomeState) {
         let mut ms = MenuState::new();
-        ms.enable_home(false);
-        let mut h = HomeState::new(false);
+        ms.enable_home(false, false);
+        let mut h = HomeState::new(false, false);
         h.page = Page::Controls;
         let key = |t, row| Stop {
             item: Item::Key(t),

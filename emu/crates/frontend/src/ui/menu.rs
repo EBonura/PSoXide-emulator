@@ -23,7 +23,10 @@ pub(crate) mod slots;
 
 pub(crate) use slots::{SlotCard, SlotsMode, SlotsState};
 
-pub(crate) use home::{is_first_visit as first_visit, DemoStatus, DeviceCommand, HomeFeed};
+#[allow(unused_imports)]
+pub(crate) use home::{
+    explainer_unseen, is_first_visit as first_visit, DemoStatus, DeviceCommand, HomeFeed,
+};
 
 const CATEGORY_SPACING: f32 = 100.0;
 const ICON_SIZE_ACTIVE: f32 = 32.0;
@@ -161,6 +164,7 @@ pub enum MenuAction {
     ToggleBoxArt,
     /// Calm the shell's motion (focus, loading, launch).
     ToggleReduceMotion,
+    ToggleMenuSounds,
     /// Quit the application.
     Quit,
 }
@@ -443,6 +447,8 @@ pub struct MenuState {
     /// green held-highlights (a live rollover/ghosting tester).
     controls_live_held: Vec<PadBindTarget>,
     pending_pointer_action: Option<MenuAction>,
+    /// Sounds the menu asked for, taken by the app each frame.
+    sounds: Vec<crate::ui_sound::UiSound>,
     categories: Vec<Category>,
     /// The home screen, once the shell turns it on; `None` keeps the old
     /// cross media bar (the unit tests and old headless previews).
@@ -527,6 +533,7 @@ impl MenuState {
             controls_labels: HashMap::new(),
             controls_live_held: Vec::new(),
             pending_pointer_action: None,
+            sounds: Vec::new(),
             categories,
             home: None,
         }
@@ -888,6 +895,28 @@ impl MenuState {
         if let Some(home) = self.home.as_mut() {
             home.set_reduce_motion(on);
         }
+    }
+
+    /// Reflect the menu-sounds setting in its row.
+    pub fn set_menu_sounds(&mut self, on: bool) {
+        self.set_value(
+            &MenuAction::ToggleMenuSounds,
+            if on { "On" } else { "Off" }.into(),
+        );
+    }
+
+    /// The sounds the shell asked for since the last call, oldest first.
+    pub(crate) fn take_sounds(&mut self) -> Vec<crate::ui_sound::UiSound> {
+        let mut out = std::mem::take(&mut self.sounds);
+        if let Some(home) = self.home.as_mut() {
+            out.append(&mut home.sounds);
+        }
+        out
+    }
+
+    /// Whether the shell is on screen, fading in or out included: menu sounds may play.
+    pub(crate) fn shell_visible(&self) -> bool {
+        self.open || self.appear > 0.0
     }
 
     /// Reflect the slow-host choice in its Settings row.
@@ -2673,6 +2702,7 @@ fn build_settings_category() -> Category {
             Some("On"),
         ),
         row("Reduce motion", MenuAction::ToggleReduceMotion, Some("Off")),
+        row("Menu sounds", MenuAction::ToggleMenuSounds, Some("On")),
         row("Fullscreen", MenuAction::ToggleFullscreen, None),
         row("About", MenuAction::ShowAbout, None),
     ];
@@ -3443,6 +3473,7 @@ mod tests {
                 "Left-handed layout",
                 "Box art from the internet",
                 "Reduce motion",
+                "Menu sounds",
                 "Fullscreen",
                 "About",
                 "Quit PSoXide"

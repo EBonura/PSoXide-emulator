@@ -64,6 +64,7 @@ mod playtest_input;
 mod session;
 mod theme;
 mod ui;
+mod ui_sound;
 // Browser glue for the touch controller (no-ops on native).
 mod web_touch;
 
@@ -352,6 +353,8 @@ struct Shell {
     /// massively overfills the audio queue and produces crackle
     /// from dropped samples.
     emu_frame_accum: f32,
+    /// When the menu sounds were last moved on, to play them in real time while no game runs.
+    ui_sound_clock: Option<Instant>,
     /// Running averages for `video.smooth_slow_host`: milliseconds one
     /// guest frame costs to emulate, and the rest of a redraw's work.
     pace: HostPace,
@@ -451,6 +454,8 @@ impl Shell {
         };
         let mut state = AppState::with_config_dir(config_dir);
         state.enable_home_screen();
+        #[cfg(not(target_arch = "wasm32"))]
+        state.ui_sound.arm();
         input.set_remembered_analog(state.settings.input.analog_choice.clone());
         #[cfg(feature = "editor")]
         let state = {
@@ -479,6 +484,7 @@ impl Shell {
             touch_chrome_applied: false,
             controller_layout_stamp: None,
             emu_frame_accum: 0.0,
+            ui_sound_clock: None,
             pace: HostPace::default(),
             compute_backend,
             display_gpu_compute: gpu_compute,
@@ -900,6 +906,41 @@ fn keycode_to_binding(code: KeyCode) -> Option<InputBinding> {
     }
 }
 
+/// Menu sounds: take what the shell asked for and, while a menu is on screen and the running game
+/// is not already feeding the output, play it in real time. `mixed` says the frame's emulation
+/// mixed the sounds into its own samples.
+fn pump_menu_sounds(
+    state: &mut AppState,
+    audio: Option<&audio::AudioOut>,
+    clock: &mut Option<Instant>,
+    mixed: bool,
+) {
+    for sound in state.menu.take_sounds() {
+        state.ui_sound.trigger(sound, 1.0);
+    }
+    let now = Instant::now();
+    let elapsed = clock
+        .replace(now)
+        .map_or(0.0, |before| now.duration_since(before).as_secs_f32());
+    if !state.menu.shell_visible() {
+        // Nothing plays over a game: a sound still ringing when the menu is gone is dropped.
+        state.ui_sound.silence();
+        return;
+    }
+    if mixed || !state.ui_sound.active() {
+        return;
+    }
+    let frames = ((elapsed.min(0.1) * ui_sound::RATE) as usize).max(64);
+    let Some(audio) = audio else {
+        // No output device: let the voices run out so the counters still read true.
+        let _ = state.ui_sound.render(frames, 0.0);
+        return;
+    };
+    audio.set_volume(state.effective_audio_volume());
+    let block = state.ui_sound.render(frames, 1.0);
+    audio.push_samples(&block);
+}
+
 impl ApplicationHandler for Shell {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.graphics.is_some() {
@@ -975,6 +1016,16 @@ impl ApplicationHandler for Shell {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Browsers play no sound before the page was used: a key, a click or a touch arms the
+        // menu sounds (a desktop build is armed from the start).
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::Touch(_)
+        ) {
+            self.state.ui_sound.arm();
+        }
         let Some(gfx) = self.graphics.as_mut() else {
             return;
         };
@@ -991,10 +1042,16 @@ impl ApplicationHandler for Shell {
             };
             let at = egui::pos2(touch.location.x as f32, touch.location.y as f32);
             let now_ms = self.input.now_ms();
+            // A tap on the toolbar (or the tab that brings it back) is the player's chrome, not play.
+            let ppp = gfx.window.scale_factor() as f32;
+            let on_chrome = self
+                .state
+                .toolbar_hit
+                .contains(egui::pos2(at.x / ppp, at.y / ppp));
             let owned = self
                 .input
                 .touch_mut()
-                .handle_touch(touch.id, phase, at, now_ms);
+                .handle_touch(touch.id, phase, at, now_ms, on_chrome);
             web_touch::note_touch(owned, at.x, at.y);
             if owned {
                 // Handled inside the event, where the browser still counts
@@ -1244,6 +1301,7 @@ impl ApplicationHandler for Shell {
                 let dt = (now - self.last_frame).as_secs_f32().min(0.1);
                 self.last_frame = now;
                 let cpu_tick_before = self.state.cpu.tick();
+                let mut ui_sound_mixed = false;
                 let gte_profile_before = self.state.cpu.cop2().profile_snapshot();
                 let bus_cycles_before =
                     self.state.bus.as_ref().map(|bus| bus.cycles()).unwrap_or(0);
@@ -1691,6 +1749,7 @@ impl ApplicationHandler for Shell {
                         port2.left_stick,
                     );
                     let mut frames_run = 0u32;
+                    let mut spu_pushed = false;
                     for _ in 0..frames_to_run {
                         // A disc read on demand (web) fetches ahead of the
                         // drive; if the next frame could want a sector that has
@@ -1761,31 +1820,37 @@ impl ApplicationHandler for Shell {
                         // timing model.
                         let audio_start = Instant::now();
                         let effective_audio_volume = self.state.effective_audio_volume();
-                        let (guest_events, guest_debug_logs) =
-                            if let Some(bus) = self.state.bus.as_mut() {
-                                bus.run_spu_to_current_cycle();
-                                if let Some(audio) = self.audio.as_ref() {
-                                    audio.set_volume(effective_audio_volume);
-                                    let samples = bus.spu.drain_audio();
-                                    if !samples.is_empty() {
-                                        audio.push_samples(&samples);
-                                    }
-                                    // Audio underruns go on the guest panel's host line.
-                                    self.state.guest_stats.note_audio_underruns(
-                                        audio.underrun_frames(),
-                                        audio.host_sample_rate(),
-                                    );
-                                } else {
-                                    // No output device -- drain and discard so the
-                                    // SPU's internal queue doesn't grow unbounded.
-                                    let _ = bus.spu.drain_audio();
+                        let (guest_events, guest_debug_logs) = if let Some(bus) =
+                            self.state.bus.as_mut()
+                        {
+                            bus.run_spu_to_current_cycle();
+                            if let Some(audio) = self.audio.as_ref() {
+                                audio.set_volume(effective_audio_volume);
+                                let mut samples = bus.spu.drain_audio();
+                                // A menu fading over the running game still has its sound.
+                                if self.state.menu.shell_visible() && self.state.ui_sound.active() {
+                                    self.state.ui_sound.render_add(&mut samples, 1.0);
+                                    spu_pushed = true;
                                 }
-                                let events = bus.telemetry.drain_events();
-                                let logs = bus.telemetry.drain_debug_logs();
-                                (events, logs)
+                                if !samples.is_empty() {
+                                    audio.push_samples(&samples);
+                                }
+                                // Audio underruns go on the guest panel's host line.
+                                self.state.guest_stats.note_audio_underruns(
+                                    audio.underrun_frames(),
+                                    audio.host_sample_rate(),
+                                );
                             } else {
-                                (Vec::new(), Vec::new())
-                            };
+                                // No output device -- drain and discard so the
+                                // SPU's internal queue doesn't grow unbounded.
+                                let _ = bus.spu.drain_audio();
+                            }
+                            let events = bus.telemetry.drain_events();
+                            let logs = bus.telemetry.drain_debug_logs();
+                            (events, logs)
+                        } else {
+                            (Vec::new(), Vec::new())
+                        };
                         let guest_profile = self.state.profiler.consume_guest_events(&guest_events);
                         if !guest_debug_logs.is_empty() {
                             // Surface guest debug logs to the host console. The
@@ -1802,9 +1867,16 @@ impl ApplicationHandler for Shell {
                     }
                     self.emu_frame_accum =
                         pacing.settle(self.emu_frame_accum, active_frame_dt, frames_run);
+                    ui_sound_mixed = spu_pushed;
                 } else {
                     self.emu_frame_accum = 0.0;
                 }
+                pump_menu_sounds(
+                    &mut self.state,
+                    self.audio.as_ref(),
+                    &mut self.ui_sound_clock,
+                    ui_sound_mixed,
+                );
                 profile.cpu_ticks = self.state.cpu.tick().saturating_sub(cpu_tick_before) as f32;
                 profile.bus_cycles = self
                     .state
@@ -2268,9 +2340,6 @@ impl Shell {
     }
 }
 
-/// CSS pixels of the portrait panel the debug strip asks for under the controls.
-const DEBUG_STRIP_CSS: f32 = 140.0;
-
 /// Act on what the on-screen controller's buttons reported: the menu, pause, save, debug and
 /// fullscreen taps, and the haptic tick for a fresh press.
 fn run_touch_actions(
@@ -2324,20 +2393,13 @@ fn update_touch_controller(
     let size = window.inner_size();
     let scale = window.scale_factor() as f32;
     let css = web_touch::safe_insets_css();
-    state.step_debug_sheet(dt);
-    // The debug panel beside the game takes its share of a landscape window.
+    // The debug panel beside the game takes a third of a phone's width, held either way up.
     let dock_right_px = ui::debug_sidebar::right_dock_points(
         egui::vec2(size.width as f32, size.height as f32) / scale,
         state.sidebar_width,
         state.debug_slide,
+        state.menu.touch_mode(),
     ) * scale;
-    // The debug strip under the controls in portrait: the panel keeps this much for it while it
-    // slides in.
-    let dock_bottom_px = if size.width < size.height {
-        DEBUG_STRIP_CSS * scale * state.debug_slide
-    } else {
-        0.0
-    };
     let params = input::touch::layout::LayoutParams {
         size: egui::vec2(size.width as f32, size.height as f32),
         scale,
@@ -2353,12 +2415,6 @@ fn update_touch_controller(
         fullscreen_button: web_touch::fullscreen_available(),
         menu_open: false,
         dock_right: dock_right_px,
-        dock_bottom: dock_bottom_px,
-        sheet: if state.debug_slide > 0.001 {
-            state.debug_sheet
-        } else {
-            0.0
-        },
     };
     let now_ms = input_router.now_ms();
     let menu_open = state.menu.open;
@@ -2380,13 +2436,16 @@ fn update_touch_controller(
     state.menu.set_touch_mode(visible);
     if visible && !*chrome_applied {
         // The toolbar costs a phone a tenth of its height; the menu button and
-        // the Settings rows reach everything on it.
+        // the Settings rows reach everything on it. Once: after this the bar is the player's own
+        // to show and hide, whatever the controller does (a pad or a key hiding the controller
+        // must not bring the bar back, nor a touch hide it again).
         *chrome_applied = true;
         state.toolbar_hidden = true;
-    } else if !visible && *chrome_applied {
-        // The controller went away again (Touch controls set back to Auto or
-        // Off on a machine with a keyboard): bring the toolbar back too, or the
-        // player is left with neither.
+    } else if !visible && *chrome_applied && !touch.touch_primary() {
+        // The controller went away because the player turned it Off or Auto on a machine that is
+        // not a touch device (a desktop trying the controller out): the bar comes back with it. On
+        // a phone or tablet the controller comes and goes by itself (a pad, a key, a touch), and the
+        // bar stays as the player left it.
         *chrome_applied = false;
         state.toolbar_hidden = false;
     }

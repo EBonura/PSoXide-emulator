@@ -260,8 +260,6 @@ mod tests {
                 fullscreen_button: false,
                 menu_open: false,
                 dock_right: 0.0,
-                dock_bottom: 0.0,
-                sheet: 0.0,
             },
             0,
             0.016,
@@ -295,8 +293,6 @@ mod tests {
             fullscreen_button: true,
             menu_open: true,
             dock_right: 0.0,
-            dock_bottom: 0.0,
-            sheet: 0.0,
         };
         let mut router = touch_router();
         router.touch_mut().update_layout(params(), 0, 0.016);
@@ -360,11 +356,13 @@ mod tests {
             if finger.map(|(_, mask)| mask) != Some(*buttons).filter(|b| *b != 0) {
                 if let Some((id, mask)) = finger.take() {
                     let at = finger_for(&router, mask);
-                    router.touch_mut().handle_touch(id, Phase::Up, at, 0);
+                    router.touch_mut().handle_touch(id, Phase::Up, at, 0, false);
                 }
                 if *buttons != 0 {
                     let at = finger_for(&router, *buttons);
-                    assert!(router.touch_mut().handle_touch(next_id, Phase::Down, at, 0));
+                    assert!(router
+                        .touch_mut()
+                        .handle_touch(next_id, Phase::Down, at, 0, false));
                     finger = Some((next_id, *buttons));
                     next_id += 1;
                 }
@@ -388,8 +386,10 @@ mod tests {
         router.poll();
         router.poll();
         let at = finger_for(&router, button::CROSS);
-        router.touch_mut().handle_touch(1, Phase::Down, at, 0);
-        router.touch_mut().handle_touch(1, Phase::Up, at, 0);
+        router
+            .touch_mut()
+            .handle_touch(1, Phase::Down, at, 0, false);
+        router.touch_mut().handle_touch(1, Phase::Up, at, 0, false);
         let frame = router.poll();
         assert!(frame.menu_confirm);
         assert_eq!(frame.port1.mask, button::CROSS);
@@ -435,8 +435,6 @@ mod tests {
                 fullscreen_button: false,
                 menu_open: false,
                 dock_right: 0.0,
-                dock_bottom: 0.0,
-                sheet: 0.0,
             },
             0,
             0.016,
@@ -457,8 +455,6 @@ mod tests {
                 fullscreen_button: false,
                 menu_open: false,
                 dock_right: 0.0,
-                dock_bottom: 0.0,
-                sheet: 0.0,
             },
             0,
             0.016,
@@ -486,7 +482,7 @@ mod tests {
         router.poll();
         router
             .touch_mut()
-            .handle_touch(1, Phase::Down, egui::pos2(1.0, 1.0), 10_000);
+            .handle_touch(1, Phase::Down, egui::pos2(1.0, 1.0), 10_000, false);
         assert!(router.touch().visible(), "a touch shows it again");
         // Off stays off.
         router

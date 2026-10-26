@@ -428,6 +428,15 @@ same `MenuAction`s going out. Tokens (colours, type scale, spacing, easings) liv
   are away), and its grab bar drags it down to a short strip with the controller back above it, or up again;
   a tap on the bar flips it. A chart that a finger starts on passes vertical travel up to the panel's scroll
   and scrubs only on a sideways drag.
+- The first run opens on the "What is this?" pages with the first-visit countdown held behind them (their taps
+  and keys do not cancel it); closing them, by Done, Skip or Back, remembers that they were seen and starts the
+  countdown. Journeys: `*-explainer` (first run, all three pages, closing, reload, a visitor from before).
+- The demo disc's seven games are chips under its title on Home (`home.contents` in the page probe).
+- Menu sounds (`ui_sound.rs`): synthesised, quiet, played only while a menu is on screen; the player counts what
+  it asked for (`sounds` in `psoxideUxState()`), which is what the `*-sounds` journeys read.
+- The interaction matrix (`phone-matrix-<auto|on|off>-<portrait|landscape>`): sequences across the toolbar, the
+  touch controls, the debug sidebar, the menu, pause, a physical pad and the orientation, with a model checking
+  every visible piece after every step.
 - Scrolling feels like iOS everywhere the shell scrolls (`ui/momentum.rs`): the content follows the finger,
   coasts on after it lifts (velocity of the last 100 ms, 0.998 per ms deceleration), stretches against the ends
   with rising resistance and springs back without crossing them, and a finger put down on a coasting list only

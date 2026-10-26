@@ -33,12 +33,15 @@ const STRIP_MAX_HEIGHT: f32 = 420.0;
 /// Inner padding, replacing the default panel frame margin we drop so the
 /// slide-in content-width math stays exact.
 const SIDEBAR_PAD: f32 = 8.0;
-/// Height of the grab bar on a phone's debug sheet, points.
-const SHEET_HANDLE: f32 = 18.0;
-/// Release speed that throws the sheet to the far side, points per second.
-const SHEET_FLING: f32 = 350.0;
-/// Height of the phone's one-line summary, points.
-const SUMMARY_ROW: f32 = 32.0;
+/// Share of a phone's width the panel takes on the right, held either way up, and its limits in
+/// points: a third of the screen, never narrower than a column of small readable type needs.
+const PHONE_SHARE: f32 = 0.33;
+const PHONE_MIN_WIDTH: f32 = 112.0;
+const PHONE_MAX_WIDTH: f32 = 420.0;
+/// A phone's panel at least this wide has room for the summary on one line.
+const ROOMY: f32 = 250.0;
+/// The panel's type scale on a phone (1 on a desktop): the smallest text it draws is 9.5 points.
+const PHONE_TYPE_SCALE: f32 = 0.9;
 
 /// Where the panel sits and how much of the window it takes, in points.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -52,10 +55,14 @@ pub(crate) enum Dock {
 /// Where the panel docks in a window of `screen` points, when it has `free_height` points under
 /// the toolbar to share and the player last dragged it `remembered_width` wide.
 ///
-/// A window wider than tall puts it on the right, so the game, the pad around it and the readouts
-/// all fit one screen; a taller one puts it under the game, above the controller's panel.
-pub(crate) fn dock_for(screen: Vec2, free_height: f32, remembered_width: f32) -> Dock {
-    if screen.x >= screen.y {
+/// A phone (`touch`) always docks it as a third of the width on the right, held either way up, so
+/// the picture and the controller keep the other two thirds and the whole height. A desktop window
+/// wider than tall puts it on the right as well, so the game, the pad around it and the readouts all
+/// fit one screen; a taller one puts it under the game.
+pub(crate) fn dock_for(screen: Vec2, free_height: f32, remembered_width: f32, touch: bool) -> Dock {
+    if touch {
+        Dock::Right((screen.x * PHONE_SHARE).clamp(PHONE_MIN_WIDTH, PHONE_MAX_WIDTH))
+    } else if screen.x >= screen.y {
         let width = if screen.x >= WIDE_WINDOW {
             remembered_width
                 .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
@@ -72,8 +79,13 @@ pub(crate) fn dock_for(screen: Vec2, free_height: f32, remembered_width: f32) ->
 
 /// How many points of width the panel takes from the right of a window while it is open, for the
 /// on-screen controller to lay itself out in what is left (zero when it docks underneath).
-pub(crate) fn right_dock_points(screen: Vec2, remembered_width: f32, open: f32) -> f32 {
-    match dock_for(screen, screen.y, remembered_width) {
+pub(crate) fn right_dock_points(
+    screen: Vec2,
+    remembered_width: f32,
+    open: f32,
+    touch: bool,
+) -> f32 {
+    match dock_for(screen, screen.y, remembered_width, touch) {
         Dock::Right(width) => width * open.clamp(0.0, 1.0),
         Dock::Bottom(_) => 0.0,
     }
@@ -85,15 +97,7 @@ pub(crate) fn right_dock_points(screen: Vec2, remembered_width: f32, open: f32) 
 /// from at full size, so the whole panel translates and clips off. A right-hand panel is
 /// resizable when fully open; its width is remembered as the animation target.
 ///
-/// `touch_strip` is where the controller's layout left room for the strip under its buttons in
-/// portrait; with it the strip fills that room and the game keeps the whole width, without it a tall
-/// window takes the strip's height from the game.
-pub fn draw(
-    ctx: &egui::Context,
-    state: &mut AppState,
-    vram_tex: egui::TextureId,
-    touch_strip: Option<Rect>,
-) {
+pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId) {
     // 0.0 = closed, 1.0 = open.
     let t = ctx.animate_bool_with_time(
         egui::Id::new("debug_sidebar_slide"),
@@ -108,11 +112,8 @@ pub fn draw(
     let screen = ctx.screen_rect().size();
     let free = ctx.available_rect();
     let touch = state.menu.touch_mode();
-    if let Some(strip) = touch_strip.filter(|_| screen.x < screen.y) {
-        draw_touch_strip(ctx, state, vram_tex, strip, t, touch);
-        return;
-    }
-    match dock_for(screen, free.height(), state.sidebar_width) {
+    psoxide_debug_ui::set_type_scale(if touch { PHONE_TYPE_SCALE } else { 1.0 });
+    match dock_for(screen, free.height(), state.sidebar_width, touch) {
         Dock::Right(width) => draw_right(ctx, state, vram_tex, width, t, animating, touch),
         Dock::Bottom(height) => draw_bottom(ctx, state, vram_tex, height, t, animating, touch),
     }
@@ -137,11 +138,12 @@ fn draw_right(
     let max_w = SIDEBAR_MAX_WIDTH.min(ctx.screen_rect().width());
     let min_w = SIDEBAR_MIN_WIDTH.min(max_w).min(target);
     let (panel_fill, separator) = panel_colours(ctx);
+    let inset = state.touch_bottom_inset;
 
     // Zero-margin fill frame: content padding is handled by hand (SIDEBAR_PAD)
     // so both the animated and open paths share the exact same layout.
     let panel = SidePanel::right("debug-sidebar").frame(egui::Frame::NONE.fill(panel_fill));
-    let wide = ctx.screen_rect().width() >= WIDE_WINDOW;
+    let wide = ctx.screen_rect().width() >= WIDE_WINDOW && !touch;
     let panel = if animating {
         panel.resizable(false).exact_width((target * t).max(1.0))
     } else if wide {
@@ -177,7 +179,9 @@ fn draw_right(
                 .layout(Layout::top_down(Align::Min)),
             |ui| {
                 ui.set_clip_rect(content_rect.intersect(panel_rect));
-                draw_contents(ui, state, vram_tex, panel_rect.bottom(), touch);
+                // A phone keeps the content clear of the home indicator.
+                let bottom = panel_rect.bottom() - if touch { inset } else { 0.0 };
+                draw_contents(ui, state, vram_tex, bottom, touch);
             },
         );
         // egui persists the panel's width from the frame content's measured
@@ -193,106 +197,6 @@ fn draw_right(
     state.debug_rect = [r.left(), r.top(), r.right(), r.bottom()];
     if !animating && wide {
         state.sidebar_width = response.response.rect.width().clamp(min_w, max_w);
-    }
-}
-
-/// The strip under a phone's controls: drawn in the room the controller's layout kept for it. It
-/// wipes down from its top edge as it opens, with its summary on the first frame it is shown.
-fn draw_touch_strip(
-    ctx: &egui::Context,
-    state: &mut AppState,
-    vram_tex: egui::TextureId,
-    strip: Rect,
-    t: f32,
-    touch: bool,
-) {
-    let (panel_fill, separator) = panel_colours(ctx);
-    let inset = state.touch_bottom_inset;
-    if (state.debug_sheet - state.debug_sheet_goal).abs() > 0.001 {
-        ctx.request_repaint();
-    }
-    let response = TopBottomPanel::bottom("debug-strip")
-        .resizable(false)
-        .exact_height(strip.height())
-        .frame(egui::Frame::NONE.fill(Color32::BLACK))
-        .show(ctx, |ui| {
-            let panel_rect = ui.max_rect();
-            // The part that has opened so far, from the top edge down.
-            let shown = Rect::from_min_size(
-                panel_rect.min,
-                Vec2::new(panel_rect.width(), panel_rect.height() * t),
-            );
-            ui.painter().rect_filled(shown, 0.0, panel_fill);
-            ui.painter()
-                .hline(panel_rect.x_range(), panel_rect.top() + 0.5, separator);
-            // The contents are laid out at full size from the first frame and clipped to what has
-            // opened, so the summary is never missing from a frame.
-            sheet_handle(ui, state, panel_rect);
-            let content = Rect::from_min_max(
-                panel_rect.min + Vec2::new(0.0, SHEET_HANDLE),
-                egui::pos2(panel_rect.right(), panel_rect.bottom() - inset),
-            );
-            ui.scope_builder(
-                UiBuilder::new()
-                    .max_rect(content.shrink(SIDEBAR_PAD))
-                    .layout(Layout::top_down(Align::Min)),
-                |ui| {
-                    ui.set_clip_rect(shown);
-                    draw_contents(ui, state, vram_tex, content.bottom() - SIDEBAR_PAD, touch);
-                },
-            );
-            panel_rect
-        });
-    let r = response.inner;
-    state.debug_rect = [r.left(), r.top(), r.right(), r.bottom()];
-}
-
-/// The grab bar on the strip's top edge: drag it up and the debug sheet covers the controller,
-/// down and the controller is back with a short strip under it; a tap flips between the two.
-fn sheet_handle(ui: &mut egui::Ui, state: &mut AppState, panel: Rect) {
-    let area = Rect::from_min_size(panel.min, Vec2::new(panel.width(), SHEET_HANDLE));
-    // A finger needs more than the bar: the touch area runs a little below it, across the middle
-    // of the panel (the close button at the right stays clear).
-    let grab = Rect::from_center_size(
-        area.center() + Vec2::new(0.0, 5.0),
-        Vec2::new(panel.width() * 0.6, SHEET_HANDLE + 10.0),
-    );
-    let response = ui.interact(
-        grab,
-        egui::Id::new("debug-sheet-handle"),
-        Sense::click_and_drag(),
-    );
-    let lit = response.hovered() || response.dragged();
-    let ink = if lit {
-        tokens::FOCUS
-    } else {
-        tokens::ICON_REST
-    };
-    ui.painter().rect_filled(
-        Rect::from_center_size(area.center(), Vec2::new(40.0, 4.0)),
-        2.0,
-        ink,
-    );
-    let span = (state.debug_sheet_span[0] - state.debug_sheet_span[1]).max(1.0);
-    if response.dragged() {
-        // The sheet follows the finger: the top edge moves by what the finger moved.
-        state.debug_sheet_drag = true;
-        let moved = -response.drag_delta().y / span;
-        state.debug_sheet = (state.debug_sheet + moved).clamp(0.0, 1.0);
-        state.debug_sheet_goal = state.debug_sheet;
-    } else if response.drag_stopped() {
-        // Let go: settle on the side the sheet was thrown towards, else the nearer one.
-        state.debug_sheet_drag = false;
-        let speed = ui.input(|i| i.pointer.velocity().y);
-        state.debug_sheet_goal = if speed < -SHEET_FLING {
-            1.0
-        } else if speed > SHEET_FLING {
-            0.0
-        } else {
-            state.debug_sheet.round()
-        };
-    } else if response.clicked() {
-        state.debug_sheet_goal = if state.debug_sheet > 0.5 { 0.0 } else { 1.0 };
     }
 }
 
@@ -376,6 +280,18 @@ impl Tab {
             Self::Video => "Video",
         }
     }
+
+    /// The label where the panel is a narrow column.
+    fn short_label(self) -> &'static str {
+        match self {
+            Self::Performance => "Perf",
+            Self::InputTape => "Tape",
+            Self::Developer => "Dev",
+            Self::Cpu => "CPU",
+            Self::Memory => "Mem",
+            Self::Video => "Video",
+        }
+    }
 }
 
 fn draw_contents(
@@ -386,16 +302,17 @@ fn draw_contents(
     touch: bool,
 ) {
     if touch {
-        // Fingertip-sized controls (36 points) in small type, so the content gets the room.
+        // A phone's type scale: small type and 28-point controls, so the content gets the room.
+        // The smallest text anywhere in the panel is 9.5 points (10 here, 9.45 in the charts).
         let style = ui.style_mut();
-        style.spacing.interact_size.y = 36.0;
-        style.spacing.button_padding = Vec2::new(9.0, 5.0);
-        style.spacing.item_spacing = Vec2::new(6.0, 6.0);
+        style.spacing.interact_size.y = 28.0;
+        style.spacing.button_padding = Vec2::new(6.0, 3.0);
+        style.spacing.item_spacing = Vec2::new(4.0, 4.0);
         for (text_style, size) in [
-            (egui::TextStyle::Body, 14.0),
-            (egui::TextStyle::Button, 14.0),
-            (egui::TextStyle::Small, 12.0),
-            (egui::TextStyle::Monospace, 13.0),
+            (egui::TextStyle::Body, 12.0),
+            (egui::TextStyle::Button, 12.0),
+            (egui::TextStyle::Small, 10.0),
+            (egui::TextStyle::Monospace, 11.0),
         ] {
             if let Some(font) = style.text_styles.get_mut(&text_style) {
                 font.size = size;
@@ -409,19 +326,31 @@ fn draw_contents(
     ui.add_space(4.0);
     let id = egui::Id::new("debug_sidebar_tab");
     let mut tab = ui.ctx().data(|d| d.get_temp::<usize>(id)).unwrap_or(0);
-    egui::ScrollArea::horizontal()
-        .id_salt("debug-tabs")
-        .auto_shrink([false, true])
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                for (i, candidate) in Tab::ALL.iter().enumerate() {
-                    if tab_chip(ui, candidate.label(), tab == i, touch) {
-                        tab = i;
-                    }
+    if touch && ui.available_width() < ROOMY {
+        // A narrow column: short labels, wrapped, so every tab is in view at once.
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+            for (i, candidate) in Tab::ALL.iter().enumerate() {
+                if tab_chip(ui, candidate.short_label(), tab == i, touch) {
+                    tab = i;
                 }
-            });
+            }
         });
+    } else {
+        egui::ScrollArea::horizontal()
+            .id_salt("debug-tabs")
+            .auto_shrink([false, true])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (i, candidate) in Tab::ALL.iter().enumerate() {
+                        if tab_chip(ui, candidate.label(), tab == i, touch) {
+                            tab = i;
+                        }
+                    }
+                });
+            });
+    }
     ui.ctx().data_mut(|d| d.insert_temp(id, tab));
     ui.add_space(2.0);
     ui.separator();
@@ -475,14 +404,14 @@ fn draw_contents(
 
 /// One tab as a chip: a pill that lights in the shell's accent when it is the open one.
 fn tab_chip(ui: &mut egui::Ui, label: &str, on: bool, touch: bool) -> bool {
-    let font = FontId::proportional(13.0);
+    let font = FontId::proportional(if touch { 11.0 } else { 13.0 });
     let galley = ui.painter().layout_no_wrap(
         label.to_string(),
         font,
         if on { tokens::FOCUS } else { tokens::DIM },
     );
-    let height = if touch { 30.0 } else { 26.0 };
-    let size = Vec2::new(galley.size().x + 24.0, height);
+    let height = if touch { 22.0 } else { 26.0 };
+    let size = Vec2::new(galley.size().x + if touch { 14.0 } else { 24.0 }, height);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let hot = response.hovered();
     let fill = if on {
@@ -594,8 +523,10 @@ fn summary(ui: &mut egui::Ui, state: &mut AppState, touch: bool) {
     });
 }
 
-/// The phone's summary: one line of small type, a status dot, the three readings, the title when
-/// it fits and the close button, so the tabs and their content get the panel.
+/// The phone's summary, in small type: a status dot, the three readings, the disc name when it
+/// fits, and the close button. A panel with the room (a tablet, a long phone held sideways) puts it
+/// on one line; the usual third of a phone's width takes two: the dot, the frame rate and close,
+/// then the frame time and the speed.
 fn compact_summary(
     ui: &mut egui::Ui,
     state: &mut AppState,
@@ -603,62 +534,77 @@ fn compact_summary(
     fps: Option<f64>,
     speed: Option<(f64, f64)>,
 ) {
-    let readings = [
-        (fps.map_or("--".into(), |f| format!("{f:.0}")), "fps"),
-        (
-            fps.filter(|f| *f > 0.0)
-                .map_or("--".into(), |f| format!("{:.1}", 1000.0 / f)),
-            "ms",
-        ),
-        (
-            speed.map_or("--".into(), |(s, _)| format!("{:.0}", s * 100.0)),
-            "% real time",
-        ),
-    ];
-    let row = Rect::from_min_size(
-        ui.cursor().min,
-        Vec2::new(ui.available_width(), SUMMARY_ROW),
-    );
+    let fps_text = fps.map_or("--".to_string(), |f| format!("{f:.0}"));
+    let ms_text = fps
+        .filter(|f| *f > 0.0)
+        .map_or("--".to_string(), |f| format!("{:.1}", 1000.0 / f));
+    let speed_text = speed.map_or("--".to_string(), |(s, _)| format!("{:.0}%", s * 100.0));
+    let roomy = ui.available_width() >= ROOMY;
+    let row_h = if roomy { 28.0 } else { 40.0 };
+    let row = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), row_h));
     ui.allocate_rect(row, Sense::hover());
     let painter = ui.painter().clone();
-    let mid = row.center().y;
-    painter.circle_filled(egui::pos2(row.left() + 6.0, mid), 4.5, status);
-    let mut x = row.left() + 18.0;
-    for (value, unit) in readings {
+    let value_font = FontId::proportional(13.0);
+    let unit_font = FontId::proportional(9.5);
+    // One reading at `x`: the value, then its unit; returns where the next one may start.
+    let reading = |x: f32, y: f32, value: &str, unit: &str| -> f32 {
         let big = painter.text(
-            egui::pos2(x, mid),
+            egui::pos2(x, y),
             egui::Align2::LEFT_CENTER,
             value,
-            FontId::proportional(15.0),
+            value_font.clone(),
             Color32::WHITE,
         );
         let small = painter.text(
-            egui::pos2(big.right() + 3.0, mid + 1.0),
+            egui::pos2(big.right() + 2.0, y + 1.0),
             egui::Align2::LEFT_CENTER,
             unit,
-            FontId::proportional(11.0),
+            unit_font.clone(),
             tokens::DIM,
         );
-        x = small.right() + 12.0;
+        small.right() + 8.0
+    };
+    let (first, second) = if roomy {
+        (row.center().y, row.center().y)
+    } else {
+        (row.top() + 11.0, row.top() + 29.0)
+    };
+    painter.circle_filled(egui::pos2(row.left() + 5.0, first), 4.0, status);
+    let mut x = reading(row.left() + 15.0, first, &fps_text, "fps");
+    if roomy {
+        x = reading(x, second, &ms_text, "ms");
+        x = reading(x, second, &speed_text, "real time");
+    } else {
+        let x2 = reading(row.left() + 1.0, second, &ms_text, "ms");
+        reading(x2, second, &speed_text, "real");
     }
-    // The close button ends the row; the title takes what is left between, cut, never wrapped.
+    // The close button ends the first line; the disc name takes what is left of a roomy one.
+    let hit = 28.0;
     let close = Rect::from_min_size(
-        egui::pos2(row.right() - SUMMARY_ROW, row.top()),
-        Vec2::splat(SUMMARY_ROW),
+        egui::pos2(
+            row.right() - hit,
+            row.top()
+                + if roomy {
+                    0.0
+                } else {
+                    first - row.top() - hit / 2.0
+                },
+        ),
+        Vec2::splat(hit),
     );
-    if let Some(game) = state.current_game.as_ref() {
+    if let (true, Some(game)) = (roomy, state.current_game.as_ref()) {
         let room = close.left() - x - 8.0;
         if room >= 70.0 {
             let galley = painter.layout(
                 game.title.clone(),
-                FontId::proportional(12.0),
+                FontId::proportional(11.0),
                 tokens::TEXT_2,
                 room,
             );
             if galley.rows.len() == 1 {
                 let at = egui::pos2(
                     close.left() - 8.0 - galley.size().x,
-                    mid - galley.size().y / 2.0,
+                    second - galley.size().y / 2.0,
                 );
                 painter.galley(at, galley, tokens::TEXT_2);
             }
@@ -671,9 +617,9 @@ fn compact_summary(
         tokens::ICON_REST
     };
     let c = close.center();
-    let stroke = Stroke::new(1.6, ink);
-    painter.line_segment([c + Vec2::new(-5.0, -5.0), c + Vec2::new(5.0, 5.0)], stroke);
-    painter.line_segment([c + Vec2::new(-5.0, 5.0), c + Vec2::new(5.0, -5.0)], stroke);
+    let stroke = Stroke::new(1.5, ink);
+    painter.line_segment([c + Vec2::new(-4.5, -4.5), c + Vec2::new(4.5, 4.5)], stroke);
+    painter.line_segment([c + Vec2::new(-4.5, 4.5), c + Vec2::new(4.5, -4.5)], stroke);
     if response.clicked() {
         state.panels.debug_sidebar = false;
     }

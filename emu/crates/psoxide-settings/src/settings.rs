@@ -415,7 +415,7 @@ impl Default for InputSettings {
 }
 
 /// Emulator-level timing preferences.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmulatorSettings {
     /// If set, the run loop paces itself to real-time instead of
     /// running flat-out. Defaults to false -- we want flat-out
@@ -423,6 +423,27 @@ pub struct EmulatorSettings {
     /// flip this on so the SPU stays in sync.
     #[serde(default)]
     pub real_time_pacing: bool,
+    /// The first-run "What is this?" pages were shown and dismissed; they do not open by
+    /// themselves again (the browser keeps this in local storage instead).
+    #[serde(default)]
+    pub welcome_seen: bool,
+    /// The shell's menus make quiet sounds (cursor, confirm, back and so on). On by default.
+    #[serde(default = "default_menu_sounds")]
+    pub menu_sounds: bool,
+}
+
+fn default_menu_sounds() -> bool {
+    true
+}
+
+impl Default for EmulatorSettings {
+    fn default() -> Self {
+        Self {
+            real_time_pacing: false,
+            welcome_seen: false,
+            menu_sounds: true,
+        }
+    }
 }
 
 /// Editor-side preferences that persist across sessions.

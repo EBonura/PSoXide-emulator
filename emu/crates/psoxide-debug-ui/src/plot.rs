@@ -1,5 +1,7 @@
 //! Painter-level chart helpers: palette, time axis, chart frames.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use egui::{Align2, Color32, FontId, Pos2, Rect, Response, Sense, Shape, Stroke, Ui};
 
 /// Chart surface (matches the frontend's darkest panel fill).
@@ -33,20 +35,33 @@ pub const NEUTRAL: Color32 = Color32::from_rgb(0x6b, 0x6b, 0x78);
 /// Status: late frame / over budget.
 pub const CRITICAL: Color32 = Color32::from_rgb(0xd0, 0x3b, 0x3b);
 
+/// The panel's type scale as `f32` bits: 1 on a desktop, smaller on a phone.
+static TYPE_SCALE: AtomicU32 = AtomicU32::new(0x3f80_0000);
+
+/// Set the scale every font of the panel is drawn at (1.0 is the desktop size).
+pub fn set_type_scale(scale: f32) {
+    TYPE_SCALE.store(scale.clamp(0.5, 2.0).to_bits(), Ordering::Relaxed);
+}
+
+/// A font size in points at the panel's type scale.
+pub fn px(size: f32) -> f32 {
+    size * f32::from_bits(TYPE_SCALE.load(Ordering::Relaxed))
+}
+
 /// Small UI font.
 pub fn small() -> FontId {
-    FontId::proportional(10.5)
+    FontId::proportional(px(10.5))
 }
 
 /// Regular UI font.
 pub fn body() -> FontId {
-    FontId::proportional(12.0)
+    FontId::proportional(px(12.0))
 }
 
 /// Digits for values, in the same face as the rest of the interface. (The pixel face the
 /// monospace family starts with reads badly at these sizes, and no value here needs columns.)
 pub fn figures(size: f32) -> FontId {
-    FontId::proportional(size + 1.5)
+    FontId::proportional(px(size + 1.5))
 }
 
 /// Mix `color` toward black (`t` < 0) or white (`t` > 0).
