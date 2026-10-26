@@ -302,6 +302,10 @@ pub(super) fn draw_list(
         h.last_row = ms.item_index;
     }
     let max_scroll = (rows.len() as f32 * row_h - view.height()).max(0.0);
+    // The wheel scrolls a list while the pointer is over it.
+    if ctx.input(|i| i.pointer.hover_pos().is_some_and(|at| view.contains(at))) {
+        h.list_scroll -= ctx.input(|i| i.smooth_scroll_delta.y);
+    }
     h.list_scroll = h.list_scroll.clamp(0.0, max_scroll);
     let clip = p.with_clip_rect(view.expand2(Vec2::new(40.0, 0.0)));
     for (i, row) in rows.iter().enumerate() {
@@ -331,15 +335,20 @@ pub(super) fn draw_list(
             super::focus_cage(&clip, cage, a * h.reveal(ms.item_index + 1), u);
         }
     }
-    // A scroll hint when more is below.
-    if h.list_scroll < max_scroll - 1.0 {
-        super::triangle(
-            &clip,
-            Pos2::new(view.center().x, view.bottom() - 8.0),
-            5.0 * u,
-            true,
-            fade(tokens::DIM, a),
-        );
+    // A scroll hint at each end that has rows hidden past it, and none where the list is at rest.
+    h.list_view = [h.list_scroll, max_scroll, view.top(), view.bottom()];
+    let (more_above, more_below) = scroll_hints(h.list_scroll, max_scroll);
+    // Each sits on a small dark disc, so a row's text passing under it never muddies the arrow.
+    let backdrop = fade(Color32::from_rgba_unmultiplied(8, 16, 22, 230), a);
+    if more_above {
+        let c = Pos2::new(view.center().x, view.top() + 11.0 * u);
+        clip.circle_filled(c, 10.0 * u, backdrop);
+        super::triangle_up(&clip, c, 5.0 * u, fade(tokens::MUTED, a));
+    }
+    if more_below {
+        let c = Pos2::new(view.center().x, view.bottom() - 11.0 * u);
+        clip.circle_filled(c, 10.0 * u, backdrop);
+        super::triangle(&clip, c, 5.0 * u, true, fade(tokens::MUTED, a));
     }
     if rows.is_empty() {
         p.text(
@@ -350,6 +359,11 @@ pub(super) fn draw_list(
             fade(tokens::MUTED, a),
         );
     }
+}
+
+/// Whether rows are hidden above and below a list scrolled `scroll` of `max_scroll`.
+fn scroll_hints(scroll: f32, max_scroll: f32) -> (bool, bool) {
+    (scroll > 1.0, scroll < max_scroll - 1.0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -822,5 +836,13 @@ mod tests {
     fn slider_numbers_use_the_shell_type_not_the_pixel_face() {
         assert_eq!(value_font(1.0).family, egui::FontFamily::Proportional);
         assert!((value_font(1.0).size - tokens::BODY).abs() < 1e-3);
+    }
+
+    #[test]
+    fn scroll_hints_show_only_where_rows_are_hidden() {
+        assert_eq!(scroll_hints(0.0, 300.0), (false, true), "at the top");
+        assert_eq!(scroll_hints(120.0, 300.0), (true, true), "in the middle");
+        assert_eq!(scroll_hints(300.0, 300.0), (true, false), "at the bottom");
+        assert_eq!(scroll_hints(0.0, 0.0), (false, false), "a list that fits");
     }
 }

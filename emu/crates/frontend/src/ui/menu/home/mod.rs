@@ -212,6 +212,9 @@ pub(crate) struct HomeState {
     feed: HomeFeed,
     dither: Option<egui::TextureHandle>,
     list_scroll: f32,
+    /// The list page's scroll, its furthest scroll and the top and bottom of its view as of the
+    /// last frame, for the journeys.
+    list_view: [f32; 4],
     controls: controls::ControlsState,
     press: Option<Press>,
     hits: Vec<(Rect, Click)>,
@@ -337,6 +340,7 @@ impl HomeState {
             feed: HomeFeed::default(),
             dither: None,
             list_scroll: 0.0,
+            list_view: [0.0; 4],
             controls: controls::ControlsState::default(),
             press: None,
             hits: Vec::new(),
@@ -765,7 +769,7 @@ impl MenuState {
             _ => -1.0,
         };
         format!(
-            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"nav_hl\":{:.3},\"nav_vis\":{:.2},\"page_age\":{:.2},\"keyboard\":{},\"framed\":{},\"press\":{:.2},\"controls\":{},\"cases\":[{}],\"hits\":[{}]}}",
+            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"nav_hl\":{:.3},\"nav_vis\":{:.2},\"page_age\":{:.2},\"keyboard\":{},\"framed\":{},\"press\":{:.2},\"controls\":{},\"list\":[{:.1},{:.1},{:.1},{:.1}],\"cases\":[{}],\"hits\":[{}]}}",
             h.page.name(),
             if h.zone == Zone::Nav { "nav" } else { "body" },
             self.home_probe().1,
@@ -789,6 +793,10 @@ impl MenuState {
             h.feed.framed,
             h.press_t,
             h.controls.probe_json(self),
+            h.list_view[0],
+            h.list_view[1],
+            h.list_view[2],
+            h.list_view[3],
             cases.join(","),
             hits.join(",")
         )
@@ -3488,6 +3496,16 @@ pub(super) fn triangle(p: &egui::Painter, c: Pos2, r: f32, down: bool, col: Colo
     p.add(Shape::convex_polygon(pts, col, Stroke::NONE));
 }
 
+/// A small triangle pointing up (the scroll hint at the top of a list).
+pub(super) fn triangle_up(p: &egui::Painter, c: Pos2, r: f32, col: Color32) {
+    let pts = vec![
+        c + Vec2::new(-r, r * 0.6),
+        c + Vec2::new(r, r * 0.6),
+        c + Vec2::new(0.0, -r * 0.7),
+    ];
+    p.add(Shape::convex_polygon(pts, col, Stroke::NONE));
+}
+
 /// A small line icon for a nav entry.
 fn draw_nav_icon(p: &egui::Painter, item: NavItem, c: Pos2, r: f32, col: Color32) {
     let stroke = Stroke::new(1.5, col);
@@ -3990,7 +4008,7 @@ mod tests {
                 },
             );
         }
-        for _ in 0..4 {
+        for _ in 0..3 {
             press(
                 &mut ms,
                 MenuInput {

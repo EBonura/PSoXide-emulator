@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Settings no longer lists Controls (it has its own tab). Long lists (Settings, Game) show an up arrow while
+  rows are hidden above and a down arrow only while rows are hidden below, and the mouse wheel scrolls them.
 - Save states are a sheet of slots. A game has a quick slot and eight numbered ones; each shows the
   picture taken when it was saved, when, and how far the game had run, and the sheet has a Save and a Load
   mode, so loading is as visible as saving. Saving over a slot asks first, a slot can be deleted, and a save

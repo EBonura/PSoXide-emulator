@@ -1096,6 +1096,7 @@ async function journeyMenus(label, urlFor) {
         seen.set(key, column);
       }
     }
+    if (labels.Settings.includes("Controls")) return "Settings still lists Controls, which has its own tab";
     const all = Object.values(labels).flat().join(" | ");
     if (/reconnect|reopen/i.test(all)) return `a saved-folder row shows on a fresh visit: ${all}`;
     console.log(`      menu rows: ${JSON.stringify(labels)}`);
@@ -1129,14 +1130,6 @@ async function journeyMenus(label, urlFor) {
       await settle();
     }
     return "never came back to Auto";
-  });
-  await step("Settings / Controls opens the controls panel; Esc closes it", async () => {
-    if (!(await page.ux()).menu_open) await open();
-    await menuSelect(page, "Settings", "Controls");
-    await page.waitFor("controls panel", (x) => x.panel === "controls", 4000);
-    await page.shot(`${label}-11-controls`);
-    await page.tapKey("Escape");
-    await page.waitFor("panel closed", (x) => x.panel === "none", 4000);
   });
   await step("Settings / About opens the welcome pages; Next pages through them and Back closes them", async () => {
     let s = await page.ux();
@@ -1236,6 +1229,107 @@ async function journeyMenus(label, urlFor) {
 
 
 // ---------------------------------------------------------------- the home screen
+
+/**
+ * The list pages (Settings, Game): the view ends above the phone's tab bar, the last row can scroll fully
+ * clear of it, and the up and down hints show only while rows are hidden past that end. Driven by a touch
+ * drag (phones), the wheel (desktop) and the keyboard.
+ */
+async function journeyList(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  const page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+  await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+  await page.goto(urlFor());
+  const activate = async (name) => (mobile ? homeTap(page, name) : homeClick(page, name));
+  /** What the list shows now: its scroll, the furthest scroll, the view, the tab bar's top and the rows drawn. */
+  const look = async () => {
+    const h = (await page.ux()).home;
+    const [scroll, max, top, bottom] = h.list;
+    const rows = h.hits.filter((x) => x[0].startsWith("row:")).map((x) => ({ name: x[0].slice(4), top: x[2], bottom: x[4] }));
+    const bar = h.hits.filter((x) => x[0].startsWith("nav:")).map((x) => x[2]);
+    return { scroll, max, top, bottom, rows, barTop: mobile && bar.length ? Math.min(...bar) : size.h };
+  };
+  const settle = async () => { await sleep(350); };
+  const whole = (r, v) => r.top >= v.top - 1 && r.bottom <= v.bottom + 1;
+  const drag = async (dy) => {
+    const v = await look();
+    const x = 32, y0 = dy < 0 ? v.bottom - 10 : v.top + 10;
+    await page.touch("touchStart", [[x, y0]]);
+    for (let i = 1; i <= 8; i++) { await sleep(16); await page.touch("touchMove", [[x, y0 + (dy * i) / 8]]); }
+    await page.touch("touchEnd", []);
+    await settle();
+  };
+  const wheel = async (dy) => {
+    const v = await look();
+    await page.mouse("mouseMoved", size.w / 2, (v.top + v.bottom) / 2);
+    await page.cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: size.w / 2, y: (v.top + v.bottom) / 2, deltaX: 0, deltaY: dy }, page.top);
+    await settle();
+  };
+  const scrollBy = (dy) => (mobile ? drag(-dy) : wheel(dy));
+  /** The checks that hold wherever the list is scrolled to. */
+  const sane = (v, where) => {
+    if (v.bottom > v.barTop - 4) return `${where}: the view ends at ${v.bottom}, under the tab bar at ${v.barTop}`;
+    if (v.max < 1) return `${where}: the list fits (max ${v.max}), so there is nothing to scroll`;
+    return null;
+  };
+  const pageSteps = async (column) => {
+    await step(`${column}: at the top the first row is whole and only the down hint applies (${label})`, async () => {
+      await settle();
+      let v = await look();
+      for (let i = 0; i < 40 && v.scroll > 1; i++) { await scrollBy(-400); v = await look(); }
+      await page.shot(`${label}-${column.toLowerCase()}-1-top`);
+      const bad = sane(v, "top");
+      if (bad) return bad;
+      if (v.scroll > 1) return `could not reach the top: ${v.scroll}`;
+      const first = v.rows.reduce((a, b) => (a.top < b.top ? a : b));
+      if (!whole(first, v)) return `the first row ${first.name} is cut at the top: ${first.top} vs ${v.top}`;
+    });
+    await step(`${column}: scrolled to the middle rows are hidden both ways`, async () => {
+      await scrollBy(Math.max(60, (await look()).max / 2));
+      const v = await look();
+      await page.shot(`${label}-${column.toLowerCase()}-2-middle`);
+      if (!(v.scroll > 1 && v.scroll < v.max - 1)) return `not in the middle: ${v.scroll} of ${v.max}`;
+    });
+    await step(`${column}: at the bottom the last row is whole and clear of the tab bar, the down hint is gone`, async () => {
+      let v = await look();
+      for (let i = 0; i < 40 && v.scroll < v.max - 1; i++) { await scrollBy(400); v = await look(); }
+      await page.shot(`${label}-${column.toLowerCase()}-3-bottom`);
+      const bad = sane(v, "bottom");
+      if (bad) return bad;
+      if (v.scroll < v.max - 1) return `could not reach the bottom: ${v.scroll} of ${v.max}`;
+      const last = v.rows.reduce((a, b) => (a.bottom > b.bottom ? a : b));
+      if (!whole(last, v)) return `the last row ${last.name} is cut: ${last.bottom} vs the view's ${v.bottom}`;
+      if (last.bottom > v.barTop - 4) return `the last row ${last.name} ends at ${last.bottom}, under the tab bar at ${v.barTop}`;
+    });
+    await step(`${column}: the keyboard walks to the last row and back, the scroll follows the focus`, async () => {
+      for (let i = 0; i < 60; i++) await page.tapKey("ArrowDown");
+      await settle();
+      let v = await look();
+      await page.shot(`${label}-${column.toLowerCase()}-4-key-bottom`);
+      const last = v.rows.reduce((a, b) => (a.bottom > b.bottom ? a : b));
+      if (!whole(last, v) || last.bottom > v.barTop - 4) return `the focused last row is not clear: ${JSON.stringify(last)} view ${v.bottom} bar ${v.barTop}`;
+      if (v.scroll < v.max - 1) return `the bottom row is focused but the list is at ${v.scroll} of ${v.max}`;
+      for (let i = 0; i < 60; i++) await page.tapKey("ArrowUp");
+      await settle();
+      v = await look();
+      await page.shot(`${label}-${column.toLowerCase()}-5-key-top`);
+      if (v.scroll > 1) return `back at the first row the list is at ${v.scroll}`;
+    });
+  };
+  await page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 90000);
+  await page.tapKey("x");
+  await step("Settings opens and has no Controls row", async () => {
+    await activate("nav:Settings");
+    await page.waitFor("the Settings page", (s) => s.home.page === "Settings", 4000);
+    await sleep(900);
+    const v = await look();
+    if (v.rows.some((r) => r.name === "Controls")) return "Settings lists Controls";
+  });
+  await pageSteps("Settings");
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
 
 /** A point on the home screen that no hit area covers (pads of 14 px), inside the safe area. */
 async function emptyPoint(page, size) {
@@ -3127,7 +3221,7 @@ async function scenarioSpam() {
   await waitDemoRunning(page);
   await page.tapKey("Escape");
   await page.waitFor("menu", (s) => s.menu_open, 5000);
-  await menuSelect(page, "Settings", "Controls", { enter: false });
+  await menuSelect(page, "Settings", "Video scale", { enter: false });
   let prev = (await page.ux()).menu;
   for (let i = 0; i < 40; i++) {
     const k = i % 4 === 0 ? "Enter" : "ArrowDown";
@@ -3399,6 +3493,8 @@ async function main() {
         if (wanted("desktop-slots-small")) await journeySlots("desktop-slots-small", () => direct("?countdown=12"), { w: 800, h: 600, dpr: 1, mobile: false });
         if (wanted("desktop-centre")) await journeyCentre("desktop-centre", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-iframe")) await journeyDesktop("desktop-iframe", () => embedded(), { embeddedMode: true });
+        if (wanted("desktop-list")) await journeyList("desktop-list", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-list-small")) await journeyList("desktop-list-small", () => direct("?countdown=12"), { w: 800, h: 600, dpr: 1, mobile: false });
         if (wanted("desktop-menus")) await journeyMenus("desktop-menus", () => direct());
         if (wanted("desktop-nowebgpu")) await journeyNoWebgpu("desktop-nowebgpu", () => direct());
         if (wanted("desktop-gamepad")) await journeyGamepad("desktop-gamepad", () => direct());
@@ -3409,6 +3505,9 @@ async function main() {
       await inChrome(3, async () => {
         if (wanted("phone-portrait")) await journeyPhone("phone-portrait", () => direct(), { w: 393, h: 852, dpr: 3 });
         if (wanted("phone-iframe")) await journeyPhone("phone-iframe", () => embedded(), { w: 393, h: 852, dpr: 3 });
+        for (const [name, w, h] of [["phone-list", 393, 852], ["phone-list-375", 375, 667], ["phone-list-small", 360, 640], ["phone-list-landscape", 852, 393]]) {
+          if (wanted(name)) await journeyList(name, () => direct("?countdown=12"), { w, h, dpr: 3, mobile: true });
+        }
         if (wanted("phone-home")) await journeyHome("phone-home", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-home-small")) await journeyHome("phone-home-small", () => direct("?countdown=12"), { w: 360, h: 640, dpr: 3, mobile: true });
         if (wanted("phone-home-landscape")) await journeyHome("phone-home-landscape", () => direct("?countdown=12"), { w: 852, h: 393, dpr: 3, mobile: true });

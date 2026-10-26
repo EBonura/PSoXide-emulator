@@ -87,8 +87,8 @@ pub enum MenuAction {
     OpenSlots(SlotsMode),
     /// Open the controls panel (controller ports and Digital/Analog mode,
     /// the clickable PS1 controller drawing, press-a-key rebinding, reset
-    /// to defaults) -- driven by the toolbar icon as well as the Settings
-    /// category's "Controls" row.
+    /// to defaults) -- driven by the toolbar icon and the shell's
+    /// Controls tab.
     OpenControls,
     /// Restore every port-1 binding to the built-in defaults.
     ResetControls,
@@ -763,7 +763,7 @@ impl MenuState {
     }
 
     /// Open the controls panel. Driven by the toolbar icon and the
-    /// Settings category's "Controls" row.
+    /// shell's Controls tab.
     pub fn open_controls(&mut self) {
         self.controls_open = true;
     }
@@ -2642,7 +2642,6 @@ fn row(label: &str, action: MenuAction, value: Option<&str>) -> MenuItem {
 /// Emulator settings. Values are filled in by the `set_*`/`sync_*` setters.
 fn build_settings_category() -> Category {
     let mut items = vec![
-        row("Controls", MenuAction::OpenControls, None),
         row("Video scale", MenuAction::CycleVideoScale, Some("High-res")),
         row(
             "Texture filter",
@@ -3422,14 +3421,13 @@ mod tests {
     }
 
     #[test]
-    fn settings_holds_controls_video_audio_and_quit() {
+    fn settings_holds_video_audio_and_quit() {
         let mut s = MenuState::new();
         s.select_category("Settings");
-        assert_eq!(s.selected_action(), Some(&MenuAction::OpenControls));
+        assert_eq!(s.selected_action(), Some(&MenuAction::CycleVideoScale));
         assert_eq!(
             labels(&s, "Settings"),
             [
-                "Controls",
                 "Video scale",
                 "Texture filter",
                 "Deinterlace",
@@ -3457,10 +3455,10 @@ mod tests {
             .iter()
             .map(|item| item.value.clone().unwrap_or_default())
             .collect();
-        assert_eq!(values[1], "Native");
-        assert_eq!(values[2], "Edge");
-        assert_eq!(&values[4..6], ["50%", "On"]);
-        assert_eq!(values[8], "Slow the game");
+        assert_eq!(values[0], "Native");
+        assert_eq!(values[1], "Edge");
+        assert_eq!(&values[3..5], ["50%", "On"]);
+        assert_eq!(values[7], "Slow the game");
         s.set_deinterlace("Bob");
         let row = category(&s, "Settings")
             .items
@@ -3480,7 +3478,7 @@ mod tests {
 
         assert_eq!(
             s.take_pending_pointer_action(),
-            Some(MenuAction::OpenControls)
+            Some(MenuAction::CycleVideoScale)
         );
     }
 

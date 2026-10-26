@@ -218,7 +218,7 @@ Results on the landed build (Chrome headless, macOS; WebKit was not driven, see 
 | desktop-menus | Settings / Box art from the internet changes its value | pass |
 | desktop-menus | Settings / UI scale back to 100% (so the later steps aim right) | pass |
 | desktop-menus | Settings / Touch controls cycles back to Auto (desktop shows no pad) | pass |
-| desktop-menus | Settings / Controls opens the controls panel; Esc closes it | pass |
+| desktop-menus | no control appears twice (Settings has no Controls row, the tab is the way in) | pass |
 | desktop-menus | Settings / About opens the welcome pages; Next pages through them and Back closes them | pass |
 | desktop-menus | Home shows the game's case, the demo disc and the folder case; Escape on Home resumes | pass |
 | desktop-menus | toolbar: save icon opens the save-states panel | pass |
