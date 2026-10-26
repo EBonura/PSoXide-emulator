@@ -23,7 +23,6 @@ pub struct HwSet {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HwSkip {
     Bpp24,
-    ScreenOffset,
     FieldRendering,
 }
 
@@ -31,9 +30,6 @@ impl HwSkip {
     pub fn describe(&self) -> &'static str {
         match self {
             HwSkip::Bpp24 => "24bpp display (hardware renderer defers to the CPU frame)",
-            HwSkip::ScreenOffset => {
-                "screen-offset display (hardware renderer defers to the CPU frame)"
-            }
             HwSkip::FieldRendering => {
                 "480i field rendering (hardware renderer defers to the CPU frame)"
             }
@@ -112,10 +108,6 @@ impl HwSet {
         if bus.gpu.field_rendering_active() {
             return Err(HwSkip::FieldRendering);
         }
-        if bus.gpu.horizontal_display_offset_px() != 0 || bus.gpu.vertical_display_offset_px() != 0
-        {
-            return Err(HwSkip::ScreenOffset);
-        }
         self.device.poll(wgpu::Maintain::Wait);
         let mut out = Vec::new();
         for (s, hw) in &self.scales {
@@ -125,8 +117,130 @@ impl HwSet {
                 cpu_w * s,
                 cpu_h * s,
             );
-            out.push((*s, Img::from_rgba(w, h, rgba)));
+            out.push((*s, offset_scanout(
+                Img::from_rgba(w, h, rgba),
+                bus.gpu.horizontal_display_offset_px(),
+                bus.gpu.vertical_display_offset_px(),
+                *s,
+            )));
         }
         Ok(out)
+    }
+}
+
+/// Compose the shifted display window exclusively from hardware readback.
+/// Offsets are native display pixels; readback and output are at `scale`.
+/// Exposed borders are opaque black and content outside the window is clipped,
+/// matching the display-sized canvas used by the CPU scanout.
+fn offset_scanout(source: Img, offset_x: i32, offset_y: i32, scale: u32) -> Img {
+    if offset_x == 0 && offset_y == 0 {
+        return source;
+    }
+    let w = i64::from(source.w);
+    let h = i64::from(source.h);
+    let x = (i64::from(offset_x) * i64::from(scale)).clamp(-w, w);
+    let y = (i64::from(offset_y) * i64::from(scale)).clamp(-h, h);
+    let mut rgba = [0, 0, 0, 255].repeat(source.w as usize * source.h as usize);
+    let x0 = x.max(0);
+    let x1 = (w + x).min(w);
+    let y0 = y.max(0);
+    let y1 = (h + y).min(h);
+    if x0 < x1 && y0 < y1 {
+        let len = (x1 - x0) as usize * 4;
+        for dy in y0..y1 {
+            let src = ((dy - y) * w + x0 - x) as usize * 4;
+            let dst = (dy * w + x0) as usize * 4;
+            rgba[dst..dst + len].copy_from_slice(&source.rgba[src..src + len]);
+        }
+    }
+    Img::from_rgba(source.w, source.h, rgba)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(scale: u32) -> Img {
+        let rgba = (1..=6).flat_map(|n| [n, n + 10, n + 20, 255]).collect();
+        Img::from_rgba(3, 2, rgba).enlarge(scale)
+    }
+
+    fn pixel(image: &Img, x: u32, y: u32) -> [u8; 4] {
+        image.rgba[((y * image.w + x) * 4) as usize..][..4].try_into().unwrap()
+    }
+
+    #[test]
+    fn zero_offset_preserves_every_readback_byte() {
+        for scale in [1, 3] {
+            let source = fixture(scale);
+            let expected = source.rgba.clone();
+            let output = offset_scanout(source, 0, 0, scale);
+            assert_eq!(output.rgba, expected);
+            assert_eq!((output.w, output.h), (3 * scale, 2 * scale));
+        }
+    }
+
+    #[test]
+    fn signed_offsets_shift_clip_and_black_fill_at_native_and_three_times() {
+        for scale in [1, 3] {
+            for (ox, oy) in [(1, 0), (-1, 0), (0, 1), (0, -1),
+                (1, 1), (1, -1), (-1, 1), (-1, -1)] {
+                let source = fixture(scale);
+                let output = offset_scanout(source.clone(), ox, oy, scale);
+                assert_eq!((output.w, output.h), (3 * scale, 2 * scale));
+                for y in 0..output.h {
+                    for x in 0..output.w {
+                        let sx = i64::from(x) - i64::from(ox) * i64::from(scale);
+                        let sy = i64::from(y) - i64::from(oy) * i64::from(scale);
+                        let expected = if sx >= 0 && sy >= 0
+                            && sx < i64::from(source.w) && sy < i64::from(source.h) {
+                            pixel(&source, sx as u32, sy as u32)
+                        } else { [0, 0, 0, 255] };
+                        assert_eq!(pixel(&output, x, y), expected,
+                            "scale={scale}, offset=({ox},{oy}), pixel=({x},{y})");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn offsets_at_or_beyond_extent_are_entirely_opaque_black() {
+        for scale in [1, 3] {
+            for (ox, oy) in [(3, 0), (-3, 0), (0, 2), (0, -2),
+                (100, 100), (-100, -100), (i32::MAX, 0), (i32::MIN, 0),
+                (0, i32::MAX), (0, i32::MIN)] {
+                let output = offset_scanout(fixture(scale), ox, oy, scale);
+                assert!(output.rgba.chunks_exact(4).all(|px| px == [0, 0, 0, 255]));
+            }
+        }
+    }
+
+    #[test]
+    fn three_times_scanout_matches_enlarged_native_clipping() {
+        for (ox, oy) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1)] {
+            let native = offset_scanout(fixture(1), ox, oy, 1).enlarge(3);
+            let scaled = offset_scanout(fixture(3), ox, oy, 3);
+            assert_eq!(scaled.rgba, native.rgba);
+        }
+    }
+
+    #[test]
+    fn three_times_offset_preserves_independent_hardware_subpixels() {
+        // Every readback pixel is distinct, including pixels within the same
+        // native 3x3 block. Scanout must copy them without resampling.
+        let rgba = (0..54).flat_map(|n| [n, n + 64, n + 128, 255]).collect();
+        let source = Img::from_rgba(9, 6, rgba);
+        let output = offset_scanout(source.clone(), 1, -1, 3);
+        for y in 0..6 {
+            for x in 0..9 {
+                let expected = if x >= 3 && y < 3 {
+                    pixel(&source, x - 3, y + 3)
+                } else { [0, 0, 0, 255] };
+                assert_eq!(pixel(&output, x, y), expected);
+            }
+        }
+        assert_ne!(pixel(&output, 3, 0), pixel(&output, 4, 0));
+        assert_ne!(pixel(&output, 3, 0), pixel(&output, 3, 1));
     }
 }
