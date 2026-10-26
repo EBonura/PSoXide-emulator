@@ -105,11 +105,6 @@ pub struct VideoSettings {
     /// collections. On by default; the pictures are never bundled.
     #[serde(default = "default_box_art")]
     pub box_art: bool,
-    /// Calmer shell motion: the focused case scales and glows instead of
-    /// lifting and turning, and nothing sweeps. Off by default; the browser's
-    /// own reduced-motion preference also turns it on.
-    #[serde(default)]
-    pub reduce_motion: bool,
 }
 
 fn default_box_art() -> bool {
@@ -143,7 +138,6 @@ impl Default for VideoSettings {
             texture_filter: default_texture_filter(),
             deinterlace: default_deinterlace(),
             box_art: default_box_art(),
-            reduce_motion: false,
         }
     }
 }
@@ -376,19 +370,12 @@ pub struct InputSettings {
     /// doesn't accidentally capture random keys for an unattached
     /// controller.
     pub port2: PortBindings,
-    /// Controllers whose analog mode the player chose, by device name: `true`
-    /// is analog, `false` is the digital identity. A controller with analog
-    /// sticks starts in analog mode; a name listed here keeps what was chosen.
-    /// The keyboard is never listed: it is never analog.
-    #[serde(default)]
-    pub analog_choice: std::collections::BTreeMap<String, bool>,
 }
 
 impl Default for InputSettings {
     fn default() -> Self {
         Self {
             port1: PortBindings::default(),
-            analog_choice: std::collections::BTreeMap::new(),
             port2: PortBindings {
                 up: InputBinding::Unbound,
                 down: InputBinding::Unbound,
@@ -610,26 +597,6 @@ mod tests {
         original.save(&path).unwrap();
         let loaded = Settings::load(&path).unwrap();
         assert_eq!(original, loaded);
-    }
-
-    #[test]
-    fn a_controllers_analog_choice_is_saved_by_name() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("settings.ron");
-        let mut s = Settings::default();
-        assert!(s.input.analog_choice.is_empty());
-        s.input
-            .analog_choice
-            .insert("Wireless Controller".to_string(), false);
-        s.save(&path).unwrap();
-        let loaded = Settings::load(&path).unwrap();
-        assert_eq!(
-            loaded.input.analog_choice.get("Wireless Controller"),
-            Some(&false)
-        );
-        // A settings file from before the field existed still loads.
-        let old = s.input.analog_choice.len();
-        assert_eq!(old, 1);
     }
 
     #[test]

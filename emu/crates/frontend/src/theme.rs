@@ -1,5 +1,4 @@
-//! UI theme -- the shell's near-black ground, cyan accent, Jost and Michroma type, VT323 numbers,
-//! Phosphor icons.
+//! UI theme -- charcoal background, teal accent, VT323 monospace, Lucide icons.
 //!
 //! Ported from PSoXide-2's theme, itself derived from the Bonnie-32 editor.
 //! Same palette and typography across both debug panels and the Menu overlay
@@ -16,26 +15,26 @@ use egui::{Color32, FontFamily, FontId, Stroke, Visuals};
 // --- Base palette ---
 
 /// Main backdrop.
-pub const BG: Color32 = Color32::from_rgb(5, 9, 13);
+pub const BG: Color32 = Color32::from_rgb(20, 20, 24);
 /// Panel fill (side panels, bottom panels).
-pub const PANEL_BG: Color32 = Color32::from_rgb(8, 15, 21);
+pub const PANEL_BG: Color32 = Color32::from_rgb(26, 26, 30);
 /// Flush header strip at the top of viz panes.
-pub const HEADER_BG: Color32 = Color32::from_rgb(6, 12, 17);
+pub const HEADER_BG: Color32 = Color32::from_rgb(18, 18, 22);
 /// Inner content area within a framed viz pane.
-pub const CONTENT_BG: Color32 = Color32::from_rgb(7, 13, 18);
+pub const CONTENT_BG: Color32 = Color32::from_rgb(22, 22, 26);
 
-pub const TEXT: Color32 = Color32::from_rgb(196, 211, 222);
-pub const TEXT_DIM: Color32 = Color32::from_rgb(129, 150, 166);
+pub const TEXT: Color32 = Color32::from_rgb(204, 204, 217);
+pub const TEXT_DIM: Color32 = Color32::from_rgb(102, 102, 115);
 
-pub const WIDGET_BG: Color32 = Color32::from_rgb(17, 29, 39);
-pub const WIDGET_HOVER: Color32 = Color32::from_rgb(26, 45, 58);
+pub const WIDGET_BG: Color32 = Color32::from_rgb(38, 38, 46);
+pub const WIDGET_HOVER: Color32 = Color32::from_rgb(52, 52, 62);
 
-pub const ACCENT: Color32 = Color32::from_rgb(34, 200, 229);
-pub const ACCENT_HOVER: Color32 = Color32::from_rgb(128, 239, 255);
-pub const ACCENT_DIM: Color32 = Color32::from_rgb(19, 156, 176);
+pub const ACCENT: Color32 = Color32::from_rgb(0, 180, 180);
+pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0, 210, 210);
+pub const ACCENT_DIM: Color32 = Color32::from_rgb(0, 120, 120);
 
-pub const SEPARATOR: Color32 = Color32::from_rgb(26, 42, 53);
-pub const SECTION_BG: Color32 = Color32::from_rgb(10, 19, 27);
+pub const SEPARATOR: Color32 = Color32::from_rgb(45, 45, 52);
+pub const SECTION_BG: Color32 = Color32::from_rgb(30, 30, 35);
 
 // --- Menu-specific palette ---
 

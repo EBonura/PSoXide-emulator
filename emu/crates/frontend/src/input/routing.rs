@@ -83,25 +83,35 @@ pub(crate) enum PadProfile {
 }
 
 impl PadProfile {
-    /// What the keyboard presents to the guest. A keyboard has no analog
-    /// sticks, so it is never analog: a DualShock that is digital until a game
-    /// asks for more, the way one powers up on hardware.
-    pub(crate) const KEYBOARD_DEFAULT: Self = Self::DualShock;
+    /// What the keyboard presents to the guest before the player chooses.
+    ///
+    /// The browser build presents an analog DualShock from the first poll: the
+    /// demo disc requires one, and a visitor has no reason to know about an
+    /// Analog toggle. The native app keeps the original digital pad.
+    pub(crate) const KEYBOARD_DEFAULT: Self = Self::keyboard_default(cfg!(target_arch = "wasm32"));
 
-    /// What a controller presents before the player chooses: analog when it
-    /// reports analog sticks (a DualShock-class pad), else the DualShock's
-    /// digital power-up identity.
-    pub(crate) const fn pad_default(has_sticks: bool) -> Self {
-        if has_sticks {
+    /// What a connected controller (gamepad or touchscreen) presents before the
+    /// player chooses. Native powers up as a DualShock does on hardware (digital
+    /// until the game asks), so digital-only retail games work; the browser
+    /// presents it already in analog mode, like the keyboard.
+    pub(crate) const PAD_DEFAULT: Self = Self::pad_default(cfg!(target_arch = "wasm32"));
+
+    /// [`Self::KEYBOARD_DEFAULT`] for a build that is, or is not, the browser's.
+    pub(crate) const fn keyboard_default(web: bool) -> Self {
+        if web {
+            Self::Analog
+        } else {
+            Self::Digital
+        }
+    }
+
+    /// [`Self::PAD_DEFAULT`] for a build that is, or is not, the browser's.
+    pub(crate) const fn pad_default(web: bool) -> Self {
+        if web {
             Self::Analog
         } else {
             Self::DualShock
         }
-    }
-
-    /// Whether the guest is told the pad is in analog mode.
-    pub(crate) const fn is_analog(self) -> bool {
-        matches!(self, Self::Analog)
     }
 
     /// Short label of the controller panel's mode button.
@@ -150,24 +160,11 @@ impl RoutingEntry {
     }
 }
 
-impl DeviceIdentity {
-    /// Whether the device reports analog sticks: every mapped gamepad (gilrs,
-    /// GameController, the browser's standard mapping) and the touch screen's
-    /// on-screen sticks. The keyboard has none.
-    pub(crate) fn has_analog_sticks(&self) -> bool {
-        self.mapped && self.backend != BackendKind::Keyboard
-    }
-}
-
 /// Host-device assignments, independent of how devices are read.
 #[derive(Clone, Debug)]
 pub(crate) struct RoutingTable {
     pub(crate) devices: BTreeMap<String, RoutingEntry>,
     pub(crate) generation: u64,
-    /// The analog choices the player made, by device name (see
-    /// `InputSettings::analog_choice`).
-    remembered: BTreeMap<String, bool>,
-    remembered_dirty: bool,
 }
 
 impl Default for RoutingTable {
@@ -175,8 +172,6 @@ impl Default for RoutingTable {
         let mut table = Self {
             devices: BTreeMap::new(),
             generation: 1,
-            remembered: BTreeMap::new(),
-            remembered_dirty: false,
         };
         table.devices.insert(
             KEYBOARD_DEVICE_ID.to_string(),
@@ -206,19 +201,18 @@ impl RoutingTable {
             existing.identity = identity;
             return;
         }
-        // A controller with analog sticks starts in analog mode; what the
-        // player chose last time for this controller wins.
-        let profile = match self.remembered.get(&identity.name) {
-            Some(true) => PadProfile::Analog,
-            Some(false) => PadProfile::DualShock,
-            None => PadProfile::pad_default(identity.has_analog_sticks()),
-        };
         self.devices.insert(
             identity.id.clone(),
             RoutingEntry {
                 identity,
                 port: PsxPort::Off,
-                profile,
+                // Native: a host controller appears as a DualShock the way one
+                // powers up on hardware, digital (ID 0x41) until the game sends
+                // the analog handshake. Starting in analog mode there made
+                // digital-only retail games such as Tomb Raider pause on "No
+                // Controller". The browser starts analog (see PAD_DEFAULT); the
+                // panel switches either way.
+                profile: PadProfile::PAD_DEFAULT,
                 pinned: false,
             },
         );
@@ -314,57 +308,31 @@ impl RoutingTable {
         }
     }
 
-    /// Load the analog choices saved from an earlier session.
-    pub(crate) fn set_remembered(&mut self, choices: BTreeMap<String, bool>) {
-        self.remembered = choices;
-        self.remembered_dirty = false;
-    }
-
-    /// The analog choices, when they changed since the last call.
-    pub(crate) fn take_remembered(&mut self) -> Option<BTreeMap<String, bool>> {
-        std::mem::take(&mut self.remembered_dirty).then(|| self.remembered.clone())
-    }
-
     pub(crate) fn set_profile(&mut self, id: &str, profile: PadProfile) -> bool {
         let Some(entry) = self.devices.get_mut(id) else {
             return false;
         };
-        // A keyboard has no sticks: nothing can put it in analog mode.
-        if entry.is_keyboard() && profile.is_analog() {
-            return false;
-        }
         if entry.profile == profile {
             return false;
         }
         entry.profile = profile;
-        if !entry.is_keyboard() {
-            let name = entry.identity.name.clone();
-            self.remembered.insert(name, profile.is_analog());
-            self.remembered_dirty = true;
-        }
         self.bump();
         true
     }
 
     /// The Analog / Mode button: switch to analog, or back to the device's
-    /// own digital identity (a controller's DualShock). The keyboard has no
-    /// such button: it stays as it is. Returns whether the device is analog
-    /// afterwards.
+    /// own digital identity (a keyboard's original pad, a controller's
+    /// DualShock). Returns whether the device is analog afterwards.
     pub(crate) fn toggle_analog(&mut self, id: &str) -> bool {
         let Some(entry) = self.devices.get_mut(id) else {
             return false;
         };
-        if entry.is_keyboard() {
-            return false;
-        }
         entry.profile = match entry.profile {
+            PadProfile::Analog if entry.is_keyboard() => PadProfile::Digital,
             PadProfile::Analog => PadProfile::DualShock,
             PadProfile::Digital | PadProfile::DualShock => PadProfile::Analog,
         };
         let analog = entry.profile == PadProfile::Analog;
-        let name = entry.identity.name.clone();
-        self.remembered.insert(name, analog);
-        self.remembered_dirty = true;
         self.bump();
         analog
     }
@@ -470,7 +438,10 @@ mod tests {
         // The keyboard shares port 1 with it; it is a device like another.
         assert_eq!(routes.port_for(KEYBOARD_DEVICE_ID), PsxPort::One);
         // A pad on the port decides what the guest sees.
-        assert_eq!(routes.profile_for(PsxPort::One), Some(PadProfile::Analog));
+        assert_eq!(
+            routes.profile_for(PsxPort::One),
+            Some(PadProfile::DualShock)
+        );
     }
 
     #[test]
@@ -537,68 +508,34 @@ mod tests {
         assert_eq!(routes.claim("b"), Some(PsxPort::One));
     }
 
-    /// A controller with analog sticks starts in analog mode; the keyboard never
-    /// is analog, whatever is asked of it.
+    /// The browser presents an analog DualShock for every kind of device from the
+    /// first poll, so the demo disc's analog requirement needs no toggle; the
+    /// native app keeps its original defaults.
     #[test]
-    fn a_controller_with_sticks_starts_analog_and_the_keyboard_never_is() {
+    fn the_browser_defaults_every_device_to_analog() {
+        assert_eq!(PadProfile::keyboard_default(true), PadProfile::Analog);
+        assert_eq!(PadProfile::pad_default(true), PadProfile::Analog);
+        assert_eq!(PadProfile::keyboard_default(false), PadProfile::Digital);
+        assert_eq!(PadProfile::pad_default(false), PadProfile::DualShock);
+        // The table's own defaults are the build's constants.
         let mut routes = RoutingTable::default();
         assert_eq!(
             routes.profile_for(PsxPort::One),
             Some(PadProfile::KEYBOARD_DEFAULT)
         );
-        assert_ne!(PadProfile::KEYBOARD_DEFAULT, PadProfile::Analog);
         routes.connect(pad("pad-a"));
         assert_eq!(
             routes.devices.get("pad-a").map(|e| e.profile),
-            Some(PadProfile::Analog)
-        );
-        // A device that reports no sticks keeps the DualShock's digital power-up.
-        let mut no_sticks = pad("pad-b");
-        no_sticks.mapped = false;
-        routes.connect(no_sticks);
-        assert_eq!(
-            routes.devices.get("pad-b").map(|e| e.profile),
-            Some(PadProfile::DualShock)
-        );
-        // Nothing puts the keyboard in analog mode: not the panel, not the mode button.
-        assert!(!routes.set_profile(KEYBOARD_DEVICE_ID, PadProfile::Analog));
-        assert!(!routes.toggle_analog(KEYBOARD_DEVICE_ID));
-        assert_eq!(
-            routes.profile_for(PsxPort::One),
-            Some(PadProfile::KEYBOARD_DEFAULT)
+            Some(PadProfile::PAD_DEFAULT)
         );
     }
 
     #[test]
-    fn the_analog_choice_is_remembered_per_controller_name() {
+    fn analog_choice_is_part_of_the_port_profile() {
         let mut routes = RoutingTable::default();
-        routes.connect(pad("pad-a"));
-        assert!(routes.take_remembered().is_none());
-        // The player switches analog off: it is saved under the controller's name.
-        assert!(routes.set_profile("pad-a", PadProfile::DualShock));
-        let saved = routes.take_remembered().expect("a change to save");
-        assert_eq!(saved.get("pad-a"), Some(&false));
-        assert!(routes.take_remembered().is_none());
-        // A later session loads it, and the same controller starts digital.
-        let mut next = RoutingTable::default();
-        next.set_remembered(saved);
-        next.connect(pad("pad-a"));
-        assert_eq!(
-            next.devices.get("pad-a").map(|e| e.profile),
-            Some(PadProfile::DualShock)
-        );
-        // Another controller still starts analog.
-        next.connect(pad("pad-z"));
-        assert_eq!(
-            next.devices.get("pad-z").map(|e| e.profile),
-            Some(PadProfile::Analog)
-        );
-        // The Mode button is remembered too.
-        assert!(next.toggle_analog("pad-a"));
-        assert_eq!(
-            next.take_remembered().and_then(|m| m.get("pad-a").copied()),
-            Some(true)
-        );
+        assert_eq!(routes.profile_for(PsxPort::One), Some(PadProfile::Digital));
+        assert!(routes.set_profile(KEYBOARD_DEVICE_ID, PadProfile::Analog));
+        assert_eq!(routes.profile_for(PsxPort::One), Some(PadProfile::Analog));
     }
 
     #[test]
@@ -608,14 +545,12 @@ mod tests {
         let mut routes = RoutingTable::default();
         routes.connect(pad("pad-a"));
         routes.claim("pad-a");
-        assert_eq!(routes.profile_for(PsxPort::One), Some(PadProfile::Analog));
-        assert!(!routes.toggle_analog("pad-a"));
         assert_eq!(
             routes.profile_for(PsxPort::One),
             Some(PadProfile::DualShock)
         );
 
-        // ID 0x41 once the player has switched analog off: a digital-only retail game accepts it.
+        // ID 0x41 at power-up: a digital-only retail game accepts it.
         let mut bus = Bus::new_without_bios();
         configure_port(&mut bus, PsxPort::One, routes.profile_for(PsxPort::One));
         assert_eq!(bus.port1_pad_mode(), Some(PadMode::Digital));
@@ -628,6 +563,13 @@ mod tests {
         assert_eq!(
             routes.profile_for(PsxPort::One),
             Some(PadProfile::DualShock)
+        );
+
+        assert!(routes.toggle_analog(KEYBOARD_DEVICE_ID));
+        assert!(!routes.toggle_analog(KEYBOARD_DEVICE_ID));
+        assert_eq!(
+            routes.devices.get(KEYBOARD_DEVICE_ID).map(|e| e.profile),
+            Some(PadProfile::Digital)
         );
     }
 

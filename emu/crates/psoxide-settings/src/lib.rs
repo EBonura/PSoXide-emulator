@@ -28,13 +28,10 @@
 
 #![warn(missing_docs)]
 
-pub mod demo_disc;
 pub mod disc_image;
 mod ecm;
-pub mod game_group;
 pub mod library;
 pub mod paths;
-pub mod redump;
 pub mod savestate;
 pub mod settings;
 

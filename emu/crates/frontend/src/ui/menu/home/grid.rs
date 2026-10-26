@@ -174,11 +174,13 @@ impl HomeState {
             }
             let focused = i == self.case_focus;
             let inner = cell.shrink(6.0 * u);
-            let (art, fx) = self.case_fx(ctx, item, focused);
-            let lit = fx.focus;
-            if lit > 0.02 {
-                super::focus_cage_eased(&clip, inner, a, u, lit, fx.calm);
+            if focused {
+                super::focus_cage(&clip, inner, a, u);
             }
+            let art = item
+                .cover_key
+                .as_deref()
+                .and_then(|k| self.covers.texture(ctx, k));
             let kind = if art.is_some() {
                 CoverKind::Art
             } else {
@@ -190,27 +192,20 @@ impl HomeState {
             } else {
                 V3::new(150.0, 134.0, 12.0)
             };
-            let moving = if fx.calm { 0.0 } else { lit };
-            let scale = (cell_w - 28.0 * u) / size.x
-                * (1.0 + if fx.calm { 0.05 } else { 0.03 } * lit.min(1.0));
-            let center = V3::new(
-                cell.center().x,
-                cell.top() + cell_h * 0.42 - 7.0 * u * moving,
-                40.0 * u * moving,
-            );
+            let scale = (cell_w - 28.0 * u) / size.x;
+            let center = V3::new(cell.center().x, cell.top() + cell_h * 0.42, 0.0);
             let draw = CaseDraw {
                 kind,
                 title: &item.title,
                 art,
                 size,
                 center,
-                yaw: -0.12 + moving * 0.16 * (self.time * 0.6).sin(),
+                yaw: -0.12,
                 pitch: -0.05,
                 lid: 0.0,
                 scale,
                 opacity: a * if focused { 1.0 } else { 0.85 },
                 seed: super::hash_str(&item.title),
-                fx,
             };
             super::scene::draw_case(&clip, &cam, &draw);
             let mut job = egui::text::LayoutJob::simple(

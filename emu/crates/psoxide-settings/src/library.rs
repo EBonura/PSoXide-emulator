@@ -610,75 +610,24 @@ fn boot_exe_name(system_cnf: &[u8]) -> Option<String> {
 pub fn disc_boot_serial(path: &Path) -> Option<String> {
     // A cue sheet names the image that holds the first track.
     let bin;
-    let ext = path
+    let path = if path
         .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default();
-    let path = if ext.eq_ignore_ascii_case("cue") {
+        .is_some_and(|e| e.eq_ignore_ascii_case("cue"))
+    {
         bin = primary_bin_from_cue(path)?;
-        bin.as_path()
-    } else if ext.eq_ignore_ascii_case("ccd") {
-        // A CloneCD set keeps its sectors in the `.img` beside the sheet.
-        bin = ccd_decoded_img_path(path);
         bin.as_path()
     } else {
         path
     };
-    boot_serial_of_reader(&SectorReader::open(path)?)
-}
-
-/// [`disc_boot_serial`] for the first bytes of a data-track image held in
-/// memory (the browser reads a slice of the file and passes it here). The
-/// slice has to reach the root directory and `SYSTEM.CNF`: 512 sectors of
-/// 2352 bytes do for every retail disc.
-#[must_use]
-pub fn boot_serial_of_prefix(prefix: Vec<u8>) -> Option<String> {
-    use psx_iso::{SECTOR_BYTES, SECTOR_USER_DATA_BYTES, SECTOR_USER_DATA_OFFSET};
-    // Raw 2352-byte sectors keep the volume descriptor 24 bytes into LBA 16;
-    // a cooked 2048-byte image keeps it at the start.
-    let at = |stride: usize, offset: usize| {
-        prefix
-            .get(stride * 16 + offset..stride * 16 + offset + 6)
-            .is_some_and(|d| d[0] == 1 && &d[1..6] == b"CD001")
-    };
-    let (stride, user_offset) = if at(SECTOR_BYTES, SECTOR_USER_DATA_OFFSET) {
-        (SECTOR_BYTES as u64, SECTOR_USER_DATA_OFFSET as u64)
-    } else if at(SECTOR_USER_DATA_BYTES, 0) {
-        (SECTOR_USER_DATA_BYTES as u64, 0)
-    } else {
-        return None;
-    };
-    let user = |lba: u64| -> Option<Vec<u8>> {
-        let start = usize::try_from(lba * stride + user_offset).ok()?;
-        prefix
-            .get(start..start + psx_iso::SECTOR_USER_DATA_BYTES)
-            .map(<[u8]>::to_vec)
-    };
-    boot_serial_with(&user)
-}
-
-fn boot_serial_of_reader(reader: &SectorReader) -> Option<String> {
-    boot_serial_with(&|lba| reader.user(lba))
-}
-
-/// The boot serial of a disc whose 2048-byte user sectors `user` reads.
-fn boot_serial_with(user: &dyn Fn(u64) -> Option<Vec<u8>>) -> Option<String> {
-    let extent = |lba: u64, count: u64, len: usize| -> Option<Vec<u8>> {
-        let mut out = Vec::with_capacity(len.min(1 << 20));
-        for i in 0..count {
-            out.extend_from_slice(&user(lba.checked_add(i)?)?);
-        }
-        out.truncate(len);
-        Some(out)
-    };
-    let pvd = user(16)?;
+    let reader = SectorReader::open(path)?;
+    let pvd = reader.user(16)?;
     if pvd[0] != 1 || &pvd[1..6] != b"CD001" {
         return None;
     }
     let sector = psx_iso::SECTOR_USER_DATA_BYTES as u64;
     let root_lba = le_u32(&pvd, 158)? as u64;
     let root_size = le_u32(&pvd, 166)? as usize;
-    let root = extent(
+    let root = reader.extent(
         root_lba,
         (root_size as u64).div_ceil(sector).min(32),
         root_size,
@@ -686,7 +635,7 @@ fn boot_serial_with(user: &dyn Fn(u64) -> Option<Vec<u8>>) -> Option<String> {
     let cnf = iso_records(&root)
         .into_iter()
         .find(|r| !r.is_dir && r.name.to_ascii_uppercase().starts_with("SYSTEM.CNF"))
-        .and_then(|r| extent(r.lba, r.size.div_ceil(sector).min(2), r.size as usize))?;
+        .and_then(|r| reader.extent(r.lba, r.size.div_ceil(sector).min(2), r.size as usize))?;
     boot_serial_of_cnf(&cnf)
 }
 
@@ -1071,21 +1020,16 @@ fn pvd_volume_identifier(user_data: &[u8]) -> Option<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CueTrackSpec {
-    pub(crate) number: u8,
-    pub(crate) track_type: psx_iso::TrackType,
-    pub(crate) path: PathBuf,
+struct CueTrackSpec {
+    number: u8,
+    track_type: psx_iso::TrackType,
+    path: PathBuf,
     /// Pregap sectors in disc space before INDEX 01.
-    pub(crate) pregap: u32,
+    pregap: u32,
     /// Pregap sectors physically present at the start of the track file.
-    pub(crate) file_pregap: u32,
+    file_pregap: u32,
     /// File-relative sector where this track's physical data begins.
-    pub(crate) file_start_sector: u32,
-}
-
-/// The tracks of a cue sheet (for the data-track hash in [`crate::redump`]).
-pub(crate) fn cue_track_files(cue_path: &Path) -> Result<Vec<CueTrackSpec>, String> {
-    parse_cue_tracks(cue_path)
+    file_start_sector: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1750,31 +1694,6 @@ fn synth_sector(user_data: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    /// A raw image with the retail serial in its `SYSTEM.CNF`.
-    fn serial_disc() -> Vec<u8> {
-        let mut builder = psx_iso::IsoBuilder::new();
-        builder.add_file("SYSTEM.CNF", b"BOOT = cdrom:\\SCUS_949.00;1\r\n".to_vec());
-        builder.add_file("SCUS_949.00", vec![0u8; 64]);
-        builder.build_bin()
-    }
-
-    #[test]
-    fn the_boot_serial_reads_from_a_prefix_of_the_image() {
-        let disc = serial_disc();
-        let prefix = disc.clone();
-        assert_eq!(boot_serial_of_prefix(prefix).as_deref(), Some("SCUS-94900"));
-        // The whole image gives the same answer through the file path.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let bin = dir.path().join("g.bin");
-        std::fs::write(&bin, &disc).expect("write");
-        assert_eq!(disc_boot_serial(&bin).as_deref(), Some("SCUS-94900"));
-        // A prefix too short to reach the root directory is no answer.
-        assert_eq!(
-            boot_serial_of_prefix(disc[..psx_iso::SECTOR_BYTES * 18].to_vec()),
-            None
-        );
-    }
-
     /// Run with `PSOXIDE_SERIAL_IMAGE=<.bin/.cue>` to read a real disc's serial.
     #[test]
     #[ignore]

@@ -38,7 +38,7 @@ pub(super) const WELCOME: [WelcomePage; 3] = [
         title: "Your games stay on your device",
         body: &[
             "Open a folder of your own disc images or programs and play them here. Files are read in place and never uploaded.",
-            "PSoXide fetches cover pictures for your discs from community collections (xlenore/psx-covers and libretro-thumbnails) and names your discs with the Redump list from libretro-database (CC BY-SA 4.0). Both are kept on this device. You can turn this off in Settings.",
+            "PSoXide fetches cover pictures for your discs from two community collections, xlenore/psx-covers and libretro-thumbnails, and keeps them on this device. You can turn this off in Settings.",
         ],
         links: &[],
     },
@@ -236,20 +236,10 @@ pub(super) fn draw_list(
         };
     let bottom = lay.safe.bottom()
         - if desktop {
-            18.0 * u + h.hint_reserve(lay)
+            18.0 * u
         } else {
             lay.bar_reserve() + 4.0 * u
         };
-    h.draw_page_hints(
-        pc,
-        &[
-            (super::Btn::Cross, "Select"),
-            (
-                super::Btn::Circle,
-                if page == Page::Game { "Resume" } else { "Back" },
-            ),
-        ],
-    );
     // Over a paused game the list sits on the shell's panel, as Controls and Debug do, so the
     // rows are never read against the game picture.
     if h.pausing(ms) && h.launch.is_none() {
@@ -671,10 +661,6 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
             ),
         );
     }
-    h.draw_page_hints(
-        pc,
-        &[(super::Btn::Cross, "Next"), (super::Btn::Circle, "Close")],
-    );
     let last = h.welcome + 1 >= WELCOME.len();
     let next = Rect::from_min_size(
         Pos2::new(x + width - 120.0 * u, foot_y),

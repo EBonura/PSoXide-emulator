@@ -50,9 +50,6 @@ pub struct UiPngArgs {
     /// With `--home`: the compact grid.
     #[arg(long)]
     pub compact: bool,
-    /// With `--home`: pretend a controller is connected (button glyphs instead of key caps).
-    #[arg(long)]
-    pub pad: bool,
     /// With `--home`: the focused case.
     #[arg(long, default_value_t = 0)]
     pub case: usize,
@@ -177,7 +174,6 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
             state.menu.select_category(&args.category);
             state.menu.open = true;
             state.menu.home_preview_compact(args.compact);
-            state.menu.home_preview_pad(args.pad);
             state.menu.home_preview(
                 &args.page,
                 args.case,

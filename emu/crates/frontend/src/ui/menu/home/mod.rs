@@ -8,17 +8,15 @@
 mod controls;
 mod covers;
 mod grid;
-mod hints;
 mod launch;
 mod pages;
 mod scene;
-pub(crate) mod tokens;
+mod tokens;
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2};
 
 use super::{LibraryItem, MenuAction, MenuInput, MenuState};
 use crate::icons;
-use hints::{Btn, HintStyle};
 use scene::{fade, CoverKind, CYAN};
 
 pub(crate) use controls::Command as DeviceCommand;
@@ -39,8 +37,6 @@ fn countdown_secs() -> f32 {
 pub(super) const SITE_URL: &str = "https://ebonura.github.io/PSoXide/";
 /// Where the free builds, and the optional donation, live.
 const ITCH_URL: &str = "https://bonnie-studios.itch.io/psoxide";
-/// Where the Demo Disc download lives (shown when no copy is on this computer).
-const DEMO_DISC_URL: &str = "https://bonnie-studios.itch.io/psoxide-demo-disc";
 pub(super) const SOURCE_URL: &str = "https://github.com/EBonura/PSoXide";
 
 /// The pages the shell can show.
@@ -170,8 +166,6 @@ enum Click {
     Restart,
     Burn,
     SizeToggle,
-    /// A shoulder glyph beside the tabs: step to the previous (-1) or next (1) section.
-    TabStep(i32),
     Rail,
     Act(MenuAction),
     Link(&'static str),
@@ -234,43 +228,7 @@ pub(crate) struct HomeState {
     rail: Option<(Rect, Vec<char>)>,
     /// Where the primary button ended last frame.
     btn_bottom: f32,
-    /// The animation state of each case that has been drawn: focus spring,
-    /// picture fade and loading shimmer, by cover key (or title).
-    anim: std::collections::HashMap<String, CaseAnim>,
-    /// Seconds of the last frame (elapsed time, not the clamped step).
-    frame_dt: f32,
-    /// How lit each hint glyph is from a press (L1, R1, Triangle, Square): 1 at the press,
-    /// easing to 0.
-    pad_press: [f32; 4],
-    /// How many first letters the shelf has (the L2/R2 hint shows when there is a jump to make).
-    letters: usize,
-    /// The reduce-motion setting.
-    calm_setting: bool,
-    /// The browser asked for reduced motion.
-    calm_browser: bool,
-    /// Desktop: the Demo Disc is a disc in the games folder (or beside the program), found by
-    /// name, not one the page streams in.
-    local_demo: bool,
 }
-
-/// The animation of one case: how focused it is (a spring, so it settles with
-/// a hint of overshoot), how far its picture has faded in, and the loading
-/// shimmer.
-#[derive(Clone, Copy, Debug, Default)]
-struct CaseAnim {
-    focus: f32,
-    vel: f32,
-    art: f32,
-    load: f32,
-    /// Seconds the picture has been loading (the shimmer waits a moment so a
-    /// cached picture never flashes it).
-    loading_for: f32,
-}
-
-/// Seconds a picture must be loading before the shimmer shows.
-const SHIMMER_DELAY: f32 = 0.15;
-/// Seconds the picture takes to fade in.
-const ART_FADE_SECS: f32 = 0.35;
 
 /// A pointer press being tracked, to tell a tap from a scroll.
 #[derive(Clone, Copy, Debug)]
@@ -318,132 +276,7 @@ impl HomeState {
             grid_cols: 3,
             rail: None,
             btn_bottom: 0.0,
-            anim: std::collections::HashMap::new(),
-            frame_dt: 0.0,
-            pad_press: [0.0; 4],
-            letters: 0,
-            calm_setting: false,
-            calm_browser: prefers_reduced_motion(),
-            local_demo: false,
         }
-    }
-
-    pub(super) fn set_reduce_motion(&mut self, on: bool) {
-        self.calm_setting = on;
-    }
-
-    /// Whether motion is calmed (the setting, or the browser's preference).
-    pub(super) fn calm(&self) -> bool {
-        self.calm_setting || self.calm_browser
-    }
-
-    /// The Square hint just left of a second action's words.
-    fn square_glyph(&self, p: &egui::Painter, lay: &Layout, words: Rect, a: f32) {
-        let Some(style) = self.hint_style(lay) else {
-            return;
-        };
-        let u = lay.u;
-        let w = hints::btn_width(p, u, style, Btn::Square);
-        let c = Pos2::new(words.left() - 12.0 * u - w / 2.0, words.center().y);
-        hints::draw_btn(p, c, u, a, style, Btn::Square, self.pad_press[3]);
-    }
-
-    /// What kind of button hints to draw: glyphs when a controller is connected, key caps
-    /// beside a keyboard on a desktop, none on a touch screen.
-    fn hint_style(&self, lay: &Layout) -> Option<HintStyle> {
-        if self.feed.gamepads > 0 {
-            Some(HintStyle::Pad)
-        } else if self.feed.touch || lay.kind != LayoutKind::Desktop {
-            None
-        } else {
-            Some(HintStyle::Keys)
-        }
-    }
-
-    /// Room a row of hints at the bottom of a page takes (desktop only).
-    fn hint_reserve(&self, lay: &Layout) -> f32 {
-        if lay.kind == LayoutKind::Desktop && self.hint_style(lay).is_some() {
-            38.0 * lay.u
-        } else {
-            0.0
-        }
-    }
-
-    /// The hint row at the bottom of a page of the shell.
-    fn draw_page_hints(&self, pc: &PageCtx<'_>, items: &[(Btn, &str)]) {
-        let lay = pc.lay;
-        let Some(style) = self.hint_style(lay) else {
-            return;
-        };
-        if lay.kind != LayoutKind::Desktop {
-            return;
-        }
-        let u = lay.u;
-        let y = lay.safe.bottom() - 22.0 * u;
-        hints::hint_row(
-            pc.painter,
-            lay.safe.left() + 48.0 * u,
-            y,
-            u,
-            pc.appear,
-            style,
-            items,
-            13.0 * u,
-        );
-    }
-
-    /// Step one case's animation and return its picture and effects.
-    fn case_fx(
-        &mut self,
-        ctx: &egui::Context,
-        item: &CaseItem,
-        focused: bool,
-    ) -> (Option<egui::TextureId>, scene::CaseFx) {
-        let art = item
-            .cover_key
-            .as_deref()
-            .and_then(|k| self.covers.texture(ctx, k));
-        let loading = item
-            .cover_key
-            .as_deref()
-            .is_some_and(|k| self.covers.status(k) == covers::CoverStatus::Loading);
-        let key = item.cover_key.clone().unwrap_or_else(|| item.title.clone());
-        let dt = self.frame_dt;
-        let a = self.anim.entry(key).or_default();
-        // A spring toward 0 or 1: about 0.4 s to settle, a little overshoot.
-        let target = if focused { 1.0 } else { 0.0 };
-        let steps = ((dt / 0.01).ceil() as usize).clamp(1, 12);
-        let h = dt.min(0.12) / steps as f32;
-        for _ in 0..steps {
-            let force = 190.0 * (target - a.focus) - 17.0 * a.vel;
-            a.vel += force * h;
-            a.focus += a.vel * h;
-        }
-        a.focus = a.focus.clamp(0.0, 1.12);
-        if loading {
-            a.loading_for += dt;
-        } else {
-            a.loading_for = 0.0;
-        }
-        let want_load = if a.loading_for > SHIMMER_DELAY {
-            1.0
-        } else {
-            0.0
-        };
-        a.load += (want_load - a.load) * (dt * 8.0).min(1.0);
-        a.art = if art.is_some() {
-            (a.art + dt / ART_FADE_SECS).min(1.0)
-        } else {
-            0.0
-        };
-        let fx = scene::CaseFx {
-            loading: a.load,
-            art_fade: tokens::ease_out_expo(a.art),
-            focus: a.focus,
-            time: self.time,
-            calm: self.calm(),
-        };
-        (art, fx)
     }
 
     /// Reopening the shell starts at its top: the pause list of a started
@@ -505,15 +338,6 @@ impl MenuState {
             self.appear
         } else {
             0.0
-        }
-    }
-
-    /// Desktop builds: the shelf always has the Demo Disc as its first case, taken from the
-    /// discs the library lists (see `HomeState::local_demo_cases`).
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub fn set_local_demo(&mut self, on: bool) {
-        if let Some(h) = self.home.as_mut() {
-            h.local_demo = on;
         }
     }
 
@@ -584,7 +408,6 @@ impl MenuState {
                     Click::Act(action) => format!("act:{action:?}"),
                     Click::Restart => "restart".into(),
                     Click::SizeToggle => "size".into(),
-                    Click::TabStep(n) => format!("tab-step:{n}"),
                     Click::Rail => "rail".into(),
                     Click::Burn => "burn".into(),
                     Click::Link(url) => format!("link:{url}"),
@@ -616,33 +439,14 @@ impl MenuState {
             .cases(self)
             .iter()
             .take(16)
-            .map(|c| {
-                let key = c.cover_key.clone().unwrap_or_else(|| c.title.clone());
-                let anim = h.anim.get(&key).copied().unwrap_or_default();
-                let cover = match c.cover_key.as_deref().map(|k| h.covers.status(k)) {
-                    Some(covers::CoverStatus::Loading) => "loading",
-                    Some(covers::CoverStatus::Ready) => "ready",
-                    Some(covers::CoverStatus::Missing) => "missing",
-                    Some(covers::CoverStatus::Idle) => "idle",
-                    None => "none",
-                };
-                format!(
-                    "[\"{}\",\"{}\",\"{}\",{:.2},{:.2},{:.2}]",
-                    escape(&c.title),
-                    escape(&c.line),
-                    cover,
-                    anim.focus,
-                    anim.load,
-                    anim.art
-                )
-            })
+            .map(|c| format!("[\"{}\",\"{}\"]", escape(&c.title), escape(&c.line)))
             .collect();
         let left = match h.countdown {
             Countdown::Running(l) => l,
             _ => -1.0,
         };
         format!(
-            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"controls\":{},\"cases\":[{}],\"hits\":[{}]}}",
+            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"controls\":{},\"cases\":[{}],\"hits\":[{}]}}",
             h.page.name(),
             if h.zone == Zone::Nav { "nav" } else { "body" },
             self.home_probe().1,
@@ -657,8 +461,6 @@ impl MenuState {
             nav_items(h.pausing(self)).len(),
             h.first_visit,
             h.covers.loaded(),
-            h.calm(),
-            h.compact,
             h.controls.probe_json(self),
             cases.join(","),
             hits.join(",")
@@ -711,7 +513,6 @@ impl MenuState {
         if let Some(t) = launch {
             h.launch = Some(launch::Launch {
                 t,
-                skipping: false,
                 action: MenuAction::StartDemoDisc,
                 kind: CoverKind::Demo,
                 title: "PSoXide Demo Disc".into(),
@@ -740,14 +541,6 @@ impl MenuState {
         shell.open_nav(self, item);
         self.home = Some(shell);
         true
-    }
-
-    /// Preview with a controller connected (the hints show glyphs).
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub fn home_preview_pad(&mut self, on: bool) {
-        if let Some(h) = self.home.as_mut() {
-            h.feed.gamepads = usize::from(on);
-        }
     }
 
     /// Preview the compact grid.
@@ -847,83 +640,13 @@ impl HomeState {
         }
     }
 
-    /// Desktop: the Demo Disc case and the other builds of it, from the discs the library lists.
-    ///
-    /// The newest public release is the Demo Disc (the hero case, whatever else is around). Every
-    /// other build in the folder (an older release, the private builds, the diagnostic ones) is a
-    /// case of its own right after the shelf's first cases, newest first. Only discs that exist
-    /// reach this list, so a cue sheet whose images are gone never shows up. With no public
-    /// release at all the hero stays and points at the download.
-    fn local_demo_cases(&self, ms: &MenuState) -> LocalDemo {
-        use psoxide_settings::demo_disc::DemoDisc;
-        let mut found: Vec<(DemoDisc, &LibraryItem)> = ms
-            .games
-            .iter()
-            .filter_map(|g| DemoDisc::parse(&g.title).map(|d| (d, g)))
-            .collect();
-        found.sort_by(|a, b| a.0.newest_first(&b.0));
-        let claimed: Vec<String> = found.iter().map(|(_, g)| g.id.clone()).collect();
-        let hero_at = found.iter().position(|(d, _)| d.is_public());
-        let hero = match hero_at.map(|i| found.remove(i)) {
-            Some((disc, item)) => CaseItem {
-                kind: CoverKind::Demo,
-                title: "PSoXide Demo Disc".into(),
-                line: match disc.version {
-                    Some((major, minor)) => format!("Seven games and demos · v{major}.{minor}"),
-                    None => "Seven games and demos".into(),
-                },
-                action: MenuAction::LaunchGame(item.id.clone()),
-                button: "Start disc",
-                cover_key: Some(demo_cover_key("hero")),
-                restart: None,
-                burn: None,
-                launches: true,
-                shelf: false,
-            },
-            None => CaseItem {
-                kind: CoverKind::Demo,
-                title: "PSoXide Demo Disc".into(),
-                line: "Not on this computer yet. Put it in your games folder".into(),
-                action: MenuAction::OpenUrl(DEMO_DISC_URL.into()),
-                button: "Get the disc",
-                cover_key: Some(demo_cover_key("hero")),
-                restart: None,
-                burn: None,
-                launches: false,
-                shelf: false,
-            },
-        };
-        let others = found
-            .iter()
-            .map(|(disc, item)| CaseItem {
-                kind: CoverKind::Plain,
-                title: disc.short_title().unwrap_or_else(|| item.title.clone()),
-                line: disc.describe(),
-                action: MenuAction::LaunchGame(item.id.clone()),
-                button: "Play",
-                cover_key: Some(demo_cover_key(&item.id)),
-                restart: None,
-                burn: None,
-                launches: true,
-                shelf: false,
-            })
-            .collect();
-        LocalDemo {
-            hero,
-            others,
-            claimed,
-        }
-    }
-
     /// The shelf: the game you left, the demo disc, your own discs.
     fn cases(&self, ms: &MenuState) -> Vec<CaseItem> {
         let mut out = Vec::new();
         let current = self.feed.current.as_ref().filter(|_| self.pausing(ms));
         let demo_id = crate::app::DEMO_DISC_ID;
-        let local = self.local_demo.then(|| self.local_demo_cases(ms));
-        let has_demo = local.is_none()
-            && (ms.homebrew.iter().any(|e| e.id == demo_id)
-                || self.feed.demo != DemoStatus::Absent);
+        let has_demo =
+            ms.homebrew.iter().any(|e| e.id == demo_id) || self.feed.demo != DemoStatus::Absent;
         if let Some((id, title)) = current {
             let is_demo = id == demo_id;
             out.push(CaseItem {
@@ -940,21 +663,12 @@ impl HomeState {
                 line: "Paused. Pick up where you left off".into(),
                 action: MenuAction::ResumeGame,
                 button: "Resume",
-                cover_key: if local.is_some()
-                    && psoxide_settings::demo_disc::DemoDisc::parse(title).is_some()
-                {
-                    Some(demo_cover_key("current"))
-                } else {
-                    (!is_demo).then(|| id.clone())
-                },
+                cover_key: (!is_demo).then(|| id.clone()),
                 restart: Some(MenuAction::LaunchGame(id.clone())),
                 burn: None,
                 launches: false,
                 shelf: false,
             });
-        }
-        if let Some(local) = local.as_ref() {
-            out.push(local.hero.clone());
         }
         if has_demo && current.is_none_or(|(id, _)| id != demo_id) {
             out.push(CaseItem {
@@ -1002,10 +716,6 @@ impl HomeState {
         if let Some((id, _)) = current {
             shown.insert(id.as_str());
         }
-        if let Some(local) = local.as_ref() {
-            // The Demo Disc builds have their own cases: never again as a plain game or a recent.
-            shown.extend(local.claimed.iter().map(String::as_str));
-        }
         // Real recents first: discs this browser or this machine really played.
         for item in ms.recent_discs.iter().take(5) {
             if shown.insert(item.id.as_str()) {
@@ -1022,9 +732,6 @@ impl HomeState {
                     shelf: false,
                 });
             }
-        }
-        if let Some(local) = local.as_ref() {
-            out.extend(local.others.iter().cloned());
         }
         // Then the rest of the shelf: your games folder and the SDK examples.
         let mut rest: Vec<&LibraryItem> = ms.games.iter().collect();
@@ -1093,7 +800,6 @@ impl HomeState {
         if launches && self.launch.is_none() {
             self.launch = Some(launch::Launch {
                 t: 0.0,
-                skipping: false,
                 action: action.clone(),
                 kind: case.kind,
                 title: case.title.clone(),
@@ -1145,22 +851,8 @@ impl HomeState {
             || input.tab_prev
             || input.tab_next
             || input.options
-            || input.secondary
             || input.letter_prev
             || input.letter_next;
-        for (i, pressed) in [
-            input.tab_prev,
-            input.tab_next,
-            input.options,
-            input.secondary,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if pressed {
-                self.pad_press[i] = 1.0;
-            }
-        }
         if playing {
             // Any input skips the sequence to the boot (not the press that began it).
             if any || input.toggle_open {
@@ -1271,21 +963,6 @@ impl HomeState {
         if input.options {
             self.compact = !self.compact;
             return None;
-        }
-        if input.secondary {
-            // The second action of the focused case, whichever it has.
-            let click = cases.get(self.case_focus).and_then(|c| {
-                if matches!(c.kind, CoverKind::Demo) {
-                    Some(Click::Peek)
-                } else if c.restart.is_some() {
-                    Some(Click::Restart)
-                } else if c.burn.is_some() {
-                    Some(Click::Burn)
-                } else {
-                    None
-                }
-            });
-            return click.and_then(|click| self.apply_click(ms, click));
         }
         if input.letter_prev || input.letter_next {
             self.jump_letter(&cases, if input.letter_next { 1 } else { -1 });
@@ -1443,10 +1120,6 @@ impl HomeState {
             .map_or(dt, |before| (now - before) as f32)
             .clamp(0.0, 1.5);
         self.clock = Some(now);
-        self.frame_dt = dt;
-        for v in &mut self.pad_press {
-            *v = (*v - dt * 4.5).max(0.0);
-        }
         // The sequence keeps the shell up while the game boots behind it.
         let playing = self.launch.is_some() && !self.launch_done;
         let target = if ms.open || playing { 1.0 } else { 0.0 };
@@ -1581,23 +1254,6 @@ impl HomeState {
     }
 }
 
-/// The Demo Disc and its sibling builds on the desktop shelf.
-struct LocalDemo {
-    /// The first case: the newest public release (or the way to get it).
-    hero: CaseItem,
-    /// Every other build, newest first.
-    others: Vec<CaseItem>,
-    /// Launch ids of all the demo discs found, for keeping them off the alphabetical shelf.
-    claimed: Vec<String>,
-}
-
-/// The cover key of a demo disc case: each case has its own, so each keeps its own motion, while
-/// all of them draw the same shipped picture.
-fn demo_cover_key(case: &str) -> String {
-    format!("{}:{case}", covers::DEMO_COVER_PREFIX)
-}
-
-#[derive(Clone)]
 struct CaseItem {
     kind: CoverKind,
     title: String,
@@ -1676,22 +1332,6 @@ pub(super) struct PageCtx<'a> {
     pub appear: f32,
 }
 
-/// Whether the browser asks for reduced motion (never on the desktop).
-fn prefers_reduced_motion() -> bool {
-    #[cfg(target_arch = "wasm32")]
-    {
-        return web_sys::window()
-            .and_then(|w| {
-                w.match_media("(prefers-reduced-motion: reduce)")
-                    .ok()
-                    .flatten()
-            })
-            .is_some_and(|q| q.matches());
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    false
-}
-
 fn remember_visit() {
     #[cfg(target_arch = "wasm32")]
     {
@@ -1728,18 +1368,17 @@ fn decode_label(ctx: &egui::Context) -> Option<egui::TextureHandle> {
 }
 
 impl HomeState {
-    /// Skip the sequence: it plays out fast on its own curves, so the hand-off
-    /// stays continuous. The press that started it does not count.
+    /// Jump the sequence to its end. The press that started it does not count.
     fn skip_launch(&mut self) {
         if let Some(l) = self.launch.as_mut() {
             if !self.launch_done && !l.frozen && l.t > launch::SKIP_AFTER {
-                l.skipping = true;
+                l.t = launch::DURATION;
             }
         }
     }
 
     /// Advance the launch sequence by elapsed time. At its end the game gets its action if it
-    /// has not had it yet; the disc goes on spinning until the game's boot closes the shell.
+    /// has not had it yet, and the last moment holds until the game's boot closes the shell.
     fn tick_launch(&mut self, dt: f32) {
         let Some(l) = self.launch.as_mut() else {
             return;
@@ -1747,9 +1386,15 @@ impl HomeState {
         if l.frozen {
             return;
         }
-        l.t += dt * if l.skipping { launch::SKIP_SPEED } else { 1.0 };
-        if !self.launch_done && l.t >= launch::DURATION {
+        if self.launch_done {
+            // Holding on the spinning disc while the game loads.
+            l.t = launch::DURATION - 0.1;
+            return;
+        }
+        l.t += dt;
+        if l.t >= launch::DURATION {
             self.launch_done = true;
+            l.t = launch::DURATION - 0.1;
             if !self.launch_sent {
                 self.launch_sent = true;
                 self.pending_launch = Some(l.action.clone());
@@ -1767,61 +1412,8 @@ impl HomeState {
             .and_then(|k| self.covers.texture(ctx, k));
         let label = self.label_tex.as_ref().map(egui::TextureHandle::id);
         launch::draw(pc.painter, pc.lay, l, art, label, pc.appear);
-        let (t, skipping) = (l.t, l.skipping);
-        if !skipping && !self.launch_done {
-            self.draw_skip_hint(pc, t);
-        }
         if let Some(action) = self.pending_launch.take() {
             ms.pending_pointer_action = Some(action);
-        }
-    }
-
-    /// "Any button skips", quietly under the launch's title once it is under way.
-    fn draw_skip_hint(&self, pc: &PageCtx<'_>, t: f32) {
-        let lay = pc.lay;
-        let u = lay.u;
-        let a = pc.appear * (((t - 0.5) / 0.3).clamp(0.0, 1.0)) * 0.9;
-        if a <= 0.01 {
-            return;
-        }
-        let p = pc.painter;
-        let y = lay.safe.bottom() - 16.0 * u;
-        let x = lay.full.center().x;
-        let size = 12.0 * u.max(0.9);
-        match self.hint_style(lay) {
-            Some(HintStyle::Pad) => {
-                let words = "Any button skips";
-                let g = p.layout_no_wrap(words.into(), FontId::proportional(size), tokens::DIM);
-                let r = hints::face_radius(u) * 0.9;
-                let total = r * 2.0 + 8.0 * u + g.size().x;
-                let left = x - total / 2.0;
-                hints::draw_face(p, Pos2::new(left + r, y), r, Btn::Cross, a, 0.0);
-                p.text(
-                    Pos2::new(left + r * 2.0 + 8.0 * u, y),
-                    Align2::LEFT_CENTER,
-                    words,
-                    FontId::proportional(size),
-                    fade(tokens::DIM, a),
-                );
-            }
-            Some(HintStyle::Keys) => {
-                p.text(
-                    Pos2::new(x, y),
-                    Align2::CENTER_CENTER,
-                    "Any key skips",
-                    FontId::proportional(size),
-                    fade(tokens::DIM, a),
-                );
-            }
-            None => {
-                p.text(
-                    Pos2::new(x, y),
-                    Align2::CENTER_CENTER,
-                    "Tap to skip",
-                    FontId::proportional(size),
-                    fade(tokens::DIM, a),
-                );
-            }
         }
     }
 
@@ -1847,13 +1439,12 @@ impl HomeState {
                 lay.safe.right() - side,
                 lay.safe.bottom()
                     - if lay.kind == LayoutKind::Desktop {
-                        12.0 * u + self.hint_reserve(lay)
+                        12.0 * u
                     } else {
                         lay.bar_reserve() + 4.0 * u
                     },
             ),
         );
-        self.draw_page_hints(pc, &[(Btn::Circle, "Back")]);
         let outline = chamfer(rect.expand(6.0), tokens::CHAMFER * u);
         pc.painter.add(Shape::convex_polygon(
             outline.clone(),
@@ -1870,7 +1461,6 @@ impl HomeState {
         let u = lay.u;
         let cases = self.cases(ms);
         self.case_focus = self.case_focus.min(cases.len().saturating_sub(1));
-        self.letters = grid::letter_groups(&cases).len();
         let f = self.case_focus;
         if self.compact {
             self.draw_compact(ms, ctx, pc, &cases);
@@ -1894,7 +1484,7 @@ impl HomeState {
             let dy = (y as f32 - self.case_pos).abs();
             dy.total_cmp(&dx)
         });
-        let time = self.time;
+        let sway = (self.time * 0.57).sin() * 0.13;
         for i in order {
             let item = &cases[i];
             let d = i as f32 - self.case_pos;
@@ -1908,48 +1498,36 @@ impl HomeState {
             } else {
                 scene::V3::new(150.0, 134.0, 12.0)
             };
-            let (art, fx) = self.case_fx(ctx, item, i == f);
-            let lit = fx.focus;
+            let scale = base * (1.0 + 0.14 * near);
+            let art = item
+                .cover_key
+                .as_deref()
+                .and_then(|k| self.covers.texture(ctx, k));
             let kind = if art.is_some() {
                 CoverKind::Art
             } else {
                 item.kind
             };
-            // The focused case comes alive: it lifts toward you, turns slowly
-            // to show its depth and stands in its own light. Reduced motion
-            // keeps only a slightly larger case and the glow.
-            let moving = if fx.calm { 0.0 } else { lit };
-            let scale =
-                base * (1.0 + 0.14 * near + if fx.calm { 0.05 } else { 0.03 } * lit.min(1.0));
-            let center = scene::V3::new(
-                cx + d * step,
-                cy - near * 10.0 * u - 18.0 * u * moving,
-                -d.abs() * 90.0 * u + 90.0 * u * moving,
-            );
-            let turn = moving * (0.2 * (time * 0.55).sin() + 0.1 * (time * 0.31 + 1.3).sin());
+            let center = scene::V3::new(cx + d * step, cy - near * 10.0 * u, -d.abs() * 90.0 * u);
             let draw = scene::CaseDraw {
                 kind,
                 title: &item.title,
                 art,
                 size,
                 center,
-                yaw: turn - d.clamp(-1.5, 1.5) * 0.30,
-                pitch: -0.07 + 0.025 * moving * (time * 0.43).sin(),
+                yaw: sway * near - d.clamp(-1.5, 1.5) * 0.30,
+                pitch: -0.07,
                 lid: 0.0,
                 scale,
                 opacity: a * (0.38 + 0.62 * near),
                 seed: hash_str(&item.title),
-                fx,
             };
             scene::draw_case(p, &cam, &draw);
             // Hit area for a click on the case.
             let half = Vec2::new(size.x, size.y) * scale * 0.5 + Vec2::splat(6.0);
             let at = cam.project(center);
-            let hit = Rect::from_center_size(at, half * 2.0);
-            self.hits.push((hit, Click::Case(i)));
-            if lit > 0.02 {
-                case_brackets(p, hit.expand(5.0 * u), lit, a, u, fx.calm);
-            }
+            self.hits
+                .push((Rect::from_center_size(at, half * 2.0), Click::Case(i)));
         }
         let Some(item) = cases.get(f) else {
             return;
@@ -2016,7 +1594,6 @@ impl HomeState {
             );
             self.hits
                 .push((wio.expand2(Vec2::new(10.0, 8.0)), Click::Peek));
-            self.square_glyph(p, &lay, wio, a);
             below = wio.bottom();
         }
         // The countdown line, or the loading line, or nothing.
@@ -2029,9 +1606,7 @@ impl HomeState {
         }
         // The one button.
         let label = item.button.to_uppercase();
-        let pad_glyph = self.hint_style(&lay) == Some(HintStyle::Pad);
-        let bw =
-            (label.chars().count() as f32 * 9.0 + 64.0 + if pad_glyph { 30.0 } else { 0.0 }) * u;
+        let bw = (label.chars().count() as f32 * 9.0 + 64.0) * u;
         let bh = 44.0 * u;
         let btn_y = cd_y.max(match lay.kind {
             LayoutKind::Desktop => h * 0.855,
@@ -2052,20 +1627,8 @@ impl HomeState {
                 egui::StrokeKind::Outside,
             );
         }
-        let label_at = if pad_glyph {
-            hints::draw_face_on_accent(
-                p,
-                Pos2::new(btn.left() + 24.0 * u, btn.center().y),
-                hints::face_radius(u) * 0.9,
-                Btn::Cross,
-                a,
-            );
-            btn.center() + Vec2::new(12.0 * u, 0.0)
-        } else {
-            btn.center()
-        };
         p.text(
-            label_at,
+            btn.center(),
             Align2::CENTER_CENTER,
             label,
             FontId::proportional(13.0 * u),
@@ -2097,17 +1660,12 @@ impl HomeState {
             let r = quiet(p, "Start over", qy);
             self.hits
                 .push((r.expand2(Vec2::new(12.0, 8.0)), Click::Restart));
-            self.square_glyph(p, &lay, r, a);
             qy = r.bottom() + 6.0 * u;
         }
         if item.burn.is_some() {
             let r = quiet(p, "Burn to CD", qy);
             self.hits
                 .push((r.expand2(Vec2::new(12.0, 8.0)), Click::Burn));
-            // Square is the first of Start over and Burn that the case has.
-            if item.restart.is_none() && !matches!(item.kind, CoverKind::Demo) {
-                self.square_glyph(p, &lay, r, a);
-            }
         }
         // Quiet links at the bottom.
         self.draw_footer(pc);
@@ -2135,9 +1693,7 @@ impl HomeState {
         let desktop = lay.kind == LayoutKind::Desktop;
         let wide = lay.kind != LayoutKind::Portrait;
         let label = item.button.to_uppercase();
-        let pad_glyph = self.hint_style(&lay) == Some(HintStyle::Pad);
-        let bw =
-            (label.chars().count() as f32 * 8.5 + 56.0 + if pad_glyph { 28.0 } else { 0.0 }) * u;
+        let bw = (label.chars().count() as f32 * 8.5 + 56.0) * u;
         let bh = 40.0 * u;
         let (tx, ty) = if wide {
             (info.left() + 48.0 * u, info.center().y - 22.0 * u)
@@ -2196,20 +1752,8 @@ impl HomeState {
                 egui::StrokeKind::Outside,
             );
         }
-        let label_at = if pad_glyph {
-            hints::draw_face_on_accent(
-                p,
-                Pos2::new(btn.left() + 22.0 * u, btn.center().y),
-                hints::face_radius(u) * 0.85,
-                Btn::Cross,
-                a,
-            );
-            btn.center() + Vec2::new(11.0 * u, 0.0)
-        } else {
-            btn.center()
-        };
         p.text(
-            label_at,
+            btn.center(),
             Align2::CENTER_CENTER,
             label,
             FontId::proportional(12.5 * u),
@@ -2368,59 +1912,32 @@ impl HomeState {
         );
         self.hits
             .push((what.expand2(Vec2::new(8.0, 10.0)), Click::Welcome));
-        // Button hints on the desktop shell: glyphs for a controller, key caps for a keyboard;
-        // touch and phones go without.
-        if lay.kind == LayoutKind::Desktop {
+        // Controller hints on the desktop shell; touch and phones go without.
+        if lay.kind == LayoutKind::Desktop && !self.feed.touch {
             let mut x = what.right() + 40.0 * u;
-            if let Some(style) = self.hint_style(lay) {
-                let back = if self.started { "Resume" } else { "Back" };
-                for (btn, label) in [
-                    (Btn::Cross, "Select"),
-                    (Btn::Circle, back),
-                    (Btn::Triangle, "View"),
-                ] {
-                    let press = if btn == Btn::Triangle {
-                        self.pad_press[2]
-                    } else {
-                        0.0
-                    };
-                    let w = hints::btn_width(p, u, style, btn);
-                    let g = hints::draw_btn(p, Pos2::new(x + w / 2.0, y), u, a, style, btn, press);
-                    let r = p.text(
-                        Pos2::new(g.right() + 8.0 * u, y),
-                        Align2::LEFT_CENTER,
-                        label,
-                        FontId::proportional(13.0 * u),
-                        dim,
-                    );
-                    if btn == Btn::Triangle {
-                        self.hits.push((g.union(r).expand(6.0), Click::SizeToggle));
-                    }
-                    x = r.right() + 22.0 * u;
+            let mut hint = |cross: bool, label: &str| {
+                let c = Pos2::new(x + 9.0 * u, y);
+                let ring = Stroke::new(1.2, fade(tokens::RING, a));
+                p.circle_stroke(c, 9.0 * u, ring);
+                let g = Stroke::new(1.3, dim);
+                if cross {
+                    let d = 3.4 * u;
+                    p.line_segment([c + Vec2::new(-d, -d), c + Vec2::new(d, d)], g);
+                    p.line_segment([c + Vec2::new(-d, d), c + Vec2::new(d, -d)], g);
+                } else {
+                    p.circle_stroke(c, 3.6 * u, g);
                 }
-                // L2 and R2 jump by letter, when the shelf has letters to jump between.
-                if self.letters > 1 {
-                    for btn in [Btn::L2, Btn::R2] {
-                        let w = hints::btn_width(p, u, style, btn);
-                        hints::draw_btn(p, Pos2::new(x + w / 2.0, y), u, a, style, btn, 0.0);
-                        x += w + 6.0 * u;
-                    }
-                    let r = p.text(
-                        Pos2::new(x + 2.0 * u, y),
-                        Align2::LEFT_CENTER,
-                        "A to Z",
-                        FontId::proportional(13.0 * u),
-                        dim,
-                    );
-                    // The links after the hints are desktop-only.
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        x = r.right() + 22.0 * u;
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    let _ = r;
-                }
-            }
+                let r = p.text(
+                    Pos2::new(x + 24.0 * u, y),
+                    Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(13.0 * u),
+                    dim,
+                );
+                x = r.right() + 24.0 * u;
+            };
+            hint(true, "Select");
+            hint(false, "Back");
             // Desktop only: a disc that is not in the games folder, and a rescan.
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -2490,29 +2007,9 @@ impl HomeState {
     }
 
     /// The desktop nav: plain text along the top, the active one marked.
-    fn draw_top_nav(
-        &mut self,
-        p: &egui::Painter,
-        lay: &Layout,
-        items: &[NavItem],
-        logo: Rect,
-        u: f32,
-        a: f32,
-    ) {
+    fn draw_top_nav(&mut self, p: &egui::Painter, items: &[NavItem], logo: Rect, u: f32, a: f32) {
         let mut x = logo.right() + 34.0 * u;
         let ny = logo.center().y;
-        let style = self.hint_style(lay);
-        // L1 at the left end of the tabs.
-        if let Some(style) = style {
-            let w = hints::btn_width(p, u, style, Btn::L1);
-            let c = Pos2::new(x + w / 2.0, ny);
-            hints::draw_btn(p, c, u, a, style, Btn::L1, self.pad_press[0]);
-            self.hits.push((
-                Rect::from_center_size(c, Vec2::new(w + 10.0, 30.0 * u)),
-                Click::TabStep(-1),
-            ));
-            x += w + 18.0 * u;
-        }
         for (i, item) in items.iter().enumerate() {
             let focused = self.zone == Zone::Nav && self.nav == i;
             let on = item.page() == self.page || focused;
@@ -2542,16 +2039,6 @@ impl HomeState {
                 .push((r.expand2(Vec2::new(10.0, 12.0)), Click::Nav(*item)));
             x = r.right() + 26.0 * u;
         }
-        // R1 at the right end.
-        if let Some(style) = style {
-            let w = hints::btn_width(p, u, style, Btn::R1);
-            let c = Pos2::new(x - 8.0 * u + w / 2.0, ny);
-            hints::draw_btn(p, c, u, a, style, Btn::R1, self.pad_press[1]);
-            self.hits.push((
-                Rect::from_center_size(c, Vec2::new(w + 10.0, 30.0 * u)),
-                Click::TabStep(1),
-            ));
-        }
     }
 
     /// The phone nav: a floating pill at the bottom, clear of the touch
@@ -2569,9 +2056,7 @@ impl HomeState {
         } else {
             56.0
         }) * u;
-        let style = self.hint_style(lay);
-        let side = style.map_or(0.0, |st| hints::btn_width(p, u, st, Btn::L1) + 10.0 * u);
-        let w = (items.len() as f32 * 76.0 * u).min(lay.safe.width() - 24.0 * u - 2.0 * side);
+        let w = (items.len() as f32 * 76.0 * u).min(lay.safe.width() - 24.0 * u);
         let bar = Rect::from_center_size(
             Pos2::new(lay.safe.center().x, lay.safe.bottom() - h / 2.0 - 10.0 * u),
             Vec2::new(w, h),
@@ -2587,21 +2072,6 @@ impl HomeState {
             Stroke::new(1.0, fade(Color32::from_rgb(38, 58, 72), a)),
             egui::StrokeKind::Inside,
         );
-        // L1 and R1 at the two ends of the bar.
-        if let Some(st) = style {
-            for (btn, step, x) in [
-                (Btn::L1, -1, bar.left() - 6.0 * u - side / 2.0 - 2.0 * u),
-                (Btn::R1, 1, bar.right() + 6.0 * u + side / 2.0 + 2.0 * u),
-            ] {
-                let c = Pos2::new(x, bar.center().y);
-                let press = self.pad_press[if step < 0 { 0 } else { 1 }];
-                hints::draw_btn(p, c, u, a, st, btn, press);
-                self.hits.push((
-                    Rect::from_center_size(c, Vec2::new(side, 40.0 * u)),
-                    Click::TabStep(step),
-                ));
-            }
-        }
         let cell = w / items.len() as f32;
         for (i, item) in items.iter().enumerate() {
             let focused = self.zone == Zone::Nav && self.nav == i;
@@ -2725,24 +2195,10 @@ impl HomeState {
                 }
             }
             self.hits.push((b.expand(4.0), Click::SizeToggle));
-            // The button that does the same: Triangle, or Tab on a keyboard.
-            if let Some(style) = self.hint_style(lay) {
-                let w = hints::btn_width(p, u, style, Btn::Triangle);
-                let gc = if desktop {
-                    Pos2::new(b.left() - 10.0 * u - w / 2.0, b.center().y)
-                } else {
-                    Pos2::new(b.right() + 10.0 * u + w / 2.0, b.center().y)
-                };
-                hints::draw_btn(p, gc, u, a, style, Btn::Triangle, self.pad_press[2]);
-                self.hits.push((
-                    Rect::from_center_size(gc, Vec2::new(w + 8.0, 30.0 * u)),
-                    Click::SizeToggle,
-                ));
-            }
         }
         let items = nav_items(self.pausing(ms));
         if desktop {
-            self.draw_top_nav(p, lay, &items, logo_rect, u, a);
+            self.draw_top_nav(p, &items, logo_rect, u, a);
         } else {
             self.draw_bottom_bar(p, lay, &items, u, a);
         }
@@ -2967,7 +2423,6 @@ impl HomeState {
             }
             Click::Act(action) => return Some(action),
             Click::SizeToggle => self.compact = !self.compact,
-            Click::TabStep(step) => self.cycle_tab(ms, step),
             Click::Rail => {}
             Click::Burn => {
                 let cases = self.cases(ms);
@@ -3063,39 +2518,7 @@ fn draw_device_icon(p: &egui::Painter, c: Pos2, r: f32, which: u8, col: Color32)
 
 /// The focus cage: a 2 px outline, 9 px brackets on the corners and a faint
 /// tint, so focus is never colour alone.
-/// The four corner brackets of the focused case: they start wider and dimmer
-/// and ease in to the case as it takes focus (`e` is its focus, 0 to 1 and a
-/// little over while it settles).
-pub(super) fn case_brackets(p: &egui::Painter, r: Rect, e: f32, a: f32, u: f32, calm: bool) {
-    let k = tokens::ease_out_expo(e.clamp(0.0, 1.0));
-    let r = if calm {
-        r
-    } else {
-        r.expand((1.0 - k) * 16.0 * u)
-    };
-    let alpha = a * k;
-    let b = tokens::BRACKET * 1.5 * u;
-    let s = Stroke::new(tokens::FOCUS_STROKE + 0.5, fade(tokens::FOCUS, alpha));
-    for (corner, dx, dy) in [
-        (r.left_top(), 1.0, 1.0),
-        (r.right_top(), -1.0, 1.0),
-        (r.left_bottom(), 1.0, -1.0),
-        (r.right_bottom(), -1.0, -1.0),
-    ] {
-        p.line_segment([corner, corner + Vec2::new(dx * b, 0.0)], s);
-        p.line_segment([corner, corner + Vec2::new(0.0, dy * b)], s);
-    }
-}
-
 pub(super) fn focus_cage(p: &egui::Painter, r: Rect, a: f32, u: f32) {
-    focus_cage_eased(p, r, a, u, 1.0, false);
-}
-
-/// [`focus_cage`] while it eases in: `e` runs 0 to 1, the frame and its fill
-/// fade up and the corner brackets close in from a little outside.
-pub(super) fn focus_cage_eased(p: &egui::Painter, r: Rect, a: f32, u: f32, e: f32, calm: bool) {
-    let k = tokens::ease_out_expo(e.clamp(0.0, 1.0));
-    let a = a * k;
     p.rect_filled(r, 0.0, fade(tokens::ACCENT, tokens::FOCUS_TINT * a));
     p.rect_stroke(
         r,
@@ -3105,7 +2528,7 @@ pub(super) fn focus_cage_eased(p: &egui::Painter, r: Rect, a: f32, u: f32, e: f3
     );
     let b = tokens::BRACKET * u;
     let s = Stroke::new(tokens::FOCUS_STROKE + 0.5, fade(tokens::FOCUS, a));
-    let o = 3.0 + if calm { 0.0 } else { (1.0 - k) * 10.0 * u };
+    let o = 3.0;
     for (corner, dx, dy) in [
         (r.left_top(), 1.0, 1.0),
         (r.right_top(), -1.0, 1.0),
@@ -3223,121 +2646,6 @@ mod tests {
         let mut h = ms.home.take().expect("home");
         h.tick_countdown(secs);
         ms.home = Some(h);
-    }
-
-    fn item(title: &str) -> LibraryItem {
-        LibraryItem {
-            folder: std::path::PathBuf::new(),
-            id: format!("path:/games/{title}.cue"),
-            title: title.into(),
-            subtitle: String::new(),
-            burnable: false,
-            launchable: true,
-        }
-    }
-
-    /// The desktop shelf for these game titles: (title, line, action, cover key) per case.
-    fn desktop_shelf(titles: &[&str]) -> Vec<(String, String, MenuAction, Option<String>)> {
-        let mut ms = MenuState::new();
-        ms.enable_home(false);
-        ms.set_local_demo(true);
-        let games: Vec<LibraryItem> = titles.iter().map(|t| item(t)).collect();
-        ms.set_library(&games, &[], &[]);
-        let h = ms.home.take().expect("home");
-        let cases = h.cases(&ms);
-        ms.home = Some(h);
-        cases
-            .into_iter()
-            .map(|c| (c.title, c.line, c.action, c.cover_key))
-            .collect()
-    }
-
-    #[test]
-    fn the_desktop_shelf_starts_with_the_newest_public_demo_disc() {
-        let shelf = desktop_shelf(&[
-            "Quake (quake-psx)",
-            "PSoXide Demo Disc v0.48 Private DIAG",
-            "PSoXide Demo Disc v0.47",
-            "PSoXide Demo Disc v0.45",
-            "PSoXide Demo Disc v0.47 Private DIAG",
-            "WipEout (USA)",
-        ]);
-        let titles: Vec<&str> = shelf.iter().map(|c| c.0.as_str()).collect();
-        assert_eq!(
-            titles,
-            [
-                "PSoXide Demo Disc",
-                "Open a games folder",
-                "Demo Disc v0.48 DIAG",
-                "Demo Disc v0.47 DIAG",
-                "Demo Disc v0.45",
-                "Quake (quake-psx)",
-                "WipEout (USA)",
-            ],
-            "the hero, then the other builds newest first, then the alphabetical shelf"
-        );
-        assert_eq!(
-            shelf[0].2,
-            MenuAction::LaunchGame("path:/games/PSoXide Demo Disc v0.47.cue".into()),
-            "Start disc starts the newest public release"
-        );
-        assert!(shelf[0].1.contains("v0.47"));
-        for demo in [&shelf[0], &shelf[2], &shelf[3], &shelf[4]] {
-            let key = demo.3.as_deref().expect("a cover key");
-            assert!(
-                key.starts_with(covers::DEMO_COVER_PREFIX),
-                "own cover: {key}"
-            );
-        }
-        let keys: std::collections::HashSet<_> =
-            [0, 2, 3, 4].iter().map(|i| &shelf[*i].3).collect();
-        assert_eq!(keys.len(), 4, "each case moves on its own");
-        assert!(
-            shelf[5]
-                .3
-                .as_deref()
-                .is_some_and(|k| !k.starts_with("embedded:")),
-            "other games look their art up as before"
-        );
-    }
-
-    #[test]
-    fn with_only_private_builds_the_hero_points_at_the_download() {
-        let shelf = desktop_shelf(&["PSoXide Demo Disc v0.48 Private DIAG"]);
-        assert_eq!(shelf[0].0, "PSoXide Demo Disc");
-        assert!(
-            matches!(shelf[0].2, MenuAction::OpenUrl(_)),
-            "{:?}",
-            shelf[0].2
-        );
-        assert_eq!(shelf[2].0, "Demo Disc v0.48 DIAG");
-        let nothing = desktop_shelf(&["Quake (quake-psx)"]);
-        assert_eq!(nothing[0].0, "PSoXide Demo Disc");
-        assert!(matches!(nothing[0].2, MenuAction::OpenUrl(_)));
-        assert_eq!(nothing[1].0, "Open a games folder");
-        assert_eq!(nothing[2].0, "Quake (quake-psx)");
-    }
-
-    #[test]
-    fn the_web_shelf_is_untouched_by_the_desktop_rules() {
-        let mut ms = home(false, DemoStatus::Ready);
-        ms.set_library(
-            &[item("PSoXide Demo Disc v0.47"), item("Quake (quake-psx)")],
-            &[],
-            &[],
-        );
-        let h = ms.home.take().expect("home");
-        let titles: Vec<String> = h.cases(&ms).into_iter().map(|c| c.title).collect();
-        ms.home = Some(h);
-        assert_eq!(
-            titles,
-            [
-                "PSoXide Demo Disc",
-                "Open a games folder",
-                "PSoXide Demo Disc v0.47",
-                "Quake (quake-psx)"
-            ]
-        );
     }
 
     #[test]

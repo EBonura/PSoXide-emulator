@@ -182,8 +182,6 @@ pub(crate) struct InputFrame {
     pub(crate) menu_letter_next: bool,
     /// Menu: the options button (Triangle went down), the case size toggle.
     pub(crate) menu_options: bool,
-    /// Menu: Square went down, the second action of the focused case.
-    pub(crate) menu_secondary: bool,
     /// First non-neutral left stick, for freecam.
     pub(crate) left_stick: (f32, f32),
     /// First non-neutral right stick, for freecam.
@@ -390,8 +388,7 @@ impl InputHub {
                 PsxPort::Off => {}
             }
 
-            // The keyboard has no Analog button: its mode key does nothing.
-            if live.mode && !state.mode_down && id != KEYBOARD_DEVICE_ID {
+            if live.mode && !state.mode_down {
                 let analog = self.routing.toggle_analog(id);
                 frame.analog_button = true;
                 frame.notices.push(InputNotice::ModeChanged {
@@ -435,7 +432,6 @@ impl InputHub {
         frame.menu_letter_prev = edges & button::L2 != 0;
         frame.menu_letter_next = edges & button::R2 != 0;
         frame.menu_options = edges & button::TRIANGLE != 0;
-        frame.menu_secondary = edges & button::SQUARE != 0;
         let steps = self.repeat.update(now_ms, resolved & DIRECTIONS);
         frame.menu_up = steps & button::UP != 0;
         frame.menu_down = steps & button::DOWN != 0;
@@ -487,16 +483,6 @@ impl InputHub {
     /// Select the controller identity a device presents to the guest.
     pub(crate) fn set_device_profile(&mut self, id: &str, profile: PadProfile) -> bool {
         self.routing.set_profile(id, profile)
-    }
-
-    /// Load the analog choices saved with the settings.
-    pub(crate) fn set_remembered_analog(&mut self, choices: BTreeMap<String, bool>) {
-        self.routing.set_remembered(choices);
-    }
-
-    /// The analog choices, when the player changed one since the last call.
-    pub(crate) fn take_remembered_analog(&mut self) -> Option<BTreeMap<String, bool>> {
-        self.routing.take_remembered()
     }
 
     /// Monotonic stamp changed by any route or mode edit.
@@ -816,22 +802,8 @@ mod tests {
     }
 
     #[test]
-    fn the_mode_button_switches_a_controller_between_analog_and_its_own_identity() {
-        // The keyboard has no Analog button: pressing its mode key changes nothing.
-        let mut hub = hub_with_pad();
-        let key = |down: bool| DeviceEvent::Sample {
-            id: KEYBOARD_DEVICE_ID.to_string(),
-            snapshot: PadSnapshot {
-                mode: down,
-                ..PadSnapshot::default()
-            },
-        };
-        assert!(!hub.step(100, vec![key(true)]).analog_button);
-        assert!(hub
-            .devices()
-            .iter()
-            .all(|d| d.identity.id != KEYBOARD_DEVICE_ID || d.profile != PadProfile::Analog));
-        for device in ["pad"] {
+    fn the_mode_button_switches_any_device_between_analog_and_its_own_identity() {
+        for device in [KEYBOARD_DEVICE_ID, "pad"] {
             let mut hub = hub_with_pad();
             let mode = |down: bool| DeviceEvent::Sample {
                 id: device.to_string(),
@@ -840,22 +812,19 @@ mod tests {
                     ..PadSnapshot::default()
                 },
             };
+            assert!(hub.step(100, vec![mode(true)]).analog_button);
             let row = |hub: &InputHub| {
                 hub.devices()
                     .into_iter()
                     .find(|r| r.identity.id == device)
                     .map(|r| r.profile)
             };
-            // A controller with sticks starts analog: the first press goes back
-            // to its own identity.
             assert_eq!(row(&hub), Some(PadProfile::Analog), "{device}");
-            assert!(hub.step(100, vec![mode(true)]).analog_button);
-            assert_ne!(row(&hub), Some(PadProfile::Analog), "{device}");
             // Holding it does not toggle again; a second press does.
             assert!(!hub.step(116, vec![mode(true)]).analog_button);
             hub.step(132, vec![mode(false)]);
             assert!(hub.step(148, vec![mode(true)]).analog_button);
-            assert_eq!(row(&hub), Some(PadProfile::Analog), "{device}");
+            assert_ne!(row(&hub), Some(PadProfile::Analog), "{device}");
         }
     }
 

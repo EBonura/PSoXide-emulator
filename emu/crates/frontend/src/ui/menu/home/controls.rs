@@ -563,17 +563,10 @@ pub(super) fn draw(
     }
     let bottom = lay.safe.bottom()
         - if desktop {
-            18.0 * u + h.hint_reserve(lay)
+            18.0 * u
         } else {
             lay.bar_reserve() + 4.0 * u
         };
-    h.draw_page_hints(
-        pc,
-        &[
-            (super::Btn::Cross, "Select or rebind"),
-            (super::Btn::Circle, "Back"),
-        ],
-    );
     let full_view = Rect::from_min_max(
         Pos2::new(left - 8.0, top),
         Pos2::new(left + width + 8.0, bottom),
@@ -934,19 +927,7 @@ fn draw_card(
             port.expand2(Vec2::new(2.0, 4.0)),
             Click::Ctl(Item::Port(info.identity.id.clone())),
         );
-        // Analog: the label and a toggle. A keyboard has no sticks: it never
-        // offers analog mode, and says so.
-        if info.identity.backend == crate::input::model::BackendKind::Keyboard {
-            p.text(
-                Pos2::new(r.right() - 14.0 * u, by + bottom_h / 2.0),
-                Align2::RIGHT_CENTER,
-                "Digital pad",
-                FontId::proportional(tokens::CAPTION_LARGE * u.min(1.15)),
-                fade(tokens::MUTED, a),
-            );
-            *row += 1;
-            return y + r.height();
-        }
+        // Analog: the label and a toggle.
         let analog = is_analog(info.profile);
         let track = pages::draw_toggle(p, r.right() - 14.0 * u, by + bottom_h / 2.0, analog, u, a);
         // The room the port chip leaves; the words give way before they touch it.
@@ -993,7 +974,7 @@ fn draw_card(
 }
 
 /// One row of the map: a label and a few caps.
-const MAP: [(&str, &[PadBindTarget]); 5] = [
+const MAP: [(&str, &[PadBindTarget]); 7] = [
     (
         "Move",
         &[
@@ -1023,9 +1004,31 @@ const MAP: [(&str, &[PadBindTarget]); 5] = [
     ),
     (
         "Start and Select",
-        &[PadBindTarget::Start, PadBindTarget::Select],
+        &[
+            PadBindTarget::Start,
+            PadBindTarget::Select,
+            PadBindTarget::Analog,
+        ],
     ),
     ("Stick clicks", &[PadBindTarget::L3, PadBindTarget::R3]),
+    (
+        "Left stick",
+        &[
+            PadBindTarget::LStickUp,
+            PadBindTarget::LStickDown,
+            PadBindTarget::LStickLeft,
+            PadBindTarget::LStickRight,
+        ],
+    ),
+    (
+        "Right stick",
+        &[
+            PadBindTarget::RStickUp,
+            PadBindTarget::RStickDown,
+            PadBindTarget::RStickLeft,
+            PadBindTarget::RStickRight,
+        ],
+    ),
 ];
 
 /// The small name over a cap.

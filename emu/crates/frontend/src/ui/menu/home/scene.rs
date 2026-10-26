@@ -17,10 +17,6 @@ pub(super) const GLOW: Color32 = Color32::from_rgb(10, 37, 48);
 /// Cyan accent (the X of the logo).
 pub(super) const CYAN: Color32 = Color32::from_rgb(34, 200, 229);
 
-/// Sides of every circle and ellipse the shell draws: enough that no facet
-/// shows at the largest size a disc appears on screen.
-pub(super) const RING_SEGMENTS: usize = 96;
-
 /// A point in scene space: x right, y down, z toward the viewer (pixels).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct V3 {
@@ -245,34 +241,6 @@ pub(super) enum CoverKind {
     Art,
 }
 
-/// What is going on with one case beyond its place on the shelf: the lookup
-/// of its picture, the picture arriving, and being the focused case.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct CaseFx {
-    /// 0..1: the picture is being looked up (a quiet shimmer and a thin ring).
-    pub loading: f32,
-    /// 0..1: how far the picture has faded in over the placeholder.
-    pub art_fade: f32,
-    /// 0..1 (a little more while it settles): the case is the focused one.
-    pub focus: f32,
-    /// Seconds, for the shimmer and the light.
-    pub time: f32,
-    /// Reduced motion: no turning or sweeping, only a scale and a glow.
-    pub calm: bool,
-}
-
-impl Default for CaseFx {
-    fn default() -> Self {
-        Self {
-            loading: 0.0,
-            art_fade: 1.0,
-            focus: 0.0,
-            time: 0.0,
-            calm: false,
-        }
-    }
-}
-
 /// One jewel case to draw.
 pub(super) struct CaseDraw<'a> {
     pub kind: CoverKind,
@@ -290,7 +258,6 @@ pub(super) struct CaseDraw<'a> {
     pub opacity: f32,
     /// Placeholder hue seed.
     pub seed: u32,
-    pub fx: CaseFx,
 }
 
 /// A face of the box as four scene-space corners, clockwise from top-left.
@@ -339,9 +306,9 @@ pub(super) fn draw_case(painter: &Painter, cam: &Camera, c: &CaseDraw<'_>) {
     for (k, a) in [(1.35, 0.10), (1.05, 0.14), (0.75, 0.18)] {
         let rx = hw * k;
         let ry = hw * 0.16 * k;
-        let pts: Vec<Pos2> = (0..RING_SEGMENTS)
+        let pts: Vec<Pos2> = (0..28)
             .map(|i| {
-                let t = i as f32 / RING_SEGMENTS as f32 * std::f32::consts::TAU;
+                let t = i as f32 / 28.0 * std::f32::consts::TAU;
                 foot + Vec2::new(t.cos() * rx, t.sin() * ry)
             })
             .collect();
@@ -350,25 +317,6 @@ pub(super) fn draw_case(painter: &Painter, cam: &Camera, c: &CaseDraw<'_>) {
             fade(Color32::BLACK, a * o),
             Stroke::NONE,
         ));
-    }
-    // The focused case stands in its own teal light.
-    let lit = c.fx.focus.clamp(0.0, 1.0);
-    if lit > 0.01 {
-        for (k, a) in [(1.9, 0.045), (1.45, 0.07), (1.0, 0.10)] {
-            let rx = hw * k;
-            let ry = hw * 0.2 * k;
-            let pts: Vec<Pos2> = (0..RING_SEGMENTS)
-                .map(|i| {
-                    let t = i as f32 / RING_SEGMENTS as f32 * std::f32::consts::TAU;
-                    foot + Vec2::new(t.cos() * rx, t.sin() * ry)
-                })
-                .collect();
-            painter.add(Shape::convex_polygon(
-                pts,
-                fade(CYAN, a * lit * o),
-                Stroke::NONE,
-            ));
-        }
     }
     let ghost = c.kind == CoverKind::Ghost;
     let (ftl, z0) = p(-1.0, -1.0, 1.0);
@@ -414,13 +362,9 @@ pub(super) fn draw_case(painter: &Painter, cam: &Camera, c: &CaseDraw<'_>) {
         if ghost {
             CYAN
         } else {
-            mix(
-                Color32::from_rgb(70, 190, 215),
-                Color32::from_rgb(128, 239, 255),
-                0.7 * lit,
-            )
+            Color32::from_rgb(70, 190, 215)
         },
-        (0.55 + 0.35 * lit) * o,
+        0.55 * o,
     );
     let open = c.lid > 0.01;
     let mut faces: Vec<(&Face, Color32, bool)> = vec![
@@ -510,18 +454,8 @@ fn draw_cover(painter: &Painter, face: &Face, c: &CaseDraw<'_>, o: f32) {
     let tilt = (inset.pts[1] - inset.pts[0]).angle();
     match c.kind {
         CoverKind::Art => {
-            // The picture fades in over the generated case, which stays under
-            // it until it has arrived completely.
-            if c.fx.art_fade < 0.999 {
-                draw_placeholder(painter, &inset, c, o, unit);
-            }
             if let Some(tex) = c.art {
-                textured_quad(
-                    painter,
-                    tex,
-                    &inset,
-                    fade(Color32::WHITE, o * c.fx.art_fade),
-                );
+                textured_quad(painter, tex, &inset, fade(Color32::WHITE, o));
             }
         }
         CoverKind::Ghost => {
@@ -540,24 +474,38 @@ fn draw_cover(painter: &Painter, face: &Face, c: &CaseDraw<'_>, o: f32) {
             );
         }
         CoverKind::Demo => draw_demo_cover(painter, &inset, o, unit, tilt),
-        CoverKind::Plain => draw_placeholder(painter, &inset, c, o, unit),
-    }
-    // The focused case's cover catches the teal light: a soft band that drifts
-    // across it (parked at one side in reduced motion).
-    if c.fx.focus > 0.02 && c.kind != CoverKind::Ghost {
-        let phase = if c.fx.calm {
-            0.35
-        } else {
-            0.5 + 0.5 * (c.fx.time * 0.8).sin()
-        };
-        light_band(
-            painter,
-            &inset,
-            -0.25 + 1.2 * phase,
-            0.34,
-            mix(CYAN, Color32::WHITE, 0.35),
-            0.22 * c.fx.focus.clamp(0.0, 1.0) * o,
-        );
+        CoverKind::Plain => {
+            let hue = c.seed % 4;
+            let (a, b) = [
+                (Color32::from_rgb(23, 50, 61), Color32::from_rgb(11, 26, 34)),
+                (Color32::from_rgb(20, 53, 67), Color32::from_rgb(10, 28, 39)),
+                (Color32::from_rgb(23, 58, 68), Color32::from_rgb(11, 30, 38)),
+                (Color32::from_rgb(26, 58, 74), Color32::from_rgb(11, 28, 39)),
+            ][hue as usize];
+            quad_gradient(painter, &inset, fade(a, o), fade(b, o));
+            let m = map(0.5, 0.40);
+            let r = 20.0 * unit;
+            let ring: Vec<Pos2> = (0..32)
+                .map(|i| {
+                    let t = i as f32 / 32.0 * std::f32::consts::TAU;
+                    m + Vec2::new(t.cos() * r, t.sin() * r)
+                })
+                .collect();
+            painter.add(Shape::closed_line(
+                ring,
+                Stroke::new(1.0, fade(CYAN, 0.5 * o)),
+            ));
+            painter.circle_stroke(m, 4.0 * unit, Stroke::new(1.0, fade(CYAN, 0.5 * o)));
+            let font = egui::FontId::proportional((w / 100.0 * 7.0).clamp(7.0, 40.0));
+            let galley = painter.layout(
+                c.title.to_string(),
+                font,
+                fade(Color32::from_rgb(230, 242, 247), o),
+                inset.pts[1].x - inset.pts[0].x - 8.0 * unit,
+            );
+            let pos = map(0.5, 0.78) - Vec2::new(galley.size().x / 2.0, galley.size().y / 2.0);
+            painter.add(Shape::galley(pos, galley, fade(Color32::WHITE, o)));
+        }
     }
     // A soft sheen across the upper corner.
     let sheen = Shape::convex_polygon(
@@ -566,109 +514,6 @@ fn draw_cover(painter: &Painter, face: &Face, c: &CaseDraw<'_>, o: f32) {
         Stroke::NONE,
     );
     painter.add(sheen);
-}
-
-/// The generated cover of a disc with no picture (yet): a tinted card with a
-/// disc ring and the title. While the lookup runs it shimmers and a thin ring
-/// turns around the hub.
-fn draw_placeholder(painter: &Painter, inset: &Face, c: &CaseDraw<'_>, o: f32, unit: f32) {
-    let map = |u: f32, v: f32| bilerp(inset, u, v);
-    let w = (inset.pts[1] - inset.pts[0]).length();
-    let hue = c.seed % 4;
-    let (a, b) = [
-        (Color32::from_rgb(23, 50, 61), Color32::from_rgb(11, 26, 34)),
-        (Color32::from_rgb(20, 53, 67), Color32::from_rgb(10, 28, 39)),
-        (Color32::from_rgb(23, 58, 68), Color32::from_rgb(11, 30, 38)),
-        (Color32::from_rgb(26, 58, 74), Color32::from_rgb(11, 28, 39)),
-    ][hue as usize];
-    quad_gradient(painter, inset, fade(a, o), fade(b, o));
-    let m = map(0.5, 0.40);
-    let r = 20.0 * unit;
-    let ring: Vec<Pos2> = (0..RING_SEGMENTS)
-        .map(|i| {
-            let t = i as f32 / RING_SEGMENTS as f32 * std::f32::consts::TAU;
-            m + Vec2::new(t.cos() * r, t.sin() * r)
-        })
-        .collect();
-    painter.add(Shape::closed_line(
-        ring,
-        Stroke::new(1.0, fade(CYAN, 0.5 * o)),
-    ));
-    painter.circle_stroke(m, 4.0 * unit, Stroke::new(1.0, fade(CYAN, 0.5 * o)));
-    let font = egui::FontId::proportional((w / 100.0 * 7.0).clamp(7.0, 40.0));
-    let galley = painter.layout(
-        c.title.to_string(),
-        font,
-        fade(Color32::from_rgb(230, 242, 247), o),
-        inset.pts[1].x - inset.pts[0].x - 8.0 * unit,
-    );
-    let pos = map(0.5, 0.78) - Vec2::new(galley.size().x / 2.0, galley.size().y / 2.0);
-    painter.add(Shape::galley(pos, galley, fade(Color32::WHITE, o)));
-    if c.fx.loading > 0.01 {
-        let load = c.fx.loading.clamp(0.0, 1.0);
-        if !c.fx.calm {
-            let sweep = (c.fx.time * 0.7).fract();
-            light_band(
-                painter,
-                inset,
-                -0.4 + 1.6 * sweep,
-                0.3,
-                mix(CYAN, Color32::WHITE, 0.2),
-                0.16 * load * o,
-            );
-        }
-        // A thin cyan arc turning around the hub ring.
-        let turn = c.fx.time * 2.4;
-        let arc: Vec<Pos2> = (0..=24)
-            .map(|i| {
-                let t = turn + i as f32 / 24.0 * 1.9;
-                m + Vec2::new(t.cos() * (r + 4.0 * unit), t.sin() * (r + 4.0 * unit))
-            })
-            .collect();
-        painter.add(Shape::line(
-            arc,
-            Stroke::new(
-                (1.4 * unit.sqrt()).clamp(1.0, 2.4),
-                fade(CYAN, 0.9 * load * o),
-            ),
-        ));
-    }
-}
-
-/// A soft diagonal band of light over a face: `u0` is where its left edge
-/// starts across the face (0 to 1), `width` its width, `peak` its brightest
-/// alpha. The band fades to nothing at both sides and never leaves the face.
-fn light_band(painter: &Painter, f: &Face, u0: f32, width: f32, color: Color32, peak: f32) {
-    let slant = 0.22;
-    let mut mesh = Mesh::default();
-    let uv = egui::epaint::WHITE_UV;
-    let columns = [(0.0, 0.0), (0.5, peak), (1.0, 0.0)];
-    let mut ok = 0;
-    for (k, (t, alpha)) in columns.iter().enumerate() {
-        let x = u0 + width * t;
-        let top = x.clamp(0.0, 1.0);
-        let bottom = (x - slant).clamp(0.0, 1.0);
-        let edge_fade = if (0.0..=1.0).contains(&x) { 1.0 } else { 0.0 };
-        let col = fade(color, alpha * edge_fade);
-        mesh.vertices.push(Vertex {
-            pos: bilerp(f, top, 0.0),
-            uv,
-            color: col,
-        });
-        mesh.vertices.push(Vertex {
-            pos: bilerp(f, bottom, 1.0),
-            uv,
-            color: col,
-        });
-        if k > 0 {
-            let b = (k as u32 - 1) * 2;
-            mesh.indices.extend([b, b + 1, b + 3, b, b + 3, b + 2]);
-            ok += 1;
-        }
-    }
-    if ok > 0 {
-        painter.add(Shape::mesh(mesh));
-    }
 }
 
 fn quad_gradient(painter: &Painter, f: &Face, top: Color32, bottom: Color32) {
@@ -737,9 +582,9 @@ fn draw_demo_cover(painter: &Painter, f: &Face, o: f32, unit: f32, tilt: f32) {
     );
     let centre = map(0.5, 0.56);
     for (i, r) in [10.0, 17.0, 24.0, 31.0, 38.0].iter().enumerate() {
-        let pts: Vec<Pos2> = (0..RING_SEGMENTS)
+        let pts: Vec<Pos2> = (0..40)
             .map(|k| {
-                let t = k as f32 / RING_SEGMENTS as f32 * std::f32::consts::TAU;
+                let t = k as f32 / 40.0 * std::f32::consts::TAU;
                 centre + Vec2::new(t.cos() * r * unit, t.sin() * r * unit * 0.9)
             })
             .collect();
@@ -750,9 +595,9 @@ fn draw_demo_cover(painter: &Painter, f: &Face, o: f32, unit: f32, tilt: f32) {
     }
     // The disc: a ring around the hub with the cyan X of the logo.
     let r = 17.0 * unit;
-    let ring: Vec<Pos2> = (0..RING_SEGMENTS)
+    let ring: Vec<Pos2> = (0..40)
         .map(|k| {
-            let t = k as f32 / RING_SEGMENTS as f32 * std::f32::consts::TAU;
+            let t = k as f32 / 40.0 * std::f32::consts::TAU;
             centre + Vec2::new(t.cos() * r, t.sin() * r)
         })
         .collect();

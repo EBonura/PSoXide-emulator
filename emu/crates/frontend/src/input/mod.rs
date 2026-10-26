@@ -129,21 +129,6 @@ impl InputRouter {
         self.hub.set_device_profile(id, profile)
     }
 
-    /// Load the analog choices saved with the settings (call before pads connect).
-    pub(crate) fn set_remembered_analog(
-        &mut self,
-        choices: std::collections::BTreeMap<String, bool>,
-    ) {
-        self.hub.set_remembered_analog(choices);
-    }
-
-    /// The analog choices, when one changed since the last call, to be saved.
-    pub(crate) fn take_remembered_analog(
-        &mut self,
-    ) -> Option<std::collections::BTreeMap<String, bool>> {
-        self.hub.take_remembered_analog()
-    }
-
     /// Monotonic stamp changed by any route or mode edit.
     pub(crate) fn routing_generation(&self) -> u64 {
         self.hub.routing_generation()

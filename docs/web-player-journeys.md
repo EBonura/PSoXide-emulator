@@ -150,20 +150,18 @@ Results on the landed build (Chrome headless, macOS; WebKit was not driven, see 
 | desktop-controls | Controls opens inside the shell; each group fits the screen with 44 px targets and nothing overlaps | pass |
 | desktop-controls | a device's port and analog toggle change the routing, and change back | pass |
 | desktop-controls | a key is rebound by selecting it and pressing the new one; Escape cancels; Reset restores | pass |
-| desktop-controls | binding a key another action holds swaps the two and says so; nothing is left unbound | pass |
 | desktop-controls | the keyboard moves between rows and along a row, Enter starts a binding, Escape cancels, then goes Home | pass |
 | desktop-controls | the touch rows work: a toggle flips and a slider drags | pass |
 | desktop-controls | page logged no errors | pass |
 | desktop-controls-narrow | Controls opens inside the shell; each group fits the screen with 44 px targets and nothing overlaps | pass |
 | desktop-controls-narrow | a device's port and analog toggle change the routing, and change back | pass |
 | desktop-controls-narrow | a key is rebound by selecting it and pressing the new one; Escape cancels; Reset restores | pass |
-| desktop-controls-narrow | binding a key another action holds swaps the two and says so; nothing is left unbound | pass |
 | desktop-controls-narrow | the keyboard moves between rows and along a row, Enter starts a binding, Escape cancels, then goes Home | pass |
 | desktop-controls-narrow | the touch rows work: a toggle flips and a slider drags | pass |
 | desktop-controls-narrow | page logged no errors | pass |
 | desktop-throttled | at 4 frames a second, clicking the nav switches sections | pass |
 | desktop-throttled | at 4 frames a second, PageDown and Escape switch sections without dropping a press | pass |
-| desktop-throttled | at 4 frames a second, Enter starts the focused disc and the launch takes about 2.3 s | pass |
+| desktop-throttled | at 4 frames a second, Enter starts the focused disc and the launch takes about 4.6 s | pass |
 | desktop-throttled | at 4 frames a second, a click or tap on Start disc launches, and any input skips the sequence | pass |
 | desktop-throttled | at 4 frames a second, a quick pad press (Cross) on the focused Start disc launches it | pass |
 | desktop-covers | cover fetch (hit): the shelf asks the collections by file name | pass |
@@ -173,11 +171,6 @@ Results on the landed build (Chrome headless, macOS; WebKit was not driven, see 
 | desktop-covers | cover fetch (offline): the shelf asks the collections by file name | pass |
 | desktop-covers | box art switched off in Settings: opening a folder fetches nothing | pass |
 | desktop-covers | with no play history, a folder's discs are not offered as recents | pass |
-| desktop-grouping | a folder of rips lists one case per game: no tracks, discs together | pass |
-| desktop-cover-states | a cover being fetched shows a loading state on its case, then (hit) settles | pass |
-| desktop-cover-states | a cover being fetched shows a loading state on its case, then (miss) settles | pass |
-| desktop-selection | moving the focus lifts the new case and settles the old one | pass |
-| desktop-selection | Reduce motion in Settings is a switch and the shell reports it | pass |
 | desktop-iframe | first visit: the home screen counts down, then the demo disc runs | pass |
 | desktop-iframe | guest sees an analog DualShock with no F9 step | pass |
 | desktop-iframe | keyboard arrow reaches guest port 1 (left stick and D-pad) | pass |
@@ -270,7 +263,6 @@ Results on the landed build (Chrome headless, macOS; WebKit was not driven, see 
 | phone-iframe | reload comes back to the home screen; tapping Start disc plays | pass |
 | phone-iframe | page logged no errors | pass |
 | phone-home | first visit: Home opens at once on the demo disc, with the countdown inline and nothing on top | pass |
-| phone-home | the home screen shows the shell header only: no touch controller on it | pass |
 | phone-home | 'What is on it' opens on demand and closes again | pass |
 | phone-home | the countdown is cancelled by a key and the visitor stays on Home | pass |
 | phone-home | a return visit stays on Home with no countdown, and Start disc starts the disc | pass |
@@ -287,7 +279,6 @@ Results on the landed build (Chrome headless, macOS; WebKit was not driven, see 
 | phone-home | the welcome pages page forward and back, and Close returns Home | pass |
 | phone-home | Settings rows are real controls: a toggle flips and a slider drags | pass |
 | phone-home-small | first visit: Home opens at once on the demo disc, with the countdown inline and nothing on top | pass |
-| phone-home-small | the home screen shows the shell header only: no touch controller on it | pass |
 | phone-home-small | 'What is on it' opens on demand and closes again | pass |
 | phone-home-small | the countdown is cancelled by a key and the visitor stays on Home | pass |
 | phone-home-small | a return visit stays on Home with no countdown, and Start disc starts the disc | pass |
@@ -304,7 +295,6 @@ Results on the landed build (Chrome headless, macOS; WebKit was not driven, see 
 | phone-home-small | the welcome pages page forward and back, and Close returns Home | pass |
 | phone-home-small | Settings rows are real controls: a toggle flips and a slider drags | pass |
 | phone-home-landscape | first visit: Home opens at once on the demo disc, with the countdown inline and nothing on top | pass |
-| phone-home-landscape | the home screen shows the shell header only: no touch controller on it | pass |
 | phone-home-landscape | 'What is on it' opens on demand and closes again | pass |
 | phone-home-landscape | the countdown is cancelled by a key and the visitor stays on Home | pass |
 | phone-home-landscape | a return visit stays on Home with no countdown, and Start disc starts the disc | pass |
@@ -320,52 +310,41 @@ Results on the landed build (Chrome headless, macOS; WebKit was not driven, see 
 | phone-home-landscape | every section is left the same visible ways: Back, Escape, the nav, the logo and a swipe or tap | pass |
 | phone-home-landscape | the welcome pages page forward and back, and Close returns Home | pass |
 | phone-home-landscape | Settings rows are real controls: a toggle flips and a slider drags | pass |
-| phone-grouping | a folder of rips lists one case per game: no tracks, discs together | pass |
-| phone-cover-states | a cover being fetched shows a loading state on its case, then (hit) settles | pass |
-| phone-cover-states | a cover being fetched shows a loading state on its case, then (miss) settles | pass |
-| phone-selection | moving the focus lifts the new case and settles the old one | pass |
-| phone-selection | Reduce motion in Settings is a switch and the shell reports it | pass |
 | phone-shell | Start disc plays the launch sequence (case opens, disc out, case recedes, tray, spin) and boots | pass |
 | phone-shell | the shell over the running game: the same nav, a Game section and the game's own case | pass |
 | phone-shell | every section opens inside the shell and fits; each is left by pad or keyboard or touch | pass |
 | phone-shell | Debug on a phone is a full page of the shell: one column, nothing over the game, a way back | pass |
-| phone-shell | the on-screen menu button answers mouse clicks as it does taps: a click resumes, a click pauses into the shell | pass |
 | phone-shell | Escape and the touch menu button leave the shell from Home and resume the same machine | pass |
 | phone-shell | page logged no errors | pass |
 | phone-shell-small | Start disc plays the launch sequence (case opens, disc out, case recedes, tray, spin) and boots | pass |
 | phone-shell-small | the shell over the running game: the same nav, a Game section and the game's own case | pass |
 | phone-shell-small | every section opens inside the shell and fits; each is left by pad or keyboard or touch | pass |
 | phone-shell-small | Debug on a phone is a full page of the shell: one column, nothing over the game, a way back | pass |
-| phone-shell-small | the on-screen menu button answers mouse clicks as it does taps: a click resumes, a click pauses into the shell | pass |
 | phone-shell-small | Escape and the touch menu button leave the shell from Home and resume the same machine | pass |
 | phone-shell-small | page logged no errors | pass |
 | phone-controls | Controls opens inside the shell; each group fits the screen with 44 px targets and nothing overlaps | pass |
 | phone-controls | a device's port and analog toggle change the routing, and change back | pass |
 | phone-controls | a key is rebound by selecting it and pressing the new one; Escape cancels; Reset restores | pass |
-| phone-controls | binding a key another action holds swaps the two and says so; nothing is left unbound | pass |
 | phone-controls | the touch rows work: a toggle flips and a slider drags | pass |
 | phone-controls | page logged no errors | pass |
 | phone-controls-small | Controls opens inside the shell; each group fits the screen with 44 px targets and nothing overlaps | pass |
 | phone-controls-small | a device's port and analog toggle change the routing, and change back | pass |
 | phone-controls-small | a key is rebound by selecting it and pressing the new one; Escape cancels; Reset restores | pass |
-| phone-controls-small | binding a key another action holds swaps the two and says so; nothing is left unbound | pass |
 | phone-controls-small | the touch rows work: a toggle flips and a slider drags | pass |
 | phone-controls-small | page logged no errors | pass |
 | phone-controls-landscape | Controls opens inside the shell; each group fits the screen with 44 px targets and nothing overlaps | pass |
 | phone-controls-landscape | a device's port and analog toggle change the routing, and change back | pass |
 | phone-controls-landscape | a key is rebound by selecting it and pressing the new one; Escape cancels; Reset restores | pass |
-| phone-controls-landscape | binding a key another action holds swaps the two and says so; nothing is left unbound | pass |
 | phone-controls-landscape | the touch rows work: a toggle flips and a slider drags | pass |
 | phone-controls-landscape | page logged no errors | pass |
 | phone-throttled | at 4 frames a second, clicking the nav switches sections | pass |
 | phone-throttled | at 4 frames a second, PageDown and Escape switch sections without dropping a press | pass |
-| phone-throttled | at 4 frames a second, Enter starts the focused disc and the launch takes about 2.3 s | pass |
+| phone-throttled | at 4 frames a second, Enter starts the focused disc and the launch takes about 4.6 s | pass |
 | phone-throttled | at 4 frames a second, a click or tap on Start disc launches, and any input skips the sequence | pass |
 | phone-shell-landscape | Start disc plays the launch sequence (case opens, disc out, case recedes, tray, spin) and boots | pass |
 | phone-shell-landscape | the shell over the running game: the same nav, a Game section and the game's own case | pass |
 | phone-shell-landscape | every section opens inside the shell and fits; each is left by pad or keyboard or touch | pass |
 | phone-shell-landscape | Debug on a phone is a full page of the shell: one column, nothing over the game, a way back | pass |
-| phone-shell-landscape | the on-screen menu button answers mouse clicks as it does taps: a click resumes, a click pauses into the shell | pass |
 | phone-shell-landscape | Escape and the touch menu button leave the shell from Home and resume the same machine | pass |
 | phone-shell-landscape | page logged no errors | pass |
 | phone-landscape | first visit: the home screen counts down on a phone, then the demo disc runs | pass |
@@ -415,7 +394,7 @@ same `MenuAction`s going out. Tokens (colours, type scale, spacing, easings) liv
   Menu button are Back before a start and on a section: they never start a disc.
 - Home is the library: big cases on the floor, or a grid (the button at the top, Triangle or Tab).
   L2/R2 jump by first letter with a big letter badge; on a phone a rail at the edge scrubs the
-  letters. Choosing a disc plays the launch sequence (2.3 s of wall clock at any frame rate; the boot starts with it; any input fast-forwards it on its own curves instead of jumping to the end).
+  letters. Choosing a disc plays the launch sequence (4.6 s of wall clock at any frame rate; the boot starts with it; any input skips to the end).
 - On a phone the sections are a floating bar at the bottom, clear of the touch overlay.
 - Controls is drawn by the shell itself (`home/controls.rs`): live device cards (grey while idle,
   cyan while a device is in use) with a port chip and an analog toggle, the remappable keyboard map
@@ -482,45 +461,3 @@ two and says so; the shell journeys sample the screen's mean brightness through 
 the pad-button step tells a stalled page (no frames drawn, retried once, logged) from a missed hit. The
 `--scenario review --label <name> --shots <dir>` run takes the before/after screenshots at 1280x800,
 800x600, 393x852, 360x640 and 852x393.
-
-## Polish round 2 (10-25)
-
-- A folder is a list of games. The desktop and the browser use one grouping
-  (`psoxide_settings::game_group`): everything a cue sheet or playlist names is part of it, only a
-  disc's data track is shown when its `(Track N)` files stand alone, and `(Disc N)` discs of one
-  game are one case. The browser's folder scan reads cue and m3u names (the first 64 KB of each)
-  and opens the data track; it has no multi-track audio yet.
-- Box art is a chain, tried in order: the disc's own `<name>.cover.png`/`cover.png` (desktop), the
-  boot serial in xlenore, the Redump list's name for the serial in libretro-thumbnails, the CRC-32
-  of the data track in the list (then its serial in xlenore and its name in libretro), and the
-  file name last. The list (`libretro-database`, CC BY-SA 4.0) is downloaded once and cached, not
-  bundled; hashing is off the UI thread, one disc at a time, cached by file, size and time.
-- A case whose picture is being looked up shimmers and shows a thin turning ring (after a short
-  delay, so a cached picture never flashes it); the picture fades in over the placeholder; a miss
-  settles back without a flicker. The probe's `cases` entries carry `[title, line, cover state,
-  focus, loading, art fade]`.
-- The focused case lifts toward you, turns slowly, stands in teal light and gets brackets that ease
-  in; the others settle back (a spring per case). Settings > Reduce motion (or the browser's
-  setting) keeps only a scale and a glow.
-- The launch is 2.3 s: the disc and the tray share one tilted frame, so the disc ends flat in the
-  recess; discs are drawn 96-sided with label and hub rings; the spin goes on while the game loads.
-- Journeys added: `*-grouping`, `*-cover-states`, `*-selection`; the launch ones now expect 2.3 s.
-
-## Hints, analog and the toolbar (10-25, round 2)
-
-- Every control that has a button shows it. `home/hints.rs` draws the four face glyphs (cross,
-  circle, triangle, square) and the L1/R1/L2/R2 pills; a controller shows glyphs, a desktop
-  keyboard shows key caps (Enter, Esc, Tab, H, Q, E), a touch screen shows none. Where: Triangle
-  beside the view switch; L1 and R1 at the two ends of the tab bar (top nav and phone bar, clickable
-  and lit for a moment by the press); Cross on Start/Play; Square beside What's on it, Start over and
-  Burn (Square is the focused case's second action); L2/R2 "A to Z" when the shelf has letters; a
-  row at the foot of Settings, Game, Controls, Debug and Welcome; "Any button skips" under the launch.
-- Analog: a controller that reports sticks starts in analog mode, and the player's choice is saved
-  by controller name (`input.analog_choice`). The keyboard is never analog: no toggle on its card, no
-  Analog or stick-key rows in its map, its mode key does nothing, and `set_profile` refuses it. It
-  presents a DualShock that is digital until a game asks, so the demo disc still reaches analog by
-  its own handshake. (A game asking is not a setting.)
-- The toolbar over a game, the touch buttons around it, the toast and the debug panels use the
-  shell's palette and states (`theme.rs` palette, `toolbar.rs` shell style).
-- Journeys added: `*-hints`; the Controls device step now expects no keyboard toggle and an analog
-  controller.
