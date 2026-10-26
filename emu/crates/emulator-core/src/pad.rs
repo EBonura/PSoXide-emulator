@@ -495,6 +495,8 @@ pub enum PadMode {
     /// to change pad state (switch between digital/analog, rumble
     /// mapping, etc), then exits via `0x43`+`0x00`.
     Config,
+    /// Namco neGcon twist controller, ID 0x23 and eight response bytes.
+    Negcon,
 }
 
 /// PS1 controller -- digital by default, DualShock-capable. Tracks
@@ -655,6 +657,29 @@ impl DigitalPad {
         }
     }
 
+    /// Build a neGcon with centered twist and all pressure controls released.
+    pub fn new_negcon() -> Self {
+        Self {
+            analog_capable: false,
+            mode: PadMode::Negcon,
+            mode_before_config: PadMode::Negcon,
+            right_y: 0,
+            left_x: 0,
+            left_y: 0,
+            ..Self::new()
+        }
+    }
+
+    /// Supply the four independent neGcon controls without digital synthesis.
+    pub fn set_negcon_axes(&mut self, twist: u8, i: u8, ii: u8, left_shoulder: u8) {
+        if self.mode == PadMode::Negcon {
+            self.right_x = twist;
+            self.right_y = i;
+            self.left_x = ii;
+            self.left_y = left_shoulder;
+        }
+    }
+
     /// Current vibration-motor state: `(small_on, big_strength)`.
     /// The frontend polls this once per frame to drive a host
     /// haptics device (gamepad rumble, phone vibrate, etc.).
@@ -741,6 +766,7 @@ impl DigitalPad {
             PadMode::Digital => PadMode::Analog,
             PadMode::Analog => PadMode::Digital,
             PadMode::Config => PadMode::Config,
+            PadMode::Negcon => PadMode::Negcon,
         };
         true
     }
@@ -764,6 +790,9 @@ impl DigitalPad {
     /// left_y)` are each 0..=255 with `STICK_CENTER = 0x80`. Games
     /// only see these when the pad is in Analog (or Config) mode.
     pub fn set_sticks(&mut self, right_x: u8, right_y: u8, left_x: u8, left_y: u8) {
+        if self.mode == PadMode::Negcon {
+            return;
+        }
         self.right_x = right_x;
         self.right_y = right_y;
         self.left_x = left_x;
@@ -777,6 +806,7 @@ impl DigitalPad {
             PadMode::Digital => 0x41,
             PadMode::Analog => 0x73,
             PadMode::Config => 0xF3,
+            PadMode::Negcon => 0x23,
         }
     }
 
@@ -784,10 +814,17 @@ impl DigitalPad {
     /// (command `0x42`). Step 1 = ID hi (0x5A), 2-3 = buttons, 4-7 =
     /// analog sticks when present.
     fn poll_byte(&self, step: u8) -> u8 {
+        // The twist controller has no Select, stick clicks, L1/L2/R2 or
+        // Cross/Square switches. Pressure controls never synthesize them.
+        let buttons = if self.mode == PadMode::Negcon {
+            self.buttons.bits() & 0x38F8
+        } else {
+            self.buttons.bits()
+        };
         match step {
             1 => 0x5A,
-            2 => !(self.buttons.bits() & 0xFF) as u8,
-            3 => !((self.buttons.bits() >> 8) & 0xFF) as u8,
+            2 => !(buttons & 0xFF) as u8,
+            3 => !((buttons >> 8) & 0xFF) as u8,
             4 => self.right_x,
             5 => self.right_y,
             6 => self.left_x,
@@ -809,6 +846,11 @@ impl DigitalPad {
         // `0x44`, ...). Reply with ID_low and hold ACK to invite the
         // next byte.
         if self.step == 0 {
+            // neGcon has no DualShock configuration or rumble commands.
+            if self.mode == PadMode::Negcon && tx != 0x42 {
+                self.reset();
+                return (0xFF, false);
+            }
             self.cmd = tx;
             self.current_trace_cycle = now;
             self.record_command(tx);
@@ -853,7 +895,7 @@ impl DigitalPad {
         match cmd {
             0x42 => match self.mode {
                 PadMode::Digital => DIGITAL_POLL_LAST,
-                PadMode::Analog | PadMode::Config => ANALOG_POLL_LAST,
+                PadMode::Analog | PadMode::Config | PadMode::Negcon => ANALOG_POLL_LAST,
             },
             0x43 | 0x44 | 0x45 | 0x46 | 0x47 | 0x4C | 0x4D if !self.analog_capable => {
                 DIGITAL_POLL_LAST
