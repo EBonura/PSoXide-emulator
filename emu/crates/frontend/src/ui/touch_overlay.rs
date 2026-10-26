@@ -99,7 +99,13 @@ pub(crate) fn reserved(ctx: &Context, touch: &TouchDevice) -> Reserved {
 }
 
 /// Paint the controller above everything else.
-pub(crate) fn draw(ctx: &Context, touch: &TouchDevice, menu_open: bool, debug_open: bool) {
+pub(crate) fn draw(
+    ctx: &Context,
+    touch: &TouchDevice,
+    menu_open: bool,
+    debug_open: bool,
+    running: bool,
+) {
     let show_pad = !menu_open;
     let Some(layout) = touch.layout() else {
         return;
@@ -134,7 +140,11 @@ pub(crate) fn draw(ctx: &Context, touch: &TouchDevice, menu_open: bool, debug_op
     for ui in &layout.ui {
         let down = pad.ui_pressed() == Some(ui.id);
         match ui.id {
-            UiId::Pause => draw_icon_button(&painter, &space, ui.draw, icons::PAUSE, down, alpha),
+            UiId::Pause => {
+                // Pause while the game runs, play while it is paused: the button shows what it does.
+                let icon = if running { icons::PAUSE } else { icons::PLAY };
+                draw_icon_button(&painter, &space, ui.draw, icon, down, alpha)
+            }
             UiId::Save => draw_icon_button(&painter, &space, ui.draw, icons::SAVE, down, alpha),
             UiId::Load => draw_icon_button(&painter, &space, ui.draw, icons::FOLDER, down, alpha),
             UiId::Debug => draw_icon_button(

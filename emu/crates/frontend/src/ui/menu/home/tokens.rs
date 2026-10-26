@@ -51,7 +51,6 @@ pub(crate) const CAPTION: f32 = 12.0;
 pub(crate) const CAPTION_LARGE: f32 = 14.0;
 pub(crate) const METRIC: f32 = 36.0;
 pub(crate) const SLIDER_VALUE: f32 = 26.0;
-pub(crate) const BAR_VALUE: f32 = 22.0;
 
 // ---- Spacing and sizes (px) ---------------------------------------------------
 

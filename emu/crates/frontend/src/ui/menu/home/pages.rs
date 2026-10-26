@@ -101,9 +101,9 @@ fn percent(value: &str) -> Option<u32> {
     value.trim().trim_end_matches('%').parse().ok()
 }
 
-/// The face of a slider's number: the shell's own type, like every other word on the page.
+/// The face of a slider's number: the same type as every other row's value (UI scale and the rest).
 fn value_font(u: f32) -> FontId {
-    FontId::proportional(tokens::BAR_VALUE * u)
+    FontId::proportional(tokens::BODY * u)
 }
 
 /// How a settings row is drawn and edited.
@@ -570,7 +570,7 @@ fn draw_control(
                 Align2::RIGHT_CENTER,
                 label,
                 value_font(u),
-                fade(tokens::TEXT_2, a),
+                fade(tokens::MUTED, a),
             );
             let tw = (200.0 * u).min(r.width() * 0.4);
             // Every track starts at the same place: room for the widest value, not this one.
@@ -821,6 +821,6 @@ mod tests {
     #[test]
     fn slider_numbers_use_the_shell_type_not_the_pixel_face() {
         assert_eq!(value_font(1.0).family, egui::FontFamily::Proportional);
-        assert!((value_font(1.0).size - tokens::BAR_VALUE).abs() < 1e-3);
+        assert!((value_font(1.0).size - tokens::BODY).abs() < 1e-3);
     }
 }

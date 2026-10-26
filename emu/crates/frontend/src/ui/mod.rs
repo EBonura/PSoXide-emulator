@@ -200,6 +200,7 @@ pub fn draw_layout(
             input_router.touch(),
             state.menu.open,
             state.panels.debug_sidebar,
+            state.running,
         );
     }
 }
