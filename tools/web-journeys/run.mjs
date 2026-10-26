@@ -2866,7 +2866,8 @@ async function journeyDebug(label, urlFor, size) {
     if (beside) {
       if (x1 < size.w - 60) return `the panel is not at the right edge: ${u.debug.rect}`;
       if (mobile) {
-        if (Math.abs((x1 - x0) / size.w - 0.33) > 0.05) return `the panel is ${x1 - x0} wide in a ${size.w} window, not about a third`;
+        const share = size.w > size.h ? 0.28 : 0.33;
+        if (Math.abs((x1 - x0) / size.w - share) > 0.03) return `the panel is ${x1 - x0} wide in a ${size.w} window, not about ${share}`;
         if (y1 - y0 < size.h * 0.6) return `the panel is only ${y1 - y0} tall in a ${size.h} window`;
         const g = u.game;
         if (g[2] > x0 + 1) return `the picture reaches ${g[2]} into the panel at ${x0}`;
@@ -2904,18 +2905,31 @@ async function journeyDebug(label, urlFor, size) {
       // The stat cards sit above the fold of the Performance tab, and the first chart starts in view on a tall phone.
       const sb = u.debug.stats_bottom, vb = u.debug.scroll[4];
       if (!(sb > 0 && sb <= vb)) return `the stat cards end at ${sb}, the view ends at ${vb}`;
-      if (mobile && size.h >= 800 && size.w < size.h && sb + 40 > vb) return `the first chart does not start in view (stats end ${sb}, view ends ${vb})`;
+      if (mobile && sb + 40 > vb) return `the first chart does not start in view (stats end ${sb}, view ends ${vb})`;
+      if (mobile) {
+        // The phone layout: a portrait phone shows the frame chart and the limits chart without scrolling; held
+        // sideways it shows the stats and the whole frame chart.
+        const [, , , , frameBottom, limitsBottom] = u.debug.layout;
+        if (size.w < size.h && !(limitsBottom > 0 && limitsBottom <= vb)) return `two charts are not in view: the second ends at ${limitsBottom}, the view ends at ${vb}`;
+        if (size.w > size.h && !(frameBottom > 0 && frameBottom <= vb + 30)) return `the first chart is not in view: its section ends at ${frameBottom}, the view ends at ${vb}`;
+      }
+      // Compact controls: Pause, ?, the Target select and Export on one row where the column is wide; the
+      // chart legend is one line of short labels.
+      const [pauseTop, targetTop, exportTop, legendH] = u.debug.layout;
+      const w = u.debug.rect[2] - u.debug.rect[0];
+      if (!mobile && w >= 190 && (Math.abs(pauseTop - targetTop) > 3 || Math.abs(pauseTop - exportTop) > 3)) return `Pause, Target and Export are not on one row: ${[pauseTop, targetTop, exportTop]}`;
+      if (!mobile && legendH > 30) return `the chart legend is ${legendH} px tall, not one line`;
       const head = top - y0;
-      if (head > (u.debug.rect[2] - u.debug.rect[0] < 200 ? 120 : 84)) return `the header and tabs take ${head} px of the panel`;
+      if (head > (mobile ? 60 : 84)) return `the header and tabs take ${head} px of the panel`;
     }
     if (mobile) {
       // Dense: the readings and the tabs take little of the column, and the tabs are never scrolled to.
       const width = u.debug.rect[2] - u.debug.rect[0];
       const head = top - y0;
-      if (width >= 200 && u.debug.tab_rows > 1) return `the tabs take ${u.debug.tab_rows} rows in a ${width} px panel`;
-      if (u.debug.tab_rows > 3) return `the tabs take ${u.debug.tab_rows} rows`;
-      if (width >= 200 && head > 78) return `the header and tabs take ${head} px of the ${y1 - y0} px panel`;
-      if (width < 200 && head > 150) return `the header and tabs take ${head} px of the ${y1 - y0} px panel`;
+      if (u.debug.tab_rows > 1) return `the tabs take ${u.debug.tab_rows} rows in a ${width} px panel`;
+      if (head > 60) return `the header and tabs take ${head} px of the ${y1 - y0} px panel`;
+      const [tabY, ...tabX] = u.debug.tabs;
+      if (!(tabX.every((x, i) => x > u.debug.rect[0] && x < u.debug.rect[2] && (i === 0 || x > tabX[i - 1])))) return `the tabs are not in order inside the panel: ${tabX}`;
     }
   });
   // Momentum scrolling of the panel's content (the shell's lists have their own journey, journeyMomentum).
@@ -2942,7 +2956,54 @@ async function journeyDebug(label, urlFor, size) {
   const toTop = async () => {
     for (let i = 0; i < 30 && (await scrollNow())[0] > 0.5; i++) { await flickContent(0.2, 0.9, 8, 140); await sleep(400); }
   };
-  if (mobile) await step("a flick on the panel's content keeps coasting after the finger lifts and slows to a stop", async () => {
+  const tapTab = async (i) => {
+    const [tabY, ...tabX] = (await page.ux()).debug.tabs;
+    await page.tap(tabX[i], tabY);
+    await sleep(500);
+  };
+  // The Performance tab's sections are folded to a line each and fit the panel; a tap on a header unfolds one.
+  if (mobile) await step("a tap on a section header unfolds it and a second tap folds it again", async () => {
+    await toTop();
+    const sections = async () => (await page.ux()).debug.sections;
+    const headers = (await sections()).filter((y) => y !== 0);
+    const viewBottom = (await scrollNow())[4] - 10;
+    const folded = headers.map((y, i) => [y, i]).filter(([y]) => y > 0 && y < viewBottom);
+    if (folded.length < 1) return `only ${folded.length} folded sections: ${headers}`;
+    const x0 = (await page.ux()).debug.rect[0] + 25;
+    const [yLast, iLast] = folded[folded.length - 1];
+    await page.tap(x0, yLast);
+    await sleep(500);
+    if (!((await sections())[iLast] < 0)) return `the header at ${yLast} did not unfold: ${await sections()}`;
+    await page.tap(x0, yLast);
+    await sleep(500);
+    if (!((await sections())[iLast] > 0)) return "a second tap did not fold it";
+  });
+  let nothingToFling = false;
+  if (mobile) await step("every section unfolded is a long page (for the scrolling steps)", async () => {
+    await toTop();
+    const x0 = (await page.ux()).debug.rect[0] + 25;
+    const viewBottom = (await scrollNow())[4] - 10;
+    const headers = (await page.ux()).debug.sections.filter((y) => y !== 0);
+    for (let i = headers.length - 1; i >= 0; i--) {
+      if (headers[i] > 0 && headers[i] < viewBottom) { await page.tap(x0, headers[i]); await sleep(350); }
+    }
+    // Held sideways the lower headers start out of view: scroll down, unfold what has come into view, come back.
+    if (!((await scrollNow())[1] > 300)) {
+      await flickContent(0.9, 0.1, 6, 100);
+      await sleep(1200);
+
+      const y1 = (await scrollNow())[4] - 10;
+      const now = (await page.ux()).debug.sections.map((y, i) => [y, i]).filter(([y]) => y > 0 && y < y1);
+      for (const [y] of now.reverse()) { await page.tap(x0, y); await sleep(350); }
+    }
+    await toTop();
+    const end = await scrollNow();
+    // A tall phone shows the whole panel with every section open: there is nothing to fling (the bounce at the
+    // ends is its own step below), and the coasting steps run on the sizes where the panel is longer than its view.
+    nothingToFling = !(end[1] > 300);
+    if (nothingToFling && size.h < 800) return `all sections open and only ${end[1]} px past the view`;
+  });
+  if (mobile && !nothingToFling) await step("a flick on the panel's content keeps coasting after the finger lifts and slows to a stop", async () => {
     // The harness delivers touch events at the page's pace; a flick that was delivered slowly says nothing about
     // momentum, so a slow one is tried again (a fast one is what a finger does).
     let start;
@@ -2969,7 +3030,7 @@ async function journeyDebug(label, urlFor, size) {
     await page.shot(`${label}-7-after-fling`);
     if (end.debug.scroll[0] <= 50) return `it ended at ${end.debug.scroll[0]}`;
   });
-  if (mobile) await step("a finger put down on a coasting panel stops it where it is and presses nothing", async () => {
+  if (mobile && !nothingToFling) await step("a finger put down on a coasting panel stops it where it is and presses nothing", async () => {
     await toTop();
     await sleep(500);
     await flickContent(0.9, 0.2);
@@ -3002,6 +3063,13 @@ async function journeyDebug(label, urlFor, size) {
     if (back.some((v) => v > 0.5)) return `crossed the top on the way back: ${back}`;
     const end = await scrollNow();
     if (end[0] !== 0 || end[2] !== 0) return `did not settle at the top: ${end}`;
+  });
+  if (mobile) await step("a tap on another tab opens it and the first brings Performance back", async () => {
+    await tapTab(4);
+    await page.shot(`${label}-9-memory`);
+    await tapTab(0);
+    const u = await page.ux();
+    if (!(u.debug.stats_bottom > 0 && u.debug.stats_bottom <= u.debug.scroll[4])) return `the stats are not back in view: ${u.debug.stats_bottom} / ${u.debug.scroll[4]}`;
   });
   if (!mobile) await step("the mouse wheel scrolls the content and stops at the ends", async () => {
     const [x, y] = await contentPoint(0.5);

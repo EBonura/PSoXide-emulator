@@ -28,7 +28,25 @@ use emulator_core::guest_stats::GuestCounters;
 use emulator_core::{Bus, Cpu};
 
 pub use panel::{draw, forwarded_scroll_drag, PanelAction};
-pub use plot::set_type_scale;
+pub use plot::{set_tiny, set_type_scale};
+
+/// Layout facts of the compact panel as last drawn, for the browser journeys: the top of the Pause
+/// button, of the Target select and of Export CSV (points down the screen; the select and Export
+/// share a row with Pause where the column is wide), and the height of the first chart's legend.
+pub fn layout_facts() -> [f32; 8] {
+    let l = |i: usize| f32::from_bits(plot::LAYOUT[i].load(std::sync::atomic::Ordering::Relaxed));
+    [l(0), l(1), l(2), l(3), l(4), l(5), l(6), l(7)]
+}
+
+/// The y of each section header of the phone panel as last drawn (negative when open); 0 for none.
+pub fn section_facts() -> [f32; 8] {
+    let n = plot::SECTION_COUNT.load(std::sync::atomic::Ordering::Relaxed) as usize;
+    let mut out = [0.0; 8];
+    for (i, slot) in out.iter_mut().enumerate().take(n.min(8)) {
+        *slot = f32::from_bits(plot::SECTIONS[i].load(std::sync::atomic::Ordering::Relaxed));
+    }
+    out
+}
 
 /// Where the stat cards ended when last drawn, points down the screen.
 pub fn stats_bottom() -> f32 {

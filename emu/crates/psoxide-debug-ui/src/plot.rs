@@ -45,6 +45,28 @@ pub fn set_type_scale(scale: f32) {
 
 /// Where the stat cards ended when last drawn, in points down the screen (f32 bits): the browser
 /// journeys check they are in view without scrolling.
+pub static LAYOUT: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+
+/// Where the phone panel's section headers were last drawn: the y of each (f32 bits), negative
+/// while the section is open, and how many there are. The browser journeys tap them.
+pub static SECTIONS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+pub static SECTION_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// The panel is laid out for a phone: one density tier below the desktop's (see [`tiny`]).
+static TINY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Lay the panel out for a phone: 8-point text, 10-point values, no card chrome, 50-point charts,
+/// sections folded to a line. A desktop keeps the normal dense layout.
+pub fn set_tiny(on: bool) {
+    TINY.store(on, Ordering::Relaxed);
+}
+
+/// Whether the panel is laid out for a phone.
+pub fn tiny() -> bool {
+    TINY.load(Ordering::Relaxed)
+}
+
+/// Where the stat cards ended when last drawn (see [`STATS_BOTTOM`]).
 pub static STATS_BOTTOM: AtomicU32 = AtomicU32::new(0);
 
 /// The panel's type scale itself: 1 on a desktop, below 1 where the panel is set small.
@@ -60,6 +82,17 @@ pub fn px(size: f32) -> f32 {
 /// Small UI font.
 pub fn small() -> FontId {
     FontId::proportional(px(10.5))
+}
+
+/// Axis and gridline labels: 9 points when the panel is set small, else the small font.
+pub fn axis_font() -> FontId {
+    if tiny() {
+        FontId::proportional(7.5)
+    } else if type_scale() < 0.95 {
+        FontId::proportional(9.0)
+    } else {
+        small()
+    }
 }
 
 /// Regular UI font.
@@ -121,6 +154,12 @@ impl TimeAxis {
 /// Allocate a chart area with hover/drag/click sensing and paint its
 /// surface. Returns the full rect and the response.
 pub fn chart_area(ui: &mut Ui, height: f32) -> (Rect, Response) {
+    // A phone's charts are sparklines: half the height, never under 40 points.
+    let height = if tiny() {
+        (height * 0.5).max(40.0)
+    } else {
+        height
+    };
     let width = ui.available_width().max(60.0);
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, height), Sense::click_and_drag());
@@ -150,7 +189,7 @@ pub fn hline(ui: &Ui, rect: Rect, y: f32, label: &str, dashed: bool, color: Colo
             Pos2::new(rect.right() - 3.0, y - 1.0),
             Align2::RIGHT_BOTTOM,
             label,
-            small(),
+            axis_font(),
             TEXT_MUTED,
         );
     }
@@ -183,13 +222,13 @@ pub fn time_ticks(ui: &Ui, axis: &TimeAxis, now: u64, refresh_hz: f64) {
         } else {
             format!("{t:.0}s")
         };
-        painter.text(
-            Pos2::new(x, axis.rect.bottom() + 1.0),
-            Align2::CENTER_TOP,
-            label,
-            small(),
-            TEXT_MUTED,
-        );
+        // Set for a phone the labels sit inside the plot, along its bottom edge.
+        let (y, anchor) = if tiny() {
+            (axis.rect.bottom() - 1.0, Align2::CENTER_BOTTOM)
+        } else {
+            (axis.rect.bottom() + 1.0, Align2::CENTER_TOP)
+        };
+        painter.text(Pos2::new(x, y), anchor, label, axis_font(), TEXT_MUTED);
         t += step_s;
     }
 }

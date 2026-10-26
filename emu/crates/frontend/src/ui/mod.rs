@@ -260,6 +260,7 @@ pub fn play_panel_contents(
 ) -> Option<psoxide_debug_ui::PanelAction> {
     // The editor's Play column keeps the panel's full size.
     psoxide_debug_ui::set_type_scale(1.0);
+    psoxide_debug_ui::set_tiny(false);
     crate::theme::viz_frame(ui, "", |ui| {
         psoxide_debug_ui::draw(ui, stats, Some(vram_tex))
     })

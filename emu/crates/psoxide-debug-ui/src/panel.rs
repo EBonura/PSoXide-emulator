@@ -29,6 +29,10 @@ pub fn draw(
     vram: Option<egui::TextureId>,
 ) -> Option<PanelAction> {
     let mut action = None;
+    if plot::tiny() {
+        draw_tiny(ui, stats, vram, &mut action);
+        return action;
+    }
     toolbar(ui, stats, &mut action);
     host_line(ui, stats);
     let (Some(newest), Some(_)) = (stats.newest_vblank(), stats.oldest_vblank()) else {
@@ -213,14 +217,19 @@ fn section(ui: &mut Ui, title: &str, open: bool, add: impl FnOnce(&mut Ui)) {
     } else {
         title
     };
-    egui::CollapsingHeader::new(RichText::new(shown).color(plot::TEXT).strong())
-        .id_salt(("guest-perf", title))
-        .default_open(open)
-        .show(ui, |ui| {
-            ui.add_space(2.0);
-            add(ui);
-            ui.add_space(4.0);
-        });
+    egui::CollapsingHeader::new(
+        RichText::new(shown)
+            .color(plot::TEXT)
+            .strong()
+            .size(plot::px(12.0)),
+    )
+    .id_salt(("guest-perf", title))
+    .default_open(open)
+    .show(ui, |ui| {
+        ui.add_space(2.0);
+        add(ui);
+        ui.add_space(4.0);
+    });
 }
 
 /// One small segmented control: `labels` side by side in a single rounded bar, `selected` lit.
@@ -290,38 +299,18 @@ fn compact_toolbar(ui: &mut Ui, stats: &mut GuestStats, action: &mut Option<Pane
             stats.view.window = WINDOWS_S[i] * refresh;
         }
     });
-    ui.horizontal_wrapped(|ui| {
-        let live = stats.view.paused_at.is_none();
-        let label = if live { "Pause" } else { "Go live" };
-        if ui
-            .button(label)
-            .on_hover_text("Freeze the charts (emulation keeps running). Drag a chart to scrub.")
-            .clicked()
-        {
-            stats.view.paused_at = if live { stats.newest_vblank() } else { None };
-        }
-        let q = ui.add(egui::Button::new(RichText::new("?").size(plot::px(10.5))).selected(help));
-        if q.on_hover_text("What the panel shows").clicked() {
-            help = !help;
-        }
-        ui.menu_button("Export CSV", |ui| {
-            ui.label(RichText::new("One row per vblank, every counter.").color(plot::TEXT_DIM));
-            for secs in EXPORT_S {
-                if ui.button(format!("Last {secs} s")).clicked() {
-                    stats.view.export_secs = secs;
-                    *action = Some(PanelAction::ExportCsv {
-                        csv: stats.csv(secs),
-                        seconds: secs,
-                    });
-                    ui.close_menu();
-                }
-            }
-        });
-    });
-    ui.horizontal(|ui| {
+    // Pause, the help "?", the frame target and Export on one row where the column is wide enough
+    // (a phone held sideways, the desktop sidebar); in a narrow column the target takes a row of
+    // its own, since a select that does not fit would widen the whole panel.
+    let one_row = ui.available_width() >= 190.0;
+    let target_select = |ui: &mut Ui, stats: &mut GuestStats| {
         let refresh_hz = stats.refresh_hz();
-        egui::ComboBox::from_id_salt("guest-perf-target")
-            .width((ui.available_width() - 36.0).max(40.0))
+        let combo = egui::ComboBox::from_id_salt("guest-perf-target")
+            .width(if one_row {
+                46.0
+            } else {
+                (ui.available_width() - 36.0).max(40.0)
+            })
             .selected_text(match stats.view.target {
                 FrameTarget::Auto => "Target: auto".to_string(),
                 FrameTarget::Vblanks(n) => format!("Target: {}", fps_label(refresh_hz, n)),
@@ -344,7 +333,52 @@ fn compact_toolbar(ui: &mut Ui, stats: &mut GuestStats, action: &mut Option<Pane
                     );
                 }
             });
+        plot::LAYOUT[1].store(
+            combo.response.rect.top().to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    };
+    ui.horizontal_wrapped(|ui| {
+        let live = stats.view.paused_at.is_none();
+        let label = if live { "Pause" } else { "Go live" };
+        let pause = ui
+            .button(label)
+            .on_hover_text("Freeze the charts (emulation keeps running). Drag a chart to scrub.");
+        plot::LAYOUT[0].store(
+            pause.rect.top().to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        if pause.clicked() {
+            stats.view.paused_at = if live { stats.newest_vblank() } else { None };
+        }
+        let q = ui.add(egui::Button::new(RichText::new("?").size(plot::px(10.5))).selected(help));
+        if q.on_hover_text("What the panel shows").clicked() {
+            help = !help;
+        }
+        if one_row {
+            target_select(ui, stats);
+        }
+        let export = ui.menu_button("Export CSV", |ui| {
+            ui.label(RichText::new("One row per vblank, every counter.").color(plot::TEXT_DIM));
+            for secs in EXPORT_S {
+                if ui.button(format!("Last {secs} s")).clicked() {
+                    stats.view.export_secs = secs;
+                    *action = Some(PanelAction::ExportCsv {
+                        csv: stats.csv(secs),
+                        seconds: secs,
+                    });
+                    ui.close_menu();
+                }
+            }
+        });
+        plot::LAYOUT[2].store(
+            export.response.rect.top().to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     });
+    if !one_row {
+        ui.horizontal(|ui| target_select(ui, stats));
+    }
     if help {
         ui.label(
             RichText::new(
@@ -440,12 +474,29 @@ fn toolbar(ui: &mut Ui, stats: &mut GuestStats, action: &mut Option<PanelAction>
 
 /// One row of legend keys above a chart: a line swatch, or a dot when
 /// `dot` is set.
-fn legend_row(ui: &mut Ui, items: &[(Color32, &str, bool)]) {
+fn legend_row(ui: &mut Ui, items: &[(Color32, &str, &str, bool)]) {
+    if plot::tiny() {
+        // A phone's charts carry their legend in a corner (see `legend_in_chart`).
+        return;
+    }
+    let legend_top = ui.cursor().top();
+    // Set small (a phone's column, the dense sidebar) the legend is one line of short labels.
+    let compact = plot::type_scale() < 0.95;
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().item_spacing.x = if compact { 3.0 } else { 4.0 };
         ui.spacing_mut().item_spacing.y = 2.0;
-        for &(color, text, dot) in items {
-            let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 10.0), egui::Sense::hover());
+        // In a phone's narrow column the longest short label is cut to two characters.
+        let narrow = compact && ui.available_width() < 140.0;
+        for &(color, long, short, dot) in items {
+            let short = if narrow && short == "1 s avg" {
+                "1 s"
+            } else {
+                short
+            };
+            let (r, _) = ui.allocate_exact_size(
+                egui::vec2(if compact { 8.0 } else { 12.0 }, 10.0),
+                egui::Sense::hover(),
+            );
             if dot {
                 ui.painter().circle_filled(r.center(), 3.5, color);
             } else {
@@ -458,16 +509,20 @@ fn legend_row(ui: &mut Ui, items: &[(Color32, &str, bool)]) {
                 );
             }
             ui.label(
-                RichText::new(text)
+                RichText::new(if compact { short } else { long })
                     .color(plot::TEXT_DIM)
                     .size(plot::px(10.5)),
             );
             // Not in a narrow column: a space that does not fit would widen the whole panel.
-            if plot::type_scale() >= 0.95 && ui.available_width() > 24.0 {
+            if !compact && ui.available_width() > 24.0 {
                 ui.add_space(6.0);
             }
         }
     });
+    plot::LAYOUT[3].store(
+        (ui.cursor().top() - legend_top).to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// The one host-side number worth showing: whether this machine keeps up.
@@ -758,13 +813,19 @@ fn fps_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx, s: &Summary) {
     legend_row(
         ui,
         &[
-            (plot::BLUE, "frame rate of each presented frame", false),
+            (
+                plot::BLUE,
+                "frame rate of each presented frame",
+                "frame",
+                false,
+            ),
             (
                 plot::shade(plot::NEUTRAL, 0.35),
                 "frames in the last second",
+                "1 s avg",
                 false,
             ),
-            (plot::CRITICAL, "late frame", true),
+            (plot::CRITICAL, "late frame", "late", true),
         ],
     );
     let (rect, response) = plot::chart_area(
@@ -775,13 +836,29 @@ fn fps_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx, s: &Summary) {
             132.0
         },
     );
+    if plot::tiny() {
+        legend_in_chart(
+            ui,
+            rect,
+            &[
+                (plot::BLUE, "frame", false),
+                (plot::shade(plot::NEUTRAL, 0.35), "1 s avg", false),
+                (plot::CRITICAL, "late", true),
+            ],
+        );
+    }
     let plot_rect = rect.shrink2(egui::vec2(4.0, 8.0));
     let axis = ctx.axis(plot_rect);
     interact(ui, stats, ctx, &axis, &response);
     let refresh = ctx.refresh;
     let y_max = refresh * 1.15;
     let y = |fps: f64| plot_rect.bottom() - (fps / y_max) as f32 * plot_rect.height();
-    for (fps, label) in [(refresh, 1u16), (refresh / 2.0, 2), (refresh / 3.0, 3)] {
+    let lines: &[(f64, u16)] = if plot::tiny() {
+        &[(refresh, 1), (refresh / 2.0, 2)]
+    } else {
+        &[(refresh, 1), (refresh / 2.0, 2), (refresh / 3.0, 3)]
+    };
+    for &(fps, label) in lines {
         plot::hline(
             ui,
             plot_rect,
@@ -945,8 +1022,51 @@ fn frame_time_histogram(ui: &mut Ui, ctx: &Ctx, s: &Summary) {
         132.0
     };
     let count_w = if narrow { 24.0 } else { 44.0 };
+    let compact = plot::type_scale() < 0.95;
     for (row, &n) in counts.iter().enumerate() {
         let interval = row + 1;
+        if compact {
+            // Two columns, label and count, the bar a tint behind them: one thin row per line.
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(width, 12.0), egui::Sense::hover());
+            let painter = ui.painter();
+            let plus = if row == rows - 1 { "+" } else { "" };
+            painter.rect_filled(rect, 2.0, plot::SURFACE);
+            if n > 0 {
+                let late = interval > usize::from(s.target);
+                let bar = Rect::from_min_size(
+                    rect.min,
+                    egui::vec2(
+                        (rect.width() * n as f32 / max as f32).max(2.0),
+                        rect.height(),
+                    ),
+                );
+                painter.rect_filled(
+                    bar,
+                    CornerRadius::same(2),
+                    plot::shade(if late { plot::CRITICAL } else { plot::BLUE }, -0.45),
+                );
+            }
+            painter.text(
+                Pos2::new(rect.left() + 3.0, rect.center().y),
+                Align2::LEFT_CENTER,
+                format!(
+                    "{interval}{plus} vb  {:.1} ms",
+                    interval as f64 * ctx.vblank_ms()
+                ),
+                plot::figures(8.5),
+                plot::TEXT_DIM,
+            );
+            painter.text(
+                Pos2::new(rect.right() - 3.0, rect.center().y),
+                Align2::RIGHT_CENTER,
+                format!("{n}"),
+                plot::figures(8.5),
+                plot::TEXT,
+            );
+            response.on_hover_text(format!("{n} frames took {interval}{plus} vblanks"));
+            continue;
+        }
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, 15.0), egui::Sense::hover());
         let painter = ui.painter();
@@ -1456,6 +1576,16 @@ impl Limit {
         }
     }
 
+    /// The name in a phone's legend.
+    fn short(self) -> &'static str {
+        match self {
+            Limit::Cpu => "CPU",
+            Limit::Gpu => "GPU",
+            Limit::WaitIo => "I/O",
+            Limit::WaitVblank => "paced",
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Limit::Cpu => "CPU-bound",
@@ -1500,11 +1630,18 @@ fn limiter_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx, _s: &Summar
     legend_row(
         ui,
         &[
-            (plot::BLUE, "CPU work, % of cycles", false),
-            (plot::ORANGE, "GPU drawing, % of cycles", false),
+            (plot::BLUE, "CPU work, % of cycles", "CPU %", false),
+            (plot::ORANGE, "GPU drawing, % of cycles", "GPU %", false),
         ],
     );
     let (rect, response) = plot::chart_area(ui, 104.0);
+    if plot::tiny() {
+        legend_in_chart(
+            ui,
+            rect,
+            &[(plot::BLUE, "CPU", false), (plot::ORANGE, "GPU", false)],
+        );
+    }
     let plot_rect = Rect::from_min_max(
         rect.min + egui::vec2(4.0, 6.0),
         Pos2::new(rect.right() - 4.0, rect.bottom() - 18.0),
@@ -1611,8 +1748,13 @@ fn limiter_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx, _s: &Summar
         }
     }
     ui.add_space(2.0);
+    let tiny = plot::tiny();
+    if tiny {
+        limits_legend_tiny(ui, &counts);
+        return;
+    }
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 10.0;
+        ui.spacing_mut().item_spacing = egui::vec2(10.0, 3.0);
         for limit in [Limit::Cpu, Limit::Gpu, Limit::WaitIo, Limit::WaitVblank] {
             let (r, _) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
             ui.painter().rect_filled(r, 2.0, limit.color());
@@ -1625,6 +1767,53 @@ fn limiter_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx, _s: &Summar
     })
     .response
     .on_hover_text("Each presented frame: CPU-bound if CPU work filled at least 90% of its vblanks, GPU-bound if drawing did, otherwise what the waiting CPU polled.");
+}
+
+/// The verdict counts under the limiter chart on a phone: a swatch and a short name each, flowing
+/// onto a second line only between items.
+fn limits_legend_tiny(ui: &mut Ui, counts: &[u32; 4]) {
+    let items: Vec<_> = [Limit::Cpu, Limit::Gpu, Limit::WaitIo, Limit::WaitVblank]
+        .into_iter()
+        .map(|limit| {
+            let galley = ui.painter().layout_no_wrap(
+                format!("{} {}", limit.short(), counts[limit as usize]),
+                FontId::proportional(7.5),
+                plot::TEXT_DIM,
+            );
+            (limit, galley)
+        })
+        .collect();
+    let width = ui.available_width();
+    let mut rows = 1;
+    let mut x = 0.0;
+    for (_, galley) in &items {
+        let w = 8.0 + galley.size().x + 5.0;
+        if x > 0.0 && x + w > width {
+            rows += 1;
+            x = 0.0;
+        }
+        x += w;
+    }
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, 10.0 * rows as f32), egui::Sense::hover());
+    let (mut x, mut y) = (rect.left(), rect.top());
+    for (limit, galley) in items {
+        let w = 8.0 + galley.size().x + 5.0;
+        if x > rect.left() && x + w > rect.right() + 0.5 {
+            x = rect.left();
+            y += 10.0;
+        }
+        ui.painter().rect_filled(
+            Rect::from_min_size(Pos2::new(x, y + 2.5), egui::vec2(5.0, 5.0)),
+            1.5,
+            limit.color(),
+        );
+        let top = y + 5.0 - galley.size().y / 2.0;
+        ui.painter()
+            .galley(Pos2::new(x + 8.0, top), galley, plot::TEXT_DIM);
+        x += w;
+    }
+    response.on_hover_text("Each presented frame: CPU-bound if CPU work filled at least 90% of its vblanks, GPU-bound if drawing did, otherwise what the waiting CPU polled.");
 }
 
 // ---------------------------------------------------------------- sparklines
@@ -2113,4 +2302,408 @@ fn texpage_heat(ui: &mut Ui, stats: &GuestStats, vram: Option<egui::TextureId>) 
             .color(plot::TEXT_MUTED)
             .size(plot::px(10.5)),
     );
+}
+
+// ---------------------------------------------------------------- the phone layout
+
+/// Text colours of the phone layout's key/value cells.
+const KEY_FONT: f32 = 8.0;
+/// A value in the phone layout, points.
+const VALUE_FONT: f32 = 10.0;
+
+/// One tiny segmented bar: `cells` side by side in a single rounded strip, lit where `lit`, divided
+/// by hairlines, with no padding to speak of. Returns the cell clicked.
+fn tiny_bar(ui: &mut Ui, cells: &[(String, bool)], max_w: f32) -> Option<usize> {
+    let font = FontId::proportional(8.0);
+    let widths: Vec<f32> = cells
+        .iter()
+        .map(|(label, _)| {
+            ui.painter()
+                .layout_no_wrap(label.clone(), font.clone(), plot::TEXT)
+                .size()
+                .x
+        })
+        .collect();
+    let text: f32 = widths.iter().sum();
+    let pad = ((max_w - text) / (2.0 * cells.len() as f32)).clamp(0.5, 4.0);
+    let total = text + 2.0 * pad * cells.len() as f32;
+    let (bar, _) = ui.allocate_exact_size(egui::vec2(total, 14.0), egui::Sense::hover());
+    ui.painter().rect_filled(bar, 3.0, plot::SURFACE);
+    let mut clicked = None;
+    let mut x = bar.left();
+    for (i, (label, lit)) in cells.iter().enumerate() {
+        let w = widths[i] + 2.0 * pad;
+        let cell = Rect::from_min_size(Pos2::new(x, bar.top()), egui::vec2(w, bar.height()));
+        let response = ui.interact(
+            cell,
+            ui.id().with(("tiny-cell", label.as_str(), i)),
+            egui::Sense::click(),
+        );
+        if *lit {
+            ui.painter()
+                .rect_filled(cell.shrink(1.0), 2.0, plot::shade(plot::BLUE, -0.45));
+        } else if response.hovered() {
+            ui.painter().rect_filled(cell.shrink(1.0), 2.0, plot::GRID);
+        }
+        ui.painter().text(
+            cell.center(),
+            Align2::CENTER_CENTER,
+            label,
+            font.clone(),
+            if *lit { plot::TEXT } else { plot::TEXT_DIM },
+        );
+        if response.clicked() {
+            clicked = Some(i);
+        }
+        x += w;
+    }
+    clicked
+}
+
+/// The phone's controls: the time window, Pause, CSV and the frame target as tiny cells, on one
+/// line where the column is wide and on two where it is not.
+fn tiny_toolbar(ui: &mut Ui, stats: &mut GuestStats, action: &mut Option<PanelAction>) {
+    let refresh = stats.refresh_hz().round().max(1.0) as u64;
+    ui.spacing_mut().item_spacing = egui::vec2(3.0, 2.0);
+    let windows = ["5", "10", "30", "60", "2m"];
+    let spans = [5_u64, 10, 30, 60, 120];
+    let live = stats.view.paused_at.is_none();
+    let target = match stats.view.target {
+        FrameTarget::Auto => "auto".to_string(),
+        FrameTarget::Vblanks(n) => format!("{:.0}", stats.refresh_hz() / f64::from(n)),
+    };
+    let win_cells: Vec<(String, bool)> = windows
+        .iter()
+        .zip(spans)
+        .map(|(w, s)| ((*w).to_string(), stats.view.window == s * refresh))
+        .collect();
+    let act_cells: Vec<(String, bool)> = vec![
+        ((if live { "II" } else { "Live" }).to_string(), !live),
+        ("CSV".to_string(), false),
+        (format!("tgt {target}"), false),
+    ];
+    // Both groups on one line when they fit; the width of a group is its text and a hair of padding.
+    let est = |cells: &[(String, bool)]| {
+        cells
+            .iter()
+            .map(|(l, _)| l.chars().count() as f32 * 4.6 + 4.0)
+            .sum::<f32>()
+    };
+    let one_line = ui.available_width() >= est(&win_cells) + est(&act_cells) + 6.0;
+    let mut windows_click = None;
+    let mut act_click = None;
+    let mut run = |ui: &mut Ui| {
+        windows_click = tiny_bar(ui, &win_cells, ui.available_width());
+        if one_line {
+            act_click = tiny_bar(ui, &act_cells, ui.available_width());
+        }
+    };
+    ui.horizontal(&mut run);
+    plot::LAYOUT[0].store(
+        ui.min_rect().top().to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    if !one_line {
+        ui.horizontal(|ui| act_click = tiny_bar(ui, &act_cells, ui.available_width()));
+    }
+    if let Some(i) = windows_click {
+        stats.view.window = spans[i] * refresh;
+    }
+    match act_click {
+        Some(0) => stats.view.paused_at = if live { stats.newest_vblank() } else { None },
+        Some(1) => {
+            // The visible window as a CSV: the player's save or download follows.
+            let secs = u32::try_from(stats.view.window / refresh)
+                .unwrap_or(60)
+                .max(1);
+            stats.view.export_secs = secs;
+            *action = Some(PanelAction::ExportCsv {
+                csv: stats.csv(secs),
+                seconds: secs,
+            });
+        }
+        Some(_) => {
+            // The target cycles: auto, then 60, 30, 20 and 15 frames a second.
+            stats.view.target = match stats.view.target {
+                FrameTarget::Auto => FrameTarget::Vblanks(1),
+                FrameTarget::Vblanks(n) if n < 4 => FrameTarget::Vblanks(n + 1),
+                FrameTarget::Vblanks(_) => FrameTarget::Auto,
+            };
+        }
+        None => {}
+    }
+}
+
+/// The stats as a table of key/value pairs, no cards: two pairs to a row in a narrow column, three
+/// where there is room.
+fn stats_table(ui: &mut Ui, cells: &[(&str, String, Color32)]) {
+    let width = ui.available_width();
+    let per_row = if width >= 165.0 { 3 } else { 2 };
+    let cell_w = (width - 4.0 * (per_row as f32 - 1.0)) / per_row as f32;
+    for row in cells.chunks(per_row) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
+            for (key, value, color) in row {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(cell_w, 12.0), egui::Sense::hover());
+                let painter = ui.painter();
+                let key_galley = painter.layout_no_wrap(
+                    (*key).to_string(),
+                    FontId::proportional(KEY_FONT),
+                    plot::TEXT_DIM,
+                );
+                let key_w = key_galley.size().x;
+                painter.galley(
+                    Pos2::new(rect.left(), rect.center().y - key_galley.size().y / 2.0),
+                    key_galley,
+                    plot::TEXT_DIM,
+                );
+                painter.text(
+                    Pos2::new(rect.left() + key_w + 3.0, rect.center().y),
+                    Align2::LEFT_CENTER,
+                    value,
+                    FontId::proportional(VALUE_FONT),
+                    *color,
+                );
+            }
+        });
+        ui.add_space(1.0);
+    }
+}
+
+/// A section folded to a line: the title in capitals, a summary beside it, a chevron; open it for the
+/// chart.
+fn section_tiny(ui: &mut Ui, title: &str, summary: &str, open: bool, add: impl FnOnce(&mut Ui)) {
+    use egui::text::{LayoutJob, TextFormat};
+    let mut job = LayoutJob::default();
+    job.append(
+        title,
+        0.0,
+        TextFormat {
+            font_id: FontId::proportional(9.0),
+            color: plot::TEXT,
+            ..TextFormat::default()
+        },
+    );
+    if !summary.is_empty() {
+        job.append(
+            summary,
+            6.0,
+            TextFormat {
+                font_id: FontId::proportional(8.0),
+                color: plot::TEXT_DIM,
+                ..TextFormat::default()
+            },
+        );
+    }
+    let y = ui.cursor().top() + 7.0;
+    let shown = egui::CollapsingHeader::new(job)
+        .id_salt(("guest-perf-tiny", title))
+        .default_open(open)
+        .show(ui, |ui| {
+            ui.add_space(1.0);
+            add(ui);
+            ui.add_space(2.0);
+        });
+    let i = plot::SECTION_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize;
+    if let Some(slot) = plot::SECTIONS.get(i) {
+        let signed = if shown.openness > 0.5 { -y } else { y };
+        slot.store(signed.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A legend inside the corner of a chart: tiny swatches and short labels.
+fn legend_in_chart(ui: &Ui, rect: Rect, items: &[(Color32, &str, bool)]) {
+    let painter = ui.painter_at(rect);
+    let font = FontId::proportional(7.0);
+    let mut x = rect.left() + 4.0;
+    let y = rect.top() + 6.0;
+    for &(color, label, dot) in items {
+        if dot {
+            painter.circle_filled(Pos2::new(x + 2.0, y), 2.2, color);
+        } else {
+            painter.line_segment(
+                [Pos2::new(x, y), Pos2::new(x + 5.0, y)],
+                Stroke::new(1.6, color),
+            );
+        }
+        let galley = painter.layout_no_wrap(label.to_string(), font.clone(), plot::TEXT_DIM);
+        painter.galley(
+            Pos2::new(x + 7.0, y - galley.size().y / 2.0),
+            galley.clone(),
+            plot::TEXT_DIM,
+        );
+        x += 7.0 + galley.size().x + 6.0;
+    }
+}
+
+/// The frame-time distribution as one row of mini bars with their counts: 1, 2, 3, 4, 5 and 6+
+/// vblanks a frame.
+fn frame_time_mini(ui: &mut Ui, ctx: &Ctx, s: &Summary) {
+    let mut counts = [0u32; 6];
+    for (interval, &n) in s.intervals.iter().enumerate().skip(1) {
+        counts[(interval - 1).min(5)] += n;
+    }
+    let max = counts.iter().copied().max().unwrap_or(0).max(1);
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::hover());
+    let painter = ui.painter();
+    let slot = rect.width() / 6.0;
+    let base = rect.top() + 10.0;
+    for (i, &n) in counts.iter().enumerate() {
+        let x0 = rect.left() + slot * i as f32;
+        let bar_h = 10.0 * n as f32 / max as f32;
+        let late = i + 1 > usize::from(s.target);
+        let color = if late { plot::CRITICAL } else { plot::BLUE };
+        painter.rect_filled(
+            Rect::from_min_max(
+                Pos2::new(x0 + 2.0, base - bar_h.max(if n > 0 { 1.5 } else { 0.0 })),
+                Pos2::new(x0 + slot - 2.0, base),
+            ),
+            1.0,
+            color,
+        );
+        painter.text(
+            Pos2::new(x0 + slot / 2.0, base + 1.0),
+            Align2::CENTER_TOP,
+            format!("{n}"),
+            FontId::proportional(7.5),
+            plot::TEXT,
+        );
+        painter.text(
+            Pos2::new(x0 + slot / 2.0, base + 9.5),
+            Align2::CENTER_TOP,
+            if i == 5 {
+                "6+".to_string()
+            } else {
+                format!("{}vb", i + 1)
+            },
+            FontId::proportional(6.5),
+            plot::TEXT_MUTED,
+        );
+    }
+    let _ = ctx;
+    response.on_hover_text("Frames that took 1, 2, 3, 4, 5 and 6 or more vblanks");
+}
+
+/// The Performance tab as laid out for a phone.
+fn draw_tiny(
+    ui: &mut Ui,
+    stats: &mut GuestStats,
+    vram: Option<egui::TextureId>,
+    action: &mut Option<PanelAction>,
+) {
+    plot::SECTION_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    ui.spacing_mut().item_spacing = egui::vec2(3.0, 2.0);
+    tiny_toolbar(ui, stats, action);
+    let (Some(newest), Some(_)) = (stats.newest_vblank(), stats.oldest_vblank()) else {
+        ui.label(
+            RichText::new("No telemetry yet. Run a game.")
+                .color(plot::TEXT_DIM)
+                .size(8.0),
+        );
+        return;
+    };
+    let right = stats.view.paused_at.unwrap_or(newest).min(newest);
+    let window = stats.view.window.max(30);
+    let first = (right + 1).saturating_sub(window);
+    let mut ctx = Ctx {
+        first,
+        last: first + window - 1,
+        now: newest,
+        refresh: stats.refresh_hz(),
+        hovered: false,
+    };
+    let summary = Summary::compute(stats, &ctx);
+    // The stat cells.
+    let fps = summary.fps(ctx.refresh);
+    let p95 = summary.percentile(0.95);
+    let cpu = (summary.cpu_cycles > 0)
+        .then(|| summary.cpu_work as f64 / summary.cpu_cycles as f64 * 100.0);
+    let gpu = (summary.cycles > 0).then(|| summary.gpu as f64 / summary.cycles as f64 * 100.0);
+    let late_color = if summary.late > 0 {
+        plot::CRITICAL
+    } else {
+        plot::TEXT
+    };
+    let cells = [
+        (
+            "fps",
+            fps.map_or("--".into(), |f| format!("{f:.1}")),
+            plot::TEXT,
+        ),
+        (
+            "p95",
+            p95.map_or("--".into(), |i| {
+                format!("{:.1}ms", i as f64 * ctx.vblank_ms())
+            }),
+            plot::TEXT,
+        ),
+        ("late", format!("{}", summary.late), late_color),
+        (
+            "p99",
+            summary.percentile(0.99).map_or("--".into(), |i| {
+                format!("{:.1}ms", i as f64 * ctx.vblank_ms())
+            }),
+            plot::TEXT,
+        ),
+        (
+            "CPU",
+            cpu.map_or("--".into(), |c| format!("{c:.0}%")),
+            plot::TEXT,
+        ),
+        (
+            "GPU",
+            gpu.map_or("--".into(), |g| format!("{g:.0}%")),
+            plot::TEXT,
+        ),
+    ];
+    stats_table(ui, &cells);
+    plot::STATS_BOTTOM.store(
+        ui.min_rect().bottom().to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    ui.add_space(2.0);
+
+    let frame_summary = format!(
+        "{} p95 {}",
+        fps.map_or("--".into(), |f| format!("{f:.0} fps")),
+        p95.map_or("--".into(), |i| format!(
+            "{:.1}ms",
+            i as f64 * ctx.vblank_ms()
+        ))
+    );
+    section_tiny(ui, "FRAME", &frame_summary, true, |ui| {
+        fps_chart(ui, stats, &mut ctx, &summary);
+        ui.add_space(2.0);
+        frame_time_mini(ui, &ctx, &summary);
+    });
+    plot::LAYOUT[4].store(
+        ui.min_rect().bottom().to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let limits_summary = format!(
+        "CPU {} GPU {}",
+        cpu.map_or("--".into(), |c| format!("{c:.0}%")),
+        gpu.map_or("--".into(), |g| format!("{g:.0}%"))
+    );
+    section_tiny(ui, "LIMITS", &limits_summary, true, |ui| {
+        limiter_chart(ui, stats, &mut ctx, &summary);
+    });
+    plot::LAYOUT[5].store(
+        ui.min_rect().bottom().to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    section_tiny(ui, "BUDGET", "", false, |ui| budget_meters(ui, stats, &ctx));
+    section_tiny(ui, "CPU TIME", "", false, |ui| {
+        cpu_chart(ui, stats, &mut ctx)
+    });
+    section_tiny(ui, "HARDWARE", "", false, |ui| {
+        sparklines(ui, stats, &mut ctx)
+    });
+    section_tiny(ui, "SPU", "", false, |ui| voice_meters(ui, stats));
+    section_tiny(ui, "VRAM", "", false, |ui| texpage_heat(ui, stats, vram));
+    if !ctx.hovered {
+        stats.view.hover = None;
+    }
 }
