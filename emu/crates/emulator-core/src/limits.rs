@@ -191,6 +191,7 @@ pub struct LimitOracles {
     fast_data: RangeSet,
     /// Lane stall-free: per 32-byte data line, (load stall cycles, loads), when `PSOXIDE_RAM_DATA_LOG` is set.
     data_log: Option<std::collections::HashMap<u32, (u64, u64)>>,
+    data_pc_log: std::collections::HashMap<(u32, u32), (u64, u64)>,
     track_pc: bool,
     /// Lane stall-free: PC of the instruction being executed (set while PCs are tracked).
     cur_pc: u32,
@@ -354,6 +355,9 @@ impl LimitOracles {
             let entry = log.entry(phys >> 5).or_insert((0, 0));
             entry.0 += u64::from(stalls);
             entry.1 += 1;
+            let e2 = self.data_pc_log.entry((phys >> 2, self.cur_pc)).or_insert((0, 0));
+            e2.0 += u64::from(stalls);
+            e2.1 += 1;
         }
     }
 
@@ -374,6 +378,14 @@ impl LimitOracles {
         for (line, (stall, loads)) in rows {
             text.push_str(&format!("{:#010x},{stall},{loads}\n", line << 5));
         }
+        let mut pcrows: Vec<_> = self.data_pc_log.iter().collect();
+        pcrows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        let mut t2 = String::from("word_addr,pc,stall_cycles,loads\n");
+        for ((w, pc), (stall, loads)) in pcrows {
+            t2.push_str(&format!("{:#010x},{:#010x},{stall},{loads}\n", w << 2, pc));
+        }
+        let p2 = path.with_extension("pc.csv");
+        std::fs::write(&p2, t2).map_err(|e| format!("write {}: {e}", p2.display()))?;
         std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
     }
 
