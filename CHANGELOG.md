@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- The debug panel on a phone is usable. Its header is one line of small type (status dot, fps, ms, % of real
+  time, the disc name when it fits, close) instead of the big numbers, the tabs are smaller, and the content
+  gets the rest. Held sideways it stays a compact sidebar; held upright it is a sheet that opens fully up over
+  the controller (the picture stays whole above it) and a grab bar on its top edge drags it down to a short
+  strip with the controller back, or up again. A finger that starts on a chart scrolls the panel.
+- Lists scroll like on iOS: momentum after a flick that slows smoothly, a rubber band at the ends, a touch
+  stops a coasting list without pressing a row, and sliders and row taps are left alone. Settings, Game,
+  Controls, the save-state sheet and the debug panel share one motion model (`ui/momentum.rs`).
+
 - Settings no longer lists Controls (it has its own tab). Long lists (Settings, Game) show an up arrow while
   rows are hidden above and a down arrow only while rows are hidden below, and the mouse wheel scrolls them.
 - Save states are a sheet of slots. A game has a quick slot and eight numbered ones; each shows the

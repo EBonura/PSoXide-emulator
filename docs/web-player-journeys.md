@@ -422,6 +422,18 @@ same `MenuAction`s going out. Tokens (colours, type scale, spacing, easings) liv
   tall docks it on the right (a phone held sideways gives it about 38% of the width and the controller lays
   itself out in what is left); a taller one docks it as a strip between the game and the controller's panel.
   The game never pauses for it. Toolbar bug button, F3, the touch Debug button and Select+R3 on a pad toggle it.
+  On a phone its header is one line of small type (a status dot, fps, ms, % of real time, the disc name only
+  when it fits, close), the tabs are small, and the content gets the rest. In portrait the panel is a sheet:
+  it opens fully up over the controller's panel (the interface row stays under the picture, the pad's controls
+  are away), and its grab bar drags it down to a short strip with the controller back above it, or up again;
+  a tap on the bar flips it. A chart that a finger starts on passes vertical travel up to the panel's scroll
+  and scrubs only on a sideways drag.
+- Scrolling feels like iOS everywhere the shell scrolls (`ui/momentum.rs`): the content follows the finger,
+  coasts on after it lifts (velocity of the last 100 ms, 0.998 per ms deceleration), stretches against the ends
+  with rising resistance and springs back without crossing them, and a finger put down on a coasting list only
+  stops it (it presses nothing). Sliders, row taps and sideways swipes are decided as before. Settings, Game,
+  Controls, the save-state sheet and the debug panel use it; the wheel and a trackpad move the same positions
+  (a wheel step ends a coast, and the ends never stretch for it).
 - Save states are a sheet of slots (`ui/menu/slots.rs`, `app/slots.rs`, `psoxide-settings/src/slots.rs`):
   the quick slot and eight numbered ones, each with a picture, the time and how far the game had run, in
   Save and Load modes. A slot is the machine state plus a trailer (thumbnail, disc hash, format) kept in one
@@ -444,7 +456,10 @@ Journeys for the debug panel, save states and centring: `desktop-debug`, `phone-
 game keeps its speed, the controller is laid out around it, nothing meets the game picture), `desktop-slots`,
 `phone-*-slots` (save, overwrite with a question, load, quick keys, reload and load again, a save from another disc or
 a newer format refused, a damaged save refused, delete) and `desktop-centre`, `phone-*-centre` (the Controls
-touch preview and the phone tab bar are centred).
+touch preview and the phone tab bar are centred). `phone-momentum*` and `desktop-momentum` drive the lists
+with real touch and wheel events (a flick coasts and slows, a touch stops it and presses no row, the stretch
+at both ends, a slider drag leaves the list alone); the `-debug` journeys also check the one-line header, the
+portrait sheet and its handle, and flings, tap-to-stop and stretch inside the panel.
 
 Journeys: `desktop-home`, `phone-home`, `phone-home-small`, `phone-home-landscape` (first visit, the
 countdown cancelled by each input, return visit, sections, L1/R1, ways back, welcome pages, settings

@@ -18,6 +18,7 @@ use super::{
 use crate::input::model::BackendKind;
 use crate::input::{InputDeviceInfo, PadProfile, PortChoice};
 use crate::ui::menu::{MenuAction, MenuInput, MenuState, PadBindTarget};
+use crate::ui::momentum::Momentum;
 
 /// The three groups, in the order of the segmented bar.
 const TABS: [&str; 3] = ["Devices", "Keyboard", "Touch"];
@@ -82,6 +83,8 @@ pub(super) struct ControlsState {
     scroll: f32,
     /// Top and bottom of the scrolling area as last drawn.
     view: [f32; 2],
+    /// The furthest scroll, as last drawn.
+    max: f32,
     stops: Vec<Stop>,
     active_at: HashMap<String, f64>,
     /// The focus the last frame drew, to scroll to it only when it moved.
@@ -99,6 +102,17 @@ pub(super) struct ControlsState {
 }
 
 impl ControlsState {
+    /// A finger moved the page by `delta` points.
+    pub(super) fn drag(&mut self, kin: &mut Momentum, delta: f32, now: f64) {
+        let view = self.view[1] - self.view[0];
+        kin.drag(&mut self.scroll, delta, now, self.max, view);
+    }
+
+    /// The finger lifted: the page coasts on or springs back.
+    pub(super) fn release(&self, kin: &mut Momentum, now: f64) {
+        kin.release(self.scroll, now, self.max);
+    }
+
     /// The page opens on its first stop.
     pub(super) fn reset(&mut self) {
         self.focus = 0;
@@ -152,13 +166,14 @@ impl ControlsState {
             .get(self.focus)
             .map_or(String::new(), |s| s.item.probe_name());
         format!(
-            "{{\"preview\":{},\"tab\":{},\"seg\":{:.3},\"focus\":\"{}\",\"stops\":{},\"scroll\":{:.0},\"view\":[{:.0},{:.0}],\"capture\":{},\"keys\":{{{}}},\"touch\":{{{}}},\"devices\":[{}]}}",
+            "{{\"preview\":{},\"tab\":{},\"seg\":{:.3},\"focus\":\"{}\",\"stops\":{},\"scroll\":{:.0},\"max\":{:.0},\"view\":[{:.0},{:.0}],\"capture\":{},\"keys\":{{{}}},\"touch\":{{{}}},\"devices\":[{}]}}",
             self.preview.map_or("null".to_string(), |p| format!("[{:.1},{:.1},{:.1},{:.1}]", p[0], p[1], p[2], p[3])),
             self.tab,
             self.seg.pos,
             esc(&focus),
             self.stops.len(),
             self.scroll,
+            self.max,
             self.view[0],
             self.view[1],
             ms.controls_capture.map_or("null".to_string(), |t| format!("\"{}\"", t.label())),
@@ -173,10 +188,6 @@ impl ControlsState {
         self.tab = tab.min(TABS.len() - 1);
         self.seg = motion::Spring::at(self.tab as f32);
         self.shown_tab = self.tab;
-    }
-
-    pub(super) fn scroll_by(&mut self, delta: f32) {
-        self.scroll = (self.scroll + delta).max(0.0);
     }
 }
 
@@ -778,11 +789,18 @@ pub(super) fn draw(
     // Scroll: the wheel, then the focus, then the limits.
     let max_scroll = (content_end - view.bottom() + 12.0 * u).max(0.0);
     // Nothing else on this page scrolls, so the wheel needs no pointer over it.
+    h.kin.step(
+        &mut h.controls.scroll,
+        h.frame_dt,
+        max_scroll,
+        view.height(),
+    );
     let wheel = ctx.input(|i| i.smooth_scroll_delta.y);
     if wheel != 0.0 {
-        h.controls.scroll -= wheel;
+        h.kin.wheel(&mut h.controls.scroll, -wheel, max_scroll);
     }
     if h.controls.seen_focus != Some(h.controls.focus) {
+        h.kin.stop();
         if let Some(r) = focus_rect {
             let (top, bottom) = (r.top() - 8.0, r.bottom() + 8.0);
             if top < view.top() + h.controls.scroll {
@@ -793,7 +811,8 @@ pub(super) fn draw(
         }
         h.controls.seen_focus = Some(h.controls.focus);
     }
-    h.controls.scroll = h.controls.scroll.clamp(0.0, max_scroll);
+    h.kin.limit(&mut h.controls.scroll, max_scroll);
+    h.controls.max = max_scroll;
     h.controls.view = [view.top(), view.bottom()];
     // A hint that more is below.
     if h.controls.scroll < max_scroll - 1.0 {

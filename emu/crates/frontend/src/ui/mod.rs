@@ -10,6 +10,7 @@ pub mod debug_sidebar;
 pub mod framebuffer;
 pub mod memory;
 pub mod menu;
+pub(crate) mod momentum;
 pub mod profiler;
 pub mod registers;
 pub mod splash;
@@ -109,7 +110,9 @@ pub fn draw_layout(
     let touch_strip = if embed {
         None
     } else {
-        touch_overlay::reserved(ctx, input_router.touch()).strip
+        let reserved = touch_overlay::reserved(ctx, input_router.touch());
+        state.debug_sheet_span = reserved.sheet_span;
+        reserved.strip
     };
     debug_sidebar::draw(ctx, state, vram_tex, touch_strip);
     if !embed {

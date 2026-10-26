@@ -1228,6 +1228,161 @@ async function journeyMenus(label, urlFor) {
 
 
 
+// ---------------------------------------------------------------- momentum scrolling of the shell's lists
+
+/**
+ * The shell's list pages scroll the way a phone's do: the content follows the finger, keeps coasting after it
+ * lifts and slows smoothly, stretches against the ends and springs back, a finger put down on a coasting list
+ * only stops it, and sliders and row taps are left alone. Desktop: the wheel scrolls it and ends a coast.
+ */
+async function journeyMomentum(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  const page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+  await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+  await page.goto(urlFor());
+  const activate = async (name) => (mobile ? homeTap(page, name) : homeClick(page, name));
+  /** [scroll, furthest scroll, view top, view bottom, 1 while it coasts or is held]. */
+  const list = async () => (await page.ux()).home.list;
+  const x = Math.min(40, size.w / 4);
+  let flickSpeed = 0;
+  /** Drag over the list from `from` to `to` (css px) in `steps` frames; lift at once, or after `rest` ms. */
+  const drag = async (from, to, steps, rest = 0, lift = true) => {
+    const t0 = Date.now();
+    await page.touch("touchStart", [[x, from]]);
+    for (let i = 1; i <= steps; i++) { await sleep(16); await page.touch("touchMove", [[x, from + ((to - from) * i) / steps]]); }
+    flickSpeed = (Math.abs(to - from) / Math.max(1, Date.now() - t0)) * 1000;
+    if (rest) await sleep(rest);
+    if (lift) await page.touch("touchEnd", []);
+  };
+  const settled = () => page.waitFor("the list at rest", (s) => s.home.list[4] === 0, 8000);
+  const toTop = async () => {
+    for (let i = 0; i < 20 && (await list())[0] > 0.5; i++) { const v = await list(); await drag(v[2] + 12, v[3] - 12, 8, 140); await sleep(300); }
+    await settled();
+  };
+  await page.waitFor("the countdown", (s) => s.home?.countdown === "running" && !s.running, 90000);
+  await page.tapKey("x");
+  await step("Settings opens", async () => {
+    await activate("nav:Settings");
+    await page.waitFor("the Settings page", (s) => s.home.page === "Settings", 4000);
+    await sleep(900);
+    const v = await list();
+    return v[1] > 100 ? true : `the list only scrolls ${v[1]} px`;
+  });
+  if (mobile) {
+    await step("a flick keeps the list coasting after the finger lifts, slowing down, and it comes to rest inside the list", async () => {
+      await toTop();
+      const v0 = await list();
+      const [top, bottom] = [v0[2], v0[3]];
+      await drag(bottom - 12, bottom - 12 - Math.min(150, (bottom - top) * 0.55), 6);
+      const lifted = (await list())[0];
+      const trace = [{ t: Date.now(), p: lifted }];
+      for (let i = 0; i < 10; i++) { await sleep(60); trace.push({ t: Date.now(), p: (await list())[0] }); }
+      const samples = trace.map((x) => x.p);
+      const max = v0[1];
+      const reachedEnd = samples.some((v) => v >= max - 1);
+      if (!reachedEnd && samples[samples.length - 1] < lifted + 25) return `after a ${flickSpeed.toFixed(0)} px/s flick it moved ${(samples[samples.length - 1] - lifted).toFixed(0)} px after the finger lifted: ${samples.map((v) => v.toFixed(0))}`;
+      if (!reachedEnd) {
+        const slow = coastProblem(trace);
+        if (slow) return slow;
+      }
+      const end = await settled();
+      await page.shot(`${label}-1-after-flick`);
+      const e = end.home.list;
+      if (e[0] < -0.5 || e[0] > e[1] + 0.5) return `it came to rest outside the list: ${e[0]} of ${e[1]}`;
+      if (Math.max(...samples) > max + 0.35 * (bottom - top) + 2) return `it stretched past the end by ${Math.max(...samples) - max}`;
+    });
+    await step("a finger put down on the coasting list stops it where it is and presses no row", async () => {
+      await toTop();
+      const v = await list();
+      const [top, bottom] = [v[2], v[3]];
+      const row0 = (await page.ux()).menu.row;
+      await drag(bottom - 12, top + 12, 6);
+      await sleep(120);
+      const moving = await list();
+      if (moving[4] !== 1) return `it was not coasting (${moving})`;
+      // Put the finger down on a row: the row that is under it must not be pressed.
+      await page.tap(size.w / 2, (top + bottom) / 2, 60);
+      const at = (await list())[0];
+      await sleep(500);
+      const later = await list();
+      if (Math.abs(later[0] - at) > 1.5 || later[4] !== 0) return `it kept going after the touch: ${at} then ${later[0]} (moving ${later[4]})`;
+      const u = await page.ux();
+      if (u.menu.row !== row0) return `the touch that stopped it pressed a row: ${row0} to ${u.menu.row}`;
+      // The next tap is a real tap again: it selects the row under it.
+      await page.tap(size.w / 2, (top + bottom) / 2, 60);
+      await sleep(300);
+      if ((await page.ux()).menu.row === row0) return "after it stopped, a tap on a row did nothing";
+    });
+    await step("pulled past the top the list stretches under the finger, then springs back without crossing", async () => {
+      await toTop();
+      const v = await list();
+      const [top, bottom] = [v[2], v[3]];
+      await drag(top + 20, top + 20 + (bottom - top) * 0.7, 10, 140, false);
+      const held = (await list())[0];
+      await page.shot(`${label}-2-stretched-top`);
+      await page.touch("touchEnd", []);
+      if (held > -12) return `held ${((bottom - top) * 0.7).toFixed(0)} px down at the top, the position is ${held} (no stretch)`;
+      if (held < -0.4 * (bottom - top)) return `stretched too far: ${held}`;
+      const back = [];
+      for (let i = 0; i < 14; i++) { await sleep(60); back.push((await list())[0]); }
+      if (back.some((p) => p > 0.5)) return `crossed the top on the way back: ${back}`;
+      const end = await list();
+      if (end[0] !== 0 || end[4] !== 0) return `did not settle at the top: ${end}`;
+    });
+    await step("pulled past the bottom it stretches the other way and springs back", async () => {
+      let v = await list();
+      for (let i = 0; i < 12 && v[0] < v[1] - 1; i++) { await drag(v[3] - 12, v[2] + 12, 8, 140); await sleep(300); v = await list(); }
+      await settled();
+      v = await list();
+      if (v[0] < v[1] - 1) return `could not reach the bottom: ${v[0]} of ${v[1]}`;
+      await drag(v[3] - 20, v[3] - 20 - (v[3] - v[2]) * 0.7, 10, 140, false);
+      const held = await list();
+      await page.shot(`${label}-3-stretched-bottom`);
+      await page.touch("touchEnd", []);
+      if (held[0] < held[1] + 12) return `held at the bottom, the position is ${held[0]} of ${held[1]} (no stretch)`;
+      await sleep(900);
+      const end = await list();
+      if (Math.abs(end[0] - end[1]) > 0.6 || end[4] !== 0) return `did not settle at the bottom: ${end}`;
+    });
+    await step("a drag that starts on a slider moves the slider, not the list", async () => {
+      await toTop();
+      const u = await page.ux();
+      const slider = u.home.hits.find((h) => h[0].startsWith("slider:"));
+      if (!slider) return true;
+      const before = (await list())[0];
+      const cy = (slider[2] + slider[4]) / 2;
+      await page.touch("touchStart", [[slider[1] + (slider[3] - slider[1]) * 0.3, cy]]);
+      for (let i = 1; i <= 8; i++) { await sleep(16); await page.touch("touchMove", [[slider[1] + (slider[3] - slider[1]) * (0.3 + 0.04 * i), cy - 12 * i]]); }
+      await page.touch("touchEnd", []);
+      await sleep(400);
+      const after = await list();
+      return Math.abs(after[0] - before) < 1 ? true : `the list moved ${before} to ${after[0]} under a slider drag`;
+    });
+  } else {
+    await step("the wheel scrolls the list and ends at the top and bottom without stretching", async () => {
+      const v = await list();
+      const [mx, my] = [size.w / 2, (v[2] + v[3]) / 2];
+      await page.mouse("mouseMoved", mx, my);
+      for (let i = 0; i < 4; i++) await page.cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: mx, y: my, deltaX: 0, deltaY: 100 }, page.top);
+      await sleep(500);
+      const after = await list();
+      if (!(after[0] > 100)) return `four wheel notches moved the list to ${after[0]}`;
+      for (let i = 0; i < 80; i++) await page.cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: mx, y: my, deltaX: 0, deltaY: 300 }, page.top);
+      await sleep(700);
+      const end = await list();
+      if (Math.abs(end[0] - end[1]) > 0.6) return `a long wheel run ended at ${end[0]} of ${end[1]}`;
+      for (let i = 0; i < 80; i++) await page.cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: mx, y: my, deltaX: 0, deltaY: -300 }, page.top);
+      await sleep(700);
+      const top = await list();
+      if (top[0] !== 0) return `scrolling back up ended at ${top[0]}`;
+    });
+  }
+  await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
+
 // ---------------------------------------------------------------- the home screen
 
 /**
@@ -1258,6 +1413,8 @@ async function journeyList(label, urlFor, size) {
     const x = 32, y0 = dy < 0 ? v.bottom - 10 : v.top + 10;
     await page.touch("touchStart", [[x, y0]]);
     for (let i = 1; i <= 8; i++) { await sleep(16); await page.touch("touchMove", [[x, y0 + (dy * i) / 8]]); }
+    // The finger rests before it lifts: a placed drag, not a flick.
+    await sleep(140);
     await page.touch("touchEnd", []);
     await settle();
   };
@@ -2218,6 +2375,22 @@ async function journeyPolish(label, urlFor, size) {
 
 // ---------------------------------------------------------------- debug panel, save states, centring
 
+/**
+ * Does a coast slow down smoothly? `trace` is [{t ms, p px}]. The readings come at the harness's pace and the page
+ * draws a frame when it can, so single intervals jitter: the check is that the speed over the last three
+ * intervals is clearly lower than over the first three and that no interval is faster than the first. Returns a
+ * message or null.
+ */
+function coastProblem(trace) {
+  const speeds = trace.slice(1).map((s, i) => ((s.p - trace[i].p) / Math.max(1, s.t - trace[i].t)) * 1000);
+  const mean = (v) => v.reduce((a, b) => a + b, 0) / v.length;
+  const early = mean(speeds.slice(0, 3)), late = mean(speeds.slice(-3));
+  const text = speeds.map((x) => x.toFixed(0)).join(",");
+  if (!(late < early * 0.8)) return `it did not slow down: ${text} px/s`;
+  if (speeds.some((v) => v > Math.max(...speeds.slice(0, 2)) * 1.5 + 40)) return `it sped up while coasting: ${text} px/s`;
+  return null;
+}
+
 const SILENT = `try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`;
 
 /**
@@ -2344,6 +2517,156 @@ async function journeyDebug(label, urlFor, size) {
       }
       if (g[2] - g[0] < size.w * 0.97) return `the picture is only ${g[2] - g[0]} wide in a ${size.w} window`;
     }
+  });
+  const portrait = mobile && size.w < size.h;
+  /** Drag the sheet's handle (portrait) by `dy` css px and let go after a rest. */
+  const dragHandle = async (dy) => {
+    const u = await page.ux();
+    const x = size.w / 2, y0 = u.debug.rect[1] + 9;
+    await page.touch("touchStart", [[x, y0]]);
+    for (let i = 1; i <= 10; i++) { await sleep(16); await page.touch("touchMove", [[x, y0 + (dy * i) / 10]]); }
+    await sleep(160);
+    await page.touch("touchEnd", []);
+    await sleep(500);
+  };
+  await step("the summary is one line and the tabs and content get the panel", async () => {
+    const u = await page.ux();
+    const [top, bottom] = [u.debug.scroll[3], u.debug.scroll[4]];
+    const [, y0, , y1] = u.debug.rect;
+    if (!(bottom > top)) return `no content view: ${u.debug.scroll}`;
+    const share = (bottom - top) / (y1 - y0);
+    await page.shot(`${label}-4-compact`);
+    // The phone's panel keeps one 32 px line for the readings; a desktop sidebar keeps its big numbers.
+    if (mobile && (share < 0.4 || bottom - top < 125)) return `the content view is ${(share * 100).toFixed(0)}% of the panel (${bottom - top} of ${y1 - y0} px)`;
+    if (!mobile && bottom - top < 150) return `the content view is only ${bottom - top} px`;
+  });
+  if (portrait) await step("portrait: the sheet is up over the controller, under the interface row, the picture whole above it", async () => {
+    await page.waitFor("the sheet up", (s) => s.debug.sheet > 0.99, 4000);
+    const u = await page.ux();
+    if (u.touch.buttons.length || u.touch.sticks.length) return "the pad's controls are still there under the sheet";
+    if (u.touch.ui.length < 5) return "the interface row is gone";
+    const uiBottom = Math.max(...u.touch.rects.filter((r) => r[0] === 0).map((r) => r[4] / size.dpr));
+    const [, y0, , y1] = u.debug.rect;
+    if (y0 < uiBottom - 1 || y0 > uiBottom + 16) return `the sheet starts at ${y0}, the interface row ends at ${uiBottom}`;
+    if (y1 - y0 < size.h * 0.3) return `the sheet is only ${y1 - y0} px of a ${size.h} px window`;
+    const problem = gameProblems(u, size.dpr);
+    if (problem) return problem;
+    await page.shot(`${label}-5-sheet-up`);
+  });
+  // Momentum scrolling of the panel's content (the shell's lists have their own journey, journeyMomentum).
+  const scrollNow = async () => (await page.ux()).debug.scroll;
+  const contentPoint = async (frac) => {
+    const u = await page.ux();
+    const [top, bottom] = [u.debug.scroll[3], u.debug.scroll[4]];
+    const [x0, , x1] = u.debug.rect;
+    return [Math.round((x0 + x1) / 2), Math.round(top + (bottom - top) * frac)];
+  };
+  /** A finger drag over the content from fraction `from` to `to` of its height in `steps` frames, lifted at speed. */
+  const flickContent = async (from, to, steps = 4, rest = 0) => {
+    const [x, y0] = await contentPoint(from);
+    const [, y1] = await contentPoint(to);
+    const t0 = Date.now();
+    await page.touch("touchStart", [[x, y0]]);
+    for (let i = 1; i <= steps; i++) { await sleep(16); await page.touch("touchMove", [[x, y0 + ((y1 - y0) * i) / steps]]); }
+    // The finger's own speed in css px per second, as the harness really delivered it.
+    lastFlickSpeed = (Math.abs(y1 - y0) / Math.max(1, Date.now() - t0)) * 1000;
+    if (rest) await sleep(rest);
+    await page.touch("touchEnd", []);
+  };
+  let lastFlickSpeed = 0;
+  const toTop = async () => {
+    for (let i = 0; i < 30 && (await scrollNow())[0] > 0.5; i++) { await flickContent(0.2, 0.9, 8, 140); await sleep(400); }
+  };
+  if (mobile) await step("a flick on the panel's content keeps coasting after the finger lifts and slows to a stop", async () => {
+    // The harness delivers touch events at the page's pace; a flick that was delivered slowly says nothing about
+    // momentum, so a slow one is tried again (a fast one is what a finger does).
+    let start;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await toTop();
+      await sleep(500);
+      start = await scrollNow();
+      if (start[1] < 300) return `the content is only ${start[1]} px past its view, nothing to fling`;
+      await flickContent(0.95, 0.15, 3);
+      if (lastFlickSpeed >= 300) break;
+    }
+    if (lastFlickSpeed < 300) return `the harness could not deliver a flick faster than ${lastFlickSpeed.toFixed(0)} px/s`;
+    const lifted = await scrollNow();
+    const trace = [{ t: Date.now(), p: lifted[0] }];
+    for (let i = 0; i < 10; i++) { await sleep(70); trace.push({ t: Date.now(), p: (await scrollNow())[0] }); }
+    const samples = trace.map((x) => x.p);
+    const moved = samples[samples.length - 1] - lifted[0];
+    // A flick of v px/s coasts about v/2 px; allow for what was already travelled before the first reading.
+    const wanted = Math.min(lastFlickSpeed / 2 - 150, 400) * 0.5;
+    if (moved < Math.max(40, wanted)) return `it only travelled ${moved.toFixed(0)} px after the finger lifted a ${lastFlickSpeed.toFixed(0)} px/s flick (${samples.map((v) => v.toFixed(0))})`;
+    const slow = coastProblem(trace);
+    if (slow) return slow;
+    const end = await page.waitFor("the coast to end", (x) => x.debug.scroll[2] === 0, 6000);
+    await page.shot(`${label}-7-after-fling`);
+    if (end.debug.scroll[0] <= 50) return `it ended at ${end.debug.scroll[0]}`;
+  });
+  if (mobile) await step("a finger put down on a coasting panel stops it where it is and presses nothing", async () => {
+    await toTop();
+    await sleep(500);
+    await flickContent(0.9, 0.2);
+    await sleep(160);
+    const before = (await scrollNow())[0];
+    if ((await scrollNow())[2] !== 1) return "it was not coasting";
+    const [x, y] = await contentPoint(0.3);
+    await page.tap(x, y, 60);
+    const at = (await scrollNow())[0];
+    await sleep(500);
+    const later = await scrollNow();
+    if (Math.abs(later[0] - at) > 2) return `it kept going after the touch: ${at} then ${later[0]}`;
+    if (at <= before) return `the touch did not even find it moving: ${before} then ${at}`;
+    if (later[2] !== 0) return "still flagged as moving";
+  });
+  if (mobile) await step("pulled past the top the content stretches under the finger and springs back; nothing stays stretched", async () => {
+    await toTop();
+    await sleep(600);
+    const [x, y0] = await contentPoint(0.2);
+    await page.touch("touchStart", [[x, y0]]);
+    for (let i = 1; i <= 12; i++) { await sleep(16); await page.touch("touchMove", [[x, y0 + 12 * i]]); }
+    await sleep(120);
+    const held = (await scrollNow())[0];
+    await page.shot(`${label}-8-stretched`);
+    await page.touch("touchEnd", []);
+    if (held > -15) return `held 144 px down at the top, the position is ${held} (no stretch)`;
+    if (held < -0.4 * 400) return `stretched too far: ${held}`;
+    const back = [];
+    for (let i = 0; i < 12; i++) { await sleep(60); back.push((await scrollNow())[0]); }
+    if (back.some((v) => v > 0.5)) return `crossed the top on the way back: ${back}`;
+    const end = await scrollNow();
+    if (end[0] !== 0 || end[2] !== 0) return `did not settle at the top: ${end}`;
+  });
+  if (!mobile) await step("the mouse wheel scrolls the content and stops at the ends", async () => {
+    const [x, y] = await contentPoint(0.5);
+    await page.mouse("mouseMoved", x, y);
+    const before = (await scrollNow())[0];
+    for (let i = 0; i < 6; i++) await page.cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY: 120 }, page.top);
+    await sleep(500);
+    const after = await scrollNow();
+    if (!(after[0] > before + 100)) return `six wheel notches moved ${before} to ${after[0]}`;
+    for (let i = 0; i < 60; i++) await page.cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY: -400 }, page.top);
+    await sleep(600);
+    const top = await scrollNow();
+    if (top[0] !== 0) return `scrolling up for a long time left it at ${top[0]}`;
+  });
+  if (portrait) await step("portrait: dragging the handle down brings the controller back under a short strip, dragging up covers it again", async () => {
+    await dragHandle(260);
+    const down = await page.waitFor("the sheet down", (s) => s.debug.sheet < 0.01, 4000);
+    if (!down.touch.buttons.length) return "the controller did not come back";
+    await page.shot(`${label}-6-sheet-down`);
+    await dragHandle(-260);
+    await page.waitFor("the sheet up again", (s) => s.debug.sheet > 0.99, 4000);
+    if ((await page.ux()).touch.buttons.length) return "the pad shows through the sheet";
+    // A tap on the handle flips it.
+    const u = await page.ux();
+    await page.tap(size.w / 2, u.debug.rect[1] + 9);
+    await page.waitFor("the sheet down by a tap", (s) => s.debug.sheet < 0.01, 4000);
+    await page.tap(size.w / 2, (await page.ux()).debug.rect[1] + 9);
+    await page.waitFor("the sheet up by a tap", (s) => s.debug.sheet > 0.99, 4000);
+    await dragHandle(260);
+    await page.waitFor("the sheet down for the controller", (s) => s.debug.sheet < 0.01, 4000);
   });
   if (mobile) await step("the controller still plays the game while the panel is open", async () => {
     const u = await page.ux();
@@ -3495,6 +3818,7 @@ async function main() {
         if (wanted("desktop-iframe")) await journeyDesktop("desktop-iframe", () => embedded(), { embeddedMode: true });
         if (wanted("desktop-list")) await journeyList("desktop-list", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-list-small")) await journeyList("desktop-list-small", () => direct("?countdown=12"), { w: 800, h: 600, dpr: 1, mobile: false });
+        if (wanted("desktop-momentum")) await journeyMomentum("desktop-momentum", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-menus")) await journeyMenus("desktop-menus", () => direct());
         if (wanted("desktop-nowebgpu")) await journeyNoWebgpu("desktop-nowebgpu", () => direct());
         if (wanted("desktop-gamepad")) await journeyGamepad("desktop-gamepad", () => direct());
@@ -3507,6 +3831,9 @@ async function main() {
         if (wanted("phone-iframe")) await journeyPhone("phone-iframe", () => embedded(), { w: 393, h: 852, dpr: 3 });
         for (const [name, w, h] of [["phone-list", 393, 852], ["phone-list-375", 375, 667], ["phone-list-small", 360, 640], ["phone-list-landscape", 852, 393]]) {
           if (wanted(name)) await journeyList(name, () => direct("?countdown=12"), { w, h, dpr: 3, mobile: true });
+        }
+        for (const [name, w, h] of [["phone-momentum", 393, 852], ["phone-momentum-375", 375, 667], ["phone-momentum-small", 360, 640], ["phone-momentum-landscape", 852, 393]]) {
+          if (wanted(name)) await journeyMomentum(name, () => direct("?countdown=12"), { w, h, dpr: 3, mobile: true });
         }
         if (wanted("phone-home")) await journeyHome("phone-home", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-home-small")) await journeyHome("phone-home-small", () => direct("?countdown=12"), { w: 360, h: 640, dpr: 3, mobile: true });

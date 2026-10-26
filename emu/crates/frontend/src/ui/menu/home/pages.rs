@@ -305,13 +305,18 @@ pub(super) fn draw_list(
             h.list_scroll = y0 + row_h - view.height();
         }
         h.last_row = ms.item_index;
+        h.kin.stop();
     }
     let max_scroll = (rows.len() as f32 * row_h - view.height()).max(0.0);
+    // A flick coasts on after the finger lifts, and stretches against either end.
+    h.kin
+        .step(&mut h.list_scroll, h.frame_dt, max_scroll, view.height());
     // The wheel scrolls a list while the pointer is over it.
-    if ctx.input(|i| i.pointer.hover_pos().is_some_and(|at| view.contains(at))) {
-        h.list_scroll -= ctx.input(|i| i.smooth_scroll_delta.y);
+    let wheel = ctx.input(|i| i.smooth_scroll_delta.y);
+    if wheel != 0.0 && ctx.input(|i| i.pointer.hover_pos().is_some_and(|at| view.contains(at))) {
+        h.kin.wheel(&mut h.list_scroll, -wheel, max_scroll);
     }
-    h.list_scroll = h.list_scroll.clamp(0.0, max_scroll);
+    h.kin.limit(&mut h.list_scroll, max_scroll);
     let clip = p.with_clip_rect(view.expand2(Vec2::new(40.0, 0.0)));
     for (i, row) in rows.iter().enumerate() {
         let y = view.top() + i as f32 * row_h - h.list_scroll;

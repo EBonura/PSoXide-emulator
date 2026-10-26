@@ -2324,6 +2324,7 @@ fn update_touch_controller(
     let size = window.inner_size();
     let scale = window.scale_factor() as f32;
     let css = web_touch::safe_insets_css();
+    state.step_debug_sheet(dt);
     // The debug panel beside the game takes its share of a landscape window.
     let dock_right_px = ui::debug_sidebar::right_dock_points(
         egui::vec2(size.width as f32, size.height as f32) / scale,
@@ -2353,6 +2354,11 @@ fn update_touch_controller(
         menu_open: false,
         dock_right: dock_right_px,
         dock_bottom: dock_bottom_px,
+        sheet: if state.debug_slide > 0.001 {
+            state.debug_sheet
+        } else {
+            0.0
+        },
     };
     let now_ms = input_router.now_ms();
     let menu_open = state.menu.open;

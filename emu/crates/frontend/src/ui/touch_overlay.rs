@@ -73,6 +73,8 @@ pub(crate) struct Reserved {
     /// Where the debug strip goes in portrait, in points, down to the window's edge: the panel's
     /// part under the controls. `None` while it was not asked for.
     pub(crate) strip: Option<Rect>,
+    /// The strip's top edge with the sheet down and fully up, in points, for its drag handle.
+    pub(crate) sheet_span: [f32; 2],
 }
 
 /// What the controller takes from the game's area, in points.
@@ -89,6 +91,7 @@ pub(crate) fn reserved(ctx: &Context, touch: &TouchDevice) -> Reserved {
         left: (safe_px.left + layout.bar_left) * inv,
         right: safe_px.right * inv,
         right_bar: layout.bar_right * inv,
+        sheet_span: [layout.sheet_span[0] * inv, layout.sheet_span[1] * inv],
         strip: strip.map(|s| {
             Rect::from_min_max(
                 pos2(s.min.x * inv, s.min.y * inv),
@@ -106,10 +109,10 @@ pub(crate) fn draw(
     debug_open: bool,
     running: bool,
 ) {
-    let show_pad = !menu_open;
     let Some(layout) = touch.layout() else {
         return;
     };
+    let show_pad = !menu_open && !layout.pad_hidden;
     let alpha = touch.alpha();
     if alpha <= 0.01 {
         return;

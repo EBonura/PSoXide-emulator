@@ -669,21 +669,19 @@ fn grid(
     let rows = state.cards.len().div_ceil(m.cols);
     let content_h = rows as f32 * m.card_h + (rows as f32 - 1.0).max(0.0) * m.gap;
     let blocked = state.asking();
-    let mut scroll = egui::ScrollArea::vertical()
-        .id_salt("slots-scroll")
-        .max_height(body.height())
-        .auto_shrink([false, false])
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
-    if blocked {
-        scroll = scroll.enable_scrolling(false);
-    }
     ui.allocate_new_ui(
         egui::UiBuilder::new()
             .max_rect(body)
             .layout(egui::Layout::top_down(egui::Align::Min)),
         |ui| {
             ui.set_clip_rect(body.expand2(Vec2::new(4.0, 0.0)));
-            scroll.show(ui, |ui| {
+            let configure = |area: egui::ScrollArea| {
+                area.max_height(body.height())
+                    .auto_shrink([false, false])
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .enable_scrolling(!blocked)
+            };
+            crate::ui::momentum::scroll_area_if(ui, "slots-scroll", !blocked, configure, |ui| {
                 let origin = ui.cursor().min;
                 ui.allocate_space(Vec2::new(body.width(), content_h + 6.0));
                 for index in 0..state.cards.len() {

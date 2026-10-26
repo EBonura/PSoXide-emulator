@@ -168,7 +168,7 @@ impl TouchPad {
         };
         let grab = if let Some(ui) = layout.ui.iter().find(|ui| ui.hit.contains(pos)) {
             Some(Grab::Ui(ui.id))
-        } else if !self.pad_enabled {
+        } else if !self.pad_enabled || layout.pad_hidden {
             None
         } else if let Some(stick) = layout.sticks.iter().find(|s| s.zone.contains(pos)) {
             Some(Grab::Stick(stick.side))

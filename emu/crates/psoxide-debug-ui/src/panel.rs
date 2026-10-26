@@ -346,6 +346,37 @@ fn fps_label(refresh: f64, interval: u16) -> String {
     format!("{:.0} fps", refresh / f64::from(interval.max(1)))
 }
 
+/// Where a chart leaves the vertical travel of a finger that started on it, for a scroll area
+/// around the panel to take.
+fn scroll_drag_key() -> egui::Id {
+    egui::Id::new("psoxide-debug-ui-scroll-drag")
+}
+
+/// The vertical drag (points, the pointer's own direction) a chart passed up this frame instead of
+/// scrubbing, if any. A frontend that scrolls the panel by dragging calls this once per frame and
+/// scrolls by it, so a finger that starts on a chart still scrolls the panel; a drag that starts
+/// sideways scrubs the chart as before.
+pub fn forwarded_scroll_drag(ctx: &egui::Context) -> Option<f32> {
+    ctx.data_mut(|d| d.remove_temp::<f32>(scroll_drag_key()))
+}
+
+/// Which way a drag that started on a chart goes, decided once it has moved a few points: `true`
+/// is vertical (the panel's scroll), `false` sideways (the scrub). `None` while undecided.
+fn drag_is_vertical(ui: &Ui, response: &Response) -> Option<bool> {
+    let id = response.id.with("axis");
+    if let Some(known) = ui.data(|d| d.get_temp::<bool>(id)) {
+        return Some(known);
+    }
+    let (origin, now) = ui.input(|i| (i.pointer.press_origin(), i.pointer.latest_pos()));
+    let travel = now? - origin?;
+    if travel.length() < 6.0 {
+        return None;
+    }
+    let vertical = travel.y.abs() > travel.x.abs();
+    ui.data_mut(|d| d.insert_temp(id, vertical));
+    Some(vertical)
+}
+
 /// Shared chart interaction: hover sets the cursor, drag scrubs (and
 /// pauses), scroll zooms, double-click returns to live.
 fn interact(ui: &Ui, stats: &mut GuestStats, ctx: &mut Ctx, axis: &TimeAxis, response: &Response) {
@@ -360,12 +391,25 @@ fn interact(ui: &Ui, stats: &mut GuestStats, ctx: &mut Ctx, axis: &TimeAxis, res
         }
     }
     if response.dragged() {
-        let dx = response.drag_delta().x;
-        let per_px = axis.span() as f32 / axis.rect.width().max(1.0);
-        let newest = stats.newest_vblank().unwrap_or(0);
-        let right = stats.view.paused_at.unwrap_or(newest) as f64 - f64::from(dx * per_px);
-        let oldest = stats.oldest_vblank().unwrap_or(0) + stats.view.window.min(newest);
-        stats.view.paused_at = Some((right.max(0.0) as u64).clamp(oldest.min(newest), newest));
+        match drag_is_vertical(ui, response) {
+            Some(true) => {
+                // Read the delta first: `data_mut` holds the context's lock.
+                let dy = response.drag_delta().y;
+                ui.data_mut(|d| d.insert_temp(scroll_drag_key(), dy));
+            }
+            Some(false) => {
+                let dx = response.drag_delta().x;
+                let per_px = axis.span() as f32 / axis.rect.width().max(1.0);
+                let newest = stats.newest_vblank().unwrap_or(0);
+                let right = stats.view.paused_at.unwrap_or(newest) as f64 - f64::from(dx * per_px);
+                let oldest = stats.oldest_vblank().unwrap_or(0) + stats.view.window.min(newest);
+                stats.view.paused_at =
+                    Some((right.max(0.0) as u64).clamp(oldest.min(newest), newest));
+            }
+            None => {}
+        }
+    } else {
+        ui.data_mut(|d| d.remove_temp::<bool>(response.id.with("axis")));
     }
     if response.double_clicked() {
         stats.view.paused_at = None;

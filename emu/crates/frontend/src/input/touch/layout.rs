@@ -100,6 +100,10 @@ pub(crate) struct LayoutParams {
     /// Pixels of the portrait panel the debug strip asks for under the controls: the controls
     /// shrink as far as needed to leave them, and never past the strip.
     pub(crate) dock_bottom: f32,
+    /// How far the debug sheet has been pulled up over the controls in portrait, 0 (the strip
+    /// under them) to 1 (the sheet fills the panel under the interface row). While it is above 0
+    /// the pad's own controls are away: only the interface row stays.
+    pub(crate) sheet: f32,
 }
 
 /// Which way the window is wider.
@@ -280,6 +284,11 @@ pub(crate) struct TouchLayout {
     /// Where the debug strip goes in portrait (window pixels, down to the window's edge): under the
     /// controls. [`Rect::NOTHING`] when none was asked for.
     pub(crate) strip: Rect,
+    /// The debug sheet covers the pad's controls (none of them is drawn or takes a touch).
+    pub(crate) pad_hidden: bool,
+    /// Where the strip's top edge sits with the sheet down and fully up, window pixels, for the
+    /// sheet's drag handle to map a finger's travel to the sheet.
+    pub(crate) sheet_span: [f32; 2],
 }
 
 fn pill(rect: Rect, inflate: Vec2, mask: u16, label: &'static str) -> PadButton {
@@ -494,10 +503,16 @@ impl TouchLayout {
         layout.game = Rect::from_min_size(pos2(ox, oy), vec2(w_px, game_h));
         if p.dock_bottom > 0.0 {
             // From the end of the block to the window's edge; the strip keeps the safe inset free.
+            // Pulled up (`sheet`), its top edge rises to just under the interface row.
+            let down = content_end.min(p.size.y - p.safe.bottom);
+            let up = content_top.min(down);
+            let sheet = p.sheet.clamp(0.0, 1.0);
             layout.strip = Rect::from_min_max(
-                pos2(ox, content_end.min(p.size.y - p.safe.bottom)),
+                pos2(ox, down + (up - down) * sheet),
                 pos2(ox + w_px, p.size.y),
             );
+            layout.sheet_span = [down, up];
+            layout.pad_hidden = sheet > 0.0;
         }
 
         layout.shoulders(ox, w_px, y0, u);
@@ -530,6 +545,11 @@ impl TouchLayout {
                 stick.zone = Rect::from_center_size(stick.rest, Vec2::splat(2.0 * zone));
             }
         }
+        if layout.pad_hidden {
+            layout.buttons.clear();
+            layout.sticks.clear();
+            layout.dpad.zone = 0.0;
+        }
         layout
     }
 
@@ -551,6 +571,8 @@ impl TouchLayout {
             bar_right: 0.0,
             game: Rect::NOTHING,
             strip: Rect::NOTHING,
+            pad_hidden: false,
+            sheet_span: [0.0; 2],
         };
         for (mask, glyph, dx, dy) in [
             (button::TRIANGLE, Glyph::Triangle, 0.0, -FACE_REACH),
@@ -804,6 +826,7 @@ pub(crate) mod tests {
             menu_open: false,
             dock_right: 0.0,
             dock_bottom: 0.0,
+            sheet: 0.0,
         }
     }
 
@@ -1053,6 +1076,7 @@ pub(crate) mod tests {
                         menu_open: false,
                         dock_right: 0.0,
                         dock_bottom: 0.0,
+                        sheet: 0.0,
                     },
                 ));
             }
@@ -1151,6 +1175,7 @@ pub(crate) mod tests {
                 menu_open: false,
                 dock_right: 0.0,
                 dock_bottom: 0.0,
+                sheet: 0.0,
             };
             let layout = TouchLayout::compute(&p);
             let natural = (h * dpr * 4.0 / 3.0).min(w * dpr);
@@ -1205,6 +1230,50 @@ pub(crate) mod tests {
         let safe = safe_rect(&p).expand(1.0);
         for (name, rect) in hit_rects(&big) {
             assert!(safe.contains_rect(rect), "{name} {rect:?}");
+        }
+    }
+
+    #[test]
+    fn the_debug_sheet_takes_the_pad_panel_and_leaves_the_interface_row() {
+        for device in &DEVICES {
+            let mut p = params(device, false, true);
+            p.dock_bottom = 140.0 * p.scale;
+            let down = TouchLayout::compute(&p);
+            assert!(
+                !down.pad_hidden && !down.buttons.is_empty(),
+                "{}",
+                device.name
+            );
+            p.sheet = 1.0;
+            let up = TouchLayout::compute(&p);
+            assert!(up.pad_hidden, "{}", device.name);
+            assert!(
+                up.buttons.is_empty() && up.sticks.is_empty() && up.dpad.zone == 0.0,
+                "{}: nothing of the pad is left to draw or touch",
+                device.name
+            );
+            assert!(
+                !up.ui.is_empty(),
+                "{}: the interface row stays",
+                device.name
+            );
+            let row_bottom = up.ui.iter().map(|u| u.draw.max.y).fold(0.0, f32::max);
+            assert!(
+                up.strip.min.y >= row_bottom && up.strip.min.y < down.strip.min.y,
+                "{}: the sheet starts under the row ({row_bottom}) and above the strip ({:?})",
+                device.name,
+                down.strip
+            );
+            assert_eq!(
+                up.strip.max.y, p.size.y,
+                "{}: it runs to the window's edge",
+                device.name
+            );
+            // Half way up, the pad is already away (it would show through the sheet).
+            p.sheet = 0.3;
+            assert!(TouchLayout::compute(&p).pad_hidden, "{}", device.name);
+            // The sheet never moves the picture.
+            assert_eq!(up.game, down.game, "{}", device.name);
         }
     }
 }

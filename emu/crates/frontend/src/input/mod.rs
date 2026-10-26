@@ -261,6 +261,7 @@ mod tests {
                 menu_open: false,
                 dock_right: 0.0,
                 dock_bottom: 0.0,
+                sheet: 0.0,
             },
             0,
             0.016,
@@ -295,6 +296,7 @@ mod tests {
             menu_open: true,
             dock_right: 0.0,
             dock_bottom: 0.0,
+            sheet: 0.0,
         };
         let mut router = touch_router();
         router.touch_mut().update_layout(params(), 0, 0.016);
@@ -434,6 +436,7 @@ mod tests {
                 menu_open: false,
                 dock_right: 0.0,
                 dock_bottom: 0.0,
+                sheet: 0.0,
             },
             0,
             0.016,
@@ -455,6 +458,7 @@ mod tests {
                 menu_open: false,
                 dock_right: 0.0,
                 dock_bottom: 0.0,
+                sheet: 0.0,
             },
             0,
             0.016,

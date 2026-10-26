@@ -14,7 +14,7 @@ use crate::app::AppState;
 use crate::theme;
 use crate::ui::menu::home::tokens;
 
-use super::{memory, registers, vram};
+use super::{memory, momentum, registers, vram};
 
 const SIDEBAR_MIN_WIDTH: f32 = 320.0;
 const SIDEBAR_MAX_WIDTH: f32 = 900.0;
@@ -33,6 +33,12 @@ const STRIP_MAX_HEIGHT: f32 = 420.0;
 /// Inner padding, replacing the default panel frame margin we drop so the
 /// slide-in content-width math stays exact.
 const SIDEBAR_PAD: f32 = 8.0;
+/// Height of the grab bar on a phone's debug sheet, points.
+const SHEET_HANDLE: f32 = 18.0;
+/// Release speed that throws the sheet to the far side, points per second.
+const SHEET_FLING: f32 = 350.0;
+/// Height of the phone's one-line summary, points.
+const SUMMARY_ROW: f32 = 32.0;
 
 /// Where the panel sits and how much of the window it takes, in points.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -202,6 +208,9 @@ fn draw_touch_strip(
 ) {
     let (panel_fill, separator) = panel_colours(ctx);
     let inset = state.touch_bottom_inset;
+    if (state.debug_sheet - state.debug_sheet_goal).abs() > 0.001 {
+        ctx.request_repaint();
+    }
     let response = TopBottomPanel::bottom("debug-strip")
         .resizable(false)
         .exact_height(strip.height())
@@ -218,8 +227,9 @@ fn draw_touch_strip(
                 .hline(panel_rect.x_range(), panel_rect.top() + 0.5, separator);
             // The contents are laid out at full size from the first frame and clipped to what has
             // opened, so the summary is never missing from a frame.
+            sheet_handle(ui, state, panel_rect);
             let content = Rect::from_min_max(
-                panel_rect.min,
+                panel_rect.min + Vec2::new(0.0, SHEET_HANDLE),
                 egui::pos2(panel_rect.right(), panel_rect.bottom() - inset),
             );
             ui.scope_builder(
@@ -235,6 +245,55 @@ fn draw_touch_strip(
         });
     let r = response.inner;
     state.debug_rect = [r.left(), r.top(), r.right(), r.bottom()];
+}
+
+/// The grab bar on the strip's top edge: drag it up and the debug sheet covers the controller,
+/// down and the controller is back with a short strip under it; a tap flips between the two.
+fn sheet_handle(ui: &mut egui::Ui, state: &mut AppState, panel: Rect) {
+    let area = Rect::from_min_size(panel.min, Vec2::new(panel.width(), SHEET_HANDLE));
+    // A finger needs more than the bar: the touch area runs a little below it, across the middle
+    // of the panel (the close button at the right stays clear).
+    let grab = Rect::from_center_size(
+        area.center() + Vec2::new(0.0, 5.0),
+        Vec2::new(panel.width() * 0.6, SHEET_HANDLE + 10.0),
+    );
+    let response = ui.interact(
+        grab,
+        egui::Id::new("debug-sheet-handle"),
+        Sense::click_and_drag(),
+    );
+    let lit = response.hovered() || response.dragged();
+    let ink = if lit {
+        tokens::FOCUS
+    } else {
+        tokens::ICON_REST
+    };
+    ui.painter().rect_filled(
+        Rect::from_center_size(area.center(), Vec2::new(40.0, 4.0)),
+        2.0,
+        ink,
+    );
+    let span = (state.debug_sheet_span[0] - state.debug_sheet_span[1]).max(1.0);
+    if response.dragged() {
+        // The sheet follows the finger: the top edge moves by what the finger moved.
+        state.debug_sheet_drag = true;
+        let moved = -response.drag_delta().y / span;
+        state.debug_sheet = (state.debug_sheet + moved).clamp(0.0, 1.0);
+        state.debug_sheet_goal = state.debug_sheet;
+    } else if response.drag_stopped() {
+        // Let go: settle on the side the sheet was thrown towards, else the nearer one.
+        state.debug_sheet_drag = false;
+        let speed = ui.input(|i| i.pointer.velocity().y);
+        state.debug_sheet_goal = if speed < -SHEET_FLING {
+            1.0
+        } else if speed > SHEET_FLING {
+            0.0
+        } else {
+            state.debug_sheet.round()
+        };
+    } else if response.clicked() {
+        state.debug_sheet_goal = if state.debug_sheet > 0.5 { 0.0 } else { 1.0 };
+    }
 }
 
 fn draw_bottom(
@@ -327,16 +386,16 @@ fn draw_contents(
     touch: bool,
 ) {
     if touch {
-        // Tap targets of at least 44 points and nothing under 13.
+        // Fingertip-sized controls (36 points) in small type, so the content gets the room.
         let style = ui.style_mut();
-        style.spacing.interact_size.y = 44.0;
-        style.spacing.button_padding = Vec2::new(14.0, 10.0);
-        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
+        style.spacing.interact_size.y = 36.0;
+        style.spacing.button_padding = Vec2::new(9.0, 5.0);
+        style.spacing.item_spacing = Vec2::new(6.0, 6.0);
         for (text_style, size) in [
-            (egui::TextStyle::Body, 15.0),
-            (egui::TextStyle::Button, 15.0),
-            (egui::TextStyle::Small, 13.0),
-            (egui::TextStyle::Monospace, 14.0),
+            (egui::TextStyle::Body, 14.0),
+            (egui::TextStyle::Button, 14.0),
+            (egui::TextStyle::Small, 12.0),
+            (egui::TextStyle::Monospace, 13.0),
         ] {
             if let Some(font) = style.text_styles.get_mut(&text_style) {
                 font.size = size;
@@ -368,11 +427,15 @@ fn draw_contents(
     ui.separator();
 
     let height = (bottom - ui.cursor().top()).max(60.0);
-    egui::ScrollArea::vertical()
-        .max_height(height)
-        .min_scrolled_height(height)
-        .auto_shrink([false, false])
-        .show(ui, |ui| match Tab::ALL[tab.min(Tab::ALL.len() - 1)] {
+    let ((), reading) = momentum::scroll_area(
+        ui,
+        "debug-content",
+        |area| {
+            area.max_height(height)
+                .min_scrolled_height(height)
+                .auto_shrink([false, false])
+        },
+        |ui| match Tab::ALL[tab.min(Tab::ALL.len() - 1)] {
             Tab::Performance => {
                 let mut export = None;
                 theme::viz_frame(ui, "", |ui| {
@@ -399,18 +462,26 @@ fn draw_contents(
                 &mut state.breakpoints,
             ),
             Tab::Video => vram::draw_contents(ui, vram_tex),
-        });
+        },
+    );
+    state.debug_scroll = [
+        reading.pos,
+        reading.max,
+        f32::from(u8::from(reading.moving)),
+        reading.top,
+        reading.bottom,
+    ];
 }
 
 /// One tab as a chip: a pill that lights in the shell's accent when it is the open one.
 fn tab_chip(ui: &mut egui::Ui, label: &str, on: bool, touch: bool) -> bool {
-    let font = FontId::proportional(if touch { 15.0 } else { 13.0 });
+    let font = FontId::proportional(13.0);
     let galley = ui.painter().layout_no_wrap(
         label.to_string(),
         font,
         if on { tokens::FOCUS } else { tokens::DIM },
     );
-    let height = if touch { 38.0 } else { 26.0 };
+    let height = if touch { 30.0 } else { 26.0 };
     let size = Vec2::new(galley.size().x + 24.0, height);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let hot = response.hovered();
@@ -455,6 +526,10 @@ fn summary(ui: &mut egui::Ui, state: &mut AppState, touch: bool) {
     };
     let fps = state.guest_stats.recent_fps();
     let speed = state.guest_stats.host_speed();
+    if touch {
+        compact_summary(ui, state, color, fps, speed);
+        return;
+    }
     let width = ui.available_width();
     ui.horizontal(|ui| {
         ui.label(RichText::new("Debug").color(tokens::ACCENT).size(15.0));
@@ -517,6 +592,91 @@ fn summary(ui: &mut egui::Ui, state: &mut AppState, touch: bool) {
             "of real time",
         );
     });
+}
+
+/// The phone's summary: one line of small type, a status dot, the three readings, the title when
+/// it fits and the close button, so the tabs and their content get the panel.
+fn compact_summary(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    status: Color32,
+    fps: Option<f64>,
+    speed: Option<(f64, f64)>,
+) {
+    let readings = [
+        (fps.map_or("--".into(), |f| format!("{f:.0}")), "fps"),
+        (
+            fps.filter(|f| *f > 0.0)
+                .map_or("--".into(), |f| format!("{:.1}", 1000.0 / f)),
+            "ms",
+        ),
+        (
+            speed.map_or("--".into(), |(s, _)| format!("{:.0}", s * 100.0)),
+            "% real time",
+        ),
+    ];
+    let row = Rect::from_min_size(
+        ui.cursor().min,
+        Vec2::new(ui.available_width(), SUMMARY_ROW),
+    );
+    ui.allocate_rect(row, Sense::hover());
+    let painter = ui.painter().clone();
+    let mid = row.center().y;
+    painter.circle_filled(egui::pos2(row.left() + 6.0, mid), 4.5, status);
+    let mut x = row.left() + 18.0;
+    for (value, unit) in readings {
+        let big = painter.text(
+            egui::pos2(x, mid),
+            egui::Align2::LEFT_CENTER,
+            value,
+            FontId::proportional(15.0),
+            Color32::WHITE,
+        );
+        let small = painter.text(
+            egui::pos2(big.right() + 3.0, mid + 1.0),
+            egui::Align2::LEFT_CENTER,
+            unit,
+            FontId::proportional(11.0),
+            tokens::DIM,
+        );
+        x = small.right() + 12.0;
+    }
+    // The close button ends the row; the title takes what is left between, cut, never wrapped.
+    let close = Rect::from_min_size(
+        egui::pos2(row.right() - SUMMARY_ROW, row.top()),
+        Vec2::splat(SUMMARY_ROW),
+    );
+    if let Some(game) = state.current_game.as_ref() {
+        let room = close.left() - x - 8.0;
+        if room >= 70.0 {
+            let galley = painter.layout(
+                game.title.clone(),
+                FontId::proportional(12.0),
+                tokens::TEXT_2,
+                room,
+            );
+            if galley.rows.len() == 1 {
+                let at = egui::pos2(
+                    close.left() - 8.0 - galley.size().x,
+                    mid - galley.size().y / 2.0,
+                );
+                painter.galley(at, galley, tokens::TEXT_2);
+            }
+        }
+    }
+    let response = ui.interact(close, egui::Id::new("debug-close"), Sense::click());
+    let ink = if response.hovered() {
+        tokens::FOCUS
+    } else {
+        tokens::ICON_REST
+    };
+    let c = close.center();
+    let stroke = Stroke::new(1.6, ink);
+    painter.line_segment([c + Vec2::new(-5.0, -5.0), c + Vec2::new(5.0, 5.0)], stroke);
+    painter.line_segment([c + Vec2::new(-5.0, 5.0), c + Vec2::new(5.0, -5.0)], stroke);
+    if response.clicked() {
+        state.panels.debug_sidebar = false;
+    }
 }
 
 /// Record a controller tape (`.pxtape`) of the running game and replay it.

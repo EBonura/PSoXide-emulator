@@ -20,6 +20,7 @@ use egui::{Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2};
 
 use super::{LibraryItem, MenuAction, MenuInput, MenuState};
 use crate::icons;
+use crate::ui::momentum::Momentum;
 use hints::{Btn, HintStyle};
 use scene::{fade, CoverKind, CYAN};
 
@@ -212,6 +213,10 @@ pub(crate) struct HomeState {
     feed: HomeFeed,
     dither: Option<egui::TextureHandle>,
     list_scroll: f32,
+    /// The motion of the list or controls page under a finger: coasting, stretch, tap-to-stop.
+    kin: Momentum,
+    /// The page the motion belongs to: a page change ends it.
+    kin_page: Page,
     /// The list page's scroll, its furthest scroll and the top and bottom of its view as of the
     /// last frame, for the journeys.
     list_view: [f32; 4],
@@ -340,6 +345,8 @@ impl HomeState {
             feed: HomeFeed::default(),
             dither: None,
             list_scroll: 0.0,
+            kin: Momentum::default(),
+            kin_page: Page::Home,
             list_view: [0.0; 4],
             controls: controls::ControlsState::default(),
             press: None,
@@ -769,7 +776,7 @@ impl MenuState {
             _ => -1.0,
         };
         format!(
-            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"nav_hl\":{:.3},\"nav_vis\":{:.2},\"page_age\":{:.2},\"keyboard\":{},\"framed\":{},\"press\":{:.2},\"controls\":{},\"list\":[{:.1},{:.1},{:.1},{:.1}],\"cases\":[{}],\"hits\":[{}]}}",
+            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"peek\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"nav_hl\":{:.3},\"nav_vis\":{:.2},\"page_age\":{:.2},\"keyboard\":{},\"framed\":{},\"press\":{:.2},\"controls\":{},\"list\":[{:.1},{:.1},{:.1},{:.1},{}],\"cases\":[{}],\"hits\":[{}]}}",
             h.page.name(),
             if h.zone == Zone::Nav { "nav" } else { "body" },
             self.home_probe().1,
@@ -797,6 +804,7 @@ impl MenuState {
             h.list_view[1],
             h.list_view[2],
             h.list_view[3],
+            i32::from(h.kin.is_active()),
             cases.join(","),
             hits.join(",")
         )
@@ -1573,6 +1581,10 @@ impl HomeState {
             ms.appear = target;
         }
         self.note_open_state(ms);
+        if self.kin_page != self.page || !ms.open {
+            self.kin.stop();
+            self.kin_page = self.page;
+        }
         if ms.appear <= 0.0 {
             self.hits.clear();
             return;
@@ -3197,10 +3209,12 @@ impl HomeState {
                     Click::Slider(i, track) if r.contains(pos) => Some((*i, *track)),
                     _ => None,
                 });
+                // A finger put down on a coasting list stops it and presses nothing.
+                let caught = self.scrolls_by_finger() && self.kin.grab();
                 self.press = Some(Press {
                     start: pos,
                     travel: 0.0,
-                    scrolled: false,
+                    scrolled: caught,
                     on_slider: slider,
                 });
             }
@@ -3236,14 +3250,26 @@ impl HomeState {
                 )
             {
                 press.scrolled = true;
-                if self.page == Page::Controls {
-                    self.controls.scroll_by(-delta.y);
-                } else {
-                    self.list_scroll = (self.list_scroll - delta.y).max(0.0);
+                let now = ctx.input(|i| i.time);
+                match self.page {
+                    Page::Controls => self.controls.drag(&mut self.kin, -delta.y, now),
+                    Page::Game | Page::Settings => {
+                        let [_, max, top, bottom] = self.list_view;
+                        self.kin
+                            .drag(&mut self.list_scroll, -delta.y, now, max, bottom - top);
+                    }
+                    _ => {}
                 }
             }
         }
         if released {
+            if self.kin.is_dragging() {
+                let now = ctx.input(|i| i.time);
+                match self.page {
+                    Page::Controls => self.controls.release(&mut self.kin, now),
+                    _ => self.kin.release(self.list_scroll, now, self.list_view[1]),
+                }
+            }
             let press = self.press.take();
             let Some(pos) = release_at.or(pos) else {
                 return;
@@ -3252,6 +3278,7 @@ impl HomeState {
             if let Some(pr) = press {
                 let (dx, dy) = (pos.x - pr.start.x, pos.y - pr.start.y);
                 if pr.on_slider.is_none() && dx.abs() > 80.0 && dy.abs() < dx.abs() * 0.6 {
+                    self.kin.stop();
                     self.cancel_countdown();
                     let step = if dx < 0.0 { 1 } else { -1 };
                     if self.page == Page::Home {
@@ -3281,6 +3308,11 @@ impl HomeState {
                 self.peek = false;
             }
         }
+    }
+
+    /// Whether the page under a finger scrolls with momentum.
+    fn scrolls_by_finger(&self) -> bool {
+        matches!(self.page, Page::Game | Page::Settings | Page::Controls)
     }
 
     fn apply_click(&mut self, ms: &mut MenuState, click: Click) -> Option<MenuAction> {

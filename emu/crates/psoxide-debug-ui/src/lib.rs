@@ -27,7 +27,7 @@ mod plot;
 use emulator_core::guest_stats::GuestCounters;
 use emulator_core::{Bus, Cpu};
 
-pub use panel::{draw, PanelAction};
+pub use panel::{draw, forwarded_scroll_drag, PanelAction};
 
 /// Vblanks of history kept (two minutes at 60 Hz).
 pub const HISTORY_VBLANKS: usize = 60 * 120;
