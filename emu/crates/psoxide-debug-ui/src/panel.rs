@@ -1,6 +1,6 @@
 //! The guest performance panel.
 
-use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Response, RichText, Stroke, Ui};
+use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Response, RichText, Stroke, Ui};
 
 use crate::plot::{self, TimeAxis};
 use crate::{CpuClass, FrameSample, FrameTarget, GuestStats, CPU_CLASSES, VOICES};
@@ -55,6 +55,10 @@ pub fn draw(
     let summary = Summary::compute(stats, &ctx);
 
     kpi_tiles(ui, stats, &ctx, &summary);
+    plot::STATS_BOTTOM.store(
+        ui.min_rect().bottom().to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     ui.add_space(4.0);
 
     section(ui, "Frame rate", true, |ui| {
@@ -195,7 +199,21 @@ impl Summary {
 }
 
 fn section(ui: &mut Ui, title: &str, open: bool, add: impl FnOnce(&mut Ui)) {
-    egui::CollapsingHeader::new(RichText::new(title).color(plot::TEXT).strong())
+    // A header does not wrap: in a narrow column (a phone's) the long titles are cut down, because
+    // a header wider than the column widens the whole panel's layout.
+    let shown = if ui.available_width() < 200.0 {
+        match title {
+            "Cycle budget per vblank" => "Cycle budget",
+            "Where the CPU time goes" => "CPU time",
+            "What limits each frame" => "Limits",
+            "Hardware activity" => "Hardware",
+            "Texture pages in use" => "Texture pages",
+            other => other,
+        }
+    } else {
+        title
+    };
+    egui::CollapsingHeader::new(RichText::new(shown).color(plot::TEXT).strong())
         .id_salt(("guest-perf", title))
         .default_open(open)
         .show(ui, |ui| {
@@ -205,7 +223,146 @@ fn section(ui: &mut Ui, title: &str, open: bool, add: impl FnOnce(&mut Ui)) {
         });
 }
 
+/// One small segmented control: `labels` side by side in a single rounded bar, `selected` lit.
+/// Returns the segment clicked. The bar squeezes its padding to fit `max_w`.
+fn segmented(ui: &mut Ui, labels: &[String], selected: Option<usize>, max_w: f32) -> Option<usize> {
+    let font = FontId::proportional(plot::px(10.5));
+    let widths: Vec<f32> = labels
+        .iter()
+        .map(|l| {
+            ui.painter()
+                .layout_no_wrap(l.clone(), font.clone(), plot::TEXT)
+                .size()
+                .x
+        })
+        .collect();
+    let text: f32 = widths.iter().sum();
+    let pad = ((max_w - text) / (2.0 * labels.len() as f32)).clamp(0.5, 6.0);
+    let total = text + 2.0 * pad * labels.len() as f32;
+    let (bar, _) = ui.allocate_exact_size(egui::vec2(total, 18.0), egui::Sense::hover());
+    ui.painter().rect_filled(bar, 4.0, plot::SURFACE);
+    let mut clicked = None;
+    let mut x = bar.left();
+    for (i, label) in labels.iter().enumerate() {
+        let w = widths[i] + 2.0 * pad;
+        let cell = Rect::from_min_size(Pos2::new(x, bar.top()), egui::vec2(w, bar.height()));
+        let response = ui.interact(cell, ui.id().with(("segment", i)), egui::Sense::click());
+        if selected == Some(i) {
+            ui.painter()
+                .rect_filled(cell.shrink(1.0), 3.0, plot::shade(plot::BLUE, -0.45));
+        } else if response.hovered() {
+            ui.painter().rect_filled(cell.shrink(1.0), 3.0, plot::GRID);
+        }
+        ui.painter().text(
+            cell.center(),
+            Align2::CENTER_CENTER,
+            label,
+            font.clone(),
+            if selected == Some(i) {
+                plot::TEXT
+            } else {
+                plot::TEXT_DIM
+            },
+        );
+        if response.clicked() {
+            clicked = Some(i);
+        }
+        x += w;
+    }
+    clicked
+}
+
+/// The compact controls (a phone's column, the small sidebar): the time window as one segmented
+/// row, then Pause, the frame target and Export on a row of their own, and the help sentence
+/// behind a small "?".
+fn compact_toolbar(ui: &mut Ui, stats: &mut GuestStats, action: &mut Option<PanelAction>) {
+    let help_id = egui::Id::new("psoxide-debug-ui-help");
+    let mut help = ui.data(|d| d.get_temp::<bool>(help_id)).unwrap_or(false);
+    let refresh = stats.refresh_hz().round().max(1.0) as u64;
+    ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
+    ui.horizontal(|ui| {
+        let labels: Vec<String> = WINDOWS_S.iter().map(|s| format!("{s}s")).collect();
+        let selected = WINDOWS_S
+            .iter()
+            .position(|s| stats.view.window == s * refresh);
+        let room = ui.available_width();
+        if let Some(i) = segmented(ui, &labels, selected, room) {
+            stats.view.window = WINDOWS_S[i] * refresh;
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        let live = stats.view.paused_at.is_none();
+        let label = if live { "Pause" } else { "Go live" };
+        if ui
+            .button(label)
+            .on_hover_text("Freeze the charts (emulation keeps running). Drag a chart to scrub.")
+            .clicked()
+        {
+            stats.view.paused_at = if live { stats.newest_vblank() } else { None };
+        }
+        let q = ui.add(egui::Button::new(RichText::new("?").size(plot::px(10.5))).selected(help));
+        if q.on_hover_text("What the panel shows").clicked() {
+            help = !help;
+        }
+        ui.menu_button("Export CSV", |ui| {
+            ui.label(RichText::new("One row per vblank, every counter.").color(plot::TEXT_DIM));
+            for secs in EXPORT_S {
+                if ui.button(format!("Last {secs} s")).clicked() {
+                    stats.view.export_secs = secs;
+                    *action = Some(PanelAction::ExportCsv {
+                        csv: stats.csv(secs),
+                        seconds: secs,
+                    });
+                    ui.close_menu();
+                }
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        let refresh_hz = stats.refresh_hz();
+        egui::ComboBox::from_id_salt("guest-perf-target")
+            .width((ui.available_width() - 36.0).max(40.0))
+            .selected_text(match stats.view.target {
+                FrameTarget::Auto => "Target: auto".to_string(),
+                FrameTarget::Vblanks(n) => format!("Target: {}", fps_label(refresh_hz, n)),
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut stats.view.target,
+                    FrameTarget::Auto,
+                    "Auto (most common)",
+                );
+                for n in 1..=4u16 {
+                    ui.selectable_value(
+                        &mut stats.view.target,
+                        FrameTarget::Vblanks(n),
+                        format!(
+                            "{} ({n} vblank{})",
+                            fps_label(refresh_hz, n),
+                            if n == 1 { "" } else { "s" }
+                        ),
+                    );
+                }
+            });
+    });
+    if help {
+        ui.label(
+            RichText::new(
+                "Emulated PS1 only. Hover for values, drag a chart to scrub it, scroll to zoom, \
+                 double-click for live.",
+            )
+            .color(plot::TEXT_MUTED)
+            .size(plot::px(10.5)),
+        );
+    }
+    ui.data_mut(|d| d.insert_temp(help_id, help));
+}
+
 fn toolbar(ui: &mut Ui, stats: &mut GuestStats, action: &mut Option<PanelAction>) {
+    if plot::type_scale() < 0.95 {
+        compact_toolbar(ui, stats, action);
+        return;
+    }
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         let live = stats.view.paused_at.is_none();
@@ -237,7 +394,7 @@ fn toolbar(ui: &mut Ui, stats: &mut GuestStats, action: &mut Option<PanelAction>
         ui.spacing_mut().item_spacing.x = 4.0;
         let refresh_hz = stats.refresh_hz();
         egui::ComboBox::from_id_salt("guest-perf-target")
-            .width(110.0)
+            .width((ui.available_width() - 6.0).clamp(60.0, 110.0))
             .selected_text(match stats.view.target {
                 FrameTarget::Auto => "Target: auto".to_string(),
                 FrameTarget::Vblanks(n) => format!("Target: {}", fps_label(stats.refresh_hz(), n)),
@@ -286,6 +443,7 @@ fn toolbar(ui: &mut Ui, stats: &mut GuestStats, action: &mut Option<PanelAction>
 fn legend_row(ui: &mut Ui, items: &[(Color32, &str, bool)]) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().item_spacing.y = 2.0;
         for &(color, text, dot) in items {
             let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 10.0), egui::Sense::hover());
             if dot {
@@ -304,7 +462,10 @@ fn legend_row(ui: &mut Ui, items: &[(Color32, &str, bool)]) {
                     .color(plot::TEXT_DIM)
                     .size(plot::px(10.5)),
             );
-            ui.add_space(6.0);
+            // Not in a narrow column: a space that does not fit would widen the whole panel.
+            if plot::type_scale() >= 0.95 && ui.available_width() > 24.0 {
+                ui.add_space(6.0);
+            }
         }
     });
 }
@@ -317,6 +478,34 @@ fn host_line(ui: &mut Ui, stats: &GuestStats) {
     };
     let behind = speed < 0.97;
     let gap_ms = stats.audio_gap_ms();
+    if plot::type_scale() < 0.95 {
+        // One short line in a narrow column.
+        let mut text = if behind {
+            format!(
+                "Host behind: {:.0}% real time, {frame_ms:.1} ms/redraw",
+                speed * 100.0
+            )
+        } else {
+            format!(
+                "Host {frame_ms:.1} ms/redraw, {:.0}% real time",
+                speed * 100.0
+            )
+        };
+        if gap_ms >= 1.0 {
+            text.push_str(&format!(", audio dry {gap_ms:.0} ms"));
+        }
+        let warn = behind || gap_ms >= 1.0;
+        ui.label(
+            RichText::new(text)
+                .color(if warn {
+                    plot::CRITICAL
+                } else {
+                    plot::TEXT_MUTED
+                })
+                .size(plot::px(10.5)),
+        );
+        return;
+    }
     let mut text = if behind {
         format!(
             "Host is behind ({:.0}% of real time, {frame_ms:.1} ms per redraw). \
@@ -484,7 +673,20 @@ fn kpi_tiles(ui: &mut Ui, stats: &GuestStats, ctx: &Ctx, s: &Summary) {
     let _ = stats;
     let spacing = 4.0;
     let avail = ui.available_width();
-    let columns = if avail > 520.0 {
+    // Set small (a phone) the cards are denser: three across from 220 points, and a single narrow
+    // column becomes one line per reading.
+    let scale = plot::type_scale();
+    let compact = scale < 0.95;
+    let columns = if compact {
+        // A tight grid of small cells: three across, two in a phone's column.
+        if avail >= 190.0 {
+            3
+        } else if avail >= 90.0 {
+            2
+        } else {
+            1
+        }
+    } else if avail > 520.0 {
         5
     } else if avail > 340.0 {
         3
@@ -493,27 +695,55 @@ fn kpi_tiles(ui: &mut Ui, stats: &GuestStats, ctx: &Ctx, s: &Summary) {
     } else {
         1
     };
+    if compact && columns == 1 {
+        for (title, value, note, color) in &tiles {
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(avail, 20.0 * scale.max(0.8)),
+                egui::Sense::hover(),
+            );
+            let painter = ui.painter();
+            painter.rect_filled(rect, 3.0, plot::SURFACE);
+            painter.text(
+                rect.left_center() + egui::vec2(5.0, 0.0),
+                Align2::LEFT_CENTER,
+                *title,
+                plot::small(),
+                plot::TEXT_DIM,
+            );
+            painter.text(
+                rect.right_center() - egui::vec2(5.0, 0.0),
+                Align2::RIGHT_CENTER,
+                value,
+                plot::figures(11.0),
+                *color,
+            );
+            response.on_hover_text(note.as_str());
+            ui.add_space(-ui.spacing().item_spacing.y + 2.0);
+        }
+        return;
+    }
+    let tile_h = if compact { 30.0 } else { 46.0 };
     let width = ((avail - spacing * (columns as f32 - 1.0)) / columns as f32).floor();
     for row in tiles.chunks(columns) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = spacing;
             for (title, value, note, color) in row {
                 let (rect, response) =
-                    ui.allocate_exact_size(egui::vec2(width, 46.0), egui::Sense::hover());
+                    ui.allocate_exact_size(egui::vec2(width, tile_h), egui::Sense::hover());
                 let painter = ui.painter();
                 painter.rect_filled(rect, 3.0, plot::SURFACE);
                 painter.text(
-                    rect.left_top() + egui::vec2(6.0, 4.0),
+                    rect.left_top() + egui::vec2(5.0, if compact { 2.5 } else { 4.0 }),
                     Align2::LEFT_TOP,
                     *title,
                     plot::small(),
                     plot::TEXT_DIM,
                 );
                 painter.text(
-                    rect.left_top() + egui::vec2(6.0, 16.0),
+                    rect.left_top() + egui::vec2(5.0, if compact { 11.5 } else { 16.0 }),
                     Align2::LEFT_TOP,
                     value,
-                    plot::figures(16.0),
+                    plot::figures(if compact { 12.0 } else { 16.0 }),
                     *color,
                 );
                 response.on_hover_text(note.as_str());
@@ -537,7 +767,14 @@ fn fps_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx, s: &Summary) {
             (plot::CRITICAL, "late frame", true),
         ],
     );
-    let (rect, response) = plot::chart_area(ui, 132.0);
+    let (rect, response) = plot::chart_area(
+        ui,
+        if plot::type_scale() < 0.95 {
+            100.0
+        } else {
+            132.0
+        },
+    );
     let plot_rect = rect.shrink2(egui::vec2(4.0, 8.0));
     let axis = ctx.axis(plot_rect);
     interact(ui, stats, ctx, &axis, &response);
@@ -699,7 +936,15 @@ fn frame_time_histogram(ui: &mut Ui, ctx: &Ctx, s: &Summary) {
     }
     let max = counts.iter().copied().max().unwrap_or(0).max(1);
     let width = ui.available_width();
-    let label_w = 132.0;
+    // A narrow column (a phone's) keeps the frame time and the count and drops the frame rate and
+    // the bar when they would not fit.
+    let narrow = width < 230.0;
+    let label_w = if narrow {
+        78.0 * plot::type_scale()
+    } else {
+        132.0
+    };
+    let count_w = if narrow { 24.0 } else { 44.0 };
     for (row, &n) in counts.iter().enumerate() {
         let interval = row + 1;
         let (rect, response) =
@@ -709,23 +954,32 @@ fn frame_time_histogram(ui: &mut Ui, ctx: &Ctx, s: &Summary) {
         painter.text(
             Pos2::new(rect.left(), rect.center().y),
             Align2::LEFT_CENTER,
-            format!(
-                "{interval}{plus} vb  {:>5.1} ms  {:>4.0} fps",
-                interval as f64 * ctx.vblank_ms(),
-                ctx.refresh / interval as f64
-            ),
+            if narrow {
+                format!(
+                    "{interval}{plus} vb {:>5.1} ms",
+                    interval as f64 * ctx.vblank_ms()
+                )
+            } else {
+                format!(
+                    "{interval}{plus} vb  {:>5.1} ms  {:>4.0} fps",
+                    interval as f64 * ctx.vblank_ms(),
+                    ctx.refresh / interval as f64
+                )
+            },
             plot::figures(10.5),
             plot::TEXT_DIM,
         );
         let bar_area = Rect::from_min_max(
             Pos2::new(rect.left() + label_w, rect.top() + 2.0),
-            Pos2::new(rect.right() - 44.0, rect.bottom() - 2.0),
+            Pos2::new(rect.right() - count_w, rect.bottom() - 2.0),
         );
-        painter.rect_filled(bar_area, 2.0, plot::SURFACE);
+        if bar_area.width() > 4.0 {
+            painter.rect_filled(bar_area, 2.0, plot::SURFACE);
+        }
         let late = interval > usize::from(s.target);
         let color = if late { plot::CRITICAL } else { plot::BLUE };
         let frac = n as f32 / max as f32;
-        if n > 0 {
+        if n > 0 && bar_area.width() > 4.0 {
             let bar = Rect::from_min_size(
                 bar_area.min,
                 egui::vec2((bar_area.width() * frac).max(2.0), bar_area.height()),
@@ -1116,7 +1370,13 @@ fn cpu_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx) {
         .color(plot::TEXT_MUTED)
         .size(plot::px(10.5)),
     );
-    let columns_n = if width > 460.0 { 3 } else { 2 };
+    let columns_n = if width > 460.0 {
+        3
+    } else if width > 150.0 {
+        2
+    } else {
+        1
+    };
     let chip_w = ((width - 4.0 * (columns_n as f32 - 1.0)) / columns_n as f32).floor();
     for row in CpuClass::ALL.chunks(columns_n) {
         ui.horizontal(|ui| {
@@ -1574,7 +1834,7 @@ const SERIES: &[Series] = &[
 ];
 
 fn sparklines(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label(
             RichText::new("Per vblank. Numbers are 1 s means at the cursor (else now).")
                 .color(plot::TEXT_MUTED)
@@ -1593,7 +1853,13 @@ fn sparklines(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx) {
         });
     });
     let width = ui.available_width();
-    let columns = if width > 520.0 { 3 } else { 2 };
+    let columns = if width > 520.0 {
+        3
+    } else if width > 150.0 {
+        2
+    } else {
+        1
+    };
     let tile_w = ((width - 6.0 * (columns as f32 - 1.0)) / columns as f32).floor();
     let visible: Vec<usize> = (0..SERIES.len())
         .filter(|i| stats.view.hidden_series & (1 << i) == 0)

@@ -111,12 +111,15 @@ pub fn draw(ctx: &Context, state: &mut AppState) {
     let cover = state.menu.shell_cover();
     // Where a finger is on the bar, or on the tab that brings it back: not play.
     let screen = ctx.screen_rect();
+    let docked = panel_width(ctx, state);
     state.toolbar_hit = if height >= 0.5 {
         Rect::from_min_size(screen.min, egui::vec2(screen.width(), height))
     } else if t > 0.5 {
+        // The tab: 6 points in from the panel (or the edge) and from the top, under a notch.
+        let top = screen.top() + state.toast_inset_top;
         Rect::from_min_max(
-            egui::pos2(screen.right() - 64.0, screen.top()),
-            egui::pos2(screen.right(), screen.top() + 44.0),
+            egui::pos2(screen.right() - docked - 52.0, top),
+            egui::pos2(screen.right() - docked, top + 44.0),
         )
     } else {
         Rect::NOTHING
@@ -197,17 +200,35 @@ pub fn draw(ctx: &Context, state: &mut AppState) {
 
     // Fade the restore tab in only once the bar has mostly cleared, so it
     // never overlaps the sliding toolbar.
-    if t > 0.5 && !state.menu.touch_mode() && cover < 0.5 {
+    // Always there while the bar is hidden, over a phone's controller too: the way back must not
+    // depend on the controls being away.
+    if t > 0.5 && cover < 0.5 {
         draw_restore_tab(ctx, state, ((t - 0.5) / 0.5).clamp(0.0, 1.0));
     }
+}
+
+/// How much of the window's right side the debug panel holds, points: from the screen's edge to
+/// the panel's own left edge (a phone's right-hand inset is outside it), zero while it is shut.
+fn panel_width(ctx: &Context, state: &AppState) -> f32 {
+    if state.debug_slide < 0.01 || state.debug_rect[2] <= 0.0 {
+        return 0.0;
+    }
+    (ctx.screen_rect().right() - state.debug_rect[0]).max(0.0)
 }
 
 /// Floating tab shown when the toolbar is hidden. Anchored to the
 /// top-right so it sits over the framebuffer corner; clicking pulls the
 /// bar back down. `opacity` fades it in with the slide.
 fn draw_restore_tab(ctx: &Context, state: &mut AppState, opacity: f32) {
+    // Under a phone's notch the tab sits below it.
+    let inset = state.toast_inset_top;
+    // Beside the debug panel, not over it: left of wherever the panel's edge is.
+    let docked = panel_width(ctx, state);
     egui::Area::new(egui::Id::new("toolbar_restore"))
-        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-6.0, 6.0))
+        .anchor(
+            egui::Align2::RIGHT_TOP,
+            egui::vec2(-(6.0 + docked), 6.0 + inset),
+        )
         .show(ctx, |ui| {
             ui.set_opacity(opacity);
             egui::Frame::new()

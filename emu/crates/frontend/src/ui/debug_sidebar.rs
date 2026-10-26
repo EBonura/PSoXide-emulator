@@ -6,8 +6,7 @@
 //! panel with a summary on top, a row of tabs and the tab's content scrolling below.
 
 use egui::{
-    Align, Color32, FontId, Layout, Rect, RichText, Sense, SidePanel, Stroke, TopBottomPanel,
-    UiBuilder, Vec2,
+    Align, Color32, FontId, Layout, Rect, Sense, SidePanel, Stroke, TopBottomPanel, UiBuilder, Vec2,
 };
 
 use crate::app::AppState;
@@ -39,9 +38,11 @@ const PHONE_SHARE: f32 = 0.33;
 const PHONE_MIN_WIDTH: f32 = 112.0;
 const PHONE_MAX_WIDTH: f32 = 420.0;
 /// A phone's panel at least this wide has room for the summary on one line.
-const ROOMY: f32 = 250.0;
-/// The panel's type scale on a phone (1 on a desktop): the smallest text it draws is 9.5 points.
-const PHONE_TYPE_SCALE: f32 = 0.9;
+const ROOMY: f32 = 190.0;
+/// A panel at least this wide shows the full tab names (a wide desktop sidebar); below it the short ones.
+const WIDE_TABS: f32 = 420.0;
+/// The panel's type scale on every screen: the smallest text it draws is 9 points.
+const PANEL_TYPE_SCALE: f32 = 0.86;
 
 /// Where the panel sits and how much of the window it takes, in points.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -112,10 +113,10 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
     let screen = ctx.screen_rect().size();
     let free = ctx.available_rect();
     let touch = state.menu.touch_mode();
-    psoxide_debug_ui::set_type_scale(if touch { PHONE_TYPE_SCALE } else { 1.0 });
+    psoxide_debug_ui::set_type_scale(PANEL_TYPE_SCALE);
     match dock_for(screen, free.height(), state.sidebar_width, touch) {
         Dock::Right(width) => draw_right(ctx, state, vram_tex, width, t, animating, touch),
-        Dock::Bottom(height) => draw_bottom(ctx, state, vram_tex, height, t, animating, touch),
+        Dock::Bottom(height) => draw_bottom(ctx, state, vram_tex, height, t, animating),
     }
 }
 
@@ -181,7 +182,7 @@ fn draw_right(
                 ui.set_clip_rect(content_rect.intersect(panel_rect));
                 // A phone keeps the content clear of the home indicator.
                 let bottom = panel_rect.bottom() - if touch { inset } else { 0.0 };
-                draw_contents(ui, state, vram_tex, bottom, touch);
+                draw_contents(ui, state, vram_tex, bottom);
             },
         );
         // egui persists the panel's width from the frame content's measured
@@ -207,7 +208,6 @@ fn draw_bottom(
     target: f32,
     t: f32,
     animating: bool,
-    touch: bool,
 ) {
     let (panel_fill, separator) = panel_colours(ctx);
     let height = if animating {
@@ -234,13 +234,7 @@ fn draw_bottom(
                     .layout(Layout::top_down(Align::Min)),
                 |ui| {
                     ui.set_clip_rect(panel_rect);
-                    draw_contents(
-                        ui,
-                        state,
-                        vram_tex,
-                        content_rect.bottom() - SIDEBAR_PAD,
-                        touch,
-                    );
+                    draw_contents(ui, state, vram_tex, content_rect.bottom() - SIDEBAR_PAD);
                 },
             );
             panel_rect
@@ -294,25 +288,20 @@ impl Tab {
     }
 }
 
-fn draw_contents(
-    ui: &mut egui::Ui,
-    state: &mut AppState,
-    vram_tex: egui::TextureId,
-    bottom: f32,
-    touch: bool,
-) {
-    if touch {
-        // A phone's type scale: small type and 28-point controls, so the content gets the room.
-        // The smallest text anywhere in the panel is 9.5 points (10 here, 9.45 in the charts).
+fn draw_contents(ui: &mut egui::Ui, state: &mut AppState, vram_tex: egui::TextureId, bottom: f32) {
+    {
+        // The panel's type scale, on every screen: small type and 22-point controls, so the
+        // content gets the room. The smallest text anywhere in the panel is 9 points (9.5 here,
+        // 9.03 in the charts).
         let style = ui.style_mut();
-        style.spacing.interact_size.y = 28.0;
-        style.spacing.button_padding = Vec2::new(6.0, 3.0);
-        style.spacing.item_spacing = Vec2::new(4.0, 4.0);
+        style.spacing.interact_size.y = 22.0;
+        style.spacing.button_padding = Vec2::new(5.0, 2.0);
+        style.spacing.item_spacing = Vec2::new(3.0, 3.0);
         for (text_style, size) in [
-            (egui::TextStyle::Body, 12.0),
-            (egui::TextStyle::Button, 12.0),
-            (egui::TextStyle::Small, 10.0),
-            (egui::TextStyle::Monospace, 11.0),
+            (egui::TextStyle::Body, 11.0),
+            (egui::TextStyle::Button, 11.0),
+            (egui::TextStyle::Small, 9.5),
+            (egui::TextStyle::Monospace, 10.5),
         ] {
             if let Some(font) = style.text_styles.get_mut(&text_style) {
                 font.size = size;
@@ -322,16 +311,18 @@ fn draw_contents(
     state.debug_contents_frames = state.debug_contents_frames.wrapping_add(1);
     // A summary that stays put while the tabs change: what is loaded, whether it runs, and how
     // fast, then the close button.
-    summary(ui, state, touch);
+    summary(ui, state);
     ui.add_space(4.0);
     let id = egui::Id::new("debug_sidebar_tab");
     let mut tab = ui.ctx().data(|d| d.get_temp::<usize>(id)).unwrap_or(0);
-    if touch && ui.available_width() < ROOMY {
-        // A narrow column: short labels, wrapped, so every tab is in view at once.
+    let tabs_top = ui.cursor().top();
+    if ui.available_width() < WIDE_TABS {
+        // A phone's column: short labels, in one row where they fit (they do from 200 points)
+        // and wrapped where they do not, so every tab is in view at once, never scrolled to.
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+            ui.spacing_mut().item_spacing = Vec2::new(3.0, 3.0);
             for (i, candidate) in Tab::ALL.iter().enumerate() {
-                if tab_chip(ui, candidate.short_label(), tab == i, touch) {
+                if tab_chip(ui, candidate.short_label(), tab == i) {
                     tab = i;
                 }
             }
@@ -344,13 +335,17 @@ fn draw_contents(
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for (i, candidate) in Tab::ALL.iter().enumerate() {
-                        if tab_chip(ui, candidate.label(), tab == i, touch) {
+                        if tab_chip(ui, candidate.label(), tab == i) {
                             tab = i;
                         }
                     }
                 });
             });
     }
+    // How many rows the tabs took (the browser journeys check they fit one on a phone held sideways).
+    state.debug_tab_rows = ((ui.cursor().top() - tabs_top + 3.0) / 25.0)
+        .round()
+        .max(1.0) as u8;
     ui.ctx().data_mut(|d| d.insert_temp(id, tab));
     ui.add_space(2.0);
     ui.separator();
@@ -399,19 +394,22 @@ fn draw_contents(
         f32::from(u8::from(reading.moving)),
         reading.top,
         reading.bottom,
+        reading.left,
+        reading.right,
+        reading.content_right,
     ];
 }
 
 /// One tab as a chip: a pill that lights in the shell's accent when it is the open one.
-fn tab_chip(ui: &mut egui::Ui, label: &str, on: bool, touch: bool) -> bool {
-    let font = FontId::proportional(if touch { 11.0 } else { 13.0 });
+fn tab_chip(ui: &mut egui::Ui, label: &str, on: bool) -> bool {
+    let font = FontId::proportional(10.0);
     let galley = ui.painter().layout_no_wrap(
         label.to_string(),
         font,
         if on { tokens::FOCUS } else { tokens::DIM },
     );
-    let height = if touch { 22.0 } else { 26.0 };
-    let size = Vec2::new(galley.size().x + if touch { 14.0 } else { 24.0 }, height);
+    let height = 20.0;
+    let size = Vec2::new(galley.size().x + 10.0, height);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let hot = response.hovered();
     let fill = if on {
@@ -445,82 +443,17 @@ fn tab_chip(ui: &mut egui::Ui, label: &str, on: bool, touch: bool) -> bool {
 /// The pinned card above the tabs: what is loaded, whether it runs, and how fast: the frame rate,
 /// the time a frame takes and how far the emulation keeps up with real time. The readings come
 /// first; a close button ends the row.
-fn summary(ui: &mut egui::Ui, state: &mut AppState, touch: bool) {
-    let (label, color) = if state.bus.is_none() {
-        ("No game", tokens::DIM)
+fn summary(ui: &mut egui::Ui, state: &mut AppState) {
+    let color = if state.bus.is_none() {
+        tokens::DIM
     } else if state.running {
-        ("Running", tokens::OK)
+        tokens::OK
     } else {
-        ("Paused", Color32::from_rgb(242, 196, 106))
+        Color32::from_rgb(242, 196, 106)
     };
     let fps = state.guest_stats.recent_fps();
     let speed = state.guest_stats.host_speed();
-    if touch {
-        compact_summary(ui, state, color, fps, speed);
-        return;
-    }
-    let width = ui.available_width();
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Debug").color(tokens::ACCENT).size(15.0));
-        ui.label(RichText::new(label).color(color).size(13.0));
-        // The title takes what the row leaves and is cut, never wrapped.
-        let close = if touch { 44.0 } else { 28.0 };
-        if let Some(game) = state.current_game.as_ref() {
-            let room = (width - ui.cursor().left() + ui.min_rect().left() - close - 12.0).max(0.0);
-            ui.add_sized(
-                [room, 18.0],
-                egui::Label::new(RichText::new(&game.title).color(tokens::TEXT_2).size(13.0))
-                    .truncate(),
-            );
-        }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let (rect, response) = ui.allocate_exact_size(Vec2::splat(close), Sense::click());
-            let ink = if response.hovered() {
-                tokens::FOCUS
-            } else {
-                tokens::ICON_REST
-            };
-            let c = rect.center();
-            let stroke = Stroke::new(1.6, ink);
-            ui.painter()
-                .line_segment([c + Vec2::new(-5.0, -5.0), c + Vec2::new(5.0, 5.0)], stroke);
-            ui.painter()
-                .line_segment([c + Vec2::new(-5.0, 5.0), c + Vec2::new(5.0, -5.0)], stroke);
-            if response
-                .on_hover_text("Close the debug panel (F3)")
-                .clicked()
-            {
-                state.panels.debug_sidebar = false;
-            }
-        });
-    });
-    ui.horizontal(|ui| {
-        let big = if touch { 30.0 } else { 24.0 };
-        let reading = |ui: &mut egui::Ui, value: String, caption: &str| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(
-                    RichText::new(value)
-                        .font(FontId::proportional(big))
-                        .color(Color32::WHITE),
-                );
-                ui.label(RichText::new(caption).size(12.0).color(tokens::DIM));
-            });
-            ui.add_space(18.0);
-        };
-        reading(ui, fps.map_or("--".into(), |f| format!("{f:.0}")), "fps");
-        reading(
-            ui,
-            fps.filter(|f| *f > 0.0)
-                .map_or("--".into(), |f| format!("{:.1}", 1000.0 / f)),
-            "ms per frame",
-        );
-        reading(
-            ui,
-            speed.map_or("--".into(), |(s, _)| format!("{:.0}%", s * 100.0)),
-            "of real time",
-        );
-    });
+    compact_summary(ui, state, color, fps, speed);
 }
 
 /// The phone's summary, in small type: a status dot, the three readings, the disc name when it
@@ -540,11 +473,11 @@ fn compact_summary(
         .map_or("--".to_string(), |f| format!("{:.1}", 1000.0 / f));
     let speed_text = speed.map_or("--".to_string(), |(s, _)| format!("{:.0}%", s * 100.0));
     let roomy = ui.available_width() >= ROOMY;
-    let row_h = if roomy { 28.0 } else { 40.0 };
+    let row_h = if roomy { 24.0 } else { 36.0 };
     let row = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), row_h));
     ui.allocate_rect(row, Sense::hover());
     let painter = ui.painter().clone();
-    let value_font = FontId::proportional(13.0);
+    let value_font = FontId::proportional(12.5);
     let unit_font = FontId::proportional(9.5);
     // One reading at `x`: the value, then its unit; returns where the next one may start.
     let reading = |x: f32, y: f32, value: &str, unit: &str| -> f32 {
@@ -573,7 +506,13 @@ fn compact_summary(
     let mut x = reading(row.left() + 15.0, first, &fps_text, "fps");
     if roomy {
         x = reading(x, second, &ms_text, "ms");
-        x = reading(x, second, &speed_text, "real time");
+        // "real time" where the line has the room, "real" where it has not.
+        let word = if ui.available_width() >= 250.0 {
+            "real time"
+        } else {
+            "real"
+        };
+        x = reading(x, second, &speed_text, word);
     } else {
         let x2 = reading(row.left() + 1.0, second, &ms_text, "ms");
         reading(x2, second, &speed_text, "real");

@@ -30,6 +30,11 @@ use emulator_core::{Bus, Cpu};
 pub use panel::{draw, forwarded_scroll_drag, PanelAction};
 pub use plot::set_type_scale;
 
+/// Where the stat cards ended when last drawn, points down the screen.
+pub fn stats_bottom() -> f32 {
+    f32::from_bits(plot::STATS_BOTTOM.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// Vblanks of history kept (two minutes at 60 Hz).
 pub const HISTORY_VBLANKS: usize = 60 * 120;
 

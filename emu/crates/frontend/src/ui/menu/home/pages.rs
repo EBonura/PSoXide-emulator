@@ -8,35 +8,45 @@ use crate::ui::menu::{MenuAction, MenuInput, MenuItem, MenuState, TouchSliderKin
 
 /// The games on the public demo disc, with the small picture each shows on the home screen.
 /// The count is the one the welcome pages and the home line give ("seven").
-pub(super) const DISC_GAMES: [(&str, &[u8]); 7] = [
+pub(super) const DISC_GAMES: [(&str, Option<&[u8]>); 7] = [
     (
         "PSoXide Arcade",
-        include_bytes!("../../../../../../../assets/home/disc/arcade.png"),
+        Some(include_bytes!(
+            "../../../../../../../assets/home/disc/arcade.png"
+        )),
     ),
     (
         "Celeste Collection",
-        include_bytes!("../../../../../../../assets/home/disc/celeste.png"),
+        Some(include_bytes!(
+            "../../../../../../../assets/home/disc/celeste.png"
+        )),
     ),
     (
         "NitroXide",
-        include_bytes!("../../../../../../../assets/home/disc/nitroxide.png"),
+        Some(include_bytes!(
+            "../../../../../../../assets/home/disc/nitroxide.png"
+        )),
     ),
     (
         "VoXide",
-        include_bytes!("../../../../../../../assets/home/disc/voxide.png"),
+        Some(include_bytes!(
+            "../../../../../../../assets/home/disc/voxide.png"
+        )),
     ),
     (
         "Quake (shareware)",
-        include_bytes!("../../../../../../../assets/home/disc/quake.png"),
+        Some(include_bytes!(
+            "../../../../../../../assets/home/disc/quake.png"
+        )),
     ),
     (
         "Cortex Ignition",
-        include_bytes!("../../../../../../../assets/home/disc/cortex.png"),
+        Some(include_bytes!(
+            "../../../../../../../assets/home/disc/cortex.png"
+        )),
     ),
-    (
-        "PSXcel",
-        include_bytes!("../../../../../../../assets/home/disc/psxcel.png"),
-    ),
+    // On the disc, but without a picture on the home screen.
+    ("PSXcel", None),
 ];
 
 /// One welcome page: a title and a few short paragraphs.

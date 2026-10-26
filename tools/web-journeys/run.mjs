@@ -1325,7 +1325,7 @@ async function journeyMatrix(label, urlFor, size, mode) {
     await sleep(500);
     const r = await hit();
     await page.tap((r[0] + r[2]) / 2, (r[1] + r[3]) / 2);
-  }, () => { m.touchNewer = false; m.bar = "shown"; }, () => m.bar === "hidden" && mode !== "on");
+  }, () => { m.touchNewer = false; m.bar = "shown"; }, () => m.bar === "hidden");
   await stepOf("hide the bar again with its chevron", async () => {
     const r = await hit();
     await page.tap(r[2] - 22, r[1] + 18);
@@ -1957,6 +1957,8 @@ async function journeyHome(label, urlFor, size) {
     if (!c) return "no contents row on the demo disc's page";
     const [x0, y0, x1, y1, n, style] = c;
     if (n !== 7) return `${n} chips, the disc has seven games`;
+    // A phone held upright at 393x852 shows chips (two rows) even with the countdown up, not a wrapped list.
+    if (size.w === 393 && size.h === 852 && style > 1) return `the contents are a plain list (style ${style}), not chips`;
     const [l, t, r, b] = insetsFor(size);
     if (x0 < l - 1 || x1 > size.w - r + 1 || y0 < t || y1 > size.h - b) return `the row [${c.slice(0, 4)}] is outside the safe area`;
     const primary = u.home.hits.find((h) => h[0] === "primary");
@@ -2893,6 +2895,28 @@ async function journeyDebug(label, urlFor, size) {
     // A phone panel is a third-width column in small type; a desktop sidebar keeps its big numbers.
     if (mobile && (share < 0.55 || bottom - top < 200)) return `the content view is ${(share * 100).toFixed(0)}% of the panel (${bottom - top} of ${y1 - y0} px)`;
     if (!mobile && bottom - top < 150) return `the content view is only ${bottom - top} px`;
+    {
+      // Nothing the panel draws reaches past the right edge of its view (a clipped number, a cut-off chart).
+      const [, , , , , viewLeft, viewRight, contentRight] = u.debug.scroll;
+      if (contentRight > viewRight + 1.5) return `the content reaches ${contentRight.toFixed(1)}, the view ends at ${viewRight.toFixed(1)} (${(contentRight - viewRight).toFixed(1)} px of overflow)`;
+    }
+    {
+      // The stat cards sit above the fold of the Performance tab, and the first chart starts in view on a tall phone.
+      const sb = u.debug.stats_bottom, vb = u.debug.scroll[4];
+      if (!(sb > 0 && sb <= vb)) return `the stat cards end at ${sb}, the view ends at ${vb}`;
+      if (mobile && size.h >= 800 && size.w < size.h && sb + 40 > vb) return `the first chart does not start in view (stats end ${sb}, view ends ${vb})`;
+      const head = top - y0;
+      if (head > (u.debug.rect[2] - u.debug.rect[0] < 200 ? 120 : 84)) return `the header and tabs take ${head} px of the panel`;
+    }
+    if (mobile) {
+      // Dense: the readings and the tabs take little of the column, and the tabs are never scrolled to.
+      const width = u.debug.rect[2] - u.debug.rect[0];
+      const head = top - y0;
+      if (width >= 200 && u.debug.tab_rows > 1) return `the tabs take ${u.debug.tab_rows} rows in a ${width} px panel`;
+      if (u.debug.tab_rows > 3) return `the tabs take ${u.debug.tab_rows} rows`;
+      if (width >= 200 && head > 78) return `the header and tabs take ${head} px of the ${y1 - y0} px panel`;
+      if (width < 200 && head > 150) return `the header and tabs take ${head} px of the ${y1 - y0} px panel`;
+    }
   });
   // Momentum scrolling of the panel's content (the shell's lists have their own journey, journeyMomentum).
   const scrollNow = async () => (await page.ux()).debug.scroll;

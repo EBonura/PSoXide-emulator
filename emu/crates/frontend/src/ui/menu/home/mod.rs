@@ -224,7 +224,9 @@ pub(crate) struct HomeState {
     feed: HomeFeed,
     dither: Option<egui::TextureHandle>,
     /// The small pictures of the demo disc's games, loaded when the home screen first shows them.
-    disc_tiles: Option<Vec<egui::TextureHandle>>,
+    disc_tiles: Option<Vec<Option<egui::TextureHandle>>>,
+    /// The demo disc's cover, for its case on Home (the disc design with a wedge for each game).
+    demo_cover: Option<egui::TextureHandle>,
     /// Where the contents chips were drawn this frame, `[x0, y0, x1, y1, chips, style]` (journeys).
     contents: Option<[f32; 6]>,
     list_scroll: f32,
@@ -365,6 +367,7 @@ impl HomeState {
             feed: HomeFeed::default(),
             dither: None,
             disc_tiles: None,
+            demo_cover: None,
             contents: None,
             list_scroll: 0.0,
             kin: Momentum::default(),
@@ -490,6 +493,16 @@ impl HomeState {
             .cover_key
             .as_deref()
             .and_then(|k| self.covers.texture(ctx, k));
+        // The demo disc has its own cover, drawn by the project: every size shows it.
+        let art = art.or_else(|| {
+            if !matches!(item.kind, CoverKind::Demo) {
+                return None;
+            }
+            if self.demo_cover.is_none() {
+                self.demo_cover = load_demo_cover(ctx);
+            }
+            self.demo_cover.as_ref().map(egui::TextureHandle::id)
+        });
         let loading = item
             .cover_key
             .as_deref()
@@ -2051,18 +2064,27 @@ const VISIT_KEY: &str = "psoxide.home.visited";
 #[cfg(target_arch = "wasm32")]
 const EXPLAINER_KEY: &str = "psoxide.home.explainer";
 
-/// The pictures of `pages::DISC_GAMES`, in order.
-fn load_disc_tiles(ctx: &egui::Context) -> Vec<egui::TextureHandle> {
+/// The pictures of `pages::DISC_GAMES`, in order (`None` where a game has no picture).
+fn load_disc_tiles(ctx: &egui::Context) -> Vec<Option<egui::TextureHandle>> {
     pages::DISC_GAMES
         .iter()
-        .filter_map(|(name, png)| {
-            let rgba = image::load_from_memory(png).ok()?.to_rgba8();
+        .map(|(name, png)| {
+            let rgba = image::load_from_memory((*png)?).ok()?.to_rgba8();
             let (w, h) = rgba.dimensions();
             let img =
                 egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw());
             Some(ctx.load_texture(format!("disc-{name}"), img, egui::TextureOptions::LINEAR))
         })
         .collect()
+}
+
+/// The demo disc's cover as a texture.
+fn load_demo_cover(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    const COVER_PNG: &[u8] = include_bytes!("../../../../../../../assets/home/demo-cover.png");
+    let rgba = image::load_from_memory(COVER_PNG).ok()?.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw());
+    Some(ctx.load_texture("demo-disc-cover", img, egui::TextureOptions::LINEAR))
 }
 
 fn decode_label(ctx: &egui::Context) -> Option<egui::TextureHandle> {
@@ -2564,26 +2586,26 @@ impl HomeState {
         let font_for =
             |style: usize| FontId::proportional(if style == 0 { 12.0 } else { 11.5 } * u.max(0.95));
         let gap = 6.0 * u;
-        let row_gap = |style: usize| if style == 0 { 6.0 * u } else { 4.5 * u };
+        let row_gap = |style: usize| if style == 0 { 6.0 * u } else { 4.0 * u };
         let names = pages::DISC_GAMES;
         // Style 0 has pictures, 1 only the names in chips, 2 one wrapped line of names.
         let measure = |style: usize| -> (Vec<(f32, f32)>, f32) {
             let (ch, pic) = match style {
                 0 => (26.0 * u, 28.0 * u),
-                _ => (20.0 * u, 0.0),
+                _ => (19.0 * u, 0.0),
             };
             let font = font_for(style);
             let mut rows: Vec<(f32, f32)> = Vec::new(); // (x offset of the row's start, row width)
             let mut widths: Vec<f32> = Vec::new();
             let mut cur = 0.0_f32;
             let mut count = 0;
-            for (name, _) in names {
+            for (name, png) in names {
                 let tw = p
                     .layout_no_wrap((*name).to_string(), font.clone(), tokens::TEXT)
                     .size()
                     .x;
                 let cw = tw
-                    + if pic > 0.0 {
+                    + if pic > 0.0 && png.is_some() {
                         18.0 * u + pic + 6.0 * u
                     } else {
                         14.0 * u
@@ -2630,7 +2652,7 @@ impl HomeState {
         let (ch, pic) = if style == 0 {
             (26.0 * u, 28.0 * u)
         } else {
-            (20.0 * u, 0.0)
+            (19.0 * u, 0.0)
         };
         let (rows, height) = measure(style);
         let _ = rows;
@@ -2654,8 +2676,8 @@ impl HomeState {
                     egui::StrokeKind::Inside,
                 );
                 let mut tx = chip.left() + 7.0 * u;
-                if pic > 0.0 {
-                    if let Some(tex) = tiles.get(i) {
+                if let (true, Some(Some(tex))) = (pic > 0.0, tiles.get(i)) {
+                    {
                         let r = Rect::from_min_size(
                             Pos2::new(chip.left() + 3.0 * u, chip.center().y - pic * 0.375),
                             Vec2::new(pic, pic * 0.75),
@@ -2679,13 +2701,13 @@ impl HomeState {
                 x += cw + gap;
             }
         };
-        for (i, (name, _)) in names.iter().enumerate() {
+        for (i, (name, png)) in names.iter().enumerate() {
             let tw = p
                 .layout_no_wrap((*name).to_string(), font.clone(), tokens::TEXT)
                 .size()
                 .x;
             let cw = tw
-                + if pic > 0.0 {
+                + if pic > 0.0 && png.is_some() {
                     18.0 * u + pic + 6.0 * u
                 } else {
                     14.0 * u

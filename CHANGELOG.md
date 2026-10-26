@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- The debug panel is smaller and better organised on every screen, desktop included: one header line (fps, ms,
+  % real time), tabs as small pills in one row, the time window as one small segmented bar, the stats as a tight
+  grid of small cells (three across, two in a phone's column), the help sentence behind a small "?", and type
+  about a seventh smaller throughout (nothing under 9 points). On a phone held upright the Performance tab shows
+  all the stats and the top of the first chart without scrolling.
+- The demo disc's cover on Home is the disc design: a disc split into six wedges with a picture of Quake, the
+  Arcade, Celeste, NitroXide, VoXide and Cortex, the X on the hub, the logo above and a spine band at the left. The
+  PSXcel picture is gone from the contents chips (its name stays).
+- The toolbar's restore tab is always there while the toolbar is hidden, over a phone's controller too, and sits
+  beside the debug panel rather than over it.
+
 - The debug panel on a phone is a sidebar about a third of the screen's width at the right, held either way up,
   and the picture and the controller take the other two thirds. Its type is small across the whole panel (the
   smallest text is 9.5 points; a desktop keeps its sizes), the header is a dot and the readings in two short

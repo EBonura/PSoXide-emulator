@@ -43,6 +43,15 @@ pub fn set_type_scale(scale: f32) {
     TYPE_SCALE.store(scale.clamp(0.5, 2.0).to_bits(), Ordering::Relaxed);
 }
 
+/// Where the stat cards ended when last drawn, in points down the screen (f32 bits): the browser
+/// journeys check they are in view without scrolling.
+pub static STATS_BOTTOM: AtomicU32 = AtomicU32::new(0);
+
+/// The panel's type scale itself: 1 on a desktop, below 1 where the panel is set small.
+pub fn type_scale() -> f32 {
+    f32::from_bits(TYPE_SCALE.load(Ordering::Relaxed))
+}
+
 /// A font size in points at the panel's type scale.
 pub fn px(size: f32) -> f32 {
     size * f32::from_bits(TYPE_SCALE.load(Ordering::Relaxed))

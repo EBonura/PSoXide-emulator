@@ -250,6 +250,11 @@ pub(crate) struct Reading {
     /// The viewport's top and bottom edge, points.
     pub(crate) top: f32,
     pub(crate) bottom: f32,
+    /// The viewport's left and right edge, points.
+    pub(crate) left: f32,
+    pub(crate) right: f32,
+    /// The widest the content reached, points (wider than the viewport means it overflows).
+    pub(crate) content_right: f32,
 }
 
 /// What a scroll area of the debug panels keeps between frames.
@@ -262,6 +267,8 @@ struct AreaState {
     view: Option<Rect>,
     /// The content's own height as last measured, without the stretch padding.
     content: f32,
+    /// The right edge of what the content drew, as last measured.
+    content_right: f32,
 }
 
 /// A vertical egui scroll area with the same momentum, rubber band and tap-to-stop as the shell's
@@ -339,11 +346,13 @@ pub(crate) fn scroll_area_if<R>(
         let start = ui.cursor().top();
         let result = add(ui);
         let height = ui.cursor().top() - start;
+        let right = ui.min_rect().right();
         ui.add_space(bottom_pad);
-        (result, height)
+        (result, height, right)
     });
-    let (result, height) = out.inner;
+    let (result, height, right) = out.inner;
     st.content = height;
+    st.content_right = right;
     let view = out.inner_rect;
     st.view = Some(view);
     // Something other than this module moved the area (the wheel, the scroll bar, a
@@ -361,6 +370,9 @@ pub(crate) fn scroll_area_if<R>(
         moving: st.momentum.is_active(),
         top: view.top(),
         bottom: view.bottom(),
+        left: view.left(),
+        right: view.right(),
+        content_right: st.content_right,
     };
     ctx.data_mut(|d| d.insert_temp(state_id, st));
     (result, reading)

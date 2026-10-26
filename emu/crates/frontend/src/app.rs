@@ -351,7 +351,9 @@ pub struct AppState {
     pub touch_bottom_inset: f32,
     /// The debug panel's scroll: position, furthest position, 1 while it coasts (the browser
     /// journeys read it).
-    pub debug_scroll: [f32; 5],
+    pub debug_scroll: [f32; 8],
+    /// Rows the debug panel's tabs took when last drawn (the browser journeys read it).
+    pub debug_tab_rows: u8,
     /// The shell's menu sounds: what is playing and what has been asked for.
     pub(crate) ui_sound: crate::ui_sound::UiSynth,
     /// Frames the debug panel's contents were laid out in (the browser journeys check the first frame
@@ -661,7 +663,8 @@ impl AppState {
             sidebar_width: 430.0,
             debug_slide: 0.0,
             debug_rect: [0.0; 4],
-            debug_scroll: [0.0; 5],
+            debug_scroll: [0.0; 8],
+            debug_tab_rows: 0,
             ui_sound: crate::ui_sound::UiSynth::default(),
             game_rect: [0.0; 4],
             touch_bottom_inset: 0.0,
@@ -956,7 +959,7 @@ impl AppState {
         format!(
             "{{\"running\":{},\"menu_open\":{},\"loaded_id\":\"{id}\",\"loading\":\"{loading}\",\
              \"machine\":{},\"port1_mode\":\"{mode}\",\"has_bus\":{},\"status\":\"{status}\",\
-             \"panel\":\"{panel}\",\"home\":{home},\"slots\":{slots},\"game\":[{:.3},{:.3},{:.3},{:.3}],\"cpu_tick\":{},\"display\":[{},{},{},{}],\"display_lit\":{},\"debug\":{{\"open\":{},\"slide\":{:.3},\"contents\":{},\"rect\":[{:.1},{:.1},{:.1},{:.1}],\"scroll\":[{:.1},{:.1},{:.0},{:.1},{:.1}]}},\"menu\":{{\"column\":\"{}\",\"row\":\"{}\",\"value\":\"{}\",\"rows\":{}}},\"touch\":{},\"sounds\":{},\"chrome\":{{\"toolbar_hidden\":{},\"toolbar_hit\":[{:.0},{:.0},{:.0},{:.0}],\"touch_mode\":{}}}}}",
+             \"panel\":\"{panel}\",\"home\":{home},\"slots\":{slots},\"game\":[{:.3},{:.3},{:.3},{:.3}],\"cpu_tick\":{},\"display\":[{},{},{},{}],\"display_lit\":{},\"debug\":{{\"open\":{},\"slide\":{:.3},\"contents\":{},\"rect\":[{:.1},{:.1},{:.1},{:.1}],\"scroll\":[{:.1},{:.1},{:.0},{:.1},{:.1},{:.1},{:.1},{:.1}],\"tab_rows\":{},\"stats_bottom\":{:.1}}},\"menu\":{{\"column\":\"{}\",\"row\":\"{}\",\"value\":\"{}\",\"rows\":{}}},\"touch\":{},\"sounds\":{},\"chrome\":{{\"toolbar_hidden\":{},\"toolbar_hit\":[{:.0},{:.0},{:.0},{:.0}],\"touch_mode\":{}}}}}",
             self.running,
             self.menu.open,
             self.gpu_resync_generation,
@@ -983,6 +986,11 @@ impl AppState {
             self.debug_scroll[2],
             self.debug_scroll[3],
             self.debug_scroll[4],
+            self.debug_scroll[5],
+            self.debug_scroll[6],
+            self.debug_scroll[7],
+            self.debug_tab_rows,
+            psoxide_debug_ui::stats_bottom(),
             column,
             escape(row),
             escape(value),
