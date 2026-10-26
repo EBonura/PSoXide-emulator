@@ -290,7 +290,12 @@ pub(super) fn draw_list(
     );
     motion::shift_since(ctx, p, title_from, h.slide(head, u));
     let top = t.bottom() + 18.0 * u;
-    let view = Rect::from_min_max(Pos2::new(left, top), Pos2::new(left + width, bottom));
+    // A thin strip at each end of the list holds its scroll hint, so the arrows never sit on a row.
+    let hint = 14.0 * u;
+    let view = Rect::from_min_max(
+        Pos2::new(left, top + hint),
+        Pos2::new(left + width, bottom - hint),
+    );
     // Keep the focused row on screen when the focus moved by key.
     if h.last_row != ms.item_index {
         let y0 = ms.item_index as f32 * row_h;
@@ -338,17 +343,14 @@ pub(super) fn draw_list(
     // A scroll hint at each end that has rows hidden past it, and none where the list is at rest.
     h.list_view = [h.list_scroll, max_scroll, view.top(), view.bottom()];
     let (more_above, more_below) = scroll_hints(h.list_scroll, max_scroll);
-    // Each sits on a small dark disc, so a row's text passing under it never muddies the arrow.
-    let backdrop = fade(Color32::from_rgba_unmultiplied(8, 16, 22, 230), a);
+    // Each is drawn in its own strip outside the rows.
     if more_above {
-        let c = Pos2::new(view.center().x, view.top() + 11.0 * u);
-        clip.circle_filled(c, 10.0 * u, backdrop);
-        super::triangle_up(&clip, c, 5.0 * u, fade(tokens::MUTED, a));
+        let c = Pos2::new(view.center().x, view.top() - hint * 0.5);
+        super::triangle_up(p, c, 5.0 * u, fade(tokens::MUTED, a));
     }
     if more_below {
-        let c = Pos2::new(view.center().x, view.bottom() - 11.0 * u);
-        clip.circle_filled(c, 10.0 * u, backdrop);
-        super::triangle(&clip, c, 5.0 * u, true, fade(tokens::MUTED, a));
+        let c = Pos2::new(view.center().x, view.bottom() + hint * 0.5);
+        super::triangle(p, c, 5.0 * u, true, fade(tokens::MUTED, a));
     }
     if rows.is_empty() {
         p.text(
