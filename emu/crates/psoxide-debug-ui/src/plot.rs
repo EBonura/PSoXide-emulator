@@ -167,6 +167,27 @@ pub fn chart_area(ui: &mut Ui, height: f32) -> (Rect, Response) {
     (rect, response)
 }
 
+/// Text with a halo in the chart's colour, so a trace or gridline behind it does not cut the letters.
+fn halo_text(
+    painter: &egui::Painter,
+    pos: Pos2,
+    anchor: Align2,
+    text: &str,
+    font: FontId,
+    color: Color32,
+) {
+    for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+        painter.text(
+            pos + egui::vec2(dx, dy),
+            anchor,
+            text,
+            font.clone(),
+            SURFACE,
+        );
+    }
+    painter.text(pos, anchor, text, font, color);
+}
+
 /// Horizontal gridline with a right-aligned label inside the plot.
 pub fn hline(ui: &Ui, rect: Rect, y: f32, label: &str, dashed: bool, color: Color32) {
     let painter = ui.painter_at(rect);
@@ -185,13 +206,19 @@ pub fn hline(ui: &Ui, rect: Rect, y: f32, label: &str, dashed: bool, color: Colo
         );
     }
     if !label.is_empty() {
-        painter.text(
-            Pos2::new(rect.right() - 3.0, y - 1.0),
-            Align2::RIGHT_BOTTOM,
-            label,
-            axis_font(),
-            TEXT_MUTED,
-        );
+        // A phone's label sits under its line: above the top one it would be clipped, and between two close lines it would collide.
+        let font = axis_font();
+        let below = tiny();
+        let (at, anchor) = if below {
+            (Pos2::new(rect.right() - 3.0, y + 1.0), Align2::RIGHT_TOP)
+        } else {
+            (Pos2::new(rect.right() - 3.0, y - 1.0), Align2::RIGHT_BOTTOM)
+        };
+        if tiny() {
+            halo_text(&painter, at, anchor, label, font, TEXT_MUTED);
+        } else {
+            painter.text(at, anchor, label, font, TEXT_MUTED);
+        }
     }
 }
 
@@ -228,7 +255,18 @@ pub fn time_ticks(ui: &Ui, axis: &TimeAxis, now: u64, refresh_hz: f64) {
         } else {
             (axis.rect.bottom() + 1.0, Align2::CENTER_TOP)
         };
-        painter.text(Pos2::new(x, y), anchor, label, axis_font(), TEXT_MUTED);
+        if tiny() {
+            halo_text(
+                &painter,
+                Pos2::new(x, y),
+                anchor,
+                &label,
+                axis_font(),
+                TEXT_MUTED,
+            );
+        } else {
+            painter.text(Pos2::new(x, y), anchor, label, axis_font(), TEXT_MUTED);
+        }
         t += step_s;
     }
 }

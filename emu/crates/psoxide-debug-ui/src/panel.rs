@@ -836,17 +836,6 @@ fn fps_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx, s: &Summary) {
             132.0
         },
     );
-    if plot::tiny() {
-        legend_in_chart(
-            ui,
-            rect,
-            &[
-                (plot::BLUE, "frame", false),
-                (plot::shade(plot::NEUTRAL, 0.35), "1 s avg", false),
-                (plot::CRITICAL, "late", true),
-            ],
-        );
-    }
     let plot_rect = rect.shrink2(egui::vec2(4.0, 8.0));
     let axis = ctx.axis(plot_rect);
     interact(ui, stats, ctx, &axis, &response);
@@ -863,12 +852,19 @@ fn fps_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx, s: &Summary) {
             ui,
             plot_rect,
             y(fps),
-            &fps_label(refresh, label),
+            // A phone's chart is too short for a second label beside the time ticks.
+            &if plot::tiny() && label > 1 {
+                String::new()
+            } else {
+                fps_label(refresh, label)
+            },
             true,
             plot::GRID,
         );
     }
-    plot::time_ticks(ui, &axis, ctx.now, refresh);
+    if !plot::tiny() {
+        plot::time_ticks(ui, &axis, ctx.now, refresh);
+    }
 
     let painter = ui.painter_at(rect);
     let mut steps: Vec<Pos2> = Vec::new();
@@ -997,6 +993,21 @@ fn fps_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx, s: &Summary) {
                 }
             });
         }
+    }
+    if plot::tiny() {
+        legend_in_chart(
+            ui,
+            rect,
+            &[
+                (plot::BLUE, "frame", false),
+                (plot::shade(plot::NEUTRAL, 0.35), "1 s avg", false),
+                (plot::CRITICAL, "late", true),
+            ],
+        );
+    }
+    if plot::tiny() {
+        // The labels go over the trace, with a halo, so the line never cuts them.
+        plot::time_ticks(ui, &axis, ctx.now, refresh);
     }
 }
 
@@ -1635,13 +1646,6 @@ fn limiter_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx, _s: &Summar
         ],
     );
     let (rect, response) = plot::chart_area(ui, 104.0);
-    if plot::tiny() {
-        legend_in_chart(
-            ui,
-            rect,
-            &[(plot::BLUE, "CPU", false), (plot::ORANGE, "GPU", false)],
-        );
-    }
     let plot_rect = Rect::from_min_max(
         rect.min + egui::vec2(4.0, 6.0),
         Pos2::new(rect.right() - 4.0, rect.bottom() - 18.0),
@@ -1746,6 +1750,13 @@ fn limiter_chart(ui: &mut Ui, stats: &mut GuestStats, ctx: &mut Ctx, _s: &Summar
                 }
             });
         }
+    }
+    if plot::tiny() {
+        legend_in_chart(
+            ui,
+            rect,
+            &[(plot::BLUE, "CPU", false), (plot::ORANGE, "GPU", false)],
+        );
     }
     ui.add_space(2.0);
     let tiny = plot::tiny();
@@ -2518,6 +2529,25 @@ fn legend_in_chart(ui: &Ui, rect: Rect, items: &[(Color32, &str, bool)]) {
     let font = FontId::proportional(7.0);
     let mut x = rect.left() + 4.0;
     let y = rect.top() + 6.0;
+    // A chip in the chart's own colour under the legend, so a gridline or the trace never runs through it.
+    let width: f32 = items
+        .iter()
+        .map(|(_, label, _)| {
+            7.0 + painter
+                .layout_no_wrap((*label).to_string(), font.clone(), plot::TEXT_DIM)
+                .size()
+                .x
+                + 6.0
+        })
+        .sum();
+    painter.rect_filled(
+        Rect::from_min_size(
+            Pos2::new(rect.left() + 2.0, y - 5.5),
+            egui::vec2(width + 3.0, 11.0),
+        ),
+        2.0,
+        plot::SURFACE,
+    );
     for &(color, label, dot) in items {
         if dot {
             painter.circle_filled(Pos2::new(x + 2.0, y), 2.2, color);
