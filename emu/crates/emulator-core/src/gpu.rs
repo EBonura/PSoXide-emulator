@@ -2364,6 +2364,10 @@ impl Gpu {
     /// the pattern (only the 15-bit 64-texel window paid, 11k a row) and is
     /// not modelled: those triangles are charged nothing here.
     fn texture_cliff_cost(&self, op: u8, depth: usize, pixels: u64, area: u64) -> u64 {
+        static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *OFF.get_or_init(|| std::env::var_os("HK_NO_CLIFF").is_some()) {
+            return 0;
+        }
         if area == 0 || pixels == 0 || self.tex_window_mask_x | self.tex_window_mask_y != 0 {
             return 0;
         }
