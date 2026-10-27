@@ -320,6 +320,9 @@ pub(crate) struct HomeState {
     pager_span: f32,
     /// The speed of the last drag when it let go (points per second), for the journeys.
     pager_last_vel: f32,
+    /// For the journeys: where the welcome buttons' row starts, how far down the words of the
+    /// pages on show reach once cut off above it, and how far they would reach uncut (points).
+    pager_probe: [f32; 3],
     /// A control being pressed: where it is and how far the press feedback has risen.
     press_rect: Option<Rect>,
     press_t: f32,
@@ -515,6 +518,7 @@ impl HomeState {
             pager_drag: None,
             pager_span: 360.0,
             pager_last_vel: 0.0,
+            pager_probe: [0.0; 3],
             press_rect: None,
             press_t: 0.0,
         }
@@ -935,7 +939,7 @@ impl MenuState {
             _ => -1.0,
         };
         format!(
-            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"nav_hl\":{:.3},\"nav_vis\":{:.2},\"page_age\":{:.2},\"keyboard\":{},\"framed\":{},\"press\":{:.2},\"controls\":{},\"list\":[{:.1},{:.1},{:.1},{:.1},{}],\"contents\":{},\"explainer\":{},\"welcome\":{},\"welcome_pos\":{:.3},\"welcome_drag\":{},\"welcome_vel\":{:.0},\"cases\":[{}],\"hits\":[{}]}}",
+            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"nav_hl\":{:.3},\"nav_vis\":{:.2},\"page_age\":{:.2},\"keyboard\":{},\"framed\":{},\"press\":{:.2},\"controls\":{},\"list\":[{:.1},{:.1},{:.1},{:.1},{}],\"contents\":{},\"explainer\":{},\"welcome\":{},\"welcome_pos\":{:.3},\"welcome_drag\":{},\"welcome_vel\":{:.0},\"welcome_rows\":[{:.1},{:.1},{:.1}],\"cases\":[{}],\"hits\":[{}]}}",
             h.page.name(),
             if h.zone == Zone::Nav { "nav" } else { "body" },
             self.home_probe().1,
@@ -972,6 +976,9 @@ impl MenuState {
             h.pager.pos,
             h.pager_drag.is_some(),
             h.pager_last_vel,
+            h.pager_probe[0],
+            h.pager_probe[1],
+            h.pager_probe[2],
             cases.join(","),
             hits.join(",")
         )

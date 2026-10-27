@@ -709,14 +709,32 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
     let x = s.center().x - width / 2.0;
     let first = pos.floor().max(0.0) as usize;
     let last_shown = (pos.ceil().max(0.0) as usize).min(count - 1);
+    // The row of dots and buttons slides between the two pages' own heights with the drag, and
+    // each page's words are cut off above it, so no line ever runs under a button.
+    let fits: Vec<(usize, WelcomeFit)> = (first..=last_shown)
+        .map(|index| (index, welcome_fit(p, lay, index)))
+        .collect();
     let mut foot_y = 0.0;
-    for index in first..=last_shown {
-        let offset = (index as f32 - pos) * span;
-        let near = (1.0 - (offset.abs() / span) * 0.7).clamp(0.0, 1.0);
-        let foot = draw_welcome_page(h, pc, index, offset, a * near);
-        let weight = 1.0 - (pos - index as f32).abs().min(1.0);
-        foot_y += foot * if first == last_shown { 1.0 } else { weight };
+    for (index, fit) in &fits {
+        let weight = 1.0 - (pos - *index as f32).abs().min(1.0);
+        foot_y += fit.foot * if first == last_shown { 1.0 } else { weight };
     }
+    let mut cut = p.clone();
+    let reach = span * 3.0;
+    cut.set_clip_rect(Rect::from_min_max(
+        Pos2::new(lay.full.left() - reach, lay.full.top() - reach),
+        Pos2::new(lay.full.right() + reach, foot_y - 6.0 * u),
+    ));
+    let mut seen_bottom = 0.0_f32;
+    let mut raw_bottom = 0.0_f32;
+    for (index, fit) in &fits {
+        let offset = (*index as f32 - pos) * span;
+        let near = (1.0 - (offset.abs() / span) * 0.7).clamp(0.0, 1.0);
+        draw_welcome_page(h, &cut, lay, *index, fit, offset, a * near);
+        raw_bottom = raw_bottom.max(fit.end);
+        seen_bottom = seen_bottom.max(fit.end.min(foot_y - 6.0 * u));
+    }
+    h.pager_probe = [foot_y, seen_bottom, raw_bottom];
     // The page nearest the middle decides the buttons.
     let cur = (pos.round().max(0.0) as usize).min(count - 1);
     // Dots: a lit one slides between them with the pages.
@@ -787,22 +805,23 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
         .push((close.expand2(Vec2::new(12.0, 12.0)), Click::Dismiss));
 }
 
-/// One welcome page, drawn `offset` points to the side of its place, at opacity `a`. Returns
-/// where the dots and buttons under its words go. Its links answer only while it sits still.
-fn draw_welcome_page(
-    h: &mut HomeState,
-    pc: &PageCtx<'_>,
-    index: usize,
-    offset: f32,
-    a: f32,
-) -> f32 {
-    let lay = pc.lay;
-    let p = pc.painter;
+/// How one welcome page is laid out: its scale, where its first line sits, where its words end and
+/// where the dots and buttons under it go.
+struct WelcomeFit {
+    k: f32,
+    y: f32,
+    end: f32,
+    foot: f32,
+}
+
+/// Lay a welcome page out without drawing it. The words get what the footer leaves: a page that does
+/// not fit at full size is set smaller (down to 0.74), and a short screen starts it higher, so no
+/// line meets the buttons at rest.
+fn welcome_fit(p: &egui::Painter, lay: &super::Layout, index: usize) -> WelcomeFit {
     let u = lay.u;
     let s = lay.safe;
     let page = &WELCOME[index];
     let width = (560.0 * u).min(s.width() - 40.0 * u);
-    let x = s.center().x - width / 2.0;
     let top = s.top()
         + if lay.kind == LayoutKind::Landscape {
             64.0 * u
@@ -814,8 +833,6 @@ fn draw_welcome_page(
     } else {
         tokens::TITLE_PHONE
     };
-    // The words get what the footer leaves. A page that does not fit at full size is set smaller
-    // (down to 0.74), and a short screen starts it higher, so no line meets the buttons.
     let limit = s.bottom() - lay.bar_reserve() - 48.0 * u - 28.0 * u;
     let height_at = |k: f32, top: f32| -> f32 {
         let uk = u * k;
@@ -836,7 +853,14 @@ fn draw_welcome_page(
             );
             y += g.size().y + 12.0 * uk;
         }
-        y += page.links.len() as f32 * (16.0 * uk * 1.25 + 4.0 * uk + 14.0 * uk);
+        for (label, _) in page.links {
+            let g = p.layout_no_wrap(
+                (*label).to_string(),
+                FontId::proportional(16.0 * uk),
+                tokens::ACCENT,
+            );
+            y += 4.0 * uk + g.size().y + 14.0 * uk;
+        }
         y
     };
     let mut k = 1.0_f32;
@@ -847,6 +871,35 @@ fn draw_welcome_page(
             y = y.min(top - (140.0 - 96.0) * u * (1.0 - k) / 0.26);
         }
     }
+    let end = height_at(k, y);
+    let foot = (end + 36.0 * u)
+        .max(s.top() + 120.0 * u)
+        .min(s.bottom() - lay.bar_reserve() - 48.0 * u);
+    WelcomeFit { k, y, end, foot }
+}
+
+/// One welcome page, drawn `offset` points to the side of its place, at opacity `a`, through a
+/// painter that already cuts it off above the buttons. Its links answer only while it sits still.
+fn draw_welcome_page(
+    h: &mut HomeState,
+    p: &egui::Painter,
+    lay: &super::Layout,
+    index: usize,
+    fit: &WelcomeFit,
+    offset: f32,
+    a: f32,
+) {
+    let u = lay.u;
+    let s = lay.safe;
+    let page = &WELCOME[index];
+    let width = (560.0 * u).min(s.width() - 40.0 * u);
+    let x = s.center().x - width / 2.0;
+    let title_px = if lay.kind == LayoutKind::Desktop {
+        tokens::TITLE_DESKTOP
+    } else {
+        tokens::TITLE_PHONE
+    };
+    let (k, mut y) = (fit.k, fit.y);
     let uk = u * k;
     // Each part comes in after the one before it, sliding along the way the page turned.
     let ctx = p.ctx();
@@ -904,9 +957,6 @@ fn draw_welcome_page(
         motion::shift_since(ctx, p, from, h.slide(part, u));
     }
     motion::shift_since(ctx, p, whole, Vec2::new(offset, 0.0));
-    (y + 36.0 * u)
-        .max(s.top() + 120.0 * u)
-        .min(s.bottom() - lay.bar_reserve() - 48.0 * u)
 }
 
 /// A toggle switch whose right edge is at `right`. Returns its track.

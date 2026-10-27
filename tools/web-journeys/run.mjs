@@ -1708,6 +1708,46 @@ async function journeyWelcomeSwipe(label, urlFor, size) {
     await settled(0);
     return (await intact(0)) ?? true;
   });
+  await step("mid-swipe, at 25%, 50% and 75% in both directions, no page's words reach the row of buttons, and that row slides between the two pages' heights", async () => {
+    const goTo = async (n) => {
+      for (let i = 0; i < 4; i++) {
+        const w = (await home()).welcome;
+        if (w === n) break;
+        await act(w < n ? "welcome-step:1" : "welcome-step:-1");
+        await settled(w < n ? w + 1 : w - 1);
+      }
+      await settled(n);
+    };
+    const rest = [];
+    for (const n of [0, 1, 2]) { await goTo(n); await sleep(300); rest[n] = (await home()).welcome_rows[0]; }
+    const problems = [];
+    const raws = [];
+    for (const [from, to] of [[0, 1], [1, 0], [1, 2], [2, 1]]) {
+      for (const frac of [0.25, 0.5, 0.75]) {
+        await goTo(from);
+        const dir = to > from ? -1 : 1;
+        const x0 = dir < 0 ? W() * 0.9 : W() * 0.1;
+        await grab(x0, Math.round(box.h * 0.42));
+        await dragTo(x0 + dir * frac * W(), 250);
+        await sleep(250);
+        const h = await home();
+        const [controls, seen, raw] = h.welcome_rows;
+        const at = `${from + 1}->${to + 1} at ${frac * 100}%`;
+        if (!h.welcome_drag) problems.push(`${at}: not dragging`);
+        const want = from + (to - from) * frac;
+        if (Math.abs(h.welcome_pos - want) > 0.05) problems.push(`${at}: pages at ${h.welcome_pos.toFixed(3)}, wanted ${want}`);
+        if (seen > controls + 0.5) problems.push(`${at}: words reach ${seen.toFixed(1)}, below the buttons at ${controls.toFixed(1)}`);
+        const slid = rest[from] + (rest[to] - rest[from]) * Math.abs(h.welcome_pos - from);
+        if (Math.abs(controls - slid) > 4) problems.push(`${at}: buttons at ${controls.toFixed(1)}, between the pages' own heights they should be near ${slid.toFixed(1)}`);
+        raws.push(raw > controls ? 1 : 0);
+        if (frac === 0.5 && from === 1 && to === 2) await page.shot(`${label}-07-mid-swipe-clipped`);
+        await drop();
+        await sleep(400);
+      }
+    }
+    await goTo(0);
+    return problems.length ? problems.slice(0, 4).join(" | ") : true;
+  });
   await step("grabbing the pages while they are still gliding takes hold of them where they are", async () => {
     await swipe(-W() * 0.5, 120);
     await sleep(60);
