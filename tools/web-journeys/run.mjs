@@ -1478,6 +1478,325 @@ async function journeyExplainer(label, urlFor, size) {
   await done(page);
 }
 
+// ---------------------------------------------------------------- swiping the welcome pages
+
+/**
+ * The welcome pages follow a finger (or the held mouse) and snap: a long or quick swipe turns one page, a short
+ * slow one comes back, the ends resist and never close the pages, and the buttons, arrow keys, pad and a swipe
+ * can be mixed in any order without the pages losing their place. Touch on phones, the mouse on the desktop.
+ */
+async function journeyWelcomeSwipe(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  const page = await newPage(label, { explainer: true });
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+  await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+  await page.goto(urlFor());
+  let box = { w: size.w, h: size.h };
+  let at = { x: 0, y: 0 };
+  let swipeMs = 0;
+  const home = async () => (await page.ux()).home;
+  const sounds = async () => (await page.ux()).sounds.counts;
+  const act = async (name) => (mobile ? homeTap(page, name) : homeClick(page, name));
+  // The pointer, by hand: down, move in frames, up.
+  const grab = async (x, y) => {
+    if (mobile) await page.touch("touchStart", [[x, y]]);
+    else { await page.mouse("mouseMoved", x, y); await sleep(30); await page.mouse("mousePressed", x, y); }
+    at = { x, y };
+  };
+  const dragTo = async (x, ms, steps = 10) => {
+    const x0 = at.x;
+    for (let i = 1; i <= steps; i++) {
+      await sleep(ms / steps);
+      const nx = x0 + ((x - x0) * i) / steps;
+      if (mobile) await page.touch("touchMove", [[nx, at.y]]); else await page.mouse("mouseMoved", nx, at.y);
+    }
+    at.x = x;
+  };
+  const drop = async () => {
+    if (mobile) await page.touch("touchEnd", []);
+    else { await page.mouse("mouseReleased", at.x, at.y); await page.mouse("mouseMoved", 2, box.h - 2); }
+  };
+  /** A whole swipe: `by` points to the right (negative: to the left) taking `ms`. */
+  const swipe = async (by, ms, { from, steps, burst } = {}) => {
+    const x0 = from ?? (by < 0 ? box.w * 0.78 : box.w * 0.22);
+    const t0 = Date.now();
+    await grab(x0, Math.round(box.h * 0.42));
+    if (burst) {
+      // A real flick is over in a few frames, faster than a DevTools round trip: send the moves back to back.
+      const n = 4;
+      await Promise.all(Array.from({ length: n }, (_, i) => {
+        const nx = x0 + (by * (i + 1)) / n;
+        return mobile ? page.touch("touchMove", [[nx, at.y]]) : page.mouse("mouseMoved", nx, at.y);
+      }));
+      at.x = x0 + by;
+      await sleep(25);
+    } else await dragTo(x0 + by, ms, steps);
+    swipeMs = Date.now() - t0;
+    await drop();
+  };
+  const settled = (n, why = `page ${n + 1} at rest`) =>
+    page.waitFor(why, (s) => s.home.page === "Welcome" && s.home.welcome === n && !s.home.welcome_drag && Math.abs(s.home.welcome_pos - n) < 0.002, 5000);
+  /** The pages are still where the visitor put them: showing, not started, not closed, countdown waiting. */
+  const intact = async (n) => {
+    const v = await page.ux();
+    const h = v.home;
+    if (h.page !== "Welcome") return `left the pages for ${h.page}`;
+    if (h.welcome !== n) return `on page ${h.welcome + 1}, wanted ${n + 1}`;
+    if (!h.explainer) return "no longer the explainer";
+    if (h.countdown !== "armed" || v.running) return `countdown ${h.countdown}, running ${v.running}`;
+    return null;
+  };
+  const W = () => box.w;
+
+  await step("it opens on page 1, at rest, with the countdown waiting behind it", async () => {
+    await page.waitFor("the explainer", (s) => s.home?.page === "Welcome" && s.home.explainer, 90000);
+    await page.waitFor("the disc loaded behind it", (s) => !!s.loaded_id, 90000);
+    await settled(0);
+    return (await intact(0)) ?? true;
+  });
+  await step("a drag moves the page with the finger one for one, and the next page follows it in", async () => {
+    await grab(W() * 0.8, Math.round(box.h * 0.42));
+    await dragTo(W() * 0.8 - W() * 0.35, 300);
+    await sleep(250);
+    const h = await home();
+    await page.shot(`${label}-01-mid-swipe`);
+    if (!h.welcome_drag) return "not dragging";
+    if (Math.abs(h.welcome_pos - 0.35) > 0.04) return `the pages sit at ${h.welcome_pos.toFixed(3)} after a drag of 35% of the width`;
+    if (h.welcome !== 0) return `the page index changed to ${h.welcome} before the finger lifted`;
+    if (h.hits.some(([n]) => n.startsWith("link:"))) return "links answer while the pages are moving";
+    await dragTo(W() * 0.8 - W() * 0.6, 200);
+    await sleep(150);
+    const g = await home();
+    if (Math.abs(g.welcome_pos - 0.6) > 0.04) return `after 60%: ${g.welcome_pos.toFixed(3)}`;
+    await drop();
+  });
+  await step("letting go past the middle settles on page 2 and stays there", async () => {
+    await settled(1);
+    await sleep(500);
+    await page.shot(`${label}-02-page-2`);
+    const h = await home();
+    if (Math.abs(h.welcome_pos - 1) > 0.002) return `drifted to ${h.welcome_pos}`;
+    return (await intact(1)) ?? true;
+  });
+  await step("a quick flick turns to page 3 and plays the Next sound", async () => {
+    const c0 = (await sounds()).confirm;
+    await swipe(-W() * 0.25, 90);
+    await settled(2);
+    await sleep(300);
+    await page.shot(`${label}-03-page-3`);
+    const c1 = (await sounds()).confirm;
+    if (c1 <= c0) return `no Next sound for the swipe (confirm ${c0} -> ${c1})`;
+    const links = (await home()).hits.filter(([n]) => n.startsWith("link:")).length;
+    if (links < 3) return `only ${links} links on page 3 once it sits still`;
+    return (await intact(2)) ?? true;
+  });
+  await step("a swipe on the last page stretches and comes back: it does not close the pages", async () => {
+    await grab(W() * 0.8, Math.round(box.h * 0.42));
+    await dragTo(W() * 0.3, 300);
+    await sleep(200);
+    const h = await home();
+    if (!(h.welcome_pos > 2.02 && h.welcome_pos < 2.25)) return `no resistance: ${h.welcome_pos.toFixed(3)} after dragging half a width past the end`;
+    await page.shot(`${label}-04-stretched-at-the-end`);
+    await drop();
+    await settled(2);
+    const bad = await intact(2);
+    if (bad) return bad;
+    await swipe(-W() * 0.6, 100);
+    await settled(2);
+    await sleep(400);
+    return (await intact(2)) ?? true;
+  });
+  await step("swiping back goes to page 2 and page 1 with the Back sound, and the first page does not close either", async () => {
+    const b0 = (await sounds()).back;
+    await swipe(W() * 0.5, 350);
+    await settled(1);
+    const b1 = (await sounds()).back;
+    if (b1 <= b0) return `no Back sound for the swipe (back ${b0} -> ${b1})`;
+    await swipe(W() * 0.5, 350);
+    await settled(0);
+    await swipe(W() * 0.6, 120);
+    await settled(0);
+    await sleep(400);
+    return (await intact(0)) ?? true;
+  });
+  await step("a short, slow swipe snaps back to the page it left, with no sound", async () => {
+    const before = await sounds();
+    await grab(W() * 0.55, Math.round(box.h * 0.42));
+    await dragTo(W() * 0.55 - 40, 500, 8);
+    await sleep(300);
+    const h = await home();
+    if (!(h.welcome_drag && h.welcome_pos > 0.03)) return `the pages did not follow a short drag: ${JSON.stringify([h.welcome_drag, h.welcome_pos])}`;
+    await page.shot(`${label}-05-short-swipe`);
+    await drop();
+    await settled(0);
+    const after = await sounds();
+    if (after.confirm !== before.confirm || after.back !== before.back) return `sounds for a swipe that turned nothing: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`;
+    return (await intact(0)) ?? true;
+  });
+  await step("a tiny quick twitch turns nothing, and neither does a long drag that is brought back before letting go", async () => {
+    await swipe(-14, 40);
+    await settled(0);
+    let bad = await intact(0);
+    if (bad) return bad;
+    await grab(W() * 0.8, Math.round(box.h * 0.42));
+    await dragTo(W() * 0.4, 250);
+    await sleep(150);
+    await dragTo(W() * 0.78, 400);
+    await sleep(500);
+    await drop();
+    await settled(0);
+    return (await intact(0)) ?? true;
+  });
+  await step("a short but quick flick does turn the page", async () => {
+    await swipe(-56, 40, { burst: true });
+    const took = swipeMs;
+    await settled(1, `page 2 at rest after a 56 px swipe that took ${took} ms (the page measured ${(await home()).welcome_vel} px/s)`);
+    const bad = await intact(1);
+    if (bad) return bad;
+    await swipe(56, 40, { burst: true });
+    await settled(0);
+    return (await intact(0)) ?? true;
+  });
+  await step("Next and Back still work after swiping, and the dots and buttons follow the page", async () => {
+    await act("welcome-step:1");
+    await settled(1);
+    const mid = await home();
+    if (!mid.hits.some(([n]) => n === "welcome-step:-1")) return "no Back button on page 2";
+    await act("welcome-step:-1");
+    await settled(0);
+    const first = await home();
+    if (first.hits.some(([n]) => n === "welcome-step:-1")) return "Back button on page 1";
+    return (await intact(0)) ?? true;
+  });
+  await step("arrow keys page too: right, right, right stays on the last page; left, left returns", async () => {
+    if (mobile) return; // a phone has no keyboard attached
+    await page.tapKey("ArrowRight"); await settled(1);
+    await page.tapKey("ArrowRight"); await settled(2);
+    await page.tapKey("ArrowRight"); await sleep(500);
+    let bad = await intact(2);
+    if (bad) return bad;
+    await page.tapKey("ArrowLeft"); await settled(1);
+    await page.tapKey("ArrowLeft"); await settled(0);
+    return (await intact(0)) ?? true;
+  });
+  await step("the pad's d-pad pages too, and a swipe after it still lands on whole pages", async () => {
+    await page.padConnect();
+    await sleep(300);
+    await page.padSet({ 15: true }); await sleep(200); await page.padSet({});
+    await settled(1);
+    await page.padSet({ 14: true }); await sleep(200); await page.padSet({});
+    await settled(0);
+    await swipe(-W() * 0.5, 300);
+    await settled(1);
+    await page.padSet({ 15: true }); await sleep(200); await page.padSet({});
+    await settled(2);
+    await swipe(W() * 0.5, 300);
+    await settled(1);
+    return (await intact(1)) ?? true;
+  });
+  await step("a swipe, a button, a key and a swipe back to back end on the right page", async () => {
+    await swipe(-W() * 0.5, 250);
+    await settled(2);
+    await act("welcome-step:-1");
+    await settled(1);
+    if (!mobile) await page.tapKey("ArrowRight"); else await swipe(-W() * 0.5, 250);
+    await settled(2);
+    await swipe(W() * 0.5, 250);
+    await settled(1);
+    await swipe(W() * 0.5, 250);
+    await settled(0);
+    return (await intact(0)) ?? true;
+  });
+  await step("grabbing the pages while they are still gliding takes hold of them where they are", async () => {
+    await swipe(-W() * 0.5, 120);
+    await sleep(60);
+    const moving = await home();
+    // Catch it on the way (if the machine is quick enough that it already arrived, that is fine too).
+    await grab(W() * 0.5, Math.round(box.h * 0.42));
+    await dragTo(W() * 0.5 - 8, 80, 2);
+    await dragTo(W() * 0.5 - 40, 100, 4);
+    await sleep(120);
+    const h = await home();
+    if (!(h.welcome_pos > 0.8 && h.welcome_pos < 2.0)) return `lost its place: ${h.welcome_pos.toFixed(3)} (was ${moving.welcome_pos.toFixed(3)})`;
+    await drop();
+    await sleep(900);
+    const end = await home();
+    if (Math.abs(end.welcome_pos - end.welcome) > 0.002 || end.welcome_drag) return `did not settle on a whole page: ${JSON.stringify([end.welcome, end.welcome_pos])}`;
+    const bad = (await page.ux()).home.page !== "Welcome";
+    await swipe(W() * 0.6, 200);
+    await swipe(W() * 0.6, 200);
+    await settled(0);
+    return bad ? "left the pages" : ((await intact(0)) ?? true);
+  });
+  await step("turning the phone mid-way keeps the pages and swiping still works in the other orientation", async () => {
+    await swipe(-W() * 0.5, 250);
+    await settled(1);
+    const spare = { w: box.h, h: box.w };
+    await page.viewport(spare.w, spare.h, { dpr: size.dpr, mobile });
+    box = spare;
+    await sleep(900);
+    let bad = await intact(1);
+    if (bad) return `after turning: ${bad}`;
+    const lay = homeLayoutProblem(await page.ux(), { ...size, w: spare.w, h: spare.h });
+    await swipe(-W() * 0.5, 250);
+    await settled(2);
+    await page.shot(`${label}-06-turned-page-3`);
+    await swipe(W() * 0.5, 250);
+    await settled(1);
+    await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+    box = { w: size.w, h: size.h };
+    await sleep(900);
+    bad = await intact(1);
+    if (bad) return `after turning back: ${bad}`;
+    await swipe(W() * 0.5, 250);
+    await settled(0);
+    return lay ?? (await intact(0)) ?? true;
+  });
+  await step("a tap on Next at the end (Done) still closes the pages, and the countdown starts", async () => {
+    await act("welcome-step:1"); await settled(1);
+    await act("welcome-step:1"); await settled(2);
+    await act("welcome-step:1");
+    await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
+    const u = await page.waitFor("the countdown", (s) => s.home.countdown === "running", 8000);
+    return u.home.explainer ? "still flagged as the explainer" : true;
+  });
+  await step("swiping on Home still moves between the cases, and a swipe through the pages reopened by hand starts nothing", async () => {
+    await page.waitFor("the disc ready", (s) => s.loaded_id && !s.running, 90000);
+    await act("welcome");
+    await page.waitFor("the pages", (s) => s.home.page === "Welcome", 4000);
+    await settled(0);
+    await swipe(-W() * 0.5, 250);
+    await settled(1);
+    await swipe(-W() * 0.5, 250);
+    await settled(2);
+    await swipe(-W() * 0.5, 250);
+    await settled(2);
+    const u = await page.ux();
+    if (u.running) return "the disc started";
+    await act("welcome-step:1");
+    await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
+    // The explainer opened from Home starts at page 1 again.
+    await act("welcome");
+    await page.waitFor("the pages", (s) => s.home.page === "Welcome", 4000);
+    const again = await home();
+    if (again.welcome !== 0 || Math.abs(again.welcome_pos) > 0.001) return `reopened on page ${again.welcome + 1} (${again.welcome_pos})`;
+    await act("dismiss");
+    await page.waitFor("Home", (s) => s.home.page === "Home", 4000);
+    const cases = (await home()).cases.length;
+    if (cases < 2) return;
+    const before = (await home()).case;
+    await grab(W() * 0.8, Math.round(box.h * 0.3));
+    await dragTo(W() * 0.2, 200);
+    await drop();
+    await sleep(500);
+    const after = (await home()).case;
+    return after === before + 1 ? true : `a swipe on Home moved the case ${before} -> ${after}`;
+  });
+  await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
+
 // ---------------------------------------------------------------- menu sounds
 
 /**
@@ -4236,6 +4555,7 @@ async function main() {
         if (wanted("desktop-list-small")) await journeyList("desktop-list-small", () => direct("?countdown=12"), { w: 800, h: 600, dpr: 1, mobile: false });
         if (wanted("desktop-momentum")) await journeyMomentum("desktop-momentum", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-explainer")) await journeyExplainer("desktop-explainer", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-welcome-swipe")) await journeyWelcomeSwipe("desktop-welcome-swipe", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-sounds")) await journeySounds("desktop-sounds", (q) => direct(q), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-menus")) await journeyMenus("desktop-menus", () => direct());
         if (wanted("desktop-nowebgpu")) await journeyNoWebgpu("desktop-nowebgpu", () => direct());
@@ -4259,6 +4579,9 @@ async function main() {
         }
         for (const [name, w, h] of [["phone-explainer", 393, 852], ["phone-explainer-small", 360, 640], ["phone-explainer-landscape", 852, 393]]) {
           if (wanted(name)) await journeyExplainer(name, () => direct("?countdown=12"), { w, h, dpr: 3, mobile: true });
+        }
+        for (const [name, w, h] of [["phone-welcome-swipe", 393, 852], ["phone-welcome-swipe-small", 360, 640], ["phone-welcome-swipe-landscape", 852, 393]]) {
+          if (wanted(name)) await journeyWelcomeSwipe(name, () => direct("?countdown=12"), { w, h, dpr: 3, mobile: true });
         }
         if (wanted("phone-sounds")) await journeySounds("phone-sounds", (q) => direct(q), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-home")) await journeyHome("phone-home", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });

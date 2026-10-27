@@ -311,8 +311,15 @@ pub(crate) struct HomeState {
     ring_vis: f32,
     /// The focus frame of a list page: where it is (in px from the list's top), gliding.
     row_cage: motion::Spring,
-    /// The welcome page shown last, to restart the reveal when it turns.
-    last_welcome: usize,
+    /// Where the welcome pages sit, in pages from the first: a finger drags it, and it glides to
+    /// the page `welcome` once let go (or when Next, Back or a key turns the page).
+    pager: motion::Spring,
+    /// A finger or the mouse is dragging the welcome pages.
+    pager_drag: Option<PagerDrag>,
+    /// How far apart the welcome pages are laid out, in points (set when they are drawn).
+    pager_span: f32,
+    /// The speed of the last drag when it let go (points per second), for the journeys.
+    pager_last_vel: f32,
     /// A control being pressed: where it is and how far the press feedback has risen.
     press_rect: Option<Rect>,
     press_t: f32,
@@ -336,6 +343,98 @@ struct CaseAnim {
 const SHIMMER_DELAY: f32 = 0.15;
 /// Seconds the picture takes to fade in.
 const ART_FADE_SECS: f32 = 0.35;
+
+/// A drag across the welcome pages.
+#[derive(Clone, Debug)]
+struct PagerDrag {
+    /// Where the pages were when the drag began, and the pointer's x then (points).
+    base: f32,
+    origin_x: f32,
+    /// How far the pointer has gone from `origin_x` (points).
+    dx: f32,
+    /// The pointer's recent x positions with the time of each (seconds), to tell a flick.
+    samples: Vec<(f64, f32)>,
+}
+
+/// A flick is the pointer's speed over this many seconds before it lets go.
+const PAGER_FLICK_WINDOW: f64 = 0.1;
+
+impl PagerDrag {
+    fn new(base: f32, origin_x: f32, now: f64, lag: f32) -> Self {
+        Self {
+            base,
+            origin_x,
+            dx: 0.0,
+            samples: vec![(now - f64::from(lag), origin_x)],
+        }
+    }
+
+    /// The pointer is at `x` at time `now`.
+    fn note(&mut self, now: f64, x: f32) {
+        self.dx = x - self.origin_x;
+        self.samples.push((now, x));
+        self.samples
+            .retain(|(t, _)| now - t <= 2.0 * PAGER_FLICK_WINDOW);
+    }
+
+    /// Points per second to the right over the last `PAGER_FLICK_WINDOW` seconds up to `now`; a
+    /// pointer that stopped before then has no speed.
+    fn velocity(&self, now: f64) -> f32 {
+        let recent: Vec<&(f64, f32)> = self
+            .samples
+            .iter()
+            .filter(|(t, _)| now - t <= PAGER_FLICK_WINDOW)
+            .collect();
+        let (Some(first), Some(last)) = (recent.first(), recent.last()) else {
+            return 0.0;
+        };
+        let span = (last.0 - first.0).max(1.0 / 60.0);
+        ((last.1 - first.1) as f64 / span) as f32
+    }
+}
+
+/// A drag this far (points), or this fraction of the span, turns the page.
+const PAGER_TURN_MIN: f32 = 70.0;
+const PAGER_TURN_MAX: f32 = 120.0;
+const PAGER_TURN_FRACTION: f32 = 0.22;
+/// A flick this fast (points per second) turns the page after a short drag.
+const PAGER_FLICK: f32 = 400.0;
+/// ...but only after the page has moved at least this far.
+const PAGER_FLICK_MIN: f32 = 30.0;
+/// How much of a drag past the first or last page shows (the pages resist).
+const PAGER_RESIST: f32 = 0.3;
+
+/// Where the pages sit (in pages from the first) after the pointer moved `dx` points from where
+/// the drag began at `base`: one for one with the pointer, resisting past the ends.
+fn pager_pos(base: f32, dx: f32, span: f32, count: usize) -> f32 {
+    let raw = base - dx / span.max(1.0);
+    let last = count.saturating_sub(1) as f32;
+    if raw < 0.0 {
+        raw * PAGER_RESIST
+    } else if raw > last {
+        last + (raw - last) * PAGER_RESIST
+    } else {
+        raw
+    }
+}
+
+/// The page a drag let go at `pos` (pages from the first, moving at `vel` points per second to
+/// the right) settles on, starting from page `at`. A short or slow drag snaps back; a drag past
+/// the turn distance, or a quick flick, turns one page, and never past the first or last.
+fn pager_target(pos: f32, vel: f32, at: usize, span: f32, count: usize) -> usize {
+    let turn = (PAGER_TURN_FRACTION * span).clamp(PAGER_TURN_MIN, PAGER_TURN_MAX);
+    let moved = (pos - at as f32) * span;
+    let toward_next = -vel;
+    let next = moved >= turn || (moved >= PAGER_FLICK_MIN && toward_next >= PAGER_FLICK);
+    let prev = -moved >= turn || (-moved >= PAGER_FLICK_MIN && -toward_next >= PAGER_FLICK);
+    if next && at + 1 < count {
+        at + 1
+    } else if prev && at > 0 {
+        at - 1
+    } else {
+        at
+    }
+}
 
 /// A pointer press being tracked, to tell a tap from a scroll.
 #[derive(Clone, Copy, Debug)]
@@ -412,7 +511,10 @@ impl HomeState {
             nav_vis: 0.0,
             ring_vis: 0.0,
             row_cage: motion::Spring::default(),
-            last_welcome: 0,
+            pager: motion::Spring::default(),
+            pager_drag: None,
+            pager_span: 360.0,
+            pager_last_vel: 0.0,
             press_rect: None,
             press_t: 0.0,
         }
@@ -593,20 +695,35 @@ impl HomeState {
             self.page_age += dt;
             self.home_age += dt;
         }
-        if self.welcome != self.last_welcome {
-            self.page_dir = if self.welcome > self.last_welcome {
-                1.0
-            } else {
-                -1.0
-            };
-            self.last_welcome = self.welcome;
-            self.page_age = 0.0;
-        }
+        self.tick_pager(dt);
         if self.case_focus != self.last_case {
             self.last_case = self.case_focus;
             // Another case: its words come in again, but from half way, so they never blank.
             self.home_age = 0.05;
         }
+    }
+
+    /// Move the welcome pages: with the finger while it drags, else gliding to the page in place.
+    fn tick_pager(&mut self, dt: f32) {
+        let count = pages::WELCOME.len();
+        if self.page != Page::Welcome {
+            self.pager_drag = None;
+            self.pager = motion::Spring::at(self.welcome as f32);
+            return;
+        }
+        if let Some(d) = &self.pager_drag {
+            self.pager = motion::Spring::at(pager_pos(d.base, d.dx, self.pager_span, count));
+        } else {
+            self.pager
+                .step_damped(self.welcome as f32, dt, self.calm(), 1.0);
+        }
+    }
+
+    /// Show the welcome pages from the first, with nothing sliding.
+    fn welcome_from_start(&mut self) {
+        self.welcome = 0;
+        self.pager = motion::Spring::at(0.0);
+        self.pager_drag = None;
     }
 
     /// How far part `index` of the page is revealed, 0 to 1 (always 1 with reduced motion).
@@ -818,7 +935,7 @@ impl MenuState {
             _ => -1.0,
         };
         format!(
-            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"nav_hl\":{:.3},\"nav_vis\":{:.2},\"page_age\":{:.2},\"keyboard\":{},\"framed\":{},\"press\":{:.2},\"controls\":{},\"list\":[{:.1},{:.1},{:.1},{:.1},{}],\"contents\":{},\"explainer\":{},\"welcome\":{},\"cases\":[{}],\"hits\":[{}]}}",
+            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"nav_hl\":{:.3},\"nav_vis\":{:.2},\"page_age\":{:.2},\"keyboard\":{},\"framed\":{},\"press\":{:.2},\"controls\":{},\"list\":[{:.1},{:.1},{:.1},{:.1},{}],\"contents\":{},\"explainer\":{},\"welcome\":{},\"welcome_pos\":{:.3},\"welcome_drag\":{},\"welcome_vel\":{:.0},\"cases\":[{}],\"hits\":[{}]}}",
             h.page.name(),
             if h.zone == Zone::Nav { "nav" } else { "body" },
             self.home_probe().1,
@@ -852,6 +969,9 @@ impl MenuState {
             )),
             h.explainer,
             h.welcome,
+            h.pager.pos,
+            h.pager_drag.is_some(),
+            h.pager_last_vel,
             cases.join(","),
             hits.join(",")
         )
@@ -1012,7 +1132,7 @@ impl MenuState {
     pub(super) fn home_show_welcome(&mut self) {
         if let Some(h) = self.home.as_mut() {
             h.page = Page::Welcome;
-            h.welcome = 0;
+            h.welcome_from_start();
         }
     }
 
@@ -1440,10 +1560,12 @@ impl HomeState {
     }
 
     fn update_welcome(&mut self, input: &MenuInput) -> Option<MenuAction> {
-        if input.right || input.confirm {
-            if self.welcome + 1 >= pages::WELCOME.len() {
-                self.page = Page::Home;
-            } else {
+        let last = self.welcome + 1 >= pages::WELCOME.len();
+        if input.confirm && last {
+            self.page = Page::Home;
+        } else if input.right || input.confirm {
+            // Right on the last page goes nowhere: only Done (or Skip, or Back) closes the pages.
+            if !last {
                 self.welcome += 1;
             }
         }
@@ -3545,6 +3667,18 @@ impl HomeState {
                 if let Some(action) = pages::slider_set(ms, row, t) {
                     ms.pending_pointer_action = Some(action);
                 }
+            } else if press.travel > 10.0 && self.page == Page::Welcome {
+                // The pages follow the pointer one for one; letting go decides where they settle.
+                press.scrolled = true;
+                let at = pos.unwrap_or(press.start);
+                let settled = self.pager_drag.is_none()
+                    && (self.pager.pos - self.welcome as f32).abs() < 0.01;
+                let now = ctx.input(|i| i.time);
+                let (base, frame) = (self.pager.pos, self.frame_dt);
+                let origin = if settled { press.start.x } else { at.x };
+                self.pager_drag
+                    .get_or_insert_with(|| PagerDrag::new(base, origin, now, frame))
+                    .note(now, at.x);
             } else if press.travel > 10.0
                 && matches!(
                     self.page,
@@ -3562,6 +3696,33 @@ impl HomeState {
                     }
                     _ => {}
                 }
+            }
+        }
+        if !down {
+            let now = ctx.input(|i| i.time);
+            let mut drag = self.pager_drag.take();
+            // A whole swipe inside one frame (a slow page, a quick flick): the press and the release
+            // came in the same frame, so there was no drag to follow, only where it began and ended.
+            if let (None, true, Page::Welcome, Some(pr), Some(end)) =
+                (&drag, released, self.page, self.press, release_at.or(pos))
+            {
+                if pr.on_slider.is_none() && (end - pr.start).length() > 10.0 {
+                    drag = Some(PagerDrag::new(
+                        self.pager.pos,
+                        pr.start.x,
+                        now,
+                        self.frame_dt,
+                    ));
+                }
+            }
+            if let Some(mut d) = drag {
+                self.press = None;
+                // Where it let go, from the event: the last move often comes in the same frame.
+                if let Some(end) = release_at.or(pos) {
+                    d.note(now, end.x);
+                }
+                self.release_pager(&d, now);
+                return;
             }
         }
         if released {
@@ -3608,6 +3769,24 @@ impl HomeState {
                 }
             }
         }
+    }
+
+    /// The pointer let go of the welcome pages: they glide on to the page they settle on, which
+    /// makes the same sound as Next or Back when it is another one.
+    fn release_pager(&mut self, d: &PagerDrag, now: f64) {
+        let count = pages::WELCOME.len();
+        let span = self.pager_span;
+        let pos = pager_pos(d.base, d.dx, span, count);
+        let vel = d.velocity(now);
+        self.pager_last_vel = vel;
+        let target = pager_target(pos, vel, self.welcome, span, count);
+        if target > self.welcome {
+            self.snd_confirm = true;
+        } else if target < self.welcome {
+            self.snd_back = true;
+        }
+        self.welcome = target;
+        self.pager = motion::Spring::with_velocity(pos, (-vel / span.max(1.0)).clamp(-10.0, 10.0));
     }
 
     /// Whether the page under a finger scrolls with momentum.
@@ -3663,7 +3842,7 @@ impl HomeState {
             Click::Link(url) => return Some(MenuAction::OpenUrl(url.to_string())),
             Click::Welcome => {
                 self.page = Page::Welcome;
-                self.welcome = 0;
+                self.welcome_from_start();
             }
             Click::WelcomeStep(step) => {
                 let next = self.welcome as i32 + step;
@@ -4421,6 +4600,92 @@ mod tests {
             },
         );
         assert_eq!(ms.panel_probe(), "none");
+    }
+
+    #[test]
+    fn right_on_the_last_welcome_page_stays_and_confirm_closes_it() {
+        let mut ms = home(false, DemoStatus::Absent);
+        ms.show_about();
+        let key = |f: fn(&mut MenuInput)| {
+            let mut i = MenuInput::default();
+            f(&mut i);
+            i
+        };
+        for _ in 0..2 {
+            press(&mut ms, key(|i| i.right = true));
+        }
+        assert_eq!(ms.home.as_ref().expect("home").welcome, 2);
+        press(&mut ms, key(|i| i.right = true));
+        assert_eq!(
+            ms.panel_probe(),
+            "about",
+            "right does not close the last page"
+        );
+        assert_eq!(ms.home.as_ref().expect("home").welcome, 2);
+        press(&mut ms, key(|i| i.confirm = true));
+        assert_eq!(ms.panel_probe(), "none", "confirm (Done) closes it");
+    }
+
+    #[test]
+    fn a_welcome_drag_follows_the_pointer_and_resists_past_the_ends() {
+        let (span, count) = (400.0, 3);
+        // Dragging left by 100 points moves the pages 100 points toward the next one.
+        assert!((pager_pos(0.0, -100.0, span, count) - 0.25).abs() < 1e-6);
+        // Dragging right on the first page, or left on the last, moves less than the pointer.
+        let first = pager_pos(0.0, 100.0, span, count);
+        assert!(first < 0.0 && first > -0.25 * 0.5, "{first}");
+        let last = pager_pos(2.0, -100.0, span, count);
+        assert!(last > 2.0 && last < 2.125, "{last}");
+    }
+
+    #[test]
+    fn a_short_or_slow_welcome_swipe_snaps_back_and_a_long_or_quick_one_turns_the_page() {
+        let (span, count) = (400.0, 3);
+        let at = |moved: f32, vel: f32, page: usize| {
+            pager_target(page as f32 + moved / span, vel, page, span, count)
+        };
+        // Short and slow: back where it was.
+        assert_eq!(at(40.0, -80.0, 1), 1);
+        assert_eq!(at(-40.0, 80.0, 1), 1);
+        // Far enough, even when slow.
+        assert_eq!(at(110.0, -50.0, 1), 2);
+        assert_eq!(at(-110.0, 50.0, 1), 0);
+        // Short but quick.
+        assert_eq!(at(45.0, -900.0, 1), 2);
+        assert_eq!(at(-45.0, 900.0, 1), 0);
+        // A quick flick that has hardly moved is a twitch, not a swipe.
+        assert_eq!(at(10.0, -2000.0, 1), 1);
+        // Never past the ends: the last page stays, and the first stays.
+        assert_eq!(at(300.0, -2000.0, 2), 2);
+        assert_eq!(at(-300.0, 2000.0, 0), 0);
+        // A flick against the drag does not turn it.
+        assert_eq!(at(45.0, 900.0, 1), 1);
+    }
+
+    #[test]
+    fn a_welcome_flick_is_the_speed_just_before_letting_go() {
+        // 60 points in 60 ms is 1000 points per second.
+        let mut d = PagerDrag::new(0.0, 100.0, 10.0, 0.0);
+        d.note(10.03, 130.0);
+        d.note(10.06, 160.0);
+        assert!(
+            (d.velocity(10.06) - 1000.0).abs() < 1.0,
+            "{}",
+            d.velocity(10.06)
+        );
+        assert_eq!(d.dx, 60.0);
+        // Held still for longer than the window before letting go: no speed left.
+        assert_eq!(d.velocity(10.4), 0.0);
+        // A long slow drag has a low speed at the end.
+        let mut slow = PagerDrag::new(0.0, 0.0, 0.0, 0.0);
+        for i in 1..=30 {
+            slow.note(f64::from(i) * 0.05, i as f32 * 4.0);
+        }
+        assert!(
+            (slow.velocity(1.5) - 80.0).abs() < 1.0,
+            "{}",
+            slow.velocity(1.5)
+        );
     }
 
     #[test]

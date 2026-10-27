@@ -692,13 +692,115 @@ fn draw_control(
     }
 }
 
+/// The welcome pages: laid side by side a screen apart, sliding along with a finger or the mouse
+/// (`HomeState::pager`), with the dots and the buttons staying where they are.
 pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<'_>) {
     let lay = pc.lay;
     let p = pc.painter;
     let a = pc.appear;
     let u = lay.u;
     let s = lay.safe;
-    let page = &WELCOME[h.welcome.min(WELCOME.len() - 1)];
+    let count = WELCOME.len();
+    // A screen apart, so the next page is never seen beside this one.
+    h.pager_span = lay.full.width();
+    let span = h.pager_span;
+    let pos = h.pager.pos;
+    let width = (560.0 * u).min(s.width() - 40.0 * u);
+    let x = s.center().x - width / 2.0;
+    let first = pos.floor().max(0.0) as usize;
+    let last_shown = (pos.ceil().max(0.0) as usize).min(count - 1);
+    let mut foot_y = 0.0;
+    for index in first..=last_shown {
+        let offset = (index as f32 - pos) * span;
+        let near = (1.0 - (offset.abs() / span) * 0.7).clamp(0.0, 1.0);
+        let foot = draw_welcome_page(h, pc, index, offset, a * near);
+        let weight = 1.0 - (pos - index as f32).abs().min(1.0);
+        foot_y += foot * if first == last_shown { 1.0 } else { weight };
+    }
+    // The page nearest the middle decides the buttons.
+    let cur = (pos.round().max(0.0) as usize).min(count - 1);
+    // Dots: a lit one slides between them with the pages.
+    for i in 0..count {
+        let c = Pos2::new(x + 6.0 * u + i as f32 * 18.0 * u, foot_y + 18.0 * u);
+        p.circle_filled(c, 3.0 * u, fade(Color32::from_rgb(42, 56, 70), a));
+    }
+    let lit = pos.clamp(0.0, (count - 1) as f32);
+    p.circle_filled(
+        Pos2::new(x + 6.0 * u + lit * 18.0 * u, foot_y + 18.0 * u),
+        4.0 * u,
+        fade(CYAN, a),
+    );
+    h.draw_page_hints(
+        pc,
+        &[(super::Btn::Cross, "Next"), (super::Btn::Circle, "Close")],
+    );
+    let last = cur + 1 >= count;
+    let next = Rect::from_min_size(
+        Pos2::new(x + width - 120.0 * u, foot_y),
+        Vec2::new(120.0 * u, 38.0 * u),
+    );
+    p.rect_filled(next, 19.0 * u, fade(CYAN, a));
+    p.text(
+        next.center(),
+        Align2::CENTER_CENTER,
+        if last { "DONE" } else { "NEXT" },
+        FontId::proportional(13.0 * u),
+        fade(tokens::ON_ACCENT, a),
+    );
+    h.hits.push((next, Click::WelcomeStep(1)));
+    if cur > 0 {
+        let prev = Rect::from_min_size(
+            next.min - Vec2::new(110.0 * u, 0.0),
+            Vec2::new(100.0 * u, 38.0 * u),
+        );
+        p.rect_stroke(
+            prev,
+            19.0 * u,
+            Stroke::new(1.0, fade(tokens::RING, a)),
+            egui::StrokeKind::Inside,
+        );
+        p.text(
+            prev.center(),
+            Align2::CENTER_CENTER,
+            "BACK",
+            FontId::proportional(13.0 * u),
+            fade(tokens::TEXT_2, a),
+        );
+        h.hits.push((prev, Click::WelcomeStep(-1)));
+    }
+    let close = p.text(
+        Pos2::new(
+            s.right()
+                - if lay.kind == LayoutKind::Desktop {
+                    48.0 * u
+                } else {
+                    20.0 * u
+                },
+            s.top() + 74.0 * u,
+        ),
+        Align2::RIGHT_TOP,
+        "Skip",
+        FontId::proportional(14.0 * u),
+        fade(tokens::MUTED, a),
+    );
+    h.hits
+        .push((close.expand2(Vec2::new(12.0, 12.0)), Click::Dismiss));
+}
+
+/// One welcome page, drawn `offset` points to the side of its place, at opacity `a`. Returns
+/// where the dots and buttons under its words go. Its links answer only while it sits still.
+fn draw_welcome_page(
+    h: &mut HomeState,
+    pc: &PageCtx<'_>,
+    index: usize,
+    offset: f32,
+    a: f32,
+) -> f32 {
+    let lay = pc.lay;
+    let p = pc.painter;
+    let u = lay.u;
+    let s = lay.safe;
+    let page = &WELCOME[index];
     let width = (560.0 * u).min(s.width() - 40.0 * u);
     let x = s.center().x - width / 2.0;
     let top = s.top()
@@ -748,11 +850,12 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
     let uk = u * k;
     // Each part comes in after the one before it, sliding along the way the page turned.
     let ctx = p.ctx();
+    let whole = motion::mark(ctx, p);
     let (head, from) = (h.reveal(0), motion::mark(ctx, p));
     p.text(
         Pos2::new(x, y),
         Align2::LEFT_TOP,
-        format!("WELCOME  {} / {}", h.welcome + 1, WELCOME.len()),
+        format!("WELCOME  {} / {}", index + 1, WELCOME.len()),
         FontId::proportional(tokens::CAPTION * u.max(1.0)),
         fade(CYAN, a * head),
     );
@@ -793,86 +896,17 @@ pub(super) fn draw_welcome(h: &mut HomeState, _ms: &MenuState, pc: &mut PageCtx<
             [r.left_bottom(), r.right_bottom()],
             Stroke::new(1.0, fade(tokens::ACCENT, a * part * 0.5)),
         );
-        h.hits
-            .push((r.expand2(Vec2::new(10.0, 10.0)), Click::Link(url)));
+        if offset.abs() < 0.5 {
+            h.hits
+                .push((r.expand2(Vec2::new(10.0, 10.0)), Click::Link(url)));
+        }
         y = r.bottom() + 14.0 * uk;
         motion::shift_since(ctx, p, from, h.slide(part, u));
     }
-    // Dots and the two steps.
-    let foot_y = (y + 36.0 * u)
+    motion::shift_since(ctx, p, whole, Vec2::new(offset, 0.0));
+    (y + 36.0 * u)
         .max(s.top() + 120.0 * u)
-        .min(s.bottom() - lay.bar_reserve() - 48.0 * u);
-    for i in 0..WELCOME.len() {
-        let on = i == h.welcome;
-        let c = Pos2::new(x + 6.0 * u + i as f32 * 18.0 * u, foot_y + 18.0 * u);
-        p.circle_filled(
-            c,
-            if on { 4.0 * u } else { 3.0 * u },
-            fade(
-                if on {
-                    CYAN
-                } else {
-                    Color32::from_rgb(42, 56, 70)
-                },
-                a,
-            ),
-        );
-    }
-    h.draw_page_hints(
-        pc,
-        &[(super::Btn::Cross, "Next"), (super::Btn::Circle, "Close")],
-    );
-    let last = h.welcome + 1 >= WELCOME.len();
-    let next = Rect::from_min_size(
-        Pos2::new(x + width - 120.0 * u, foot_y),
-        Vec2::new(120.0 * u, 38.0 * u),
-    );
-    p.rect_filled(next, 19.0 * u, fade(CYAN, a));
-    p.text(
-        next.center(),
-        Align2::CENTER_CENTER,
-        if last { "DONE" } else { "NEXT" },
-        FontId::proportional(13.0 * u),
-        fade(tokens::ON_ACCENT, a),
-    );
-    h.hits.push((next, Click::WelcomeStep(1)));
-    if h.welcome > 0 {
-        let prev = Rect::from_min_size(
-            next.min - Vec2::new(110.0 * u, 0.0),
-            Vec2::new(100.0 * u, 38.0 * u),
-        );
-        p.rect_stroke(
-            prev,
-            19.0 * u,
-            Stroke::new(1.0, fade(tokens::RING, a)),
-            egui::StrokeKind::Inside,
-        );
-        p.text(
-            prev.center(),
-            Align2::CENTER_CENTER,
-            "BACK",
-            FontId::proportional(13.0 * u),
-            fade(tokens::TEXT_2, a),
-        );
-        h.hits.push((prev, Click::WelcomeStep(-1)));
-    }
-    let close = p.text(
-        Pos2::new(
-            s.right()
-                - if lay.kind == LayoutKind::Desktop {
-                    48.0 * u
-                } else {
-                    20.0 * u
-                },
-            s.top() + 74.0 * u,
-        ),
-        Align2::RIGHT_TOP,
-        "Skip",
-        FontId::proportional(14.0 * u),
-        fade(tokens::MUTED, a),
-    );
-    h.hits
-        .push((close.expand2(Vec2::new(12.0, 12.0)), Click::Dismiss));
+        .min(s.bottom() - lay.bar_reserve() - 48.0 * u)
 }
 
 /// A toggle switch whose right edge is at `right`. Returns its track.

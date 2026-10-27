@@ -29,8 +29,18 @@ impl Spring {
         Self { pos, vel: 0.0 }
     }
 
+    /// A spring that already moves at `vel` (units per second), e.g. a page let go of by a flick.
+    pub(super) fn with_velocity(pos: f32, vel: f32) -> Self {
+        Self { pos, vel }
+    }
+
     /// Move toward `target` over `dt` seconds; `snap` jumps there at once (reduced motion).
     pub(super) fn step(&mut self, target: f32, dt: f32, snap: bool) {
+        self.step_damped(target, dt, snap, ZETA);
+    }
+
+    /// `step` with another damping ratio: 1 arrives without overshoot (a page that snaps to its place).
+    pub(super) fn step_damped(&mut self, target: f32, dt: f32, snap: bool, zeta: f32) {
         if snap {
             *self = Self::at(target);
             return;
@@ -39,7 +49,7 @@ impl Spring {
         while left > 1e-5 {
             let h = left.min(MAX_STEP);
             left -= h;
-            let force = OMEGA * OMEGA * (target - self.pos) - 2.0 * ZETA * OMEGA * self.vel;
+            let force = OMEGA * OMEGA * (target - self.pos) - 2.0 * zeta * OMEGA * self.vel;
             self.vel += force * h;
             self.pos += self.vel * h;
         }
