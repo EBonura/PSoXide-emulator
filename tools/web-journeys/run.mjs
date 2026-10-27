@@ -2667,6 +2667,284 @@ async function journeyGrouping(label, urlFor, size) {
   await cdp.send("Target.closeTarget", { targetId: page.targetId });
 }
 
+/** A games folder with sixty discs, so the grid has several screens of rows. */
+const FAKE_MANY = `
+  const names = [...Array(58)].map((_, i) => "Disc " + String(i + 1).padStart(2, "0") + " (USA).bin");
+  class FakeDir { constructor() { this.kind = "directory"; this.name = "games"; }
+    async *entries() { for (const n of names) yield [n, { kind: "file", name: n }]; } }
+  window.showDirectoryPicker = async () => new FakeDir();
+`;
+
+/**
+ * The grid of the home screen scrolls: by the wheel and a trackpad on a desktop (notches eased in, small
+ * pixel steps as they come, both ends clamped, the page itself never scrolling or zooming), by a finger on
+ * a phone (it follows the finger, stretches at the ends and springs back). The focus is left where it is;
+ * a key, a click or a tap brings it back into view only if it is not already. No sound for any of it.
+ */
+async function journeyGridScroll(label, urlFor, size) {
+  current = label;
+  const mobile = !!size.mobile;
+  const page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile });
+  await stubCovers(page, "miss");
+  await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); } catch (e) {}`);
+  await page.addInit(FAKE_MANY);
+  await page.goto(urlFor());
+  const activate = async (name) => (mobile ? homeTap(page, name) : homeClick(page, name));
+  /** [scroll, furthest scroll, top, bottom] of the grid. */
+  const grid = async () => (await page.ux()).home.grid;
+  const focus = async () => (await page.ux()).home.case;
+  const sounds = async () => (await page.ux()).sounds.total;
+  const visible = async (i) => (await page.ux()).home.hits.some((h) => h[0] === `case:${i}`);
+  const settle = async (ms = 1500) => {
+    let last = (await grid())[0];
+    for (const start = Date.now(); Date.now() - start < ms; ) {
+      await sleep(120);
+      const now = (await grid())[0];
+      if (Math.abs(now - last) < 0.05) return now;
+      last = now;
+    }
+    return last;
+  };
+  const centre = async () => { const g = await grid(); return [size.w / 2, (g[2] + g[3]) / 2]; };
+  const wheel = async (dy, count = 1, gap = 24, modifiers = 0) => {
+    const [x, y] = await centre();
+    for (let i = 0; i < count; i++) {
+      await page.cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY: dy, modifiers }, page.top);
+      if (gap) await sleep(gap);
+    }
+  };
+  /** Drag the finger over the grid by `dy` css px (negative: up, which scrolls forward) in `steps` frames. */
+  const drag = async (dy, { steps = 10, rest = 120, lift = true } = {}) => {
+    const g = await grid();
+    // Inside the grid whatever its height (a landscape phone shows little of it).
+    dy = Math.max(-0.85 * (g[3] - g[2]), Math.min(0.85 * (g[3] - g[2]), dy));
+    const x = Math.min(size.w / 2, 200), y0 = (g[2] + g[3]) / 2 - dy / 2;
+    await page.touch("touchStart", [[x, y0]]);
+    for (let i = 1; i <= steps; i++) { await sleep(16); await page.touch("touchMove", [[x, y0 + (dy * i) / steps]]); }
+    if (rest) await sleep(rest);
+    if (lift) await page.touch("touchEnd", []);
+  };
+  /** A case wholly on screen (a clipped one would be scrolled in by a click) other than `not`. */
+  const wholeCase = (u, not) => {
+    const hits = u.home.hits.filter((h) => /^case:\d+$/.test(h[0]));
+    const tall = Math.max(...hits.map((h) => h[4] - h[2]));
+    const hit = hits.find((h) => h[4] - h[2] >= tall - 1 && +h[0].slice(5) !== not);
+    return hit ? +hit[0].slice(5) : undefined;
+  };
+  /** Nothing flipped by itself: still the grid on Home, nothing launched, no overlay. */
+  const stable = async (what) => {
+    const u = await page.ux();
+    if (u.home.page !== "Home") return `${what}: the page became ${u.home.page}`;
+    if (!u.home.compact) return `${what}: the grid switched back to cases`;
+    if (u.home.launch >= 0) return `${what}: a launch started`;
+    if (u.running) return `${what}: a game started`;
+    return null;
+  };
+
+  await page.waitFor("the home screen", (s) => s.home?.page === "Home" && s.has_bus, 90000);
+  await page.tapKey("x");
+  await step("a folder of 58 discs fills the grid with several screens of rows", async () => {
+    await activate("case:1");
+    await activate("primary");
+    await page.waitFor("the folder scanned", (s) => /Found 58/.test(s.status), 15000);
+    await sleep(500);
+    await activate("size");
+    await page.waitFor("the grid", (s) => s.home.compact, 4000);
+    await sleep(900);
+    await page.shot(`${label}-1-grid-top`);
+    const g = await grid();
+    return g[1] > g[3] - g[2] ? true : `the grid scrolls only ${g[1]} px for a view of ${g[3] - g[2]}`;
+  });
+
+  if (!mobile) {
+    await step("the page itself never scrolls or zooms: the wheel is taken by the canvas, with Ctrl (a pinch) too", async () => {
+      await page.eval(`window.__wheel = []; window.addEventListener("wheel", (e) => window.__wheel.push([e.defaultPrevented, e.ctrlKey]), { passive: true });`);
+      await wheel(100, 2);
+      await wheel(100, 2, 24, 2);
+      await sleep(400);
+      const seen = JSON.parse(await page.eval(`JSON.stringify(window.__wheel)`));
+      if (seen.length !== 4 || seen.some((w) => !w[0])) return `the browser was left to act on a wheel event: ${JSON.stringify(seen)}`;
+      const doc = JSON.parse(await page.eval(`JSON.stringify({ y: window.scrollY, top: document.scrollingElement.scrollTop, scale: window.visualViewport.scale })`));
+      if (doc.y !== 0 || doc.top !== 0 || doc.scale !== 1) return `the page moved: ${JSON.stringify(doc)}`;
+      await wheel(-100, 40);
+      await settle();
+    });
+    await step("four wheel notches scroll the grid by about 400 px, easing in, with the focus left alone and no sound", async () => {
+      const [f0, s0] = [await focus(), await sounds()];
+      const problems = [];
+      await wheel(100, 1, 0);
+      const trace = [];
+      for (let i = 0; i < 24; i++) { trace.push((await grid())[0]); await sleep(15); }
+      if (trace.filter((v) => v > 5 && v < 95).length < 2) problems.push(`one notch did not ease in: ${trace.map((v) => v.toFixed(0))}`);
+      if (trace.some((v, i) => i && v < trace[i - 1] - 0.01)) problems.push(`one notch went backwards: ${trace.map((v) => v.toFixed(0))}`);
+      await settle();
+      const base = (await grid())[0];
+      if (Math.abs(base - 100) > 8) problems.push(`one notch of 100 moved the grid by ${base}`);
+      await wheel(100, 3);
+      const after = await settle();
+      await page.shot(`${label}-2-wheel-down`);
+      if (Math.abs(after - 400) > 30) problems.push(`four notches moved the grid to ${after}`);
+      if ((await focus()) !== f0) problems.push(`the wheel moved the focus from ${f0} to ${await focus()}`);
+      if ((await sounds()) !== s0) problems.push(`the wheel made ${(await sounds()) - s0} sounds`);
+      return problems[0] ?? (await stable("after the wheel")) ?? true;
+    });
+    await step("the wheel scrolls back up to exactly the top and never stretches past it", async () => {
+      const seen = [];
+      const watch = (async () => { for (let i = 0; i < 40; i++) { seen.push((await grid())[0]); await sleep(25); } })();
+      await wheel(-300, 30, 10);
+      await watch;
+      const end = await settle();
+      if (end !== 0) return `ended at ${end}`;
+      return Math.min(...seen) >= 0 ? true : `stretched past the top: ${Math.min(...seen)}`;
+    });
+    await step("a long wheel run down ends exactly at the bottom and never stretches past it, and one notch back answers at once", async () => {
+      const seen = [];
+      const watch = (async () => { for (let i = 0; i < 60; i++) { seen.push((await grid())[0]); await sleep(25); } })();
+      await wheel(300, 80, 8);
+      await watch;
+      const g = await grid();
+      const end = await settle();
+      await page.shot(`${label}-3-wheel-bottom`);
+      if (Math.abs(end - g[1]) > 0.6) return `ended at ${end} of ${g[1]}`;
+      if (Math.max(...seen) > g[1] + 0.5) return `stretched past the bottom: ${Math.max(...seen)} of ${g[1]}`;
+      await wheel(-100, 1, 0);
+      await sleep(250);
+      const back = (await grid())[0];
+      return back < g[1] - 40 ? true : `a notch back up from the bottom only reached ${back} of ${g[1]}`;
+    });
+    await step("a trackpad's small pixel steps are used as they come, with no easing and no lag", async () => {
+      await wheel(-300, 30, 5);
+      await settle();
+      const [f0, s0] = [await focus(), await sounds()];
+      await wheel(3, 60, 16);
+      const early = (await grid())[0];
+      await sleep(80);
+      const end = await settle();
+      if (Math.abs(end - 180) > 15) return `sixty 3 px steps moved the grid to ${end}`;
+      if (end - early > 12) return `the last steps lagged: ${early} then ${end}`;
+      await wheel(-1, 100, 4);
+      const up = await settle();
+      if (Math.abs(up - 80) > 12) return `a hundred 1 px steps back left it at ${up}`;
+      if ((await focus()) !== f0 || (await sounds()) !== s0) return "the trackpad changed the focus or made a sound";
+    });
+    await step("scrolling away from the focused case leaves it off screen, and the next key brings the new focus into view", async () => {
+      await wheel(-300, 20, 5);
+      await settle();
+      const f0 = await focus();
+      await wheel(100, 30, 10);
+      await settle();
+      if (await visible(f0)) return `case ${f0} is still on screen after scrolling to the bottom`;
+      if ((await focus()) !== f0) return "the wheel moved the focus";
+      await page.tapKey("ArrowRight");
+      const u = await page.waitFor("the focus to move", (s) => s.home.case === f0 + 1, 3000);
+      await sleep(900);
+      await page.shot(`${label}-4-key-after-wheel`);
+      if (!(await visible(f0 + 1))) return `the focused case ${f0 + 1} was not brought into view (scroll ${(await grid())[0]})`;
+      return (await stable("after the key")) ?? true;
+    });
+    await step("wheel, key, click and wheel again in turn: each does its own thing and nothing flips by itself", async () => {
+      await wheel(-300, 30, 5);
+      await settle();
+      await page.tapKey("ArrowDown");
+      await sleep(500);
+      const afterKey = await focus();
+      await wheel(100, 4);
+      const scrolled = await settle();
+      if ((await focus()) !== afterKey) return "the wheel moved the focus";
+      const u = await page.ux();
+      const target = wholeCase(u, afterKey);
+      if (target === undefined) return "no other case on screen to click";
+      await activate(`case:${target}`);
+      await sleep(900);
+      if ((await focus()) !== target) return `the click did not focus case ${target}`;
+      const clicked = (await grid())[0];
+      if (Math.abs(clicked - scrolled) > 2) return `clicking a case already on screen scrolled the grid from ${scrolled} to ${clicked}`;
+      await wheel(-100, 2);
+      const up = await settle();
+      if (!(up < clicked - 100)) return `the wheel after the click did not scroll up: ${clicked} to ${up}`;
+      await page.tapKey("ArrowLeft");
+      await sleep(400);
+      if ((await focus()) !== target - 1) return `ArrowLeft after the wheel did not step the focus from ${target}`;
+      const bad = await stable("end of the sequence");
+      await page.shot(`${label}-5-sequence`);
+      return bad ?? ((await sounds()) >= 0 ? true : "");
+    });
+    await step("the grid and the cases view each keep working after a wheel run: the toggle is not confused", async () => {
+      await activate("size");
+      await page.waitFor("the cases", (s) => !s.home.compact, 3000);
+      await wheel(300, 5);
+      await sleep(400);
+      const big = await page.ux();
+      if (big.home.page !== "Home" || big.running) return "the wheel over the big cases did something";
+      await activate("size");
+      await page.waitFor("the grid", (s) => s.home.compact, 3000);
+      return (await stable("back in the grid")) ?? true;
+    });
+  } else {
+    await step("a finger drag scrolls the grid with the finger, presses no case and changes no focus", async () => {
+      const [f0, s0] = [await focus(), await sounds()];
+      await drag(-260, { rest: 200 });
+      await sleep(400);
+      const after = await settle(4000);
+      await page.shot(`${label}-2-drag-down`);
+      const g = await grid();
+      if (!(after > Math.min(150, 0.4 * (g[3] - g[2])))) return `a 260 px drag moved the grid to ${after}`;
+      if ((await focus()) !== f0) return `the drag moved the focus from ${f0}`;
+      if ((await sounds()) !== s0) return "the drag made a sound";
+      return (await stable("after the drag")) ?? true;
+    });
+    await step("pulling past the top stretches a little and springs back to exactly the top", async () => {
+      for (let i = 0; i < 40 && (await grid())[0] > 0.5; i++) { await drag(400, { rest: 200 }); await settle(4000); }
+      const g0 = await grid();
+      await drag(220, { rest: 100, lift: false });
+      const held = (await grid())[0];
+      await page.touch("touchEnd", []);
+      const end = await settle(4000);
+      if (!(held < -4)) return `held past the top it only reached ${held}`;
+      if (!(held > -0.4 * (g0[3] - g0[2]) - 2)) return `it stretched ${held}, past the limit`;
+      return end === 0 ? true : `it came to rest at ${end}`;
+    });
+    await step("pulling past the bottom stretches a little and springs back to exactly the bottom", async () => {
+      for (let i = 0; i < 40; i++) { const g = await grid(); if (g[1] - g[0] < 0.5) break; await drag(-500, { rest: 200 }); await settle(4000); }
+      const g0 = await grid();
+      await drag(-220, { rest: 100, lift: false });
+      const held = (await grid())[0];
+      await page.touch("touchEnd", []);
+      const end = await settle(4000);
+      await page.shot(`${label}-3-bottom`);
+      if (!(held > g0[1] + 4)) return `held past the bottom it only reached ${held} of ${g0[1]}`;
+      return Math.abs(end - g0[1]) < 0.6 ? true : `it came to rest at ${end} of ${g0[1]}`;
+    });
+    await step("drag, tap a case, drag back, step with a key and tap again: each does its own thing", async () => {
+      await drag(500, { rest: 150 });
+      await settle(4000);
+      const u = await page.ux();
+      const f0 = u.home.case;
+      const target = wholeCase(u, f0);
+      if (target === undefined) return "no other case on screen to tap";
+      const before = (await grid())[0];
+      await activate(`case:${target}`);
+      await sleep(700);
+      if ((await focus()) !== target) return `the tap did not focus case ${target}`;
+      const tapped = (await grid())[0];
+      if (Math.abs(tapped - before) > 2) return `tapping a visible case scrolled the grid from ${before} to ${tapped}`;
+      await drag(-200, { rest: 150 });
+      const scrolled = await settle(4000);
+      if (!(scrolled > tapped + 60)) return `the drag after the tap did not scroll: ${tapped} to ${scrolled}`;
+      if ((await focus()) !== target) return "the drag moved the focus";
+      await page.tapKey("ArrowLeft");
+      await sleep(500);
+      if ((await focus()) !== target - 1) return `a key after the drag did not step the focus from ${target}`;
+      const bad = await stable("end of the sequence");
+      await page.shot(`${label}-4-sequence`);
+      return bad ?? true;
+    });
+  }
+  await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
+
 /** While a picture is being looked up the case says so; the picture fades in; a miss settles quietly. */
 async function journeyCoverStates(label, urlFor, size) {
   current = label;
@@ -4570,7 +4848,7 @@ async function main() {
   if (args.scenario === "spam") { await inChrome(1, scenarioSpam); siteServer?.close(); parentServer?.close(); process.exit(0); }
   const wanted = (name) => !ONLY || name.includes(ONLY);
   try {
-    if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu", "home", "covers", "shell", "throttled", "controls", "grouping", "selection", "cover-states", "hints", "polish", "debug", "slots", "centre"].some((k) => ONLY.includes(k))) {
+    if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu", "home", "covers", "shell", "throttled", "controls", "grouping", "selection", "cover-states", "hints", "polish", "debug", "slots", "centre", "grid"].some((k) => ONLY.includes(k))) {
       await inChrome(1, async () => {
         if (wanted("desktop-direct")) await journeyDesktop("desktop-direct", () => direct());
         if (wanted("desktop-home")) await journeyHome("desktop-home", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
@@ -4579,6 +4857,8 @@ async function main() {
         if (wanted("desktop-controls-narrow")) await journeyControls("desktop-controls-narrow", () => direct("?countdown=12"), { w: 800, h: 700, dpr: 1, mobile: false });
         if (wanted("desktop-throttled")) await journeyThrottled("desktop-throttled", () => direct("?countdown=12"), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-covers")) await journeyCovers("desktop-covers", () => direct());
+        if (wanted("desktop-grid-scroll")) await journeyGridScroll("desktop-grid-scroll", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
+        if (wanted("desktop-grid-scroll-small")) await journeyGridScroll("desktop-grid-scroll-small", () => direct(), { w: 800, h: 600, dpr: 1, mobile: false });
         if (wanted("desktop-grouping")) await journeyGrouping("desktop-grouping", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-cover-states")) await journeyCoverStates("desktop-cover-states", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
         if (wanted("desktop-selection")) await journeySelection("desktop-selection", () => direct(), { w: 1280, h: 800, dpr: 1, mobile: false });
@@ -4603,7 +4883,7 @@ async function main() {
         if (wanted("desktop-gamepad-iframe")) await journeyGamepad("desktop-gamepad-iframe", () => embedded());
       });
     }
-    if (!ONLY || ONLY.includes("phone") || ONLY.includes("home") || ONLY.includes("shell") || ONLY.includes("throttled") || ONLY.includes("controls") || ONLY.includes("grouping") || ONLY.includes("hints") || ONLY.includes("selection") || ONLY.includes("cover-states") || ONLY.includes("polish") || ONLY.includes("debug") || ONLY.includes("slots") || ONLY.includes("centre")) {
+    if (!ONLY || ONLY.includes("phone") || ONLY.includes("home") || ONLY.includes("shell") || ONLY.includes("throttled") || ONLY.includes("controls") || ONLY.includes("grouping") || ONLY.includes("hints") || ONLY.includes("selection") || ONLY.includes("cover-states") || ONLY.includes("polish") || ONLY.includes("debug") || ONLY.includes("slots") || ONLY.includes("centre") || ONLY.includes("grid")) {
       await inChrome(3, async () => {
         if (wanted("phone-portrait")) await journeyPhone("phone-portrait", () => direct(), { w: 393, h: 852, dpr: 3 });
         if (wanted("phone-iframe")) await journeyPhone("phone-iframe", () => embedded(), { w: 393, h: 852, dpr: 3 });
@@ -4627,6 +4907,9 @@ async function main() {
         if (wanted("phone-home")) await journeyHome("phone-home", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-home-small")) await journeyHome("phone-home-small", () => direct("?countdown=12"), { w: 360, h: 640, dpr: 3, mobile: true });
         if (wanted("phone-home-landscape")) await journeyHome("phone-home-landscape", () => direct("?countdown=12"), { w: 852, h: 393, dpr: 3, mobile: true });
+        for (const [name, w, h] of [["phone-grid-scroll", 393, 852], ["phone-grid-scroll-small", 360, 640], ["phone-grid-scroll-landscape", 852, 393]]) {
+          if (wanted(name)) await journeyGridScroll(name, () => direct(), { w, h, dpr: 3, mobile: true });
+        }
         if (wanted("phone-grouping")) await journeyGrouping("phone-grouping", () => direct(), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-cover-states")) await journeyCoverStates("phone-cover-states", () => direct(), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-selection")) await journeySelection("phone-selection", () => direct(), { w: 393, h: 852, dpr: 3, mobile: true });

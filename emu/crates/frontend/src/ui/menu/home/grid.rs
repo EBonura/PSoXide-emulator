@@ -9,6 +9,7 @@ use egui::{Align2, Color32, Pos2, Rect, Shape, Stroke, Vec2};
 use super::scene::{fade, Camera, CaseDraw, CoverKind, CYAN, V3};
 use super::{tokens, CaseItem, Click, HomeState, LayoutKind, PageCtx};
 use crate::ui::menu::MenuState;
+use crate::ui::momentum::scroll_by_wheel;
 
 /// The first letter a case is filed under: `#` for digits and symbols.
 pub(super) fn letter_of(title: &str) -> char {
@@ -150,11 +151,57 @@ impl HomeState {
         let rows_total = cases.len().div_ceil(cols);
         let width = cols as f32 * cell_w;
         let left = area.center().x - width / 2.0;
-        // Keep the focused row in view, easing.
+        let max_scroll = (rows_total as f32 * cell_h - area.height()).max(0.0);
+        // A flick coasts on and stretches against the ends; the wheel and a trackpad scroll the
+        // grid wherever the pointer is (nothing else on this page scrolls), like the lists, and
+        // leave the focus where it is.
+        self.kin.step(
+            &mut self.grid_scroll,
+            self.frame_dt,
+            max_scroll,
+            area.height(),
+        );
+        if scroll_by_wheel(
+            ctx,
+            "grid",
+            &mut self.kin,
+            &mut self.grid_scroll,
+            cell_h,
+            area.height(),
+            max_scroll,
+        ) {
+            self.grid_target = None;
+            self.cancel_countdown();
+        }
+        // A focus that moved by key, pad or click is brought into view unless it already is: a
+        // row just past an edge by the least scroll that shows it, a farther one (a letter
+        // jump) to the middle. Either way it eases there.
         let focus_row = self.case_focus / cols;
-        let want = (focus_row as f32 * cell_h - (area.height() - cell_h) / 2.0)
-            .clamp(0.0, (rows_total as f32 * cell_h - area.height()).max(0.0));
-        self.grid_scroll += (want - self.grid_scroll) * 0.25;
+        let (row_top, row_bottom) = (focus_row as f32 * cell_h, (focus_row + 1) as f32 * cell_h);
+        if self.grid_seen != Some(self.case_focus) {
+            self.grid_seen = Some(self.case_focus);
+            let (top, bottom) = (self.grid_scroll, self.grid_scroll + area.height());
+            self.grid_target = if row_top >= top - 1.0 && row_bottom <= bottom + 1.0 {
+                None
+            } else if row_top < top && row_top >= top - cell_h {
+                Some(row_top)
+            } else if row_bottom > bottom && row_bottom <= bottom + cell_h {
+                Some(row_bottom - area.height())
+            } else {
+                Some(row_top - (area.height() - cell_h) / 2.0)
+            };
+            self.kin.stop();
+        }
+        if let Some(target) = self.grid_target.filter(|_| !self.kin.is_active()) {
+            let want = target.clamp(0.0, max_scroll);
+            self.grid_scroll += (want - self.grid_scroll) * 0.25;
+            if (want - self.grid_scroll).abs() < 0.5 {
+                self.grid_scroll = want;
+                self.grid_target = None;
+            }
+        }
+        self.kin.limit(&mut self.grid_scroll, max_scroll);
+        self.grid_view = [self.grid_scroll, max_scroll, area.top(), area.bottom()];
         let clip = p.with_clip_rect(area.expand2(Vec2::new(8.0, 0.0)));
         let cam = Camera {
             origin: Pos2::new(area.center().x, area.center().y - 400.0 * u),

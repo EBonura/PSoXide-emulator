@@ -270,6 +270,12 @@ pub(crate) struct HomeState {
     /// The letter shown big for a moment after a jump, and how long it has left.
     badge: Option<(char, f32)>,
     grid_scroll: f32,
+    /// Where the grid is easing to bring its focused case into view, if it is.
+    grid_target: Option<f32>,
+    /// The focus the grid last looked at.
+    grid_seen: Option<usize>,
+    /// The grid's scroll, furthest scroll, top and bottom as last drawn (for fingers and the probe).
+    grid_view: [f32; 4],
     grid_cols: usize,
     /// The letter rail of the grid on a phone, when it is up.
     rail: Option<(Rect, Vec<char>)>,
@@ -494,6 +500,9 @@ impl HomeState {
             compact: false,
             badge: None,
             grid_scroll: 0.0,
+            grid_target: None,
+            grid_seen: None,
+            grid_view: [0.0; 4],
             grid_cols: 3,
             rail: None,
             btn_bottom: 0.0,
@@ -939,7 +948,7 @@ impl MenuState {
             _ => -1.0,
         };
         format!(
-            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"nav_hl\":{:.3},\"nav_vis\":{:.2},\"page_age\":{:.2},\"keyboard\":{},\"framed\":{},\"press\":{:.2},\"controls\":{},\"list\":[{:.1},{:.1},{:.1},{:.1},{}],\"contents\":{},\"explainer\":{},\"welcome\":{},\"welcome_pos\":{:.3},\"welcome_drag\":{},\"welcome_vel\":{:.0},\"welcome_rows\":[{:.1},{:.1},{:.1}],\"cases\":[{}],\"hits\":[{}]}}",
+            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"nav_hl\":{:.3},\"nav_vis\":{:.2},\"page_age\":{:.2},\"keyboard\":{},\"framed\":{},\"press\":{:.2},\"controls\":{},\"list\":[{:.1},{:.1},{:.1},{:.1},{}],\"grid\":[{:.1},{:.1},{:.1},{:.1}],\"contents\":{},\"explainer\":{},\"welcome\":{},\"welcome_pos\":{:.3},\"welcome_drag\":{},\"welcome_vel\":{:.0},\"welcome_rows\":[{:.1},{:.1},{:.1}],\"cases\":[{}],\"hits\":[{}]}}",
             h.page.name(),
             if h.zone == Zone::Nav { "nav" } else { "body" },
             self.home_probe().1,
@@ -967,6 +976,10 @@ impl MenuState {
             h.list_view[2],
             h.list_view[3],
             i32::from(h.kin.is_active()),
+            h.grid_view[0],
+            h.grid_view[1],
+            h.grid_view[2],
+            h.grid_view[3],
             h.contents.map_or("null".to_string(), |c| format!(
                 "[{:.1},{:.1},{:.1},{:.1},{},{}]",
                 c[0], c[1], c[2], c[3], c[4] as i32, c[5] as i32
@@ -3701,6 +3714,12 @@ impl HomeState {
                         self.kin
                             .drag(&mut self.list_scroll, -delta.y, now, max, bottom - top);
                     }
+                    Page::Home if self.compact => {
+                        let [_, max, top, bottom] = self.grid_view;
+                        self.grid_target = None;
+                        self.kin
+                            .drag(&mut self.grid_scroll, -delta.y, now, max, bottom - top);
+                    }
                     _ => {}
                 }
             }
@@ -3737,6 +3756,7 @@ impl HomeState {
                 let now = ctx.input(|i| i.time);
                 match self.page {
                     Page::Controls => self.controls.release(&mut self.kin, now),
+                    Page::Home => self.kin.release(self.grid_scroll, now, self.grid_view[1]),
                     _ => self.kin.release(self.list_scroll, now, self.list_view[1]),
                 }
             }
@@ -3798,7 +3818,11 @@ impl HomeState {
 
     /// Whether the page under a finger scrolls with momentum.
     fn scrolls_by_finger(&self) -> bool {
-        matches!(self.page, Page::Game | Page::Settings | Page::Controls)
+        match self.page {
+            Page::Game | Page::Settings | Page::Controls => true,
+            Page::Home => self.compact,
+            _ => false,
+        }
     }
 
     fn apply_click(&mut self, ms: &mut MenuState, click: Click) -> Option<MenuAction> {

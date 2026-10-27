@@ -5,6 +5,7 @@ use egui::{Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2};
 use super::scene::{fade, CYAN};
 use super::{motion, tokens, Click, HomeState, LayoutKind, Page, PageCtx};
 use crate::ui::menu::{MenuAction, MenuInput, MenuItem, MenuState, TouchSliderKind};
+use crate::ui::momentum::scroll_by_wheel;
 
 /// The games on the public demo disc, with the small picture each shows on the home screen.
 /// The count is the one the welcome pages and the home line give ("seven").
@@ -354,9 +355,16 @@ pub(super) fn draw_list(
     h.kin
         .step(&mut h.list_scroll, h.frame_dt, max_scroll, view.height());
     // The wheel scrolls a list while the pointer is over it.
-    let wheel = ctx.input(|i| i.smooth_scroll_delta.y);
-    if wheel != 0.0 && ctx.input(|i| i.pointer.hover_pos().is_some_and(|at| view.contains(at))) {
-        h.kin.wheel(&mut h.list_scroll, -wheel, max_scroll);
+    if ctx.input(|i| i.pointer.hover_pos().is_some_and(|at| view.contains(at))) {
+        scroll_by_wheel(
+            ctx,
+            "list",
+            &mut h.kin,
+            &mut h.list_scroll,
+            row_h,
+            view.height(),
+            max_scroll,
+        );
     }
     h.kin.limit(&mut h.list_scroll, max_scroll);
     let clip = p.with_clip_rect(view.expand2(Vec2::new(40.0, 0.0)));

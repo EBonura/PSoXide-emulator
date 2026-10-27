@@ -12,7 +12,7 @@
 //! deceleration at the rate of `UIScrollView.DecelerationRate.normal` (0.998 per millisecond),
 //! rubber-band resistance while pulling past an end, and a critically damped spring back.
 
-use egui::{Id, Rect, Sense, Ui};
+use egui::{Context, Event, Id, MouseWheelUnit, Rect, Sense, Ui};
 
 /// Deceleration, per second: velocity falls by `exp(-FRICTION * t)`. That is 0.998 per
 /// millisecond, iOS's normal rate, so a flick of `v` points per second travels `v / FRICTION`.
@@ -238,6 +238,139 @@ pub(crate) fn stretch(pos: f32, max: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// How much of a row one line of wheel travel is (a notch of a line-based mouse is a few lines).
+const LINE_ROWS: f32 = 1.0 / 3.0;
+/// A pixel delta smaller than this comes from a trackpad and is used as it arrives; a larger one
+/// is a mouse wheel's notch, which is eased in.
+const TRACKPAD_BELOW: f32 = 8.0;
+/// A queued wheel step is applied this share of itself in [`EASE_SECONDS`].
+const EASE_SHARE: f32 = 0.9;
+const EASE_SECONDS: f32 = 0.1;
+/// A queued step that nobody asked about for this long is dropped, seconds.
+const STALE_QUEUE: f64 = 0.3;
+
+/// How far one wheel event moves the content towards its end, in points. `unit` says what `delta`
+/// counts: points (a trackpad, or a browser's pixel mode), lines (a notch of a line-based mouse,
+/// worth a third of `row` each) or pages (a screenful, `view` points).
+#[must_use]
+pub(crate) fn wheel_travel(unit: MouseWheelUnit, delta: f32, row: f32, view: f32) -> f32 {
+    -match unit {
+        MouseWheelUnit::Point => delta,
+        MouseWheelUnit::Line => delta * row * LINE_ROWS,
+        MouseWheelUnit::Page => delta * view,
+    }
+}
+
+/// Wheel travel waiting to be applied: a mouse notch is spread over a few frames, a trackpad's
+/// small steps pass straight through (easing them would only add lag).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WheelEase {
+    queued: f32,
+    seen: f64,
+}
+
+impl WheelEase {
+    /// Take in one event's `travel`; returns the part that applies at once.
+    pub(crate) fn push(&mut self, unit: MouseWheelUnit, travel: f32) -> f32 {
+        if unit == MouseWheelUnit::Point && travel.abs() < TRACKPAD_BELOW {
+            travel
+        } else {
+            self.queued += travel;
+            0.0
+        }
+    }
+
+    /// The share of the queue that applies in a frame of `dt` seconds.
+    pub(crate) fn advance(&mut self, dt: f32) -> f32 {
+        if self.queued.abs() < 1.0 {
+            return std::mem::take(&mut self.queued);
+        }
+        let share = 1.0 - (1.0 - EASE_SHARE).powf(dt.clamp(0.0, 0.1) / EASE_SECONDS);
+        let applied = self.queued * share;
+        self.queued -= applied;
+        applied
+    }
+
+    /// Whether a queued step is still being applied.
+    #[must_use]
+    pub(crate) fn is_easing(&self) -> bool {
+        self.queued != 0.0
+    }
+
+    /// Drop what is queued (the content hit an end, or nobody asked for a while).
+    pub(crate) fn clear(&mut self) {
+        self.queued = 0.0;
+    }
+}
+
+/// How far the wheel and the trackpad moved the surface called `key` this frame, in points
+/// towards the end of its content. `row` is the surface's row pitch and `view` its height.
+#[must_use]
+pub(crate) fn wheel_frame(ctx: &Context, key: &'static str, row: f32, view: f32) -> f32 {
+    let id = Id::new(("wheel-ease", key));
+    let (events, dt, now) = ctx.input(|i| {
+        let events: Vec<(MouseWheelUnit, f32)> = i
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                // Ctrl or Cmd with the wheel is a zoom, shift a sideways scroll: not this.
+                Event::MouseWheel {
+                    unit,
+                    delta,
+                    modifiers,
+                } if !(modifiers.ctrl
+                    || modifiers.command
+                    || modifiers.mac_cmd
+                    || modifiers.shift) =>
+                {
+                    Some((*unit, delta.y))
+                }
+                _ => None,
+            })
+            .collect();
+        (events, i.stable_dt, i.time)
+    });
+    let mut ease: WheelEase = ctx.data_mut(|d| d.get_temp(id)).unwrap_or_default();
+    if now - ease.seen > STALE_QUEUE {
+        ease.clear();
+    }
+    ease.seen = now;
+    let mut moved: f32 = events
+        .into_iter()
+        .map(|(unit, delta)| ease.push(unit, wheel_travel(unit, delta, row, view)))
+        .sum();
+    moved += ease.advance(dt);
+    if ease.is_easing() {
+        ctx.request_repaint();
+    }
+    ctx.data_mut(|d| d.insert_temp(id, ease));
+    moved
+}
+
+/// Scroll `pos` by this frame's wheel (see [`wheel_frame`]): the content follows at once, ends any
+/// coast, never stretches and, at an end, forgets the rest of a queued step so that reversing
+/// answers straight away. Returns whether the wheel moved anything.
+pub(crate) fn scroll_by_wheel(
+    ctx: &Context,
+    key: &'static str,
+    kin: &mut Momentum,
+    pos: &mut f32,
+    row: f32,
+    view: f32,
+    max: f32,
+) -> bool {
+    let delta = wheel_frame(ctx, key, row, view);
+    if delta == 0.0 {
+        return false;
+    }
+    kin.wheel(pos, delta, max);
+    if (delta < 0.0 && *pos <= 0.0) || (delta > 0.0 && *pos >= max) {
+        let id = Id::new(("wheel-ease", key));
+        ctx.data_mut(|d| d.get_temp_mut_or_default::<WheelEase>(id).clear());
+    }
+    true
 }
 
 /// Where a scroll area stands, for the browser journeys: the position, the furthest position and
@@ -547,5 +680,201 @@ mod tests {
         let before = pos;
         m.limit(&mut pos, 100.0);
         assert_eq!(pos, before, "a stretch under the finger stays");
+    }
+
+    #[test]
+    fn a_wheel_event_moves_the_content_the_opposite_way_to_its_delta() {
+        // Egui's delta is positive for "scroll up", which is towards the start of the content.
+        assert_eq!(
+            wheel_travel(MouseWheelUnit::Point, 30.0, 200.0, 600.0),
+            -30.0
+        );
+        assert_eq!(
+            wheel_travel(MouseWheelUnit::Point, -30.0, 200.0, 600.0),
+            30.0
+        );
+    }
+
+    #[test]
+    fn lines_are_a_third_of_a_row_and_pages_a_screenful() {
+        let line = wheel_travel(MouseWheelUnit::Line, -1.0, 210.0, 600.0);
+        assert!((line - 70.0).abs() < 1e-3, "{line}");
+        // A browser that counts three lines to a notch moves one row.
+        let notch = wheel_travel(MouseWheelUnit::Line, -3.0, 210.0, 600.0);
+        assert!((notch - 210.0).abs() < 1e-3, "{notch}");
+        assert_eq!(
+            wheel_travel(MouseWheelUnit::Page, -1.0, 210.0, 600.0),
+            600.0
+        );
+    }
+
+    #[test]
+    fn a_trackpads_small_steps_apply_at_once_and_a_notch_is_eased_in() {
+        let mut e = WheelEase::default();
+        assert_eq!(
+            e.push(MouseWheelUnit::Point, 3.5),
+            3.5,
+            "no lag on a trackpad"
+        );
+        assert!(!e.is_easing());
+        assert_eq!(
+            e.push(MouseWheelUnit::Point, 100.0),
+            0.0,
+            "a notch is queued"
+        );
+        assert_eq!(e.push(MouseWheelUnit::Line, 70.0), 0.0, "so is a line step");
+        assert!(e.is_easing());
+    }
+
+    #[test]
+    fn a_queued_step_is_spread_over_frames_and_all_of_it_arrives() {
+        let mut e = WheelEase::default();
+        e.push(MouseWheelUnit::Point, 100.0);
+        let steps: Vec<f32> = (0..60).map(|_| e.advance(1.0 / 60.0)).collect();
+        assert!(
+            steps[0] > 0.0 && steps[0] < 100.0,
+            "the first frame takes a part: {}",
+            steps[0]
+        );
+        assert!(
+            steps[..10].windows(2).all(|w| w[1] <= w[0] + 1e-4),
+            "it eases out: every frame moves no more than the last"
+        );
+        let total: f32 = steps.iter().sum();
+        assert!(
+            (total - 100.0).abs() < 1e-3,
+            "the whole step arrives: {total}"
+        );
+        assert!(!e.is_easing());
+        // Nine tenths of it within a tenth of a second, however the frames fall.
+        let mut e = WheelEase::default();
+        e.push(MouseWheelUnit::Point, 100.0);
+        let got: f32 = (0..6).map(|_| e.advance(0.1 / 6.0)).sum();
+        assert!((got - 90.0).abs() < 1.0, "{got}");
+    }
+
+    #[test]
+    fn a_long_frame_applies_no_more_than_the_queue() {
+        let mut e = WheelEase::default();
+        e.push(MouseWheelUnit::Point, 100.0);
+        let first = e.advance(5.0);
+        assert!(
+            (first - 90.0).abs() < 0.5,
+            "a stalled frame counts as a tenth of a second: {first}"
+        );
+        assert!(first <= 100.0);
+    }
+
+    #[test]
+    fn clearing_forgets_the_queue() {
+        let mut e = WheelEase::default();
+        e.push(MouseWheelUnit::Point, -100.0);
+        e.clear();
+        assert_eq!(e.advance(0.016), 0.0);
+    }
+
+    #[test]
+    fn the_wheel_at_an_end_stays_clamped_for_a_long_run_either_way() {
+        let (mut m, mut pos) = (Momentum::default(), 40.0);
+        for _ in 0..200 {
+            m.wheel(
+                &mut pos,
+                wheel_travel(MouseWheelUnit::Point, -120.0, 200.0, 600.0),
+                500.0,
+            );
+        }
+        assert_eq!(pos, 500.0);
+        for _ in 0..200 {
+            m.wheel(
+                &mut pos,
+                wheel_travel(MouseWheelUnit::Point, 120.0, 200.0, 600.0),
+                500.0,
+            );
+        }
+        assert_eq!(pos, 0.0);
+        // Content that fits has nowhere to go.
+        m.wheel(&mut pos, 80.0, 0.0);
+        assert_eq!(pos, 0.0);
+    }
+
+    /// Run one frame of `ctx` with these wheel events and scroll `pos` by them.
+    fn frame_with(
+        ctx: &Context,
+        time: f64,
+        events: Vec<Event>,
+        kin: &mut Momentum,
+        pos: &mut f32,
+    ) -> bool {
+        let input = egui::RawInput {
+            time: Some(time),
+            predicted_dt: 1.0 / 60.0,
+            events,
+            ..Default::default()
+        };
+        let mut moved = false;
+        let _ = ctx.run(input, |ctx| {
+            moved = scroll_by_wheel(ctx, "test", kin, pos, 200.0, 600.0, 1000.0);
+        });
+        moved
+    }
+
+    fn wheel_event(unit: MouseWheelUnit, y: f32, modifiers: egui::Modifiers) -> Event {
+        Event::MouseWheel {
+            unit,
+            delta: egui::vec2(0.0, y),
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn the_frame_reader_scrolls_by_wheel_and_ignores_zoom_and_sideways() {
+        let ctx = Context::default();
+        let (mut kin, mut pos) = (Momentum::default(), 100.0);
+        let none = egui::Modifiers::NONE;
+        // A trackpad step moves it in that frame.
+        let step = wheel_event(MouseWheelUnit::Point, -5.0, none);
+        assert!(frame_with(&ctx, 1.0, vec![step], &mut kin, &mut pos));
+        assert_eq!(pos, 105.0);
+        // Ctrl (a pinch) and shift (sideways) are not vertical scrolling.
+        let pinch = wheel_event(MouseWheelUnit::Point, -5.0, egui::Modifiers::CTRL);
+        let side = wheel_event(MouseWheelUnit::Point, -5.0, egui::Modifiers::SHIFT);
+        assert!(!frame_with(
+            &ctx,
+            1.02,
+            vec![pinch, side],
+            &mut kin,
+            &mut pos
+        ));
+        assert_eq!(pos, 105.0);
+        // A mouse notch is eased in over the next frames.
+        let notch = wheel_event(MouseWheelUnit::Point, -100.0, none);
+        assert!(frame_with(&ctx, 1.04, vec![notch], &mut kin, &mut pos));
+        let first = pos;
+        assert!(first > 105.0 && first < 205.0, "{first}");
+        for k in 0..30 {
+            frame_with(
+                &ctx,
+                1.06 + f64::from(k) * 0.017,
+                vec![],
+                &mut kin,
+                &mut pos,
+            );
+        }
+        assert!((pos - 205.0).abs() < 0.5, "{pos}");
+    }
+
+    #[test]
+    fn at_an_end_the_rest_of_a_step_is_dropped_so_reversing_answers_at_once() {
+        let ctx = Context::default();
+        let (mut kin, mut pos) = (Momentum::default(), 990.0);
+        let notch = wheel_event(MouseWheelUnit::Point, -300.0, egui::Modifiers::NONE);
+        frame_with(&ctx, 1.0, vec![notch], &mut kin, &mut pos);
+        assert_eq!(pos, 1000.0);
+        let back = wheel_event(MouseWheelUnit::Point, 4.0, egui::Modifiers::NONE);
+        frame_with(&ctx, 1.02, vec![back], &mut kin, &mut pos);
+        assert_eq!(
+            pos, 996.0,
+            "no queued push towards the end is left to cancel it out"
+        );
     }
 }

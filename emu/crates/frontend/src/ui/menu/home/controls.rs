@@ -18,7 +18,7 @@ use super::{
 use crate::input::model::BackendKind;
 use crate::input::{InputDeviceInfo, PadProfile, PortChoice};
 use crate::ui::menu::{MenuAction, MenuInput, MenuState, PadBindTarget};
-use crate::ui::momentum::Momentum;
+use crate::ui::momentum::{scroll_by_wheel, Momentum};
 
 /// The three groups, in the order of the segmented bar.
 const TABS: [&str; 3] = ["Devices", "Keyboard", "Touch"];
@@ -795,10 +795,15 @@ pub(super) fn draw(
         max_scroll,
         view.height(),
     );
-    let wheel = ctx.input(|i| i.smooth_scroll_delta.y);
-    if wheel != 0.0 {
-        h.kin.wheel(&mut h.controls.scroll, -wheel, max_scroll);
-    }
+    scroll_by_wheel(
+        ctx,
+        "controls",
+        &mut h.kin,
+        &mut h.controls.scroll,
+        56.0 * u,
+        view.height(),
+        max_scroll,
+    );
     if h.controls.seen_focus != Some(h.controls.focus) {
         h.kin.stop();
         if let Some(r) = focus_rect {
