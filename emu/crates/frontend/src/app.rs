@@ -507,6 +507,9 @@ pub struct AppState {
     /// Points the status toast sits lower than usual, so it clears the touch
     /// controller's top buttons when a notch pushes them down.
     pub toast_inset_top: f32,
+    /// Points the top bar's restore tab sits in from the right edge when a notch is there, so it
+    /// stays inside the safe area and clear of the controller's right bar.
+    pub toast_inset_right: f32,
     /// The overlay menu paused a running game (see [`crate::session::Transport`]).
     /// Closing the menu resumes it; a game the player paused stays paused.
     paused_by_menu: bool,
@@ -723,6 +726,7 @@ impl AppState {
             web_image_id: 0,
             paused_by_menu: false,
             toast_inset_top: 0.0,
+            toast_inset_right: 0.0,
             current_game_hash: None,
             // The menu starts open on the Library, which the startup scan
             // below has just covered.

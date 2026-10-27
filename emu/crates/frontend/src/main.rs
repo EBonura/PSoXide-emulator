@@ -2428,6 +2428,11 @@ fn update_touch_controller(
     let visible = touch.visible();
     let safe_top_px = touch.safe_px().top;
     state.toast_inset_top = if visible { safe_top_px / scale } else { 0.0 };
+    state.toast_inset_right = if visible {
+        touch.safe_px().right / scale
+    } else {
+        0.0
+    };
     state.touch_bottom_inset = if visible {
         touch.safe_px().bottom / scale
     } else {

@@ -2667,6 +2667,101 @@ async function journeyGrouping(label, urlFor, size) {
   await cdp.send("Target.closeTarget", { targetId: page.targetId });
 }
 
+/** Whether two touch areas ([name, "r", x0, y0, x1, y1] or [name, "c", x, y, radius, 0]) overlap by more than a hair. */
+function areasMeet(a, b) {
+  const E = 0.5;
+  const box = (t) => (t[1] === "r" ? [t[2], t[3], t[4], t[5]] : [t[2] - t[4], t[3] - t[4], t[2] + t[4], t[3] + t[4]]);
+  const near = (c, r) => {
+    const [x0, y0, x1, y1] = r;
+    const dx = c[2] - Math.min(Math.max(c[2], x0), x1), dy = c[3] - Math.min(Math.max(c[3], y0), y1);
+    return Math.hypot(dx, dy) < c[4] - E;
+  };
+  if (a[1] === "r" && b[1] === "r") {
+    return a[2] < b[4] - E && b[2] < a[4] - E && a[3] < b[5] - E && b[3] < a[5] - E;
+  }
+  if (a[1] === "c" && b[1] === "c") return Math.hypot(a[2] - b[2], a[3] - b[3]) < a[4] + b[4] - E;
+  return a[1] === "c" ? near(a, box(b)) : near(b, box(a));
+}
+
+/**
+ * The on-screen controller keeps clear of the tab that brings the top bar back (and of the top bar when it is
+ * shown), of the interface row and of every other control, inside the safe area (notch, home indicator), in
+ * every orientation and with the notch on either side. Toggling the top bar moves nothing.
+ */
+async function journeyTouchClear(label, urlFor, size, mode, notch = null) {
+  current = label;
+  const page = await newPage(label);
+  await page.viewport(size.w, size.h, { dpr: size.dpr, mobile: true });
+  await page.addInit(`try { localStorage.setItem("psoxide.silenthint", "1"); localStorage.setItem("psoxide.touch.v1", "mode=${mode}"); } catch (e) {}`);
+  if (notch) {
+    const insets = size.w > size.h ? { top: 0, bottom: 21, left: notch === "left" ? 59 : 0, right: notch === "right" ? 59 : 0 } : { top: 47, bottom: 34, left: 0, right: 0 };
+    await page.cdp.send("Emulation.setSafeAreaInsetsOverride", { insets }, page.top);
+  }
+  await page.goto(urlFor());
+  await bootDemo(page, { ...size, mobile: true });
+  const FACE = new Set(["pad:4096", "pad:8192", "pad:16384", "pad:32768"]);
+  const check = async (what) => {
+    const u = await page.ux();
+    const t = u.touch;
+    if (!t?.hits?.length) return `${what}: the controller reports no touch areas`;
+    const dpr = size.dpr, W = size.w * dpr, H = size.h * dpr;
+    const [sl, st, sr, sb] = t.safe;
+    const zone = u.chrome.toolbar_hit.map((v) => v * dpr);
+    const out = [];
+    const zoneArea = ["top bar or tab", "r", zone[0], zone[1], zone[2], zone[3]];
+    for (const h of t.hits) {
+      const box = h[1] === "r" ? [h[2], h[3], h[4], h[5]] : [h[2] - h[4], h[3] - h[4], h[2] + h[4], h[3] + h[4]];
+      if (box[0] < sl - 1 || box[1] < st - 1 || box[2] > W - sr + 1 || box[3] > H - sb + 1) out.push(`${h[0]} ${box.map((v) => v.toFixed(0))} is outside the safe area ${[sl, st, W - sr, H - sb].map((v) => v.toFixed(0))}`);
+      if (zone[2] > zone[0] && areasMeet(h, zoneArea)) out.push(`${h[0]} meets the ${u.chrome.toolbar_hidden ? "restore tab" : "top bar"} ${zone.map((v) => v.toFixed(0))}`);
+    }
+    for (let i = 0; i < t.hits.length; i++) {
+      for (let j = i + 1; j < t.hits.length; j++) {
+        const [a, b] = [t.hits[i], t.hits[j]];
+        if (FACE.has(a[0]) && FACE.has(b[0])) continue; // the face buttons overlap on purpose
+        if (areasMeet(a, b)) out.push(`${a[0]} meets ${b[0]}`);
+      }
+    }
+    if (u.chrome.toolbar_hidden && !(zone[2] - zone[0] > 20)) out.push("the restore tab has no area");
+    if (u.chrome.toolbar_hidden && zone[2] > W - sr + 1) out.push(`the restore tab ${zone.map((v) => v.toFixed(0))} reaches into the right inset ${sr}`);
+    return out.length ? `${what}: ${out.slice(0, 4).join("; ")}` : null;
+  };
+  const layoutKey = async () => JSON.stringify((await page.ux()).touch.hits);
+  const waitBar = (hidden) => page.waitFor(hidden ? "the bar hidden" : "the bar shown", (s) => s.chrome.toolbar_hidden === hidden && (hidden ? s.chrome.toolbar_hit[2] - s.chrome.toolbar_hit[0] < 100 && s.chrome.toolbar_hit[2] > 0 : s.chrome.toolbar_hit[3] >= 33), 5000);
+  await step(`${mode}: the controller is up and the top bar hides itself`, async () => {
+    await page.waitFor("the controller", (s) => s.touch?.hits?.length > 0, 10000);
+    await waitBar(true);
+    await sleep(600);
+    return true;
+  });
+  let hidden = "";
+  await step(`${mode}: with the top bar hidden, no control meets the restore tab, another control or the edge of the screen`, async () => {
+    hidden = await layoutKey();
+    await page.shot(`${label}-1-bar-hidden`);
+    return (await check("bar hidden")) ?? true;
+  });
+  await step(`${mode}: the tab brings the bar back; with it shown no control meets the bar or another control, and nothing moved`, async () => {
+    const r = (await page.ux()).chrome.toolbar_hit;
+    await page.tap((r[0] + r[2]) / 2, (r[1] + r[3]) / 2);
+    await waitBar(false);
+    await sleep(500);
+    await page.shot(`${label}-2-bar-shown`);
+    const bad = await check("bar shown");
+    if (bad) return bad;
+    return (await layoutKey()) === hidden ? true : "the controls moved when the top bar came back";
+  });
+  await step(`${mode}: hiding the bar again with its chevron changes nothing`, async () => {
+    const r = (await page.ux()).chrome.toolbar_hit;
+    await page.tap(r[2] - 22, r[1] + 18);
+    await waitBar(true);
+    await sleep(500);
+    const bad = await check("bar hidden again");
+    if (bad) return bad;
+    return (await layoutKey()) === hidden ? true : "the controls moved when the top bar went away";
+  });
+  await step("page logged no errors", () => (page.logs.length === 0 ? true : page.logs.slice(0, 3).join(" | ")));
+  await cdp.send("Target.closeTarget", { targetId: page.targetId });
+}
+
 /** A games folder with sixty discs, so the grid has several screens of rows. */
 const FAKE_MANY = `
   const names = [...Array(58)].map((_, i) => "Disc " + String(i + 1).padStart(2, "0") + " (USA).bin");
@@ -4883,7 +4978,7 @@ async function main() {
         if (wanted("desktop-gamepad-iframe")) await journeyGamepad("desktop-gamepad-iframe", () => embedded());
       });
     }
-    if (!ONLY || ONLY.includes("phone") || ONLY.includes("home") || ONLY.includes("shell") || ONLY.includes("throttled") || ONLY.includes("controls") || ONLY.includes("grouping") || ONLY.includes("hints") || ONLY.includes("selection") || ONLY.includes("cover-states") || ONLY.includes("polish") || ONLY.includes("debug") || ONLY.includes("slots") || ONLY.includes("centre") || ONLY.includes("grid")) {
+    if (!ONLY || ONLY.includes("phone") || ONLY.includes("home") || ONLY.includes("shell") || ONLY.includes("throttled") || ONLY.includes("controls") || ONLY.includes("grouping") || ONLY.includes("hints") || ONLY.includes("selection") || ONLY.includes("cover-states") || ONLY.includes("polish") || ONLY.includes("debug") || ONLY.includes("slots") || ONLY.includes("centre") || ONLY.includes("grid") || ONLY.includes("touch-clear")) {
       await inChrome(3, async () => {
         if (wanted("phone-portrait")) await journeyPhone("phone-portrait", () => direct(), { w: 393, h: 852, dpr: 3 });
         if (wanted("phone-iframe")) await journeyPhone("phone-iframe", () => embedded(), { w: 393, h: 852, dpr: 3 });
@@ -4932,6 +5027,16 @@ async function main() {
           if (wanted(`${name}-debug`)) await journeyDebug(`${name}-debug`, q, { ...size, mobile: true });
           if (wanted(`${name}-slots`)) await journeySlots(`${name}-slots`, q, { ...size, mobile: true });
           if (wanted(`${name}-centre`)) await journeyCentre(`${name}-centre`, q, { ...size, mobile: true, framed: name === "phone-iframe" });
+        }
+        for (const [name, w, h] of [["393x852", 393, 852], ["852x393", 852, 393], ["667x375", 667, 375], ["375x667", 375, 667], ["932x430", 932, 430]]) {
+          for (const mode of ["on", "auto"]) {
+            if (wanted(`phone-touch-clear-${name}-${mode}`)) await journeyTouchClear(`phone-touch-clear-${name}-${mode}`, () => direct("?countdown=12"), { w, h, dpr: 3 }, mode);
+          }
+        }
+        for (const [name, w, h] of [["852x393", 852, 393], ["932x430", 932, 430]]) {
+          for (const notch of ["left", "right"]) {
+            if (wanted(`phone-touch-clear-${name}-notch-${notch}`)) await journeyTouchClear(`phone-touch-clear-${name}-notch-${notch}`, () => direct("?countdown=12"), { w, h, dpr: 3 }, "on", notch);
+          }
         }
         if (wanted("phone-shell")) await journeyShell("phone-shell", () => direct("?countdown=12"), { w: 393, h: 852, dpr: 3, mobile: true });
         if (wanted("phone-shell-small")) await journeyShell("phone-shell-small", () => direct("?countdown=12"), { w: 360, h: 640, dpr: 3, mobile: true });

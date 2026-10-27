@@ -117,10 +117,8 @@ pub fn draw(ctx: &Context, state: &mut AppState) {
     } else if t > 0.5 {
         // The tab: 6 points in from the panel (or the edge) and from the top, under a notch.
         let top = screen.top() + state.toast_inset_top;
-        Rect::from_min_max(
-            egui::pos2(screen.right() - docked - 52.0, top),
-            egui::pos2(screen.right() - docked, top + 44.0),
-        )
+        let right = screen.right() - docked.max(state.toast_inset_right);
+        Rect::from_min_max(egui::pos2(right - 52.0, top), egui::pos2(right, top + 44.0))
     } else {
         Rect::NOTHING
     };
@@ -222,8 +220,9 @@ fn panel_width(ctx: &Context, state: &AppState) -> f32 {
 fn draw_restore_tab(ctx: &Context, state: &mut AppState, opacity: f32) {
     // Under a phone's notch the tab sits below it.
     let inset = state.toast_inset_top;
-    // Beside the debug panel, not over it: left of wherever the panel's edge is.
-    let docked = panel_width(ctx, state);
+    // Beside the debug panel, not over it: left of wherever the panel's edge is, and with a notch
+    // at the right, inside it.
+    let docked = panel_width(ctx, state).max(state.toast_inset_right);
     egui::Area::new(egui::Id::new("toolbar_restore"))
         .anchor(
             egui::Align2::RIGHT_TOP,

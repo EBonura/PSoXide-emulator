@@ -518,9 +518,57 @@ pub(crate) fn layout_probe_json(
         })
         .collect::<Vec<_>>()
         .join(",");
+    // Where a touch counts, by name: ["name","r",x0,y0,x1,y1] for a rectangle, ["name","c",x,y,radius,0]
+    // for a disc (the face buttons' areas overlap on purpose; the journeys know which).
+    let region = |name: String, r: crate::input::touch::layout::Region| match r {
+        crate::input::touch::layout::Region::Circle { center, radius } => {
+            format!(
+                "[\"{name}\",\"c\",{:.1},{:.1},{radius:.1},0]",
+                center.x, center.y
+            )
+        }
+        crate::input::touch::layout::Region::Rect(r) => format!(
+            "[\"{name}\",\"r\",{:.1},{:.1},{:.1},{:.1}]",
+            r.min.x, r.min.y, r.max.x, r.max.y
+        ),
+    };
+    let ui_name = |id: UiId| match id {
+        UiId::Pause => "pause",
+        UiId::Save => "save",
+        UiId::Load => "load",
+        UiId::Debug => "debug",
+        UiId::Menu => "menu",
+        UiId::Fullscreen => "fullscreen",
+    };
+    let mut hit_list: Vec<String> = layout
+        .buttons
+        .iter()
+        .map(|b| region(format!("pad:{}", b.mask), b.hit))
+        .collect();
+    hit_list.push(region(
+        "dpad".to_string(),
+        crate::input::touch::layout::Region::Circle {
+            center: layout.dpad.center,
+            radius: layout.dpad.zone,
+        },
+    ));
+    hit_list.extend(layout.sticks.iter().map(|s| {
+        let side = if s.side == StickSide::Left { "L" } else { "R" };
+        region(
+            format!("stick:{side}"),
+            crate::input::touch::layout::Region::Rect(s.zone),
+        )
+    }));
+    hit_list.extend(layout.ui.iter().map(|u| {
+        region(
+            format!("ui:{}", ui_name(u.id)),
+            crate::input::touch::layout::Region::Rect(u.hit),
+        )
+    }));
+    let hits = hit_list.join(",");
     format!(
         "{{\"buttons\":[{buttons}],\"dpad\":[{:.1},{:.1},{:.1}],\"sticks\":[{sticks}],\"ui\":[{ui}],\
-         \"rects\":[{rects}],\"safe\":[{:.1},{:.1},{:.1},{:.1}]}}",
+         \"rects\":[{rects}],\"hits\":[{hits}],\"safe\":[{:.1},{:.1},{:.1},{:.1}]}}",
         layout.dpad.center.x,
         layout.dpad.center.y,
         layout.dpad.half_span,

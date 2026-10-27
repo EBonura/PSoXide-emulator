@@ -56,12 +56,27 @@ const STICK_BAR: f32 = 46.0;
 const BLOCK: f32 = 2.0 * (FACE_REACH + FACE_HIT);
 /// Half the side of a stick's capture square in the portrait panel, CSS px: the ring and a little.
 const PORTRAIT_STICK_ZONE: f32 = 50.0;
-/// Gap between the items of a landscape bar's stack, CSS px.
-const STACK_GAP: f32 = 8.0;
-/// Height of the whole stack of a landscape bar (shoulders, icons, cluster, stick, pill and the gaps
-/// and margins) at full size, CSS px.
-const STACK_ANALOG: f32 = 38.0 + 36.0 + BLOCK + 92.0 + 34.0 + 6.0 * STACK_GAP;
-const STACK_DIGITAL: f32 = 38.0 + 36.0 + BLOCK + 34.0 + 5.0 * STACK_GAP;
+/// The tightest gap between the items of a landscape bar's stack, CSS px.
+const GAP_MIN: f32 = 5.0;
+/// The most a gap grows beyond [`GAP_MIN`] when the bar has height to spare, CSS px.
+const GAP_GROW: f32 = 10.0;
+/// Margin under the last item of a landscape bar's stack, CSS px.
+const STACK_BOTTOM: f32 = 6.0;
+/// What the top of a landscape bar keeps clear, CSS px below the safe top: the tab that brings the
+/// top bar back (44 high, in the right bar's corner) and a breath, and so also the top bar itself
+/// (34 high) when it is shown. The left bar keeps the same band, so the two stay symmetric.
+pub(crate) const TOP_CLEAR: f32 = 46.0;
+/// How far a landscape shoulder's touch area reaches above and below it, CSS px; the interface row's
+/// reaches 3 (see `ui_row`), so the tightest gap between them just keeps them apart.
+const SHOULDER_LIFT: f32 = 1.75;
+/// Items of a landscape bar's stack (shoulders, interface row, cluster, stick, Start / Select) at
+/// full size, CSS px, without the gaps.
+const STACK_ANALOG_ITEMS: f32 = 38.0 + 36.0 + BLOCK + 92.0 + 34.0;
+const STACK_DIGITAL_ITEMS: f32 = 38.0 + 36.0 + BLOCK + 34.0;
+/// Height a landscape bar's stack needs under [`TOP_CLEAR`] at full size with the tightest gaps,
+/// CSS px, with the room its shoulders' touch areas take above them.
+const STACK_ANALOG: f32 = STACK_ANALOG_ITEMS + 4.0 * GAP_MIN + STACK_BOTTOM + SHOULDER_LIFT;
+const STACK_DIGITAL: f32 = STACK_DIGITAL_ITEMS + 3.0 * GAP_MIN + STACK_BOTTOM + SHOULDER_LIFT;
 /// Height of the portrait panel's first line (the interface buttons and their gap), CSS px.
 const UI_BAND: f32 = 36.0 + 12.0;
 
@@ -311,7 +326,7 @@ impl TouchLayout {
             STACK_DIGITAL
         };
         let pref = f32::from(p.size_pct) / 100.0;
-        let k_fit = (h_px / p.scale / stack).max(0.45);
+        let k_fit = ((h_px / p.scale - TOP_CLEAR) / stack).max(0.45);
         let mut k = (k_fit.clamp(0.55, 1.4) * pref).min(k_fit);
         let nat_bar = ((w_px - gw_nat) / 2.0).max(0.0);
         // The picture may give up to a fifth of its width to the bars.
@@ -336,7 +351,8 @@ impl TouchLayout {
             (cx_l, cx_r)
         };
 
-        // The stack runs top to bottom; what height is left over is shared between the gaps.
+        // The stack runs top to bottom under the band the top corner keeps clear; what height is
+        // left over grows the gaps (a little) and then sits above the shoulders and under Start.
         let items = [
             SHOULDER_BAR.y,
             ICON_BUTTON.y,
@@ -346,11 +362,13 @@ impl TouchLayout {
         ];
         let shown: Vec<f32> = items.iter().copied().filter(|h| *h > 0.0).collect();
         let gaps = (shown.len() - 1) as f32;
-        let total = shown.iter().sum::<f32>() + gaps * STACK_GAP + 2.0 * STACK_GAP;
-        let slack = (h_px / u - total).max(0.0);
-        let gap = STACK_GAP + (slack / (gaps + 2.0)).min(10.0);
-        let mut y =
-            oy + (STACK_GAP + (slack - (gap - STACK_GAP) * (gaps + 2.0)).max(0.0) / 2.0) * u;
+        // The shoulders' touch areas reach above them; they start under the clear band.
+        let avail = (h_px - TOP_CLEAR * p.scale) / u - SHOULDER_LIFT;
+        let need = shown.iter().sum::<f32>() + gaps * GAP_MIN + STACK_BOTTOM;
+        let slack = (avail - need).max(0.0);
+        let gap = GAP_MIN + (slack / (gaps + 1.0)).min(GAP_GROW);
+        let spare = (slack - (gap - GAP_MIN) * (gaps + 1.0)).max(0.0);
+        let mut y = oy + TOP_CLEAR * p.scale + (SHOULDER_LIFT + spare / 2.0) * u;
         let mut layout = Self::base(
             Orientation::Landscape,
             u,
@@ -364,7 +382,7 @@ impl TouchLayout {
 
         // Shoulders: L2 L1 in the left bar, R1 R2 in the right.
         let sh = SHOULDER_BAR * u;
-        let inflate = vec2((SHOULDER_GAP / 2.0 - 0.5) * u, 4.0 * u);
+        let inflate = vec2((SHOULDER_GAP / 2.0 - 0.5) * u, SHOULDER_LIFT * u);
         let pair = |cx: f32| {
             (
                 cx - (SHOULDER_BAR.x + SHOULDER_GAP / 2.0) * u,
@@ -427,7 +445,7 @@ impl TouchLayout {
         }
 
         // SELECT under the left bar's stack, START under the right's.
-        let pill_inflate = vec2(3.0 * u, 3.0 * u);
+        let pill_inflate = vec2(3.0 * u, 4.0 * u);
         let size = SMALL_PILL * u;
         layout.buttons.push(pill(
             Rect::from_center_size(pos2(cx_l, y + size.y / 2.0), size),
@@ -607,7 +625,7 @@ impl TouchLayout {
             self.ui.push(UiButton {
                 id,
                 draw: r,
-                hit: r.expand2(vec2(0.0, 5.0 * u)),
+                hit: r.expand2(vec2(u, 3.0 * u)),
             });
             x += (ICON_BUTTON.x + ICON_GAP) * u;
         }
@@ -934,7 +952,7 @@ pub(crate) mod tests {
                             }
                             assert!(
                                 !ra.intersects(*rb),
-                                "{} {} analog={analog}: {na} overlaps {nb}",
+                                "{} {} analog={analog}: {na} {ra:?} overlaps {nb} {rb:?}",
                                 device.name,
                                 if landscape { "landscape" } else { "portrait" },
                             );
@@ -1158,6 +1176,143 @@ pub(crate) mod tests {
         let safe = safe_rect(&p).expand(1.0);
         for (name, rect) in hit_rects(&big) {
             assert!(safe.contains_rect(rect), "{name} {rect:?}");
+        }
+    }
+
+    /// The windows the journeys drive and the devices, in both orientations, with and without the
+    /// guest's sticks, a notch at the sides and the debug panel docked.
+    fn windows_under_test() -> Vec<(String, LayoutParams)> {
+        let mut out = Vec::new();
+        for device in &DEVICES {
+            for landscape in [false, true] {
+                for analog in [false, true] {
+                    out.push((
+                        format!("{} landscape={landscape}", device.name),
+                        params(device, landscape, analog),
+                    ));
+                }
+            }
+        }
+        for (w, h, dpr, insets) in [
+            (393.0, 852.0, 3.0, (47.0, 34.0, 0.0, 0.0)),
+            (852.0, 393.0, 3.0, (0.0, 21.0, 47.0, 47.0)),
+            (667.0, 375.0, 3.0, (0.0, 21.0, 47.0, 47.0)),
+            (375.0, 667.0, 3.0, (47.0, 34.0, 0.0, 0.0)),
+            (932.0, 430.0, 3.0, (0.0, 21.0, 59.0, 59.0)),
+            (640.0, 360.0, 3.0, (0.0, 0.0, 0.0, 0.0)),
+        ] {
+            for analog in [false, true] {
+                out.push((
+                    format!("{w}x{h} analog={analog}"),
+                    LayoutParams {
+                        size: vec2(w, h) * dpr,
+                        scale: dpr,
+                        safe: Insets {
+                            top: insets.0 * dpr,
+                            bottom: insets.1 * dpr,
+                            left: insets.2 * dpr,
+                            right: insets.3 * dpr,
+                        },
+                        analog,
+                        size_pct: 100,
+                        left_handed: false,
+                        fullscreen_button: true,
+                        menu_open: false,
+                        dock_right: 0.0,
+                    },
+                ));
+            }
+        }
+        out
+    }
+
+    /// The tab that brings the top bar back, and the top bar itself, in window pixels (the
+    /// toolbar's own numbers: the tab is 52 by 44 points in the corner, the bar 34 high).
+    fn top_corner(p: &LayoutParams) -> [Rect; 2] {
+        let right = p.size.x - p.safe.right - p.dock_right;
+        let tab = Rect::from_min_max(
+            pos2(right - 52.0 * p.scale, p.safe.top),
+            pos2(right, p.safe.top + 44.0 * p.scale),
+        );
+        let bar = Rect::from_min_max(Pos2::ZERO, pos2(p.size.x, 34.0 * p.scale));
+        [tab, bar]
+    }
+
+    /// Nothing the player touches sits under the restore tab or the top bar, whichever of the
+    /// two is up, in either orientation and either hand, with or without the debug panel.
+    #[test]
+    fn no_control_sits_under_the_restore_tab_or_the_top_bar() {
+        for (name, base) in windows_under_test() {
+            for left_handed in [false, true] {
+                for dock in [0.0, 0.33] {
+                    let mut p = base;
+                    p.left_handed = left_handed;
+                    p.dock_right = dock * p.size.x;
+                    let layout = TouchLayout::compute(&p);
+                    for zone in top_corner(&p) {
+                        for (what, rect) in hit_rects(&layout) {
+                            assert!(
+                                !rect.shrink(0.5).intersects(zone),
+                                "{name} lh={left_handed} dock={dock}: {what} {rect:?} meets {zone:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The two shoulder pairs sit level, mirror each other about the game, and sit right above
+    /// the row of interface buttons of their bar.
+    #[test]
+    fn the_shoulders_are_level_symmetric_and_just_above_the_interface_row() {
+        for (name, base) in windows_under_test() {
+            if base.size.x < base.size.y {
+                continue;
+            }
+            let layout = TouchLayout::compute(&base);
+            let shoulder = |mask| {
+                layout
+                    .buttons
+                    .iter()
+                    .find(|b| b.mask == mask)
+                    .unwrap()
+                    .draw
+                    .bounds()
+            };
+            let (l2, l1, r1, r2) = (
+                shoulder(button::L2),
+                shoulder(button::L1),
+                shoulder(button::R1),
+                shoulder(button::R2),
+            );
+            for s in [l1, r1, r2] {
+                assert!(
+                    (s.top() - l2.top()).abs() < 0.5,
+                    "{name}: shoulders not level"
+                );
+            }
+            let mid = base.safe.left + (base.size.x - base.safe.left - base.safe.right) / 2.0;
+            assert!(
+                ((mid - l2.left()) - (r2.right() - mid)).abs() < 1.0,
+                "{name}: pairs are not mirrored"
+            );
+            let row_top = layout
+                .ui
+                .iter()
+                .map(|u| u.draw.top())
+                .fold(f32::MAX, f32::min);
+            let gap = row_top - l2.bottom();
+            assert!(
+                (0.0..=(GAP_MIN + GAP_GROW + 1.0) * layout.unit).contains(&gap),
+                "{name}: the interface row is {gap} below the shoulders"
+            );
+            // Under the corner the restore tab keeps clear.
+            assert!(
+                l2.top() >= base.safe.top + 44.0 * base.scale,
+                "{name}: shoulders start at {}",
+                l2.top()
+            );
         }
     }
 }

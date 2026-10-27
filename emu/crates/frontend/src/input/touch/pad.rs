@@ -703,10 +703,12 @@ mod tests {
     #[test]
     fn there_are_no_stick_grabs_while_the_guest_pad_is_digital() {
         let mut pad = pad(false);
-        // The place a stick would be is plain screen (not owned) when digital.
-        let layout = TouchLayout::compute(&params(&DEVICES[1], true, true));
-        let rest = layout.stick(StickSide::Left).unwrap().rest;
-        assert!(!pad.pointer(1, Phase::Down, rest));
+        // The place a stick would be is plain screen (not owned) when digital: the band at the top
+        // of the left bar, which no control uses, stands in for it.
+        let params = params(&DEVICES[1], true, false);
+        let spot = pos2(params.safe.left + 40.0, params.safe.top + 10.0);
+        assert!(!pad.pointer(1, Phase::Down, spot));
+        assert_eq!(pad.stick(StickSide::Left), (0.0, 0.0));
     }
 
     #[test]
