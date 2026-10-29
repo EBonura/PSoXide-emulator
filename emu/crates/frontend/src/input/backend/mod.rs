@@ -51,17 +51,22 @@ pub(crate) struct FacePositions {
     pub(crate) north: bool,
 }
 
+/// The four face buttons as the pad reports them by label.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(crate) struct FaceLabels {
+    pub(crate) a: bool,
+    pub(crate) b: bool,
+    pub(crate) x: bool,
+    pub(crate) y: bool,
+}
+
 /// Face buttons read by label (`a`, `b`, `x`, `y`) turned into positions. An Xbox-style pad has A
 /// at the bottom, B right, X left, Y top; a Nintendo-layout one has B at the bottom, A right,
 /// Y left, X top.
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-pub(crate) fn face_by_position(
-    a: bool,
-    b: bool,
-    x: bool,
-    y: bool,
-    nintendo: bool,
-) -> FacePositions {
+pub(crate) fn face_by_position(labels: FaceLabels, nintendo: bool) -> FacePositions {
+    let FaceLabels { a, b, x, y } = labels;
     if nintendo {
         FacePositions {
             south: b,
@@ -76,6 +81,33 @@ pub(crate) fn face_by_position(
             west: x,
             north: y,
         }
+    }
+}
+
+/// Names of the pad adapters [`platform_pad_backends`] returns, for the log.
+#[cfg(target_os = "macos")]
+pub(crate) const PLATFORM_PAD_ADAPTERS: &str =
+    "GameController (+ gilrs for HID pads it does not claim)";
+/// Names of the pad adapters [`platform_pad_backends`] returns, for the log.
+#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+pub(crate) const PLATFORM_PAD_ADAPTERS: &str = "gilrs";
+/// Names of the pad adapters [`platform_pad_backends`] returns, for the log.
+#[cfg(target_arch = "wasm32")]
+pub(crate) const PLATFORM_PAD_ADAPTERS: &str = "web gamepad";
+
+/// The pad adapters for this platform, in poll order.
+pub(crate) fn platform_pad_backends() -> Vec<Box<dyn DeviceBackend>> {
+    #[cfg(target_os = "macos")]
+    {
+        vec![Box::new(mac::MacPads::new())]
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+    {
+        vec![Box::new(gilrs_pad::GilrsBackend::new())]
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        vec![Box::new(web::WebPadBackend::default())]
     }
 }
 
@@ -115,7 +147,7 @@ mod layout_tests {
     fn a_nintendo_pad_reads_its_face_buttons_by_position() {
         // Pressing the right button (Nintendo A) must be Circle, the bottom one (B) Cross, the
         // left (Y) Square and the top (X) Triangle.
-        let by = |a, b, x, y| face_by_position(a, b, x, y, true);
+        let by = |a, b, x, y| face_by_position(FaceLabels { a, b, x, y }, true);
         assert_eq!(
             by(true, false, false, false),
             FacePositions {
@@ -145,7 +177,7 @@ mod layout_tests {
             }
         );
         // Everything else keeps the Xbox-style reading.
-        let by = |a, b, x, y| face_by_position(a, b, x, y, false);
+        let by = |a, b, x, y| face_by_position(FaceLabels { a, b, x, y }, false);
         assert_eq!(
             by(true, false, false, false),
             FacePositions {
@@ -174,32 +206,5 @@ mod layout_tests {
                 ..Default::default()
             }
         );
-    }
-}
-
-/// Names of the pad adapters [`platform_pad_backends`] returns, for the log.
-#[cfg(target_os = "macos")]
-pub(crate) const PLATFORM_PAD_ADAPTERS: &str =
-    "GameController (+ gilrs for HID pads it does not claim)";
-/// Names of the pad adapters [`platform_pad_backends`] returns, for the log.
-#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
-pub(crate) const PLATFORM_PAD_ADAPTERS: &str = "gilrs";
-/// Names of the pad adapters [`platform_pad_backends`] returns, for the log.
-#[cfg(target_arch = "wasm32")]
-pub(crate) const PLATFORM_PAD_ADAPTERS: &str = "web gamepad";
-
-/// The pad adapters for this platform, in poll order.
-pub(crate) fn platform_pad_backends() -> Vec<Box<dyn DeviceBackend>> {
-    #[cfg(target_os = "macos")]
-    {
-        vec![Box::new(mac::MacPads::new())]
-    }
-    #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
-    {
-        vec![Box::new(gilrs_pad::GilrsBackend::new())]
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        vec![Box::new(web::WebPadBackend::default())]
     }
 }

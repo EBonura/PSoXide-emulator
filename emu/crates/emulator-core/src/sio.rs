@@ -517,6 +517,7 @@ impl Sio0 {
     /// or baud register that leaves it unchanged changed nothing a caller of
     /// `Cpu::run` can look at (pad polls, memory-card selection), which is
     /// what lets a batch go past it.
+    #[must_use]
     pub fn activity(&self) -> u64 {
         self.activity
     }

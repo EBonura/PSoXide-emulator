@@ -1677,11 +1677,9 @@ impl HomeState {
                 return self.activate(case, &action, case.launches);
             }
         }
-        if input.back {
-            if self.pausing(ms) {
-                // Back from a game's shell resumes it.
-                ms.open = false;
-            }
+        if input.back && self.pausing(ms) {
+            // Back from a game's shell resumes it.
+            ms.open = false;
         }
         None
     }
@@ -1927,7 +1925,7 @@ impl HomeState {
                 _ if row_plain => UiSound::Confirm,
                 _ => UiSound::Step,
             })
-        } else if confirmed && !(list_page && !row_plain) {
+        } else if confirmed && (!list_page || row_plain) {
             Some(UiSound::Confirm)
         } else if before.case != now.case
             || before.nav != now.nav

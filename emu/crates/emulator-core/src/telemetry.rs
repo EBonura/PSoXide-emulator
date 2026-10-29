@@ -180,6 +180,7 @@ impl GuestTelemetry {
     /// Whether a complete guest debug log line is waiting to be drained. A headless
     /// runner that batches instructions stops on this so that it drains every line
     /// right after the instruction that completed it, as a per-instruction loop does.
+    #[must_use]
     pub fn has_debug_logs(&self) -> bool {
         !self.debug_logs.is_empty()
     }

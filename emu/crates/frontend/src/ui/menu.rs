@@ -3191,19 +3191,18 @@ mod tests {
         // The texture filter is one control, in Settings only (it used to be
         // in the Game column as well).
         s.sync_video_audio(true, "Edge", 1.0, false);
-        for column in ["Settings"] {
-            let filter: Vec<_> = s
-                .categories
-                .iter()
-                .find(|c| c.name == column)
-                .unwrap()
-                .items
-                .iter()
-                .filter(|item| item.action == MenuAction::CycleTextureFilter)
-                .collect();
-            assert_eq!(filter.len(), 1, "{column}");
-            assert_eq!(filter[0].value.as_deref(), Some("Edge"), "{column}");
-        }
+        let column = "Settings";
+        let filter: Vec<_> = s
+            .categories
+            .iter()
+            .find(|c| c.name == column)
+            .unwrap()
+            .items
+            .iter()
+            .filter(|item| item.action == MenuAction::CycleTextureFilter)
+            .collect();
+        assert_eq!(filter.len(), 1, "{column}");
+        assert_eq!(filter[0].value.as_deref(), Some("Edge"), "{column}");
         let game = s.categories.iter().find(|c| c.name == "Game").unwrap();
         assert!(
             game.items

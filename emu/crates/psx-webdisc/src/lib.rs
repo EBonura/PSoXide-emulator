@@ -58,6 +58,7 @@ const HEADER_BYTES: usize = 4 + 1 + 1 + 4 + 4 + 8 + 8 + 8 + 4 + 4;
 
 /// A format or integrity failure, with a human-readable cause.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Error(pub String);
 
 impl fmt::Display for Error {
@@ -75,6 +76,7 @@ fn err<T>(message: impl Into<String>) -> Result<T, Error> {
 /// How a sector is stored. See the module docs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum Kind {
     /// Mode 2 Form 1: 2048 user bytes.
     Form1 = 0,
@@ -98,6 +100,7 @@ impl Kind {
     }
 
     /// Bytes this kind contributes to its chunk before compression.
+    #[must_use]
     pub fn payload_len(self) -> usize {
         match self {
             Kind::Form1 => 2048,
@@ -174,16 +177,19 @@ pub struct Chunk {
 
 impl Chunk {
     /// Index of the first sector in the chunk.
+    #[must_use]
     pub fn first_sector(&self) -> u32 {
         self.first_sector
     }
 
     /// Bytes held in memory.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.payload.len()
     }
 
     /// Whether the chunk is empty (never, for a parsed index).
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.payload.is_empty()
     }
@@ -191,68 +197,81 @@ impl Chunk {
 
 impl Index {
     /// Number of sectors in the image.
+    #[must_use]
     pub fn sector_count(&self) -> u32 {
         self.sector_count
     }
 
     /// Image length in bytes.
+    #[must_use]
     pub fn image_bytes(&self) -> u64 {
         u64::from(self.sector_count) * SECTOR as u64
     }
 
     /// Frames added to a sector's index to get the time in its header.
+    #[must_use]
     pub fn lba_bias(&self) -> u32 {
         self.lba_bias
     }
 
     /// FNV-1a 64 of the whole raw image, the key input tapes and saves use.
+    #[must_use]
     pub fn image_hash(&self) -> u64 {
         self.image_hash
     }
 
     /// Bytes per payload file, 0 when the payload is one file.
+    #[must_use]
     pub fn part_bytes(&self) -> u64 {
         self.part_bytes
     }
 
     /// Bytes in the payload, over all its files.
+    #[must_use]
     pub fn payload_bytes(&self) -> u64 {
         self.payload_bytes
     }
 
     /// Chunks a boot reads before its first frame.
+    #[must_use]
     pub fn boot_chunks(&self) -> u32 {
         self.boot_chunks
     }
 
     /// Number of chunks.
+    #[must_use]
     pub fn chunk_count(&self) -> u32 {
         (self.chunk_offsets.len() - 1) as u32
     }
 
     /// The chunk that holds `sector`.
+    #[must_use]
     pub fn chunk_of(&self, sector: u32) -> u32 {
         sector / CHUNK_SECTORS
     }
 
     /// Sectors a chunk holds.
+    #[must_use]
     pub fn chunk_sectors(&self, chunk: u32) -> Range<u32> {
         let first = chunk * CHUNK_SECTORS;
         first..(first + CHUNK_SECTORS).min(self.sector_count)
     }
 
     /// Where a chunk's stored bytes sit in the payload.
+    #[must_use]
     pub fn chunk_range(&self, chunk: u32) -> Range<u64> {
         self.chunk_offsets[chunk as usize]..self.chunk_offsets[chunk as usize + 1]
     }
 
     /// Bytes of the payload a boot reads up front (the first `boot_chunks`).
+    #[must_use]
     pub fn boot_bytes(&self) -> u64 {
         self.chunk_offsets[self.boot_chunks.min(self.chunk_count()) as usize]
     }
 
     /// Bytes 12..20 of a sector (header, then the first subheader bytes):
     /// what the drive reports after a seek, available without its chunk.
+    #[must_use]
     pub fn head8(&self, sector: u32) -> Option<[u8; 8]> {
         let kind = *self.kinds.get(sector as usize)?;
         let header = if kind == Kind::Verbatim {
@@ -278,6 +297,11 @@ impl Index {
     }
 
     /// Inflate the stored bytes of `chunk` and check them against the index.
+    ///
+    /// # Errors
+    ///
+    /// When `chunk` is past the end of the disc or the stored bytes do not
+    /// inflate to what the index expects.
     pub fn inflate(&self, chunk: u32, stored: &[u8]) -> Result<Chunk, Error> {
         if chunk >= self.chunk_count() {
             return err(format!("chunk {chunk} is past the end of the disc"));
@@ -317,6 +341,7 @@ impl Index {
     /// # Panics
     ///
     /// When `sector` is not in `chunk`.
+    #[must_use]
     pub fn sector(&self, chunk: &Chunk, sector: u32) -> [u8; SECTOR] {
         let kind = self.kinds[sector as usize];
         let mut at = 0usize;
@@ -341,6 +366,11 @@ impl Index {
     }
 
     /// Parse an index file.
+    ///
+    /// # Errors
+    ///
+    /// When `bytes` is not a compact disc index of a version this reader knows,
+    /// or the index is truncated or inconsistent.
     pub fn parse(bytes: &[u8]) -> Result<Index, Error> {
         if bytes.len() < HEADER_BYTES || &bytes[..4] != MAGIC {
             return err("not a compact disc index");
@@ -490,6 +520,7 @@ impl Default for ImageHasher {
 
 impl ImageHasher {
     /// A hasher over no bytes.
+    #[must_use]
     pub fn new() -> Self {
         Self(0xcbf2_9ce4_8422_2325)
     }
@@ -505,12 +536,14 @@ impl ImageHasher {
     }
 
     /// The hash so far.
+    #[must_use]
     pub fn finish(&self) -> u64 {
         self.0
     }
 }
 
 /// Name of payload file `n` (1-based) when the payload is split.
+#[must_use]
 pub fn part_name(base: &str, n: u64) -> String {
     format!("{base}.{n:03}")
 }

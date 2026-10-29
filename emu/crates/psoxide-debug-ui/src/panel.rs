@@ -604,6 +604,7 @@ fn scroll_drag_key() -> egui::Id {
 /// scrubbing, if any. A frontend that scrolls the panel by dragging calls this once per frame and
 /// scrolls by it, so a finger that starts on a chart still scrolls the panel; a drag that starts
 /// sideways scrubs the chart as before.
+#[must_use]
 pub fn forwarded_scroll_drag(ctx: &egui::Context) -> Option<f32> {
     ctx.data_mut(|d| d.remove_temp::<f32>(scroll_drag_key()))
 }

@@ -33,6 +33,7 @@ pub use plot::{set_tiny, set_type_scale};
 /// Layout facts of the compact panel as last drawn, for the browser journeys: the top of the Pause
 /// button, of the Target select and of Export CSV (points down the screen; the select and Export
 /// share a row with Pause where the column is wide), and the height of the first chart's legend.
+#[must_use]
 pub fn layout_facts() -> [f32; 8] {
     let l = |i: usize| f32::from_bits(plot::LAYOUT[i].load(std::sync::atomic::Ordering::Relaxed));
     [l(0), l(1), l(2), l(3), l(4), l(5), l(6), l(7)]

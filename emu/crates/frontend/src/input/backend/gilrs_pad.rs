@@ -7,7 +7,7 @@ use gilrs::{Axis, Button, Event, EventType, Gamepad, GamepadId, Gilrs};
 
 use crate::input::model::{BackendKind, DeviceEvent, DeviceIdentity, PadSnapshot, StickDpad};
 
-use super::{face_by_position, is_nintendo_layout, DeviceBackend};
+use super::{face_by_position, is_nintendo_layout, DeviceBackend, FaceLabels};
 
 /// Analog trigger activation threshold.
 const TRIGGER_THRESHOLD: f32 = 0.5;
@@ -122,10 +122,12 @@ fn snapshot(gamepad: &Gamepad<'_>, stick: &mut StickDpad, nintendo: bool) -> Pad
     let mut buttons = 0;
     // `South` is the SDL mapping's `a`: the bottom button on an Xbox pad, the right one on a Nintendo pad.
     let face = face_by_position(
-        gamepad.is_pressed(Button::South),
-        gamepad.is_pressed(Button::East),
-        gamepad.is_pressed(Button::West),
-        gamepad.is_pressed(Button::North),
+        FaceLabels {
+            a: gamepad.is_pressed(Button::South),
+            b: gamepad.is_pressed(Button::East),
+            x: gamepad.is_pressed(Button::West),
+            y: gamepad.is_pressed(Button::North),
+        },
         nintendo,
     );
     for (pressed, bit) in [

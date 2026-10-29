@@ -574,6 +574,11 @@ impl Settings {
     /// The output starts with a short comment banner so the first
     /// thing a user sees when they open the file is context, not
     /// raw RON.
+    ///
+    /// # Errors
+    ///
+    /// When the directory or the temporary file cannot be written, the
+    /// settings cannot be serialised, or the rename fails.
     pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
