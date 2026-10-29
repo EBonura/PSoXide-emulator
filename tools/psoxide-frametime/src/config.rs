@@ -17,7 +17,9 @@ pub(crate) struct Config {
     pub route: String,
     /// Which tick-log column names the scene, and how scenes are named.
     pub scene: Scene,
-    /// Per-frame counters shown in the tables and used to judge the slow stretches.
+    /// Per-frame counters shown in the tables and used to judge the slow stretches. A frame takes
+    /// the largest value its ticks logged, so a counter the game clears after drawing still reads.
+
     #[serde(default, rename = "counter")]
     pub counters: Vec<Counter>,
     /// Columns holding the player position (x, y, z), listed in the worst-frame tables.
@@ -54,6 +56,14 @@ pub(crate) struct Scene {
     /// Ids to treat as "no scene".
     #[serde(default)]
     pub ignore: Vec<u32>,
+    /// Optional column the game sets to say what it is doing; with it, `play` is gameplay and
+    /// `load` is loading, and every other value (title, menus, a segment's boot) is not measured.
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default = "default_play")]
+    pub play: u32,
+    #[serde(default = "default_load")]
+    pub load: u32,
     /// Measure from this journey step (1-based) on; earlier ticks are the boot and menus.
     #[serde(default = "default_from_step")]
     pub from_step: u64,
@@ -61,6 +71,14 @@ pub(crate) struct Scene {
 
 fn default_load_vblanks() -> u64 {
     30
+}
+
+fn default_play() -> u32 {
+    1
+}
+
+fn default_load() -> u32 {
+    2
 }
 
 fn default_from_step() -> u64 {

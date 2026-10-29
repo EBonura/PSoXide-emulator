@@ -174,7 +174,7 @@ enum Phase {
 }
 
 /// Read the step names out of a `psoxide-gate run -v` log.
-pub(crate) fn step_labels(gate_log: &str) -> HashMap<u64, String> {
+pub(crate) fn step_labels(gate_log: &str, offset: u64) -> HashMap<u64, String> {
     let mut labels = HashMap::new();
     for line in gate_log.lines() {
         // [gate] tick   7210 step 13 c0a0b first simulation tick
@@ -184,7 +184,7 @@ pub(crate) fn step_labels(gate_log: &str) -> HashMap<u64, String> {
         let mut it = rest.trim_start().splitn(4, ' ');
         let (_tick, _step) = (it.next(), it.next());
         if let Some(n) = it.next().and_then(|s| s.parse::<u64>().ok()) {
-            labels.insert(n, it.next().unwrap_or("").trim().to_string());
+            labels.insert(n + offset, it.next().unwrap_or("").trim().to_string());
         }
     }
     labels
@@ -226,15 +226,32 @@ impl Run {
         });
         let n = log.ticks.len();
 
-        let (phase, scene_of, loads_raw) = match ready_col {
-            Some(rc) => classify_ready(log, cfg, scene_col, rc),
-            None => classify_stall(log, cfg, scene_col),
+        let mode_col = cfg
+            .scene
+            .mode
+            .as_deref()
+            .map(|m| log.column(m))
+            .transpose()?;
+        let (phase, scene_of, loads_raw) = match (mode_col, ready_col) {
+            (Some(mc), _) => classify_mode(log, cfg, scene_col, mc),
+            (None, Some(rc)) => classify_ready(log, cfg, scene_col, rc),
+            (None, None) => classify_stall(log, cfg, scene_col),
         };
         let first_play = phase
             .iter()
             .position(|p| *p == Phase::Play)
             .ok_or("no gameplay found: the scene word never held a known scene")?;
-        let c0 = log.ticks[first_play].cycles;
+        // Game time: every tick of play or loading counts, the boot, menus and the gaps between
+        // journey segments do not.
+        let mut clock = vec![0u64; n];
+        let mut run = 0u64;
+        for i in 0..n {
+            if phase[i] != Phase::Pre {
+                run += log.ticks[i].cycles - if i == 0 { 0 } else { log.ticks[i - 1].cycles };
+            }
+            clock[i] = run;
+        }
+        let c0 = clock[first_play];
 
         let mut frames = Vec::new();
         let mut last_flip: Option<usize> = None;
@@ -250,6 +267,10 @@ impl Run {
                 }
             };
             let span = lf + 1..=i;
+            if span.clone().any(|k| phase[k] == Phase::Pre) {
+                last_flip = Some(i);
+                continue;
+            }
             let touches_load = span.clone().any(|k| phase[k] == Phase::Load);
             let scene = if touches_load {
                 span.clone()
@@ -268,8 +289,17 @@ impl Run {
                 cycles: t.cycles - log.ticks[lf].cycles,
                 instrs: log.ticks[lf + 1..=i].iter().map(|x| x.cpu_delta).sum(),
                 load: touches_load,
-                t_s: (t.cycles - c0) as f64 / BUS_HZ,
-                counters: counter_cols.iter().map(|c| t.words[*c]).collect(),
+                t_s: (clock[i] - c0) as f64 / BUS_HZ,
+                counters: counter_cols
+                    .iter()
+                    .map(|c| {
+                        log.ticks[lf + 1..=i]
+                            .iter()
+                            .map(|x| x.words[*c])
+                            .max()
+                            .unwrap_or(0)
+                    })
+                    .collect(),
                 pos: pos_cols.iter().map(|c| t.words[*c]).collect(),
                 stages: tel_cols.filter(|_| has_stages).map(|c| {
                     let sum = |k: usize| {
@@ -293,7 +323,7 @@ impl Run {
                 to,
                 start_tick: log.ticks[start].tick,
                 vblanks,
-                start_s: (log.ticks[start].cycles - c0) as f64 / BUS_HZ,
+                start_s: (clock[start] - c0) as f64 / BUS_HZ,
                 seconds: vblanks as f64 * vb_s,
             })
             .collect();
@@ -307,11 +337,11 @@ impl Run {
         for i in first_play..n {
             let t = &log.ticks[i];
             if step_starts.last().map(|s| s.0) != Some(t.step) {
-                let begin = if i == 0 { 0 } else { log.ticks[i - 1].cycles };
+                let begin = if i == 0 { 0 } else { clock[i - 1] };
                 step_starts.push((t.step, begin.saturating_sub(c0) as f64 / BUS_HZ));
             }
         }
-        let total_s = (log.ticks[n - 1].cycles - c0) as f64 / BUS_HZ;
+        let total_s = (clock[n - 1] - c0) as f64 / BUS_HZ;
         Ok(Run {
             frames,
             loads,
@@ -430,4 +460,104 @@ fn classify_stall(log: &TickLog, cfg: &Config, sc: usize) -> Classified {
         last_flip = Some(i);
     }
     (phase, scene_of, loads)
+}
+
+/// The game says what it is doing (`scene.mode`): `play` is play, `load` is loading, anything
+/// else (title, menus, the boot of a journey segment) is not measured. Frame intervals of
+/// `load_vblanks` or more inside play are loads too, for loads the game does not announce.
+fn classify_mode(log: &TickLog, cfg: &Config, sc: usize, mc: usize) -> Classified {
+    let n = log.ticks.len();
+    let mut phase = vec![Phase::Pre; n];
+    let mut scene_of = vec![String::new(); n];
+    let mut cur = String::new();
+    for (i, t) in log.ticks.iter().enumerate() {
+        if t.step >= cfg.scene.from_step {
+            if let Some(name) = cfg.scene_name(t.words[sc]) {
+                cur = name;
+            }
+            let m = t.words[mc];
+            phase[i] = if m == cfg.scene.play {
+                Phase::Play
+            } else if m == cfg.scene.load {
+                Phase::Load
+            } else {
+                Phase::Pre
+            };
+        }
+        scene_of[i] = cur.clone();
+    }
+    let mut loads = Vec::new();
+    // Runs of announced loading. The scene after the run is where the load led.
+    let mut i = 0;
+    while i < n {
+        if phase[i] != Phase::Load {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < n && phase[i] == Phase::Load {
+            i += 1;
+        }
+        let to = scene_of
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| scene_of[start].clone());
+        let from = scene_of[start].clone();
+        for s in &mut scene_of[start..i] {
+            *s = to.clone();
+        }
+        loads.push((
+            start,
+            from,
+            to,
+            log.ticks[i - 1].tick - log.ticks[start].tick + 1,
+        ));
+    }
+    // Unannounced stalls inside play.
+    let mut last_flip: Option<usize> = None;
+    for (i, t) in log.ticks.iter().enumerate() {
+        if !t.flipped {
+            continue;
+        }
+        if let Some(lf) = last_flip {
+            let vb = t.tick - log.ticks[lf].tick;
+            let span_play = phase[lf..=i].iter().all(|p| *p == Phase::Play);
+            if span_play && vb >= cfg.scene.load_vblanks {
+                loads.push((lf, scene_of[lf].clone(), scene_of[i].clone(), vb));
+                for p in &mut phase[lf + 1..=i] {
+                    *p = Phase::Load;
+                }
+            }
+        }
+        last_flip = Some(i);
+    }
+    loads.sort_by_key(|l| l.0);
+    (phase, scene_of, loads)
+}
+
+impl TickLog {
+    /// Join the logs of consecutive journey segments (each booted from the card the one before
+    /// left) into one: ticks, steps and cycles continue where the previous segment stopped.
+    /// Returns the step offset added to each segment.
+    pub(crate) fn join(parts: Vec<TickLog>) -> Result<(TickLog, Vec<u64>), String> {
+        let mut parts = parts.into_iter();
+        let mut all = parts.next().ok_or("no tick log given")?;
+        let mut offsets = vec![0u64];
+        for p in parts {
+            if p.columns != all.columns {
+                return Err("tick logs of one route must log the same columns".into());
+            }
+            let tick_off = all.ticks.last().map_or(0, |t| t.tick);
+            let step_off = all.ticks.iter().map(|t| t.step).max().unwrap_or(0);
+            let cycle_off = all.ticks.last().map_or(0, |t| t.cycles);
+            offsets.push(step_off);
+            all.ticks.extend(p.ticks.into_iter().map(|mut t| {
+                t.tick += tick_off;
+                t.step += step_off;
+                t.cycles += cycle_off;
+                t
+            }));
+        }
+        Ok((all, offsets))
+    }
 }

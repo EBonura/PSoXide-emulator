@@ -197,3 +197,95 @@ fn two_stalls_in_a_row_are_two_loads() {
     assert_eq!(run.loads.len(), 2);
     assert!(run.play_frames().all(|f| f.vblanks < 20));
 }
+
+/// Title ticks (mode 0), play (mode 1), a load (mode 2), play again; scene word follows.
+fn moded(segment_scene: u64) -> String {
+    let mut s =
+        String::from("boot,tick,step,bus_cycles,cycle_delta,cpu_delta,flipped,polls,scene,mode\n");
+    let mut tick = 0u64;
+    let mut push = |s: &mut String, flip: bool, scene: u64, mode: u64| {
+        tick += 1;
+        s.push_str(&format!(
+            "1,{tick},1,{},{VB},1000,{},0,{scene},{mode}\n",
+            tick * VB,
+            u8::from(flip)
+        ));
+    };
+    for i in 0..50 {
+        push(&mut s, i % 3 == 0, 0, 0);
+    }
+    for i in 0..100 {
+        push(&mut s, i % 2 == 0, segment_scene, 1);
+    }
+    for i in 0..30 {
+        push(&mut s, i == 29, segment_scene + 1, 2);
+    }
+    for i in 0..100 {
+        push(&mut s, i % 3 == 0, segment_scene + 1, 1);
+    }
+    s
+}
+
+fn cfg_mode() -> Config {
+    toml::from_str(
+        "title = \"Test\"\n[scene]\nword = \"scene\"\nmode = \"mode\"\n[scene.names]\n1 = \"alpha\"\n2 = \"beta\"\n3 = \"gamma\"\n",
+    )
+    .expect("config")
+}
+
+#[test]
+fn mode_word_separates_menus_play_and_loads() {
+    let log = TickLog::parse(&moded(1)).expect("parse");
+    let run = Run::measure(&log, &cfg_mode(), Default::default()).expect("measure");
+    assert_eq!(run.loads.len(), 1);
+    assert_eq!(run.loads[0].to, "beta");
+    assert_eq!(run.loads[0].vblanks, 30);
+    // The 50 title ticks are not game time: the clock starts at the first play tick.
+    assert!((3.7..4.0).contains(&run.total_s), "total {}", run.total_s);
+    assert!(run.play_frames().all(|f| f.vblanks <= 3));
+    assert_eq!(run.summaries().len(), 3);
+}
+
+#[test]
+fn segments_join_into_one_route() {
+    let a = TickLog::parse(&moded(1)).expect("a");
+    let b = TickLog::parse(&moded(2)).expect("b");
+    let (log, offsets) = TickLog::join(vec![a, b]).expect("join");
+    assert_eq!(offsets, vec![0, 1]);
+    let run = Run::measure(&log, &cfg_mode(), Default::default()).expect("measure");
+    assert_eq!(run.loads.len(), 2);
+    // The second segment's title ticks are left out as well.
+    assert!((7.5..8.0).contains(&run.total_s), "total {}", run.total_s);
+}
+
+#[test]
+fn telemetry_columns_add_an_update_render_split() {
+    let mut s = String::from(
+        "boot,tick,step,bus_cycles,cycle_delta,cpu_delta,flipped,polls,scene,tel_events,tel_update,tel_render,tel_present\n",
+    );
+    for t in 1..=400u64 {
+        // Two vblanks a frame: 300k cycles of update and 700k of render land in the flip tick.
+        let flip = t % 2 == 0;
+        let (u, r) = if flip { (300_000, 700_000) } else { (0, 0) };
+        s.push_str(&format!(
+            "1,{t},1,{},{VB},1000,{},0,1,4,{u},{r},0\n",
+            t * VB,
+            u8::from(flip)
+        ));
+    }
+    let log = TickLog::parse(&s).expect("parse");
+    let c: Config = toml::from_str(
+        "title = \"Test\"\n[scene]\nword = \"scene\"\n[scene.names]\n1 = \"alpha\"\n",
+    )
+    .expect("config");
+    let run = Run::measure(&log, &c, Default::default()).expect("measure");
+    assert!(run.has_stages);
+    let f = run.play_frames().next().expect("a frame");
+    assert_eq!(f.stages, Some([300_000, 700_000]));
+    let dir = std::env::temp_dir().join(format!("frametime-stages-{}", std::process::id()));
+    crate::report::write(&run, &c, &[], &dir).expect("write");
+    let html = std::fs::read_to_string(dir.join("index.html")).expect("page");
+    assert!(html.contains("guest update stage"));
+    assert!(html.contains("Update (ms, mean)"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

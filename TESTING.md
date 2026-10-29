@@ -411,4 +411,7 @@ same route and draws both on one chart, lined up by journey step so a load that 
 follows, with a per-scene table of mean fps, 1% low and the share of frames over 2 and 3 vblanks. Both logs must
 come from the same journey and the same config. The config (`tests/frametime.toml` in the game repo, next to its
 journeys) names the tick-log column that holds the scene id, an optional table of scene names, how a load is
-told (a column that ticks while the simulation runs, or a stall of N vblanks), and the counters to show.
+told (a column that ticks while the simulation runs, a mode word the game sets for play and loading, or a stall of
+N vblanks), and the counters to show (a frame reads the largest value its ticks logged). A route played as several
+journey segments gives `report` and `compare` their logs comma separated, in order; the boot and menus of each
+segment are not game time. `compare` takes `--names before,after` for the legend.

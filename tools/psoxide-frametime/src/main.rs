@@ -36,11 +36,13 @@ enum Cmd {
     Report {
         /// The game's frametime.toml.
         config: PathBuf,
-        /// Tick log written by `psoxide-gate run --tick-log`.
-        ticks: PathBuf,
-        /// The gate's `-v` output, for step names.
-        #[arg(long)]
-        gate_log: Option<PathBuf>,
+        /// Tick log written by `psoxide-gate run --tick-log`; several, comma separated, are
+        /// consecutive segments of one route.
+        #[arg(value_delimiter = ',', num_args = 1..)]
+        ticks: Vec<PathBuf>,
+        /// The gate's `-v` output, for step names (one per tick log, comma separated).
+        #[arg(long, value_delimiter = ',')]
+        gate_log: Vec<PathBuf>,
         /// A paragraph for the page's method section (the disc used, for one).
         #[arg(long)]
         note: Vec<String>,
@@ -50,10 +52,12 @@ enum Cmd {
     /// Two runs of the same route (before and after a change) on one page.
     Compare {
         config: PathBuf,
-        before: PathBuf,
-        after: PathBuf,
+        /// Tick log of the run before, or its segments comma separated.
+        before: String,
+        /// Tick log of the run after.
+        after: String,
         /// Names for the two runs, `before,after` by default.
-        #[arg(long, value_delimiter = ',', num_args = 2, default_values = ["before", "after"])]
+        #[arg(long, value_delimiter = ',', default_values = ["before", "after"])]
         names: Vec<String>,
         #[arg(long)]
         out: PathBuf,
@@ -62,17 +66,24 @@ enum Cmd {
     GateArgs { config: PathBuf },
 }
 
-fn measure(config: &Config, ticks: &PathBuf, gate_log: Option<&PathBuf>) -> Result<Run, String> {
-    let text =
-        std::fs::read_to_string(ticks).map_err(|e| format!("read {}: {e}", ticks.display()))?;
-    let log = TickLog::parse(&text).map_err(|e| format!("{}: {e}", ticks.display()))?;
-    let labels = match gate_log {
-        Some(p) => log::step_labels(
-            &std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?,
-        ),
-        None => Default::default(),
-    };
-    Run::measure(&log, config, labels).map_err(|e| format!("{}: {e}", ticks.display()))
+fn measure(config: &Config, ticks: &[PathBuf], gate_logs: &[PathBuf]) -> Result<Run, String> {
+    let mut parts = Vec::new();
+    for p in ticks {
+        let text = std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?;
+        parts.push(TickLog::parse(&text).map_err(|e| format!("{}: {e}", p.display()))?);
+    }
+    let (log, offsets) = TickLog::join(parts)?;
+    let mut labels = std::collections::HashMap::new();
+    for (p, off) in gate_logs.iter().zip(&offsets) {
+        let text = std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?;
+        labels.extend(log::step_labels(&text, *off));
+    }
+    Run::measure(&log, config, labels).map_err(|e| format!("{}: {e}", ticks[0].display()))
+}
+
+/// Split `a.csv,b.csv` into the segments of one run.
+fn segments(list: &str) -> Vec<PathBuf> {
+    list.split(',').map(PathBuf::from).collect()
 }
 
 fn run(cli: Cli) -> Result<(), String> {
@@ -85,7 +96,7 @@ fn run(cli: Cli) -> Result<(), String> {
             out,
         } => {
             let cfg = Config::load(&config)?;
-            let run = measure(&cfg, &ticks, gate_log.as_ref())?;
+            let run = measure(&cfg, &ticks, &gate_log)?;
             let rows = report::write(&run, &cfg, &note, &out)?;
             if let Some(a) = rows.last() {
                 println!(
@@ -103,9 +114,12 @@ fn run(cli: Cli) -> Result<(), String> {
             names,
             out,
         } => {
+            if names.len() != 2 {
+                return Err("--names takes two names, `before,after`".into());
+            }
             let cfg = Config::load(&config)?;
-            let a = measure(&cfg, &before, None)?;
-            let b = measure(&cfg, &after, None)?;
+            let a = measure(&cfg, &segments(&before), &[])?;
+            let b = measure(&cfg, &segments(&after), &[])?;
             let line = compare::write(&a, &b, &cfg, (&names[0], &names[1]), &out)?;
             println!("{line}");
             println!("wrote {}", out.join("index.html").display());
