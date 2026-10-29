@@ -448,6 +448,11 @@ pub struct AppState {
     /// = no game loaded yet (initial state on first run, also after
     /// "Reset" with no last-loaded game).
     pub current_game: Option<LibraryEntry>,
+    /// The baked-in example the machine was booted from, when it was not a
+    /// library game, so Reset can boot it again. Native only: the browser
+    /// keeps the boot image in `web_boot`.
+    #[cfg(not(target_arch = "wasm32"))]
+    bundled_game: Option<&'static str>,
     /// The file port 1's memory card was loaded from at the last launch,
     /// and the only file [`AppState::flush_memcard_port1`] writes. A disc
     /// booted on the HLE kernel gets its own card copy here (see
@@ -703,6 +708,8 @@ impl AppState {
             library,
             paths,
             current_game: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            bundled_game: None,
             memcard_port1_path: None,
             status_message: None,
             audio_volume: 1.0,
@@ -1017,23 +1024,34 @@ impl AppState {
         )
     }
 
-    /// Reset the running game. Web: restart it in place from the image in hand.
-    /// Native: reseat the CPU at its reset vector, keeping the run state.
+    /// Reset the running game: cold-boot it again from its image. Web: from the
+    /// image in hand. Native: through the launch the game came in by. Neither has
+    /// a BIOS to reseat the CPU into, so a reset vector is not an option.
     pub fn reset_game(&mut self) {
         #[cfg(target_arch = "wasm32")]
         self.reset_web_game();
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            // Reboot the CPU but keep the run state -- reset shouldn't drop
-            // you into a paused state.
-            self.cpu = emulator_core::Cpu::new();
-            crate::install_native_tier(&mut self.cpu);
-            self.exec_history.clear();
-            self.gpr_snapshot = None;
-            if let Some(bus) = self.bus.as_mut() {
-                bus.gpu.vram.clear();
-                self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
+        self.reset_native_game();
+    }
+
+    /// Native Reset: launch the loaded game again (a library entry or a baked-in
+    /// example), then run it with the menu out of the way, as after any boot.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reset_native_game(&mut self) {
+        let result = match (self.current_game.clone(), self.bundled_game) {
+            (Some(entry), _) => self.launch_entry(&entry),
+            (None, Some(id)) => self.launch_by_id(id),
+            (None, None) => {
+                self.status_message_set("Nothing to reset");
+                return;
             }
+        };
+        match result {
+            Ok(()) => {
+                self.machine_booted();
+                self.status_message_set("Game reset");
+            }
+            Err(error) => self.status_message_set(format!("Reset failed: {error}")),
         }
     }
 
@@ -1223,6 +1241,10 @@ impl AppState {
                 kind,
                 disc.bytes.len() as u64,
             );
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.bundled_game = Some(disc.id);
+            }
             #[cfg(not(target_arch = "wasm32"))]
             let _ = kind;
             return Ok(());
@@ -2548,6 +2570,10 @@ impl AppState {
         self.cpu = cpu;
         crate::install_native_tier(&mut self.cpu);
         self.current_game = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.bundled_game = None;
+        }
         self.exec_history.clear();
         self.gpr_snapshot = None;
         self.machine_booted();
@@ -3728,6 +3754,10 @@ impl AppState {
         self.exec_history.clear();
         self.gpr_snapshot = None;
         self.current_game = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.bundled_game = None;
+        }
         Ok(())
     }
 
@@ -5416,6 +5446,100 @@ mod tests {
             hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
         }
         (hash, after)
+    }
+
+    /// Reset cold-boots the loaded game from its image: after it, the game runs
+    /// the same frames a fresh launch does. (It used to reseat the CPU at the
+    /// BIOS reset vector, where a disc booted without a BIOS has only zeros.)
+    #[test]
+    fn reset_restarts_the_loaded_game_like_a_fresh_launch() {
+        let exe = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/examples/hello-input.exe");
+        let root = frontend_test_temp_dir("reset-restarts");
+        let mut state = AppState::with_config_dir(Some(root.clone()));
+        let entry = LibraryEntry {
+            id: "0123456789abcdef".to_string(),
+            path: exe,
+            kind: GameKind::Exe,
+            title: "hello-input".to_string(),
+            region: Region::Unknown,
+            size: 0,
+            mtime: 0,
+            diagnostic: None,
+        };
+        const FRAMES: usize = 30;
+        let idle = Port1PadSample::from_buttons(0xffff);
+        let run = |state: &mut AppState, frames: usize| {
+            (0..frames).map(|_| gui_frame(state, idle)).last().unwrap()
+        };
+        state.launch_entry(&entry).unwrap();
+        let fresh = run(&mut state, FRAMES);
+
+        // Play on, with a button held, so the machine is nowhere near its start.
+        for _ in 0..60 {
+            gui_frame(&mut state, Port1PadSample::from_buttons(0xffef));
+        }
+        // Paused with the menu open: Reset must bring the game back running.
+        state.running = false;
+        state.menu.open = true;
+        state.reset_game();
+        assert!(state.running, "reset runs the game");
+        assert!(!state.menu.open, "reset gets the menu out of the way");
+        let pc = state.cpu.pc();
+        assert!(
+            !(0xbfc0_0000..0xbfc8_0000).contains(&pc),
+            "reset must not land in the BIOS window, which holds nothing without a BIOS: {pc:#x}"
+        );
+        assert_eq!(
+            run(&mut state, FRAMES),
+            fresh,
+            "same frames as a fresh launch"
+        );
+        assert_eq!(
+            state.current_game.as_ref().map(|g| g.id.as_str()),
+            Some(entry.id.as_str())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Reset on a disc booted without a BIOS boots it again, with its memory
+    /// card still attached, instead of jumping into the empty BIOS window.
+    #[test]
+    fn reset_boots_a_disc_again_with_its_card() {
+        let root = frontend_test_temp_dir("reset-disc");
+        let bin = root.join("game.bin");
+        std::fs::write(&bin, bootable_test_bin()).unwrap();
+        let mut state = AppState::with_config_dir(Some(root.join("config")));
+        let entry = disc_entry(&bin);
+        state.launch_entry(&entry).unwrap();
+        let card = state.memcard_port1_path.clone();
+        assert!(card.is_some());
+        for _ in 0..10 {
+            gui_frame(&mut state, Port1PadSample::from_buttons(0xffff));
+        }
+        state.reset_game();
+        let pc = state.cpu.pc();
+        assert!(!(0xbfc0_0000..0xbfc8_0000).contains(&pc), "{pc:#x}");
+        assert_eq!(state.memcard_port1_path, card);
+        assert!(state.running && state.bus.is_some());
+        assert_eq!(
+            state.current_game.as_ref().map(|g| g.id.clone()),
+            Some(entry.id.clone())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Reset with nothing loaded changes nothing and says so.
+    #[test]
+    fn reset_with_nothing_loaded_says_so() {
+        let root = frontend_test_temp_dir("reset-none");
+        let mut state = AppState::with_config_dir(Some(root.clone()));
+        state.reset_game();
+        assert!(state.bus.is_none());
+        assert_eq!(
+            state.status_message.as_ref().map(|(m, _)| m.as_str()),
+            Some("Nothing to reset")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Record from the GUI's own entry points (`toggle_input_recording`),
