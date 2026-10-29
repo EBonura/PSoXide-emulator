@@ -420,7 +420,7 @@ fn classify_stall(log: &TickLog, cfg: &Config, sc: usize) -> Classified {
         }
         if let Some(lf) = last_flip {
             let vb = t.tick - log.ticks[lf].tick;
-            if phase[lf] == Phase::Play && vb >= cfg.scene.load_vblanks {
+            if phase[lf] != Phase::Pre && vb >= cfg.scene.load_vblanks {
                 loads.push((lf, scene_of[lf].clone(), scene_of[i].clone(), vb));
                 for p in &mut phase[lf + 1..=i] {
                     *p = Phase::Load;

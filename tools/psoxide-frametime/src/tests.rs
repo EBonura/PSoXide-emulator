@@ -162,3 +162,38 @@ fn compare_lines_runs_up_by_step_and_writes_a_page() {
     assert!(csv.lines().any(|l| l.starts_with("alpha,")));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn two_stalls_in_a_row_are_two_loads() {
+    // Flip, 40 quiet ticks, flip, 35 quiet ticks, then steady play: both gaps are loads.
+    let mut s = String::from(
+        "boot,tick,step,bus_cycles,cycle_delta,cpu_delta,flipped,polls,scene,sim,faces\n",
+    );
+    let mut tick = 0u64;
+    let mut push = |s: &mut String, flip: bool| {
+        tick += 1;
+        s.push_str(&format!(
+            "1,{tick},1,{},{VB},1000,{},0,1,{tick},100\n",
+            tick * VB,
+            u8::from(flip)
+        ));
+    };
+    for i in 0..30 {
+        push(&mut s, i % 2 == 0);
+    }
+    for _ in 0..39 {
+        push(&mut s, false);
+    }
+    push(&mut s, true);
+    for _ in 0..34 {
+        push(&mut s, false);
+    }
+    push(&mut s, true);
+    for i in 0..60 {
+        push(&mut s, i % 2 == 0);
+    }
+    let log = TickLog::parse(&s).expect("parse");
+    let run = Run::measure(&log, &cfg(false), Default::default()).expect("measure");
+    assert_eq!(run.loads.len(), 2);
+    assert!(run.play_frames().all(|f| f.vblanks < 20));
+}
