@@ -7,7 +7,11 @@
 // and reads the player's state through `psoxideUxState()` / `psoxideTouchState()`.
 //
 //   node tools/web-journeys/run.mjs --site <dir> [--only <substring>] [--shots <dir>]
-//        [--chrome <path>] [--report <file.md>]
+//        [--chrome <path>] [--report <file.md>] [--shard <i>/<n>] [--smoke]
+//
+// `--shard i/n` runs the journeys whose name hashes to i of n, so n runs started together (each is
+// its own Chrome and its own ports) cover the suite exactly once; `--smoke` runs one journey of each
+// kind (a rehearsal, not the release gate). Both print how long each journey took.
 //
 // `--site` is a directory holding index.html, the wasm and the disc delivery
 // (demo-disc.pxi / .pxw / web-manifest.txt). Exit status is 1 when any step fails.
@@ -27,6 +31,29 @@ const args = Object.fromEntries(
 const SITE = path.resolve(args.site ?? "site");
 const SHOTS = args.shots ? path.resolve(args.shots) : null;
 const ONLY = args.only ?? "";
+const SHARD = (() => {
+  if (!args.shard) return null;
+  const m = /^(\d+)\/(\d+)$/.exec(args.shard);
+  if (!m || Number(m[2]) < 1 || Number(m[1]) >= Number(m[2])) {
+    console.error("--shard takes i/n with 0 <= i < n");
+    process.exit(2);
+  }
+  return { i: Number(m[1]), n: Number(m[2]) };
+})();
+// One journey of each kind, desktop and phone, direct and embedded.
+const SMOKE = args.smoke
+  ? new Set([
+    "desktop-direct", "desktop-iframe", "desktop-menus", "desktop-shell", "desktop-controls", "desktop-list",
+    "desktop-debug", "desktop-slots", "phone-portrait", "phone-home", "phone-list", "phone-shell",
+    "phone-controls", "phone-portrait-debug", "phone-portrait-slots",
+  ])
+  : null;
+/** FNV-1a of the journey name: a stable shard that does not move when journeys are added. */
+function shardOf(name, n) {
+  let h = 0x811c9dc5;
+  for (const c of name) h = Math.imul(h ^ c.charCodeAt(0), 0x01000193) >>> 0;
+  return h % n;
+}
 const CHROME =
   args.chrome ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 // Ports default to a spread keyed by the process id, so two runs (two lanes) do not collide.
@@ -4941,7 +4968,15 @@ async function main() {
   if (args.scenario === "tap") { await inChrome(1, scenarioTap); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "bench") { await inChrome(1, scenarioBench); siteServer?.close(); parentServer?.close(); process.exit(0); }
   if (args.scenario === "spam") { await inChrome(1, scenarioSpam); siteServer?.close(); parentServer?.close(); process.exit(0); }
-  const wanted = (name) => !ONLY || name.includes(ONLY);
+  // Every journey asks wanted() right before it runs, so the gap between two yeses is its duration.
+  const clock = []; // [name, startedAt]
+  const wanted = (name) => {
+    if (ONLY && !name.includes(ONLY)) return false;
+    if (SMOKE && !SMOKE.has(name)) return false;
+    if (SHARD && shardOf(name, SHARD.n) !== SHARD.i) return false;
+    clock.push([name, Date.now()]);
+    return true;
+  };
   try {
     if (!ONLY || ONLY.includes("desktop") || ["gamepad", "menus", "nowebgpu", "home", "covers", "shell", "throttled", "controls", "grouping", "selection", "cover-states", "hints", "polish", "debug", "slots", "centre", "grid"].some((k) => ONLY.includes(k))) {
       await inChrome(1, async () => {
@@ -5058,6 +5093,13 @@ async function main() {
     siteServer?.close(); parentServer?.close();
   }
   const failed = results.filter((r) => !r.ok);
+  const finished = Date.now();
+  const timed = clock.map(([name, at], k) => [name, ((clock[k + 1]?.[1] ?? finished) - at) / 1000]);
+  if (timed.length) {
+    console.log(`\njourney times (${timed.length} journeys${SHARD ? `, shard ${SHARD.i}/${SHARD.n}` : ""}${SMOKE ? ", smoke" : ""}):`);
+    for (const [name, secs] of [...timed].sort((a, b) => b[1] - a[1])) console.log(`TIME  ${secs.toFixed(0).padStart(5)} s  ${name}`);
+    console.log(`TIME  ${timed.reduce((t, [, v]) => t + v, 0).toFixed(0).padStart(5)} s  total of the journeys above`);
+  }
   const table = ["| Journey | Step | Result |", "|---|---|---|",
     ...results.map((r) => `| ${r.journey} | ${r.name} | ${r.ok ? "pass" : "FAIL: " + r.detail.replace(/\|/g, "/")} |`)].join("\n");
   if (args.report) fs.writeFileSync(path.resolve(args.report), table + "\n");

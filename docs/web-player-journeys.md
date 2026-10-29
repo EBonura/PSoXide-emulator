@@ -98,7 +98,15 @@ matches the emulated one (winit sizes the canvas from the real device pixel box)
     trunk build --release --public-url ./ --dist dist     # in emu/crates/frontend, see build notes
     node tools/web-journeys/run.mjs --site <site dir> --shots <dir> --report report.md
     node tools/web-journeys/run.mjs --site <site dir> --only phone-portrait
+    node tools/web-journeys/run.mjs --site <site dir> --smoke               # one journey of each kind
+    node tools/web-journeys/run.mjs --site <site dir> --shard 0/3 --port 21000   # a third of the suite
     node tools/web-journeys/run.mjs --site <site dir> --scenario bench --query "?disc=games/quake.bin" --throttle 4
+
+`--shard i/n` runs the journeys whose name hashes to i of n (a stable FNV-1a of the name), so
+n runs started together, each with its own `--port` (the debug port is `--port` + 20000 or
+- 20000), cover the suite exactly once; each is its own Chrome. `--smoke` runs a fixed set of
+about fifteen journeys, one of each kind, for a rehearsal; it is not the release gate. Every
+run ends with a `TIME` line per journey, slowest first, so the cost of a journey is visible.
 
 Speed (Quake menu scene through `?disc=`, headless Chrome on an M-series Mac; CPU throttle stands in
 for a phone): 59.3 guest fps at 1x (6.3 ms of emulation per guest frame), 38.7 fps at 4x throttle,
