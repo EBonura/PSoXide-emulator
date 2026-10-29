@@ -171,6 +171,9 @@ pub struct RunOptions {
     pub trace_failures: bool,
     pub trace_state: Vec<String>,
     pub trace_checkpoint: Vec<String>,
+    /// Write the per-tick CSV here (see `tick_log`).
+    pub tick_log: Option<PathBuf>,
+    pub tick_log_ram: Vec<crate::tick_log::WordSpec>,
     pub journey_path: PathBuf,
     pub artifact_dir: PathBuf,
 }
@@ -396,6 +399,16 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     if opts.trace_failures {
         m.bus.gpu.enable_pixel_tracer();
     }
+    if let Some(path) = &opts.tick_log {
+        match crate::tick_log::TickLog::create(path, &opts.tick_log_ram, &syms) {
+            Ok(log) => m.tick_log = Some(log),
+            Err(e) => {
+                result.abort = Some(e);
+                result.wall = start.elapsed();
+                return result;
+            }
+        }
+    }
     let trace = opts.trace_failures.then(crate::trace::Trace::new);
     let mut run = Run {
         journey,
@@ -614,6 +627,7 @@ impl Run<'_> {
                     self.notes.extend(observer.evidence());
                 }
                 let ticks = self.m.ticks;
+                let tick_log = self.m.tick_log.take();
                 self.m = Machine::boot(&Boot {
                     disc: &self.opts.disc,
                     pad: self.journey.pad,
@@ -622,6 +636,10 @@ impl Run<'_> {
                     cmd_log: self.hw.is_some() || self.trace.is_some(),
                     track_display: self.journey.uses_display_history(),
                 })?;
+                self.m.tick_log = tick_log;
+                if let Some(log) = self.m.tick_log.as_mut() {
+                    log.reboot();
+                }
                 if let Some(trace) = self.trace.as_mut() {
                     self.m.bus.gpu.enable_pixel_tracer();
                     trace.reboot();
@@ -680,6 +698,9 @@ impl Run<'_> {
     fn play(&mut self) -> Result<(), String> {
         let steps = &self.journey.steps;
         for (i, step) in steps.iter().enumerate() {
+            if let Some(log) = self.m.tick_log.as_mut() {
+                log.set_step(i as u64 + 1);
+            }
             if self.opts.verbose {
                 eprintln!(
                     "[gate] tick {:>6} step {:>2} {}",

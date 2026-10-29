@@ -66,6 +66,8 @@ pub struct Machine {
     pub injected: Option<(u64, u64)>,
     pub irq_ack_seen: Option<u64>,
     pub irq_missed: Option<String>,
+    /// Per-tick CSV, when `--tick-log` asked for one.
+    pub tick_log: Option<crate::tick_log::TickLog>,
     deadline: u64,
     period: u64,
     last_display: (u16, u16),
@@ -163,6 +165,7 @@ impl Machine {
             injected: None,
             irq_ack_seen: None,
             irq_missed: None,
+            tick_log: None,
             deadline,
             period,
             last_display: (area.x, area.y),
@@ -327,6 +330,9 @@ impl Machine {
         } else {
             false
         };
+        if let Some(log) = self.tick_log.as_mut() {
+            log.record(self.ticks, &mut self.bus, self.cpu.tick(), flipped);
+        }
         self.history.push(TickRec {
             flipped,
             changed,

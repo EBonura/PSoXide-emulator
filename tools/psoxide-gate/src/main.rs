@@ -18,6 +18,7 @@ mod refresh;
 mod render;
 mod report;
 mod symbols;
+mod tick_log;
 mod trace;
 
 use std::path::{Path, PathBuf};
@@ -116,7 +117,15 @@ struct RunArgs {
     /// Capture this named checkpoint even when its comparisons pass.
     #[arg(long, requires = "trace_failures")]
     trace_checkpoint: Vec<String>,
-    /// Print each step as it starts.
+    /// Write a per-tick CSV (cycles, instructions, display flips, journey step) to this file.
+    /// One target only. `tools/psoxide-frametime` turns it into frame-time pages.
+    #[arg(long, value_name = "PATH")]
+    tick_log: Option<PathBuf>,
+    /// RAM words to add to the tick log as columns: `NAME=SYMBOL+OFFSET` or `NAME=0xADDR`
+    /// (symbols come from the journey). Read off the bus, so the run is unchanged.
+    #[arg(long, requires = "tick_log", value_delimiter = ',')]
+    tick_log_ram: Vec<String>,
+    /// Print each step as it starts (the tick-log tool reads the step names from this).
     #[arg(short, long)]
     verbose: bool,
 }
@@ -337,12 +346,19 @@ struct Opts {
     trace_failures: bool,
     trace_state: Vec<String>,
     trace_checkpoint: Vec<String>,
+    tick_log: Option<PathBuf>,
+    tick_log_ram: Vec<tick_log::WordSpec>,
     out: PathBuf,
 }
 
 impl Opts {
-    fn from_run(a: &RunArgs) -> Opts {
-        Opts {
+    fn from_run(a: &RunArgs) -> Result<Opts, String> {
+        let words = a
+            .tick_log_ram
+            .iter()
+            .map(|w| tick_log::WordSpec::parse(w))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Opts {
             disc: a.disc.clone(),
             build: a.build,
             library: a.library,
@@ -354,8 +370,10 @@ impl Opts {
             trace_failures: a.trace_failures,
             trace_state: a.trace_state.clone(),
             trace_checkpoint: a.trace_checkpoint.clone(),
+            tick_log: a.tick_log.clone(),
+            tick_log_ram: words,
             out: a.out.clone(),
-        }
+        })
     }
 }
 
@@ -399,6 +417,8 @@ fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
             trace_failures: o.trace_failures,
             trace_state: o.trace_state.clone(),
             trace_checkpoint: o.trace_checkpoint.clone(),
+            tick_log: o.tick_log.clone(),
+            tick_log_ram: o.tick_log_ram.clone(),
             journey_path: job.journey_path.clone(),
             artifact_dir: o.out.join(&journey.name).join("cards"),
         },
@@ -467,7 +487,10 @@ fn cmd_run(a: &RunArgs) -> Result<ExitCode, String> {
             }
         })
         .collect();
-    let opts = Opts::from_run(a);
+    if a.tick_log.is_some() && planned.len() != 1 {
+        return Err("--tick-log needs a single target".into());
+    }
+    let opts = Opts::from_run(a)?;
     let slots: Vec<Mutex<Option<JourneyResult>>> = jobs.iter().map(|_| Mutex::new(None)).collect();
     let next = AtomicUsize::new(0);
     std::thread::scope(|s| {
@@ -535,6 +558,8 @@ fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
         trace_failures: false,
         trace_state: Vec::new(),
         trace_checkpoint: Vec::new(),
+        tick_log: None,
+        tick_log_ram: Vec::new(),
         out: a.out.clone(),
     };
     let r = run_planned(job, &fleet, &opts);

@@ -1,0 +1,18 @@
+[package]
+name = "psoxide-frametime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Frame-time pages from a psoxide-gate tick log: one page per route, or a before/after comparison of two runs of the same route."
+
+[dependencies]
+clap  = { workspace = true }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true }
+toml  = "1"
+
+[lints]
+workspace = true

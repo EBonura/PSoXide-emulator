@@ -17,6 +17,7 @@ members = [
     "emu/crates/psoxide-validation",
     "emu/crates/psx-gpu-render",
     "emu/crates/psx-webdisc",
+    "tools/psoxide-frametime",
     "tools/psoxide-gate",
     "tools/web-lazy-image"
 ]

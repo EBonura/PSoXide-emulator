@@ -384,3 +384,31 @@ checkpoint, mode, scale and image dimensions. Embedded labels and stdout give
 the exact changed-pixel count, or `no visible change` with zero. Raw screenshots
 remain unmodified. Retain this PNG for every visible landing/library swap and
 show it inline with the previous installed and new build identities.
+
+## Frame-time pages
+
+`psoxide-gate run --tick-log PATH` writes one CSV row per emulated vblank of a single journey: bus cycles,
+retired instructions, whether the display start flipped (a rendered frame), the journey step, and any guest RAM
+words asked for with `--tick-log-ram NAME=SYMBOL+OFFSET,...` (symbols resolve through the journey's `symbols` and
+`[addr]`, `NAME=0xADDR` also works). The words are read off the bus, so the run is unchanged, and every row is
+flushed, so a killed run keeps its last load. Telemetry columns (`tel_update`, `tel_render`, `tel_present`:
+cycles inside the guest's stages) are zero unless the game was built to emit guest telemetry. With no flag the
+log costs one branch per tick.
+
+`psoxide-frametime` (tools/psoxide-frametime) turns the CSV into a page:
+
+```sh
+psoxide-gate run tests/journey.toml --no-hw -v --tick-log run/ticks.csv \
+    --tick-log-ram "$(psoxide-frametime gate-args tests/frametime.toml)" > run/gate.log 2>&1
+psoxide-frametime report  tests/frametime.toml run/ticks.csv --gate-log run/gate.log --out run/page
+psoxide-frametime compare tests/frametime.toml before/ticks.csv after/ticks.csv --out run/compare
+```
+
+`report` writes `data/*.csv` (per-frame log, per-scene summary, loads, worst windows, worst frames, per-step) and
+`index.html`: tiles, the frame-time chart, a per-scene table, the slowest ten-second stretches (with the counters
+and whether a least-squares fit on them explains the stretch) and the method. `compare` takes two logs of the
+same route and draws both on one chart, lined up by journey step so a load that got longer does not shift what
+follows, with a per-scene table of mean fps, 1% low and the share of frames over 2 and 3 vblanks. Both logs must
+come from the same journey and the same config. The config (`tests/frametime.toml` in the game repo, next to its
+journeys) names the tick-log column that holds the scene id, an optional table of scene names, how a load is
+told (a column that ticks while the simulation runs, or a stall of N vblanks), and the counters to show.

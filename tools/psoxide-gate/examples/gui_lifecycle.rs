@@ -13,6 +13,10 @@ mod img;
 mod journey;
 #[path = "../src/machine.rs"]
 mod machine;
+#[path = "../src/symbols.rs"]
+mod symbols;
+#[path = "../src/tick_log.rs"]
+mod tick_log;
 
 use clap::Parser;
 use machine::{Boot, Machine};
