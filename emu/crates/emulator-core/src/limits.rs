@@ -258,6 +258,10 @@ impl LimitOracles {
     /// ranges), so a caller can rank lines and build such a range file.
     /// Neither changes timing unless a range file is given, and neither is
     /// active before `PSOXIDE_LIMIT_FROM_POLL` / `FROM_CYCLE`.
+    ///
+    /// # Errors
+    ///
+    /// When the `fast_data` range file cannot be read or parsed.
     pub fn with_data_oracles(
         mut self,
         fast_data: Option<&Path>,
@@ -364,12 +368,16 @@ impl LimitOracles {
     }
 
     /// Lane stall-free: write the per-line data log, hottest first.
+    ///
+    /// # Errors
+    ///
+    /// When the log file cannot be written.
     pub fn write_data_log(&self, path: &Path) -> Result<(), String> {
         let Some(log) = self.data_log.as_ref() else {
             return Ok(());
         };
         let mut rows: Vec<_> = log.iter().collect();
-        rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.1 .0));
         let mut text = String::from("line_addr,stall_cycles,loads\n");
         for (line, (stall, loads)) in rows {
             text.push_str(&format!("{:#010x},{stall},{loads}\n", line << 5));

@@ -14,7 +14,7 @@ use emulator_core::button;
 
 use crate::input::model::{BackendKind, DeviceEvent, DeviceIdentity, PadSnapshot, StickDpad};
 
-use super::{face_by_position, is_nintendo_layout, DeviceBackend};
+use super::{face_by_position, is_nintendo_layout, DeviceBackend, FaceLabels};
 
 /// Trigger travel that counts as a press when the framework reports no
 /// digital state of its own.
@@ -111,10 +111,12 @@ fn read(pad: &GCExtendedGamepad, nintendo: bool) -> GcReading {
         let left_trigger = pad.leftTrigger();
         let right_trigger = pad.rightTrigger();
         let face = face_by_position(
-            pressed(&pad.buttonA()),
-            pressed(&pad.buttonB()),
-            pressed(&pad.buttonX()),
-            pressed(&pad.buttonY()),
+            FaceLabels {
+                a: pressed(&pad.buttonA()),
+                b: pressed(&pad.buttonB()),
+                x: pressed(&pad.buttonX()),
+                y: pressed(&pad.buttonY()),
+            },
             nintendo,
         );
         GcReading {

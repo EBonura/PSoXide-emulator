@@ -14,11 +14,11 @@ host clippy::enum_glob_use 4
 host clippy::rc_buffer 0
 host clippy::rc_mutex 0
 host clippy::get_first 0
-host clippy::must_use_candidate 442
-host clippy::unwrap_used 43
+host clippy::must_use_candidate 441
+host clippy::unwrap_used 42
 host clippy::exhaustive_enums 55
 host clippy::exhaustive_structs 87
-host clippy::missing_errors_doc 50
+host clippy::missing_errors_doc 49
 host clippy::missing_panics_doc 15
 host clippy::wildcard_imports 14
 host clippy::string_add 1

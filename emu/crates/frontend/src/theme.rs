@@ -320,6 +320,11 @@ pub fn viz_frame<R>(
     resp.inner
 }
 
+/// A font for titles and numbers (Michroma, with the text font behind it).
+pub fn title_font(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name("michroma".into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,9 +356,4 @@ mod tests {
     fn editor_build_binds_the_lucide_family_at_startup() {
         lay_out_in(FontFamily::Name("lucide".into()));
     }
-}
-
-/// A font for titles and numbers (Michroma, with the text font behind it).
-pub fn title_font(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("michroma".into()))
 }

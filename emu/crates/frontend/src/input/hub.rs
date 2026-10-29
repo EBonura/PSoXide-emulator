@@ -913,32 +913,31 @@ mod tests {
             .devices()
             .iter()
             .all(|d| d.identity.id != KEYBOARD_DEVICE_ID || d.profile != PadProfile::Analog));
-        for device in ["pad"] {
-            let mut hub = hub_with_pad();
-            let mode = |down: bool| DeviceEvent::Sample {
-                id: device.to_string(),
-                snapshot: PadSnapshot {
-                    mode: down,
-                    ..PadSnapshot::default()
-                },
-            };
-            let row = |hub: &InputHub| {
-                hub.devices()
-                    .into_iter()
-                    .find(|r| r.identity.id == device)
-                    .map(|r| r.profile)
-            };
-            // A controller with sticks starts analog: the first press goes back
-            // to its own identity.
-            assert_eq!(row(&hub), Some(PadProfile::Analog), "{device}");
-            assert!(hub.step(100, vec![mode(true)]).analog_button);
-            assert_ne!(row(&hub), Some(PadProfile::Analog), "{device}");
-            // Holding it does not toggle again; a second press does.
-            assert!(!hub.step(116, vec![mode(true)]).analog_button);
-            hub.step(132, vec![mode(false)]);
-            assert!(hub.step(148, vec![mode(true)]).analog_button);
-            assert_eq!(row(&hub), Some(PadProfile::Analog), "{device}");
-        }
+        let device = "pad";
+        let mut hub = hub_with_pad();
+        let mode = |down: bool| DeviceEvent::Sample {
+            id: device.to_string(),
+            snapshot: PadSnapshot {
+                mode: down,
+                ..PadSnapshot::default()
+            },
+        };
+        let row = |hub: &InputHub| {
+            hub.devices()
+                .into_iter()
+                .find(|r| r.identity.id == device)
+                .map(|r| r.profile)
+        };
+        // A controller with sticks starts analog: the first press goes back
+        // to its own identity.
+        assert_eq!(row(&hub), Some(PadProfile::Analog), "{device}");
+        assert!(hub.step(100, vec![mode(true)]).analog_button);
+        assert_ne!(row(&hub), Some(PadProfile::Analog), "{device}");
+        // Holding it does not toggle again; a second press does.
+        assert!(!hub.step(116, vec![mode(true)]).analog_button);
+        hub.step(132, vec![mode(false)]);
+        assert!(hub.step(148, vec![mode(true)]).analog_button);
+        assert_eq!(row(&hub), Some(PadProfile::Analog), "{device}");
     }
 
     #[test]

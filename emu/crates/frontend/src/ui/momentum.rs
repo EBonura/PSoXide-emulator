@@ -664,7 +664,7 @@ mod tests {
             m.step(&mut pos, 5.0, 2000.0, 400.0);
         }
         assert!(
-            pos.is_finite() && pos >= 0.0 && pos <= 2000.0 + 0.35 * 400.0,
+            pos.is_finite() && (0.0..=2000.0 + 0.35 * 400.0).contains(&pos),
             "{pos}"
         );
     }

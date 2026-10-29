@@ -11,7 +11,9 @@
 //! skipped or branched on: no limit oracle is configured, so the limit
 //! checks and the freeze thaw are no-ops.
 
-use super::*;
+use super::{
+    Bus, Dma, IrqSource, Sio0, Timers, CODE_FILL_MMIO_WAIT_CAP, IRQ_MASK_ADDR, IRQ_STAT_ADDR,
+};
 
 /// The registers [`Bus::cpu_io_load32`] reads.
 #[derive(Clone, Copy, PartialEq, Eq)]

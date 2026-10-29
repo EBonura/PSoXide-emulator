@@ -1237,7 +1237,7 @@ unsafe fn idct_neon(columns: &[[i16; DSIZE]; DSIZE], block: &mut [i16; DSIZE2]) 
         };
     }
 
-    // SAFETY (all loads and stores below): every pointer is to a row of eight
+    // SAFETY: for all the loads and stores below, every pointer is to a row of eight
     // halfwords inside an array of eight rows.
     unsafe {
         let weights = [

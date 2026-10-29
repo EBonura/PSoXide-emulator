@@ -47,6 +47,7 @@ type Range = std::ops::Range<usize>;
 
 /// Counts of what a pack stored.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Stats {
     /// Sectors by kind: form 1, form 2, form 2 without EDC, verbatim.
     pub kinds: [u64; 4],
@@ -94,6 +95,10 @@ impl<W: Write> Packer<W> {
     }
 
     /// Add the next sector of the image.
+    ///
+    /// # Errors
+    ///
+    /// When writing a full chunk to the output fails.
     pub fn push(&mut self, raw: &[u8; SECTOR]) -> io::Result<()> {
         self.hasher.update(raw);
         let index = self.sectors;
@@ -153,6 +158,10 @@ impl<W: Write> Packer<W> {
 
     /// Flush the last chunk and build the index file. `part_bytes` and
     /// `boot_sectors` are recorded for the reader.
+    ///
+    /// # Errors
+    ///
+    /// When writing the last chunk or flushing the output fails.
     pub fn finish(mut self, part_bytes: u64, boot_sectors: u32) -> io::Result<(Vec<u8>, Stats)> {
         self.flush_chunk()?;
         self.out.flush()?;
@@ -200,6 +209,10 @@ pub struct PayloadFiles {
 
 impl PayloadFiles {
     /// Open the payload `base` in `dir`, as `index` says it is laid out.
+    ///
+    /// # Errors
+    ///
+    /// When a payload file cannot be opened.
     pub fn open(dir: &Path, base: &str, index: &Index) -> io::Result<PayloadFiles> {
         let paths: Vec<PathBuf> = if index.part_bytes() == 0 {
             vec![dir.join(base)]
@@ -219,6 +232,10 @@ impl PayloadFiles {
     }
 
     /// Read `len` bytes at `offset` of the payload.
+    ///
+    /// # Errors
+    ///
+    /// When a payload part is missing or shorter than the index says, or a read fails.
     pub fn read(&mut self, mut offset: u64, len: u64) -> io::Result<Vec<u8>> {
         let mut out = Vec::with_capacity(len as usize);
         let mut left = len;
@@ -254,6 +271,12 @@ impl PayloadFiles {
 /// Decode every chunk of the compact disc and compare each sector with
 /// `image`, byte for byte, then check the image hash the index records.
 /// Returns the number of sectors verified.
+///
+/// # Errors
+///
+/// When the payload cannot be read, a chunk fails to inflate, a sector or its
+/// header bytes differ from `image`, `image` is longer than the index, or the
+/// image hash differs from the one the index records.
 pub fn verify(
     index: &Index,
     payload: &mut PayloadFiles,
@@ -279,7 +302,7 @@ pub fn verify(
                     "sector {sector} differs from the image at byte {at}"
                 )));
             }
-            if index.head8(sector) != Some(want[12..20].try_into().expect("8 bytes")) {
+            if index.head8(sector) != Some(std::array::from_fn(|i| want[12 + i])) {
                 return Err(Error(format!("sector {sector}: head8 differs")));
             }
             sectors += 1;
