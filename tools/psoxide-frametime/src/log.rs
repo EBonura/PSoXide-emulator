@@ -197,7 +197,11 @@ impl Run {
         cfg: &Config,
         labels: HashMap<u64, String>,
     ) -> Result<Run, String> {
-        let scene_col = log.column(&cfg.scene.word)?;
+        let scene_col = if cfg.scene.steps.is_empty() {
+            Some(log.column(&cfg.scene.word)?)
+        } else {
+            None
+        };
         let ready_col = cfg
             .scene
             .ready
@@ -234,7 +238,12 @@ impl Run {
             .transpose()?;
         let (phase, scene_of, loads_raw) = match (mode_col, ready_col) {
             (Some(mc), _) => classify_mode(log, cfg, scene_col, mc),
-            (None, Some(rc)) => classify_ready(log, cfg, scene_col, rc),
+            (None, Some(rc)) => classify_ready(
+                log,
+                cfg,
+                scene_col.ok_or("scene.ready needs scene.word, not scene.steps")?,
+                rc,
+            ),
             (None, None) => classify_stall(log, cfg, scene_col),
         };
         let first_play = phase
@@ -426,7 +435,7 @@ fn classify_ready(log: &TickLog, cfg: &Config, sc: usize, rc: usize) -> Classifi
 }
 
 /// Loads are frame intervals of `load_vblanks` or more (`scene.ready` not set).
-fn classify_stall(log: &TickLog, cfg: &Config, sc: usize) -> Classified {
+fn classify_stall(log: &TickLog, cfg: &Config, sc: Option<usize>) -> Classified {
     let n = log.ticks.len();
     let mut phase = vec![Phase::Pre; n];
     let mut scene_of = vec![String::new(); n];
@@ -434,7 +443,7 @@ fn classify_stall(log: &TickLog, cfg: &Config, sc: usize) -> Classified {
     let mut started = false;
     for (i, t) in log.ticks.iter().enumerate() {
         if t.step >= cfg.scene.from_step {
-            if let Some(name) = cfg.scene_name(t.words[sc]) {
+            if let Some(name) = scene_of_tick(cfg, sc, t) {
                 cur = name;
                 started = true;
             }
@@ -465,14 +474,14 @@ fn classify_stall(log: &TickLog, cfg: &Config, sc: usize) -> Classified {
 /// The game says what it is doing (`scene.mode`): `play` is play, `load` is loading, anything
 /// else (title, menus, the boot of a journey segment) is not measured. Frame intervals of
 /// `load_vblanks` or more inside play are loads too, for loads the game does not announce.
-fn classify_mode(log: &TickLog, cfg: &Config, sc: usize, mc: usize) -> Classified {
+fn classify_mode(log: &TickLog, cfg: &Config, sc: Option<usize>, mc: usize) -> Classified {
     let n = log.ticks.len();
     let mut phase = vec![Phase::Pre; n];
     let mut scene_of = vec![String::new(); n];
     let mut cur = String::new();
     for (i, t) in log.ticks.iter().enumerate() {
         if t.step >= cfg.scene.from_step {
-            if let Some(name) = cfg.scene_name(t.words[sc]) {
+            if let Some(name) = scene_of_tick(cfg, sc, t) {
                 cur = name;
             }
             let m = t.words[mc];
@@ -559,5 +568,19 @@ impl TickLog {
             }));
         }
         Ok((all, offsets))
+    }
+}
+
+/// The scene a tick belongs to: from the scene word, or from the journey step when the config lists steps.
+fn scene_of_tick(cfg: &Config, sc: Option<usize>, t: &Tick) -> Option<String> {
+    match sc {
+        Some(c) => cfg.scene_name(t.words[c]),
+        None => cfg
+            .scene
+            .steps
+            .iter()
+            .rev()
+            .find(|s| s.from <= t.step)
+            .map(|s| s.name.clone()),
     }
 }

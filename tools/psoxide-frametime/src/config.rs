@@ -37,7 +37,13 @@ pub(crate) struct Config {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Scene {
     /// Tick-log column holding the scene, map or room id.
+    /// Empty when the scene comes from `steps`.
+    #[serde(default)]
     pub word: String,
+    /// Scenes by journey step, for a game with no scene word: each entry starts at step `from`
+    /// (1-based, as the gate's -v output counts) and lasts until the next entry.
+    #[serde(default)]
+    pub steps: Vec<StepScene>,
     /// `id = "name"` pairs. Ids missing here are not scenes (loading junk) when the table is
     /// non-empty; with no table every value is a scene named `scene <id>`.
     #[serde(default)]
@@ -83,6 +89,13 @@ fn default_load() -> u32 {
 
 fn default_from_step() -> u64 {
     1
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StepScene {
+    pub from: u64,
+    pub name: String,
 }
 
 #[derive(Debug, Deserialize)]

@@ -289,3 +289,27 @@ fn telemetry_columns_add_an_update_render_split() {
     assert!(html.contains("Update (ms, mean)"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn scenes_can_come_from_journey_steps() {
+    // 100 ticks per step, three steps, a flip every other tick.
+    let mut s = String::from("boot,tick,step,bus_cycles,cycle_delta,cpu_delta,flipped,polls\n");
+    for t in 1..=300u64 {
+        s.push_str(&format!(
+            "1,{t},{},{},{VB},1000,{},0\n",
+            (t - 1) / 100 + 1,
+            t * VB,
+            u8::from(t % 2 == 0)
+        ));
+    }
+    let log = TickLog::parse(&s).expect("parse");
+    let c: Config = toml::from_str(
+        "title = \"T\"\n[scene]\n[[scene.steps]]\nfrom = 1\nname = \"menu\"\n[[scene.steps]]\nfrom = 2\nname = \"play\"\n",
+    )
+    .expect("config");
+    let run = Run::measure(&log, &c, Default::default()).expect("measure");
+    assert_eq!(run.scenes, vec!["menu".to_string(), "play".to_string()]);
+    let rows = run.summaries();
+    assert_eq!(rows[0].name, "menu");
+    assert_eq!(rows[0].frames, 49);
+}
