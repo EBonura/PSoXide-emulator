@@ -461,6 +461,10 @@ pub struct LaunchArgs {
     /// loading and menus when profiling a deterministic gameplay route.
     #[arg(long, default_value_t = 0, requires = "pc_line_log")]
     pub pc_line_start_route_tick: u64,
+    /// Write scratchpad data accesses as `pc,line,accesses` (32-byte scratchpad lines, 0..31). Needs
+    /// `--instruction-class-log`; counts the whole run.
+    #[arg(long, requires = "instruction_class_log")]
+    pub scratchpad_access_log: Option<PathBuf>,
     /// Attribute MMIO stall cycles to the canonical 16-byte I-cache line of
     /// the instruction that incurred them. A single device write can stall for
     /// thousands of cycles, so retired-instruction counts cannot answer where
@@ -1407,6 +1411,9 @@ fn run_headless_launch(
         None => None,
     };
     cpu.set_instruction_class_profile_enabled(args.instruction_class_log.is_some());
+    if args.scratchpad_access_log.is_some() {
+        cpu.enable_scratchpad_log();
+    }
     let mut instruction_class_log = match args.instruction_class_log.as_ref() {
         Some(path) => {
             if let Some(parent) = path
@@ -2418,6 +2425,18 @@ fn run_headless_launch(
             }
         }
     }
+    if let Some(path) = args.scratchpad_access_log.as_ref() {
+        let mut rows: Vec<_> = cpu.take_scratchpad_log().into_iter().collect();
+        rows.sort_unstable();
+        let mut text = String::from("pc,line,accesses\n");
+        for ((pc, line), n) in rows {
+            text.push_str(&format!("0x{pc:08x},{line},{n}\n"));
+        }
+        std::fs::write(path, text).map_err(|error| format!("{}: {error}", path.display()))?;
+        if emit_summary {
+            eprintln!("[cli] scratchpad accesses → {}", path.display());
+        }
+    }
     if let (Some(path), Some(histogram)) = (args.pc_line_log.as_ref(), pc_line_histogram.as_ref()) {
         histogram.write(path, "instructions")?;
         if emit_summary {
@@ -3239,6 +3258,7 @@ fn validation_launch_args(
         cpu_cycle_profile_log: None,
         pc_line_log: None,
         pc_line_start_route_tick: 0,
+        scratchpad_access_log: None,
         mmio_stall_line_log: None,
         mmio_stall_line_start_route_tick: 0,
         ram_load_stall_line_log: None,

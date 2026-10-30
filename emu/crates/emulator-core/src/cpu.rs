@@ -668,6 +668,8 @@ pub struct Cpu {
     /// Opt-in exact instruction-class profiler.
     #[serde(skip)]
     instruction_class_profile_enabled: bool,
+    /// Scratchpad accesses by `(pc, 32-byte line)`, recorded while the instruction-class profile runs.
+    scratchpad_log: Option<std::collections::HashMap<(u32, u16), u64>>,
     /// Dynamic instruction-class totals. Diagnostic only.
     #[serde(skip)]
     instruction_class_profile: InstructionClassProfileSnapshot,
@@ -806,6 +808,7 @@ impl Cpu {
             cpu_wait_profile: CpuWaitProfileSnapshot::default(),
             wait_loop: WaitLoopTracker::default(),
             instruction_class_profile_enabled: false,
+            scratchpad_log: None,
             instruction_class_profile: InstructionClassProfileSnapshot::default(),
             cop2: Gte::new(),
             freelook: FreelookState::default(),
@@ -1078,6 +1081,16 @@ impl Cpu {
         self.instruction_class_profile = InstructionClassProfileSnapshot::default();
     }
 
+    /// Start recording scratchpad data accesses by `(pc, 32-byte line)` (needs the instruction-class profile on).
+    pub fn enable_scratchpad_log(&mut self) {
+        self.scratchpad_log = Some(std::collections::HashMap::new());
+    }
+
+    /// Take the scratchpad access counts recorded so far: `(pc, line)` to executions.
+    pub fn take_scratchpad_log(&mut self) -> std::collections::HashMap<(u32, u16), u64> {
+        self.scratchpad_log.take().unwrap_or_default()
+    }
+
     /// Snapshot dynamic instruction-class totals.
     #[inline]
     pub fn instruction_class_profile(&self) -> InstructionClassProfileSnapshot {
@@ -1312,7 +1325,7 @@ impl Cpu {
         Some(ProfiledDataAccess::Other)
     }
 
-    fn profile_instruction_class(&mut self, instr: u32, in_delay_slot: bool) {
+    fn profile_instruction_class(&mut self, pc: u32, instr: u32, in_delay_slot: bool) {
         let opcode = ((instr >> 26) & 0x3f) as u8;
         let funct = (instr & 0x3f) as u8;
         let base = ((instr >> 21) & 0x1f) as u8;
@@ -1372,6 +1385,10 @@ impl Cpu {
                     .contains(&physical)
             {
                 increment!(scratchpad_accesses);
+                if let Some(log) = self.scratchpad_log.as_mut() {
+                    let line = ((physical - memory::scratchpad::BASE) >> 5) as u16;
+                    *log.entry((pc, line)).or_insert(0) += 1;
+                }
             } else if (memory::expansion1::BASE..memory::bios::BASE).contains(&physical) {
                 increment!(mmio_accesses);
             } else {
@@ -2197,7 +2214,7 @@ impl Cpu {
         self.executing_in_branch_delay = in_branch_delay;
 
         if self.instruction_class_profile_enabled {
-            self.profile_instruction_class(instr, in_delay_slot);
+            self.profile_instruction_class(pc_before, instr, in_delay_slot);
         }
 
         // The load delay queued by the *previous* instruction is held
@@ -6280,13 +6297,13 @@ mod tests {
 
         // LB $t0, 0($sp), followed by a delay-slot NOP observation.
         let lb_sp = (0x20u32 << 26) | (29u32 << 21) | (8u32 << 16);
-        cpu.profile_instruction_class(lb_sp, false);
-        cpu.profile_instruction_class(0, true);
+        cpu.profile_instruction_class(0, lb_sp, false);
+        cpu.profile_instruction_class(0, 0, true);
         // One GTE command, one LUI, one JALR and one MULT.
-        cpu.profile_instruction_class(0x4a00_0001, false);
-        cpu.profile_instruction_class(0x3c08_1234, false);
-        cpu.profile_instruction_class((8u32 << 21) | (31u32 << 11) | 0x09, false);
-        cpu.profile_instruction_class((8u32 << 21) | (9u32 << 16) | 0x18, false);
+        cpu.profile_instruction_class(0, 0x4a00_0001, false);
+        cpu.profile_instruction_class(0, 0x3c08_1234, false);
+        cpu.profile_instruction_class(0, (8u32 << 21) | (31u32 << 11) | 0x09, false);
+        cpu.profile_instruction_class(0, (8u32 << 21) | (9u32 << 16) | 0x18, false);
 
         let profile = cpu.instruction_class_profile();
         assert_eq!(profile.instructions, 6);
