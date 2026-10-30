@@ -6291,6 +6291,28 @@ mod tests {
     }
 
     #[test]
+    fn scratchpad_log_counts_accesses_by_pc_and_line() {
+        let mut cpu = Cpu::new();
+        cpu.enable_scratchpad_log();
+        cpu.gprs[8] = memory::scratchpad::BASE;
+        cpu.gprs[9] = 0x8000_1000;
+        // LW $t1, 0x44($t0) at 0x8001_0000 twice (line 2), SW $t1, 0($t0) at 0x8001_0004 (line 0), and a
+        // main-RAM load that must not be logged.
+        let lw_line2 = (0x23u32 << 26) | (8u32 << 21) | (9u32 << 16) | 0x44;
+        let sw_line0 = (0x2bu32 << 26) | (8u32 << 21) | (9u32 << 16);
+        let lw_ram = (0x23u32 << 26) | (9u32 << 21) | (10u32 << 16);
+        cpu.profile_instruction_class(0x8001_0000, lw_line2, false);
+        cpu.profile_instruction_class(0x8001_0000, lw_line2, false);
+        cpu.profile_instruction_class(0x8001_0004, sw_line0, false);
+        cpu.profile_instruction_class(0x8001_0008, lw_ram, false);
+        let log = cpu.take_scratchpad_log();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[&(0x8001_0000, 2)], 2);
+        assert_eq!(log[&(0x8001_0004, 0)], 1);
+        assert!(cpu.take_scratchpad_log().is_empty(), "taking the log empties it");
+    }
+
+    #[test]
     fn instruction_class_profile_counts_delay_width_region_and_units() {
         let mut cpu = Cpu::new();
         cpu.gprs[29] = memory::scratchpad::BASE;
