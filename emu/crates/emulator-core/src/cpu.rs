@@ -6309,7 +6309,10 @@ mod tests {
         assert_eq!(log.len(), 2);
         assert_eq!(log[&(0x8001_0000, 2)], 2);
         assert_eq!(log[&(0x8001_0004, 0)], 1);
-        assert!(cpu.take_scratchpad_log().is_empty(), "taking the log empties it");
+        assert!(
+            cpu.take_scratchpad_log().is_empty(),
+            "taking the log empties it"
+        );
     }
 
     #[test]
