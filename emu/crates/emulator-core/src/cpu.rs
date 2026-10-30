@@ -669,6 +669,7 @@ pub struct Cpu {
     #[serde(skip)]
     instruction_class_profile_enabled: bool,
     /// Scratchpad accesses by `(pc, 32-byte line)`, recorded while the instruction-class profile runs.
+    #[serde(skip)]
     scratchpad_log: Option<std::collections::HashMap<(u32, u16), u64>>,
     /// Dynamic instruction-class totals. Diagnostic only.
     #[serde(skip)]
