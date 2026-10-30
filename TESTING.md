@@ -205,15 +205,15 @@ Steps are tables, run in order:
 - **Plain wait.** `wait = 300`.
 - **Conditional wait.** `wait_until = { kind = "...", ... }` with `timeout`
   ticks (default 3600). A timeout aborts the journey and reports the frozen
-  frame. Allowed kinds: `ram`, `pixels`, `flat`, `not_flat`, `dark`,
-  `not_dark`. Prefer these to long fixed waits: they keep a journey aligned
+  frame. Allowed kinds: `ram`, `expr`, `pixels`, `flat`, `not_flat`,
+  `dark`, `not_dark`. Prefer these to long fixed waits: they keep a journey aligned
   when a build loads faster or slower, and a freeze becomes a precise failure.
 - **Conditional input hold.** `lstick = [128, 0]` with
   `hold_until = { kind = "ram", sym = "PLAYER_POS", offset = 8, signed = true, op = "le", value = 690 }`
   and a required positive `timeout` keeps the ordinary pad input down until
   the condition succeeds or the tick bound expires. The pad is released on
   success, timeout and guest error; `wait` can add rest after release. RAM and
-  pixel conditions use the same fields as assertions. `hold`, `repeat`,
+  pixel conditions use the same fields as assertions. `expr` conditions work too. `hold`, `repeat`,
   `wait_until`, tapes and card actions cannot share this step.
 - **Checkpoint.** `checkpoint = "name"` captures the frame and runs the step's
   asserts. `golden = false` skips the golden comparison (animated or
@@ -231,6 +231,7 @@ Steps are tables, run in order:
 | `frame_diff` | the share of pixels that differ from an earlier checkpoint (`from`) is within `min_changed` / `max_changed`: "nothing moved", "the screen changed" |
 | `flat`, `dark`, `not_dark` | the frame is one colour or dark: anchors for cuts to black between scenes |
 | `ram` | a word at `sym` (or `addr`) plus `offset` satisfies `op` (`eq ne lt le gt ge between zero nonzero`) and `value`; `size` 1, 2 or 4, `signed`, and `each = { count, stride }` for arrays, all elements must hold |
+| `expr` | an integer expression over RAM reads is not 0: `expr = "i32(FOE_DX) < 0 && abs(i32(FOE_DX)) < 14 * 65536"`; see Expression conditions below |
 
 Any assert takes `expect_fail = true` and a `note`.
 
@@ -238,6 +239,101 @@ Any assert takes `expect_fail = true` and a `note`.
 exact name or by `::` path suffix against an ELF symbol table (legacy Rust
 mangling is undone), an lld map, or an `address name` list. An unresolved
 symbol fails the assert with the reason.
+
+### Expression conditions
+
+A `ram` condition compares one word with a constant. When a journey needs "the nearest foe is
+in reach", "a window is open" or "the boss is winding up on my left", do not compile that
+logic into the guest: publish the raw values (positions, hit points, timers, phases) and let
+the gate derive the rest. `kind = "expr"` evaluates a small integer expression over main RAM
+and passes when the value is not 0. It works wherever `ram` does: `[[step.assert]]`,
+`wait_until` and `hold_until`.
+
+```toml
+[step.hold_until]               # walk left until no False Knight attack threatens from the left
+kind = "expr"
+expr = "!(let dx = i32(HK_FK_DX), ph = u32(HK_FK_PHASE) in dx < 0 && dx > -14 * 65536 && ph >= 1 && ph <= 2)"
+```
+
+The language is integer only (signed 64-bit, wrapping, no float) and deterministic: the same
+RAM always gives the same answer, and it never touches emulated time.
+
+| form | meaning |
+|---|---|
+| `123`, `0x1f_ff` | a number (decimal or hex, `_` allowed). `-5` is the number |
+| `+ - * / %` | arithmetic. `/` and `%` truncate toward zero; a zero divisor fails the check |
+| `<< >> & \| ^` | shifts (arithmetic, count 0..=63) and bit operations: `(MASK >> u8(PHASE)) & 1` |
+| `== != < <= > >=` | comparison, 1 or 0. Not chainable: write `a < x && x < b` |
+| `! && \|\|` | not, and, or. Short-circuit, so `a && u8(P)` never reads `P` when `a` is 0 |
+| `c ? a : b` | choice |
+| `abs(e)`, `min(a, b, ...)`, `max(a, b, ...)` | |
+| `u8 i8 u16 i16 u32 i32 (address)` | read that width at an address, zero or sign extended. Little endian, unaligned is fine |
+| `SYM`, `` `odd.name` `` | a symbol's address (link map, ELF, or a journey `[addr]` entry). Legal only inside a read: `i32(HK_PLAYER_X)`. A bare symbol elsewhere is an error that says so |
+| `base[i]` | inside a read of width W, `base + i * W`: `u16(TABLE[3])`, `i32(POS[u8(WHO)])` |
+| `let a = e, b = e2 in body` | name a value; each binding sees the earlier ones. Extends as far right as it can, so wrap it in parentheses to negate or combine it |
+| `any(i in lo..hi: e)`, `all(...)` | stop at the first hit or miss. Empty range: `any` 0, `all` 1 |
+| `count(...)`, `sum(...)`, `min(...)`, `max(...)` | over `lo..hi` (exclusive). Empty range: 0, 0, 2147483647, -2147483648 |
+
+Both bounds of a range are evaluated once, so `0..u32(COUNT)` is fine. At most 8 names (loop
+variables and `let`s) are in scope, and one evaluation may run 100,000 loop iterations. Records
+(an array of structs) take explicit arithmetic: `i32(ACT + 8 * i + 4)` is field `y` of record
+`i` when each record is `x: i32, y: i32`.
+
+Symbols resolve like `ram` asserts, so a missing symbol fails with the same message. A bad
+expression is rejected when the journey loads, with the column. An address outside main RAM,
+a zero divisor or a loop over budget fails the check with the reason (in a `wait_until`
+that is a timeout carrying the reason). Failures and passes list the first reads behind the
+value: `value = 0 (reads: HK_FK_DX=-65536, HK_FK_PHASE=0)`.
+
+Cost: the expression is parsed and bound to addresses once per run and then walked as a tree
+at each poll. A single comparison takes about 12 ns, a threat check over two words about 40 ns,
+and the strike sense below over a full 32 slot table (about 6 reads a slot) about 4 µs, on an
+M-series Mac (`cargo test --release -p psoxide-gate expr_cost -- --ignored --nocapture`). A tick of
+emulation takes about 4 ms, and `hold_until` and `wait_until` poll once a tick, so ten such
+senses cost well under 1%. Rewriting the 81 conditions of an HK walk (59 holds and 22 waits) from `ram` to `expr` left every
+tick's cycle and instruction counts identical and the wall time within run-to-run noise.
+
+#### Worked example: a walker sense as an expression
+
+hk-psx publishes `HK_WALK_STRIKE_LEFT` so a walk script can write
+"hold left until `HK_WALK_STRIKE_LEFT == 0`" (a reaction that costs nothing when there is no
+foe). The guest computes it every tick from its private actor table with about 2 KB of code.
+With the actor positions published as a raw table, the gate computes it instead:
+
+```text
+guest: HK_ACT[32] of { x: i32, y: i32 }, x = 0x7fffffff when the slot is not a live foe in the
+       scene; HK_PLAYER_X, HK_PLAYER_Y (already there); HK_NAIL_BUSY (already there)
+
+strike left =
+  u32(HK_NAIL_BUSY) == 0 &&
+  any(i in 0..32:
+    let ax = i32(HK_ACT + 8 * i),
+        dx = ax - i32(HK_PLAYER_X),
+        dy = i32(HK_ACT + 8 * i + 4) - i32(HK_PLAYER_Y)
+    in ax != 2147483647 && dx < 0 && abs(dx) <= 3 * 65536 + 13107
+       && dy >= -(2 * 65536 + 26214) && dy <= 65536 + 39321)
+```
+
+The `hold_until` is the negation, `!( ... )`, so it ends at once when no foe is in the swing
+box. The same shape gives strike right (`dx >= 0`), the overhead swing, the jump strike, "a
+foe is near" (Focus is unsafe), the live count (`count(i in 0..32: ax != ...)`) and the walk
+gap to the nearest foe (`min(i in ...: cond ? max(abs(dx) - 3 * 65536, 0) : 2147483647)`,
+2147483647 meaning none). tools/psoxide-gate/src/expr.rs checks these against the Rust they
+replace over 3000 random tables, edge values included.
+
+A sense that only needs words the guest already publishes needs no guest change at all. The
+planned "False Knight threat from the left" is `HK_FK_DX` (Q16, 2147483647 when there is no
+boss) and `HK_FK_PHASE` (1 winding up, 2 attacking):
+
+```text
+let dx = i32(HK_FK_DX), ph = u32(HK_FK_PHASE) in
+dx < 0 && dx > -14 * 65536 && ph >= 1 && ph <= 2
+```
+
+A Rust struct has no stable layout, so a table of private structs cannot be indexed from
+outside; publish the few raw fields a condition needs as a plain array, or give the type
+`#[repr(C)]` and a symbol. (Reading DWARF member offsets would remove that step; see Known
+gaps.)
 
 ### Checkpoint rules of thumb
 

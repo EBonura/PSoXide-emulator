@@ -402,3 +402,10 @@ pub fn button_mask(name: &str) -> u16 {
         _ => 0,
     }
 }
+
+impl crate::expr::Memory for Machine {
+    fn load(&self, addr: u32, width: u8) -> Option<u32> {
+        let b = self.ram_bytes(addr, usize::from(width))?;
+        Some(b.iter().rev().fold(0u32, |v, x| v << 8 | u32::from(*x)))
+    }
+}

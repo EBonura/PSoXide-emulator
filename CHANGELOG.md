@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- psoxide-gate journeys can test guest RAM with integer expressions: `kind = "expr"` in an assert, `wait_until` or
+  `hold_until`, with typed reads at symbol plus offset, array indexing, `let`, `any`/`all`/`count`/`sum`/`min`/`max`
+  loops over a table, and the usual arithmetic, comparison and logic. A guest publishes raw values and the gate
+  derives "nearest foe" or "window open" from them, so those senses no longer cost resident RAM. Every existing
+  journey parses and runs unchanged (identical per-tick cycle counts). See TESTING.md, Expression conditions.
 - The debug panel is smaller and better organised on every screen, desktop included: one header line (fps, ms,
   % real time), tabs as small pills in one row, the time window as one small segmented bar, the stats as a tight
   grid of small cells (three across, two in a phone's column), the help sentence behind a small "?", and type

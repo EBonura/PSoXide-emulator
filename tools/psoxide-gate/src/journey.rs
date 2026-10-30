@@ -252,6 +252,8 @@ pub struct Step {
 /// One check. `kind` selects which of the other fields apply:
 ///
 /// - `ram`: `sym` or `addr`, `op`, `value`; optional `each` for arrays.
+/// - `expr`: `expr`, an integer expression over RAM reads (see `crate::expr`): holds when
+///   its value is not 0. The only fields it takes are `expr`, `expect_fail` and `note`.
 /// - `presenting`: the display changed in at least `min_changes` of the last
 ///   `window` ticks.
 /// - `not_flat`: no single colour covers more than `max_dominant` of the frame
@@ -324,6 +326,12 @@ pub struct Assert {
     /// Check `count` elements spaced `stride` bytes apart; all must hold.
     #[serde(default)]
     pub each: Option<Each>,
+
+    // expr
+    /// `expr` assert: an integer expression over guest RAM, for example
+    /// `"i32(HK_FK_DX) < 0 && abs(i32(HK_FK_DX)) < 14 * 65536"`.
+    #[serde(default)]
+    pub expr: Option<String>,
 
     // pixels
     /// Native 1x frame rectangle to look in (default: the whole frame).
@@ -556,8 +564,8 @@ impl Step {
             if !matches!(self.timeout, Some(1..)) {
                 return Err("hold_until needs a positive timeout".into());
             }
-            if !["ram", "pixels"].contains(&cond.kind.as_str()) || cond.expect_fail {
-                return Err("hold_until supports ordinary ram or pixels conditions".into());
+            if !["ram", "expr", "pixels"].contains(&cond.kind.as_str()) || cond.expect_fail {
+                return Err("hold_until supports ordinary ram, expr or pixels conditions".into());
             }
             cond.validate()?;
         }
@@ -620,10 +628,13 @@ impl Step {
             }
         }
         if let Some(c) = &self.wait_until {
-            if !["ram", "pixels", "flat", "not_flat", "dark", "not_dark"].contains(&c.kind.as_str())
+            if ![
+                "ram", "expr", "pixels", "flat", "not_flat", "dark", "not_dark",
+            ]
+            .contains(&c.kind.as_str())
             {
                 return Err(
-                    "wait_until supports kind = ram, pixels, flat, not_flat, dark or not_dark"
+                    "wait_until supports kind = ram, expr, pixels, flat, not_flat, dark or not_dark"
                         .into(),
                 );
             }
@@ -641,6 +652,7 @@ pub const ASSERT_KINDS: &[&str] = &[
     "card_unchanged",
     "card_irq_ack",
     "ram",
+    "expr",
     "presenting",
     "not_flat",
     "flat",
@@ -687,6 +699,29 @@ impl Assert {
             if !matches!(self.size.unwrap_or(4), 1 | 2 | 4) {
                 return Err("ram size must be 1, 2 or 4".into());
             }
+        }
+        if self.kind == "expr" {
+            let Some(source) = &self.expr else {
+                return Err("expr assert needs `expr`".into());
+            };
+            if self.sym.is_some()
+                || self.addr.is_some()
+                || self.offset.is_some()
+                || self.size.is_some()
+                || self.signed
+                || self.op.is_some()
+                || self.value.is_some()
+                || self.value_hi.is_some()
+                || self.each.is_some()
+            {
+                return Err(
+                    "an expr assert takes only `expr`; put reads inside it, e.g. i32(SYM + 8)"
+                        .into(),
+                );
+            }
+            crate::expr::Expr::parse(source).map_err(|e| format!("expr `{source}`: {e}"))?;
+        } else if self.expr.is_some() {
+            return Err("`expr` only applies to kind = \"expr\"".into());
         }
         if self.kind == "frame_diff" {
             if self.from.is_none() {
@@ -876,5 +911,58 @@ expect_fail = true
             assert!(parse(&bad).is_err(), "{bad}");
         }
         parse(&format!("{base}hold_until = {{ kind = 'pixels', color = [0, 0, 0], min_count = 100 }}\ntimeout = 240\n")).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod expr_tests {
+    use super::*;
+
+    fn parse(text: &str) -> Result<Journey, String> {
+        let j: Journey = toml::from_str(text).map_err(|e| e.to_string())?;
+        j.validate()?;
+        Ok(j)
+    }
+
+    #[test]
+    fn expr_conditions_work_in_every_place_a_ram_condition_does() {
+        let cond = "{ kind = 'expr', expr = \"i32(FOE_DX) < 0 && abs(i32(FOE_DX)) < 14 * 65536\" }";
+        let j = parse(&format!(
+            "name = 'e'\n[[step]]\nwait_until = {cond}\ntimeout = 60\n\
+             [[step]]\nlstick = [0, 128]\nhold_until = {cond}\ntimeout = 60\n\
+             [[step]]\ncheckpoint = 'c'\n[[step.assert]]\nkind = 'expr'\nexpr = 'u8(X) == 1'\nexpect_fail = true\nnote = 'later'\n"
+        ))
+        .unwrap();
+        assert_eq!(j.steps.len(), 3);
+        assert_eq!(j.steps[2].asserts[0].expr.as_deref(), Some("u8(X) == 1"));
+    }
+
+    #[test]
+    fn the_documented_hold_until_example_loads() {
+        let text = "name = 'e'\n[[step]]\nlstick = [0, 128]\ntimeout = 60\n[step.hold_until]\nkind = \"expr\"\nexpr = \"!(let dx = i32(HK_FK_DX), ph = u32(HK_FK_PHASE) in dx < 0 && dx > -14 * 65536 && ph >= 1 && ph <= 2)\"\n";
+        parse(text).unwrap();
+    }
+
+    #[test]
+    fn bad_expr_asserts_are_rejected_at_load() {
+        let base = "name = 'e'\n[[step]]\ncheckpoint = 'c'\n[[step.assert]]\n";
+        for bad in [
+            "kind = 'expr'",
+            "kind = 'expr'\nexpr = 'u8(X) +'",
+            "kind = 'expr'\nexpr = 'X == 1'",
+            "kind = 'expr'\nexpr = 'u8(X)'\nsym = 'X'",
+            "kind = 'expr'\nexpr = 'u8(X)'\nop = 'eq'\nvalue = 1",
+            "kind = 'ram'\nsym = 'X'\nop = 'eq'\nvalue = 1\nexpr = 'u8(X)'",
+        ] {
+            assert!(parse(&format!("{base}{bad}")).is_err(), "{bad}");
+        }
+        let err = parse(&format!("{base}kind = 'expr'\nexpr = 'u8(X) +'")).unwrap_err();
+        assert!(err.contains("column"), "{err}");
+        // hold_until still refuses expect_fail.
+        assert!(parse(
+            "name = 'e'\n[[step]]\nlstick = [0, 128]\ntimeout = 5\n\
+             hold_until = { kind = 'expr', expr = 'u8(X)', expect_fail = true }"
+        )
+        .is_err());
     }
 }

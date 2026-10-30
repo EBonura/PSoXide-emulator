@@ -10,6 +10,7 @@ mod card;
 mod compare;
 mod contact;
 mod exec;
+mod expr;
 mod fleet;
 mod img;
 mod journey;

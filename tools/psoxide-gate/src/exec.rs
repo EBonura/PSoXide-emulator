@@ -277,6 +277,10 @@ struct Run<'a> {
     initial_card: Vec<u8>,
     cards: Vec<crate::card::CardImage>,
     notes: Vec<String>,
+    /// `expr` conditions parsed and bound to this run's symbols, by source text, so a per-tick
+    /// wait pays for the parse and the symbol lookups once.
+    exprs:
+        std::cell::RefCell<std::collections::HashMap<String, Result<crate::expr::Program, String>>>,
 }
 
 /// Run one journey. The disc fingerprint (a SHA-256 over the whole image) only labels the
@@ -422,6 +426,7 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         initial_card,
         cards: Vec::new(),
         notes: Vec::new(),
+        exprs: Default::default(),
     };
     run.m.release_pads();
     result.abort = run.play().err();
@@ -774,10 +779,15 @@ impl Run<'_> {
         timeout: u64,
         label: &str,
     ) -> Result<(), String> {
-        if poll_until(self, timeout, |run| run.eval_wait(cond).0, |run| run.tick())? {
+        if poll_until(
+            self,
+            timeout,
+            |run| run.eval_wait(cond, false).0,
+            |run| run.tick(),
+        )? {
             return Ok(());
         }
-        let (_, detail) = self.eval_wait(cond);
+        let (_, detail) = self.eval_wait(cond, true);
         let msg = format!(
             "step {}: {label} timed out after {timeout} ticks ({detail})",
             index + 1,
@@ -814,10 +824,11 @@ impl Run<'_> {
         Err(msg)
     }
 
-    fn eval_wait(&self, cond: &Assert) -> (bool, String) {
+    fn eval_wait(&self, cond: &Assert, explain: bool) -> (bool, String) {
         match cond.kind.as_str() {
             "pixels" => self.eval_pixels(cond, &self.m.display_image()),
             "flat" | "not_flat" | "dark" | "not_dark" => self.eval_flat(cond, None),
+            "expr" => self.eval_expr(cond, explain).unwrap_or_else(|e| (false, e)),
             _ => self.eval_ram(cond).unwrap_or_else(|e| (false, e)),
         }
     }
@@ -1062,6 +1073,10 @@ impl Run<'_> {
         if a.kind == "ram" {
             return checked_assert(ram_name(a), self.eval_ram(a), a);
         }
+        if a.kind == "expr" {
+            let name = format!("expr {}", a.expr.as_deref().unwrap_or("?"));
+            return checked_assert(name, self.eval_expr(a, true), a);
+        }
         let (name, ok, detail) = match a.kind.as_str() {
             "card_writes" => {
                 let count = self
@@ -1241,6 +1256,47 @@ impl Run<'_> {
             other => (other.to_string(), false, "unknown assert kind".into()),
         };
         checked_assert(name, Ok((ok, detail)), a)
+    }
+
+    /// Evaluate an `expr` assert. The detail gives the value and the first reads behind it.
+    fn eval_expr(&self, a: &Assert, explain: bool) -> Result<(bool, String), String> {
+        let source = a.expr.as_deref().ok_or("expr assert has no `expr`")?;
+        let mut cache = self.exprs.borrow_mut();
+        if !cache.contains_key(source) {
+            let bound = crate::expr::Expr::parse(source).and_then(|e| {
+                e.bind(|name| {
+                    self.syms.resolve(name).map_err(|mut msg| {
+                        if self.syms.is_empty() {
+                            msg.push_str(
+                                " (no symbol file loaded; give the journey `symbols` or `addr`)",
+                            );
+                        }
+                        msg
+                    })
+                })
+            });
+            cache.insert(source.to_string(), bound);
+        }
+        let program = match cache.get(source) {
+            Some(Ok(program)) => program,
+            Some(Err(e)) => return Err(e.clone()),
+            None => return Err("expr was not compiled".into()),
+        };
+        if !explain {
+            let value = program.eval(&self.m)?;
+            return Ok((value != 0, String::new()));
+        }
+        let (value, reads) = program.eval_traced(&self.m);
+        let value = value?;
+        let reads = program.describe_reads(&reads);
+        Ok((
+            value != 0,
+            if reads.is_empty() {
+                format!("value = {value}")
+            } else {
+                format!("value = {value} (reads: {reads})")
+            },
+        ))
     }
 
     /// Evaluate a `ram` assert. The detail names the actual values.

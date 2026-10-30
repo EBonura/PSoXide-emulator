@@ -7,6 +7,8 @@
 mod card;
 #[path = "../src/compare.rs"]
 mod compare;
+#[path = "../src/expr.rs"]
+mod expr;
 #[path = "../src/img.rs"]
 mod img;
 #[path = "../src/journey.rs"]
