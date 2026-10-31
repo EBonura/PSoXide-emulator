@@ -215,6 +215,9 @@ Steps are tables, run in order:
   success, timeout and guest error; `wait` can add rest after release. RAM and
   pixel conditions use the same fields as assertions. `expr` conditions work too. `hold`, `repeat`,
   `wait_until`, tapes and card actions cannot share this step.
+- **Block or loop.** `block = "name"` runs a `[[block]]` (a named list of steps) once. Add
+  `until`, `max_iter` and `timeout` and it repeats until the condition holds; see Loops and
+  blocks below. An inline `[[step.body]]` list does the same without a name.
 - **Checkpoint.** `checkpoint = "name"` captures the frame and runs the step's
   asserts. `golden = false` skips the golden comparison (animated or
   timing-dependent frames still get liveness and matrix checks).
@@ -334,6 +337,71 @@ A Rust struct has no stable layout, so a table of private structs cannot be inde
 outside; publish the few raw fields a condition needs as a plain array, or give the type
 `#[repr(C)]` and a symbol. (Reading DWARF member offsets would remove that step; see Known
 gaps.)
+
+### Loops and blocks
+
+A journey that plays a closed loop (shoot until nothing is alive, push until the door opens)
+should not write the loop out once per pass: a 20 enemy fight unrolled into straight steps
+was a 42 MB journey file. A loop step repeats a list of steps until a condition holds, with a
+hard bound on both the passes and the time.
+
+```toml
+[[block]]                       # a named list of steps, written once, referenced by name
+name = "fight_round"
+[[block.step]]
+lstick = [128, 128]
+press = ["cross"]
+hold_until = { kind = "expr", expr = "u8(PROP_HEALTH[i32(TARGET)]) == 0" }
+timeout = 60
+[[block.step]]
+wait = 6
+
+[[step]]
+label = "fight"
+block = "fight_round"           # or an inline body: [[step.body]] (and [[step.body.body]] ...)
+until = { kind = "expr", expr = "count(i in 0..128: u8(PROP_KIND[i]) == 2 && u8(PROP_HEALTH[i]) > 0) == 0" }
+max_iter = 40                   # required, 1..=1000000
+timeout = 6000                  # required, ticks for the whole loop
+```
+
+| key | meaning |
+|---|---|
+| `block` | name of a `[[block]]` whose steps are the body. Without `until` the block runs once (reuse, no loop), and `max_iter` and `timeout` are not allowed |
+| `body` | inline steps (`[[step.body]]`), the other way to give a loop its body. Needs `until` |
+| `when` | a guard of any `wait_until` kind, tested once when the step is reached: false skips the step at no cost in ticks. With `until` it decides whether the loop starts. `body` with `when` and no `until` is an inline run-once block |
+| `until` | a condition of any `wait_until` kind (`ram`, `expr`, `pixels`, `flat`, `not_flat`, `dark`, `not_dark`) |
+| `max_iter` | most passes. The condition is tested before every pass and once after the last, so `until` already true runs the body zero times, and holding after exactly `max_iter` passes is a success. Still false after them aborts the journey |
+| `timeout` | ticks the whole loop may take, inner loops and waits included. The tick that would exceed it is refused, so a body stops mid-pass |
+
+Rules:
+
+- Loops nest to 8 levels (blocks and inline bodies each count one). A block may call other
+  blocks but not itself, directly or through others. An outer loop's `timeout` keeps bounding
+  every loop inside it, whatever their own limits are.
+- A body or block may hold input steps, `wait`, `wait_until`, `hold_until` and further loops.
+  It may not hold a `checkpoint`, an assert, a card action or a tape: a body repeats, and a
+  golden is one frame per name. Check state after the loop, with an assert on the next step.
+  A step with `block` or `body` takes no input, wait or assert of its own.
+- A loop only stops on its condition, `max_iter` or `timeout`. Use `when` for "do this only if
+  the target is there"; a `hold_until` or `wait_until` whose condition already holds also ends
+  at once, so most per-target guards need nothing more.
+- Determinism is unchanged: the same guest gives the same ticks. The `step` column of
+  `--tick-log` is the top-level step number, so a whole loop is one step there, and a journey
+  without loops gives the same log as before.
+
+An abort names where it happened and keeps the frozen frame in the report, like a
+`wait_until` timeout: ``step 7 `fight`: loop timed out after 6000 ticks at iteration 12 of at
+most 40 (value = 1 (reads: ...))``, or ``step 7 `fight`: loop still false after max_iter 40
+iterations``.
+A failure inside the body names the nested step: `step 7, iteration 12, step 3: hold_until
+timed out ...`; its frame is saved as `step 7.i12.3`. The loop sites in the `loops` group are
+named by path: ``step 7 `fight` > step 3 `kill```.
+
+The report ends with a `loops` group: one check per loop site with the iterations of each run
+(an inner loop runs once per outer pass), the total, the limit and the ticks spent. Read it
+when a gauntlet starts taking more passes than it did.
+
+Cost: a pass costs only what its steps cost; an `until` is polled once per pass, not per tick.
 
 ### Checkpoint rules of thumb
 

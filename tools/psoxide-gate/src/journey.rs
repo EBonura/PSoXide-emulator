@@ -48,9 +48,26 @@ pub struct Journey {
     pub max_ticks: u64,
     #[serde(default)]
     pub render: RenderCfg,
+    /// Named step lists a `block = "name"` step runs (once, or in a loop).
+    #[serde(default, rename = "block")]
+    pub blocks: Vec<Block>,
     #[serde(default, rename = "step")]
     pub steps: Vec<Step>,
 }
+
+/// A named, reusable list of steps (`[[block]]` with `[[block.step]]`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Block {
+    pub name: String,
+    #[serde(default, rename = "step")]
+    pub steps: Vec<Step>,
+}
+
+/// Deepest nesting of loop and block steps a journey may have.
+pub const MAX_NESTING: usize = 8;
+/// Largest `max_iter` a loop step may ask for.
+pub const MAX_ITER_LIMIT: u64 = 1_000_000;
 
 fn default_max_ticks() -> u64 {
     60 * 60 * 20
@@ -222,6 +239,26 @@ pub struct Step {
     pub wait_until: Option<Assert>,
     #[serde(default)]
     pub timeout: Option<u64>,
+
+    // ---- loops and blocks ----
+    /// Run the `[[block]]` of this name (see `until` for a loop).
+    #[serde(default)]
+    pub block: Option<String>,
+    /// Inline steps (`[[step.body]]`) repeated until `until` holds. Alternative to `block`.
+    #[serde(default)]
+    pub body: Vec<Step>,
+    /// Guard: run the block or body only if this condition holds when the step is reached
+    /// (any `wait_until` kind; otherwise the step costs no ticks). With `until` the guard
+    /// decides whether the loop starts at all.
+    #[serde(default)]
+    pub when: Option<Assert>,
+    /// Loop condition: any `wait_until` kind, checked before each iteration, so a loop whose
+    /// condition already holds runs zero times. Needs `block` or `body`, `max_iter` and `timeout`.
+    #[serde(default)]
+    pub until: Option<Assert>,
+    /// Most iterations the loop may run; the condition still false after them aborts the journey.
+    #[serde(default)]
+    pub max_iter: Option<u64>,
 
     // ---- checkpoint ----
     /// Capture a frame under this name and run the step's asserts.
@@ -410,7 +447,7 @@ impl Journey {
             }
         }
         let uses_port2 = self
-            .steps
+            .all_steps()
             .iter()
             .any(|s| s.port == Some(2) || s.other.is_some());
         if uses_port2 && self.pad2 == Pad2Mode::None {
@@ -426,7 +463,7 @@ impl Journey {
                     .or(step.checkpoint.as_deref())
                     .unwrap_or("-")
             );
-            step.validate().map_err(|e| format!("{at}: {e}"))?;
+            step.validate(false).map_err(|e| format!("{at}: {e}"))?;
             if step
                 .card
                 .as_ref()
@@ -455,7 +492,96 @@ impl Journey {
                 }
             }
         }
+        self.validate_blocks()
+    }
+
+    /// Block names are unique ids, bodies hold only repeatable steps, every reference resolves,
+    /// nothing calls itself, and nesting stays within `MAX_NESTING`.
+    fn validate_blocks(&self) -> Result<(), String> {
+        let mut names = std::collections::BTreeSet::new();
+        for b in &self.blocks {
+            if !safe_id(&b.name) {
+                return Err(format!(
+                    "block name `{}` must be a short id without spaces or slashes",
+                    b.name
+                ));
+            }
+            if !names.insert(b.name.as_str()) {
+                return Err(format!("duplicate block `{}`", b.name));
+            }
+            if b.steps.is_empty() {
+                return Err(format!("block `{}` has no steps", b.name));
+            }
+            for (i, step) in b.steps.iter().enumerate() {
+                step.validate(true)
+                    .map_err(|e| format!("block `{}` step {}: {e}", b.name, i + 1))?;
+            }
+        }
+        let mut stack = Vec::new();
+        self.check_nesting(&self.steps, &mut stack)?;
+        for b in &self.blocks {
+            stack.clear();
+            stack.push(b.name.as_str());
+            self.check_nesting(&b.steps, &mut stack)?;
+        }
         Ok(())
+    }
+
+    /// Walk `steps`, following block calls; `stack` holds the blocks being expanded.
+    fn check_nesting<'a>(
+        &'a self,
+        steps: &'a [Step],
+        stack: &mut Vec<&'a str>,
+    ) -> Result<(), String> {
+        for step in steps {
+            let inner: &[Step] = match &step.block {
+                Some(name) => {
+                    let Some(block) = self.block(name) else {
+                        return Err(format!("unknown block `{name}`"));
+                    };
+                    if stack.contains(&name.as_str()) {
+                        return Err(format!(
+                            "block `{name}` calls itself ({} > {name})",
+                            stack.join(" > ")
+                        ));
+                    }
+                    stack.push(name);
+                    &block.steps
+                }
+                None if !step.body.is_empty() => {
+                    // An inline body is one level too.
+                    stack.push("(body)");
+                    &step.body
+                }
+                None => continue,
+            };
+            if stack.len() > MAX_NESTING {
+                return Err(format!("blocks and loops nest deeper than {MAX_NESTING}"));
+            }
+            self.check_nesting(inner, stack)?;
+            stack.pop();
+        }
+        Ok(())
+    }
+
+    pub fn block(&self, name: &str) -> Option<&Block> {
+        self.blocks.iter().find(|b| b.name == name)
+    }
+
+    /// Every step, including those inside inline bodies and blocks.
+    pub fn all_steps(&self) -> Vec<&Step> {
+        fn walk<'a>(steps: &'a [Step], out: &mut Vec<&'a Step>) {
+            for s in steps {
+                out.push(s);
+                walk(&s.body, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.steps, &mut out);
+        for b in &self.blocks {
+            walk(&b.steps, &mut out);
+        }
+        out
     }
 
     pub fn checkpoints(&self) -> impl Iterator<Item = &Step> {
@@ -466,7 +592,7 @@ impl Journey {
     /// consumer of `TickRec::changed`. Without one the machine skips hashing the display
     /// every tick, which was about 6% of a gate run.
     pub fn uses_display_history(&self) -> bool {
-        self.steps.iter().any(|s| {
+        self.all_steps().iter().any(|s| {
             s.asserts
                 .iter()
                 .chain(s.hold_until.iter())
@@ -499,7 +625,23 @@ impl Step {
             || self.other.is_some()
     }
 
-    fn validate(&self) -> Result<(), String> {
+    /// A step that runs other steps: a block call or a loop.
+    pub fn is_composite(&self) -> bool {
+        self.block.is_some() || !self.body.is_empty()
+    }
+
+    /// `in_body`: the step repeats inside a loop body or a block, where a checkpoint (one golden
+    /// per name), an assert, a card action and a tape cannot sit.
+    fn validate(&self, in_body: bool) -> Result<(), String> {
+        if in_body
+            && (self.checkpoint.is_some()
+                || !self.asserts.is_empty()
+                || self.card.is_some()
+                || self.tape.is_some())
+        {
+            return Err("checkpoint, assert, card and tape cannot sit in a loop body or block (check after the loop)".into());
+        }
+        self.validate_loop()?;
         let other_buttons = self.other.iter().flat_map(|o| o.press.iter());
         for b in self.press.iter().chain(other_buttons) {
             if !BUTTONS.contains(&b.to_ascii_lowercase().as_str()) {
@@ -517,13 +659,14 @@ impl Step {
             return Err("`port` needs press, lstick or rstick".into());
         }
         let kinds = [
+            self.is_composite(),
             self.has_input() || self.wait.is_some(),
             self.wait_until.is_some(),
             self.checkpoint.is_some() || !self.asserts.is_empty(),
             self.card.is_some() || self.tape.is_some(),
         ];
         if kinds.iter().filter(|k| **k).count() == 0 {
-            return Err("step does nothing (needs press/lstick/rstick, wait, wait_until, checkpoint or assert)".into());
+            return Err("step does nothing (needs press/lstick/rstick, wait, wait_until, checkpoint, assert, block or body)".into());
         }
         if self.checkpoint.is_none()
             && (self.golden.is_some()
@@ -545,8 +688,9 @@ impl Step {
             && self.wait_until.is_none()
             && self.hold_until.is_none()
             && self.tape.is_none()
+            && self.until.is_none()
         {
-            return Err("`timeout` needs wait_until, hold_until or tape".into());
+            return Err("`timeout` needs wait_until, hold_until, until or tape".into());
         }
         if self.tape_rebase && self.tape.is_none() {
             return Err("`tape_rebase` needs tape".into());
@@ -628,11 +772,7 @@ impl Step {
             }
         }
         if let Some(c) = &self.wait_until {
-            if ![
-                "ram", "expr", "pixels", "flat", "not_flat", "dark", "not_dark",
-            ]
-            .contains(&c.kind.as_str())
-            {
+            if !WAIT_KINDS.contains(&c.kind.as_str()) {
                 return Err(
                     "wait_until supports kind = ram, expr, pixels, flat, not_flat, dark or not_dark"
                         .into(),
@@ -646,6 +786,79 @@ impl Step {
         Ok(())
     }
 }
+
+impl Step {
+    /// Rules of block calls and loops (`block`, `body`, `until`, `max_iter`).
+    fn validate_loop(&self) -> Result<(), String> {
+        if !self.is_composite() {
+            if self.until.is_some() || self.max_iter.is_some() || self.when.is_some() {
+                return Err("`when`, `until` and `max_iter` need `block` or `body`".into());
+            }
+            return Ok(());
+        }
+        if self.block.is_some() && !self.body.is_empty() {
+            return Err("a step has `block` or `body`, not both".into());
+        }
+        if self.has_input()
+            || self.hold.is_some()
+            || self.wait.is_some()
+            || self.repeat.is_some()
+            || self.port.is_some()
+            || self.wait_until.is_some()
+            || self.hold_until.is_some()
+            || self.checkpoint.is_some()
+            || !self.asserts.is_empty()
+            || self.card.is_some()
+            || self.tape.is_some()
+            || self.tape_rebase
+        {
+            return Err("a block or loop step takes only label, block/body, when, until, max_iter and timeout; put input and waits in its steps".into());
+        }
+        if let Some(guard) = &self.when {
+            check_condition("when", guard)?;
+        }
+        for (i, s) in self.body.iter().enumerate() {
+            s.validate(true)
+                .map_err(|e| format!("body step {}: {e}", i + 1))?;
+        }
+        let Some(cond) = &self.until else {
+            if self.max_iter.is_some() || self.timeout.is_some() {
+                return Err(
+                    "`max_iter` and `timeout` need `until` (without it the steps run once)".into(),
+                );
+            }
+            if self.block.is_none() && self.when.is_none() {
+                return Err("`body` needs `until` or `when`; use `block` to run steps once".into());
+            }
+            return Ok(());
+        };
+        if !matches!(self.max_iter, Some(1..=MAX_ITER_LIMIT)) {
+            return Err(format!(
+                "a loop needs `max_iter` within 1..={MAX_ITER_LIMIT}"
+            ));
+        }
+        if !matches!(self.timeout, Some(1..)) {
+            return Err("a loop needs a positive `timeout` (ticks for the whole loop)".into());
+        }
+        check_condition("until", cond)
+    }
+}
+
+/// A `when` or `until` condition: one of the wait kinds, valid, not an expected failure.
+fn check_condition(key: &str, cond: &Assert) -> Result<(), String> {
+    if !WAIT_KINDS.contains(&cond.kind.as_str()) || cond.expect_fail {
+        return Err(format!(
+            "`{key}` supports kind = {} (no expect_fail)",
+            WAIT_KINDS.join(", ")
+        ));
+    }
+    cond.validate()
+}
+
+/// Condition kinds `wait_until` and `until` accept.
+pub const WAIT_KINDS: &[&str] = &[
+    "ram", "expr", "pixels", "flat", "not_flat", "dark", "not_dark",
+];
 
 pub const ASSERT_KINDS: &[&str] = &[
     "card_writes",
@@ -964,5 +1177,178 @@ mod expr_tests {
              hold_until = { kind = 'expr', expr = 'u8(X)', expect_fail = true }"
         )
         .is_err());
+    }
+
+    #[test]
+    fn loops_and_blocks_load_with_inline_and_named_bodies() {
+        let j = parse(
+            r#"
+name = 'l'
+[[block]]
+name = 'kill_one'
+[[block.step]]
+lstick = [128, 128]
+hold_until = { kind = 'expr', expr = 'u8(HP) == 0' }
+timeout = 60
+
+[[step]]
+label = 'fight'
+block = 'kill_one'
+until = { kind = 'expr', expr = 'count(i in 0..8: u8(ALIVE[i]) != 0) == 0' }
+max_iter = 40
+timeout = 6000
+
+[[step]]
+label = 'retry'
+until = { kind = 'ram', sym = 'DOOR', op = 'eq', value = 1 }
+max_iter = 5
+timeout = 600
+[[step.body]]
+press = ['cross']
+wait = 4
+[[step.body]]
+until = { kind = 'expr', expr = 'u8(HP) == 0' }
+max_iter = 3
+timeout = 100
+[[step.body.body]]
+wait = 2
+
+[[step]]
+block = 'kill_one'
+"#,
+        )
+        .unwrap();
+        assert_eq!(j.blocks.len(), 1);
+        assert_eq!(j.steps.len(), 3);
+        assert_eq!(j.steps[1].body.len(), 2);
+        assert_eq!(j.steps[1].body[1].body.len(), 1);
+        assert_eq!(j.steps[0].max_iter, Some(40));
+        // Steps inside bodies and blocks are visible to the whole-journey scans.
+        assert_eq!(j.all_steps().len(), 3 + 2 + 1 + 1);
+    }
+
+    #[test]
+    fn loop_steps_without_a_bound_or_a_body_are_rejected() {
+        let blk = "[[block]]\nname = 'b'\n[[block.step]]\nwait = 1\n";
+        let until = "until = { kind = 'expr', expr = 'u8(X) == 1' }\n";
+        let cases: &[(&str, &str)] = &[
+            ("no max_iter", "block = 'b'\n{until}timeout = 10\n"),
+            ("no timeout", "block = 'b'\n{until}max_iter = 3\n"),
+            ("zero max_iter", "block = 'b'\n{until}max_iter = 0\ntimeout = 10\n"),
+            ("zero timeout", "block = 'b'\n{until}max_iter = 3\ntimeout = 0\n"),
+            ("huge max_iter", "block = 'b'\n{until}max_iter = 1000001\ntimeout = 10\n"),
+            ("unknown block", "block = 'nope'\n{until}max_iter = 3\ntimeout = 10\n"),
+            ("both block and body", "block = 'b'\n{until}max_iter = 3\ntimeout = 10\n[[step.body]]\nwait = 1\n"),
+            ("body without until", "[[step.body]]\nwait = 1\n"),
+            ("max_iter without until", "block = 'b'\nmax_iter = 3\n"),
+            ("timeout without until", "block = 'b'\ntimeout = 3\n"),
+            ("until without a body", "{until}max_iter = 3\ntimeout = 10\nwait = 1\n"),
+            ("loop with input", "block = 'b'\n{until}max_iter = 3\ntimeout = 10\npress = ['cross']\n"),
+            ("loop with wait_until", "block = 'b'\n{until}max_iter = 3\ntimeout = 10\nwait_until = { kind = 'flat' }\n"),
+            ("loop with a checkpoint", "block = 'b'\n{until}max_iter = 3\ntimeout = 10\ncheckpoint = 'c'\n"),
+            ("until kind not allowed", "block = 'b'\nuntil = { kind = 'audio', min_peak = 1 }\nmax_iter = 3\ntimeout = 10\n"),
+            ("until with expect_fail", "block = 'b'\nuntil = { kind = 'expr', expr = 'u8(X)', expect_fail = true }\nmax_iter = 3\ntimeout = 10\n"),
+            ("bad until expression", "block = 'b'\nuntil = { kind = 'expr', expr = 'u8(X) +' }\nmax_iter = 3\ntimeout = 10\n"),
+        ];
+        for (name, step) in cases {
+            let step = step.replace("{until}", until);
+            let text = format!("name = 'l'\n{blk}[[step]]\n{step}");
+            assert!(parse(&text).is_err(), "{name} should be rejected:\n{text}");
+        }
+        // The same loop with all its bounds is fine.
+        parse(&format!(
+            "name = 'l'\n{blk}[[step]]\nblock = 'b'\n{until}max_iter = 3\ntimeout = 10\n"
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn bodies_and_blocks_cannot_hold_checkpoints_asserts_cards_or_tapes() {
+        let until = "until = { kind = 'expr', expr = 'u8(X) == 1' }\nmax_iter = 3\ntimeout = 10\n";
+        for inner in [
+            "checkpoint = 'c'",
+            "wait = 1\n[[step.body.assert]]\nkind = 'presenting'",
+            "tape = 'a.pxtape'",
+            "card = { action = 'snapshot' }",
+        ] {
+            let inline = format!("name = 'l'\n[[step]]\n{until}[[step.body]]\n{inner}\n");
+            assert!(parse(&inline).is_err(), "{inner}");
+        }
+        let block = "name = 'l'\n[[block]]\nname = 'b'\n[[block.step]]\ncheckpoint = 'c'\n";
+        assert!(parse(block).is_err());
+    }
+
+    #[test]
+    fn blocks_must_be_unique_resolvable_acyclic_and_shallow() {
+        let b = |name: &str, call: &str| {
+            format!("[[block]]\nname = '{name}'\n[[block.step]]\nblock = '{call}'\n")
+        };
+        let leaf = "[[block]]\nname = 'leaf'\n[[block.step]]\nwait = 1\n";
+        // Duplicate, empty, bad name, self call, two block cycle, unknown call from a block.
+        assert!(parse(&format!("name = 'l'\n{leaf}{leaf}")).is_err());
+        assert!(parse("name = 'l'\n[[block]]\nname = 'e'\n").is_err());
+        assert!(parse("name = 'l'\n[[block]]\nname = 'a b'\n[[block.step]]\nwait = 1\n").is_err());
+        assert!(parse(&format!("name = 'l'\n{}", b("a", "a")))
+            .unwrap_err()
+            .contains("calls itself"));
+        let cycle = format!("name = 'l'\n{}{}", b("a", "b"), b("b", "a"));
+        assert!(parse(&cycle).unwrap_err().contains("calls itself"));
+        assert!(parse(&format!("name = 'l'\n{}", b("a", "ghost")))
+            .unwrap_err()
+            .contains("unknown block"));
+        // A chain of 7 calls is fine, a chain of 9 is too deep.
+        let chain = |n: usize| {
+            let mut t = String::from("name = 'l'\n[[step]]\nblock = 'c0'\n");
+            for i in 0..n {
+                t.push_str(&b(&format!("c{i}"), &format!("c{}", i + 1)));
+            }
+            t.push_str(&format!(
+                "[[block]]\nname = 'c{n}'\n[[block.step]]\nwait = 1\n"
+            ));
+            t
+        };
+        parse(&chain(6)).unwrap();
+        assert!(parse(&chain(9)).unwrap_err().contains("nest deeper"));
+    }
+
+    #[test]
+    fn a_block_without_until_runs_once_and_takes_no_bounds() {
+        let blk = "[[block]]\nname = 'b'\n[[block.step]]\nwait = 1\n";
+        parse(&format!("name = 'l'\n{blk}[[step]]\nblock = 'b'\n")).unwrap();
+        assert!(parse(&format!(
+            "name = 'l'\n{blk}[[step]]\nblock = 'b'\nmax_iter = 2\n"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn port_two_inside_a_body_still_needs_pad2() {
+        let text = "name = 'l'\n[[step]]\nuntil = { kind = 'expr', expr = 'u8(X)' }\nmax_iter = 2\ntimeout = 9\n[[step.body]]\nport = 2\npress = ['cross']\n";
+        assert!(parse(text).unwrap_err().contains("pad2"));
+        assert!(parse(&text.replace("name = 'l'", "name = 'l'\npad2 = 'analog'")).is_ok());
+    }
+
+    #[test]
+    fn when_guards_a_block_or_an_inline_body() {
+        let blk = "[[block]]\nname = 'b'\n[[block.step]]\nwait = 1\n";
+        let when = "when = { kind = 'expr', expr = 'u8(X) == 1' }\n";
+        for ok in [
+            format!("[[step]]\nblock = 'b'\n{when}"),
+            format!("[[step]]\n{when}[[step.body]]\nwait = 1\n"),
+            format!(
+                "[[step]]\nblock = 'b'\n{when}until = {{ kind = 'expr', expr = 'u8(X) == 0' }}\nmax_iter = 2\ntimeout = 9\n"
+            ),
+        ] {
+            parse(&format!("name = 'l'\n{blk}{ok}")).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        for bad in [
+            "[[step]]\nwait = 1\nwhen = { kind = 'expr', expr = 'u8(X)' }\n",
+            "[[step]]\nblock = 'b'\nwhen = { kind = 'audio', min_peak = 1 }\n",
+            "[[step]]\nblock = 'b'\nwhen = { kind = 'expr', expr = 'u8(X)', expect_fail = true }\n",
+            "[[step]]\nblock = 'b'\nwhen = { kind = 'expr', expr = 'u8(X) +' }\n",
+            "[[step]]\nblock = 'b'\nmax_iter = 2\nwhen = { kind = 'expr', expr = 'u8(X)' }\n",
+        ] {
+            assert!(parse(&format!("name = 'l'\n{blk}{bad}")).is_err(), "{bad}");
+        }
     }
 }

@@ -281,6 +281,146 @@ struct Run<'a> {
     /// wait pays for the parse and the symbol lookups once.
     exprs:
         std::cell::RefCell<std::collections::HashMap<String, Result<crate::expr::Program, String>>>,
+    /// Tick limits of the loops being run, outermost first.
+    deadlines: Deadlines,
+    /// Set by `tick` when it refused a tick because a loop's timeout ran out: the index in
+    /// `deadlines` of the outermost loop that expired.
+    expired: Option<usize>,
+    /// One entry per loop site, for the report.
+    loops: Vec<LoopStat>,
+}
+
+/// Where a step sits: its report name, how to say it in a message, and the loop site it counts
+/// under. A top-level step is `step 7`; a step in iteration 3 of that loop is `step 7.i3.2`.
+struct At {
+    name: String,
+    text: String,
+    site: String,
+}
+
+impl At {
+    fn top(index: usize, step: &Step) -> At {
+        let n = index + 1;
+        At {
+            name: format!("step {n}"),
+            text: format!("step {n}"),
+            site: format!("step {n}{}", tag(step)),
+        }
+    }
+
+    /// Step `j` (1-based) of the body of this loop step, in iteration `iter`.
+    fn child(&self, iter: u64, j: usize, step: &Step) -> At {
+        At {
+            name: format!("{}.i{iter}.{j}", self.name),
+            text: format!("{}, iteration {iter}, step {j}", self.text),
+            site: format!("{} > step {j}{}", self.site, tag(step)),
+        }
+    }
+}
+
+fn tag(step: &Step) -> String {
+    step.label
+        .as_deref()
+        .or(step.block.as_deref())
+        .map(|l| format!(" `{l}`"))
+        .unwrap_or_default()
+}
+
+/// What the report says of one loop site (a loop step, wherever it was reached from).
+struct LoopStat {
+    site: String,
+    limit: u64,
+    /// Iterations taken by each run of the loop (a nested loop runs once per outer iteration).
+    runs: Vec<u64>,
+    ticks: u64,
+    /// The last run aborted the journey.
+    failed: bool,
+}
+
+/// Tick limits of the loops in progress. A loop's timeout covers everything inside it, so the
+/// outer limits keep applying to the inner loops.
+struct Deadlines {
+    frames: Vec<u64>,
+    /// Smallest limit, `u64::MAX` with no loop, so the per-tick test is one comparison.
+    soonest: u64,
+}
+
+impl Default for Deadlines {
+    fn default() -> Deadlines {
+        Deadlines::new()
+    }
+}
+
+impl Deadlines {
+    fn new() -> Deadlines {
+        Deadlines {
+            frames: Vec::new(),
+            soonest: u64::MAX,
+        }
+    }
+
+    fn push(&mut self, limit: u64) {
+        self.frames.push(limit);
+        self.soonest = self.soonest.min(limit);
+    }
+
+    fn pop(&mut self) {
+        self.frames.pop();
+        self.soonest = self.frames.iter().copied().min().unwrap_or(u64::MAX);
+    }
+
+    /// The outermost loop whose limit `now` has reached.
+    fn expired(&self, now: u64) -> Option<usize> {
+        if now < self.soonest {
+            return None;
+        }
+        self.frames.iter().position(|&limit| now >= limit)
+    }
+}
+
+/// How a loop ended.
+#[derive(Debug, PartialEq, Eq)]
+enum LoopEnd {
+    /// `until` held after this many iterations.
+    Held(u64),
+    /// `until` was still false after `max_iter` iterations.
+    MaxIter(u64),
+    /// The loop's tick limit ran out.
+    TimedOut(u64),
+    /// Something inside failed (already reported there).
+    Failed(u64, String),
+}
+
+/// The loop control, apart from the machine: check `until` before each iteration, run the body,
+/// stop at `max_iter` or when the body fails. `timed_out` tells a body failure that is this
+/// loop's tick limit from any other.
+fn drive_loop<S>(
+    state: &mut S,
+    max_iter: u64,
+    mut holds: impl FnMut(&mut S) -> bool,
+    mut body: impl FnMut(&mut S, u64) -> Result<(), String>,
+    timed_out: impl Fn(&S) -> bool,
+) -> LoopEnd {
+    let mut iterations = 0;
+    loop {
+        if holds(state) {
+            return LoopEnd::Held(iterations);
+        }
+        if timed_out(state) {
+            return LoopEnd::TimedOut(iterations);
+        }
+        if iterations >= max_iter {
+            return LoopEnd::MaxIter(iterations);
+        }
+        iterations += 1;
+        if let Err(e) = body(state, iterations) {
+            return if timed_out(state) {
+                LoopEnd::TimedOut(iterations)
+            } else {
+                LoopEnd::Failed(iterations, e)
+            };
+        }
+    }
 }
 
 /// Run one journey. The disc fingerprint (a SHA-256 over the whole image) only labels the
@@ -427,9 +567,15 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         cards: Vec::new(),
         notes: Vec::new(),
         exprs: Default::default(),
+        deadlines: Deadlines::new(),
+        expired: None,
+        loops: Vec::new(),
     };
     run.m.release_pads();
     result.abort = run.play().err();
+    if let Some(group) = run.loop_group() {
+        run.groups.push(group);
+    }
     if let Some(observer) = &run.m.card_observer {
         result.notes.extend(observer.evidence());
     }
@@ -442,7 +588,7 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     result
 }
 
-impl Run<'_> {
+impl<'a> Run<'a> {
     fn card_step(&mut self, index: usize, step: &Step) -> Result<(), String> {
         if let Some(path) = &step.tape {
             let (tape, note) = load_step_tape(
@@ -669,6 +815,10 @@ impl Run<'_> {
     }
 
     fn tick(&mut self) -> Result<(), String> {
+        if let Some(frame) = self.deadlines.expired(self.m.ticks) {
+            self.expired = Some(frame);
+            return Err(format!("loop timeout reached at tick {}", self.m.ticks));
+        }
         if self.m.ticks >= self.journey.max_ticks {
             return Err(format!(
                 "journey exceeded max_ticks ({})",
@@ -701,8 +851,8 @@ impl Run<'_> {
     }
 
     fn play(&mut self) -> Result<(), String> {
-        let steps = &self.journey.steps;
-        for (i, step) in steps.iter().enumerate() {
+        let journey: &'a Journey = self.journey;
+        for (i, step) in journey.steps.iter().enumerate() {
             if let Some(log) = self.m.tick_log.as_mut() {
                 log.set_step(i as u64 + 1);
             }
@@ -717,13 +867,27 @@ impl Run<'_> {
                         .unwrap_or("")
                 );
             }
+            self.run_step(&At::top(i, step), Some(i), step)?;
+        }
+        Ok(())
+    }
+
+    /// One step. `top` is its index when it is a top-level step, the only place card actions,
+    /// tapes and checkpoints can be.
+    fn run_step(&mut self, at: &At, top: Option<usize>, step: &'a Step) -> Result<(), String> {
+        if let Some(i) = top {
             if step.card.is_some() || step.tape.is_some() {
                 self.card_step(i, step)?;
             }
-            self.input_and_wait(i, step)?;
-            if let Some(cond) = &step.wait_until {
-                self.wait_until(i, cond, step.timeout.unwrap_or(3600), "wait_until")?;
-            }
+        }
+        if step.is_composite() {
+            return self.composite(at, step);
+        }
+        self.input_and_wait(at, step)?;
+        if let Some(cond) = &step.wait_until {
+            self.wait_until(at, cond, step.timeout.unwrap_or(3600), "wait_until")?;
+        }
+        if let Some(i) = top {
             if step.checkpoint.is_some() || !step.asserts.is_empty() {
                 self.checkpoint(i, step);
             }
@@ -731,7 +895,152 @@ impl Run<'_> {
         Ok(())
     }
 
-    fn input_and_wait(&mut self, index: usize, step: &Step) -> Result<(), String> {
+    /// A block call (once) or a loop (`until`).
+    fn composite(&mut self, at: &At, step: &'a Step) -> Result<(), String> {
+        let journey: &'a Journey = self.journey;
+        let steps: &'a [Step] = match &step.block {
+            Some(name) => match journey.block(name) {
+                Some(b) => &b.steps,
+                None => return Err(format!("{}: unknown block `{name}`", at.text)),
+            },
+            None => &step.body,
+        };
+        if let Some(guard) = &step.when {
+            if !self.eval_wait(guard, false).0 {
+                if self.opts.verbose {
+                    eprintln!(
+                        "[gate] tick {:>6} {} skipped (when is false)",
+                        self.m.ticks, at.text
+                    );
+                }
+                return Ok(());
+            }
+        }
+        let Some(until) = &step.until else {
+            return self.run_body(at, steps, 1);
+        };
+        let max_iter = step.max_iter.unwrap_or(1);
+        let timeout = step.timeout.unwrap_or(1);
+        let start = self.m.ticks;
+        let depth = self.deadlines.frames.len();
+        self.deadlines.push(start.saturating_add(timeout));
+        let slot = self.loop_slot(&at.site, max_iter);
+        let end = drive_loop(
+            self,
+            max_iter,
+            |run| run.eval_wait(until, false).0,
+            |run, iteration| {
+                if run.opts.verbose {
+                    eprintln!(
+                        "[gate] tick {:>6} {} iteration {iteration}/{max_iter}",
+                        run.m.ticks, at.text
+                    );
+                }
+                run.run_body(at, steps, iteration)
+            },
+            |run| run.expired == Some(depth),
+        );
+        self.deadlines.pop();
+        let iterations = match &end {
+            LoopEnd::Held(n)
+            | LoopEnd::MaxIter(n)
+            | LoopEnd::TimedOut(n)
+            | LoopEnd::Failed(n, _) => *n,
+        };
+        let stat = &mut self.loops[slot];
+        stat.runs.push(iterations);
+        stat.ticks += self.m.ticks - start;
+        stat.failed = !matches!(end, LoopEnd::Held(_));
+        let what = tag(step);
+        match end {
+            LoopEnd::Held(_) => Ok(()),
+            LoopEnd::Failed(_, e) => Err(e),
+            LoopEnd::MaxIter(n) => {
+                let (_, detail) = self.eval_wait(until, true);
+                let msg = format!(
+                    "{}{what}: loop still false after max_iter {max_iter} iterations ({n} taken; {detail})",
+                    at.text
+                );
+                Err(self.freeze(at.name.clone(), "loop", msg))
+            }
+            LoopEnd::TimedOut(n) => {
+                self.expired = None;
+                let (_, detail) = self.eval_wait(until, true);
+                let msg = format!(
+                    "{}{what}: loop timed out after {timeout} ticks at iteration {n} of at most {max_iter} ({detail})",
+                    at.text
+                );
+                Err(self.freeze(at.name.clone(), "loop", msg))
+            }
+        }
+    }
+
+    /// The steps of a block or loop body, once.
+    fn run_body(&mut self, at: &At, steps: &'a [Step], iteration: u64) -> Result<(), String> {
+        for (j, step) in steps.iter().enumerate() {
+            let child = at.child(iteration, j + 1, step);
+            if self.opts.verbose && step.is_composite() {
+                eprintln!("[gate] tick {:>6} {}", self.m.ticks, child.text);
+            }
+            self.run_step(&child, None, step)?;
+        }
+        Ok(())
+    }
+
+    fn loop_slot(&mut self, site: &str, limit: u64) -> usize {
+        if let Some(i) = self.loops.iter().position(|l| l.site == site) {
+            return i;
+        }
+        self.loops.push(LoopStat {
+            site: site.to_string(),
+            limit,
+            runs: Vec::new(),
+            ticks: 0,
+            failed: false,
+        });
+        self.loops.len() - 1
+    }
+
+    /// One check per loop site: iterations per run, so a journey that starts needing more
+    /// iterations than it used to shows up in the report.
+    fn loop_group(&self) -> Option<Group> {
+        if self.loops.is_empty() {
+            return None;
+        }
+        let checks = self
+            .loops
+            .iter()
+            .map(|l| {
+                let total: u64 = l.runs.iter().sum();
+                let most = l.runs.iter().max().copied().unwrap_or(0);
+                let shown: Vec<String> = l.runs.iter().take(16).map(u64::to_string).collect();
+                let more = if l.runs.len() > 16 { ", ..." } else { "" };
+                Check {
+                    name: format!("loop {}", l.site),
+                    status: Status::Pass,
+                    detail: format!(
+                        "{total} iterations in {} run{} (most in one run {most}, limit {}), {} ticks inside; iterations per run: {}{more}{}",
+                        l.runs.len(),
+                        if l.runs.len() == 1 { "" } else { "s" },
+                        l.limit,
+                        l.ticks,
+                        shown.join(", "),
+                        if l.failed { "; the last run aborted the journey" } else { "" },
+                    ),
+                }
+            })
+            .collect();
+        Some(Group {
+            name: "loops".into(),
+            label: None,
+            tick: self.m.ticks,
+            capture: None,
+            checks,
+            wants_golden: false,
+        })
+    }
+
+    fn input_and_wait(&mut self, at: &At, step: &Step) -> Result<(), String> {
         if step.card.is_some() || step.tape.is_some() {
             return Ok(());
         }
@@ -759,7 +1068,7 @@ impl Run<'_> {
                 if let Some(cond) = &step.hold_until {
                     with_pad_release(
                         self,
-                        |run| run.wait_until(index, cond, step.timeout.unwrap(), "hold_until"),
+                        |run| run.wait_until(at, cond, step.timeout.unwrap(), "hold_until"),
                         |run| run.m.release_pads(),
                     )?;
                 } else {
@@ -774,7 +1083,7 @@ impl Run<'_> {
 
     fn wait_until(
         &mut self,
-        index: usize,
+        at: &At,
         cond: &Assert,
         timeout: u64,
         label: &str,
@@ -789,9 +1098,14 @@ impl Run<'_> {
         }
         let (_, detail) = self.eval_wait(cond, true);
         let msg = format!(
-            "step {}: {label} timed out after {timeout} ticks ({detail})",
-            index + 1,
+            "{}: {label} timed out after {timeout} ticks ({detail})",
+            at.text
         );
+        Err(self.freeze(at.name.clone(), label, msg))
+    }
+
+    /// Record a failure with the frame it froze on, and hand the message back as the error.
+    fn freeze(&mut self, name: String, label: &str, msg: String) -> String {
         let cpu = self.m.display_image();
         let (hw, hw_skip) = match &self.hw {
             Some(renderer) => match renderer.capture(&self.m.bus, cpu.w, cpu.h) {
@@ -801,7 +1115,7 @@ impl Run<'_> {
             None => (Vec::new(), None),
         };
         self.groups.push(Group {
-            name: format!("step {}", index + 1),
+            name,
             label: Some(label.into()),
             tick: self.m.ticks,
             capture: Some(Capture {
@@ -821,7 +1135,7 @@ impl Run<'_> {
             }],
             wants_golden: false,
         });
-        Err(msg)
+        msg
     }
 
     fn eval_wait(&self, cond: &Assert, explain: bool) -> (bool, String) {
@@ -1755,5 +2069,186 @@ mod tests {
         assert_eq!(result, Err("journey exceeded max_ticks".into()));
         assert_eq!(max_ticks.ticks, 1);
         assert!(!max_ticks.held && max_ticks.released);
+    }
+
+    /// A stand-in for the machine: `tick` advances a clock and refuses once a loop's limit is
+    /// reached, as `Run::tick` does.
+    #[derive(Default)]
+    struct Clock {
+        ticks: u64,
+        deadlines: Deadlines,
+        expired: Option<usize>,
+        /// Value `until` looks at.
+        done: u64,
+    }
+
+    impl Clock {
+        fn new() -> Clock {
+            Clock::default()
+        }
+
+        fn tick(&mut self) -> Result<(), String> {
+            if let Some(frame) = self.deadlines.expired(self.ticks) {
+                self.expired = Some(frame);
+                return Err("limit".into());
+            }
+            self.ticks += 1;
+            Ok(())
+        }
+
+        /// A loop like `Run::composite`: `until` is `done >= target`, each iteration runs `body`.
+        fn run_loop(
+            &mut self,
+            target: u64,
+            max_iter: u64,
+            timeout: u64,
+            mut body: impl FnMut(&mut Clock, u64) -> Result<(), String>,
+        ) -> LoopEnd {
+            let depth = self.deadlines.frames.len();
+            self.deadlines.push(self.ticks + timeout);
+            let end = drive_loop(
+                self,
+                max_iter,
+                |c| c.done >= target,
+                |c, i| body(c, i),
+                |c| c.expired == Some(depth),
+            );
+            self.deadlines.pop();
+            if matches!(end, LoopEnd::TimedOut(_)) {
+                self.expired = None;
+            }
+            end
+        }
+    }
+
+    #[test]
+    fn a_loop_whose_condition_already_holds_runs_zero_times() {
+        let mut c = Clock::new();
+        c.done = 5;
+        let end = c.run_loop(5, 3, 100, |c, _| c.tick());
+        assert_eq!(end, LoopEnd::Held(0));
+        assert_eq!(c.ticks, 0);
+    }
+
+    #[test]
+    fn a_loop_runs_until_the_condition_holds() {
+        let mut c = Clock::new();
+        let end = c.run_loop(4, 10, 1000, |c, _| {
+            c.done += 1;
+            c.tick()
+        });
+        assert_eq!(end, LoopEnd::Held(4));
+        assert_eq!(c.ticks, 4);
+    }
+
+    #[test]
+    fn the_condition_is_checked_after_the_last_allowed_iteration() {
+        let mut c = Clock::new();
+        let end = c.run_loop(3, 3, 1000, |c, _| {
+            c.done += 1;
+            Ok(())
+        });
+        assert_eq!(end, LoopEnd::Held(3));
+    }
+
+    #[test]
+    fn a_condition_still_false_after_max_iter_stops_the_loop() {
+        let mut c = Clock::new();
+        let end = c.run_loop(100, 3, 1000, |c, _| c.tick());
+        assert_eq!(end, LoopEnd::MaxIter(3));
+        assert_eq!(c.ticks, 3);
+    }
+
+    #[test]
+    fn a_failing_body_ends_the_loop_with_its_message() {
+        let mut c = Clock::new();
+        let end = c.run_loop(100, 10, 1000, |c, i| {
+            c.tick()?;
+            if i == 2 {
+                Err("step 1 wait_until timed out".into())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(
+            end,
+            LoopEnd::Failed(2, "step 1 wait_until timed out".into())
+        );
+    }
+
+    #[test]
+    fn the_timeout_counts_ticks_and_stops_the_body_mid_iteration() {
+        let mut c = Clock::new();
+        // Iterations of 5 ticks against a limit of 12: the third iteration is cut at tick 12.
+        let end = c.run_loop(100, 100, 12, |c, _| {
+            for _ in 0..5 {
+                c.tick()?;
+            }
+            Ok(())
+        });
+        assert_eq!(end, LoopEnd::TimedOut(3));
+        assert_eq!(c.ticks, 12);
+        assert!(c.deadlines.frames.is_empty());
+        assert_eq!(c.deadlines.soonest, u64::MAX);
+    }
+
+    #[test]
+    fn the_outer_timeout_cuts_an_inner_loop_that_has_time_left() {
+        let mut c = Clock::new();
+        let mut inner_end = None;
+        let end = c.run_loop(100, 100, 20, |c, _| {
+            // The inner loop alone would allow 1000 ticks.
+            let e = c.run_loop(100, 100, 1000, |c, _| c.tick());
+            inner_end = Some(e);
+            Ok(())
+        });
+        // The inner loop sees a failure that is not its own; the outer one calls it a timeout.
+        assert!(
+            matches!(inner_end, Some(LoopEnd::Failed(21, _))),
+            "{inner_end:?}"
+        );
+        assert_eq!(end, LoopEnd::TimedOut(1));
+    }
+
+    #[test]
+    fn nested_loops_each_keep_their_own_iteration_counts() {
+        let mut c = Clock::new();
+        let mut inner_runs = Vec::new();
+        let end = c.run_loop(3, 10, 1000, |c, _| {
+            let target = c.done + 1;
+            let mut taken = 0;
+            let e = c.run_loop(target, 10, 1000, |c, _| {
+                taken += 1;
+                if taken == 2 {
+                    c.done += 1;
+                }
+                c.tick()
+            });
+            inner_runs.push(e);
+            // The outer condition counts completed inner runs.
+            Ok(())
+        });
+        assert_eq!(end, LoopEnd::Held(3));
+        assert_eq!(
+            inner_runs,
+            vec![LoopEnd::Held(2), LoopEnd::Held(2), LoopEnd::Held(2)]
+        );
+    }
+
+    #[test]
+    fn deadlines_track_the_soonest_limit_through_push_and_pop() {
+        let mut d = Deadlines::new();
+        assert_eq!(d.expired(u64::MAX - 1), None);
+        d.push(50);
+        d.push(30);
+        d.push(80);
+        assert_eq!(d.expired(29), None);
+        assert_eq!(d.expired(30), Some(1));
+        d.pop();
+        d.pop();
+        assert_eq!(d.expired(49), None);
+        assert_eq!(d.expired(50), Some(0));
+        d.pop();
+        assert_eq!(d.soonest, u64::MAX);
     }
 }
