@@ -105,6 +105,12 @@ impl Default for PadAudit {
 }
 
 impl PadAudit {
+    /// The machine was rebooted: its polls count from zero again, with nothing pressed.
+    pub fn reboot(&mut self) {
+        self.seen = 0;
+        self.states = vec![!0];
+    }
+
     /// A pad state (button mask) takes effect now.
     fn set(&mut self, mask: u16) {
         let wire = !mask;
@@ -813,6 +819,21 @@ mod tests {
             .collect();
         assert!(polls.windows(2).all(|w| w[1] == w[0] + 1), "{polls:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_audit_keeps_counting_across_a_reboot() {
+        let mut audit = PadAudit::default();
+        audit.set(button::UP);
+        audit.judge(1, Some(!button::UP), 1);
+        audit.judge(2, Some(!button::UP), 2);
+        assert_eq!((audit.polls, audit.torn), (2, 0));
+        // The rebooted machine counts polls from zero and starts with nothing pressed.
+        audit.reboot();
+        audit.judge(1, Some(!0), 3);
+        assert_eq!((audit.polls, audit.torn), (3, 0));
+        audit.judge(2, Some(!button::UP), 4);
+        assert_eq!(audit.torn, 1, "UP was not set since the reboot");
     }
 
     #[test]

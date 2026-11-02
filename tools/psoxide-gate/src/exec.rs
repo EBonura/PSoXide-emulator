@@ -860,6 +860,8 @@ impl<'a> Run<'a> {
                 }
                 let ticks = self.m.ticks;
                 let tick_log = self.m.tick_log.take();
+                // The audit counts across the reboot; its poll count starts over with the machine.
+                let pad_audit = self.m.pad_audit.take();
                 self.m = Machine::boot(&Boot {
                     disc: &self.opts.disc,
                     pad: self.journey.pad,
@@ -869,6 +871,10 @@ impl<'a> Run<'a> {
                     track_display: self.journey.uses_display_history(),
                 })?;
                 self.m.tick_log = tick_log;
+                self.m.pad_audit = pad_audit.map(|mut audit| {
+                    audit.reboot();
+                    audit
+                });
                 if let Some(log) = self.m.tick_log.as_mut() {
                     log.reboot();
                 }
