@@ -719,7 +719,7 @@ impl<'a> Run<'a> {
                         finished = true;
                         break;
                     }
-                    match self.to_poll(poll_end) {
+                    match self.run_to_poll(poll_end) {
                         Ok(true) => {}
                         Ok(false) => break,
                         Err(error) => {
@@ -947,9 +947,9 @@ impl<'a> Run<'a> {
 
     /// Run to the start of the next pad poll: `Ok(true)` stopped on one, `Ok(false)` the machine
     /// reached tick `until_tick` first. A tick a stop leaves open is finished by the next
-    /// `tick` or `to_poll`, so ticks, history, hardware frames and the tick log are the same
+    /// `tick` or `run_to_poll`, so ticks, history, hardware frames and the tick log are the same
     /// as without the stop.
-    fn to_poll(&mut self, until_tick: u64) -> Result<bool, String> {
+    fn run_to_poll(&mut self, until_tick: u64) -> Result<bool, String> {
         loop {
             if !self.m.tick_open() && self.m.ticks >= until_tick {
                 return Ok(false);
@@ -1255,7 +1255,14 @@ impl<'a> Run<'a> {
                 if let Some(cond) = &step.hold_until {
                     with_pad_release(
                         self,
-                        |run| run.wait_until_poll(at, cond, step.timeout.unwrap(), "hold_until"),
+                        |run| {
+                            run.wait_until_poll(
+                                at,
+                                cond,
+                                step.timeout.expect("validated: hold_until has a timeout"),
+                                "hold_until",
+                            )
+                        },
                         |run| run.m.release_pads_at_poll(),
                     )?;
                 } else {
@@ -1271,7 +1278,7 @@ impl<'a> Run<'a> {
     /// Stand on a poll start: stay if the machine already does, else run to the next.
     /// `until_tick` bounds the run; the game never polling before it is an error.
     fn on_poll(&mut self, until_tick: u64) -> Result<(), String> {
-        if !self.m.is_at_poll() && !self.to_poll(until_tick)? {
+        if !self.m.is_at_poll() && !self.run_to_poll(until_tick)? {
             return Err("the game made no pad poll in time".into());
         }
         Ok(())
@@ -1284,7 +1291,7 @@ impl<'a> Run<'a> {
     fn polls(&mut self, n: u64) -> Result<(), String> {
         let target = self.m.bus.port1_completed_polls().saturating_add(n);
         while self.m.bus.port1_completed_polls() < target {
-            self.to_poll(u64::MAX)?;
+            self.run_to_poll(u64::MAX)?;
         }
         Ok(())
     }
@@ -1304,7 +1311,7 @@ impl<'a> Run<'a> {
         if self.m.is_at_poll() && self.eval_wait(cond, false).0 {
             return Ok(());
         }
-        while self.to_poll(end)? {
+        while self.run_to_poll(end)? {
             if self.eval_wait(cond, false).0 {
                 return Ok(());
             }
