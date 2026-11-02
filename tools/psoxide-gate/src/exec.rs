@@ -174,6 +174,8 @@ pub struct RunOptions {
     /// Write the per-tick CSV here (see `tick_log`).
     pub tick_log: Option<PathBuf>,
     pub tick_log_ram: Vec<crate::tick_log::WordSpec>,
+    /// Check every pad poll for a torn read (see `Machine::pad_audit`).
+    pub audit_pad: bool,
     pub journey_path: PathBuf,
     pub artifact_dir: PathBuf,
 }
@@ -252,6 +254,36 @@ fn load_step_tape(
         tape.samples.len()
     );
     Ok((tape, note))
+}
+
+impl crate::machine::PadAudit {
+    /// The report group: one check that no poll was read torn.
+    fn group(&self, tick: u64) -> Group {
+        let detail = match &self.first_torn {
+            None => format!("{} pad polls, none torn", self.polls),
+            Some((at, word, states)) => format!(
+                "{} of {} pad polls torn; the first at tick {at}: the game read {word:#06x}, \
+                 the pad had been set to {:04x?} while it ran",
+                self.torn, self.polls, states
+            ),
+        };
+        Group {
+            name: "pad audit".into(),
+            label: None,
+            tick,
+            capture: None,
+            checks: vec![Check {
+                name: "no torn pad poll".into(),
+                status: if self.torn == 0 {
+                    Status::Pass
+                } else {
+                    Status::Fail
+                },
+                detail,
+            }],
+            wants_golden: false,
+        }
+    }
 }
 
 fn replay_complete(
@@ -553,6 +585,9 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
             }
         }
     }
+    if opts.audit_pad {
+        m.pad_audit = Some(Default::default());
+    }
     let trace = opts.trace_failures.then(crate::trace::Trace::new);
     let mut run = Run {
         journey,
@@ -579,6 +614,9 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     if let Some(observer) = &run.m.card_observer {
         result.notes.extend(observer.evidence());
     }
+    if let Some(audit) = &run.m.pad_audit {
+        run.groups.push(audit.group(run.m.ticks));
+    }
     result.notes.extend(run.notes);
     result.cards = run.cards;
     result.ticks = run.m.ticks;
@@ -591,6 +629,13 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
 impl<'a> Run<'a> {
     fn card_step(&mut self, index: usize, step: &Step) -> Result<(), String> {
         if let Some(path) = &step.tape {
+            if step.at_poll() {
+                // A synchronous tape starts on a poll start: its first sample must not land
+                // inside one, and a rebased tape counts from the poll the machine stands on.
+                let limit = self.m.ticks.saturating_add(step.timeout.unwrap_or(3600));
+                self.on_poll(limit)
+                    .map_err(|e| format!("step {}: tape cannot start: {e}", index + 1))?;
+            }
             let (tape, note) = load_step_tape(
                 &self.opts.repo_root.join(path),
                 path,
@@ -653,27 +698,54 @@ impl<'a> Run<'a> {
             let tape_end_poll = self.m.tape.as_ref().map(tape_end).transpose()?;
             let mut finished = false;
             let mut run_error = None;
-            for _ in 0..timeout {
-                let injected_complete = self.m.tape.is_none()
-                    && self.m.injected.is_some()
-                    && self
-                        .m
-                        .card_observer
-                        .as_ref()
-                        .is_some_and(|o| o.target_observed);
-                if replay_complete(
-                    tape_end_poll,
-                    self.m.bus.port1_completed_polls(),
-                    self.m.cut.is_some(),
-                    self.m.cut_hit.is_some(),
-                    injected_complete,
-                ) {
-                    finished = true;
-                    break;
+            if step.at_poll() {
+                // A synchronous step looks at the replay once per poll and stops at the start of
+                // the first poll after the one that read the last sample, whatever video frame
+                // that falls in.
+                let poll_end = self.m.ticks.saturating_add(timeout);
+                loop {
+                    if replay_complete(
+                        tape_end_poll,
+                        self.m.bus.port1_completed_polls(),
+                        false,
+                        false,
+                        false,
+                    ) {
+                        finished = true;
+                        break;
+                    }
+                    match self.to_poll(poll_end) {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(error) => {
+                            run_error = Some(error);
+                            break;
+                        }
+                    }
                 }
-                if let Err(error) = self.tick() {
-                    run_error = Some(error);
-                    break;
+            } else {
+                for _ in 0..timeout {
+                    let injected_complete = self.m.tape.is_none()
+                        && self.m.injected.is_some()
+                        && self
+                            .m
+                            .card_observer
+                            .as_ref()
+                            .is_some_and(|o| o.target_observed);
+                    if replay_complete(
+                        tape_end_poll,
+                        self.m.bus.port1_completed_polls(),
+                        self.m.cut.is_some(),
+                        self.m.cut_hit.is_some(),
+                        injected_complete,
+                    ) {
+                        finished = true;
+                        break;
+                    }
+                    if let Err(error) = self.tick() {
+                        run_error = Some(error);
+                        break;
+                    }
                 }
             }
             let injected_complete = self.m.tape.is_none()
@@ -691,7 +763,11 @@ impl<'a> Run<'a> {
                 injected_complete,
             );
             self.m.tape = None;
-            self.m.release_pads();
+            if step.at_poll() {
+                self.m.release_pads_at_poll();
+            } else {
+                self.m.release_pads();
+            }
             if let Some(error) = run_error {
                 return Err(error);
             }
@@ -814,7 +890,8 @@ impl<'a> Run<'a> {
         Ok(())
     }
 
-    fn tick(&mut self) -> Result<(), String> {
+    /// The checks before a tick may start: an expired loop deadline, the journey's tick cap.
+    fn tick_guard(&mut self) -> Result<(), String> {
         if let Some(frame) = self.deadlines.expired(self.m.ticks) {
             self.expired = Some(frame);
             return Err(format!("loop timeout reached at tick {}", self.m.ticks));
@@ -825,13 +902,25 @@ impl<'a> Run<'a> {
                 self.journey.max_ticks
             ));
         }
+        Ok(())
+    }
+
+    /// What happens before a tick's first instruction (nothing again when `advance` left the
+    /// tick open and goes on with it).
+    fn tick_start(&mut self) {
+        if self.m.tick_open() {
+            return;
+        }
         if let Some(hw) = self.hw.as_mut() {
             hw.before_tick(&self.m.bus);
         }
         if self.trace.is_some() {
             self.m.bus.gpu.clear_pixel_owner_stamps();
         }
-        self.m.tick()?;
+    }
+
+    /// What happens after a tick's last instruction.
+    fn tick_finish(&mut self) {
         if let Some(trace) = self.trace.as_mut() {
             trace.record(self.m.ticks, &self.m.bus.gpu);
         }
@@ -839,6 +928,44 @@ impl<'a> Run<'a> {
             hw.after_tick(&mut self.m.bus);
         } else if self.trace.is_some() {
             self.m.bus.gpu.drain_completed_cmd_log();
+        }
+    }
+
+    /// Run one tick, or the rest of the one a poll stop left open.
+    fn tick(&mut self) -> Result<(), String> {
+        self.tick_guard()?;
+        self.tick_start();
+        self.m.tick()?;
+        self.tick_finish();
+        Ok(())
+    }
+
+    /// Run to the start of the next pad poll: `Ok(true)` stopped on one, `Ok(false)` the machine
+    /// reached tick `until_tick` first. A tick a stop leaves open is finished by the next
+    /// `tick` or `to_poll`, so ticks, history, hardware frames and the tick log are the same
+    /// as without the stop.
+    fn to_poll(&mut self, until_tick: u64) -> Result<bool, String> {
+        loop {
+            if !self.m.tick_open() && self.m.ticks >= until_tick {
+                return Ok(false);
+            }
+            self.tick_guard()?;
+            self.tick_start();
+            let advance = self.m.advance(true)?;
+            if advance.tick_done {
+                self.tick_finish();
+            }
+            if advance.at_poll {
+                return Ok(true);
+            }
+        }
+    }
+
+    /// Finish the tick a poll stop left open, so a step that works on whole ticks (a frame
+    /// wait, a checkpoint) starts where it always did.
+    fn settle(&mut self) -> Result<(), String> {
+        if self.m.tick_open() {
+            self.tick()?;
         }
         Ok(())
     }
@@ -869,12 +996,15 @@ impl<'a> Run<'a> {
             }
             self.run_step(&At::top(i, step), Some(i), step)?;
         }
-        Ok(())
+        self.settle()
     }
 
     /// One step. `top` is its index when it is a top-level step, the only place card actions,
     /// tapes and checkpoints can be.
     fn run_step(&mut self, at: &At, top: Option<usize>, step: &'a Step) -> Result<(), String> {
+        if !step.is_composite() && !step.at_poll() {
+            self.settle()?;
+        }
         if let Some(i) = top {
             if step.card.is_some() || step.tape.is_some() {
                 self.card_step(i, step)?;
@@ -885,10 +1015,16 @@ impl<'a> Run<'a> {
         }
         self.input_and_wait(at, step)?;
         if let Some(cond) = &step.wait_until {
-            self.wait_until(at, cond, step.timeout.unwrap_or(3600), "wait_until")?;
+            let timeout = step.timeout.unwrap_or(3600);
+            if step.at_poll() {
+                self.wait_until_poll(at, cond, timeout, "wait_until")?;
+            } else {
+                self.wait_until(at, cond, timeout, "wait_until")?;
+            }
         }
         if let Some(i) = top {
             if step.checkpoint.is_some() || !step.asserts.is_empty() {
+                self.settle()?;
                 self.checkpoint(i, step);
             }
         }
@@ -1044,6 +1180,9 @@ impl<'a> Run<'a> {
         if step.card.is_some() || step.tape.is_some() {
             return Ok(());
         }
+        if step.at_poll() {
+            return self.input_and_wait_polls(at, step);
+        }
         let repeat = step.repeat.unwrap_or(1).max(1);
         for _ in 0..repeat {
             if step.has_input() {
@@ -1079,6 +1218,95 @@ impl<'a> Run<'a> {
             self.ticks(step.wait.unwrap_or(0))?;
         }
         Ok(())
+    }
+
+    /// `input_and_wait` for a synchronous step (`sync = "poll"`), in the game's own unit: the
+    /// pad is set as a poll starts, whole, and `hold` and `wait` count polls (one per
+    /// simulation tick of a game that reads the pad once per tick) instead of video frames.
+    /// The step starts on the first poll start at or after the point it is reached, so a
+    /// run of synchronous steps goes from poll to poll with no poll between them.
+    fn input_and_wait_polls(&mut self, at: &At, step: &Step) -> Result<(), String> {
+        let repeat = step.repeat.unwrap_or(1).max(1);
+        for _ in 0..repeat {
+            self.on_poll(u64::MAX)?;
+            if step.has_input() {
+                let port = step.port.unwrap_or(1);
+                let held = |press: &[String]| press.iter().fold(0u16, |m, b| m | button_mask(b));
+                if !step.press.is_empty() || step.lstick.is_some() || step.rstick.is_some() {
+                    self.m.set_pad_at_poll(
+                        port,
+                        held(&step.press),
+                        step.lstick.unwrap_or(Machine::centre()),
+                        step.rstick.unwrap_or(Machine::centre()),
+                    );
+                }
+                if let Some(o) = &step.other {
+                    self.m.set_pad_at_poll(
+                        if port == 2 { 1 } else { 2 },
+                        held(&o.press),
+                        o.lstick.unwrap_or(Machine::centre()),
+                        o.rstick.unwrap_or(Machine::centre()),
+                    );
+                }
+                if let Some(cond) = &step.hold_until {
+                    with_pad_release(
+                        self,
+                        |run| run.wait_until_poll(at, cond, step.timeout.unwrap(), "hold_until"),
+                        |run| run.m.release_pads_at_poll(),
+                    )?;
+                } else {
+                    self.polls(step.hold.unwrap_or(4))?;
+                    self.m.release_pads_at_poll();
+                }
+            }
+            self.polls(step.wait.unwrap_or(0))?;
+        }
+        Ok(())
+    }
+
+    /// Stand on a poll start: stay if the machine already does, else run to the next.
+    /// `until_tick` bounds the run; the game never polling before it is an error.
+    fn on_poll(&mut self, until_tick: u64) -> Result<(), String> {
+        if !self.m.is_at_poll() && !self.to_poll(until_tick)? {
+            return Err("the game made no pad poll in time".into());
+        }
+        Ok(())
+    }
+
+    /// Let `n` more pad polls complete.
+    fn polls(&mut self, n: u64) -> Result<(), String> {
+        for _ in 0..n {
+            self.to_poll(u64::MAX)?;
+        }
+        Ok(())
+    }
+
+    /// `wait_until` for a synchronous step: the condition is read as each pad poll starts
+    /// (and at once when the machine already stands on one), and the step ends on the poll
+    /// that satisfied it, not at the end of the video frame around it. `timeout` counts ticks
+    /// as always; a condition that never holds at a poll fails, with no last look between polls.
+    fn wait_until_poll(
+        &mut self,
+        at: &At,
+        cond: &Assert,
+        timeout: u64,
+        label: &str,
+    ) -> Result<(), String> {
+        let end = self.m.ticks.saturating_add(timeout);
+        if self.m.is_at_poll() && self.eval_wait(cond, false).0 {
+            return Ok(());
+        }
+        while self.to_poll(end)? {
+            if self.eval_wait(cond, false).0 {
+                return Ok(());
+            }
+        }
+        let (_, detail) = self.eval_wait(cond, true);
+        let msg = format!(
+            "{}: {label} timed out after {timeout} ticks ({detail})",
+            at.text
+        );
+        Err(self.freeze(at.name.clone(), label, msg))
     }
 
     fn wait_until(

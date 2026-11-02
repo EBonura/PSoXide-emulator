@@ -217,6 +217,11 @@ pub struct Step {
     /// Input for the other port, held at the same time (two-player play).
     #[serde(default)]
     pub other: Option<Input>,
+    /// `"poll"`: act on the game's own pad polls instead of on video frames, counting `hold`
+    /// and `wait` in polls (see `Step::at_poll`). `"frame"` (the default) is the original
+    /// behaviour.
+    #[serde(default)]
+    pub sync: Option<String>,
     /// Ticks the input stays down (default 4, enough for one pad poll).
     #[serde(default)]
     pub hold: Option<u64>,
@@ -625,6 +630,17 @@ impl Step {
             || self.other.is_some()
     }
 
+    /// The step is synchronous to the game's pad polls (`sync = "poll"`): its pad changes take
+    /// effect between two polls, never in the middle of one; its `hold`, `wait`, `hold_until`,
+    /// `wait_until` and tape count and look at pad polls instead of video frames, so
+    /// what it does depends on the game's own tick count and not on which frame of a burst
+    /// the gate happened to look at. A poll is looked at as it starts, before the game reads a
+    /// button from it. The step ends on the poll that satisfied it, and a step
+    /// after it that is also synchronous starts on that same poll. `timeout` stays in ticks.
+    pub fn at_poll(&self) -> bool {
+        self.sync.as_deref() == Some("poll")
+    }
+
     /// A step that runs other steps: a block call or a loop.
     pub fn is_composite(&self) -> bool {
         self.block.is_some() || !self.body.is_empty()
@@ -683,6 +699,42 @@ impl Step {
         }
         if self.hold.is_some() && !self.has_input() {
             return Err("`hold` needs press, lstick or rstick".into());
+        }
+        if let Some(sync) = &self.sync {
+            if !["poll", "frame"].contains(&sync.as_str()) {
+                return Err("`sync` must be \"poll\" or \"frame\"".into());
+            }
+            if self.at_poll() {
+                if self.is_composite() {
+                    return Err("`sync` goes on the input, wait_until and tape steps, not on a block or loop".into());
+                }
+                if self.card.is_some() {
+                    return Err("`sync = \"poll\"` does not apply to card actions".into());
+                }
+                if !(self.has_input()
+                    || self.wait.is_some()
+                    || self.wait_until.is_some()
+                    || self.tape.is_some())
+                {
+                    return Err(
+                        "`sync = \"poll\"` needs press, lstick, rstick, wait, wait_until or tape"
+                            .into(),
+                    );
+                }
+                for (key, cond) in [
+                    ("hold_until", self.hold_until.as_ref()),
+                    ("wait_until", self.wait_until.as_ref()),
+                ] {
+                    if let Some(c) = cond {
+                        if !["ram", "expr"].contains(&c.kind.as_str()) {
+                            return Err(format!(
+                                "`sync = \"poll\"` reads guest RAM between polls: {key} must be ram or expr, not {}",
+                                c.kind
+                            ));
+                        }
+                    }
+                }
+            }
         }
         if self.timeout.is_some()
             && self.wait_until.is_none()
@@ -1350,5 +1402,48 @@ block = 'kill_one'
         ] {
             assert!(parse(&format!("name = 'l'\n{blk}{bad}")).is_err(), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+
+    fn parse(text: &str) -> Result<Journey, String> {
+        let j: Journey = toml::from_str(text).map_err(|e| e.to_string())?;
+        j.validate()?;
+        Ok(j)
+    }
+
+    #[test]
+    fn synchronous_steps_parse_and_a_step_without_sync_is_frame_based() {
+        let j = parse(
+            "name = 'p'\n[[step]]\nsync = 'poll'\nlstick = [0, 128]\n\
+             hold_until = { kind = 'expr', expr = 'u8(X) == 1' }\ntimeout = 60\n\
+             [[step]]\nsync = 'poll'\nwait = 3\n\
+             [[step]]\nsync = 'poll'\nwait_until = { kind = 'ram', sym = 'X', op = 'eq', value = 1 }\n\
+             [[step]]\nsync = 'frame'\nwait = 3\n[[step]]\nwait = 3\n",
+        )
+        .unwrap();
+        let polled: Vec<bool> = j.steps.iter().map(Step::at_poll).collect();
+        assert_eq!(polled, [true, true, true, false, false]);
+    }
+
+    #[test]
+    fn sync_needs_input_a_wait_or_a_tape_and_a_ram_condition() {
+        let bad = |step: &str| {
+            parse(&format!("name = 'p'\n[[step]]\nsync = 'poll'\n{step}")).unwrap_err()
+        };
+        assert!(bad("checkpoint = 'c'").contains("needs press"));
+        assert!(bad("lstick = [0, 128]\nhold_until = { kind = 'pixels', region = {x=0,y=0,w=1,h=1}, color = [0,0,0], min_count = 1 }\ntimeout = 5")
+            .contains("ram or expr"));
+        assert!(bad("wait_until = { kind = 'flat' }").contains("ram or expr"));
+        assert!(bad("card = { action = 'snapshot' }").contains("card"));
+        assert!(parse("name = 'p'\n[[step]]\nsync = 'bogus'\nwait = 1\n")
+            .unwrap_err()
+            .contains("poll"));
+        assert!(parse("name = 'p'\n[[block]]\nname = 'b'\n[[block.step]]\nwait = 1\n[[step]]\nsync = 'poll'\nblock = 'b'\n")
+            .unwrap_err()
+            .contains("not on a block"));
     }
 }

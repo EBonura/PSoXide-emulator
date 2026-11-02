@@ -215,6 +215,9 @@ Steps are tables, run in order:
   success, timeout and guest error; `wait` can add rest after release. RAM and
   pixel conditions use the same fields as assertions. `expr` conditions work too. `hold`, `repeat`,
   `wait_until`, tapes and card actions cannot share this step.
+- **Poll-synchronous steps.** `sync = "poll"` on an input, `wait`, `wait_until` or tape step
+  makes it act on the game's own pad polls instead of on video frames. See "Poll-synchronous
+  steps" below. Without it a step behaves exactly as it always did.
 - **Block or loop.** `block = "name"` runs a `[[block]]` (a named list of steps) once. Add
   `until`, `max_iter` and `timeout` and it repeats until the condition holds; see Loops and
   blocks below. An inline `[[step.body]]` list does the same without a name.
@@ -396,6 +399,53 @@ iterations``.
 A failure inside the body names the nested step: `step 7, iteration 12, step 3: hold_until
 timed out ...`; its frame is saved as `step 7.i12.3`. The loop sites in the `loops` group are
 named by path: ``step 7 `fight` > step 3 `kill```.
+
+### Poll-synchronous steps
+
+A gate tick is one video frame. A game that reads the pad once per simulation tick (HL, HK, OoT)
+ticks in bursts of one to four frames when a frame runs long, so what a per-frame look at the
+game sees depends on the CD and render phase: `hold_until` ended a stick leg one tick early or
+late depending on the boot, and a pad set between two ticks of the gate could land between the
+two button bytes of a poll (the d-pad byte before it, the face-button byte after it), so the
+game read Square a tick before Up. `sync = "poll"` removes both:
+
+```toml
+[[step]]                       # walk forward until x >= 512, judged once per pad poll
+sync = "poll"
+lstick = [128, 0]
+hold_until = { kind = "expr", expr = "i32(PLAYER_X) >= 512" }
+timeout = 600                  # ticks (video frames), as ever
+```
+
+- A poll starts when the pad takes the command byte of a port-1 poll (0x42); the gate stops the CPU
+  on that instruction, before any button byte is exchanged. The game's state is then what its last
+  simulation tick left and the poll about to be read is the one that tick will act on. A step
+  starts on a poll start: at once if the previous step ended on one, else on the next. Its pad is
+  set there, whole (no poll can read the d-pad byte of the old pad and the face-button byte of the
+  new one), and that very poll is the first to read it.
+- `hold` and `wait` count polls, not frames (a game that polls once per simulation tick: sim
+  ticks). `hold_until` and `wait_until` read guest RAM (`ram` and `expr` only) as each poll starts
+  and end on the poll that satisfied them; the pad is released on that poll, so a leg ends with no
+  tick of delay (a per-frame look ends it with none or one, by phase). A following synchronous
+  step starts on the same poll, so a chain of legs has no poll between them, and the game's
+  reaction does not depend on which frame of a burst the gate happened to look at.
+- A tape with `sync = "poll"` starts on a poll start (a rebased one counts from the polls done by
+  then, so its first sample is read by that very poll) and ends on the start of the poll after the one
+  that read its last sample.
+- `timeout` stays in ticks and is a bound only. A condition that never holds at a poll fails;
+  there is no last look between polls.
+- A step without `sync` (or with `sync = "frame"`) first finishes the tick a synchronous step left
+  open, then runs as before; a journey with no `sync` runs the same instructions, ticks and
+  `--tick-log` rows as without the feature (the emulated machine is not touched: the gate only
+  stops the CPU at a poll and resumes it, which the tape player already did).
+- A synchronous step must be reachable by a game that polls: a game that never polls the pad
+  fails the step at `timeout` (or the journey at `max_ticks`).
+- A condition that holds for many ticks (`SIM_NOW < 64`) ends the step at the first poll that sees
+  it; anchor a chain on a condition that becomes true at one moment (a map id, a counter reaching
+  a value) when the poll it ends on must be the same on every boot.
+
+Games differ in polls per simulation tick: measure with `--tick-log` (`polls` column) against the
+game's own tick counter before relying on `hold`/`wait` counts.
 
 The report ends with a `loops` group: one check per loop site with the iterations of each run
 (an inner loop runs once per outer pass), the total, the limit and the ticks spent. Read it

@@ -126,6 +126,11 @@ struct RunArgs {
     /// (symbols come from the journey). Read off the bus, so the run is unchanged.
     #[arg(long, requires = "tick_log", value_delimiter = ',')]
     tick_log_ram: Vec<String>,
+    /// Check every port-1 pad poll for a torn read (the d-pad byte of one pad state with the
+    /// face-button byte of another, which a pad written between two bytes of a poll gives) and
+    /// fail the journey if there is one. Needs a single target. A step with `sync = "poll"` cannot tear.
+    #[arg(long)]
+    audit_pad: bool,
     /// Print each step as it starts (the tick-log tool reads the step names from this).
     #[arg(short, long)]
     verbose: bool,
@@ -349,6 +354,7 @@ struct Opts {
     trace_checkpoint: Vec<String>,
     tick_log: Option<PathBuf>,
     tick_log_ram: Vec<tick_log::WordSpec>,
+    audit_pad: bool,
     out: PathBuf,
 }
 
@@ -373,6 +379,7 @@ impl Opts {
             trace_checkpoint: a.trace_checkpoint.clone(),
             tick_log: a.tick_log.clone(),
             tick_log_ram: words,
+            audit_pad: a.audit_pad,
             out: a.out.clone(),
         })
     }
@@ -420,6 +427,7 @@ fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
             trace_checkpoint: o.trace_checkpoint.clone(),
             tick_log: o.tick_log.clone(),
             tick_log_ram: o.tick_log_ram.clone(),
+            audit_pad: o.audit_pad,
             journey_path: job.journey_path.clone(),
             artifact_dir: o.out.join(&journey.name).join("cards"),
         },
@@ -561,6 +569,7 @@ fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
         trace_checkpoint: Vec::new(),
         tick_log: None,
         tick_log_ram: Vec::new(),
+        audit_pad: false,
         out: a.out.clone(),
     };
     let r = run_planned(job, &fleet, &opts);

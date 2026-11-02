@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- psoxide-gate journeys can act on the game's pad polls instead of video frames: `sync = "poll"` on an input,
+  `wait`, `wait_until` or tape step sets the pad only between two polls (a poll can no longer read the d-pad byte of
+  the old pad and the face-button byte of the new one), counts `hold` and `wait` in polls, and reads
+  `hold_until`/`wait_until` as each poll starts, so a closed-loop walk no longer depends on which frame of a
+  simulation-tick burst the gate looked at. Opt-in per step; journeys without it run the same ticks and tick logs
+  as before and the emulated machine is untouched. See TESTING.md, Poll-synchronous steps.
 - psoxide-gate journeys can test guest RAM with integer expressions: `kind = "expr"` in an assert, `wait_until` or
   `hold_until`, with typed reads at symbol plus offset, array indexing, `let`, `any`/`all`/`count`/`sum`/`min`/`max`
   loops over a table, and the usual arithmetic, comparison and logic. A guest publishes raw values and the gate
