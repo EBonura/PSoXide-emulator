@@ -174,6 +174,8 @@ pub struct RunOptions {
     /// Write the per-tick CSV here (see `tick_log`).
     pub tick_log: Option<PathBuf>,
     pub tick_log_ram: Vec<crate::tick_log::WordSpec>,
+    /// One tick-log row per pad poll instead of per tick.
+    pub tick_log_polls: bool,
     /// Check every pad poll for a torn read (see `Machine::pad_audit`).
     pub audit_pad: bool,
     pub journey_path: PathBuf,
@@ -577,7 +579,10 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     }
     if let Some(path) = &opts.tick_log {
         match crate::tick_log::TickLog::create(path, &opts.tick_log_ram, &syms) {
-            Ok(log) => m.tick_log = Some(log),
+            Ok(mut log) => {
+                log.per_poll = opts.tick_log_polls;
+                m.tick_log = Some(log);
+            }
             Err(e) => {
                 result.abort = Some(e);
                 result.wall = start.elapsed();
@@ -1024,7 +1029,6 @@ impl<'a> Run<'a> {
         }
         if let Some(i) = top {
             if step.checkpoint.is_some() || !step.asserts.is_empty() {
-                self.settle()?;
                 self.checkpoint(i, step);
             }
         }
@@ -1273,9 +1277,13 @@ impl<'a> Run<'a> {
         Ok(())
     }
 
-    /// Let `n` more pad polls complete.
+    /// Let `n` more pad polls complete, ending on the start of the next. A poll the game
+    /// rejects and asks for again (`reader.poll()` does, on a garbled transfer) starts twice and
+    /// completes once; it counts once, so the pad is held for the same simulation ticks whatever
+    /// the transfers did, which the number of poll starts does not give.
     fn polls(&mut self, n: u64) -> Result<(), String> {
-        for _ in 0..n {
+        let target = self.m.bus.port1_completed_polls().saturating_add(n);
+        while self.m.bus.port1_completed_polls() < target {
             self.to_poll(u64::MAX)?;
         }
         Ok(())

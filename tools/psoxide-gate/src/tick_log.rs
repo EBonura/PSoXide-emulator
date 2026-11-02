@@ -97,6 +97,10 @@ pub struct TickLog {
     last_cpu: u64,
     /// Bus cycle at which each stage in `STAGES` began, while it is open.
     open: [Option<u64>; STAGES.len()],
+    /// One row per port-1 poll start instead of one per tick (`--tick-log-polls`). The row is
+    /// written on the instruction that took the command byte, so it holds the state the poll's
+    /// simulation tick is about to act on, whatever video frame it falls in.
+    pub per_poll: bool,
 }
 
 impl TickLog {
@@ -131,6 +135,7 @@ impl TickLog {
             last_cycles: 0,
             last_cpu: 0,
             open: [None; STAGES.len()],
+            per_poll: false,
         })
     }
 

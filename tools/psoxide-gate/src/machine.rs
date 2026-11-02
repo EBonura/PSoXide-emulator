@@ -404,7 +404,9 @@ impl Machine {
                 .min(if fine { 1 } else { PC_CHUNK })
                 .max(1);
             let watch_tape = self.tape.is_some() || self.pad_audit.is_some();
-            let watch_starts = stop_at_poll || self.pending_pads.iter().any(Option::is_some);
+            let per_poll_log = self.tick_log.as_ref().is_some_and(|l| l.per_poll);
+            let watch_starts =
+                stop_at_poll || per_poll_log || self.pending_pads.iter().any(Option::is_some);
             let (ran, result) = if fine {
                 (1, self.cpu.step(&mut self.bus))
             } else {
@@ -482,6 +484,9 @@ impl Machine {
             if started {
                 self.seen_starts = poll_starts(&self.bus);
                 self.apply_pending_pads();
+                if let Some(log) = self.tick_log.as_mut().filter(|l| l.per_poll) {
+                    log.record(self.ticks, &mut self.bus, self.cpu.tick(), false);
+                }
             }
             at_poll = started && watch_starts;
             if let Some((command, byte_index, occurrence)) = self.cut {
@@ -538,7 +543,7 @@ impl Machine {
         } else {
             false
         };
-        if let Some(log) = self.tick_log.as_mut() {
+        if let Some(log) = self.tick_log.as_mut().filter(|l| !l.per_poll) {
             log.record(self.ticks, &mut self.bus, self.cpu.tick(), flipped);
         }
         self.history.push(TickRec {
@@ -776,6 +781,38 @@ mod tests {
         );
         assert_eq!(latched.torn, 0);
         assert!(loose.first_torn.is_some());
+    }
+
+    #[test]
+    fn a_per_poll_tick_log_has_a_row_for_every_poll_start() {
+        let dir = std::env::temp_dir().join(format!("poll-log-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("polls.csv");
+        let symbols = crate::symbols::Symbols::default();
+        let mut log = crate::tick_log::TickLog::create(&path, &[], &symbols).unwrap();
+        log.per_poll = true;
+        let mut m = machine_with(&polling_guest());
+        m.tick_log = Some(log);
+        for _ in 0..5 {
+            m.tick().unwrap();
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        // The poll in progress when the last tick ends has started and not completed.
+        let started = m.bus.port1_completed_polls() as usize;
+        assert!(
+            rows.len() == started || rows.len() == started + 1,
+            "{} rows, {started} polls",
+            rows.len()
+        );
+        assert!(rows.len() > 100);
+        // Column 8 is the completed-poll count, so the rows count up by one.
+        let polls: Vec<u64> = rows
+            .iter()
+            .map(|r| r.split(',').nth(7).unwrap().parse().unwrap())
+            .collect();
+        assert!(polls.windows(2).all(|w| w[1] == w[0] + 1), "{polls:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

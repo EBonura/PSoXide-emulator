@@ -634,7 +634,9 @@ impl Step {
     /// effect between two polls, never in the middle of one; its `hold`, `wait`, `hold_until`,
     /// `wait_until` and tape count and look at pad polls instead of video frames, so
     /// what it does depends on the game's own tick count and not on which frame of a burst
-    /// the gate happened to look at. A poll is looked at as it starts, before the game reads a
+    /// the gate happened to look at. A checkpoint or assert on such a step is taken where the
+    /// previous step ended, without finishing the video frame around it, so the step after it
+    /// still starts on the same poll. A poll is looked at as it starts, before the game reads a
     /// button from it. The step ends on the poll that satisfied it, and a step
     /// after it that is also synchronous starts on that same poll. `timeout` stays in ticks.
     pub fn at_poll(&self) -> bool {
@@ -710,16 +712,6 @@ impl Step {
                 }
                 if self.card.is_some() {
                     return Err("`sync = \"poll\"` does not apply to card actions".into());
-                }
-                if !(self.has_input()
-                    || self.wait.is_some()
-                    || self.wait_until.is_some()
-                    || self.tape.is_some())
-                {
-                    return Err(
-                        "`sync = \"poll\"` needs press, lstick, rstick, wait, wait_until or tape"
-                            .into(),
-                    );
                 }
                 for (key, cond) in [
                     ("hold_until", self.hold_until.as_ref()),
@@ -1430,11 +1422,15 @@ mod sync_tests {
     }
 
     #[test]
-    fn sync_needs_input_a_wait_or_a_tape_and_a_ram_condition() {
+    fn sync_wants_a_ram_condition_and_no_card_or_block() {
         let bad = |step: &str| {
             parse(&format!("name = 'p'\n[[step]]\nsync = 'poll'\n{step}")).unwrap_err()
         };
-        assert!(bad("checkpoint = 'c'").contains("needs press"));
+        assert!(bad("timeout = 5").contains("does nothing"));
+        assert!(
+            parse("name = 'p'\n[[step]]\nsync = 'poll'\ncheckpoint = 'c'\ngolden = false\n")
+                .is_ok()
+        );
         assert!(bad("lstick = [0, 128]\nhold_until = { kind = 'pixels', region = {x=0,y=0,w=1,h=1}, color = [0,0,0], min_count = 1 }\ntimeout = 5")
             .contains("ram or expr"));
         assert!(bad("wait_until = { kind = 'flat' }").contains("ram or expr"));

@@ -122,6 +122,11 @@ struct RunArgs {
     /// One target only. `tools/psoxide-frametime` turns it into frame-time pages.
     #[arg(long, value_name = "PATH")]
     tick_log: Option<PathBuf>,
+    /// Write the tick log with one row per pad poll (as it starts) instead of one per tick: the
+    /// state each simulation tick of a polling game is about to act on, which the same journey
+    /// under another boot phase repeats row for row when its steps are `sync = "poll"`.
+    #[arg(long, requires = "tick_log")]
+    tick_log_polls: bool,
     /// RAM words to add to the tick log as columns: `NAME=SYMBOL+OFFSET` or `NAME=0xADDR`
     /// (symbols come from the journey). Read off the bus, so the run is unchanged.
     #[arg(long, requires = "tick_log", value_delimiter = ',')]
@@ -354,6 +359,7 @@ struct Opts {
     trace_checkpoint: Vec<String>,
     tick_log: Option<PathBuf>,
     tick_log_ram: Vec<tick_log::WordSpec>,
+    tick_log_polls: bool,
     audit_pad: bool,
     out: PathBuf,
 }
@@ -379,6 +385,7 @@ impl Opts {
             trace_checkpoint: a.trace_checkpoint.clone(),
             tick_log: a.tick_log.clone(),
             tick_log_ram: words,
+            tick_log_polls: a.tick_log_polls,
             audit_pad: a.audit_pad,
             out: a.out.clone(),
         })
@@ -427,6 +434,7 @@ fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
             trace_checkpoint: o.trace_checkpoint.clone(),
             tick_log: o.tick_log.clone(),
             tick_log_ram: o.tick_log_ram.clone(),
+            tick_log_polls: o.tick_log_polls,
             audit_pad: o.audit_pad,
             journey_path: job.journey_path.clone(),
             artifact_dir: o.out.join(&journey.name).join("cards"),
@@ -569,6 +577,7 @@ fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
         trace_checkpoint: Vec::new(),
         tick_log: None,
         tick_log_ram: Vec::new(),
+        tick_log_polls: false,
         audit_pad: false,
         out: a.out.clone(),
     };

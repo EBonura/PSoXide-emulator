@@ -423,8 +423,9 @@ timeout = 600                  # ticks (video frames), as ever
   starts on a poll start: at once if the previous step ended on one, else on the next. Its pad is
   set there, whole (no poll can read the d-pad byte of the old pad and the face-button byte of the
   new one), and that very poll is the first to read it.
-- `hold` and `wait` count polls, not frames (a game that polls once per simulation tick: sim
-  ticks). `hold_until` and `wait_until` read guest RAM (`ram` and `expr` only) as each poll starts
+- `hold` and `wait` count completed polls, not frames (a game that polls once per simulation
+  tick: sim ticks). A poll the game rejects and asks for again starts twice and completes once;
+  it counts once, and the pad set on its first start serves the retry. `hold_until` and `wait_until` read guest RAM (`ram` and `expr` only) as each poll starts
   and end on the poll that satisfied them; the pad is released on that poll, so a leg ends with no
   tick of delay (a per-frame look ends it with none or one, by phase). A following synchronous
   step starts on the same poll, so a chain of legs has no poll between them, and the game's
@@ -445,7 +446,15 @@ timeout = 600                  # ticks (video frames), as ever
   a value) when the poll it ends on must be the same on every boot.
 
 Games differ in polls per simulation tick: measure with `--tick-log` (`polls` column) against the
-game's own tick counter before relying on `hold`/`wait` counts.
+game's own tick counter before relying on `hold`/`wait` counts. HL and HK poll once per simulation
+tick.
+
+Two diagnostics go with it. `--tick-log-polls` (with `--tick-log`) writes one row per poll start
+instead of one per tick: the state each simulation tick is about to act on, so two runs of the same
+journey under different boot phases compare row for row (a retried poll adds a row with the same
+`polls` value). `--audit-pad` judges every completed port-1 poll against the pad states set while it
+ran and fails the journey on a button word that is none of them (a d-pad byte from one state and a
+face-button byte from another); it works on any journey, with or without `sync`.
 
 The report ends with a `loops` group: one check per loop site with the iterations of each run
 (an inner loop runs once per outer pass), the total, the limit and the ticks spent. Read it
