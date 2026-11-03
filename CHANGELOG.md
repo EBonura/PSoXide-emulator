@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Opt-in hardware targets: `--hardware mister` (or `PSOXIDE_HARDWARE=mister`, also on `psoxide-gate run`) emulates the MiSTer PSX core as run on a SuperStation One, where GP0(1Fh) mostly never raises GPUSTAT bit 24 or I_STAT bit 1 (an idle GPU always loses it; one big triangle or rect ahead of it passes; chains of draws almost always lose it; VRAM copies are a coin), so a game that waits for the flag runs at 2 FPS or hangs, as on the console. Models `gpu-irq=core|parity|exact|never` and a seed are options; `real` (the default) is unchanged: route logs and display hashes are byte-identical. See docs/hardware-targets.md.
 - Opt-in entry states for disc boot: `--entry-state openbios` (modelled on what PCSX-Redux OpenBIOS leaves: its exception vector with the handler moved, DPCR/DICR, SPU volumes and control, CD single-speed mode, RAM not zeroed) and `--entry-state hostile[:SEED]` (every item a BIOS may leave differently, randomised from a fixed seed, with `skip=CATEGORY` to bisect), on the frontend and `psoxide-gate run`, or `PSOXIDE_ENTRY_STATE`. A program that depends on state a BIOS leaves fails under them as it would on a console with another BIOS. The default boot is unchanged (per-tick route logs byte-identical on ten discs). See docs/entry-states.md.
 - psoxide-gate journeys can act on the game's pad polls instead of video frames: `sync = "poll"` on an input,
   `wait`, `wait_until` or tape step sets the pad only between two polls (a poll can no longer read the d-pad byte of

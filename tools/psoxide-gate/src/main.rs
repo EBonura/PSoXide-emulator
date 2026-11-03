@@ -143,6 +143,13 @@ struct RunArgs {
     /// regression; the default run stays the reference.
     #[arg(long, value_name = "SPEC")]
     entry_state: Option<String>,
+    /// Hardware target: `real` (default) or `mister` (the MiSTer PSX core on a
+    /// SuperStation One), with `gpu-irq=`, `seed=` and `trace=` options
+    /// (docs/hardware-targets.md). Same as `PSOXIDE_HARDWARE`. Goldens are
+    /// recorded on `real`; a difference under `mister` is a finding about the
+    /// program on that core.
+    #[arg(long, value_name = "SPEC")]
+    hardware: Option<String>,
     /// Print each step as it starts (the tick-log tool reads the step names from this).
     #[arg(short, long)]
     verbose: bool,
@@ -492,6 +499,17 @@ fn cmd_run(a: &RunArgs) -> Result<ExitCode, String> {
         // Before any journey thread starts: the boot reads it.
         std::env::set_var(emulator_core::entry_state::ENV_VAR, spec);
     }
+    if let Some(spec) = &a.hardware {
+        emulator_core::HardwareTarget::from_spec(spec)?;
+        // Before any journey thread starts: every GPU reads it when it is built.
+        std::env::set_var(emulator_core::hardware_target::ENV_VAR, spec);
+    }
+    if emulator_core::HardwareTarget::from_env().differs_from_real() {
+        eprintln!(
+            "[gate] hardware target {:?}: differences from the goldens are findings about the program on that core",
+            emulator_core::HardwareTarget::from_env()
+        );
+    }
     if emulator_core::EntryState::from_env() != emulator_core::EntryState::Default {
         eprintln!(
             "[gate] entry state {}: differences from the goldens are findings about the program",
@@ -571,6 +589,9 @@ fn cmd_run(a: &RunArgs) -> Result<ExitCode, String> {
 fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
     if emulator_core::EntryState::from_env() != emulator_core::EntryState::Default {
         return Err("bless runs on the default entry state: unset PSOXIDE_ENTRY_STATE".into());
+    }
+    if emulator_core::HardwareTarget::from_env().differs_from_real() {
+        return Err("bless runs on the real hardware target: unset PSOXIDE_HARDWARE".into());
     }
     let (planned, fleet) = plan(&a.target, &a.common)?;
     if a.target == "all" || planned.len() != 1 {

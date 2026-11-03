@@ -28,6 +28,7 @@ pub mod fastboot;
 pub mod freelook;
 pub mod gpu;
 pub mod guest_stats;
+pub mod hardware_target;
 pub mod hle_asm;
 pub mod hle_bios;
 pub mod hle_bu;
@@ -69,6 +70,7 @@ pub use entry_state::EntryState;
 pub use fastboot::{fast_boot_disc, fast_boot_disc_with};
 pub use freelook::FreelookState;
 pub use gpu::{Deinterlace, DisplayArea, Gpu};
+pub use hardware_target::HardwareTarget;
 pub use input_tape::{
     game_image_hash, game_image_hash_parts, read_tape, tape_from_bytes, tape_from_csv, tape_to_csv,
     write_tape, GameImageHasher, PadSample,

@@ -180,6 +180,19 @@ fn main() {
         // Before any thread exists: the boot reads it.
         std::env::set_var(emulator_core::entry_state::ENV_VAR, spec);
     }
+    if let Some(spec) = &cli.hardware {
+        // Checked here so a typo stops the run instead of running as a retail console.
+        if let Err(e) = emulator_core::HardwareTarget::from_spec(spec) {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+        // Before any thread exists: every GPU reads it when it is built.
+        std::env::set_var(emulator_core::hardware_target::ENV_VAR, spec);
+    }
+    let target = emulator_core::HardwareTarget::from_env();
+    if target.differs_from_real() {
+        eprintln!("[hardware] target: {} ({target:?})", target.name());
+    }
     if cli.command.is_some() {
         if let Err(e) = cli::run(cli) {
             eprintln!("error: {e}");

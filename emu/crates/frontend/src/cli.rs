@@ -87,6 +87,15 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "SPEC")]
     pub entry_state: Option<String>,
 
+    /// Hardware target: `real` (the retail console, default) or `mister`
+    /// (the MiSTer PSX core as run on a SuperStation One: GP0(1Fh) mostly
+    /// never raises GPUSTAT bit 24 or I_STAT bit 1). Options follow after
+    /// commas: `gpu-irq=never|core|parity`, `seed=N`, `trace=N`. Same as
+    /// setting `PSOXIDE_HARDWARE`; see docs/hardware-targets.md. Applies to
+    /// the GUI and to every subcommand.
+    #[arg(long, global = true, value_name = "SPEC")]
+    pub hardware: Option<String>,
+
     /// Launch the GUI in a regular floating window instead of the
     /// default borderless-fullscreen mode. Useful when developing
     /// with the editor side-by-side with a terminal or docs. Only
