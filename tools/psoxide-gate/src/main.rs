@@ -136,6 +136,13 @@ struct RunArgs {
     /// fail the journey if there is one. Needs a single target. A step with `sync = "poll"` cannot tear.
     #[arg(long)]
     audit_pad: bool,
+    /// Entry state the boot hands each program: `default`, `openbios` or
+    /// `hostile[:SEED]`, with `,skip=CATEGORY` and `,dpcr=`/`,dicr=`/`,imask=`
+    /// options (docs/entry-states.md). Same as `PSOXIDE_ENTRY_STATE`. A
+    /// golden mismatch under a non-default state is the finding, not a
+    /// regression; the default run stays the reference.
+    #[arg(long, value_name = "SPEC")]
+    entry_state: Option<String>,
     /// Print each step as it starts (the tick-log tool reads the step names from this).
     #[arg(short, long)]
     verbose: bool,
@@ -480,6 +487,17 @@ fn print_failures(r: &JourneyResult, all: bool) {
 }
 
 fn cmd_run(a: &RunArgs) -> Result<ExitCode, String> {
+    if let Some(spec) = &a.entry_state {
+        emulator_core::EntryState::from_spec(spec)?;
+        // Before any journey thread starts: the boot reads it.
+        std::env::set_var(emulator_core::entry_state::ENV_VAR, spec);
+    }
+    if emulator_core::EntryState::from_env() != emulator_core::EntryState::Default {
+        eprintln!(
+            "[gate] entry state {}: differences from the goldens are findings about the program",
+            emulator_core::EntryState::from_env().spec()
+        );
+    }
     if a.strict && a.no_hw {
         return Err("--strict requires hardware rendering; remove --no-hw".into());
     }
@@ -551,6 +569,9 @@ fn cmd_run(a: &RunArgs) -> Result<ExitCode, String> {
 }
 
 fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
+    if emulator_core::EntryState::from_env() != emulator_core::EntryState::Default {
+        return Err("bless runs on the default entry state: unset PSOXIDE_ENTRY_STATE".into());
+    }
     let (planned, fleet) = plan(&a.target, &a.common)?;
     if a.target == "all" || planned.len() != 1 {
         return Err(

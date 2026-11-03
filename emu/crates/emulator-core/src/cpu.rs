@@ -967,6 +967,16 @@ impl Cpu {
         self.set_gpr(5, argv);
     }
 
+    /// Values a BIOS leaves in registers a program must not depend on:
+    /// each `(index, value)` pair, then HI and LO.
+    pub(crate) fn seed_entry_scratch(&mut self, regs: &[(u8, u32)], hi: u32, lo: u32) {
+        for (index, value) in regs {
+            self.set_gpr(*index, *value);
+        }
+        self.hi = hi;
+        self.lo = lo;
+    }
+
     /// Set `$fp` after [`Self::seed_from_exe_with_args`], for the disc boot
     /// case where the BIOS leaves it different from `$sp`.
     pub(crate) fn seed_frame_pointer(&mut self, fp: u32) {

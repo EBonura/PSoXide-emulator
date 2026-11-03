@@ -171,6 +171,15 @@ fn main() {
     // Clap's derive API panics with a nicely-formatted message on
     // bad arguments, which is exactly what a CLI user expects.
     let cli = Cli::parse();
+    if let Some(spec) = &cli.entry_state {
+        // Checked here so a typo stops the run instead of booting the default.
+        if let Err(e) = emulator_core::EntryState::from_spec(spec) {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+        // Before any thread exists: the boot reads it.
+        std::env::set_var(emulator_core::entry_state::ENV_VAR, spec);
+    }
     if cli.command.is_some() {
         if let Err(e) = cli::run(cli) {
             eprintln!("error: {e}");

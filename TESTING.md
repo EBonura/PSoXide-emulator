@@ -65,6 +65,10 @@ The fleet manifest is `tools/psoxide-gate/fleet.toml`: library entry, repo, and
 journey path per first-party game. A game without a journey shows as MISSING.
 Third-party titles are covered by the emulator's `validate` manifests instead.
 
+## Entry states
+
+The gate boots on the retail-modelled HLE state, so a program that depends on state a BIOS leaves (vector words, DMA priorities, SPU volumes, CD mode, zeroed RAM) cannot fail it. `--entry-state openbios` and `--entry-state hostile[:SEED]` (or `PSOXIDE_ENTRY_STATE`) boot the same journeys on another documented state; see `docs/entry-states.md`. A golden mismatch under one is a finding about the program, not a regression, and `bless` refuses to run with one set. Every PSoXide program must work on every Sony BIOS and on OpenBIOS, so a release candidate runs its journey under `hostile` for several seeds.
+
 ## The report
 
 `index.html` is a contact sheet. Each checkpoint writes a labeled matrix PNG:

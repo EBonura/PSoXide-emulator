@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Opt-in entry states for disc boot: `--entry-state openbios` (modelled on what PCSX-Redux OpenBIOS leaves: its exception vector with the handler moved, DPCR/DICR, SPU volumes and control, CD single-speed mode, RAM not zeroed) and `--entry-state hostile[:SEED]` (every item a BIOS may leave differently, randomised from a fixed seed, with `skip=CATEGORY` to bisect), on the frontend and `psoxide-gate run`, or `PSOXIDE_ENTRY_STATE`. A program that depends on state a BIOS leaves fails under them as it would on a console with another BIOS. The default boot is unchanged (per-tick route logs byte-identical on ten discs). See docs/entry-states.md.
 - psoxide-gate journeys can act on the game's pad polls instead of video frames: `sync = "poll"` on an input,
   `wait`, `wait_until` or tape step sets the pad only between two polls (a poll can no longer read the d-pad byte of
   the old pad and the face-button byte of the new one), counts `hold` and `wait` in polls, and reads

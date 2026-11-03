@@ -79,6 +79,14 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub config_dir: Option<PathBuf>,
 
+    /// Entry state the disc boot hands the program: `default` (the retail-
+    /// modelled HLE state), `openbios` (modelled on PCSX-Redux OpenBIOS) or
+    /// `hostile[:SEED]` (every item BIOSes may differ on, randomised from a
+    /// fixed seed). Same as setting `PSOXIDE_ENTRY_STATE`; see
+    /// docs/entry-states.md. Applies to the GUI and to every subcommand.
+    #[arg(long, global = true, value_name = "SPEC")]
+    pub entry_state: Option<String>,
+
     /// Launch the GUI in a regular floating window instead of the
     /// default borderless-fullscreen mode. Useful when developing
     /// with the editor side-by-side with a terminal or docs. Only

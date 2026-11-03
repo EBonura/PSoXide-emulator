@@ -57,6 +57,7 @@ HLE change.
 | `hle_bios.rs` | dispatch, per-call cycle costs, the host printf and libc functions | psx-spx function descriptions. Cycle costs are measured, see below |
 | `bios_names.rs` | the name shown for each A, B and C function | psx-spx "BIOS Function Summary" |
 | `system_cnf.rs`, `fastboot.rs` | SYSTEM.CNF parsing and the state a game is entered in | psx-spx, and the entry state measured by the census |
+| `entry_state.rs` | opt-in alternative entry states (`PSOXIDE_ENTRY_STATE`): an OpenBIOS-modelled one and a seeded randomised one | numbers only. The OpenBIOS values are register stores read as constants from the ROM image by campaign lane hwtest-1103 and from a disassembly of the same few init routines (no OpenBIOS source or code was read, none is in the tree); the randomised ranges are PSoXide's own. See docs/entry-states.md |
 
 ### Choices psx-spx leaves open
 

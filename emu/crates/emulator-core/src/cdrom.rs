@@ -2970,6 +2970,13 @@ xa_filter=({},{}) sched_cycle={} read_lba={} now={} pending=[{}]",
         byte
     }
 
+    /// Mode byte and interrupt-enable mask a boot leaves in the controller
+    /// (Setmode and the INT enable register); see `crate::entry_state`.
+    pub(crate) fn apply_entry_state(&mut self, mode: u8, irq_mask: u8) {
+        self.mode = mode;
+        self.irq_mask = irq_mask & 0x1f;
+    }
+
     /// Put the head on `lba` without reading: where a boot loader left the
     /// drive when the executable it loaded starts.
     pub fn park_head(&mut self, lba: u32) {

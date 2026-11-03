@@ -975,6 +975,34 @@ impl Spu {
         self.write16(TRANSFER_CTRL, 0x0004);
     }
 
+    /// SPU state a disc executable finds under a BIOS other than the retail
+    /// one (or under one the hostile entry state invents): every register
+    /// the profile names, with the control mirror settled the way
+    /// [`Self::apply_retail_bios_shell_audio_profile`] leaves it.
+    pub(crate) fn apply_entry_profile(&mut self, p: &crate::entry_state::SpuEntry) {
+        self.write16(MAIN_VOL_L, p.main_l);
+        self.write16(MAIN_VOL_R, p.main_r);
+        self.write16(REVERB_VOL_L, p.reverb_l);
+        self.write16(REVERB_VOL_R, p.reverb_r);
+        self.write16(REVERB_BASE, p.reverb_base);
+        self.write16(EON_LO, p.eon as u16);
+        self.write16(EON_HI, (p.eon >> 16) as u16);
+        self.write16(EXT_VOL_L, p.ext_l);
+        self.write16(EXT_VOL_R, p.ext_r);
+        self.write16(CD_VOL_L, p.cd_l);
+        self.write16(CD_VOL_R, p.cd_r);
+        self.write16(TRANSFER_ADDR, p.transfer_addr);
+        self.write16(TRANSFER_CTRL, p.transfer_ctrl);
+        for (index, value) in p.reverb_cfg.iter().enumerate() {
+            self.write16(REVERB_CFG_BASE + index as u32 * 2, *value);
+        }
+        self.spucnt = p.spucnt;
+        self.spustat_control = p.spucnt & 0x003f;
+        self.spustat_control_pending = None;
+        self.spustat = (self.spustat & !0x083f) | self.spustat_control;
+        self.reverb.reset_output();
+    }
+
     /// Advance the noise generator by one SPU sample (PSX-SPX "SPU Noise
     /// Generator"). SPUCNT bits 13..10 are the shift and bits 9..8 the step
     /// (4 to 7). Every sample the timer drops by the step; when it goes

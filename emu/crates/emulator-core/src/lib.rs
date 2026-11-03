@@ -23,6 +23,7 @@ pub mod bus;
 pub mod cdrom;
 pub mod cpu;
 pub mod dma;
+pub mod entry_state;
 pub mod fastboot;
 pub mod freelook;
 pub mod gpu;
@@ -64,7 +65,8 @@ pub use cpu::{
     Cpu, CpuCycleProfileSnapshot, InstructionCacheMissKind, InstructionCacheProfileSnapshot,
     InstructionCacheRefillEvent, InstructionClassProfileSnapshot,
 };
-pub use fastboot::fast_boot_disc;
+pub use entry_state::EntryState;
+pub use fastboot::{fast_boot_disc, fast_boot_disc_with};
 pub use freelook::FreelookState;
 pub use gpu::{Deinterlace, DisplayArea, Gpu};
 pub use input_tape::{

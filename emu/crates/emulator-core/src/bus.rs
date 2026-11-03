@@ -645,10 +645,7 @@ impl Bus {
         let Ok(spec) = std::env::var("PSOXIDE_POISON_MEM") else {
             return;
         };
-        let byte = match spec.trim() {
-            "" | "1" | "true" | "yes" => 0xaa,
-            s => u8::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or(0xaa),
-        };
+        let byte = Self::poison_byte(&spec);
         self.ram.fill(byte);
         self.ram_pages.touch_all();
         self.scratchpad.fill(byte);
@@ -811,6 +808,48 @@ impl Bus {
     /// the HLE path that has no BIOS shell to program it.
     pub fn apply_hle_entry_audio_profile(&mut self) {
         self.spu.apply_hle_entry_audio_profile();
+    }
+
+    /// Byte named by a `PSOXIDE_POISON_MEM` value (`1`/`true`/`yes`/empty is `0xAA`).
+    pub(crate) fn poison_byte(spec: &str) -> u8 {
+        match spec.trim() {
+            "" | "1" | "true" | "yes" => 0xaa,
+            s => u8::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or(0xaa),
+        }
+    }
+
+    /// Overwrite `len` bytes of RAM from `start_addr` (any segment) with
+    /// bytes from `next`. Entry states use this for memory a BIOS leaves
+    /// undefined.
+    pub(crate) fn fill_ram_with(
+        &mut self,
+        start_addr: u32,
+        len: usize,
+        mut next: impl FnMut() -> u8,
+    ) {
+        let start = (start_addr & 0x001f_ffff) as usize;
+        let end = (start + len).min(memory::ram::SIZE);
+        if end <= start {
+            return;
+        }
+        for byte in &mut self.ram[start..end] {
+            *byte = next();
+        }
+        self.ram_pages.touch_range(start, end - start);
+    }
+
+    /// Overwrite the scratchpad with bytes from `next`.
+    pub(crate) fn fill_scratchpad_with(&mut self, mut next: impl FnMut() -> u8) {
+        for byte in self.scratchpad.iter_mut() {
+            *byte = next();
+        }
+    }
+
+    /// Overwrite VRAM with halfwords from `next`.
+    pub(crate) fn fill_vram_with(&mut self, mut next: impl FnMut() -> u16) {
+        for word in self.gpu.vram.words_mut().iter_mut() {
+            *word = next();
+        }
     }
 
     /// Load DICR verbatim, including the write-1-to-clear flag bits a

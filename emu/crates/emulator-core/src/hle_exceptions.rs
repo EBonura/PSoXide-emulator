@@ -220,7 +220,14 @@ pub const HANDLER_SLOTS: u32 = 0x70;
 /// ReturnFromException. When all chains are done, the exit buffer
 /// (HookEntryInt) is jumped through with `v0` = 1.
 fn assemble_handler() -> Vec<u32> {
-    let mut a = Asm::new(crate::hle_kernel::EXCEPTION_HANDLER);
+    assemble_handler_at(crate::hle_kernel::EXCEPTION_HANDLER)
+}
+
+/// [`assemble_handler`] placed at `base` instead of the retail address, for
+/// entry states that keep the handler somewhere else (see
+/// [`relocate_handler`]).
+fn assemble_handler_at(base: u32) -> Vec<u32> {
+    let mut a = Asm::new(base);
     for _ in 0..4 {
         a.nop();
     }
@@ -230,7 +237,7 @@ fn assemble_handler() -> Vec<u32> {
     a.lw(K0, 0, K0);
     a.nop();
     a.addi(K0, K0, tcb::REGS as i16);
-    debug_assert_eq!(a.here(), crate::hle_kernel::EXCEPTION_HANDLER + 0x28);
+    debug_assert_eq!(a.here(), base + 0x28);
     a.sw(AT, 4 * AT as i16, K0);
     a.sw(V0, 4 * V0 as i16, K0);
     a.sw(V1, 4 * V1 as i16, K0);
@@ -239,7 +246,7 @@ fn assemble_handler() -> Vec<u32> {
     a.nop();
     a.mfc0(V0, 13);
     a.nop();
-    while a.here() < crate::hle_kernel::EXCEPTION_HANDLER + HANDLER_SLOTS {
+    while a.here() < base + HANDLER_SLOTS {
         a.nop();
     }
     for _ in 0..16 {
@@ -737,16 +744,82 @@ fn write_words(bus: &mut Bus, base: u32, words: &[u32]) {
 /// Map", garbage area: games read [0..9], and R-Type needs the halfword at
 /// 0 to be nonzero).
 pub fn install_vector(bus: &mut Bus) {
-    let handler = crate::hle_kernel::EXCEPTION_HANDLER;
+    // C(06h) names the handler; it is the retail address unless an entry
+    // state moved it (see `relocate_handler`).
+    let handler = peek32(bus, crate::hle_kernel::C0_TABLE + 4 * 6);
+    install_vector_form(bus, handler, VectorForm::LuiAddiuJr);
+}
+
+/// How the general exception vector reaches its handler. A BIOS may use any
+/// of these; the retail kernel uses `LuiAddiuJr`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VectorForm {
+    /// `lui k0,hi; addiu k0,k0,lo; jr k0; nop`
+    LuiAddiuJr,
+    /// `lui k0,hi; ori k0,k0,lo; jr k0; nop`
+    LuiOriJr,
+    /// `j target; nop; nop; nop`
+    Jump,
+}
+
+/// Write the vector at 80h (and its copy at 0) so it reaches `handler`.
+pub fn install_vector_form(bus: &mut Bus, handler: u32, form: VectorForm) {
     let mut a = Asm::new(VECTOR);
-    a.lui(K0, (handler >> 16) as u16);
-    a.addiu(K0, K0, handler as u16 as i16);
-    a.jr(K0);
-    a.nop();
+    match form {
+        VectorForm::LuiAddiuJr => {
+            a.lui(K0, (handler >> 16) as u16);
+            a.addiu(K0, K0, handler as u16 as i16);
+            a.jr(K0);
+            a.nop();
+        }
+        VectorForm::LuiOriJr => {
+            a.lui(K0, (handler >> 16) as u16);
+            a.ori(K0, K0, handler as u16);
+            a.jr(K0);
+            a.nop();
+        }
+        VectorForm::Jump => {
+            // J encodes bits 27..2 of the target.
+            a.word(0x0800_0000 | ((handler >> 2) & 0x03ff_ffff));
+            a.nop();
+            a.nop();
+            a.nop();
+        }
+    }
     let words = a.finish();
     write_words(bus, VECTOR, &words);
     write_words(bus, 0, &words);
     poke32(bus, 0, 3);
+}
+
+/// Move the exception handler from the retail address to `base`: assemble it
+/// there, repoint C(06h), carry the call slots (the early card routine's
+/// `lui`/`ori`/`jalr`) across, and leave a tight loop where the retail
+/// handler was, so a program that jumps to the retail address (a Sony vector
+/// written by hand) spins instead of reaching a handler no other BIOS keeps
+/// there. The caller writes the vector.
+pub fn relocate_handler(bus: &mut Bus, base: u32) {
+    use crate::hle_kernel::{C0_TABLE, EXCEPTION_HANDLER, EXCEPTION_HANDLER_END};
+    let slots: Vec<u32> = (0..4)
+        .map(|i| peek32(bus, EXCEPTION_HANDLER + HANDLER_SLOTS + 4 * i))
+        .collect();
+    let mut at = EXCEPTION_HANDLER;
+    while at < EXCEPTION_HANDLER_END {
+        // `b .` and its delay slot: entering anywhere in the region spins.
+        poke32(bus, at, 0x1000_ffff);
+        poke32(bus, at + 4, 0);
+        at += 8;
+    }
+    write_words(bus, base, &assemble_handler_at(base));
+    write_words(bus, base + HANDLER_SLOTS, &slots);
+    poke32(bus, C0_TABLE + 4 * 6, base);
+}
+
+/// Length of the exception handler in bytes.
+#[must_use]
+pub fn handler_len_bytes() -> u32 {
+    4 * code().handler.len() as u32
 }
 
 /// Lay out the exception core: guest code, table entries for the guest
