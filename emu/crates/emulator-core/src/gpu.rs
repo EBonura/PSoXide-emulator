@@ -922,6 +922,7 @@ impl Gpu {
     }
 
     /// Counters of the `PSOXIDE_QUIRK_GPU_IRQ` model (all zero when it is off).
+    #[must_use]
     pub fn irq_quirk_stats(&self) -> IrqQuirkStats {
         self.irq_quirk.stats
     }

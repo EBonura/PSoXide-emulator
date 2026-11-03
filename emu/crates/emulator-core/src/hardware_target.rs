@@ -30,6 +30,7 @@ pub const ENV_VAR: &str = "PSOXIDE_HARDWARE";
 
 /// Which implementation of the console is being emulated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Implementation {
     /// A retail console (the calibrated default).
     Real,
@@ -45,6 +46,7 @@ pub enum Implementation {
 /// sets the bit. An idle GPU always pops on the narrow phase; a draw ahead of
 /// the word shifts the phase by the draw's duration parity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GpuIrqModel {
     /// Every 1Fh raises the request (retail console).
     Reliable,
@@ -68,6 +70,7 @@ pub enum GpuIrqModel {
 
 /// A named hardware target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HardwareTarget {
     /// Which console implementation this is.
     pub implementation: Implementation,
@@ -81,6 +84,7 @@ pub struct HardwareTarget {
 
 impl HardwareTarget {
     /// A retail console: the emulator's calibrated behaviour.
+    #[must_use]
     pub const fn real() -> Self {
         Self {
             implementation: Implementation::Real,
@@ -91,6 +95,7 @@ impl HardwareTarget {
     }
 
     /// The MiSTer PSX core (480094b) on a SuperStation One.
+    #[must_use]
     pub const fn mister() -> Self {
         Self {
             implementation: Implementation::MisterFpga,
@@ -101,6 +106,10 @@ impl HardwareTarget {
     }
 
     /// Parse a spec (see the module docs).
+    ///
+    /// # Errors
+    ///
+    /// Names the unknown target, option or value.
     pub fn from_spec(spec: &str) -> Result<Self, String> {
         let mut parts = spec.split(',').map(str::trim);
         let mut target = match parts.next().unwrap_or("") {
@@ -149,7 +158,10 @@ impl HardwareTarget {
 
     /// The target `PSOXIDE_HARDWARE` names; [`HardwareTarget::real`] when unset.
     ///
-    /// Panics on a malformed spec: a typo must not run as a retail console.
+    /// # Panics
+    ///
+    /// On a malformed spec: a typo must not run as a retail console.
+    #[must_use]
     pub fn from_env() -> Self {
         match std::env::var(ENV_VAR) {
             Ok(spec) => Self::from_spec(&spec).unwrap_or_else(|e| panic!("{ENV_VAR}: {e}")),
@@ -158,11 +170,13 @@ impl HardwareTarget {
     }
 
     /// Whether this target changes any behaviour from the retail console.
+    #[must_use]
     pub fn differs_from_real(&self) -> bool {
         self.gpu_irq != GpuIrqModel::Reliable
     }
 
     /// Short name for logs.
+    #[must_use]
     pub fn name(&self) -> &'static str {
         match self.implementation {
             Implementation::Real => "real hardware",

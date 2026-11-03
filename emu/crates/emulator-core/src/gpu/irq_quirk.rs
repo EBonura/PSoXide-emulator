@@ -34,6 +34,7 @@ const ODD_PIXELS: u64 = 16;
 
 /// Counters for the report; not part of any save state.
 #[derive(Clone, Copy, Debug, Default)]
+#[non_exhaustive]
 pub struct IrqQuirkStats {
     /// GP0(1Fh) commands that reached the GPU.
     pub requested: u64,
