@@ -19,6 +19,7 @@ members = [
     "emu/crates/psx-webdisc",
     "tools/psoxide-frametime",
     "tools/psoxide-gate",
+    "tools/psoxide-vmcook",
     "tools/web-lazy-image"
 ]
 # `cargo run --release` from the repo root starts the emulator.

@@ -482,9 +482,7 @@ impl Shell {
         #[cfg(feature = "editor")]
         let state = {
             let mut state = state;
-            state
-                .editor
-                .append_console_lines([
+            state.editor.append_console_lines([
                 audio_status,
                 "[input] keyboard ready; controllers are announced here as they appear".to_string(),
             ]);

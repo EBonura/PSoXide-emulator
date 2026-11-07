@@ -1,0 +1,12 @@
+[package]
+name = "psoxide-vmcook"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cook-time visibility pruning and texture sizing for camera-locked GoldSrc viewmodels (HMD8 + HLTX)."
+
+[dependencies]
+psx-asset = { workspace = true }
+psx-gte = { workspace = true }
+emulator-core = { workspace = true }
