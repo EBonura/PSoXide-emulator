@@ -28,11 +28,11 @@
 /// ```
 #[inline]
 pub const fn to_physical(virt: u32) -> u32 {
-    virt & 0x1FFF_FFFF
+    virt & 0x1fff_ffff
 }
 
 /// Base of KSEG1, the uncached mirror of the physical map.
-pub const KSEG1_BASE: u32 = 0xA000_0000;
+pub const KSEG1_BASE: u32 = 0xa000_0000;
 
 /// The uncached (KSEG1) address of physical address `phys`, the view device
 /// registers outside the I/O window are conventionally accessed through.
@@ -62,7 +62,7 @@ pub mod ram {
 /// Unused by stock hardware; reads return `0xFF`.
 pub mod expansion1 {
     /// Physical base address.
-    pub const BASE: u32 = 0x1F00_0000;
+    pub const BASE: u32 = 0x1f00_0000;
     /// Maximum size (configurable via `EXP1_DELAY_SIZE` register).
     pub const SIZE: usize = 8 * 1024 * 1024;
 }
@@ -73,7 +73,7 @@ pub mod expansion1 {
 /// KSEG1 (uncached access to scratchpad is undefined).
 pub mod scratchpad {
     /// Physical base address.
-    pub const BASE: u32 = 0x1F80_0000;
+    pub const BASE: u32 = 0x1f80_0000;
     /// Size in bytes (1 KiB).
     pub const SIZE: usize = 1024;
 }
@@ -85,7 +85,7 @@ pub mod scratchpad {
 /// (`gpu`, `spu`, `cd`, …).
 pub mod io {
     /// Physical base address.
-    pub const BASE: u32 = 0x1F80_1000;
+    pub const BASE: u32 = 0x1f80_1000;
     /// Size in bytes (4 KiB). Expansion 2 begins immediately after at
     /// `0x1F80_2000`.
     pub const SIZE: usize = 4 * 1024;
@@ -94,18 +94,22 @@ pub mod io {
 /// Expansion Region 2: 8 KiB debug / dev-kit port.
 pub mod expansion2 {
     /// Physical base address.
-    pub const BASE: u32 = 0x1F80_2000;
+    pub const BASE: u32 = 0x1f80_2000;
     /// Size in bytes (8 KiB).
     pub const SIZE: usize = 8 * 1024;
     /// POST status byte: BIOS writes progress codes here during boot.
-    pub const POST: u32 = 0x1F80_2041;
+    pub const POST: u32 = 0x1f80_2041;
+    /// Debug console character-out: a byte stored here is printed on the host
+    /// by PCSX-Redux, OpenBIOS's own `putchar` and PSoXide's emulator. A
+    /// retail console has nothing mapped here, so the store is ignored.
+    pub const DEBUG_CONSOLE: u32 = 0x1f80_2080;
 
     /// PSoXide's emulator-only telemetry port: four word registers in the
     /// expansion window that instrumented guests write and the emulator
     /// timestamps. Retail hardware sees ordinary expansion-port accesses.
     pub mod telemetry {
         /// Physical base of the port.
-        pub const BASE: u32 = super::BASE + 0x0F00;
+        pub const BASE: u32 = super::BASE + 0x0f00;
         /// Event command word (`kind << 24 | id`); a write appends one event.
         pub const EVENT: u32 = BASE;
         /// Event value latch; the next event write snapshots it.
@@ -117,10 +121,46 @@ pub mod expansion2 {
     }
 }
 
+/// The memory controller's access-timing registers (nocash PSX-SPX "Memory Control"). The
+/// base-address and RAM-size registers beside them are not here: a program never sets those.
+pub mod timing {
+    /// Expansion 1 (parallel port) delay and size.
+    pub const EXPANSION1: u32 = 0x1f80_1008;
+    /// Expansion 3 delay and size.
+    pub const EXPANSION3: u32 = 0x1f80_100c;
+    /// BIOS ROM delay and size.
+    pub const BIOS_ROM: u32 = 0x1f80_1010;
+    /// SPU delay and size.
+    pub const SPU: u32 = 0x1f80_1014;
+    /// CD-ROM controller delay and size.
+    pub const CDROM: u32 = 0x1f80_1018;
+    /// Expansion 2 delay and size.
+    pub const EXPANSION2: u32 = 0x1f80_101c;
+    /// Common delay: the extra cycles around every device access.
+    pub const COMMON: u32 = 0x1f80_1020;
+
+    /// Each register with the value a program starts with (`psx_rt::entry` writes them).
+    ///
+    /// They are the values the retail BIOS programs, from PSX-SPX; the SPU word is the
+    /// one a retail console measured at program start (hardware tests, boot capture). OpenBIOS
+    /// writes a few of its own (CD-ROM `0x00020943`, common `0x0000132C`, Expansion 2
+    /// `0x00080777`), and Sony versions need not agree either, which is why a program sets
+    /// them instead of taking what it finds.
+    pub const ENTRY: [(u32, u32); 7] = [
+        (EXPANSION1, 0x0013_243f),
+        (EXPANSION3, 0x0000_3022),
+        (BIOS_ROM, 0x0013_243f),
+        (SPU, 0x2009_31e1),
+        (CDROM, 0x0002_0843),
+        (EXPANSION2, 0x0007_0777),
+        (COMMON, 0x0000_1325),
+    ];
+}
+
 /// Expansion Region 3: 2 MiB, rarely used.
 pub mod expansion3 {
     /// Physical base address.
-    pub const BASE: u32 = 0x1FA0_0000;
+    pub const BASE: u32 = 0x1fa0_0000;
     /// Size in bytes (2 MiB).
     pub const SIZE: usize = 2 * 1024 * 1024;
 }
@@ -132,11 +172,11 @@ pub mod expansion3 {
 /// an undefined state at reset).
 pub mod bios {
     /// Physical base address.
-    pub const BASE: u32 = 0x1FC0_0000;
+    pub const BASE: u32 = 0x1fc0_0000;
     /// Size in bytes (512 KiB).
     pub const SIZE: usize = 512 * 1024;
     /// Reset vector: KSEG1 view of BIOS base.
-    pub const RESET_VECTOR: u32 = 0xBFC0_0000;
+    pub const RESET_VECTOR: u32 = 0xbfc0_0000;
 }
 
 /// Cache control register at `0xFFFE_0130`.
@@ -145,9 +185,15 @@ pub mod bios {
 /// I-cache enable, scratchpad enable, and a handful of debug bits. Bit
 /// names and the "usually" settings follow psx-spx, "Memory Control",
 /// FFFE0130h.
+///
+/// This is the hardware map, for the emulator and host tools. Guest code never writes the
+/// register: changing it (or isolating the cache) while a DMA channel runs corrupts the next
+/// instruction fetch on a console. `psx_rt::cache` is the only code that does it, behind a
+/// DMA-idle gate, and the `cache-gate` link check fails an image in which anything else does
+/// (`sdk/docs/CACHE-CONTROL.md`).
 pub mod cache_control {
     /// Virtual address. Does not follow the KUSEG/KSEG0/KSEG1 mirror rule.
-    pub const ADDR: u32 = 0xFFFE_0130;
+    pub const ADDR: u32 = 0xfffe_0130;
 
     /// Bit 2: tag test mode. While COP0 SR.IsC is set, word stores to
     /// `0x000..0x1000` write instruction-cache tags, which is how a line
@@ -175,9 +221,9 @@ pub mod cache_control {
     pub const FLUSH: u32 = TAG_TEST | I_CACHE;
 
     /// The normal running setting: every bit psx-spx lists as usually
-    /// set. It has not been read back from a console yet; a
-    /// hardware-tests case that reads the register after boot would
-    /// confirm it.
+    /// set. It is also the literal the BIOS ROM writes after its own flush
+    /// (read from SCPH-5501, 5502 and 7502); a hardware-tests case that
+    /// reads the register after boot would confirm it on a console.
     pub const RUNNING: u32 = SCRATCHPAD
         | DATA_CACHE
         | I_REFILL_4_WORDS
@@ -211,6 +257,6 @@ mod tests {
     #[test]
     fn cache_control_settings_add_up() {
         assert_eq!(cache_control::FLUSH, 0x0000_0804);
-        assert_eq!(cache_control::RUNNING, 0x0001_E988);
+        assert_eq!(cache_control::RUNNING, 0x0001_e988);
     }
 }

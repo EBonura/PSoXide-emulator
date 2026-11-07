@@ -56,8 +56,12 @@
 //! a Rust SDK instead of a C one.
 
 #![no_std]
+#![feature(optimize_attribute)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
+
+pub mod layout;
+pub mod map;
 
 use psx_hw::gpu::{gp0, gp1, pack_xy};
 use psx_io::dma::{self, Channel};
@@ -97,7 +101,7 @@ impl Color555 {
     /// Opaque black with mask bit clear.
     pub const BLACK: Self = Self(0);
     /// Opaque white -- all five bits set in each channel.
-    pub const WHITE: Self = Self(0x7FFF);
+    pub const WHITE: Self = Self(0x7fff);
 
     /// Build a color from 8-bit channels, truncating the low 3 bits
     /// of each. `rgb8(255, 255, 255) == WHITE`.
@@ -355,9 +359,32 @@ impl<const PAGE_COUNT: usize> TextureWindowAtlas<PAGE_COUNT> {
     /// power-of-two, and no larger than 128 texels, matching the
     /// hardware texture-window range.
     pub fn allocate(&mut self, width: u16, height: u16) -> Option<TextureWindowPlacement> {
+        self.allocate_with_usable_rows(width, height, 256)
+    }
+
+    /// Allocate within the first `usable_rows` texel rows of each page.
+    ///
+    /// The row bound must be a multiple of 8 in `8..=256`. Dimensions and
+    /// placement alignment follow [`Self::allocate`]. Invalid bounds or a
+    /// rectangle taller than the bound return `None` without changing the atlas.
+    /// This per-call bound does not reserve excluded rows: callers sharing a
+    /// page band must consistently apply their ownership limit.
+    pub fn allocate_with_usable_rows(
+        &mut self,
+        width: u16,
+        height: u16,
+        usable_rows: u16,
+    ) -> Option<TextureWindowPlacement> {
+        if usable_rows == 0
+            || usable_rows > 256
+            || !usable_rows.is_multiple_of(TEXTURE_WINDOW_UNIT_TEXELS)
+        {
+            return None;
+        }
         let width_units = texture_window_units(width)?;
         let height_units = texture_window_units(height)?;
-        let max_y = TEXTURE_PAGE_UNITS.checked_sub(height_units)?;
+        let row_units = (usable_rows / TEXTURE_WINDOW_UNIT_TEXELS) as usize;
+        let max_y = row_units.checked_sub(height_units)?;
         let max_x = TEXTURE_PAGE_UNITS.checked_sub(width_units)?;
 
         for page_index in 0..PAGE_COUNT {
@@ -606,7 +633,7 @@ impl TexturePage {
     #[doc(alias = "getTPage")]
     pub const fn uv_word(self, semi_trans: u8) -> u16 {
         assert!(semi_trans < 4, "semi_trans must be 0..4");
-        let tpx = (self.x / 64) & 0xF;
+        let tpx = (self.x / 64) & 0xf;
         let tpy = if self.y == 256 { 1 } else { 0 };
         let depth = self.depth.as_u16();
         tpx | (tpy << 4) | ((semi_trans as u16) << 5) | (depth << 7)
@@ -670,8 +697,8 @@ impl Clut {
     /// ```
     #[doc(alias = "getClut")]
     pub const fn uv_word(self) -> u16 {
-        let cx = (self.x / 16) & 0x3F;
-        let cy = self.y & 0x1FF;
+        let cx = (self.x / 16) & 0x3f;
+        let cy = self.y & 0x1ff;
         cx | (cy << 6)
     }
 }
@@ -679,6 +706,18 @@ impl Clut {
 // ======================================================================
 // Unified VRAM allocator
 // ======================================================================
+
+/// The 16 x 8 pixel block every frame's draw-done sequence fills with black
+/// (`psx_hw::gpu::gp0::DRAW_DONE_SCRATCH`, the bottom right corner of VRAM).
+/// [`VramAllocator`] never hands out a rectangle that touches it, so a texture
+/// page that would cover it is skipped; code that places data there by hand
+/// loses it to the sequence.
+pub const DRAW_DONE_SCRATCH: VramRect = VramRect::new(
+    psx_hw::gpu::gp0::DRAW_DONE_SCRATCH.0,
+    psx_hw::gpu::gp0::DRAW_DONE_SCRATCH.1,
+    16,
+    8,
+);
 
 /// Coarse VRAM occupancy cell width in pixels (one texture-page column).
 const ALLOC_COL_W: u16 = 64;
@@ -737,23 +776,53 @@ pub trait VramRegionSource {
 
 /// CLUT-row sub-allocator over a reserved band of `ROWS` VRAM rows.
 ///
-/// Each row holds [`CLUT_SLOTS_PER_ROW`] 16-pixel slots tracked as a `u64`
-/// bitmap, so a 4bpp (16-entry) CLUT takes 1 slot and an 8bpp (256-entry)
-/// CLUT takes 16 contiguous slots.
+/// Each row holds up to [`CLUT_SLOTS_PER_ROW`] 16-pixel slots tracked as a
+/// `u64` bitmap, so a 4bpp (16-entry) CLUT takes 1 slot and an 8bpp
+/// (256-entry) CLUT takes 16 contiguous slots. [`ClutRowAllocator::new`] spans
+/// the whole 1024-pixel row; [`ClutRowAllocator::with_width`] narrows the band
+/// to its first `width` pixels, which is what lets a layout keep the band
+/// clear of every texture page (see [`VramAllocator::with_clut_band`]).
 #[derive(Copy, Clone, Debug)]
 pub struct ClutRowAllocator<const ROWS: usize> {
     base_y: u16,
+    slots_per_row: u16,
     // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
     rows: [u64; ROWS],
 }
 
 impl<const ROWS: usize> ClutRowAllocator<ROWS> {
-    /// Build an allocator over rows `[base_y, base_y + ROWS)`.
+    /// Build an allocator over rows `[base_y, base_y + ROWS)`, full VRAM width.
     pub const fn new(base_y: u16) -> Self {
         Self {
             base_y,
+            slots_per_row: CLUT_SLOTS_PER_ROW,
             rows: [0; ROWS],
         }
+    }
+
+    /// Build an allocator over rows `[base_y, base_y + ROWS)` limited to the
+    /// first `width` pixels of each row (a multiple of 16, at most the VRAM
+    /// width).
+    #[allow(clippy::manual_is_multiple_of)]
+    pub const fn with_width(base_y: u16, width: u16) -> Self {
+        assert!(
+            width >= 16 && width % 16 == 0 && width <= VRAM_WIDTH,
+            "ClutRowAllocator: width must be a multiple of 16 within VRAM"
+        );
+        assert!(
+            (base_y as usize) + ROWS <= VRAM_HEIGHT as usize,
+            "ClutRowAllocator: band runs past VRAM"
+        );
+        Self {
+            base_y,
+            slots_per_row: width / 16,
+            rows: [0; ROWS],
+        }
+    }
+
+    /// The rectangle every CLUT this allocator can hand out lies inside.
+    pub const fn bounds(&self) -> VramRect {
+        VramRect::new(0, self.base_y, self.slots_per_row * 16, ROWS as u16)
     }
 
     fn slot_count(entries: u16) -> usize {
@@ -763,7 +832,7 @@ impl<const ROWS: usize> ClutRowAllocator<ROWS> {
     /// Allocate a CLUT of `entries` (16 or 256) palette slots.
     pub fn alloc(&mut self, entries: u16) -> Option<Clut> {
         let slots = Self::slot_count(entries);
-        let cap = CLUT_SLOTS_PER_ROW as usize;
+        let cap = self.slots_per_row as usize;
         if slots == 0 || slots > cap.min(64) {
             return None;
         }
@@ -793,7 +862,7 @@ impl<const ROWS: usize> ClutRowAllocator<ROWS> {
         let slots = Self::slot_count(entries);
         let r = clut.y().saturating_sub(self.base_y) as usize;
         let s = (clut.x() / 16) as usize;
-        if r >= ROWS || s + slots > 64 {
+        if r >= ROWS || s + slots > self.slots_per_row as usize {
             return;
         }
         // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
@@ -824,10 +893,15 @@ pub struct VramAllocator<const ROOM_PAGES: usize, const CLUT_ROWS: usize> {
     room_page_handles: [VramHandle; ROOM_PAGES],
     room_base_x: u16,
     room_base_y: u16,
+    clut_band_reserved: bool,
 }
 
 impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, CLUT_ROWS> {
     /// Build an empty allocator. `clut_base_y` is the first CLUT-band row.
+    ///
+    /// The band spans the whole 1024-pixel row and is *not* reserved in the
+    /// page grid, so a texture page placed at page row 256 runs through it. Use
+    /// [`with_clut_band`](Self::with_clut_band) to keep the two apart.
     pub const fn new(clut_base_y: u16) -> Self {
         Self {
             grid: [0; VRAM_ALLOC_ROWS],
@@ -837,7 +911,68 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
             room_page_handles: [VramHandle::Empty; ROOM_PAGES],
             room_base_x: 0,
             room_base_y: 0,
+            clut_band_reserved: false,
         }
+    }
+
+    /// Build an empty allocator whose CLUTs all lie in `band`, with `band`
+    /// reserved in the page grid so no texture page, model strip or room page
+    /// can overlap it.
+    ///
+    /// A texture page is 256 rows tall, so every page at page row 256 reaches
+    /// VRAM row 511; a CLUT band that shares rows with such a page also shares
+    /// its pixels, and a sampler that runs a texel past the bottom of its
+    /// window reads palette words as texture. The only VRAM that no page covers
+    /// is the strip under a 320 x 480 framebuffer, so `band` is expected to be
+    /// that strip, e.g. `VramRect::new(0, 480, 320, 32)` with `CLUT_ROWS == 32`.
+    ///
+    /// `band` must start at x 0, be `CLUT_ROWS` rows tall, and align to the
+    /// 64 x 16 pixel occupancy cells.
+    #[allow(clippy::manual_is_multiple_of)]
+    pub const fn with_clut_band(band: VramRect) -> Self {
+        assert!(band.x == 0, "with_clut_band: CLUT slots start at x 0");
+        assert!(
+            band.h as usize == CLUT_ROWS,
+            "with_clut_band: band height must equal CLUT_ROWS"
+        );
+        assert!(
+            band.w % ALLOC_COL_W == 0 && band.y % ALLOC_ROW_H == 0 && band.h % ALLOC_ROW_H == 0,
+            "with_clut_band: band must align to the 64 x 16 occupancy cells"
+        );
+        let mut grid = [0u16; VRAM_ALLOC_ROWS];
+        let c1 = (band.w / ALLOC_COL_W) as usize;
+        let r0 = (band.y / ALLOC_ROW_H) as usize;
+        let r1 = ((band.y + band.h) / ALLOC_ROW_H) as usize;
+        let mut r = r0;
+        while r < r1 {
+            let mut c = 0;
+            while c < c1 {
+                grid[r] |= 1 << c;
+                c += 1;
+            }
+            r += 1;
+        }
+        Self {
+            grid,
+            clut: ClutRowAllocator::with_width(band.y, band.w),
+            room: TextureWindowAtlas::new(),
+            room_pages: [None; ROOM_PAGES],
+            room_page_handles: [VramHandle::Empty; ROOM_PAGES],
+            room_base_x: 0,
+            room_base_y: 0,
+            clut_band_reserved: true,
+        }
+    }
+
+    /// The rectangle every CLUT this allocator hands out lies inside.
+    pub const fn clut_bounds(&self) -> VramRect {
+        self.clut.bounds()
+    }
+
+    /// Whether the CLUT band is reserved in the page grid, which makes it
+    /// disjoint from every texture rectangle by construction.
+    pub const fn clut_band_is_reserved(&self) -> bool {
+        self.clut_band_reserved
     }
 
     fn span(x: u16, y: u16, w: u16, h: u16) -> (usize, usize, usize, usize) {
@@ -850,6 +985,9 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
 
     #[allow(dead_code)] // used by later stages for overlap assertions
     fn rect_free(&self, x: u16, y: u16, w: u16, h: u16) -> bool {
+        if DRAW_DONE_SCRATCH.overlaps(VramRect::new(x, y, w, h)) {
+            return false;
+        }
         let (c0, c1, r0, r1) = Self::span(x, y, w, h);
         for r in r0..r1 {
             for c in c0..c1 {
@@ -878,6 +1016,10 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
     /// region still owned by legacy hardcoded uploads). Returns a handle that
     /// can be `free`d but is normally permanent.
     pub fn reserve_rect(&mut self, rect: VramRect) -> VramHandle {
+        assert!(
+            !self.clut_band_reserved || !rect.overlaps(self.clut.bounds()),
+            "reserve_rect: rectangle overlaps the reserved CLUT band"
+        );
         self.set_rect(rect.x, rect.y, rect.w, rect.h, true);
         VramHandle::Rect(rect)
     }
@@ -943,7 +1085,13 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
         let n = count as usize;
         let mut c = 0usize;
         while c + n <= VRAM_ALLOC_COLS {
-            let cols_free = (c..c + n).all(|col| (r0..r1).all(|r| self.grid[r] & (1 << col) == 0));
+            let cols_free = (c..c + n).all(|col| (r0..r1).all(|r| self.grid[r] & (1 << col) == 0))
+                && !DRAW_DONE_SCRATCH.overlaps(VramRect::new(
+                    (c as u16) * ALLOC_COL_W,
+                    page_y,
+                    count * ALLOC_COL_W,
+                    TEXTURE_PAGE_TEXELS,
+                ));
             if cols_free {
                 return Some((c as u16) * ALLOC_COL_W);
             }
@@ -1356,32 +1504,6 @@ pub fn upload_clut(clut: Clut, entries: &[Color555]) {
 // Tests
 // ======================================================================
 
-/// Renamed to [`TexturePage`].
-#[deprecated(note = "renamed to `TexturePage`")]
-pub type Tpage = TexturePage;
-
-/// Renamed to [`TextureDepth`].
-#[deprecated(note = "renamed to `TextureDepth`")]
-pub type TexDepth = TextureDepth;
-
-impl TexturePage {
-    /// Renamed to [`TexturePage::uv_word`].
-    #[deprecated(note = "renamed to `uv_word`")]
-    #[inline(always)]
-    pub const fn uv_tpage_word(self, semi_trans: u8) -> u16 {
-        self.uv_word(semi_trans)
-    }
-}
-
-impl Clut {
-    /// Renamed to [`Clut::uv_word`].
-    #[deprecated(note = "renamed to `uv_word`")]
-    #[inline(always)]
-    pub const fn uv_clut_word(self) -> u16 {
-        self.uv_word()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1458,7 +1580,7 @@ mod tests {
     #[test]
     fn color_rgb8_truncates_low_bits() {
         assert_eq!(Color555::rgb8(0, 0, 0).as_u16(), 0);
-        assert_eq!(Color555::rgb8(255, 255, 255).as_u16(), 0x7FFF);
+        assert_eq!(Color555::rgb8(255, 255, 255).as_u16(), 0x7fff);
         // 0x18 = 24 → 24 >> 3 = 3.
         assert_eq!(Color555::rgb8(24, 0, 0).as_u16(), 3);
     }
@@ -1489,6 +1611,57 @@ mod tests {
     #[should_panic = "overflows VRAM width"]
     fn vram_rect_new_rejects_horizontal_overflow() {
         let _ = VramRect::new(1000, 0, 100, 10);
+    }
+
+    #[test]
+    fn texture_window_row_bound_preserves_scan_order_and_palette_rows() {
+        let mut atlas = TextureWindowAtlas::<2>::new();
+        for index in 0..24 {
+            let placement = atlas.allocate_with_usable_rows(64, 64, 224).unwrap();
+            assert_eq!(placement.page_index(), index / 12);
+            assert_eq!(u16::from(placement.origin_u()), (index % 4) * 64);
+            assert_eq!(u16::from(placement.origin_v()), ((index % 12) / 4) * 64);
+            assert!(u16::from(placement.origin_v()) + u16::from(placement.height()) <= 224);
+        }
+        assert!(atlas.allocate_with_usable_rows(64, 64, 224).is_none());
+        // The remaining aligned 32-high strip still fits below the limit.
+        let strip = atlas.allocate_with_usable_rows(32, 32, 224).unwrap();
+        assert_eq!(
+            (strip.page_index(), strip.origin_u(), strip.origin_v()),
+            (0, 0, 192)
+        );
+        assert_eq!(core::mem::size_of_val(&atlas), 2 * 32 * 4);
+    }
+
+    #[test]
+    fn texture_window_row_bound_rejects_invalid_input_without_mutation() {
+        let mut atlas = TextureWindowAtlas::<1>::new();
+        atlas.allocate(32, 32).unwrap();
+        let before = atlas;
+        for rows in [0, 1, 7, 9, 223, 255, 257, 264, u16::MAX] {
+            assert!(atlas.allocate_with_usable_rows(8, 8, rows).is_none());
+            assert_eq!(atlas, before);
+        }
+        assert!(atlas.allocate_with_usable_rows(64, 64, 56).is_none());
+        assert_eq!(atlas, before);
+        assert!(atlas.allocate_with_usable_rows(48, 32, 224).is_none());
+        assert_eq!(atlas, before);
+        let edge = atlas.allocate_with_usable_rows(8, 8, 8).unwrap();
+        assert_eq!((edge.origin_u(), edge.origin_v()), (32, 0));
+    }
+
+    #[test]
+    fn texture_window_full_row_bound_matches_default_allocator() {
+        let mut default = TextureWindowAtlas::<2>::new();
+        let mut bounded = default;
+        for index in 0..160 {
+            let (width, height) = [(32, 32), (64, 16), (8, 128), (128, 8)][index % 4];
+            assert_eq!(
+                default.allocate(width, height),
+                bounded.allocate_with_usable_rows(width, height, 256)
+            );
+            assert_eq!(default, bounded);
+        }
     }
 
     #[test]
@@ -1564,7 +1737,7 @@ mod tests {
         let tp = TexturePage::new(640, 0, TextureDepth::Bit15);
         // x=640 → tpx=10, y=0 → tpy=0, depth=15bpp → 2.
         let word = tp.uv_word(0);
-        assert_eq!(word & 0xF, 10, "tpx");
+        assert_eq!(word & 0xf, 10, "tpx");
         assert_eq!((word >> 4) & 1, 0, "tpy");
         assert_eq!((word >> 5) & 3, 0, "semi_trans");
         assert_eq!((word >> 7) & 3, 2, "depth");
@@ -1587,8 +1760,8 @@ mod tests {
         let cl = Clut::new(640, 240);
         // x=640 → cx=40, y=240 → cy=240.
         let word = cl.uv_word();
-        assert_eq!(word & 0x3F, 40, "cx");
-        assert_eq!((word >> 6) & 0x1FF, 240, "cy");
+        assert_eq!(word & 0x3f, 40, "cx");
+        assert_eq!((word >> 6) & 0x1ff, 240, "cy");
     }
 
     #[test]
@@ -1654,6 +1827,28 @@ mod tests {
     }
 
     #[test]
+    fn the_draw_done_scratch_block_is_never_allocated() {
+        // Fill every page column of the model row with one-page slots: the one
+        // at the right edge would cover the corner block, so it is refused.
+        let mut a: VramAllocator<2, 32> = VramAllocator::new(480);
+        let mut got = 0;
+        while let Some((page, _)) = a.alloc_model_slot(64, TextureDepth::Bit4) {
+            let rect = VramRect::new(page.x(), page.y(), 64, TEXTURE_PAGE_TEXELS);
+            assert!(
+                !rect.overlaps(DRAW_DONE_SCRATCH),
+                "page at {} {}",
+                page.x(),
+                page.y()
+            );
+            got += 1;
+        }
+        assert_eq!(got, VRAM_ALLOC_COLS - 1, "every column but the corner one");
+        assert!(!a.rect_free(960, 256, 64, 256));
+        assert!(!a.rect_free(1008, 504, 16, 8));
+        assert!(a.rect_free(960, 256, 64, 240));
+    }
+
+    #[test]
     fn model_slots_preserve_indexed_texture_depth() {
         let mut a = VramAllocator::<2, 16>::new(480);
         let (bit4, _h4) = a.alloc_model_slot(32, TextureDepth::Bit4).unwrap();
@@ -1677,6 +1872,116 @@ mod tests {
         c.free(a, 16);
         let reused = c.alloc(16).unwrap();
         assert_eq!((reused.x(), reused.y()), (0, 480), "freed slot reused");
+    }
+
+    #[test]
+    fn clut_row_allocator_width_limits_each_row() {
+        let mut c = ClutRowAllocator::<2>::with_width(480, 320);
+        assert_eq!(c.bounds(), VramRect::new(0, 480, 320, 2));
+        // 20 four-bit CLUTs fill row 480; the 21st goes to row 481.
+        for slot in 0..20u16 {
+            let clut = c.alloc(16).unwrap();
+            assert_eq!((clut.x(), clut.y()), (slot * 16, 480));
+        }
+        let next = c.alloc(16).unwrap();
+        assert_eq!((next.x(), next.y()), (0, 481));
+        // A 256-entry CLUT is 16 slots and fits a 20-slot row once.
+        let mut c = ClutRowAllocator::<2>::with_width(480, 320);
+        assert!(c.alloc(256).is_some());
+        assert_eq!(c.alloc(256).unwrap().y(), 481);
+        assert!(c.alloc(256).is_none());
+        // Freeing outside the band is ignored rather than corrupting a row.
+        c.free(Clut::new(320, 480), 16);
+    }
+
+    /// Every rectangle the allocator can hand out, with the CLUT band reserved
+    /// beside the framebuffer, is disjoint from every CLUT it can hand out.
+    #[test]
+    fn reserved_clut_band_is_disjoint_from_every_texture_rectangle() {
+        const BAND: VramRect = VramRect::new(0, 480, 320, 32);
+        let inside = |r: VramRect, outer: VramRect| {
+            r.x >= outer.x
+                && r.y >= outer.y
+                && r.x + r.w <= outer.x + outer.w
+                && r.y + r.h <= outer.y + outer.h
+        };
+        let mut a = VramAllocator::<6, 32>::with_clut_band(BAND);
+        assert!(a.clut_band_is_reserved());
+        assert_eq!(a.clut_bounds(), BAND);
+        let framebuffer = VramRect::new(0, 0, 320, 480);
+        a.reserve_rect(framebuffer);
+        a.reserve_room_band(640, 0);
+
+        let mut rects: [Option<VramRect>; 64] = [None; 64];
+        let mut count = 0;
+        let mut keep = |handle: VramHandle, rects: &mut [Option<VramRect>; 64]| {
+            if let VramHandle::Rect(r) = handle {
+                rects[count] = Some(r);
+                count += 1;
+            }
+        };
+        // Pages at both page rows, until the allocator refuses.
+        for page_y in [0u16, 256] {
+            while let Some((_, h)) = a.alloc_page_run(1, TextureDepth::Bit4, page_y) {
+                keep(h, &mut rects);
+            }
+        }
+        // Model strips and room pages ask the same grid.
+        assert!(a.alloc_model_slot(64, TextureDepth::Bit4).is_none());
+        let first_room_page = a.alloc_window(64, 64);
+        assert!(
+            first_room_page.is_none(),
+            "no page is left to back a room window"
+        );
+
+        // CLUTs: fill the band with 4-bit and 8-bit palettes.
+        let mut cluts: [Option<VramRect>; 640] = [None; 640];
+        let mut n = 0;
+        while let Some((clut, _)) = a.alloc_clut(16) {
+            cluts[n] = Some(VramRect::new(clut.x(), clut.y(), 16, 1));
+            n += 1;
+        }
+        assert_eq!(
+            n,
+            20 * 32,
+            "the band holds 20 four-bit CLUTs on each of 32 rows"
+        );
+        let mut a8 = VramAllocator::<6, 32>::with_clut_band(BAND);
+        let mut eight = 0;
+        while let Some((clut, _)) = a8.alloc_clut(256) {
+            assert!(inside(VramRect::new(clut.x(), clut.y(), 256, 1), BAND));
+            eight += 1;
+        }
+        assert_eq!(eight, 32);
+
+        for clut in cluts[..n].iter().flatten() {
+            assert!(inside(*clut, BAND), "CLUT inside the band");
+            assert!(!clut.overlaps(framebuffer));
+            for page in rects[..count].iter().flatten() {
+                assert!(!clut.overlaps(*page), "CLUT overlaps a texture page");
+            }
+        }
+        assert!(count > 0);
+    }
+
+    #[test]
+    fn the_unreserved_full_width_band_overlaps_a_lower_page() {
+        // The layout this replaces: pages at page row 256 run through the CLUT
+        // band under the framebuffer, and nothing in the allocator notices.
+        let mut a = VramAllocator::<6, 16>::new(480);
+        assert!(!a.clut_band_is_reserved());
+        let (_, handle) = a.alloc_page_run(1, TextureDepth::Bit4, 256).unwrap();
+        let VramHandle::Rect(page) = handle else {
+            panic!("page handle");
+        };
+        assert!(page.overlaps(a.clut_bounds()));
+    }
+
+    #[test]
+    #[should_panic = "overlaps the reserved CLUT band"]
+    fn reserving_a_rectangle_over_the_clut_band_is_refused() {
+        let mut a = VramAllocator::<6, 32>::with_clut_band(VramRect::new(0, 480, 320, 32));
+        a.reserve_rect(VramRect::new(0, 256, 320, 256));
     }
 
     #[test]

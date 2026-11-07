@@ -504,17 +504,6 @@ impl TriTextured {
         }
     }
 
-    /// The same packet as [`Self::with_material`], which it forwards to.
-    #[deprecated(note = "identical to `with_material`")]
-    #[inline(always)]
-    pub const fn with_material_packet_texcoords(
-        verts: [(i16, i16); 3],
-        uvs: [(u8, u8); 3],
-        material: TextureMaterial,
-    ) -> Self {
-        Self::with_material(verts, uvs, material)
-    }
-
     /// Build a textured triangle from UV words that already contain
     /// the low `(u, v)` bytes in packet layout. The material still
     /// supplies CLUT, tpage, tint, blend, and texture-window state.
@@ -695,18 +684,6 @@ impl TriTexturedGouraud {
         }
     }
 
-    /// The same packet as [`Self::with_material`], which it forwards to.
-    #[deprecated(note = "identical to `with_material`")]
-    #[inline(always)]
-    pub const fn with_material_packet_texcoords(
-        verts: [(i16, i16); 3],
-        uvs: [(u8, u8); 3],
-        colors: [(u8, u8, u8); 3],
-        material: TextureMaterial,
-    ) -> Self {
-        Self::with_material(verts, uvs, colors, material)
-    }
-
     /// Build a textured Gouraud triangle from UV words that already
     /// contain the low `(u, v)` packet bytes.
     pub const fn with_material_packed_uv_words(
@@ -784,7 +761,7 @@ impl TriTexturedGouraud {
         ot_slot: u16,
     ) -> Self {
         debug_assert!((colors[0] | colors[1] | colors[2]) >> 24 == 0);
-        debug_assert!((clut_high_word | tpage_high_word) & 0xFFFF == 0);
+        debug_assert!((clut_high_word | tpage_high_word) & 0xffff == 0);
         Self {
             tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
             tex_window: texture_window_word,
@@ -798,34 +775,6 @@ impl TriTexturedGouraud {
             v2: pack_vertex(verts[2].0, verts[2].1),
             uv2: uv_words[2] as u32,
         }
-    }
-
-    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
-    ///
-    /// # Safety
-    ///
-    /// Nothing beyond that function's preconditions; it stays `unsafe` so
-    /// existing `unsafe` blocks keep compiling without a warning.
-    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
-    #[inline(always)]
-    pub const unsafe fn with_staged_slot_prepacked_unchecked(
-        verts: [(i16, i16); 3],
-        uv_words: [u16; 3],
-        colors: [u32; 3],
-        clut_high_word: u32,
-        tpage_high_word: u32,
-        texture_window_word: u32,
-        ot_slot: u16,
-    ) -> Self {
-        Self::with_staged_slot_prepacked_colors(
-            verts,
-            uv_words,
-            colors,
-            clut_high_word,
-            tpage_high_word,
-            texture_window_word,
-            ot_slot,
-        )
     }
 
     /// Zeroed packet for static prebuilt-pool initialisation. Real
@@ -878,7 +827,7 @@ impl TriTexturedGouraud {
         let (r0, g0, b0) = colors[0];
         let (r1, g1, b1) = colors[1];
         let (r2, g2, b2) = colors[2];
-        self.color0_cmd = (self.color0_cmd & 0xFF00_0000) | pack_color(r0, g0, b0);
+        self.color0_cmd = (self.color0_cmd & 0xff00_0000) | pack_color(r0, g0, b0);
         self.color1 = pack_color(r1, g1, b1);
         self.color2 = pack_color(r2, g2, b2);
     }
@@ -976,7 +925,7 @@ impl ClassicTriTexturedGouraud {
         ot_slot: u16,
     ) -> Self {
         debug_assert!((colors[0] | colors[1] | colors[2]) >> 24 == 0);
-        debug_assert!((clut_high_word | tpage_high_word) & 0xFFFF == 0);
+        debug_assert!((clut_high_word | tpage_high_word) & 0xffff == 0);
         Self {
             tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
             color0_cmd: packet::SHADED_TEXTURED_TRIANGLE | colors[0],
@@ -989,32 +938,6 @@ impl ClassicTriTexturedGouraud {
             v2: pack_vertex(verts[2].0, verts[2].1),
             uv2: uv_words[2] as u32,
         }
-    }
-
-    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
-    ///
-    /// # Safety
-    ///
-    /// Nothing beyond that function's preconditions; it stays `unsafe` so
-    /// existing `unsafe` blocks keep compiling without a warning.
-    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
-    #[inline(always)]
-    pub const unsafe fn with_staged_slot_prepacked_unchecked(
-        verts: [(i16, i16); 3],
-        uv_words: [u16; 3],
-        colors: [u32; 3],
-        clut_high_word: u32,
-        tpage_high_word: u32,
-        ot_slot: u16,
-    ) -> Self {
-        Self::with_staged_slot_prepacked_colors(
-            verts,
-            uv_words,
-            colors,
-            clut_high_word,
-            tpage_high_word,
-            ot_slot,
-        )
     }
 }
 
@@ -1117,7 +1040,7 @@ impl ClassicQuadTexturedGouraud {
         ot_slot: u16,
     ) -> Self {
         debug_assert!((colors[0] | colors[1] | colors[2] | colors[3]) >> 24 == 0);
-        debug_assert!((clut_high_word | tpage_high_word) & 0xFFFF == 0);
+        debug_assert!((clut_high_word | tpage_high_word) & 0xffff == 0);
         Self {
             tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
             color0_cmd: packet::SHADED_TEXTURED_QUAD | colors[0],
@@ -1133,32 +1056,6 @@ impl ClassicQuadTexturedGouraud {
             v3: pack_vertex(verts[3].0, verts[3].1),
             uv3: uv_words[3] as u32,
         }
-    }
-
-    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
-    ///
-    /// # Safety
-    ///
-    /// Nothing beyond that function's preconditions; it stays `unsafe` so
-    /// existing `unsafe` blocks keep compiling without a warning.
-    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
-    #[inline(always)]
-    pub const unsafe fn with_staged_slot_prepacked_unchecked(
-        verts: [(i16, i16); 4],
-        uv_words: [u16; 4],
-        colors: [u32; 4],
-        clut_high_word: u32,
-        tpage_high_word: u32,
-        ot_slot: u16,
-    ) -> Self {
-        Self::with_staged_slot_prepacked_colors(
-            verts,
-            uv_words,
-            colors,
-            clut_high_word,
-            tpage_high_word,
-            ot_slot,
-        )
     }
 }
 
@@ -1289,7 +1186,7 @@ impl QuadTexturedGouraud {
         ot_slot: u16,
     ) -> Self {
         debug_assert!((colors[0] | colors[1] | colors[2] | colors[3]) >> 24 == 0);
-        debug_assert!((clut_high_word | tpage_high_word) & 0xFFFF == 0);
+        debug_assert!((clut_high_word | tpage_high_word) & 0xffff == 0);
         Self {
             tag: ((Self::WORDS as u32) << 24) | ot_slot as u32,
             tex_window: texture_window_word,
@@ -1306,34 +1203,6 @@ impl QuadTexturedGouraud {
             v3: pack_vertex(verts[3].0, verts[3].1),
             uv3: uv_words[3] as u32,
         }
-    }
-
-    /// Renamed to [`Self::with_staged_slot_prepacked_colors`], which is safe.
-    ///
-    /// # Safety
-    ///
-    /// Nothing beyond that function's preconditions; it stays `unsafe` so
-    /// existing `unsafe` blocks keep compiling without a warning.
-    #[deprecated(note = "renamed to `with_staged_slot_prepacked_colors`, which is safe")]
-    #[inline(always)]
-    pub const unsafe fn with_staged_slot_prepacked_unchecked(
-        verts: [(i16, i16); 4],
-        uv_words: [u16; 4],
-        colors: [u32; 4],
-        clut_high_word: u32,
-        tpage_high_word: u32,
-        texture_window_word: u32,
-        ot_slot: u16,
-    ) -> Self {
-        Self::with_staged_slot_prepacked_colors(
-            verts,
-            uv_words,
-            colors,
-            clut_high_word,
-            tpage_high_word,
-            texture_window_word,
-            ot_slot,
-        )
     }
 
     /// Zeroed packet for static prebuilt-pool initialisation. Real
@@ -1396,7 +1265,7 @@ impl QuadTexturedGouraud {
         let (r1, g1, b1) = colors[1];
         let (r2, g2, b2) = colors[2];
         let (r3, g3, b3) = colors[3];
-        self.color0_cmd = (self.color0_cmd & 0xFF00_0000) | pack_color(r0, g0, b0);
+        self.color0_cmd = (self.color0_cmd & 0xff00_0000) | pack_color(r0, g0, b0);
         self.color1 = pack_color(r1, g1, b1);
         self.color2 = pack_color(r2, g2, b2);
         self.color3 = pack_color(r3, g3, b3);
@@ -1725,12 +1594,12 @@ mod tests {
     fn quad_textured_gouraud_serializes_to_gp0_3c_stream() {
         let material =
             TexturedGouraudPacketMaterial::from_texture(TextureMaterial::new(0x1234, 0x0105));
-        let uvw = [0x0201u16, 0x3C04, 0x3C42, 0x0240];
+        let uvw = [0x0201u16, 0x3c04, 0x3c42, 0x0240];
         let cols = [
             (0x11u8, 0x22u8, 0x33u8),
             (0x44, 0x55, 0x66),
             (0x77, 0x88, 0x99),
-            (0xAA, 0xBB, 0xCC),
+            (0xaa, 0xbb, 0xcc),
         ];
         let verts = [(10i16, 20i16), (110, 20), (110, 90), (10, 90)];
         let quad =
@@ -1746,17 +1615,17 @@ mod tests {
         };
         assert_eq!(words[0], 0, "tag zero until OT insert");
         assert_eq!(words[1], material.tex_window_word, "E2 window prefix");
-        assert_eq!(words[2] >> 24, 0x3C, "Gouraud+textured+quad opcode");
-        assert_eq!(words[2] & 0x00FF_FFFF, pack_color(0x11, 0x22, 0x33));
+        assert_eq!(words[2] >> 24, 0x3c, "Gouraud+textured+quad opcode");
+        assert_eq!(words[2] & 0x00ff_ffff, pack_color(0x11, 0x22, 0x33));
         assert_eq!(words[3], pack_vertex(10, 20));
         assert_eq!(words[4], 0x0201 | material.clut_high_word);
         assert_eq!(words[5], pack_color(0x44, 0x55, 0x66));
         assert_eq!(words[6], pack_vertex(110, 20));
-        assert_eq!(words[7], 0x3C04 | material.tpage_high_word);
+        assert_eq!(words[7], 0x3c04 | material.tpage_high_word);
         assert_eq!(words[8], pack_color(0x77, 0x88, 0x99));
         assert_eq!(words[9], pack_vertex(110, 90));
-        assert_eq!(words[10], 0x3C42);
-        assert_eq!(words[11], pack_color(0xAA, 0xBB, 0xCC));
+        assert_eq!(words[10], 0x3c42);
+        assert_eq!(words[11], pack_color(0xaa, 0xbb, 0xcc));
         assert_eq!(words[12], pack_vertex(10, 90));
         assert_eq!(words[13], 0x0240);
     }

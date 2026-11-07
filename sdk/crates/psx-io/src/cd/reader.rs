@@ -26,19 +26,25 @@
 //! keeps CD-ROM interrupts away from the CPU for the length of a stream:
 //!
 //! * `I_MASK` is set to VBlank-only (by `prepare`, and again by each
-//!   `start_read`) until [`SectorReader::stop`] puts the previous value back. Every other source stops reaching the CPU in
-//!   between: a CD-ROM IRQ with no handler would otherwise be an unhandled-IRQ
+//!   `start_read`) until [`SectorReader::stop`] puts the previous value back,
+//!   plus whatever [`irq::keep_enabled_while_polling`] holds. Every other
+//!   source stops reaching the CPU in between: a CD-ROM IRQ with no handler would otherwise be an unhandled-IRQ
 //!   storm.
 //! * The latched CD-ROM `I_STAT` bit is acked and the controller's five IRQ
 //!   enables are switched on, then every pending controller IRQ is acked.
-//! * On the first `prepare` of a reader, IRQs latched by earlier activity (the
-//!   BIOS disc boot's file load) are drained. Pausing instead would hang on
-//!   an emulator that has no active read to pause.
+//! * On the first `prepare` of a reader the drive is not assumed idle, whatever
+//!   booted the program (Sony BIOS versions end their file load differently,
+//!   OpenBIOS and a chain loader differently again). IRQs latched by earlier
+//!   activity are drained, GetStat asks what the drive is doing, and if it is
+//!   reading, seeking or playing it is stopped with the proven Pause
+//!   ([`pause::settle_drive`]); an idle drive is left alone, so there is no
+//!   Pause for an emulator to leave unanswered. Every wait is counted.
 //! * `SetMode` is sent: double speed and 2048-byte user data by default.
 //!
 //! No DMA channel is enabled: nothing here uses one.
 
 use super::lba_to_bcd_msf;
+use super::pause::{self, Completion, PauseAnswer, PauseDrive, PauseFailure};
 use crate::irq;
 use crate::periph::Cd;
 use psx_hw::cd::irq::{
@@ -46,8 +52,8 @@ use psx_hw::cd::irq::{
     DATA_READY as IRQ_DATA_READY, ERROR as IRQ_ERROR,
 };
 use psx_hw::cd::{
-    CMD_DEMUTE, CMD_PAUSE, CMD_READN, CMD_SEEKL, CMD_SETFILTER, CMD_SETLOC, CMD_SETMODE,
-    MODE_DOUBLE_SPEED,
+    CMD_DEMUTE, CMD_GETSTAT, CMD_PAUSE, CMD_READN, CMD_SEEKL, CMD_SETFILTER, CMD_SETLOC,
+    CMD_SETMODE, MODE_DOUBLE_SPEED,
 };
 
 /// One CD sector's user data in 32-bit words.
@@ -75,12 +81,46 @@ const ALL_IRQS_ENABLED: u8 = psx_hw::cd::irq::ALL;
 pub const DIAG_CD_ERROR: u8 = 0x05;
 /// [`SectorReader::diagnostics`] cause byte: the wait spun out; the snapshot
 /// carries the raw status register and the last IRQ flag seen.
-pub const DIAG_TIMEOUT: u8 = 0xFF;
+pub const DIAG_TIMEOUT: u8 = 0xff;
 /// [`SectorReader::diagnostics`] cause byte: the parameter FIFO never freed up.
-pub const DIAG_PARAM_STUCK: u8 = 0xFE;
+pub const DIAG_PARAM_STUCK: u8 = 0xfe;
+/// [`SectorReader::diagnostics`] cause byte: [`SectorReader::stop_proved`] could
+/// not prove the drive stopped; the snapshot's status byte is
+/// [`PauseFailure::code`] and the command byte is `CMD_PAUSE`.
+pub const DIAG_PAUSE: u8 = 0xfd;
 /// [`SectorReader::diagnostics`] command byte standing in for a `read_sector`
 /// wait (ReadN is streaming; no command byte is in flight).
-pub const DIAG_SITE_READ: u8 = 0xD0;
+pub const DIAG_SITE_READ: u8 = 0xd0;
+
+/// Called from every spin of every polled wait in this module, see [`set_idle_hook`].
+///
+/// In `.data`, not `.bss`: a chain-loader image has no `.bss` zeroed for it.
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
+static mut IDLE_HOOK: Option<fn()> = None;
+
+/// Install (or with `None` remove) a function the polled reader calls from every
+/// spin of every wait it makes (a seek, the next sector of a read, a command's
+/// acknowledge) and so between the sectors of any load built on it.
+///
+/// It is how a program keeps something moving while it blocks on the disc: the
+/// `psx-loading` widget polls from here, so one hook animates every polled load
+/// the program does, whichever crate issues it (pack table scans and chunk reads
+/// included). The hook runs with the drive owned by the reader: it must not
+/// touch the CD controller, and it must return at once when there is nothing to
+/// do, because it runs thousands of times a second. It is global, one at a time.
+pub fn set_idle_hook(hook: Option<fn()>) {
+    // SAFETY: a plain store to a private static; the guest is single threaded and
+    // no interrupt handler reads it.
+    unsafe { IDLE_HOOK = hook };
+}
+
+#[inline]
+fn run_idle_hook() {
+    // SAFETY: as `set_idle_hook`.
+    if let Some(hook) = unsafe { IDLE_HOOK } {
+        hook();
+    }
+}
 
 enum Wait {
     Matched,
@@ -202,9 +242,16 @@ impl SectorReader {
         // The FIFO fills shortly after the request; the bound covers a slow
         // drive without letting a dead one hang the caller.
         let mut spins = 0;
+        crate::diag::wait_begin(crate::diag::site::CD_FIFO, 0);
         while !cd.is_data_fifo_ready() && spins < DATA_POLL {
             spins += 1;
         }
+        if spins >= DATA_POLL {
+            crate::diag::wait_timeout(crate::diag::site::CD_FIFO, 0, DATA_POLL);
+        } else {
+            crate::diag::wait_end();
+        }
+        crate::diag::cd_sector();
         for word in buffer.iter_mut() {
             let b0 = cd.read_data_byte() as u32;
             let b1 = cd.read_data_byte() as u32;
@@ -237,18 +284,36 @@ impl SectorReader {
     }
 
     fn wait_irq(&mut self, expected: u8, limit: u32) -> Wait {
+        self.wait_irq_with(expected, limit, &mut || {})
+    }
+
+    /// [`wait_irq`](Self::wait_irq) calling `idle` once per spin, before the
+    /// controller is looked at again, so a caller can keep servicing something
+    /// else (the pad) through a wait that runs longer than a frame.
+    fn wait_irq_with(&mut self, expected: u8, limit: u32, idle: &mut dyn FnMut()) -> Wait {
+        let site = if expected == IRQ_DATA_READY {
+            crate::diag::site::CD_SECTOR
+        } else {
+            crate::diag::site::CD_RESPONSE
+        };
+        crate::diag::wait_begin(site, expected as u32);
         let mut spins = 0;
         while spins < limit {
+            idle();
+            run_idle_hook();
             let flag = self.cd.irq_flag_value();
             if flag == expected {
+                crate::diag::wait_end();
                 return Wait::Matched;
             }
             // Some drives raise the data FIFO before (or without) latching the
             // DataReady flag; treat visible data as a match.
             if expected == IRQ_DATA_READY && self.cd.is_data_fifo_ready() {
+                crate::diag::wait_end();
                 return Wait::Matched;
             }
             if flag == IRQ_ERROR {
+                crate::diag::wait_end();
                 return Wait::CdError;
             }
             if flag != 0 {
@@ -256,6 +321,7 @@ impl SectorReader {
             }
             spins += 1;
         }
+        crate::diag::wait_timeout(site, expected as u32, limit);
         Wait::Timeout
     }
 
@@ -265,6 +331,7 @@ impl SectorReader {
         let status = self.cd.read_response_byte();
         let code = self.cd.read_response_byte();
         self.diag = [DIAG_CD_ERROR, status, command, code];
+        crate::diag::cd_error(status, code);
     }
 
     /// Record a wait that spun out.
@@ -272,12 +339,28 @@ impl SectorReader {
         let status = self.cd.status_register();
         let flag = self.cd.irq_flag_value();
         self.diag = [DIAG_TIMEOUT, status, command, flag];
+        crate::diag::cd_timeout(u32::from_be_bytes(self.diag));
     }
 
     /// Dispatch one command with controller IRQs masked and every FIFO in a
     /// known state, then wait for `expected` and ack it. The mask/ack ordering
     /// is load-bearing on silicon; do not reorder.
     fn send_command(&mut self, command: u8, params: &[u8], expected: u8, limit: u32) -> bool {
+        matches!(
+            self.send_command_waiting(command, params, expected, limit),
+            Some(Wait::Matched)
+        )
+    }
+
+    /// [`send_command`](Self::send_command) saying how the wait ended; `None`
+    /// when the command never went out (the parameter FIFO stayed full).
+    fn send_command_waiting(
+        &mut self,
+        command: u8,
+        params: &[u8],
+        expected: u8,
+        limit: u32,
+    ) -> Option<Wait> {
         let saved = self.cd.irq_enable_mask();
         self.cd.set_irq_enable_mask(0);
         self.cd.acknowledge_all_and_reset_parameters();
@@ -288,42 +371,72 @@ impl SectorReader {
             if !self.cd.wait_parameter_room(PARAM_POLL) {
                 self.diag = [DIAG_PARAM_STUCK, self.cd.status_register(), command, 0];
                 self.cd.set_irq_enable_mask(saved);
-                return false;
+                return None;
             }
             self.cd.send_parameter_byte(param);
         }
         self.cd.send_command_byte(command);
-        let ok = match self.wait_irq(expected, limit) {
+        let outcome = self.wait_irq(expected, limit);
+        match outcome {
             Wait::Matched => {
                 self.cd.drain_response_limited(DRAIN_LIMIT);
                 self.cd.acknowledge_irq(expected);
-                true
             }
             Wait::CdError => {
                 self.note_drive_error(command);
                 self.cd.drain_response_limited(DRAIN_LIMIT);
                 self.cd.acknowledge_all_and_reset_parameters();
-                false
+            }
+            Wait::Timeout => self.note_timeout(command),
+        }
+        self.cd.set_irq_enable_mask(saved);
+        Some(outcome)
+    }
+
+    /// GetStat: the drive's status byte, or `None` when it does not answer within
+    /// [`ACK_POLL`] spins. Same masking, draining and acknowledging as
+    /// [`send_command`](Self::send_command), so a read still streaming sectors
+    /// (each popped and acknowledged by the wait) cannot hold the answer back.
+    fn get_status(&mut self) -> Option<u8> {
+        let saved = self.cd.irq_enable_mask();
+        self.cd.set_irq_enable_mask(0);
+        self.cd.acknowledge_all_and_reset_parameters();
+        self.cd.drain_response_limited(DRAIN_LIMIT);
+        self.cd.reset_parameter_fifo();
+        self.cd.send_command_byte(CMD_GETSTAT);
+        let status = match self.wait_irq(IRQ_ACK, ACK_POLL) {
+            Wait::Matched => {
+                let status = self.cd.read_response_byte();
+                self.cd.drain_response_limited(DRAIN_LIMIT);
+                self.cd.acknowledge_irq(IRQ_ACK);
+                Some(status)
+            }
+            Wait::CdError => {
+                self.note_drive_error(CMD_GETSTAT);
+                self.cd.drain_response_limited(DRAIN_LIMIT);
+                self.cd.acknowledge_all_and_reset_parameters();
+                None
             }
             Wait::Timeout => {
-                self.note_timeout(command);
-                false
+                self.note_timeout(CMD_GETSTAT);
+                None
             }
         };
         self.cd.set_irq_enable_mask(saved);
-        ok
+        status
     }
 
     /// Set `I_MASK` to VBlank-only, keeping the caller's mask for
-    /// [`stop`](Self::stop). Idempotent within a stream.
+    /// [`stop`](Self::stop), plus the sources [`irq::keep_enabled_while_polling`]
+    /// holds (the pad engine's). Idempotent within a stream.
     fn enter_polling_mask(&mut self) {
         self.saved_mask.keep(irq::mask());
-        irq::set_mask(1 << psx_hw::irq::source::VBLANK);
+        irq::set_mask((1 << psx_hw::irq::source::VBLANK) | irq::polling_keep());
     }
 
     fn restore_irq_mask(&mut self) {
         if let Some(mask) = self.saved_mask.take() {
-            irq::set_mask(mask);
+            irq::set_mask(mask_after_stream(mask, irq::polling_keep()));
         }
     }
 
@@ -385,11 +498,13 @@ impl SectorReader {
         self.cd.set_irq_enable_mask(ALL_IRQS_ENABLED);
         self.cd.acknowledge_all_and_reset_parameters();
         if !self.prepared {
-            // A BIOS disc boot has already finished its file load. Do not
-            // send Pause before our first stream; on real BIOS boot paths
-            // some emulators have no active read command to pause and
-            // never acknowledge it. Drain any already-latched data/ack
-            // instead.
+            // Do not trust what the program that ran before us left in the drive. A Sony BIOS
+            // ends its file load with a Pause; another BIOS (OpenBIOS) or a chain loader's last
+            // read can hand over with a ReadN still streaming, a Pause's second response
+            // pending, or IRQs latched. First drop whatever is already latched (bounded: a
+            // streaming drive refills the flag, the loop gives up after 16 and the next steps
+            // deal with the stream), then ask the drive what it is doing and stop it if it is
+            // doing anything.
             let mut drained = 0;
             while drained < 16 {
                 let flag = self.cd.irq_flag_value();
@@ -398,6 +513,17 @@ impl SectorReader {
                 }
                 self.ack_unexpected(flag);
                 drained += 1;
+            }
+            self.cd.acknowledge_all_and_reset_parameters();
+            match pause::settle_drive(&mut ReaderPause(self)) {
+                // Idle, or stopped and proved so. A drive that does not answer at all is left
+                // to the SetMode below, which fails on its own bound and reports it.
+                Ok(_) | Err(PauseFailure::NoAnswer) => {}
+                Err(failure) => {
+                    self.diag = [DIAG_PAUSE, failure.code(), CMD_PAUSE, 0];
+                    self.cd.acknowledge_all_and_reset_parameters();
+                    return false;
+                }
             }
             self.cd.acknowledge_all_and_reset_parameters();
             self.prepared = true;
@@ -416,6 +542,7 @@ impl SectorReader {
     /// Setloc to a program-relative `lba`, shifted by [`crate::disc_base`]
     /// to where this program's image actually landed on a multi-program disc.
     fn set_location(&mut self, lba: u32) -> bool {
+        crate::diag::cd_start(crate::disc_base::shift_lba(lba));
         let [minute, second, frame] = lba_to_bcd_msf(crate::disc_base::shift_lba(lba));
         self.send_command(CMD_SETLOC, &[minute, second, frame], IRQ_ACK, ACK_POLL)
     }
@@ -450,6 +577,19 @@ impl SectorReader {
     /// settling; the same console that corrupts our sustained implicit-seek
     /// streams loads 1.4 MB EXEs through the BIOS bracket without fault.
     pub fn start_read_seek_first(&mut self, lba: u32, seek_poll: u32) -> bool {
+        self.start_read_seek_first_with(lba, seek_poll, &mut || {})
+    }
+
+    /// [`start_read_seek_first`](Self::start_read_seek_first) calling `idle`
+    /// while it waits for the seek to complete. A long seek (the head crossing
+    /// the disc) takes several frames, and the command sequence is otherwise
+    /// the same, in the same order; `idle` must not touch the CD controller.
+    pub fn start_read_seek_first_with(
+        &mut self,
+        lba: u32,
+        seek_poll: u32,
+        idle: &mut dyn FnMut(),
+    ) -> bool {
         self.enter_polling_mask();
         if !self.set_location(lba) {
             return false;
@@ -460,7 +600,7 @@ impl SectorReader {
         if !self.send_command(CMD_SEEKL, &[], IRQ_ACK, ACK_POLL) {
             return false;
         }
-        match self.wait_irq(IRQ_COMPLETE, seek_poll) {
+        match self.wait_irq_with(IRQ_COMPLETE, seek_poll, idle) {
             Wait::Matched => {}
             Wait::CdError | Wait::Timeout => return false,
         }
@@ -488,12 +628,14 @@ impl SectorReader {
             Wait::Matched => {}
             Wait::CdError => {
                 self.note_drive_error(DIAG_SITE_READ);
+                crate::diag::cd_read_failed(self.diagnostics());
                 self.cd.drain_response_limited(DRAIN_LIMIT);
                 self.cd.acknowledge_all_and_reset_parameters();
                 return false;
             }
             Wait::Timeout => {
                 self.note_timeout(DIAG_SITE_READ);
+                crate::diag::cd_read_failed(self.diagnostics());
                 self.cd.drain_response_limited(DRAIN_LIMIT);
                 self.cd.acknowledge_all_and_reset_parameters();
                 return false;
@@ -544,6 +686,16 @@ impl SectorReader {
     /// Pause the ReadN stream (keeps the drive spun up), ack everything and
     /// put the interrupt mask [`prepare`](Self::prepare) replaced back.
     /// Safe to call after failures; it tolerates a drive with no active read.
+    ///
+    /// **This returns after the Pause is acknowledged, not when the drive has
+    /// stopped.** On the console the second response comes 1.2 to 3.9 million
+    /// system clocks later (see [`pause`](super::pause)); waiting here would
+    /// charge every chunk of a table scan that long. That is safe for the next
+    /// command of a read sequence (any command cancels the pending second
+    /// response, and a data sector still in flight is drained by the waits),
+    /// and wrong for a caller that then asks the drive for its state: a GetStat
+    /// right after still says "reading". Use [`stop_proved`](Self::stop_proved)
+    /// when the drive has to be quiet before anything else happens.
     pub fn stop(&mut self) {
         if self.send_command(CMD_PAUSE, &[], IRQ_ACK, CLEANUP_POLL) {
             let _ = self.wait_irq(IRQ_COMPLETE, CLEANUP_POLL);
@@ -554,6 +706,81 @@ impl SectorReader {
         // Last, so a CD-ROM IRQ still latched cannot reach the CPU through
         // the restored mask.
         self.restore_irq_mask();
+    }
+
+    /// [`stop`](Self::stop), then wait until the drive has really stopped, with
+    /// the protocol the console needs ([`pause::pause_until_stopped`]): wait for
+    /// the second response up to [`pause::COMPLETE_SPINS`], settle by status
+    /// when it never comes, and send the Pause again after a seek that refused
+    /// it. Takes up to about 60 ms of drive time after a long read at double
+    /// speed and 115 ms at single speed; in a failure it takes up to a second.
+    ///
+    /// On `Err` the interrupt mask is restored all the same and
+    /// [`diagnostics`](Self::diagnostics) carries [`DIAG_PAUSE`] with the
+    /// [`PauseFailure::code`]. The caller decides whether to retry or give up.
+    pub fn stop_proved(&mut self) -> Result<(), PauseFailure> {
+        let result = pause::pause_until_stopped(&mut ReaderPause(self));
+        if let Err(failure) = result {
+            self.diag = [DIAG_PAUSE, failure.code(), CMD_PAUSE, 0];
+        }
+        self.cd.acknowledge_all_and_reset_parameters();
+        self.restore_irq_mask();
+        result
+    }
+}
+
+/// [`SectorReader`] as the drive of [`pause::pause_until_stopped`].
+struct ReaderPause<'a>(&'a mut SectorReader);
+
+impl PauseDrive for ReaderPause<'_> {
+    fn send_pause(&mut self) -> PauseAnswer {
+        match self
+            .0
+            .send_command_waiting(CMD_PAUSE, &[], IRQ_ACK, CLEANUP_POLL)
+        {
+            Some(Wait::Matched) => PauseAnswer::Acknowledged,
+            Some(Wait::CdError) => PauseAnswer::Refused,
+            Some(Wait::Timeout) | None => PauseAnswer::Silent,
+        }
+    }
+
+    fn wait_completion(&mut self, spins: u32) -> Completion {
+        let reader = &mut *self.0;
+        match reader.wait_irq(IRQ_COMPLETE, spins) {
+            Wait::Matched => {
+                reader.cd.drain_response_limited(DRAIN_LIMIT);
+                reader.cd.acknowledge_irq(IRQ_COMPLETE);
+                Completion::Arrived
+            }
+            Wait::CdError => {
+                reader.note_drive_error(CMD_PAUSE);
+                reader.cd.drain_response_limited(DRAIN_LIMIT);
+                reader.cd.acknowledge_all_and_reset_parameters();
+                Completion::Error
+            }
+            Wait::Timeout => Completion::TimedOut,
+        }
+    }
+
+    fn status(&mut self) -> Option<u8> {
+        self.0.get_status()
+    }
+
+    fn wait_seek_end(&mut self, spins: u32) -> bool {
+        let reader = &mut *self.0;
+        match reader.wait_irq(IRQ_DATA_READY, spins) {
+            Wait::Matched => {
+                // wait_irq also matches on a ready FIFO with no flag; pop either way.
+                reader.ack_unexpected(IRQ_DATA_READY);
+                true
+            }
+            Wait::CdError => {
+                reader.cd.drain_response_limited(DRAIN_LIMIT);
+                reader.cd.acknowledge_all_and_reset_parameters();
+                false
+            }
+            Wait::Timeout => false,
+        }
     }
 }
 
@@ -567,9 +794,25 @@ impl Default for SectorReader {
     }
 }
 
+/// The `I_MASK` to put back when a polled stream ends: the one it found, plus
+/// the sources a driver installed meanwhile asked to keep
+/// ([`irq::keep_enabled_while_polling`]). Restoring the saved word alone would
+/// drop a source (the pad engine's) that was switched on during the stream.
+const fn mask_after_stream(saved: u32, keep: u32) -> u32 {
+    saved | keep
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_source_kept_during_the_stream_survives_its_end() {
+        // The pad engine installed mid-stream: its bits were not in the mask
+        // the reader saved, and must not be dropped when it is put back.
+        assert_eq!(mask_after_stream(0b0101, 0b1000_0000), 0b1000_0101);
+        assert_eq!(mask_after_stream(0b0101, 0), 0b0101);
+    }
 
     #[test]
     fn the_reader_owns_the_token_and_hands_it_back() {
@@ -595,6 +838,24 @@ mod tests {
         assert_eq!(saved.take(), None, "stop restores once");
         saved.keep(0x42);
         assert_eq!(saved.take(), Some(0x42), "a new stream saves afresh");
+    }
+
+    #[test]
+    fn the_idle_hook_runs_when_set_and_not_after_it_is_removed() {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        fn count() {
+            CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        run_idle_hook();
+        assert_eq!(CALLS.load(Ordering::Relaxed), 0, "no hook, no call");
+        set_idle_hook(Some(count));
+        run_idle_hook();
+        run_idle_hook();
+        assert_eq!(CALLS.load(Ordering::Relaxed), 2);
+        set_idle_hook(None);
+        run_idle_hook();
+        assert_eq!(CALLS.load(Ordering::Relaxed), 2);
     }
 
     #[test]

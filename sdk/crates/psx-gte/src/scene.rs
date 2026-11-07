@@ -23,9 +23,8 @@
 //! ```
 
 use crate::math::{Mat3I16, Vec3I16, Vec3I32};
-use crate::ops;
 use crate::regs::pack_xy;
-use crate::{read_control, read_data, write_control, write_data};
+use crate::{ops, read_control, read_data, write_control, write_data};
 #[cfg(target_arch = "mips")]
 use core::arch::asm;
 
@@ -152,6 +151,28 @@ pub struct AabbClipPlane {
     pub signbits: u8,
     /// Q12 plane distance.
     pub distance: i32,
+}
+
+/// Read the rotation matrix back from the GTE's RT control registers (0..=4).
+///
+/// The inverse of [`load_rotation`], for a caller that borrows the matrix and
+/// has to hand the GTE back exactly as it found it.
+#[doc(alias = "GetRotMatrix")]
+pub fn read_rotation() -> Mat3I16 {
+    let c0 = read_control!(0);
+    let c1 = read_control!(1);
+    let c2 = read_control!(2);
+    let c3 = read_control!(3);
+    let c4 = read_control!(4);
+    let lo = |v: u32| v as u16 as i16;
+    let hi = |v: u32| (v >> 16) as u16 as i16;
+    Mat3I16 {
+        m: [
+            [lo(c0), hi(c0), lo(c1)],
+            [hi(c1), lo(c2), hi(c2)],
+            [lo(c3), hi(c3), lo(c4)],
+        ],
+    }
 }
 
 /// Load the rotation matrix into the GTE's RT control registers (0..=4).
@@ -353,6 +374,64 @@ pub fn transform_vertex_scheduled(v: Vec3I16) -> Vec3I32 {
     #[cfg(not(target_arch = "mips"))]
     {
         transform_vertex(v)
+    }
+}
+
+/// Rotate one vector by the loaded RT with no translation and no fraction
+/// shift, using the same console-confirmed MTC2/MVMVA/MFC2 schedule as
+/// [`transform_vertex_scheduled`].
+///
+/// The result is the exact row products `RT * v` (MAC1..MAC3 of an `sf = 0`
+/// MVMVA), so a caller replacing a CPU matrix-vector product gets identical
+/// integers. It reads RT only; TR is not added.
+#[inline(always)]
+pub fn rotate_vector_unshifted_scheduled(v: Vec3I16) -> Vec3I32 {
+    #[cfg(target_arch = "mips")]
+    {
+        let xy = v.xy_packed();
+        let z = v.z_packed();
+        let mac1: u32;
+        let mac2: u32;
+        let mac3: u32;
+        // SAFETY: the same register use as `transform_vertex_mips`: MTC2
+        // $8/$9 into V0, two buffer NOPs (the HWB-010/011 commit gap), the
+        // MVMVA, then MFC2 MAC1..MAC3 into $8..$10 and a final load-delay
+        // NOP. Only $8..$10 are written and all are declared outputs.
+        unsafe {
+            asm!(
+                ".word {w0}",
+                ".word {w1}",
+                ".word 0",
+                ".word 0",
+                ".word {w2}",
+                ".word {w3}",
+                ".word {w4}",
+                ".word {w5}",
+                ".word 0",
+                w0 = const psx_hw::gte::mtc2(8, 0),
+                w1 = const psx_hw::gte::mtc2(9, 1),
+                w2 = const psx_hw::gte::command::ROTATE_V0_UNSHIFTED,
+                w3 = const psx_hw::gte::mfc2(8, 25),
+                w4 = const psx_hw::gte::mfc2(9, 26),
+                w5 = const psx_hw::gte::mfc2(10, 27),
+                inlateout("$8") xy => mac1,
+                inlateout("$9") z => mac2,
+                lateout("$10") mac3,
+                options(nostack, nomem, preserves_flags),
+            );
+        }
+        Vec3I32::new(mac1 as i32, mac2 as i32, mac3 as i32)
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        write_data!(0, v.xy_packed());
+        write_data!(1, v.z_packed());
+        crate::host::execute(psx_hw::gte::command::ROTATE_V0_UNSHIFTED);
+        Vec3I32::new(
+            read_data!(25) as i32,
+            read_data!(26) as i32,
+            read_data!(27) as i32,
+        )
     }
 }
 
@@ -1521,39 +1600,6 @@ pub fn error_flags() -> u32 {
     read_control!(31)
 }
 
-/// Renamed to [`start_project_triple`].
-#[deprecated(note = "renamed to `start_project_triple`")]
-#[inline(always)]
-pub fn rtpt_kick(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> ProjectTripleInFlight {
-    start_project_triple(v0, v1, v2)
-}
-
-/// Renamed to [`classic_ordering_depth3_from_sum`].
-#[deprecated(note = "renamed to `classic_ordering_depth3_from_sum`")]
-#[inline(always)]
-pub fn classic_otz3_from_sum(sum: u32) -> u16 {
-    classic_ordering_depth3_from_sum(sum)
-}
-
-/// Renamed to [`is_aabb_outside_clip4`].
-#[deprecated(note = "renamed to `is_aabb_outside_clip4`")]
-#[inline(always)]
-pub fn aabb_outside_clip4(
-    mins: [i16; 3],
-    maxs: [i16; 3],
-    planes: &[AabbClipPlane; 4],
-    clip_flags: u8,
-) -> bool {
-    is_aabb_outside_clip4(mins, maxs, planes, clip_flags)
-}
-
-/// Renamed to [`screen_area_scheduled`].
-#[deprecated(note = "renamed to `screen_area_scheduled`")]
-#[inline(always)]
-pub fn screen_area_mac0_scheduled(vertices: [(i16, i16); 3]) -> i32 {
-    screen_area_scheduled(vertices)
-}
-
 #[cfg(all(test, not(target_arch = "mips")))]
 mod host_smoke {
     //! Smoke tests for the host-side software-GTE shim.
@@ -1808,11 +1854,11 @@ mod host_smoke {
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             seed
         };
-        let mut hash = 0xCBF2_9CE4_8422_2325u64;
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
         let mut eat = |value: i32| {
             for byte in value.to_le_bytes() {
                 hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
             }
         };
         for i in 0..40_000u32 {
@@ -1833,7 +1879,7 @@ mod host_smoke {
             eat(out.xy_squared);
             eat(out.squared);
         }
-        assert_eq!(hash, 0x803B_4A0D_7EA1_0CB5);
+        assert_eq!(hash, 0x803b_4a0d_7ea1_0cb5);
     }
 
     /// The table the previous implementation used, captured by running it.
@@ -1852,6 +1898,30 @@ mod host_smoke {
         2165, 2160, 2155, 2151, 2146, 2142, 2137, 2133, 2128, 2124, 2119, 2115, 2110, 2106, 2102,
         2097, 2093, 2089, 2084, 2080, 2076, 2072, 2068, 2064, 2060, 2056, 2052,
     ];
+
+    #[test]
+    fn unshifted_rotation_is_the_exact_row_product() {
+        let m = Mat3I16 {
+            m: [[4096, -1200, 33], [-7, 3900, -2048], [1500, 2, -4000]],
+        };
+        host::reset();
+        load_rotation(&m);
+        for v in [
+            Vec3I16::new(127, -128, 5),
+            Vec3I16::new(-1, 0, 127),
+            Vec3I16::new(0, 0, 0),
+            Vec3I16::new(-128, -128, -128),
+        ] {
+            let got = rotate_vector_unshifted_scheduled(v);
+            let dot = |r: usize| {
+                i32::from(m.m[r][0]) * i32::from(v.x)
+                    + i32::from(m.m[r][1]) * i32::from(v.y)
+                    + i32::from(m.m[r][2]) * i32::from(v.z)
+            };
+            assert_eq!([got.x, got.y, got.z], [dot(0), dot(1), dot(2)]);
+        }
+        assert_eq!(read_rotation(), m);
+    }
 
     #[test]
     fn generated_rsqrt_table_matches_the_previous_table() {

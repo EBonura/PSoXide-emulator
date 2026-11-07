@@ -35,13 +35,6 @@ pub enum Channel {
     OrderingTableClear = 6,
 }
 
-#[allow(non_upper_case_globals)]
-impl Channel {
-    /// Renamed to [`Channel::Cd`].
-    #[deprecated(note = "renamed to `Channel::Cd`")]
-    pub const Cdrom: Channel = Channel::Cd;
-}
-
 impl Channel {
     /// Address of this channel's register block.
     #[inline(always)]
@@ -69,7 +62,10 @@ pub const fn size_words(words: u16) -> u32 {
 /// Size word for block sync: `block_count` blocks of `block_size` words.
 ///
 /// A zero field means 0x1_0000 on silicon, so a zero count is a 65,536-block
-/// transfer, not an empty one.
+/// transfer, not an empty one. The same goes for a count the controller has
+/// already counted down: silicon decrements the block field as blocks finish
+/// and leaves 0 behind, so the value is spent by the kick it armed. Store a
+/// fresh one before every block-sync kick ([`start`] does).
 #[doc(alias = "BCR")]
 #[inline(always)]
 pub const fn size_blocks(block_size: u16, block_count: u16) -> u32 {
@@ -101,6 +97,11 @@ pub struct Transfer {
 /// call (it emits no instruction), then control. The caller still enables
 /// the channel ([`enable_channel`]) and waits for completion ([`wait_done`]).
 ///
+/// All three are stored on every call, and that is load-bearing for block
+/// sync: silicon counts the size register's block field down to 0 as the
+/// transfer runs, so a second kick that relied on the first call's size would
+/// run 65,536 blocks. Call `start` again, with the size, for each block kick.
+///
 /// # Safety
 ///
 /// From the control store until the channel goes idle ([`wait_done`]
@@ -120,6 +121,13 @@ pub struct Transfer {
 ///   write to a busy channel, so the old transfer would keep running).
 #[inline(always)]
 pub unsafe fn start(ch: Channel, transfer: Transfer) {
+    crate::diag::dma_kick(ch as u32);
+    #[cfg(feature = "console-diag")]
+    if matches!(ch, Channel::Gpu)
+        && transfer.control & psx_hw::dma::CHCR_SYNC_LINKED == psx_hw::dma::CHCR_SYNC_LINKED
+    {
+        crate::diag::ll_scan(transfer.address);
+    }
     // SAFETY: the caller upholds this function's contract for the transfer
     // these three stores arm and start.
     unsafe {
@@ -128,6 +136,26 @@ pub unsafe fn start(ch: Channel, transfer: Transfer) {
     }
     compiler_barrier();
     // SAFETY: as above.
+    unsafe { raw::set_control(ch, transfer.control) };
+}
+
+/// [`start`] without the direct-access guard on the address store, for the
+/// draw-done kick that runs inside the guard or inside a scratchpad stack call
+/// tree (the stack guard cannot bound the guard's function pointer).
+///
+/// # Safety
+///
+/// As [`start`]; and the caller has already made the GPU channel safe to
+/// re-arm (the guard has run, or the channel is idle by construction).
+pub(crate) unsafe fn start_unguarded(ch: Channel, transfer: Transfer) {
+    crate::diag::dma_kick(ch as u32);
+    // SAFETY: a store to this channel's address register; the caller upholds
+    // `start`'s contract, and the guard is not needed (see above).
+    unsafe { crate::write_u32(ch.register_base() + reg::MADR, transfer.address) };
+    // SAFETY: as `raw::set_size`.
+    unsafe { raw::set_size(ch, transfer.size) };
+    compiler_barrier();
+    // SAFETY: as `start`.
     unsafe { raw::set_control(ch, transfer.control) };
 }
 
@@ -182,6 +210,10 @@ pub mod raw {
     /// # Safety
     ///
     /// As [`set_address`]: the count sets the extent of the next transfer.
+    ///
+    /// In block sync (`CHCR_SYNC_BLOCK`) silicon decrements the block count as
+    /// blocks finish, so this store arms exactly one kick: write it again
+    /// before each later block-sync kick, or the second runs 65,536 blocks.
     #[doc(alias = "BCR")]
     #[inline(always)]
     pub unsafe fn set_size(ch: Channel, value: u32) {
@@ -191,6 +223,8 @@ pub mod raw {
 
     /// Write the channel's control register. With `CHCR_START` set this
     /// starts a transfer from whatever the address and size registers hold.
+    /// For a block-sync kick that holds only once per size store, because the
+    /// transfer spends the block count (see [`set_size`]).
     ///
     /// # Safety
     ///
@@ -205,55 +239,12 @@ pub mod raw {
     }
 }
 
-/// Write the channel's RAM address register.
-///
-/// # Safety
-///
-/// The value arms or starts a transfer on `ch`; see [`start`]'s contract.
-#[deprecated(
-    note = "a safe address store lets safe code aim DMA anywhere in RAM; use the unsafe `dma::start`, or `dma::raw::set_address` for probes"
-)]
-#[inline(always)]
-pub unsafe fn set_madr(ch: Channel, addr: u32) {
-    // SAFETY: forwarded contract.
-    unsafe { raw::set_address(ch, addr) }
-}
-
 /// Read the channel's RAM address register.
 #[doc(alias = "MADR")]
 #[inline(always)]
 pub fn address(ch: Channel) -> u32 {
     // SAFETY: a side-effect-free read of this channel's address register.
     unsafe { crate::read_u32(ch.register_base() + reg::MADR) }
-}
-
-/// Write the size register in manual / linked-list mode: just a 16-bit word
-/// count.
-///
-/// # Safety
-///
-/// The value arms or starts a transfer on `ch`; see [`start`]'s contract.
-#[deprecated(
-    note = "use the unsafe `dma::start` with `dma::size_words`, or `dma::raw::set_size` for probes"
-)]
-#[inline(always)]
-pub unsafe fn set_bcr_manual(ch: Channel, words: u16) {
-    // SAFETY: forwarded contract.
-    unsafe { raw::set_size(ch, size_words(words)) }
-}
-
-/// Write the control register. Starts the transfer if `CHCR_START` is set.
-///
-/// # Safety
-///
-/// The value arms or starts a transfer on `ch`; see [`start`]'s contract.
-#[deprecated(
-    note = "a safe control store starts DMA from safe code; use the unsafe `dma::start`, `dma::abort` to stop a channel, or `dma::raw::set_control` for probes"
-)]
-#[inline(always)]
-pub unsafe fn set_chcr(ch: Channel, value: u32) {
-    // SAFETY: forwarded contract.
-    unsafe { raw::set_control(ch, value) }
 }
 
 /// Read the channel's control register.
@@ -299,15 +290,6 @@ impl OrderingTableClearDma {
     pub fn clear_table(&mut self, buf: &mut [u32]) -> bool {
         clear_table(buf)
     }
-}
-
-/// [`OrderingTableClearDma::clear_table`] on a token the caller does not hold.
-#[deprecated(note = "use `OrderingTableClearDma::clear_table` with the token")]
-#[inline(always)]
-pub fn clear_ordering_table(buf: &mut [u32]) -> bool {
-    // SAFETY: a token is a logic guard, not a memory-safety one (see
-    // `crate::periph`), and the old function never took one.
-    unsafe { OrderingTableClearDma::steal() }.clear_table(buf)
 }
 
 fn clear_table(buf: &mut [u32]) -> bool {
@@ -423,12 +405,16 @@ pub fn abort(ch: Channel) {
 /// must not assume its data landed.
 pub fn wait_done(ch: Channel, spins: u32) -> bool {
     let mut waited = 0u32;
+    let which = ch as u32;
+    crate::diag::wait_begin(crate::diag::site::DMA_DONE + which, which);
     while is_busy(ch) {
         if waited >= spins {
+            crate::diag::wait_timeout(crate::diag::site::DMA_DONE + which, which, spins);
             return false;
         }
         waited += 1;
     }
+    crate::diag::wait_end();
     true
 }
 
@@ -462,7 +448,7 @@ mod tests {
     #[test]
     fn block_size_packs_size_low_and_count_high() {
         assert_eq!(size_blocks(16, 3), 0x0003_0010);
-        assert_eq!(size_blocks(0xFFFF, 0xFFFF), 0xFFFF_FFFF);
+        assert_eq!(size_blocks(0xffff, 0xffff), 0xffff_ffff);
         assert_eq!(size_words(0x1234), 0x1234);
     }
 

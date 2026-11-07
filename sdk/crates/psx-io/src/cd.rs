@@ -13,18 +13,18 @@
 //! and status bits live in [`psx_hw::cd`].
 
 pub mod audio;
+pub mod pause;
 pub mod reader;
 pub mod xa;
+pub mod xa_clock;
 
 use crate::periph::Cd;
 use crate::{irq, read_u8, write_u8};
 
-use psx_hw::cd::index_status as status;
-use psx_hw::cd::irq as code;
-use psx_hw::cd::{reg, request, volume_apply};
 use psx_hw::cd::{
-    CMD_DEMUTE, CMD_GETLOCP, CMD_GETSTAT, CMD_MUTE, CMD_PAUSE, CMD_PLAY, CMD_READN, CMD_SETLOC,
-    CMD_SETMODE, CMD_STOP, STAT_PLAYING, STAT_SEEKING,
+    index_status as status, irq as code, reg, request, volume_apply, CMD_DEMUTE, CMD_GETLOCP,
+    CMD_GETSTAT, CMD_MUTE, CMD_PAUSE, CMD_PLAY, CMD_READN, CMD_SETLOC, CMD_SETMODE, CMD_STOP,
+    STAT_PLAYING, STAT_SEEKING,
 };
 
 /// Response bytes a sector probe discards at most. The FIFO holds 16, but a
@@ -152,6 +152,7 @@ impl Cd {
             }
             write_byte(reg::PARAMETER, param);
         }
+        crate::diag::cd_command(command);
         write_byte(reg::COMMAND_RESPONSE, command);
         Some(irq_enable)
     }
@@ -299,6 +300,14 @@ impl Cd {
     ///
     /// Unlike [`Self::try_stop`], this leaves the drive spun up, which makes it the
     /// right handoff before gameplay code starts issuing data-read commands.
+    ///
+    /// `spin_limit` bounds each of the two waits. Out of a data read the second
+    /// response comes 1.2 to 3.9 million system clocks after the first on the
+    /// console (and about 4.2 million after CD-DA), so a limit under
+    /// [`pause::COMPLETE_SPINS`] can report failure for a Pause that is merely
+    /// slow. Returns `false` for a refusal (INT5, during a seek) as well; the
+    /// protocol that waits the seek out and sends again is
+    /// [`pause::pause_until_stopped`].
     pub fn try_pause_until_complete(&mut self, spin_limit: u32) -> bool {
         try_command_until_complete_inner(CMD_PAUSE, &[], spin_limit)
     }
@@ -462,6 +471,7 @@ impl Cd {
 
     /// Write the command byte, which starts the command.
     pub fn send_command_byte(&mut self, byte: u8) {
+        crate::diag::cd_command(byte);
         write_byte(reg::COMMAND_RESPONSE, byte);
     }
 
@@ -523,6 +533,7 @@ impl CommandIo for Mmio {
         write_byte(reg::PARAMETER, value);
     }
     fn write_command(&mut self, command: u8) {
+        crate::diag::cd_command(command);
         write_byte(reg::COMMAND_RESPONSE, command);
     }
     fn wait_irq(&mut self, expected: u8, spins: u32) -> Result<u8, CdError> {
@@ -647,7 +658,7 @@ pub const fn bin_to_bcd(v: u8) -> u8 {
 /// Convert a BCD byte back to binary. Inverse of [`bin_to_bcd`] for well-formed
 /// input; nibbles above 9 are not normalised (the drive never emits them).
 pub const fn bcd_to_bin(v: u8) -> u8 {
-    (v >> 4) * 10 + (v & 0x0F)
+    (v >> 4) * 10 + (v & 0x0f)
 }
 
 /// Decoded CdlGetlocP reply. The relative MSF (`relative_*`) is elapsed time
@@ -766,6 +777,7 @@ fn try_command_until_complete_inner(command: u8, params: &[u8], spin_limit: u32)
         }
         write_byte(reg::PARAMETER, param);
     }
+    crate::diag::cd_command(command);
     write_byte(reg::COMMAND_RESPONSE, command);
 
     let ok = wait_ack_then_complete(spin_limit);
@@ -856,6 +868,7 @@ fn clear_parameter_fifo() {
 }
 
 fn ack_irq(bits: u8) {
+    crate::diag::cd_irq_acked(bits);
     select_index(1);
     write_byte(reg::REQUEST_IRQ, bits & code::ACK_ALL);
     irq::acknowledge(1 << psx_hw::irq::source::CDROM);
@@ -866,6 +879,7 @@ fn irq_flag() -> u8 {
     select_index(1);
     let flag = read_byte(reg::REQUEST_IRQ) & code::ACK_ALL;
     select_index(0);
+    crate::diag::cd_irq_seen(flag);
     flag
 }
 
@@ -939,34 +953,6 @@ pub fn discard_response() {
     steal().discard_response()
 }
 
-/// Moved to [`Cd::dispatch_command`].
-#[deprecated(note = "use `Cd::dispatch_command` with the `Cd` token")]
-#[inline(always)]
-pub fn dispatch_command(command: u8, params: &[u8], spin_limit: u32) -> Option<u8> {
-    steal().dispatch_command(command, params, spin_limit)
-}
-
-/// Moved to [`Cd::restore_irq_output`].
-#[deprecated(note = "use `Cd::restore_irq_output` with the `Cd` token")]
-#[inline(always)]
-pub fn restore_irq_output(saved: u8) {
-    steal().restore_irq_output(saved)
-}
-
-/// Moved to [`Cd::poll_data_sector`].
-#[deprecated(note = "use `Cd::poll_data_sector` with the `Cd` token")]
-#[inline(always)]
-pub fn poll_data_sector() -> Result<bool, SectorPollError> {
-    steal().poll_data_sector()
-}
-
-/// Moved to [`Cd::try_status`].
-#[deprecated(note = "use `Cd::try_status` with the `Cd` token")]
-#[inline(always)]
-pub fn try_status(spin_limit: u32) -> Option<Response> {
-    steal().try_status(spin_limit)
-}
-
 /// Moved to [`Cd::try_set_mode`].
 #[deprecated(note = "use `Cd::try_set_mode` with the `Cd` token")]
 #[inline(always)]
@@ -974,32 +960,11 @@ pub fn try_set_mode(mode: u8, spin_limit: u32) -> Option<Response> {
     steal().try_set_mode(mode, spin_limit)
 }
 
-/// Moved to [`Cd::try_set_target_lba`].
-#[deprecated(note = "use `Cd::try_set_target_lba` with the `Cd` token")]
-#[inline(always)]
-pub fn try_set_target_lba(lba: u32, spin_limit: u32) -> Option<Response> {
-    steal().try_set_target_lba(lba, spin_limit)
-}
-
-/// Moved to [`Cd::try_start_reading`].
-#[deprecated(note = "use `Cd::try_start_reading` with the `Cd` token")]
-#[inline(always)]
-pub fn try_start_reading(spin_limit: u32) -> Option<Response> {
-    steal().try_start_reading(spin_limit)
-}
-
 /// Moved to [`Cd::try_unmute`].
 #[deprecated(note = "use `Cd::try_unmute` with the `Cd` token")]
 #[inline(always)]
 pub fn try_unmute(spin_limit: u32) -> Option<Response> {
     steal().try_unmute(spin_limit)
-}
-
-/// Moved to [`Cd::try_mute`].
-#[deprecated(note = "use `Cd::try_mute` with the `Cd` token")]
-#[inline(always)]
-pub fn try_mute(spin_limit: u32) -> Option<Response> {
-    steal().try_mute(spin_limit)
 }
 
 /// Moved to [`Cd::try_play_track`].
@@ -1014,20 +979,6 @@ pub fn try_play_track(track: u8, spin_limit: u32) -> Option<Response> {
 #[inline(always)]
 pub fn try_pause(spin_limit: u32) -> Option<Response> {
     steal().try_pause(spin_limit)
-}
-
-/// Moved to [`Cd::try_pause_until_complete`].
-#[deprecated(note = "use `Cd::try_pause_until_complete` with the `Cd` token")]
-#[inline(always)]
-pub fn try_pause_until_complete(spin_limit: u32) -> bool {
-    steal().try_pause_until_complete(spin_limit)
-}
-
-/// Moved to [`Cd::try_play_position`].
-#[deprecated(note = "use `Cd::try_play_position` with the `Cd` token")]
-#[inline(always)]
-pub fn try_play_position(spin_limit: u32) -> Option<Response> {
-    steal().try_play_position(spin_limit)
 }
 
 #[cfg(test)]
@@ -1141,7 +1092,7 @@ mod tests {
     impl CommandIo for FakeIo {
         fn begin(&mut self) -> u8 {
             self.event(BEGIN);
-            0x1F
+            0x1f
         }
         fn wait_param_room(&mut self, spins: u32) -> bool {
             self.event(ROOM);

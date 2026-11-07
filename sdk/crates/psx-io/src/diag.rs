@@ -1,0 +1,555 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//! Console diagnostics: the counters a stop-panel prints.
+//!
+//! Built only with the `console-diag` feature. Without it every function here
+//! is an empty inline and the block does not exist, so a shipping image is
+//! byte-for-byte what it was. With it, the SDK's own bounded waits, CD command
+//! writes, sector pops and DMA kicks leave their last state in one
+//! `static` block, [`BLOCK`], that `psx_rt::diag` reads when a program stops
+//! (a fault, a panic, or no progress for many frames) and paints on screen,
+//! so one photo of a console shows where it stopped.
+//!
+//! Nothing here touches hardware; every store is a plain volatile word store
+//! to a private static, safe from the foreground and from the VBlank handler.
+
+/// Wait sites recorded in [`Block::wait_cur`] and [`Block::wait_last`].
+pub mod site {
+    /// `gpu::wait_command_ready` (GPUSTAT bit 26).
+    pub const GPU_READY_CMD: u32 = 1;
+    /// `gpu::wait_dma_ready` (GPUSTAT bit 28).
+    pub const GPU_READY_DMA: u32 = 2;
+    /// `dma::wait_done`; the channel number is added (3 to 9).
+    pub const DMA_DONE: u32 = 3;
+    /// The CD reader waiting for a command response; the expected flag is in
+    /// the high byte of the recorded value.
+    pub const CD_RESPONSE: u32 = 11;
+    /// The CD reader waiting for the next data sector.
+    pub const CD_SECTOR: u32 = 12;
+    /// The CD reader waiting for the data FIFO to fill.
+    pub const CD_FIFO: u32 = 13;
+}
+
+/// The diagnostics block. Every field is a plain word; the panel reads them
+/// with volatile loads.
+#[repr(C)]
+pub struct Block {
+    /// [`MAGIC`] once any hook has run.
+    pub magic: u32,
+    /// GP1 writes seen (one per presented frame in most programs).
+    pub gp1_writes: u32,
+    /// DMA kicks per channel, `dma::start`.
+    pub dma_kicks: [u32; 7],
+    /// `dma::wait_done` budgets that ran out.
+    pub dma_wait_fail: u32,
+    /// Channel of the last such failure.
+    pub dma_wait_ch: u32,
+    /// GPUSTAT ready-waits that timed out (and reset the GPU's command buffer).
+    pub gpu_wait_fail: u32,
+    /// Wait in progress now: site in the low byte, aux in the next, 0 for none.
+    pub wait_cur: u32,
+    /// The last wait that spun out: site, aux like `wait_cur`.
+    pub wait_last: u32,
+    /// Spin budget of that wait.
+    pub wait_last_spins: u32,
+    /// Waits that spun out.
+    pub wait_timeouts: u32,
+    /// Last CD command byte written.
+    pub cd_cmd: u32,
+    /// CD commands written.
+    pub cd_cmds: u32,
+    /// Last non-zero CD IRQ flag read.
+    pub cd_irq_seen: u32,
+    /// Last CD IRQ bits acknowledged.
+    pub cd_irq_acked: u32,
+    /// INT5 (drive error) responses.
+    pub cd_int5: u32,
+    /// Status byte of the last INT5.
+    pub cd_int5_status: u32,
+    /// Error byte of the last INT5.
+    pub cd_int5_code: u32,
+    /// CD waits that spun out.
+    pub cd_timeouts: u32,
+    /// `cause<<24 | status<<16 | command<<8 | flag` of the last timeout.
+    pub cd_timeout_info: u32,
+    /// Sectors popped from the data FIFO.
+    pub cd_sectors: u32,
+    /// Last absolute LBA a read was started at (after the disc-base shift).
+    pub cd_lba: u32,
+    /// Reads started (`start_read`): more than the chunks asked for means retries.
+    pub cd_starts: u32,
+    /// `read_sector` calls that failed.
+    pub cd_read_fail: u32,
+    /// The reader's own failure snapshot at the last failure.
+    pub cd_fail_word: u32,
+    /// Linked lists scanned at kick time.
+    pub ll_scans: u32,
+    /// Nodes seen in the last scan.
+    pub ll_nodes: u32,
+    /// Nodes over 16 payload words, all scans (silicon loses words from longer nodes).
+    pub ll_bad: u32,
+    /// Largest payload word count seen.
+    pub ll_max: u32,
+    /// Address of the first oversized node seen.
+    pub ll_bad_addr: u32,
+    /// Instruction-cache flushes (`psx_rt::cache`), each behind the DMA gate.
+    pub flushes: u32,
+    /// Flushes that found a DMA channel busy on entry and waited.
+    pub flush_waits: u32,
+    /// Times a flush backed out because a walk was kicked between its idle check and its mask.
+    pub flush_retries: u32,
+    /// Flushes whose wait for an idle bus ran out (the flush went ahead).
+    pub flush_timeouts: u32,
+    /// Most busy polls one flush made.
+    pub flush_max_spins: u32,
+    /// DMA CHCR 0 to 6 as the last flush found them on entry.
+    pub flush_chcr: [u32; 7],
+    /// GPUSTAT on entry to the last flush.
+    pub flush_gpustat: u32,
+    /// COP0 Status on entry to the last flush.
+    pub flush_sr: u32,
+    /// The cache control register on entry to the last flush.
+    pub flush_cc: u32,
+    /// Free-form step id set by the program ([`step`]).
+    pub step_id: u32,
+    /// Free-form step text, NUL padded.
+    pub step_text: [u8; 24],
+}
+
+/// Written to [`Block::magic`] by the first hook.
+pub const MAGIC: u32 = 0x5053_4447;
+
+/// The block. Read it with volatile loads.
+#[cfg(feature = "console-diag")]
+#[no_mangle]
+pub static mut PSX_DIAG: Block = Block {
+    magic: 0,
+    gp1_writes: 0,
+    dma_kicks: [0; 7],
+    dma_wait_fail: 0,
+    dma_wait_ch: 0,
+    gpu_wait_fail: 0,
+    wait_cur: 0,
+    wait_last: 0,
+    wait_last_spins: 0,
+    wait_timeouts: 0,
+    cd_cmd: 0,
+    cd_cmds: 0,
+    cd_irq_seen: 0,
+    cd_irq_acked: 0,
+    cd_int5: 0,
+    cd_int5_status: 0,
+    cd_int5_code: 0,
+    cd_timeouts: 0,
+    cd_timeout_info: 0,
+    cd_sectors: 0,
+    cd_lba: 0,
+    cd_starts: 0,
+    cd_read_fail: 0,
+    cd_fail_word: 0,
+    ll_scans: 0,
+    ll_nodes: 0,
+    ll_bad: 0,
+    ll_max: 0,
+    ll_bad_addr: 0,
+    flushes: 0,
+    flush_waits: 0,
+    flush_retries: 0,
+    flush_timeouts: 0,
+    flush_max_spins: 0,
+    flush_chcr: [0; 7],
+    flush_gpustat: 0,
+    flush_sr: 0,
+    flush_cc: 0,
+    step_id: 0,
+    step_text: [0; 24],
+};
+
+#[cfg(feature = "console-diag")]
+macro_rules! field {
+    ($f:ident) => {
+        // SAFETY: a raw pointer to a field of a private static; nothing is read or written here.
+        unsafe { &raw mut PSX_DIAG.$f }
+    };
+}
+
+#[cfg(feature = "console-diag")]
+#[inline(always)]
+fn bump(p: *mut u32) {
+    // SAFETY: a private static word; the program is single threaded and the only other reader is
+    // the panel, which runs when the program has stopped.
+    unsafe { p.write_volatile(p.read_volatile().wrapping_add(1)) }
+}
+
+#[cfg(feature = "console-diag")]
+#[inline(always)]
+fn set(p: *mut u32, v: u32) {
+    // SAFETY: as in `bump`.
+    unsafe { p.write_volatile(v) }
+}
+
+/// A raw read of one word of the block, for the panel.
+///
+/// # Safety
+/// `p` must point at a word of [`PSX_DIAG`].
+#[cfg(feature = "console-diag")]
+#[inline(always)]
+pub unsafe fn get(p: *const u32) -> u32 {
+    // SAFETY: as in `bump`; the caller passes a pointer into the block.
+    unsafe { p.read_volatile() }
+}
+
+/// Mark that the block is live.
+#[cfg(feature = "console-diag")]
+#[inline(always)]
+fn touch() {
+    set(field!(magic), MAGIC);
+}
+
+/// A `dma::start` on channel `ch` (0 to 6).
+#[inline(always)]
+pub fn dma_kick(ch: u32) {
+    #[cfg(feature = "console-diag")]
+    {
+        touch();
+        if ch < 7 {
+            // SAFETY: `ch` is in range, and the pointer stays inside the static.
+            bump(unsafe { (&raw mut PSX_DIAG.dma_kicks).cast::<u32>().add(ch as usize) });
+        }
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = ch;
+}
+
+/// A write to GP1.
+#[inline(always)]
+pub fn gp1_write() {
+    #[cfg(feature = "console-diag")]
+    bump(field!(gp1_writes));
+}
+
+/// A wait begins. `aux` is a small extra id (a channel, an expected flag).
+#[inline(always)]
+pub fn wait_begin(site: u32, aux: u32) {
+    #[cfg(feature = "console-diag")]
+    {
+        touch();
+        set(field!(wait_cur), site | (aux << 8));
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = (site, aux);
+}
+
+/// The wait that [`wait_begin`] opened ended normally.
+#[inline(always)]
+pub fn wait_end() {
+    #[cfg(feature = "console-diag")]
+    set(field!(wait_cur), 0);
+}
+
+/// The wait that [`wait_begin`] opened spun out after `spins` polls.
+#[inline(always)]
+pub fn wait_timeout(site: u32, aux: u32, spins: u32) {
+    #[cfg(feature = "console-diag")]
+    {
+        set(field!(wait_cur), 0);
+        set(field!(wait_last), site | (aux << 8));
+        set(field!(wait_last_spins), spins);
+        bump(field!(wait_timeouts));
+        if site == site::DMA_DONE {
+            bump(field!(dma_wait_fail));
+            set(field!(dma_wait_ch), aux);
+        } else if site <= site::GPU_READY_DMA {
+            bump(field!(gpu_wait_fail));
+        }
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = (site, aux, spins);
+}
+
+/// A CD command byte was written.
+#[inline(always)]
+pub fn cd_command(command: u8) {
+    #[cfg(feature = "console-diag")]
+    {
+        touch();
+        set(field!(cd_cmd), command as u32);
+        bump(field!(cd_cmds));
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = command;
+}
+
+/// A non-zero CD IRQ flag was read.
+#[inline(always)]
+pub fn cd_irq_seen(flag: u8) {
+    #[cfg(feature = "console-diag")]
+    if flag != 0 {
+        set(field!(cd_irq_seen), flag as u32);
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = flag;
+}
+
+/// CD IRQ bits were acknowledged.
+#[inline(always)]
+pub fn cd_irq_acked(bits: u8) {
+    #[cfg(feature = "console-diag")]
+    set(field!(cd_irq_acked), bits as u32);
+    #[cfg(not(feature = "console-diag"))]
+    let _ = bits;
+}
+
+/// The drive answered a command with INT5.
+#[inline(always)]
+pub fn cd_error(status: u8, code: u8) {
+    #[cfg(feature = "console-diag")]
+    {
+        bump(field!(cd_int5));
+        set(field!(cd_int5_status), status as u32);
+        set(field!(cd_int5_code), code as u32);
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = (status, code);
+}
+
+/// A CD wait spun out; `info` is the reader's snapshot word.
+#[inline(always)]
+pub fn cd_timeout(info: u32) {
+    #[cfg(feature = "console-diag")]
+    {
+        bump(field!(cd_timeouts));
+        set(field!(cd_timeout_info), info);
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = info;
+}
+
+/// One sector was popped from the data FIFO.
+#[inline(always)]
+pub fn cd_sector() {
+    #[cfg(feature = "console-diag")]
+    bump(field!(cd_sectors));
+}
+
+/// A read was started at absolute `lba`.
+#[inline(always)]
+pub fn cd_start(lba: u32) {
+    #[cfg(feature = "console-diag")]
+    {
+        bump(field!(cd_starts));
+        set(field!(cd_lba), lba);
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = lba;
+}
+
+/// `read_sector` failed; `word` is the reader's snapshot.
+#[inline(always)]
+pub fn cd_read_failed(word: u32) {
+    #[cfg(feature = "console-diag")]
+    {
+        bump(field!(cd_read_fail));
+        set(field!(cd_fail_word), word);
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = word;
+}
+
+/// An instruction-cache flush has the bus quiet and is about to change the cache: record what it
+/// found. `chcr` are the seven DMA control registers, in channel order.
+#[inline(always)]
+pub fn flush_enter(chcr: [u32; 7], gpustat: u32, sr: u32, cc: u32) {
+    #[cfg(feature = "console-diag")]
+    {
+        touch();
+        bump(field!(flushes));
+        // SAFETY: `flush_chcr` is a 7-word array in the static; the writes stay inside it.
+        let dst = unsafe { (&raw mut PSX_DIAG.flush_chcr).cast::<u32>() };
+        let mut i = 0;
+        while i < 7 {
+            // SAFETY: `i` < 7, inside `flush_chcr`.
+            unsafe { dst.add(i).write_volatile(chcr[i]) };
+            i += 1;
+        }
+        set(field!(flush_gpustat), gpustat);
+        set(field!(flush_sr), sr);
+        set(field!(flush_cc), cc);
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = (chcr, gpustat, sr, cc);
+}
+
+/// An instruction-cache flush's gate has finished: whether a channel was busy on entry, how many
+/// times it backed out, the busy polls it made, and whether its bound ran out.
+#[inline(always)]
+pub fn flush_exit(busy_at_entry: bool, retries: u32, spins: u32, timed_out: bool) {
+    #[cfg(feature = "console-diag")]
+    {
+        if busy_at_entry {
+            bump(field!(flush_waits));
+        }
+        if retries != 0 {
+            let p = field!(flush_retries);
+            // SAFETY: `p` points into the block.
+            set(p, unsafe { get(p) }.wrapping_add(retries));
+        }
+        if timed_out {
+            bump(field!(flush_timeouts));
+        }
+        let max = field!(flush_max_spins);
+        // SAFETY: `max` points into the block.
+        if spins > unsafe { get(max) } {
+            set(max, spins);
+        }
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = (busy_at_entry, retries, spins, timed_out);
+}
+
+/// True when `pc` is not an address code can run from: main RAM through KSEG0 or KSEG1 (the
+/// kernel area included), or the BIOS ROM. A jump into anything else went somewhere wild.
+pub const fn is_wild_pc(pc: u32) -> bool {
+    let ram = (pc >= 0x8000_0000 && pc < 0x8020_0000) || (pc >= 0xa000_0000 && pc < 0xa020_0000);
+    let rom = pc >= 0xbfc0_0000 && pc < 0xbfc8_0000;
+    !(ram || rom)
+}
+
+/// The instruction word whose `j` target is `pc` (top four bits of `pc` taken from the jump's own
+/// address region): `0x08000000 | pc >> 2` in its 26-bit field. A CPU that jumped to a wild `pc`
+/// fetched such a word from somewhere; if the word reads as a GPU list header, the fetch got
+/// DMA traffic.
+pub const fn jump_word_for(pc: u32) -> u32 {
+    0x0800_0000 | ((pc >> 2) & 0x03ff_ffff)
+}
+
+/// Name the step the program has reached, for the panel: `id` and up to 24
+/// ASCII bytes of `text`.
+#[inline(never)]
+pub fn step(id: u32, text: &str) {
+    #[cfg(feature = "console-diag")]
+    {
+        touch();
+        set(field!(step_id), id);
+        // SAFETY: a raw pointer to a field of a private static; nothing is read or written here.
+        let dst = unsafe { (&raw mut PSX_DIAG.step_text).cast::<u8>() };
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while i < 24 {
+            let b = if i < bytes.len() { bytes[i] } else { 0 };
+            // SAFETY: `i < 24`, inside `step_text`.
+            unsafe { dst.add(i).write_volatile(b) };
+            i += 1;
+        }
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = (id, text);
+}
+
+/// Stop here on purpose: execute BREAK so the console-diag exception handler takes the screen
+/// and shows the panel (with the last [`step`]) instead of the program going on.
+#[inline(never)]
+pub fn stop() {
+    #[cfg(all(feature = "console-diag", target_arch = "mips"))]
+    // SAFETY: BREAK raises the exception the panel is built to catch.
+    unsafe {
+        core::arch::asm!("break 0");
+    }
+}
+
+/// [`step`] with a tag and two numbers printed as hex: `"<tag> <a:8 hex> <b:8 hex>"`, the tag
+/// cut to 6 bytes, so a failure site can say which file/chunk and which result in 24 bytes.
+#[inline(never)]
+pub fn step_hex(id: u32, tag: &str, a: u32, b: u32) {
+    #[cfg(feature = "console-diag")]
+    {
+        let mut text = [b' '; 24];
+        let t = tag.as_bytes();
+        let mut i = 0;
+        while i < 6 && i < t.len() {
+            text[i] = t[i];
+            i += 1;
+        }
+        let digits = b"0123456789ABCDEF";
+        let mut n = 0;
+        while n < 8 {
+            text[7 + n] = digits[((a >> (28 - 4 * n)) & 15) as usize];
+            text[16 + n] = digits[((b >> (28 - 4 * n)) & 15) as usize];
+            n += 1;
+        }
+        // SAFETY: only ASCII bytes were written.
+        step(id, unsafe { core::str::from_utf8_unchecked(&text) });
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = (id, tag, a, b);
+}
+
+/// Walk the GPU linked list that starts at `head` (a physical or KSEG address) and record
+/// every node over 16 payload words. The walk is bounded and stays inside main RAM.
+#[inline(never)]
+pub fn ll_scan(head: u32) {
+    #[cfg(feature = "console-diag")]
+    {
+        const RAM_MASK: u32 = 0x001f_fffc;
+        touch();
+        bump(field!(ll_scans));
+        let mut addr = head & RAM_MASK;
+        let mut nodes = 0u32;
+        while nodes < 200_000 {
+            // SAFETY: `addr` is masked into main RAM, 4-byte aligned; the tag word is plain memory.
+            let tag = unsafe { core::ptr::read_volatile((0x8000_0000 | addr) as *const u32) };
+            let words = tag >> 24;
+            if words > 16 {
+                let bad = field!(ll_bad);
+                // SAFETY: `bad` points into the block.
+                if unsafe { get(bad) } == 0 {
+                    set(field!(ll_bad_addr), addr);
+                }
+                bump(field!(ll_bad));
+            }
+            let max = field!(ll_max);
+            // SAFETY: `max` points into the block.
+            if words > unsafe { get(max) } {
+                set(field!(ll_max), words);
+            }
+            nodes += 1;
+            if tag & 0x0080_0000 != 0 {
+                break;
+            }
+            addr = tag & RAM_MASK;
+        }
+        set(field!(ll_nodes), nodes);
+    }
+    #[cfg(not(feature = "console-diag"))]
+    let _ = head;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_addresses_are_not_wild_and_the_bus_error_pc_is() {
+        assert!(!is_wild_pc(0x8001_0000));
+        assert!(!is_wild_pc(0x8000_0080));
+        assert!(!is_wild_pc(0xa00a_2b4c));
+        assert!(!is_wild_pc(0xbfc0_1944));
+        // The console fault of 2026-10-22: PC B428AD34.
+        assert!(is_wild_pc(0xb428_ad34));
+        assert!(is_wild_pc(0x0000_0000));
+        assert!(is_wild_pc(0x8020_0000));
+        assert!(is_wild_pc(0xbfc8_0000));
+    }
+
+    #[test]
+    fn the_wild_pc_decodes_to_the_jump_word_that_was_fetched() {
+        // The word read as a GPU list header was count 9, next 0x0A2B4D, against MADR 0x0A2B4C.
+        assert_eq!(jump_word_for(0xb428_ad34), 0x090a_2b4d);
+        assert_eq!(jump_word_for(0x8001_0000) >> 26, 2, "opcode J");
+    }
+
+    #[test]
+    fn the_flush_hooks_are_callable_without_the_feature() {
+        flush_enter([0; 7], 0, 0, 0);
+        flush_exit(true, 1, 2, false);
+    }
+}

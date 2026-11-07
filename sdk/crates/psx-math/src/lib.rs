@@ -19,6 +19,14 @@
 //!   `mul_q12_i32`, plus the 64-bit-free wide forms `mul_div_i32`,
 //!   `mul_shr_i32`, `mul_shr_trunc_i32`, `mul_div_u32`, `isqrt_u64` and
 //!   `div_u64_by_u32`.
+//! - [`wide`] -- [`Wide`] / [`WideU`], the one sanctioned 64-bit value
+//!   for guest code: `mult`/`multu` products, 64-bit add, subtract,
+//!   compare and shift, and explicit extraction to 32 bits. Nothing that
+//!   needs a compiler helper exists. Also [`Mask64`], a 64-flag bit set in
+//!   two words.
+//! - [`wide_div`] -- exact division of a [`Wide`] / [`WideU`] by a word or a
+//!   wide value, with [`Rounding`] and clamping chosen by the caller, a
+//!   128-bit product and ratio compare, all in 32-bit instructions.
 //! - [`fmt`] -- integer-to-decimal ASCII without `core::fmt`, for
 //!   HUD/score text drawn with `psx-font`.
 //!
@@ -67,16 +75,24 @@
 //!   positions, accumulated velocities, etc.
 
 #![no_std]
+#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+#[cfg(all(target_arch = "mips", feature = "asm-kernels"))]
+mod asm_kernels;
 pub mod attributed_clip;
+pub mod clip_lanes;
 pub mod color;
 pub mod fmt;
 pub mod int32;
 pub mod sincos;
+pub mod wide;
+pub mod wide_div;
 
 // Re-export the most common symbols at the crate root so users
 // can `use psx_math::{sin_q12, cos_q12}` without reaching through
 // the submodule -- these are the hot-loop primitives.
 pub use sincos::{atan2_q12, cos_q12, sin_q12, SIN_TABLE};
+pub use wide::{Mask64, Wide, WideU};
+pub use wide_div::Rounding;

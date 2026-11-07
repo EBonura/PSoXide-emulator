@@ -8,7 +8,7 @@
 
 /// Register block of channel 0; channel `n` is at `CHANNEL_BASE + n *
 /// CHANNEL_STRIDE`.
-pub const CHANNEL_BASE: u32 = 0x1F80_1080;
+pub const CHANNEL_BASE: u32 = 0x1f80_1080;
 /// Distance between two channels' register blocks.
 pub const CHANNEL_STRIDE: u32 = 0x10;
 /// Offset of the memory-address register in a channel block.
@@ -22,9 +22,22 @@ pub const BCR: u32 = 0x4;
 pub const CHCR: u32 = 0x8;
 
 /// Global priority / enable register.
-pub const DPCR: u32 = 0x1F80_10F0;
+pub const DPCR: u32 = 0x1f80_10f0;
 /// Global interrupt / completion-flag register.
-pub const DICR: u32 = 0x1F80_10F4;
+pub const DICR: u32 = 0x1f80_10f4;
+
+/// [`DPCR`] as a program starts: every channel disabled, channel `n` at priority
+/// `n + 1` (0 is highest). This is the controller's own power-on value (nocash
+/// PSX-SPX "DMA Channels"); `psx_rt::entry` writes it so a program does not inherit
+/// whatever ladder and enable bits the BIOS that booted it left. Sony BIOS
+/// versions do not agree on that (a retail console was measured handing over
+/// `0x9099`), and OpenBIOS does something else again.
+pub const DPCR_ENTRY: u32 = 0x0765_4321;
+
+/// [`DICR`] write that acknowledges every completion flag (bits 24..=30, write 1
+/// to clear) and leaves the force bit, the channel enables and the master enable
+/// at zero: no channel raises the DMA interrupt.
+pub const DICR_ENTRY: u32 = 0x7f00_0000;
 
 /// CHCR.0: direction, 0 = device to RAM, 1 = RAM to device.
 pub const CHCR_TO_DEVICE: u32 = 1 << 0;
@@ -35,6 +48,12 @@ pub const CHCR_CHOPPING_ENABLE: u32 = 1 << 8;
 /// CHCR.9..10 sync mode 0: manual, one burst of BCR words.
 pub const CHCR_SYNC_MANUAL: u32 = 0 << 9;
 /// CHCR.9..10 sync mode 1: block, BCR = block count x block size (words).
+///
+/// On silicon the controller counts BCR's block field down as blocks finish,
+/// so a finished transfer leaves it at 0, and a block kick with count 0 runs
+/// 65,536 blocks. Write BCR again before every kick; a second kick that
+/// reuses the old value runs away (console-tested on the SPU and GPU
+/// channels, hardware-tests v2.1).
 pub const CHCR_SYNC_BLOCK: u32 = 1 << 9;
 /// CHCR.9..10 sync mode 2: linked list, walks a chain of packet headers.
 pub const CHCR_SYNC_LINKED: u32 = 2 << 9;
@@ -76,9 +95,9 @@ pub const fn dpcr_enable(channel: u32) -> u32 {
 pub mod linked_list {
     /// The usual terminator: the walk ends at a node whose next pointer has
     /// bit 23 set, and this value has it.
-    pub const END: u32 = 0x00FF_FFFF;
+    pub const END: u32 = 0x00ff_ffff;
     /// Mask of the next-node address in a tag word.
-    pub const ADDRESS_MASK: u32 = 0x00FF_FFFF;
+    pub const ADDRESS_MASK: u32 = 0x00ff_ffff;
     /// Position of the payload length in a tag word.
     pub const LENGTH_SHIFT: u32 = 24;
 
@@ -109,15 +128,15 @@ mod tests {
     #[test]
     fn linked_list_tags_pack_length_and_address() {
         assert_eq!(linked_list::tag(3, 0x0012_3456), 0x0312_3456);
-        assert_eq!(linked_list::tag(1, linked_list::END), 0x01FF_FFFF);
+        assert_eq!(linked_list::tag(1, linked_list::END), 0x01ff_ffff);
         // An address above 24 bits cannot spill into the length byte.
         assert_eq!(linked_list::tag(0, 0x8012_3456), 0x0012_3456);
     }
 
     #[test]
     fn channel_blocks_and_linked_list_control_word() {
-        assert_eq!(CHANNEL_BASE + CHANNEL_STRIDE * channel::GPU, 0x1F80_10A0);
-        assert_eq!(CHANNEL_BASE + CHANNEL_STRIDE * channel::OTC, 0x1F80_10E0);
+        assert_eq!(CHANNEL_BASE + CHANNEL_STRIDE * channel::GPU, 0x1f80_10a0);
+        assert_eq!(CHANNEL_BASE + CHANNEL_STRIDE * channel::OTC, 0x1f80_10e0);
         assert_eq!(CHCR_LINKED_LIST_TO_DEVICE, 0x0100_0401);
     }
 }

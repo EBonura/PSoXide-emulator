@@ -41,6 +41,46 @@ pub fn set_mask(bits: u32) {
     unsafe { crate::write_u32(reg::I_MASK, bits) }
 }
 
+/// Sources a polled driver must leave enabled in `I_MASK` (see
+/// [`keep_enabled_while_polling`]).
+///
+/// Forced into `.data` rather than left in `.bss`: a chain-loader blob is a
+/// bare image that nothing zeroes a `.bss` for, yet it reads the disc through
+/// the polled reader, which consults this word. Guest-only: the host builds
+/// this crate too, and mach-o spells section names differently.
+#[cfg_attr(target_arch = "mips", link_section = ".data")]
+static mut POLLING_KEEP: u32 = 0;
+
+/// Ask the polled drivers that cut `I_MASK` down to VBlank for the length of a
+/// stream (the CD [`SectorReader`](crate::cd::reader::SectorReader)) to leave
+/// `bits` enabled. For a source whose handler is installed and works alone
+/// through interrupts, such as the pad engine's IRQ7 and root counter 0: cut
+/// from the mask, its transaction never advances for as long as the stream
+/// runs, and the engine abandons and faults one transaction per VBlank. Call
+/// it from foreground code.
+pub fn keep_enabled_while_polling(bits: u32) {
+    // SAFETY: a foreground-only read-modify-write of a word no handler touches.
+    unsafe {
+        let kept = core::ptr::read_volatile(&raw const POLLING_KEEP);
+        core::ptr::write_volatile(&raw mut POLLING_KEEP, kept | bits);
+    }
+}
+
+/// Undo [`keep_enabled_while_polling`] for `bits`.
+pub fn release_polling_keep(bits: u32) {
+    // SAFETY: as in `keep_enabled_while_polling`.
+    unsafe {
+        let kept = core::ptr::read_volatile(&raw const POLLING_KEEP);
+        core::ptr::write_volatile(&raw mut POLLING_KEEP, kept & !bits);
+    }
+}
+
+/// The sources [`keep_enabled_while_polling`] holds enabled.
+pub fn polling_keep() -> u32 {
+    // SAFETY: a volatile aligned read of a word only the foreground writes.
+    unsafe { core::ptr::read_volatile(&raw const POLLING_KEEP) }
+}
+
 /// Clear the CPU's interrupt-enable bit (COP0 `SR.IEc`) and report whether it
 /// was set, so [`restore_cpu_interrupts`] can put it back. Sections nest.
 ///
@@ -129,28 +169,6 @@ pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
     result
 }
 
-/// Renamed to [`acknowledge`].
-#[deprecated(note = "renamed to `acknowledge`")]
-#[inline(always)]
-pub fn ack(bits: u32) {
-    acknowledge(bits)
-}
-
-/// Moved to [`psx_hw::irq::source`].
-pub mod source {
-    use psx_hw::irq::source as bit;
-
-    /// Moved to [`psx_hw::irq::source::CDROM`].
-    #[deprecated(note = "moved to `psx_hw::irq::source::CDROM`")]
-    pub const CDROM: u32 = bit::CDROM;
-    /// Moved to [`psx_hw::irq::source::DMA`].
-    #[deprecated(note = "moved to `psx_hw::irq::source::DMA`")]
-    pub const DMA: u32 = bit::DMA;
-    /// Moved to [`psx_hw::irq::source::SPU`].
-    #[deprecated(note = "moved to `psx_hw::irq::source::SPU`")]
-    pub const SPU: u32 = bit::SPU;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +181,22 @@ mod tests {
             without_interrupts(|| 7)
         });
         assert_eq!((runs, value), (1, 7));
+    }
+}
+
+#[cfg(test)]
+mod polling_keep_tests {
+    use super::*;
+
+    #[test]
+    fn sources_kept_for_polled_drivers_are_added_and_released_independently() {
+        assert_eq!(polling_keep(), 0);
+        keep_enabled_while_polling(0x90);
+        keep_enabled_while_polling(0x10);
+        assert_eq!(polling_keep(), 0x90);
+        release_polling_keep(0x80);
+        assert_eq!(polling_keep(), 0x10);
+        release_polling_keep(0x10);
+        assert_eq!(polling_keep(), 0);
     }
 }
