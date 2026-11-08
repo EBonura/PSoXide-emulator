@@ -3125,11 +3125,9 @@ impl Gpu {
             }
             // GP0 0x1F -- request GPU IRQ1. Rare in games, but BIOS and
             // hardware test suites can observe both GPUSTAT.24 and I_STAT.1.
-            0x1f => {
-                if !self.irq_quirk.active() || self.irq_quirk.decide() {
-                    self.status.raw |= 1 << 24;
-                    self.irq_requested = true;
-                }
+            0x1f if !self.irq_quirk.active() || self.irq_quirk.decide() => {
+                self.status.raw |= 1 << 24;
+                self.irq_requested = true;
             }
             // GP0 0xE3 -- drawing area top-left. X bits 9:0, Y bits 18:10.
             0xe3 => {

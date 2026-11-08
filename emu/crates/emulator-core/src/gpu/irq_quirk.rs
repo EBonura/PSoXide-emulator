@@ -173,7 +173,11 @@ impl IrqQuirk {
             // Lines: unmeasured, a coin.
             0x40..=0x5f => (self.coin(), pixels < ODD_PIXELS, false),
             // Opaque rect of N pixels: 11 + N, odd when N is even.
-            0x60..=0x7f => (pixels > 0 && pixels % 2 == 0, pixels < ODD_PIXELS, false),
+            0x60..=0x7f => (
+                pixels > 0 && pixels.is_multiple_of(2),
+                pixels < ODD_PIXELS,
+                false,
+            ),
             _ => return,
         };
         if self.trace > 0 {
@@ -205,7 +209,7 @@ impl IrqQuirk {
                 } else if len == 0 {
                     self.stats.dropped_idle += 1;
                     false
-                } else if self.next() % JITTER_ONE_IN == 0 {
+                } else if self.next().is_multiple_of(JITTER_ONE_IN) {
                     self.stats.jitter_passes += 1;
                     true
                 } else {
@@ -225,7 +229,7 @@ impl IrqQuirk {
                 } else if len == 0 {
                     self.stats.dropped_idle += 1;
                     false
-                } else if self.next() % JITTER_ONE_IN == 0 {
+                } else if self.next().is_multiple_of(JITTER_ONE_IN) {
                     self.stats.jitter_passes += 1;
                     true
                 } else {

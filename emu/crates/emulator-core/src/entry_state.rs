@@ -666,9 +666,9 @@ impl Plan {
             (ram, _) => ram,
         };
         fill_bytes(ram, |next| {
-            bus.fill_ram_with(0x8001_0000, 0x1f_0000, || next());
+            bus.fill_ram_with(0x8001_0000, 0x1f_0000, next);
         });
-        fill_bytes(self.scratch, |next| bus.fill_scratchpad_with(|| next()));
+        fill_bytes(self.scratch, |next| bus.fill_scratchpad_with(next));
         fill_bytes(self.vram, |next| {
             bus.fill_vram_with(|| {
                 let lo = next();
