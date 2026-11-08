@@ -221,6 +221,38 @@ const IO_SPACE_START: u32 = 0x1f80_1000;
 /// release builds.
 const VERIFY_BUS_CLOCK: bool = cfg!(any(debug_assertions, feature = "verify-busclock"));
 
+/// Line matcher behind [`Bus::watch_debug_console`].
+#[derive(Debug)]
+struct ConsoleWatch {
+    prefixes: Vec<Vec<u8>>,
+    line: Vec<u8>,
+    hit: Option<Vec<u8>>,
+}
+
+impl ConsoleWatch {
+    fn new(prefixes: Vec<Vec<u8>>) -> Self {
+        Self {
+            prefixes,
+            line: Vec::new(),
+            hit: None,
+        }
+    }
+
+    fn push(&mut self, byte: u8) {
+        if self.hit.is_some() {
+            return;
+        }
+        if byte == b'\n' {
+            let line = std::mem::take(&mut self.line);
+            if self.prefixes.iter().any(|p| line.starts_with(p)) {
+                self.hit = Some(line);
+            }
+        } else if byte != b'\r' && self.line.len() < 512 {
+            self.line.push(byte);
+        }
+    }
+}
+
 /// The PS1 system bus.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Bus {
@@ -490,6 +522,9 @@ pub struct Bus {
     /// Derived, not saved.
     #[serde(skip)]
     gpu_quiet_until: u64,
+    /// Stop request armed by [`Bus::watch_debug_console`]. Not saved.
+    #[serde(skip)]
+    console_watch: Option<ConsoleWatch>,
     /// The cycle at which the last [`Bus::refresh_gpu_quiet_until`] found the
     /// walk not quiet at all (a zero-length span). Together with
     /// `gpu_quiet_until == cycles` it says that state is known to be unchanged
@@ -623,6 +658,7 @@ impl Bus {
             gpu_list_ram_next: 0,
             dma_block_runs: [None; 2],
             gpu_quiet_until: 0,
+            console_watch: None,
             gpu_quiet_zero_at: 0,
             gpu_moving_until: 0,
             gpu_moving: false,
@@ -1091,6 +1127,19 @@ impl Bus {
     /// Disc positions of the first and last dropped sector.
     pub fn cdrom_dropped_lba_range(&self) -> (u32, u32) {
         self.cdrom.dropped_lba_range()
+    }
+
+    /// Arms a stop on the guest's debug console (0x1F802080): once a complete
+    /// line begins with any of `prefixes`, [`Bus::console_watch_hit`] returns
+    /// it. A line start, not a substring, so an intermediate line that merely
+    /// mentions a verdict cannot end the run.
+    pub fn watch_debug_console(&mut self, prefixes: Vec<Vec<u8>>) {
+        self.console_watch = Some(ConsoleWatch::new(prefixes));
+    }
+
+    /// The first complete console line that began with a watched prefix.
+    pub fn console_watch_hit(&self) -> Option<&[u8]> {
+        self.console_watch.as_ref().and_then(|w| w.hit.as_deref())
     }
 
     /// Number of controller polls port 1 has completed, for pacing input
@@ -4680,6 +4729,9 @@ impl Bus {
         // headless with a capturable TTY.
         if phys == 0x1f80_2080 {
             use std::io::Write;
+            if let Some(watch) = self.console_watch.as_mut() {
+                watch.push(value);
+            }
             let mut out = std::io::stdout().lock();
             let _ = out.write_all(&[value]);
             if value == b'\n' {
@@ -5068,6 +5120,29 @@ mod tests {
         let mut bios = vec![0u8; memory::bios::SIZE];
         bios[0..4].copy_from_slice(&0xdead_beefu32.to_le_bytes());
         bios
+    }
+
+    #[test]
+    fn console_watch_matches_a_line_start_only() {
+        let mut bus = Bus::new_without_bios();
+        bus.watch_debug_console(vec![b"gate: PASS".to_vec(), b"gate: FAIL".to_vec()]);
+        let mut say = |bus: &mut Bus, text: &str| {
+            for b in text.bytes() {
+                bus.write8(0xbf80_2080, b);
+            }
+        };
+        // Mentions the verdict mid-line, and a partial verdict line: no hit.
+        say(&mut bus, "note: gate: PASS expected\n");
+        say(&mut bus, "gate: PAS");
+        assert_eq!(bus.console_watch_hit(), None);
+        // The line only counts once it is complete (CR is ignored).
+        say(&mut bus, "S\r");
+        assert_eq!(bus.console_watch_hit(), None);
+        say(&mut bus, "\n");
+        assert_eq!(bus.console_watch_hit(), Some(&b"gate: PASS"[..]));
+        // The first hit stays.
+        say(&mut bus, "gate: FAIL (x)\n");
+        assert_eq!(bus.console_watch_hit(), Some(&b"gate: PASS"[..]));
     }
 
     #[test]

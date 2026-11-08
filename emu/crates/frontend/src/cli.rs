@@ -311,6 +311,15 @@ pub struct LaunchArgs {
     /// `--steps` still caps the run.
     #[arg(long)]
     pub stop_at_poll: Option<u64>,
+    /// Stop once the guest's debug console (0x1F802080, where `tty::print`
+    /// goes) has completed a line that BEGINS with this text; repeatable. For
+    /// guests that print their own verdict and never poll a pad, so the run
+    /// ends when the guest is done whatever its instruction density.
+    /// `--steps` still caps the run; the summary line carries `stopped-at=`
+    /// only when a stop condition fired, so a gate can tell a ceiling hit from
+    /// a verdict.
+    #[arg(long = "stop-on-tty", value_name = "PREFIX")]
+    pub stop_on_tty: Vec<String>,
     /// Write a save state to `--save-state-out` once this many route ticks
     /// have elapsed, then keep running. Lets a long scripted walk to a
     /// checkpoint (a game's first area, say) be done once and resumed with
@@ -1549,6 +1558,14 @@ fn run_headless_launch(
     // "we hit an unimplemented instruction" and worth surfacing.
     let mut stopped_at: Option<u64> = None;
     let mut stop_poll_reached = false;
+    if !args.stop_on_tty.is_empty() {
+        bus.watch_debug_console(
+            args.stop_on_tty
+                .iter()
+                .map(|p| p.as_bytes().to_vec())
+                .collect(),
+        );
+    }
     let mut stop_poll_display_start = (0u16, 0u16);
     let mut audio_capture: Vec<(i16, i16)> = Vec::new();
     let gte_profile_before = cpu.cop2().profile_snapshot();
@@ -2189,6 +2206,10 @@ fn run_headless_launch(
             }
         }
         if tape_exhausted {
+            stopped_at = Some(i + 1);
+            break;
+        }
+        if bus.console_watch_hit().is_some() {
             stopped_at = Some(i + 1);
             break;
         }
@@ -3238,6 +3259,7 @@ fn validation_launch_args(
         input_tape_delay_ticks: 0,
         input_tape_transcribe: None,
         stop_at_poll: None,
+        stop_on_tty: Vec::new(),
         save_state_at_tick: None,
         save_state_out: None,
         pad_pulses: checkpoint.pad_pulses.clone(),
@@ -5045,6 +5067,25 @@ mod press_script_tests {
             panic!("expected launch command");
         };
         assert_eq!(args.stop_at_poll, Some(5250));
+    }
+
+    #[test]
+    fn stop_on_tty_is_repeatable() {
+        let cli = Cli::try_parse_from([
+            "psoxide-emulator",
+            "launch",
+            "--path",
+            "game.cue",
+            "--stop-on-tty",
+            "x: ALL PASS",
+            "--stop-on-tty",
+            "x: FAIL",
+        ])
+        .expect("tty-stop launch arguments");
+        let Some(Command::Launch(args)) = cli.command else {
+            panic!("expected launch command");
+        };
+        assert_eq!(args.stop_on_tty, ["x: ALL PASS", "x: FAIL"]);
     }
 
     #[test]
