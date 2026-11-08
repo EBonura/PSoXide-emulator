@@ -21,6 +21,7 @@ macro_rules! env_flag {
 pub mod bios_names;
 pub mod bus;
 pub mod cdrom;
+pub mod cpe;
 pub mod cpu;
 pub mod dma;
 pub mod entry_state;
@@ -47,6 +48,7 @@ pub mod limits;
 pub mod mdec;
 pub mod mmio_trace;
 pub mod pad;
+pub mod pcdrv;
 pub mod scheduler;
 pub(crate) mod serde_big_array;
 pub mod sio;

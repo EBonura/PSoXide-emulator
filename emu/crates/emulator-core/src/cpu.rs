@@ -2920,7 +2920,21 @@ impl Cpu {
             0x08 => self.op_jr(instr, pc),
             0x09 => self.op_jalr(instr, pc),
             0x0c => self.op_syscall(pc, in_delay_slot),
-            0x0d => self.op_break(pc, in_delay_slot),
+            0x0d => {
+                let code = (instr >> 6) & 0x000f_ffff;
+                if code == crate::pcdrv::POLLHOST_CODE && bus.pcdrv_enabled() {
+                    // `pollhost()`: the dev kit's debug monitor looked for
+                    // host commands and resumed. Nothing is attached here.
+                    return Ok(());
+                }
+                let args = [self.gprs[5], self.gprs[6], self.gprs[7]];
+                if let Some((v0, v1)) = bus.pcdrv_call(code, args) {
+                    self.gprs[2] = v0;
+                    self.gprs[3] = v1;
+                    return Ok(());
+                }
+                self.op_break(pc, in_delay_slot)
+            }
             // MFHI/MFLO read the multiply/divide unit; stall until an
             // in-flight MULT/DIV has retired (the R3000A HI/LO interlock).
             0x10 => {

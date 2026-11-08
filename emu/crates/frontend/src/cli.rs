@@ -257,6 +257,12 @@ pub struct LaunchArgs {
     /// the HLE BIOS entry path but still exercise the CD-ROM controller.
     #[arg(long)]
     pub disc: Option<PathBuf>,
+    /// Serve the dev kit PC link (`PCopen`/`PCread`, `BREAK 0x101..0x107`)
+    /// from this host folder, so development builds that load their data
+    /// from the developer's PC can run. A `.cpe` launch defaults to the
+    /// folder the `.cpe` sits in.
+    #[arg(long, value_name = "DIR")]
+    pub pcdrv: Option<PathBuf>,
     /// Load port 1's memory card from this 128 KiB `.mcd` file and persist any
     /// writes back at the end of the headless run. A missing file starts as a
     /// freshly formatted card. This makes cold-boot save tests reproducible.
@@ -1086,6 +1092,40 @@ fn run_headless_launch(
             }
             bus
         }
+        "cpe" => {
+            let mut bus = Bus::new_without_bios();
+            if capture_gpu_commands {
+                bus.gpu.enable_cmd_log();
+            }
+            let bytes = std::fs::read(&game_path).map_err(|e| e.to_string())?;
+            let cpe =
+                emulator_core::cpe::Cpe::parse(&bytes).map_err(|e| format!("parse CPE: {e:?}"))?;
+            for (addr, data) in &cpe.segments {
+                bus.load_exe_payload(*addr, data);
+            }
+            let entry = cpe.entry_point().unwrap_or_default();
+            // The dev kit started programs with the stack at the top of
+            // RAM; the startup code sets its own GP.
+            cpu.seed_from_exe(entry, 0, Some(0x801f_fff0));
+            bus.enable_hle_bios();
+            let root = args.pcdrv.clone().unwrap_or_else(|| {
+                game_path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default()
+            });
+            bus.enable_pcdrv(root.clone());
+            attach_headless_playtest_pad(&mut bus, pad_options);
+            if emit_summary {
+                eprintln!(
+                    "[cli] side-loaded CPE {} - entry=0x{entry:08x} segments={} pcdrv={}",
+                    game_path.display(),
+                    cpe.segments.len(),
+                    root.display()
+                );
+            }
+            bus
+        }
         "bin" | "iso" => {
             let mut bus = Bus::new_without_bios();
             if capture_gpu_commands {
@@ -1181,6 +1221,15 @@ fn run_headless_launch(
         bus.attach_memcard_port2(bytes);
         if emit_summary {
             eprintln!("[cli] port-2 memory card → {}", path.display());
+        }
+    }
+
+    if ext != "cpe" {
+        if let Some(root) = args.pcdrv.as_ref() {
+            bus.enable_pcdrv(root.clone());
+            if emit_summary {
+                eprintln!("[cli] PC link served from {}", root.display());
+            }
         }
     }
 
@@ -3249,6 +3298,7 @@ fn validation_launch_args(
         game_id: None,
         savestate: None,
         disc: None,
+        pcdrv: None,
         memcard: None,
         memcard2: None,
         no_memcard: false,

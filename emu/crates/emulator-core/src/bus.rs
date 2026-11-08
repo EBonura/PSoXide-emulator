@@ -415,6 +415,11 @@ pub struct Bus {
     /// excluded from save states.
     #[serde(skip)]
     pub telemetry: GuestTelemetry,
+    /// Dev kit PC link: host file access through `BREAK 0x101..0x107`
+    /// (see `pcdrv.rs`). `None` unless a launcher opts in; host file
+    /// handles are not part of a save state.
+    #[serde(skip)]
+    pcdrv: Option<Box<crate::pcdrv::PcDrv>>,
     /// When true, the CPU replaces fetches at `0xA0` / `0xB0` / `0xC0`
     /// with a host-Rust implementation of the BIOS syscall they
     /// dispatch to. Off by default; turned on by [`Bus::enable_hle_bios`] -- typically right after
@@ -632,6 +637,7 @@ impl Bus {
             mmio_trace: MmioTrace::new(),
             limits: crate::limits::LimitOracles::from_env(),
             telemetry: GuestTelemetry::new(),
+            pcdrv: None,
             hle_bios_enabled: false,
             hle_bios_calls: [[0; 256]; 3],
             hle_bios_records: Vec::new(),
@@ -2630,6 +2636,35 @@ impl Bus {
     /// snapshots and offline diffing.
     pub fn ram(&self) -> &[u8] {
         &self.ram[..]
+    }
+
+    /// Serve the dev kit PC link from `root`: `BREAK 0x101..0x107` then
+    /// reads and writes host files instead of raising an exception.
+    pub fn enable_pcdrv(&mut self, root: std::path::PathBuf) {
+        self.pcdrv = Some(Box::new(crate::pcdrv::PcDrv::new(root)));
+    }
+
+    pub(crate) fn pcdrv_enabled(&self) -> bool {
+        self.pcdrv.is_some()
+    }
+
+    /// Answer a PC link `BREAK` if the device is on and `code` is one of
+    /// its calls. Returns `(v0, v1)`, or `None` to take the exception.
+    pub(crate) fn pcdrv_call(&mut self, code: u32, args: [u32; 3]) -> Option<(u32, u32)> {
+        if !(crate::pcdrv::FIRST_CODE..=crate::pcdrv::LAST_CODE).contains(&code) {
+            return None;
+        }
+        let drv = self.pcdrv.as_mut()?;
+        let result = drv.call(code, args, &mut self.ram[..]);
+        // A read lands in RAM behind the CPU's back, like a DMA: let the
+        // page write counters (cache invalidation) see the buffer.
+        if code == 0x105 && result.0 == 0 {
+            let ram_len = self.ram.len();
+            let start = (args[2] & 0x1fff_ffff) as usize % ram_len;
+            let len = (result.1 as usize).min(ram_len - start);
+            self.ram_pages.touch_range(start, len);
+        }
+        Some(result)
     }
 
     /// Record `addr` as seen on an unmapped *read*, returning
