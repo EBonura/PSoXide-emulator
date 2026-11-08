@@ -47,11 +47,20 @@ pub const fn to_kseg1(phys: u32) -> u32 {
 }
 
 /// Main RAM: 2 MiB starting at physical `0x0000_0000`.
+///
+/// The `devkit-ram` feature models a development board instead (DTL-H2000
+/// class): 8 MiB filling the whole window, no mirrors. Some 1990s
+/// development builds were linked for it and overrun a retail console.
 pub mod ram {
     /// Physical base address.
     pub const BASE: u32 = 0x0000_0000;
-    /// Size in bytes (2 MiB).
+    /// Size in bytes (2 MiB; 8 MiB with `devkit-ram`).
+    #[cfg(not(feature = "devkit-ram"))]
     pub const SIZE: usize = 2 * 1024 * 1024;
+    #[cfg(feature = "devkit-ram")]
+    pub const SIZE: usize = 8 * 1024 * 1024;
+    /// Offset mask for a physical RAM address (`SIZE - 1`).
+    pub const MASK: u32 = SIZE as u32 - 1;
     /// Hardware-mirrored range: 2 MiB of physical RAM repeats four times,
     /// filling `0x0000_0000..0x0080_0000`.
     pub const MIRROR_END: u32 = 0x0080_0000;

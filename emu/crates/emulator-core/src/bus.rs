@@ -869,7 +869,7 @@ impl Bus {
         len: usize,
         mut next: impl FnMut() -> u8,
     ) {
-        let start = (start_addr & 0x001f_ffff) as usize;
+        let start = (start_addr & memory::ram::MASK) as usize;
         let end = (start + len).min(memory::ram::SIZE);
         if end <= start {
             return;
@@ -2822,8 +2822,8 @@ impl Bus {
     /// Zero an address range in main RAM after KSEG/KUSEG address
     /// normalization. The end address is exclusive.
     pub fn clear_ram_range(&mut self, start_addr: u32, end_addr: u32) {
-        let start = (start_addr & 0x001f_ffff) as usize;
-        let end = (end_addr & 0x001f_ffff) as usize;
+        let start = (start_addr & memory::ram::MASK) as usize;
+        let end = (end_addr & memory::ram::MASK) as usize;
         if end <= start {
             return;
         }
@@ -3209,7 +3209,7 @@ impl Bus {
             let mut addr = start;
             let mut left = total_words as usize;
             while left > 0 {
-                let offset = (addr & 0x001f_ffff) as usize;
+                let offset = (addr & memory::ram::MASK) as usize;
                 let words = left.min((self.ram.len() - offset) / 4);
                 let bytes = words * 4;
                 self.mdec
@@ -3226,7 +3226,7 @@ impl Bus {
         let mut words = vec![0u32; total_words as usize];
         self.mdec.dma_read_out(&mut words);
         for word in words {
-            let offset = (addr & 0x001f_ffff) as usize;
+            let offset = (addr & memory::ram::MASK) as usize;
             if offset + 4 <= self.ram.len() {
                 self.ram[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
                 self.ram_pages.touch(offset);
@@ -3304,7 +3304,7 @@ impl Bus {
         } else {
             2
         };
-        let mut addr = ch.base & 0x001f_ffff;
+        let mut addr = ch.base & memory::ram::MASK;
         if to_spu {
             let mut words: Vec<u16> = Vec::with_capacity(halfword_count as usize);
             for _ in 0..halfword_count {
@@ -3330,7 +3330,7 @@ impl Bus {
             );
             for word in words {
                 write_ram_u16(&mut self.ram[..], addr, word);
-                self.ram_pages.touch((addr & 0x001f_ffff) as usize);
+                self.ram_pages.touch((addr & memory::ram::MASK) as usize);
                 addr = addr.wrapping_add(step);
             }
         }
@@ -3416,7 +3416,7 @@ impl Bus {
             let b2 = self.cdrom.pop_dma_data_byte() as u32;
             let b3 = self.cdrom.pop_dma_data_byte() as u32;
             let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-            let offset = (addr & 0x001f_ffff) as usize;
+            let offset = (addr & memory::ram::MASK) as usize;
             if offset + 4 <= self.ram.len() {
                 self.ram[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
                 self.ram_pages.touch(offset);
@@ -3562,7 +3562,7 @@ impl Bus {
                     .read32_at(crate::gpu::GP0_ADDR, self.cycles)
                     .unwrap_or(0);
                 write_ram_u32(&mut self.ram[..], addr, word);
-                self.ram_pages.touch((addr & 0x001f_ffff) as usize);
+                self.ram_pages.touch((addr & memory::ram::MASK) as usize);
                 addr = addr.wrapping_add(step);
             }
         }
@@ -3608,7 +3608,7 @@ impl Bus {
                     .read32_at(crate::gpu::GP0_ADDR, self.cycles)
                     .unwrap_or(0);
                 write_ram_u32(&mut self.ram[..], addr, word);
-                self.ram_pages.touch((addr & 0x001f_ffff) as usize);
+                self.ram_pages.touch((addr & memory::ram::MASK) as usize);
                 addr = addr.wrapping_add(step);
             }
         }
@@ -5084,7 +5084,7 @@ fn shift_write_queue(queue: [u64; 4], by: usize) -> [u64; 4] {
 }
 
 fn read_ram_u32(ram: &[u8], phys: u32) -> u32 {
-    let offset = (phys & 0x001f_ffff) as usize;
+    let offset = (phys & memory::ram::MASK) as usize;
     if offset + 4 <= ram.len() {
         u32::from_le_bytes([
             ram[offset],
@@ -5098,7 +5098,7 @@ fn read_ram_u32(ram: &[u8], phys: u32) -> u32 {
 }
 
 fn write_ram_u32(ram: &mut [u8], phys: u32, value: u32) {
-    let offset = (phys & 0x001f_ffff) as usize;
+    let offset = (phys & memory::ram::MASK) as usize;
     if offset + 4 <= ram.len() {
         ram[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
@@ -5108,7 +5108,7 @@ fn write_ram_u32(ram: &mut [u8], phys: u32, value: u32) {
 /// halfwords: the BCR product counts 32-bit words, each feeding two samples,
 /// and the completion delay is half that product.
 fn read_ram_u16(ram: &[u8], phys: u32) -> u16 {
-    let offset = (phys & 0x001f_ffff) as usize;
+    let offset = (phys & memory::ram::MASK) as usize;
     if offset + 2 <= ram.len() {
         u16::from_le_bytes([ram[offset], ram[offset + 1]])
     } else {
@@ -5117,7 +5117,7 @@ fn read_ram_u16(ram: &[u8], phys: u32) -> u16 {
 }
 
 fn write_ram_u16(ram: &mut [u8], phys: u32, value: u16) {
-    let offset = (phys & 0x001f_ffff) as usize;
+    let offset = (phys & memory::ram::MASK) as usize;
     if offset + 2 <= ram.len() {
         ram[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
     }

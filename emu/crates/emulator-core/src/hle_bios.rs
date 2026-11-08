@@ -1118,8 +1118,8 @@ fn set_mem_size(bus: &mut Bus, megabytes: u32) {
 mod libc {
     use crate::Bus;
 
-    /// Largest transfer or scan one call performs (2 MiB, the RAM size).
-    const MAX_BYTES: u32 = 0x20_0000;
+    /// Largest transfer or scan one call performs (the RAM size).
+    const MAX_BYTES: u32 = psx_hw::memory::ram::SIZE as u32;
     /// Lengths above this are refused by the BIOS memory functions.
     const MAX_LEN: u32 = 0x7fff_ffff;
 

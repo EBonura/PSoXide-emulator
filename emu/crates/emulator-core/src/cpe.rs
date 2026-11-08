@@ -17,6 +17,7 @@
 /// Register number a tag-3 chunk uses for the program counter.
 pub const REG_PC: u16 = 0x90;
 
+/// A parsed CPE file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cpe {
     /// `(load address, bytes)` in file order; later chunks win on overlap.
@@ -25,15 +26,29 @@ pub struct Cpe {
     pub registers: Vec<(u16, u32)>,
 }
 
+/// Why a file is not a usable CPE.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CpeError {
+    /// The file does not start with `CPE\x01`.
     BadMagic,
-    Truncated { offset: usize },
-    UnknownChunk { tag: u8, offset: usize },
+    /// A chunk runs past the end of the file.
+    Truncated {
+        /// File offset of the read that ran out.
+        offset: usize,
+    },
+    /// A chunk tag this parser does not know.
+    UnknownChunk {
+        /// The tag byte.
+        tag: u8,
+        /// File offset of the tag.
+        offset: usize,
+    },
+    /// No chunk sets the PC.
     NoEntryPoint,
 }
 
 impl Cpe {
+    /// Parse a whole CPE file.
     pub fn parse(bytes: &[u8]) -> Result<Self, CpeError> {
         if bytes.get(..4) != Some(b"CPE\x01") {
             return Err(CpeError::BadMagic);

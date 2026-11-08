@@ -1662,13 +1662,15 @@ fn run_headless_launch(
                 *samples.entry(cpu.pc()).or_insert(0u64) += 1;
             }
             if let Some(samples) = pc_callsite_samples.as_mut() {
-                let stack_offset = (cpu.gpr(29) as usize & 0x1f_ffff).saturating_add(20);
+                let stack_offset =
+                    (cpu.gpr(29) as usize & psx_hw::memory::ram::MASK as usize).saturating_add(20);
                 let stack_return_address = bus
                     .ram()
                     .get(stack_offset..stack_offset.saturating_add(4))
                     .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
                     .unwrap_or_default();
-                let inner_stack_offset = (cpu.gpr(29) as usize & 0x1f_ffff).saturating_add(36);
+                let inner_stack_offset =
+                    (cpu.gpr(29) as usize & psx_hw::memory::ram::MASK as usize).saturating_add(36);
                 let inner_stack_return_address = bus
                     .ram()
                     .get(inner_stack_offset..inner_stack_offset.saturating_add(4))
@@ -3574,7 +3576,7 @@ fn write_route_ram_words(
     host_ns: Option<u128>,
 ) -> std::io::Result<()> {
     for address in addresses {
-        let offset = (address & 0x1f_ffff) as usize;
+        let offset = (address & psx_hw::memory::ram::MASK) as usize;
         let word = u32::from_le_bytes(ram[offset..offset + 4].try_into().unwrap());
         write!(writer, ",{word}")?;
     }

@@ -23,6 +23,10 @@ default = ["native-jit"]
 editor = ["dep:psxed-ui", "dep:psxed-project", "dep:psx-asset", "dep:psx-bsp", "dep:psx-engine"]
 # AArch64 native tier, with PSOXIDE_JIT=0 as a runtime off switch (on by default).
 native-jit = ["dep:psoxide-jit"]
+# 8 MiB development-board RAM for dev kit builds (`.cpe`). Interpreter only:
+# the native tier bakes the retail 2 MiB mask into its code. Build with
+# `--no-default-features --features devkit-ram`.
+devkit-ram = ["emulator-core/devkit-ram", "psx-hw/devkit-ram"]
 # `mcp` (native-only) embeds a live MCP debug server (official `rmcp` SDK over
 # streamable HTTP) inside the running GUI, so an agent can drive the emulator:
 # screenshot, read/write RAM+VRAM, step/run frames, toggle wireframe, save/load

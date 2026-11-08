@@ -10,6 +10,9 @@
 
 #![warn(missing_docs)]
 
+#[cfg(all(feature = "devkit-ram", feature = "native-jit"))]
+compile_error!("devkit-ram needs --no-default-features: the native tier assumes 2 MiB of RAM");
+
 mod app;
 mod app_icon;
 mod audio;

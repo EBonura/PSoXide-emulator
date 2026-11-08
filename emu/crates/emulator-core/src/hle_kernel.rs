@@ -454,7 +454,7 @@ pub fn realloc(bus: &mut Bus, old: u32, new_size: u32) -> u32 {
     if new == 0 {
         return 0;
     }
-    for i in 0..new_size.min(0x20_0000) {
+    for i in 0..new_size.min(psx_hw::memory::ram::SIZE as u32) {
         let b = bus.try_read8(old.wrapping_add(i)).unwrap_or(0);
         bus.write8_safe(new.wrapping_add(i), b);
     }

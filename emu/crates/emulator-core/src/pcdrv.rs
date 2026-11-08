@@ -28,8 +28,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-/// First and last `BREAK` codes this device answers.
+/// First `BREAK` code this device answers (init).
 pub const FIRST_CODE: u32 = 0x101;
+/// Last `BREAK` code this device answers (lseek).
 pub const LAST_CODE: u32 = 0x107;
 
 /// `pollhost()`: `BREAK 0x400` once the library has seen a host attached
@@ -40,7 +41,8 @@ pub const POLLHOST_CODE: u32 = 0x400;
 /// Value the guest sees in `v0` when a call fails.
 const FAIL: u32 = u32::MAX;
 
-/// Open host files, indexed by the handle the guest holds.
+/// The PC link device: a host folder and the files the guest has open in it,
+/// indexed by the handle the guest holds.
 pub struct PcDrv {
     root: PathBuf,
     files: Vec<Option<File>>,
@@ -49,6 +51,7 @@ pub struct PcDrv {
 }
 
 impl PcDrv {
+    /// Serve files from `root`.
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
@@ -57,6 +60,7 @@ impl PcDrv {
         }
     }
 
+    /// The host folder files are served from.
     pub fn root(&self) -> &Path {
         &self.root
     }
