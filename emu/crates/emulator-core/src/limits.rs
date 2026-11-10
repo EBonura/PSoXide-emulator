@@ -280,6 +280,9 @@ impl LimitOracles {
                 std::env::var("PSOXIDE_LIMIT_UNTIL_GL").ok().as_deref(),
             )
         })
+        .and_then(|limits| {
+            Ok(limits.with_shadow_sched(std::env::var_os("PSOXIDE_SHADOW_SCHED").as_deref().map(Path::new)))
+        })
         .unwrap_or_else(|error| panic!("PSOXIDE_LIMIT_*: {error}"))
     }
 
@@ -356,6 +359,25 @@ impl LimitOracles {
         Ok(self)
     }
 
+    /// Lane ps1-sched: collect the window's straight-line blocks into `file`
+    /// (`PSOXIDE_SHADOW_SCHED=FILE`). Needs the census machinery; makes it if absent.
+    pub fn with_shadow_sched(mut self, file: Option<&Path>) -> Self {
+        let Some(path) = file else {
+            return self;
+        };
+        if self.census.is_none() {
+            self.census = Some(Box::new(crate::shadow_census::ShadowCensus::new(None, Vec::new())));
+            self.configured |= CENSUS;
+            self.track_pc = true;
+            self.pending = true;
+        }
+        if let Some(census) = self.census.as_mut() {
+            census.sched = Some(Box::default());
+            census.sched_path = Some(path.to_path_buf());
+        }
+        self
+    }
+
     /// Whether the activation still waits for a `GL` console line.
     #[inline]
     pub(crate) fn gl_blocks_activation(&self) -> bool {
@@ -420,6 +442,12 @@ impl LimitOracles {
             return;
         }
         census.written = true;
+        if let (Some(sched), Some(path)) = (census.sched.as_mut(), census.sched_path.as_ref()) {
+            match sched.dump(path) {
+                Ok(n) => eprintln!("[shadow] sched: {n} distinct blocks, {} instructions -> {}", sched.instrs, path.display()),
+                Err(error) => eprintln!("[shadow] sched write {}: {error}", path.display()),
+            }
+        }
         let text = census.render(window, wait_cycles, &funcs);
         if let Some(path) = census.path.as_ref() {
             match std::fs::write(path, text) {
@@ -435,7 +463,7 @@ impl LimitOracles {
         let in_wait = !self.wait.is_empty() && self.wait.find(self.cur_pc).is_some();
         if let Some(census) = self.census.as_mut() {
             if self.active & CENSUS != 0 {
-                census.pre(instr, base, cycle, in_wait);
+                census.pre(self.cur_pc, instr, base, cycle, in_wait);
             }
         }
     }

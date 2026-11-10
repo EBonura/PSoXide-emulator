@@ -96,6 +96,7 @@ impl Access {
 
 #[derive(Debug, Default)]
 struct OpenShadow {
+    serial: u64,
     func: Option<usize>,
     exceptions_at_open: u64,
 }
@@ -150,6 +151,10 @@ pub struct ShadowCensus {
     pub ends: [[u64; 8]; 11],
     /// Per profile range: shadows opened, instructions hidden.
     pub per_func: Vec<[u64; 2]>,
+    /// Lane ps1-sched: the block collector, when `PSOXIDE_SHADOW_SCHED` names a file.
+    pub(crate) sched: Option<Box<crate::shadow_sched::Collector>>,
+    /// Lane ps1-sched: where the block table goes.
+    pub(crate) sched_path: Option<PathBuf>,
     /// Current access class (set by `pre`).
     acc: Access,
     sp_base: bool,
@@ -169,14 +174,20 @@ impl ShadowCensus {
     }
 
     /// Before an instruction: classify it and count it.
-    pub(crate) fn pre(&mut self, instr: u32, base: u32, cycle: u64, in_wait: bool) {
+    pub(crate) fn pre(&mut self, pc: u32, instr: u32, base: u32, cycle: u64, in_wait: bool) {
         self.acc = Access::classify(instr, base);
         self.sp_base = (instr >> 21) & 31 == 29;
         self.counting = !in_wait;
         self.end_cycle = cycle;
         if in_wait {
             self.wait_instrs += 1;
+            if let Some(sched) = self.sched.as_mut() {
+                sched.on_wait();
+            }
             return;
+        }
+        if let Some(sched) = self.sched.as_mut() {
+            sched.push(pc, instr, self.acc as u8);
         }
         self.first_cycle.get_or_insert(cycle);
         self.instrs += 1;
@@ -252,6 +263,11 @@ impl ShadowCensus {
                 return;
             }
         }
+        if let (Some(sched), Some(open)) = (self.sched.as_mut(), self.open.as_ref()) {
+            if open.serial != sched.serial {
+                sched.cross_hidden += 1;
+            }
+        }
         self.hidden += 1;
         self.hidden_by_pos[usize::from(pos).min(7)] += 1;
         match self.open.as_ref().and_then(|o| o.func) {
@@ -267,6 +283,9 @@ impl ShadowCensus {
         if !self.counting {
             return;
         }
+        if let Some(sched) = self.sched.as_mut() {
+            sched.mark_open();
+        }
         self.opened += 1;
         match self.acc {
             Access::RamLoad => {
@@ -279,6 +298,7 @@ impl ShadowCensus {
             self.per_func[f][0] += 1;
         }
         self.open = Some(OpenShadow {
+            serial: self.sched.as_ref().map_or(0, |s| s.serial),
             func,
             exceptions_at_open: exceptions_now,
         });

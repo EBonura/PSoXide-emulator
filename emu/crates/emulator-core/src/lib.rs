@@ -45,6 +45,7 @@ pub mod input_tape;
 pub mod irq;
 pub mod limits;
 pub mod shadow_census;
+pub mod shadow_sched;
 pub mod mdec;
 pub mod mmio_trace;
 pub mod pad;
