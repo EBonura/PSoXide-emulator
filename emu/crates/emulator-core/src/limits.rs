@@ -77,11 +77,21 @@ pub const MMIO: u32 = 1 << 6;
 /// Prices what the scratchpad tenants a guest already has are worth. Not part
 /// of `all`.
 pub const SPRAM: u32 = 1 << 7;
+/// Load-shadow oracle (not part of `all`): nothing hides behind a load.
+pub const SHADOWNONE: u32 = 1 << 8;
+/// Load-shadow oracle (not part of `all`): reading the loaded register no longer ends a shadow.
+pub const SHADOWDEP: u32 = 1 << 9;
+/// Load-shadow oracle (not part of `all`): every main-RAM load refunds four issue cycles.
+pub const SHADOWMAX: u32 = 1 << 10;
+/// Internal: the shadow census is on (`PSOXIDE_SHADOW_CENSUS`). Not an oracle name.
+pub const CENSUS: u32 = 1 << 11;
+/// Any load-shadow study switch.
+pub const SHADOW_STUDY: u32 = SHADOWNONE | SHADOWDEP | SHADOWMAX | CENSUS;
 
 /// Consecutive free instructions after which a free range is charged again.
 pub const FREE_GUARD: u64 = 1 << 24;
 
-const NAMES: [(&str, u32); 8] = [
+const NAMES: [(&str, u32); 11] = [
     ("icache", ICACHE),
     ("ram", RAM),
     ("muldiv", MULDIV),
@@ -90,6 +100,9 @@ const NAMES: [(&str, u32); 8] = [
     ("cd", CD),
     ("mmio", MMIO),
     ("spram", SPRAM),
+    ("shadownone", SHADOWNONE),
+    ("shadowdep", SHADOWDEP),
+    ("shadowmax", SHADOWMAX),
 ];
 
 /// One named code range, `start..end`.
@@ -217,6 +230,18 @@ pub struct LimitOracles {
     pub profile_totals: Vec<(u64, u64, u64)>,
     /// Bus cycle at activation, if active.
     pub activated_at_cycle: Option<u64>,
+    /// Lane ps1-shadow: the shadow census, when `PSOXIDE_SHADOW_CENSUS` names a file.
+    pub census: Option<Box<crate::shadow_census::ShadowCensus>>,
+    /// Lane ps1-shadow: issue cycles still to refund (shadowmax).
+    pub shadow_pool: u64,
+    /// Lane ps1-shadow: issue cycles refunded so far (shadowmax).
+    pub shadow_refunded: u64,
+    /// Lane ps1-shadow: activate once the guest console printed `GL <n>`.
+    gl_from: Option<u32>,
+    /// Lane ps1-shadow: close the census once the guest console printed `GL <n>`.
+    gl_until: Option<u32>,
+    gl_reached: bool,
+    gl_line: Vec<u8>,
 }
 
 impl LimitOracles {
@@ -244,6 +269,15 @@ impl LimitOracles {
                     .as_deref()
                     .map(Path::new),
                 std::env::var_os("PSOXIDE_RAM_DATA_LOG").is_some(),
+            )
+        })
+        .and_then(|limits| {
+            limits.with_shadow_census(
+                std::env::var_os("PSOXIDE_SHADOW_CENSUS")
+                    .as_deref()
+                    .map(Path::new),
+                std::env::var("PSOXIDE_LIMIT_FROM_GL").ok().as_deref(),
+                std::env::var("PSOXIDE_LIMIT_UNTIL_GL").ok().as_deref(),
             )
         })
         .unwrap_or_else(|error| panic!("PSOXIDE_LIMIT_*: {error}"))
@@ -276,6 +310,157 @@ impl LimitOracles {
             self.pending = true;
         }
         Ok(self)
+    }
+
+    /// Lane ps1-shadow: the shadow census (`PSOXIDE_SHADOW_CENSUS=FILE`) and the
+    /// guest-console window (`PSOXIDE_LIMIT_FROM_GL=N`, `PSOXIDE_LIMIT_UNTIL_GL=M`:
+    /// go live after the guest printed the line `GL N`, close the census after `GL M`).
+    ///
+    /// # Errors
+    ///
+    /// When a frame number does not parse.
+    pub fn with_shadow_census(
+        mut self,
+        file: Option<&Path>,
+        from_gl: Option<&str>,
+        until_gl: Option<&str>,
+    ) -> Result<Self, String> {
+        let number = |name: &str, text: Option<&str>| -> Result<Option<u32>, String> {
+            text.map(|t| {
+                t.trim()
+                    .parse()
+                    .map_err(|error| format!("{name} {t}: {error}"))
+            })
+            .transpose()
+        };
+        self.gl_from = number("FROM_GL", from_gl)?;
+        self.gl_until = number("UNTIL_GL", until_gl)?;
+        if self.gl_from.is_some() {
+            self.pending = true;
+        }
+        if let Some(path) = file {
+            let funcs = self
+                .profile
+                .ranges()
+                .iter()
+                .map(|r| (r.name.clone(), r.start, r.end))
+                .collect();
+            self.census = Some(Box::new(crate::shadow_census::ShadowCensus::new(
+                Some(path.to_path_buf()),
+                funcs,
+            )));
+            self.configured |= CENSUS;
+            self.track_pc = true;
+            self.pending = true;
+        }
+        Ok(self)
+    }
+
+    /// Whether the activation still waits for a `GL` console line.
+    #[inline]
+    pub(crate) fn gl_blocks_activation(&self) -> bool {
+        self.gl_from.is_some() && !self.gl_reached
+    }
+
+    /// Whether console bytes have to be watched for `GL` lines.
+    #[inline]
+    pub(crate) fn watches_console(&self) -> bool {
+        self.gl_from.is_some() || self.gl_until.is_some()
+    }
+
+    /// One byte the guest wrote to the debug console, at bus cycle `cycle`.
+    pub(crate) fn console_byte(&mut self, byte: u8, cycle: u64) {
+        if byte != b'\n' {
+            if byte != b'\r' && self.gl_line.len() < 64 {
+                self.gl_line.push(byte);
+            }
+            return;
+        }
+        let line = std::mem::take(&mut self.gl_line);
+        let Some(rest) = line.strip_prefix(b"GL ") else {
+            return;
+        };
+        let word = rest.split(|b| *b == b' ').next().unwrap_or(&[]);
+        let Ok(frame) = u32::from_str_radix(std::str::from_utf8(word).unwrap_or(""), 16) else {
+            return;
+        };
+        if Some(frame) == self.gl_from {
+            self.gl_reached = true;
+        }
+        if Some(frame) == self.gl_until {
+            self.active &= !CENSUS;
+            self.write_census(cycle);
+            if self.configured & SHADOWMAX != 0 {
+                eprintln!(
+                    "[shadow] shadowmax at GL {frame}: refunded {} issue cycles, pool left {}",
+                    self.shadow_refunded, self.shadow_pool
+                );
+            }
+        }
+    }
+
+    /// Write the census file if it has not been written yet. `cycle` is the bus cycle now.
+    pub fn write_census(&mut self, cycle: u64) {
+        let window = match (self.census.as_ref(), self.activated_at_cycle) {
+            (Some(_), Some(start)) => cycle.saturating_sub(start),
+            _ => return,
+        };
+        let funcs: Vec<(String, u32, u32, u64, u64)> = self
+            .profile
+            .ranges()
+            .iter()
+            .zip(&self.profile_totals)
+            .map(|(r, t)| (r.name.clone(), r.start, r.end, t.0, t.2))
+            .collect();
+        let wait_cycles = self.wait_cycles;
+        let Some(census) = self.census.as_mut() else {
+            return;
+        };
+        if census.written {
+            return;
+        }
+        census.written = true;
+        let text = census.render(window, wait_cycles, &funcs);
+        if let Some(path) = census.path.as_ref() {
+            match std::fs::write(path, text) {
+                Ok(()) => eprintln!("[shadow] census -> {}", path.display()),
+                Err(error) => eprintln!("[shadow] census write {}: {error}", path.display()),
+            }
+        }
+    }
+
+    /// Before an instruction runs under a shadow study switch.
+    #[inline]
+    pub(crate) fn shadow_pre(&mut self, instr: u32, base: u32, cycle: u64) {
+        let in_wait = !self.wait.is_empty() && self.wait.find(self.cur_pc).is_some();
+        if let Some(census) = self.census.as_mut() {
+            if self.active & CENSUS != 0 {
+                census.pre(instr, base, cycle, in_wait);
+            }
+        }
+    }
+
+    /// The instruction just run opened a shadow.
+    #[inline]
+    pub(crate) fn shadow_opened(&mut self, exceptions: u64) {
+        if self.active & SHADOWMAX != 0 {
+            self.shadow_pool += 4;
+        }
+        let func = self.profile.find(self.cur_pc);
+        if self.active & CENSUS != 0 {
+            if let Some(census) = self.census.as_mut() {
+                census.opened(func, exceptions);
+            }
+        }
+    }
+
+    /// Take up to `cost` cycles from the shadowmax refund pool.
+    #[inline]
+    pub(crate) fn shadow_refund(&mut self, cost: u32) -> u32 {
+        let take = self.shadow_pool.min(u64::from(cost));
+        self.shadow_pool -= take;
+        self.shadow_refunded += take;
+        take as u32
     }
 
     fn from_settings(
@@ -551,7 +736,7 @@ fn parse_oracles(list: &str) -> Result<u32, String> {
         .filter(|name| !name.is_empty())
     {
         if name == "all" {
-            mask |= NAMES.iter().map(|(_, bit)| bit).fold(0, |a, b| a | b) & !SPRAM;
+            mask |= NAMES.iter().map(|(_, bit)| bit).fold(0, |a, b| a | b) & !(SPRAM | SHADOWNONE | SHADOWDEP | SHADOWMAX);
             continue;
         }
         let bit = NAMES

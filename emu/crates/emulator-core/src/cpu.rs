@@ -2199,7 +2199,9 @@ impl Cpu {
         // the opcode would have them observe the earlier cycle, which
         // shifts Timer 1 reads by the issue cost per memory access
         // (gate-pinned).
-        let issue_cycles = if self.hides_in_load_shadow(instr, bus) {
+        let issue_cycles = if bus.limits.on(crate::limits::SHADOW_STUDY) {
+            self.shadow_study_issue(instr, bus)
+        } else if self.hides_in_load_shadow(instr, bus) {
             0
         } else {
             cycle_cost(instr)
@@ -2251,6 +2253,10 @@ impl Cpu {
                 position: 0,
                 register: ((instr >> 16) & 0x1f) as u8,
             });
+            if bus.limits.on(crate::limits::SHADOW_STUDY) {
+                let exceptions: u64 = self.exception_counts.iter().sum();
+                bus.limits.shadow_opened(exceptions);
+            }
         }
         if self.cpu_cycle_profile_enabled {
             self.record_execution_stalls(
@@ -2646,6 +2652,63 @@ impl Cpu {
             // Unassigned COP2 move/control fields are inert on silicon.
             _ => Ok(()),
         }
+    }
+
+    /// Lane ps1-shadow: the issue cost of `instr` while a load-shadow study
+    /// switch is on (`shadownone`, `shadowdep`, `shadowmax`, or the census).
+    /// With none of the oracles named it applies the model's own rule
+    /// ([`Cpu::hides_in_load_shadow`]) unchanged and only counts.
+    #[inline(never)]
+    fn shadow_study_issue(&mut self, instr: u32, bus: &mut Bus) -> u32 {
+        let none = bus.limit(crate::limits::SHADOWNONE);
+        let dep = bus.limit(crate::limits::SHADOWDEP);
+        let max = bus.limit(crate::limits::SHADOWMAX);
+        let census = bus.limits.census.is_some() && bus.limit(crate::limits::CENSUS);
+        if census {
+            let base = self.gprs[((instr >> 21) & 0x1f) as usize];
+            let cycle = bus.cycles();
+            bus.limits.shadow_pre(instr, base, cycle);
+        }
+        let cost = cycle_cost(instr);
+        let mut hidden = false;
+        if let Some(shadow) = self.load_shadow.as_mut() {
+            shadow.position += 1;
+            let pos = shadow.position;
+            let opcode = instr >> 26;
+            let touches_bus = opcode >= 0x20;
+            let rs = ((instr >> 21) & 0x1f) as u8;
+            let rt = ((instr >> 16) & 0x1f) as u8;
+            let reads_loaded =
+                shadow.register != 0 && (rs == shadow.register || rt == shadow.register);
+            let icache_miss = !bus.last_fetch_was_a_cache_hit();
+            let ends = touches_bus || (reads_loaded && !dep) || icache_miss || pos > 6;
+            let exceptions: u64 = self.exception_counts.iter().sum();
+            if census {
+                if let Some(c) = bus.limits.census.as_mut() {
+                    if c.open_exceptions().is_some_and(|at| at != exceptions) {
+                        c.close_for_exception(pos);
+                    }
+                    if ends {
+                        c.end(pos, touches_bus, reads_loaded, icache_miss, exceptions);
+                    }
+                }
+            }
+            if ends {
+                self.load_shadow = None;
+            } else if pos > 2 && !none && !max {
+                hidden = true;
+            }
+            if hidden && census {
+                if let Some(c) = bus.limits.census.as_mut() {
+                    c.hide(pos);
+                }
+            }
+        }
+        let mut issue = if hidden { 0 } else { cost };
+        if max {
+            issue -= bus.limits.shadow_refund(issue);
+        }
+        issue
     }
 
     /// Load scheduling (LSI's LDSCH): the wait of a RAM load overlaps the

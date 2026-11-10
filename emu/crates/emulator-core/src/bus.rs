@@ -2544,6 +2544,9 @@ impl Bus {
     #[inline(never)]
     fn maybe_activate_limits(&mut self) {
         self.gpu_quiet_until = 0;
+        if self.limits.gl_blocks_activation() {
+            return;
+        }
         let polls = self.port1_completed_polls();
         if polls < self.limits.start_poll() || self.cycles < self.limits.start_cycle() {
             return;
@@ -4731,6 +4734,10 @@ impl Bus {
             use std::io::Write;
             if let Some(watch) = self.console_watch.as_mut() {
                 watch.push(value);
+            }
+            if self.limits.watches_console() {
+                let cycle = self.cycles;
+                self.limits.console_byte(value, cycle);
             }
             let mut out = std::io::stdout().lock();
             let _ = out.write_all(&[value]);
