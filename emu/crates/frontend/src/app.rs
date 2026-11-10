@@ -645,7 +645,10 @@ impl AppState {
         // for everyone else; authored builds should normally launch
         // through CUE/BIN discs.
         let mut cpu = Cpu::new();
-        let bus = load_initial_bus(&settings, &mut cpu);
+        let (bus, env_launch_path) = match load_initial_bus(&settings, &mut cpu) {
+            Some((bus, path)) => (Some(bus), Some(path)),
+            None => (None, None),
+        };
         crate::install_native_tier(&mut cpu);
         let autorun = bus.is_some() && env_flag("PSOXIDE_AUTORUN");
 
@@ -766,6 +769,9 @@ impl AppState {
 
         out.sync_menu_settings_paths();
         out.sync_menu_controls();
+        if let Some(path) = env_launch_path.filter(|_| autorun) {
+            out.adopt_env_launch(&path);
+        }
         // Dev/preview hook in the PSOXIDE_AUTORUN tradition: open the
         // controls panel straight away, so visual tweaks to the pad
         // drawing can be screenshotted without clicking through the UI.
@@ -1882,6 +1888,24 @@ impl AppState {
             }
         }
         self.menu.set_recent_discs(&items);
+    }
+
+    /// The legacy env-var launch (`PSOXIDE_EXE` or `PSOXIDE_DISC` with
+    /// `PSOXIDE_AUTORUN`) booted the machine at `path`: make it the current
+    /// game and close the menu, as "Open disc..." does, so the game shows and
+    /// the PS button and Back pause and resume it. The path is not added to
+    /// Recent discs: a developer launch does not touch the saved settings.
+    fn adopt_env_launch(&mut self, path: &Path) {
+        match psoxide_settings::library::entry_for_path(path) {
+            Ok(entry) => {
+                self.slot_game_changed(&entry.id);
+                self.current_game = Some(entry);
+            }
+            Err(e) => eprintln!("[frontend] env launch not registered as a game: {e}"),
+        }
+        let mut transport = self.transport(true);
+        transport.game_booted();
+        self.set_transport(transport);
     }
 
     /// Ask for a disc image or EXE anywhere on disk and launch it.
@@ -5022,7 +5046,9 @@ fn binding_for_target_mut(
     }
 }
 
-fn load_initial_bus(_settings: &Settings, cpu: &mut Cpu) -> Option<Bus> {
+/// Boot the machine `PSOXIDE_EXE` or `PSOXIDE_DISC` names, returning it with
+/// the file it came from.
+fn load_initial_bus(_settings: &Settings, cpu: &mut Cpu) -> Option<(Bus, PathBuf)> {
     if let Some((exe, exe_path)) = load_exe() {
         let mut bus = Bus::new_without_bios();
         bus.load_exe_payload(exe.load_addr, &exe.payload);
@@ -5030,7 +5056,7 @@ fn load_initial_bus(_settings: &Settings, cpu: &mut Cpu) -> Option<Bus> {
         cpu.seed_from_exe(exe.initial_pc, exe.initial_gp, exe.initial_sp());
         bus.enable_hle_bios();
         bus.attach_digital_pad_port1();
-        if let Some(disc) = load_disc() {
+        if let Some((disc, _)) = load_disc() {
             bus.cdrom.insert_disc(Some(disc));
         } else {
             match load_sidecar_disc_for_exe(&exe_path) {
@@ -5044,9 +5070,9 @@ fn load_initial_bus(_settings: &Settings, cpu: &mut Cpu) -> Option<Bus> {
             exe.initial_pc,
             exe.payload.len()
         );
-        return Some(bus);
+        return Some((bus, exe_path));
     }
-    let disc = load_disc()?;
+    let (disc, disc_path) = load_disc()?;
     let mut bus = Bus::new_without_bios();
     if let Err(error) = fast_boot_disc(&mut bus, cpu, &disc) {
         eprintln!("[frontend] cannot boot disc: {error:?}");
@@ -5054,7 +5080,7 @@ fn load_initial_bus(_settings: &Settings, cpu: &mut Cpu) -> Option<Bus> {
     }
     bus.cdrom.insert_disc(Some(disc));
     bus.attach_digital_pad_port1();
-    Some(bus)
+    Some((bus, disc_path))
 }
 
 /// Read `PSOXIDE_EXE` → PSX-EXE file → parsed `Exe`. Logs and returns
@@ -5078,10 +5104,10 @@ fn load_exe() -> Option<(Exe, PathBuf)> {
     }
 }
 
-/// Read `PSOXIDE_DISC` → disc image → `Disc`. Accepts raw BIN/ISO and
-/// CUE-backed multitrack images. Logs and returns `None` on any trouble
+/// Read `PSOXIDE_DISC` → disc image → `Disc`, with its path. Accepts raw
+/// BIN/ISO and CUE-backed multitrack images. Logs and returns `None` on any trouble
 /// so a misconfigured path doesn't wedge the frontend.
-fn load_disc() -> Option<Disc> {
+fn load_disc() -> Option<(Disc, PathBuf)> {
     let var = std::env::var("PSOXIDE_DISC").ok()?;
     let path = PathBuf::from(&var);
     match load_authored_disc(&path) {
@@ -5091,7 +5117,7 @@ fn load_disc() -> Option<Disc> {
                 path.display(),
                 disc.sector_count()
             );
-            Some(disc)
+            Some((disc, path))
         }
         Err(error) => {
             eprintln!(
@@ -6218,6 +6244,47 @@ mod tests {
         std::fs::write(&notes, b"x").unwrap();
         assert!(state.open_disc_path(&notes).is_err());
         assert_eq!(state.settings.paths.recent_discs[0], recent[1]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `PSOXIDE_DISC` + `PSOXIDE_AUTORUN` shows the game rather than the menu,
+    /// and the PS button then pauses and resumes it like an opened disc.
+    #[test]
+    fn env_launch_shows_the_game_and_the_ps_button_pauses_it() {
+        let root = frontend_test_temp_dir("env-launch");
+        let bin = root.join("Env Game.bin");
+        std::fs::write(&bin, bootable_test_bin()).unwrap();
+        // The env vars are process-wide and other tests build AppState too, so
+        // boot the machine directly and hand over what `load_initial_bus` would.
+        let mut state = AppState::with_config_dir(Some(root.join("config")));
+        let disc = psoxide_settings::library::load_disc_from_bin(&bin).unwrap();
+        let mut bus = Bus::new_without_bios();
+        fast_boot_disc(&mut bus, &mut state.cpu, &disc).unwrap();
+        state.bus = Some(bus);
+        assert!(state.menu.open, "the menu starts open");
+
+        state.adopt_env_launch(&bin);
+        assert!(state.running && !state.menu.open);
+        let current = state.current_game.clone().unwrap();
+        assert_eq!(current.path, bin.canonicalize().unwrap());
+        assert!(state.settings.paths.recent_discs.is_empty());
+
+        let ps_button = |state: &mut AppState| {
+            let game_loaded = state.bus.is_some() && state.current_game.is_some();
+            let mut transport = state.transport(game_loaded);
+            transport.ps_button();
+            state.set_transport(transport);
+        };
+        ps_button(&mut state);
+        assert!(
+            !state.running && state.menu.open,
+            "PS pauses behind the menu"
+        );
+        ps_button(&mut state);
+        assert!(
+            state.running && !state.menu.open,
+            "PS again resumes the game"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
