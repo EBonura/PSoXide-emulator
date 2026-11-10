@@ -6260,6 +6260,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "devkit-ram"))] // Writes the last word of the retail 2 MiB.
     fn instruction_fetch_fault_in_delay_slot_sets_bd_and_branch_epc() {
         let mut bus = Bus::new_without_bios();
         // Last executable word of the 8 MiB RAM mirror: J 0x80001000.

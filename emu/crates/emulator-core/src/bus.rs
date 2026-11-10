@@ -5358,6 +5358,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "devkit-ram"))] // The 8 MiB board has no mirrors.
     fn ram_mirrors_wrap_within_8mib() {
         // Hardware mirrors the 2 MiB RAM four times up to 0x0080_0000.
         // A write to offset 0 should be visible at +2 MiB, +4 MiB, +6 MiB.
