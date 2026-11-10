@@ -227,7 +227,7 @@ fn leave_critical_section(gprs: &mut [u32; 32]) -> Ret {
 /// `args` are the argument registers at the call.
 pub fn call_cycles(table: Table, func: u8, v0: Option<u32>, args: [u32; 4]) -> u32 {
     // Lengths beyond RAM are refused or wrap; cap the charge there.
-    let len = |n: u32| u64::from(n.min(psx_hw::memory::ram::SIZE as u32));
+    let len = |n: u32| u64::from(n.min(crate::ram::SIZE as u32));
     let cycles = match (table, func, v0) {
         (Table::B, 0x0b, Some(1)) => 48,
         (Table::B, 0x0b, Some(_)) => 43,
@@ -1119,7 +1119,7 @@ mod libc {
     use crate::Bus;
 
     /// Largest transfer or scan one call performs (the RAM size).
-    const MAX_BYTES: u32 = psx_hw::memory::ram::SIZE as u32;
+    const MAX_BYTES: u32 = crate::ram::SIZE as u32;
     /// Lengths above this are refused by the BIOS memory functions.
     const MAX_LEN: u32 = 0x7fff_ffff;
 

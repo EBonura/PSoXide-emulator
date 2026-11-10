@@ -257,7 +257,7 @@ impl ConsoleWatch {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Bus {
     #[serde(with = "big_bytes")]
-    ram: Box<[u8; memory::ram::SIZE]>,
+    ram: Box<[u8; crate::ram::SIZE]>,
     /// Excluded from save states: the BIOS image is load-time
     /// configuration (whatever `.bin` the frontend pointed at), not
     /// mutable game state, and embedding a 512 KiB copy in every save
@@ -869,8 +869,8 @@ impl Bus {
         len: usize,
         mut next: impl FnMut() -> u8,
     ) {
-        let start = (start_addr & memory::ram::MASK) as usize;
-        let end = (start + len).min(memory::ram::SIZE);
+        let start = (start_addr & crate::ram::MASK) as usize;
+        let end = (start + len).min(crate::ram::SIZE);
         if end <= start {
             return;
         }
@@ -2822,8 +2822,8 @@ impl Bus {
     /// Zero an address range in main RAM after KSEG/KUSEG address
     /// normalization. The end address is exclusive.
     pub fn clear_ram_range(&mut self, start_addr: u32, end_addr: u32) {
-        let start = (start_addr & memory::ram::MASK) as usize;
-        let end = (end_addr & memory::ram::MASK) as usize;
+        let start = (start_addr & crate::ram::MASK) as usize;
+        let end = (end_addr & crate::ram::MASK) as usize;
         if end <= start {
             return;
         }
@@ -3209,7 +3209,7 @@ impl Bus {
             let mut addr = start;
             let mut left = total_words as usize;
             while left > 0 {
-                let offset = (addr & memory::ram::MASK) as usize;
+                let offset = (addr & crate::ram::MASK) as usize;
                 let words = left.min((self.ram.len() - offset) / 4);
                 let bytes = words * 4;
                 self.mdec
@@ -3226,7 +3226,7 @@ impl Bus {
         let mut words = vec![0u32; total_words as usize];
         self.mdec.dma_read_out(&mut words);
         for word in words {
-            let offset = (addr & memory::ram::MASK) as usize;
+            let offset = (addr & crate::ram::MASK) as usize;
             if offset + 4 <= self.ram.len() {
                 self.ram[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
                 self.ram_pages.touch(offset);
@@ -3304,7 +3304,7 @@ impl Bus {
         } else {
             2
         };
-        let mut addr = ch.base & memory::ram::MASK;
+        let mut addr = ch.base & crate::ram::MASK;
         if to_spu {
             let mut words: Vec<u16> = Vec::with_capacity(halfword_count as usize);
             for _ in 0..halfword_count {
@@ -3330,7 +3330,7 @@ impl Bus {
             );
             for word in words {
                 write_ram_u16(&mut self.ram[..], addr, word);
-                self.ram_pages.touch((addr & memory::ram::MASK) as usize);
+                self.ram_pages.touch((addr & crate::ram::MASK) as usize);
                 addr = addr.wrapping_add(step);
             }
         }
@@ -3416,7 +3416,7 @@ impl Bus {
             let b2 = self.cdrom.pop_dma_data_byte() as u32;
             let b3 = self.cdrom.pop_dma_data_byte() as u32;
             let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-            let offset = (addr & memory::ram::MASK) as usize;
+            let offset = (addr & crate::ram::MASK) as usize;
             if offset + 4 <= self.ram.len() {
                 self.ram[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
                 self.ram_pages.touch(offset);
@@ -3562,7 +3562,7 @@ impl Bus {
                     .read32_at(crate::gpu::GP0_ADDR, self.cycles)
                     .unwrap_or(0);
                 write_ram_u32(&mut self.ram[..], addr, word);
-                self.ram_pages.touch((addr & memory::ram::MASK) as usize);
+                self.ram_pages.touch((addr & crate::ram::MASK) as usize);
                 addr = addr.wrapping_add(step);
             }
         }
@@ -3608,7 +3608,7 @@ impl Bus {
                     .read32_at(crate::gpu::GP0_ADDR, self.cycles)
                     .unwrap_or(0);
                 write_ram_u32(&mut self.ram[..], addr, word);
-                self.ram_pages.touch((addr & memory::ram::MASK) as usize);
+                self.ram_pages.touch((addr & crate::ram::MASK) as usize);
                 addr = addr.wrapping_add(step);
             }
         }
@@ -3956,8 +3956,8 @@ impl Bus {
     pub fn write8_safe(&mut self, virt: u32, value: u8) -> bool {
         let phys = to_physical(virt);
         if phys < memory::ram::MIRROR_END {
-            self.ram[(phys as usize) % memory::ram::SIZE] = value;
-            self.ram_pages.touch((phys as usize) % memory::ram::SIZE);
+            self.ram[(phys as usize) % crate::ram::SIZE] = value;
+            self.ram_pages.touch((phys as usize) % crate::ram::SIZE);
             true
         } else if (memory::scratchpad::BASE
             ..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
@@ -3978,7 +3978,7 @@ impl Bus {
     pub fn try_read8(&self, virt: u32) -> Option<u8> {
         let phys = to_physical(virt);
         if phys < memory::ram::MIRROR_END {
-            return Some(self.ram[(phys as usize) % memory::ram::SIZE]);
+            return Some(self.ram[(phys as usize) % crate::ram::SIZE]);
         }
         if (memory::scratchpad::BASE..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
             .contains(&phys)
@@ -4029,7 +4029,7 @@ impl Bus {
 
     fn read8_impl(&mut self, virt: u32, phys: u32) -> u8 {
         if phys < memory::ram::MIRROR_END {
-            return self.ram[(phys as usize) % memory::ram::SIZE];
+            return self.ram[(phys as usize) % crate::ram::SIZE];
         }
         if phys >= IO_SPACE_START {
             self.gpu_quiet_until = 0;
@@ -4131,7 +4131,7 @@ impl Bus {
 
     fn read16_impl(&mut self, virt: u32, phys: u32) -> u16 {
         if phys < memory::ram::MIRROR_END {
-            let off = (phys as usize) % memory::ram::SIZE;
+            let off = (phys as usize) % crate::ram::SIZE;
             return u16::from_le_bytes([self.ram[off], self.ram[off + 1]]);
         }
         if phys >= IO_SPACE_START {
@@ -4232,7 +4232,7 @@ impl Bus {
         // fetch and almost every guest load lands here -- and inlining
         // just this arm into `Cpu::execute_one` skips an outlined call.
         if phys < memory::ram::MIRROR_END {
-            let offset = (phys as usize) % memory::ram::SIZE;
+            let offset = (phys as usize) % crate::ram::SIZE;
             let value = read_u32_le(&self.ram[offset..]);
             self.data_bus_latch = value;
             return value;
@@ -4249,7 +4249,7 @@ impl Bus {
     pub(crate) fn read_instruction32(&mut self, virt: u32) -> u32 {
         let phys = to_physical(virt);
         if phys < memory::ram::MIRROR_END {
-            let offset = (phys as usize) % memory::ram::SIZE;
+            let offset = (phys as usize) % crate::ram::SIZE;
             return read_u32_le(&self.ram[offset..]);
         }
         if (memory::bios::BASE..memory::bios::BASE + memory::bios::SIZE as u32).contains(&phys) {
@@ -4270,7 +4270,7 @@ impl Bus {
     pub fn peek_instruction(&self, virt: u32) -> Option<u32> {
         let phys = to_physical(virt);
         if phys < memory::ram::MIRROR_END {
-            let offset = (phys as usize) % memory::ram::SIZE;
+            let offset = (phys as usize) % crate::ram::SIZE;
             Some(read_u32_le(&self.ram[offset..]))
         } else if (memory::bios::BASE..memory::bios::BASE + memory::bios::SIZE as u32)
             .contains(&phys)
@@ -4287,7 +4287,7 @@ impl Bus {
             return value;
         }
         if phys < memory::ram::MIRROR_END {
-            let offset = (phys as usize) % memory::ram::SIZE;
+            let offset = (phys as usize) % crate::ram::SIZE;
             return read_u32_le(&self.ram[offset..]);
         }
         if phys >= IO_SPACE_START {
@@ -4393,7 +4393,7 @@ impl Bus {
         // RAM-first fast path; see `read32` for the exactness argument
         // (every telemetry / trace / peripheral address is outside RAM).
         if phys < memory::ram::MIRROR_END {
-            let offset = (phys as usize) % memory::ram::SIZE;
+            let offset = (phys as usize) % crate::ram::SIZE;
             self.ram[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             self.ram_pages.touch(offset);
             return;
@@ -4545,7 +4545,7 @@ impl Bus {
         let bytes = value.to_le_bytes();
 
         if phys < memory::ram::MIRROR_END {
-            let offset = (phys as usize) % memory::ram::SIZE;
+            let offset = (phys as usize) % crate::ram::SIZE;
             self.ram[offset..offset + 4].copy_from_slice(&bytes);
             self.ram_pages.touch(offset);
             return;
@@ -4751,8 +4751,8 @@ impl Bus {
             self.run_spu_to_current_cycle();
         }
         if phys < memory::ram::MIRROR_END {
-            self.ram[(phys as usize) % memory::ram::SIZE] = value;
-            self.ram_pages.touch((phys as usize) % memory::ram::SIZE);
+            self.ram[(phys as usize) % crate::ram::SIZE] = value;
+            self.ram_pages.touch((phys as usize) % crate::ram::SIZE);
             return;
         }
         if phys >= IO_SPACE_START {
@@ -4850,7 +4850,7 @@ impl Bus {
     fn write16_impl(&mut self, virt: u32, phys: u32, value: u16) {
         let bytes = value.to_le_bytes();
         if phys < memory::ram::MIRROR_END {
-            let off = (phys as usize) % memory::ram::SIZE;
+            let off = (phys as usize) % crate::ram::SIZE;
             self.ram[off..off + 2].copy_from_slice(&bytes);
             self.ram_pages.touch(off);
             return;
@@ -5084,7 +5084,7 @@ fn shift_write_queue(queue: [u64; 4], by: usize) -> [u64; 4] {
 }
 
 fn read_ram_u32(ram: &[u8], phys: u32) -> u32 {
-    let offset = (phys & memory::ram::MASK) as usize;
+    let offset = (phys & crate::ram::MASK) as usize;
     if offset + 4 <= ram.len() {
         u32::from_le_bytes([
             ram[offset],
@@ -5098,7 +5098,7 @@ fn read_ram_u32(ram: &[u8], phys: u32) -> u32 {
 }
 
 fn write_ram_u32(ram: &mut [u8], phys: u32, value: u32) {
-    let offset = (phys & memory::ram::MASK) as usize;
+    let offset = (phys & crate::ram::MASK) as usize;
     if offset + 4 <= ram.len() {
         ram[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
@@ -5108,7 +5108,7 @@ fn write_ram_u32(ram: &mut [u8], phys: u32, value: u32) {
 /// halfwords: the BCR product counts 32-bit words, each feeding two samples,
 /// and the completion delay is half that product.
 fn read_ram_u16(ram: &[u8], phys: u32) -> u16 {
-    let offset = (phys & memory::ram::MASK) as usize;
+    let offset = (phys & crate::ram::MASK) as usize;
     if offset + 2 <= ram.len() {
         u16::from_le_bytes([ram[offset], ram[offset + 1]])
     } else {
@@ -5117,7 +5117,7 @@ fn read_ram_u16(ram: &[u8], phys: u32) -> u16 {
 }
 
 fn write_ram_u16(ram: &mut [u8], phys: u32, value: u16) {
-    let offset = (phys & memory::ram::MASK) as usize;
+    let offset = (phys & crate::ram::MASK) as usize;
     if offset + 2 <= ram.len() {
         ram[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
     }

@@ -1663,14 +1663,14 @@ fn run_headless_launch(
             }
             if let Some(samples) = pc_callsite_samples.as_mut() {
                 let stack_offset =
-                    (cpu.gpr(29) as usize & psx_hw::memory::ram::MASK as usize).saturating_add(20);
+                    (cpu.gpr(29) as usize & emulator_core::ram::MASK as usize).saturating_add(20);
                 let stack_return_address = bus
                     .ram()
                     .get(stack_offset..stack_offset.saturating_add(4))
                     .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
                     .unwrap_or_default();
                 let inner_stack_offset =
-                    (cpu.gpr(29) as usize & psx_hw::memory::ram::MASK as usize).saturating_add(36);
+                    (cpu.gpr(29) as usize & emulator_core::ram::MASK as usize).saturating_add(36);
                 let inner_stack_return_address = bus
                     .ram()
                     .get(inner_stack_offset..inner_stack_offset.saturating_add(4))
@@ -3576,7 +3576,7 @@ fn write_route_ram_words(
     host_ns: Option<u128>,
 ) -> std::io::Result<()> {
     for address in addresses {
-        let offset = (address & psx_hw::memory::ram::MASK) as usize;
+        let offset = (address & emulator_core::ram::MASK) as usize;
         let word = u32::from_le_bytes(ram[offset..offset + 4].try_into().unwrap());
         write!(writer, ",{word}")?;
     }
@@ -4445,7 +4445,7 @@ impl PcLineHistogram {
         let bucket_shift = if words { PC_WORD_SHIFT } else { PC_LINE_SHIFT };
         Self {
             bucket_shift,
-            ram: vec![0; memory::ram::SIZE >> bucket_shift].into_boxed_slice(),
+            ram: vec![0; emulator_core::ram::SIZE >> bucket_shift].into_boxed_slice(),
             bios: vec![0; memory::bios::SIZE >> bucket_shift].into_boxed_slice(),
             other: BTreeMap::new(),
         }
@@ -4463,7 +4463,7 @@ impl PcLineHistogram {
         }
         let physical = memory::to_physical(pc);
         if physical < memory::ram::MIRROR_END {
-            let bucket = (physical as usize % memory::ram::SIZE) >> self.bucket_shift;
+            let bucket = (physical as usize % emulator_core::ram::SIZE) >> self.bucket_shift;
             self.ram[bucket] = self.ram[bucket].saturating_add(count);
         } else if (memory::bios::BASE..memory::bios::BASE + memory::bios::SIZE as u32)
             .contains(&physical)
@@ -4660,7 +4660,7 @@ impl StackHighWaterProfile {
 fn canonical_ram_address(address: u32) -> Option<u32> {
     let physical = memory::to_physical(address);
     (physical < memory::ram::MIRROR_END)
-        .then_some(0x8000_0000 | (physical as usize % memory::ram::SIZE) as u32)
+        .then_some(0x8000_0000 | (physical as usize % emulator_core::ram::SIZE) as u32)
 }
 
 #[inline]

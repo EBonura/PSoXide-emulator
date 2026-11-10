@@ -21,7 +21,7 @@ pub(crate) struct RamPages {
 
 impl RamPages {
     /// 4 KiB pages in main RAM.
-    const PAGES: usize = memory::ram::SIZE >> 12;
+    const PAGES: usize = crate::ram::SIZE >> 12;
 
     pub(crate) fn new() -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -329,7 +329,7 @@ impl Bus {
     pub(crate) fn peek_is_gte_command(&self, virt: u32) -> bool {
         let phys = to_physical(virt);
         let word = if phys < memory::ram::MIRROR_END {
-            let offset = (phys as usize) & (memory::ram::SIZE - 4);
+            let offset = (phys as usize) & (crate::ram::SIZE - 4);
             read_u32_le(&self.ram[offset..])
         } else {
             match self.peek_instruction(virt) {
@@ -363,7 +363,7 @@ impl Bus {
         self.cycles = now;
         let stalls = self.ram_read_stalls(virt);
         let phys = to_physical(virt);
-        let offset = (phys as usize) % memory::ram::SIZE;
+        let offset = (phys as usize) % crate::ram::SIZE;
         let value = match width {
             4 => {
                 let value = read_u32_le(&self.ram[offset..]);
@@ -450,7 +450,7 @@ impl Bus {
             _ => 4,
         };
         let stalls = self.batch_ram_store(now, virt, source, width);
-        let offset = to_physical(virt) % memory::ram::SIZE as u32;
+        let offset = to_physical(virt) % crate::ram::SIZE as u32;
         let (start, len) = block;
         let lands = offset.wrapping_sub(start) < len || start.wrapping_sub(offset) < width;
         // A store never starts a load shadow; the flag stays clear.
@@ -467,7 +467,7 @@ impl Bus {
         self.cycles = now;
         self.data_bus_latch = source;
         let stall = self.ram_write_stalls(virt);
-        let offset = (to_physical(virt) as usize) % memory::ram::SIZE;
+        let offset = (to_physical(virt) as usize) % crate::ram::SIZE;
         match width {
             4 => self.ram[offset..offset + 4].copy_from_slice(&source.to_le_bytes()),
             2 => self.ram[offset..offset + 2].copy_from_slice(&(source as u16).to_le_bytes()),
@@ -498,7 +498,7 @@ impl Bus {
         self.data_bus_latch = value;
         let stall = self.ram_write_stalls(virt);
         self.add_cycles(stall);
-        let offset = (to_physical(virt) as usize) % memory::ram::SIZE;
+        let offset = (to_physical(virt) as usize) % crate::ram::SIZE;
         self.ram[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         self.ram_pages.touch(offset);
     }
@@ -508,7 +508,7 @@ impl Bus {
     /// RAM's id. Equal stamps mean nothing wrote those pages in between.
     #[inline(always)]
     pub(crate) fn ram_stamp(&self, offset: usize, len: usize) -> RamStamp {
-        let last = (offset + len.max(1) - 1) % memory::ram::SIZE;
+        let last = (offset + len.max(1) - 1) % crate::ram::SIZE;
         RamStamp {
             id: self.ram_pages.id,
             first: self.ram_pages.count(offset),
@@ -520,7 +520,7 @@ impl Bus {
     /// `offset` (any mirror): what an I-cache fill of that line reads.
     #[inline(always)]
     pub(crate) fn ram_line(&self, offset: usize) -> [u32; 4] {
-        let base = (offset % memory::ram::SIZE) & !0xf;
+        let base = (offset % crate::ram::SIZE) & !0xf;
         let line = &self.ram[base..base + 16];
         [
             read_u32_le(&line[0..]),
@@ -533,7 +533,7 @@ impl Bus {
     /// The word of main RAM at byte offset `offset` (any mirror).
     #[inline(always)]
     pub(crate) fn ram_word(&self, offset: usize) -> u32 {
-        read_u32_le(&self.ram[(offset % memory::ram::SIZE) & !3..])
+        read_u32_le(&self.ram[(offset % crate::ram::SIZE) & !3..])
     }
 }
 

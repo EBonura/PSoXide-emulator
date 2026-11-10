@@ -1199,7 +1199,7 @@ pub unsafe extern "C" fn jit_gte_hazard(run: *mut NativeRun, index: u32) -> u32 
 /// the running block or the word after it (any mirror).
 fn store_hits_block(run: &NativeRun, addr: u32, len: u32) -> bool {
     use psx_hw::memory;
-    let size = memory::ram::SIZE as u32;
+    let size = crate::ram::SIZE as u32;
     let phys = memory::to_physical(addr);
     if phys >= memory::ram::MIRROR_END {
         return false;

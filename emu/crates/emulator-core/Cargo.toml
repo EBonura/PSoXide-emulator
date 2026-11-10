@@ -40,7 +40,7 @@ toml = "1"
 default = []
 # 8 MiB development-board RAM, for dev kit builds (`.cpe` files linked for
 # it). A separate binary: the retail build is unchanged.
-devkit-ram = ["psx-hw/devkit-ram"]
+devkit-ram = []
 # Record every MMIO read/write in a bounded ring buffer on the Bus.
 # Off by default -- see `mmio_trace.rs` for why it's compile-time gated.
 trace-mmio = []

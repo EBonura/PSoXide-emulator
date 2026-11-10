@@ -28,7 +28,7 @@ pub const MAX_BLOCK_OPS: usize = 64;
 /// I-cache lines a block can span (64 words from any alignment).
 const MAX_LINES: usize = MAX_BLOCK_OPS / 4 + 1;
 /// Main RAM size; blocks are indexed by physical word within one mirror.
-const RAM_BYTES: u32 = memory::ram::SIZE as u32;
+const RAM_BYTES: u32 = crate::ram::SIZE as u32;
 
 /// How an instruction may sit in a block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

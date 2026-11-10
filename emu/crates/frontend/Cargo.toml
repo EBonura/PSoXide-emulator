@@ -26,7 +26,7 @@ native-jit = ["dep:psoxide-jit"]
 # 8 MiB development-board RAM for dev kit builds (`.cpe`). Interpreter only:
 # the native tier bakes the retail 2 MiB mask into its code. Build with
 # `--no-default-features --features devkit-ram`.
-devkit-ram = ["emulator-core/devkit-ram", "psx-hw/devkit-ram"]
+devkit-ram = ["emulator-core/devkit-ram"]
 # `mcp` (native-only) embeds a live MCP debug server (official `rmcp` SDK over
 # streamable HTTP) inside the running GUI, so an agent can drive the emulator:
 # screenshot, read/write RAM+VRAM, step/run frames, toggle wireframe, save/load

@@ -49,6 +49,7 @@ pub mod mdec;
 pub mod mmio_trace;
 pub mod pad;
 pub mod pcdrv;
+pub mod ram;
 pub mod scheduler;
 pub(crate) mod serde_big_array;
 pub mod sio;
