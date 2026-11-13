@@ -728,6 +728,12 @@ impl DigitalPad {
         self.mode
     }
 
+    /// Whether the game has locked the analog mode (command `0x44`), so the Analog button, and
+    /// a host-side switch, can not change it.
+    pub fn analog_locked(&self) -> bool {
+        self.analog_locked
+    }
+
     /// Simulate the physical DualShock Analog button. Real pads only
     /// let this toggle Digital/Analog while not in config mode and not
     /// locked by the game via command `0x44`.

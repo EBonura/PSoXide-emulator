@@ -62,7 +62,7 @@ mod debug_ui_png;
 mod headless_log;
 mod iso_inspect;
 mod profile_report;
-mod ui_png;
+pub(crate) mod ui_png;
 
 use headless_log::{CounterLog, DisplayHashLog, GuestProfileLog};
 use iso_inspect::{contains_bytes, iso_root_entries, iso_volume_id};

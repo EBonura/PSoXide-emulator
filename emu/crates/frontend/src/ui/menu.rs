@@ -88,11 +88,8 @@ pub enum MenuAction {
     ImportSlot,
     /// Open the slot sheet in a mode, over the running game.
     OpenSlots(SlotsMode),
-    /// Open the controls panel (controller ports and Digital/Analog mode,
-    /// the clickable PS1 controller drawing, press-a-key rebinding, reset
-    /// to defaults) -- driven by the toolbar icon and the shell's
-    /// Controls tab.
-    OpenControls,
+    /// The toolbar's controller button: the quick popup over the game (or close it).
+    QuickControls,
     /// Restore every port-1 binding to the built-in defaults.
     ResetControls,
     /// Launch a game by its menu launch token. Retail games use the

@@ -12,6 +12,7 @@ mod hints;
 mod launch;
 mod motion;
 mod pages;
+pub(crate) mod quick;
 mod scene;
 mod slots;
 pub(crate) mod tokens;
@@ -1125,6 +1126,13 @@ impl MenuState {
     /// Whether the Controls page wants this frame's devices from the app.
     pub fn home_wants_devices(&self) -> bool {
         self.home.as_ref().is_some_and(|h| h.wants_devices())
+    }
+
+    /// Hand the Controls page which pads the game locked in their analog mode.
+    pub(crate) fn home_set_locks(&mut self, locks: [bool; 2]) {
+        if let Some(h) = self.home.as_mut() {
+            h.set_controls_locks(locks);
+        }
     }
 
     /// Hand the Controls page the connected devices.

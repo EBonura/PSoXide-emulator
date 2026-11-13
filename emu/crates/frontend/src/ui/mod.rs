@@ -140,6 +140,7 @@ pub fn draw_layout(
     // The Controls page shows the live devices and says what to change on them.
     if state.menu.home_wants_devices() {
         state.menu.home_set_devices(input_router.devices());
+        state.menu.home_set_locks(pad_locks(state));
     }
     state.menu.draw(ctx, dt, menu_warning);
     for command in state.menu.home_take_device_commands() {
@@ -156,6 +157,7 @@ pub fn draw_layout(
             state.status_message_set(message);
         }
     }
+    draw_quick_controls(ctx, state, input_router);
     // A controller's analog mode the player changed (on the Controls page or the
     // Analog button) is saved, so the next visit starts the same way.
     if let Some(choices) = input_router.take_remembered_analog() {
@@ -198,6 +200,59 @@ pub fn draw_layout(
             state.panels.debug_sidebar,
             state.running,
         );
+    }
+}
+
+/// Whether the running game locked the analog mode of the pad on port 1 and port 2.
+fn pad_locks(state: &AppState) -> [bool; 2] {
+    state.bus.as_ref().map_or([false; 2], |bus| {
+        [bus.port1_analog_locked(), bus.port2_analog_locked()]
+    })
+}
+
+/// The quick controller popup (the toolbar's controller button), when it is open: the two ports,
+/// the analog switches and the way to the full Controls page.
+fn draw_quick_controls(ctx: &egui::Context, state: &mut AppState, input_router: &mut InputRouter) {
+    use crate::input::PadProfile;
+    use menu::home::quick::{rows, Act};
+    if state.quick.is_none() {
+        return;
+    }
+    let modes = state.bus.as_ref().map_or([None; 2], |bus| {
+        [bus.port1_pad_mode(), bus.port2_pad_mode()]
+    });
+    let locks = pad_locks(state);
+    let devices = input_router.devices();
+    let rows = rows(&devices, modes, locks);
+    let top = state.toolbar_hit.bottom().max(0.0);
+    let ignore = state.toolbar_hit;
+    let Some(act) = state
+        .quick
+        .as_mut()
+        .and_then(|quick| quick.draw(ctx, &rows, top, ignore))
+    else {
+        return;
+    };
+    match act {
+        Act::Close => state.close_quick_controls(),
+        Act::Full => state.quick_to_full_controls(),
+        Act::SetAnalog(id, analog) => {
+            let profile = if analog {
+                PadProfile::Analog
+            } else {
+                PadProfile::DualShock
+            };
+            if input_router.set_device_profile(&id, profile) {
+                let name = devices
+                    .iter()
+                    .find(|d| d.identity.id == id)
+                    .map_or("Controller", |d| d.identity.name.as_str());
+                state.status_message_set(format!(
+                    "{name}: analog {}",
+                    if analog { "on" } else { "off" }
+                ));
+            }
+        }
     }
 }
 
@@ -318,12 +373,8 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.open_slots(mode);
             MenuOutcome::None
         }
-        OpenControls => {
-            if state.menu.home_enabled() {
-                state.open_shell_page("Controls");
-            } else {
-                state.menu.open_controls();
-            }
+        QuickControls => {
+            state.toggle_quick_controls();
             MenuOutcome::None
         }
         ResetControls => {

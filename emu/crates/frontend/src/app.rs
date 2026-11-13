@@ -33,6 +33,8 @@ use crate::ui::memory::MemoryView;
 use crate::ui::menu::{LibraryItem as MenuLibraryItem, MenuState, PadBindTarget};
 use crate::{paths_equivalent, repo_root_dir, ui};
 
+#[cfg(test)]
+mod shell_flow_tests;
 mod slots;
 
 /// Ring-buffer capacity for the execution-history panel. 16 rows is
@@ -413,6 +415,13 @@ pub struct AppState {
     /// When true, the shell advances emulation on each redraw. Toggled
     /// via the Menu's Run/Pause item.
     pub running: bool,
+    /// The quick controller popup, while it is open over the game.
+    pub quick: Option<ui::menu::home::quick::Quick>,
+    /// The full Controls page was opened from the popup: Escape and Back on it give the game back
+    /// as it was, instead of going to the shell's home.
+    pub full_from_quick: bool,
+    /// The popup opened or closed: the window loop drops buttons held across the change.
+    pub quick_changed: bool,
     /// Safety cap for one frontend frame. The run loop targets PSX
     /// master-clock cycles, not this many instructions, but the cap
     /// prevents a broken guest from spinning forever in one redraw.
@@ -703,6 +712,9 @@ impl AppState {
             guest_stats: psoxide_debug_ui::GuestStats::new(),
             memory_view: MemoryView::default(),
             running: autorun,
+            quick: None,
+            full_from_quick: false,
+            quick_changed: false,
             run_steps_per_frame: 1_000_000,
             exec_history: VecDeque::with_capacity(EXEC_HISTORY_CAP),
             breakpoints: BTreeSet::new(),
@@ -1089,6 +1101,143 @@ impl AppState {
         transport.menu_open = true;
         transport.menu_back();
         self.set_transport(transport);
+    }
+
+    /// The toolbar's controller button: open the quick popup over the game, or close it. The game
+    /// pauses while it is up and comes back as it was (running or paused).
+    pub fn toggle_quick_controls(&mut self) {
+        if self.quick.is_some() {
+            self.close_quick_controls();
+        } else if !self.menu.open {
+            self.quick = Some(ui::menu::home::quick::Quick::new(self.running));
+            self.running = false;
+            self.menu.sync_run_label(false);
+            self.quick_changed = true;
+        }
+    }
+
+    /// Close the quick popup and give the game back the way it was.
+    pub fn close_quick_controls(&mut self) {
+        if let Some(quick) = self.quick.take() {
+            self.running = quick.was_running;
+            self.menu.sync_run_label(self.running);
+            self.quick_changed = true;
+        }
+    }
+
+    /// "Full controller settings": from the popup to the Controls page. The game stays paused
+    /// behind it, and Escape or Back there return to it as it was.
+    pub fn quick_to_full_controls(&mut self) {
+        let Some(quick) = self.quick.take() else {
+            return;
+        };
+        self.quick_changed = true;
+        if !self.menu.home_enabled() {
+            self.running = quick.was_running;
+            self.menu.sync_run_label(self.running);
+            self.menu.open_controls();
+            return;
+        }
+        let game_loaded = self.bus.is_some() && self.current_game.is_some();
+        let mut transport = self.transport(game_loaded);
+        transport.running = false;
+        transport.menu_open = true;
+        // The menu paused it only if it was running: closing the page resumes exactly that.
+        transport.paused_by_menu = quick.was_running;
+        self.set_transport(transport);
+        self.menu.home_goto("Controls");
+        self.full_from_quick = true;
+    }
+
+    /// One frame of menu input: the PS button (Escape, Select+Start, the touch Menu button), Back,
+    /// and the menu's own navigation. Returns the action a confirm or a pointer press chose, for
+    /// the caller to apply. Kept apart from the window loop so tests walk the same path.
+    pub fn step_menu(&mut self, mut input: ui::menu::MenuInput) -> Option<ui::menu::MenuAction> {
+        let menu_open_at_frame_start = self.menu.open;
+        // The quick controller popup owns the keys while it is up: Escape, Back and the PS button
+        // close it and give the game back as it was; the rest goes to the popup.
+        if self.quick.is_some() {
+            if input.toggle_open || input.back {
+                self.close_quick_controls();
+            } else if let Some(quick) = self.quick.as_mut() {
+                quick.press(&input);
+            }
+            return None;
+        }
+        // The Controls page that the popup's button opened: Escape and Back return to the game.
+        if self.full_from_quick {
+            let on_controls = self.menu.open && self.menu.controls_panel_open();
+            if !on_controls {
+                self.full_from_quick = false;
+            } else if (input.toggle_open || input.back) && self.menu.controls_capture().is_none() {
+                self.full_from_quick = false;
+                self.menu.open = false;
+                self.menu_closed_by_back();
+                self.quick_changed = true;
+                return None;
+            }
+        }
+        // An embedded player has no menu: Escape and Select+Start
+        // go nowhere rather than opening one over the host's example.
+        if crate::app::embed_mode() {
+            input.toggle_open = false;
+        }
+        // Before anything has started, and on any section but Home, Escape,
+        // Select+Start and the touch Menu button are Back: they never start the
+        // disc and never leave the shell from a section.
+        if input.toggle_open && self.menu.home_blocks_ps_button() {
+            input.toggle_open = false;
+            input.back = true;
+        }
+        if input.toggle_open {
+            input.toggle_open = false;
+            input.back = false;
+            // With the controls panel up, Escape means "close
+            // the panel", not "toggle the whole menu" -- the
+            // nearest thing on screen should dismiss first.
+            // (A pending key capture never reaches here: the
+            // capture arm consumes Escape as its cancel.)
+            let closed_controls_panel = self.menu.close_top_panel();
+            // In the editor, Escape first releases an active embedded-play
+            // input capture instead of toggling the menu.
+            #[cfg(feature = "editor")]
+            let editor_released_capture = !closed_controls_panel
+                && self.workspace.is_editor()
+                && self.embedded_playtest_running()
+                && self.embedded_playtest_input_captured()
+                && {
+                    self.release_embedded_playtest_input();
+                    true
+                };
+            #[cfg(not(feature = "editor"))]
+            let editor_released_capture = false;
+            if closed_controls_panel || editor_released_capture {
+                // Handled above: input capture released.
+            } else {
+                // The PS button: pause and open the menu while playing,
+                // resume and close it while it is open (see session.rs).
+                #[cfg(feature = "editor")]
+                let resumable_embedded = self.embedded_playtest_input_captured();
+                #[cfg(not(feature = "editor"))]
+                let resumable_embedded = false;
+                let game_loaded =
+                    self.bus.is_some() && (self.current_game.is_some() || resumable_embedded);
+                let mut transport = self.transport(game_loaded);
+                transport.ps_button();
+                self.set_transport(transport);
+            }
+        }
+
+        // Back on the Library column: pick up discs added to the games
+        // folder since it was last on screen.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.rescan_on_library_view();
+        let menu_action = self.menu.update(&input);
+        if menu_action.is_none() && menu_open_at_frame_start && !self.menu.open {
+            // Back closed the menu: resume the game the menu paused.
+            self.menu_closed_by_back();
+        }
+        menu_action
     }
 
     pub fn launch_entry(&mut self, entry: &LibraryEntry) -> Result<(), String> {
@@ -2948,18 +3097,6 @@ impl AppState {
         if let Some(covers) = self.menu.covers() {
             covers.pump();
         }
-    }
-
-    /// Open the shell on one of its sections, pausing the game behind it when
-    /// one is running.
-    pub fn open_shell_page(&mut self, page: &str) {
-        if !self.menu.open {
-            let game_loaded = self.bus.is_some() && self.current_game.is_some();
-            let mut transport = self.transport(game_loaded);
-            transport.ps_button();
-            self.set_transport(transport);
-        }
-        self.menu.home_goto(page);
     }
 
     /// "Start disc": resume the demo disc if it is booted and waiting behind
@@ -6032,7 +6169,7 @@ mod tests {
     }
 
     /// A tiny bootable disc: SYSTEM.CNF plus a 4-byte PSX-EXE.
-    fn bootable_test_bin() -> Vec<u8> {
+    pub(super) fn bootable_test_bin() -> Vec<u8> {
         let mut exe = vec![0u8; psx_iso::EXE_HEADER_BYTES];
         exe[..8].copy_from_slice(b"PS-X EXE");
         exe[0x10..0x14].copy_from_slice(&0x8001_0000u32.to_le_bytes());
@@ -6381,7 +6518,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    fn frontend_test_temp_dir(name: &str) -> PathBuf {
+    pub(super) fn frontend_test_temp_dir(name: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

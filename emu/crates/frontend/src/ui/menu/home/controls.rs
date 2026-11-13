@@ -77,6 +77,8 @@ struct Stop {
 #[derive(Default)]
 pub(super) struct ControlsState {
     pub(super) devices: Vec<InputDeviceInfo>,
+    /// Whether the game has locked the analog mode of the pad on port 1 and port 2.
+    pub(super) locks: [bool; 2],
     pub(super) commands: Vec<Command>,
     tab: usize,
     focus: usize,
@@ -102,6 +104,19 @@ pub(super) struct ControlsState {
 }
 
 impl ControlsState {
+    /// Whether the game locked the analog mode of the pad this card is for, so the switch
+    /// cannot act. The keyboard has no analog mode to lock.
+    pub(super) fn mode_locked(&self, info: &InputDeviceInfo) -> bool {
+        if info.identity.backend == crate::input::model::BackendKind::Keyboard {
+            return false;
+        }
+        match info.port {
+            crate::input::routing::PsxPort::One => self.locks[0],
+            crate::input::routing::PsxPort::Two => self.locks[1],
+            crate::input::routing::PsxPort::Off => false,
+        }
+    }
+
     /// A finger moved the page by `delta` points.
     pub(super) fn drag(&mut self, kin: &mut Momentum, delta: f32, now: f64) {
         let view = self.view[1] - self.view[0];
@@ -1097,10 +1112,20 @@ fn draw_card(
             return y + r.height();
         }
         let analog = is_analog(info.profile);
-        let track = pages::draw_toggle(p, r.right() - 14.0 * u, by + bottom_h / 2.0, analog, u, a);
+        let locked = h.controls.mode_locked(info);
+        let track = pages::draw_toggle(
+            p,
+            r.right() - 14.0 * u,
+            by + bottom_h / 2.0,
+            analog,
+            u,
+            if locked { a * 0.4 } else { a },
+        );
         // The room the port chip leaves; the words give way before they touch it.
         let room = track.left() - 10.0 * u - (port.right() + 12.0 * u);
-        let words = if info.profile == PadProfile::DualShock && !analog {
+        let words = if locked {
+            "Locked by the game"
+        } else if info.profile == PadProfile::DualShock && !analog {
             "Analog if asked"
         } else {
             "Analog mode"
@@ -1570,6 +1595,11 @@ fn draw_preview(
 }
 
 impl HomeState {
+    /// Which ports have a pad whose analog mode the game locked.
+    pub(super) fn set_controls_locks(&mut self, locks: [bool; 2]) {
+        self.controls.locks = locks;
+    }
+
     /// A new frame of devices from the app.
     pub(super) fn set_controls_devices(&mut self, devices: Vec<InputDeviceInfo>) {
         self.controls.devices = devices;
@@ -1717,7 +1747,12 @@ impl HomeState {
                 }
             }
             Item::Mode(id) => {
-                if let Some(d) = self.controls.devices.iter().find(|d| d.identity.id == *id) {
+                if let Some(d) = self
+                    .controls
+                    .devices
+                    .iter()
+                    .find(|d| d.identity.id == *id && !self.controls.mode_locked(d))
+                {
                     self.controls
                         .commands
                         .push(Command::Profile(id.clone(), toggled(d.profile)));
@@ -1778,6 +1813,48 @@ mod tests {
         assert_eq!(toggled(PadProfile::Analog), PadProfile::Digital);
     }
 
+    #[test]
+    fn a_pad_the_game_locked_cannot_have_its_mode_switched() {
+        use crate::input::model::{BackendKind, DeviceIdentity, PadSnapshot};
+        use crate::input::routing::PsxPort;
+        let device = |id: &str, backend, port| InputDeviceInfo {
+            identity: DeviceIdentity {
+                id: id.into(),
+                name: id.into(),
+                backend,
+                vid_pid: None,
+                mapping: "standard".into(),
+                mapped: true,
+            },
+            port,
+            choice: PortChoice::Auto,
+            profile: PadProfile::Analog,
+            ignored: false,
+            live: PadSnapshot::default(),
+        };
+        let pad = device("pad", BackendKind::Gilrs, PsxPort::One);
+        let keys = device("kbd", BackendKind::Keyboard, PsxPort::One);
+        let mut ms = MenuState::new();
+        ms.enable_home(false, false);
+        let mut h = HomeState::new(false, false);
+        h.set_controls_devices(vec![pad.clone(), keys.clone()]);
+        assert!(!h.controls.mode_locked(&pad));
+        h.set_controls_locks([true, false]);
+        assert!(h.controls.mode_locked(&pad), "the game locked port 1");
+        assert!(
+            !h.controls.mode_locked(&keys),
+            "the keyboard has nothing to lock"
+        );
+        h.step_device(&Item::Mode("pad".into()), 1);
+        assert!(
+            h.controls.commands.is_empty(),
+            "the locked switch does nothing"
+        );
+        h.set_controls_locks([false, false]);
+        h.step_device(&Item::Mode("pad".into()), 1);
+        assert_eq!(h.controls.commands.len(), 1);
+        let _ = ms;
+    }
     #[test]
     fn long_key_names_are_cut_for_a_cap() {
         assert_eq!(short_key("ArrowUp"), "Up");

@@ -1548,66 +1548,7 @@ impl ApplicationHandler for Shell {
                 // press "back" on whatever menu item happened to
                 // be highlighted.
                 let menu_open_at_frame_start = self.state.menu.open;
-                // An embedded player has no menu: Escape and Select+Start
-                // go nowhere rather than opening one over the host's example.
-                if crate::app::embed_mode() {
-                    input.toggle_open = false;
-                }
-                // Before anything has started, and on any section but Home, Escape,
-                // Select+Start and the touch Menu button are Back: they never start the
-                // disc and never leave the shell from a section.
-                if input.toggle_open && self.state.menu.home_blocks_ps_button() {
-                    input.toggle_open = false;
-                    input.back = true;
-                }
-                if input.toggle_open {
-                    input.toggle_open = false;
-                    input.back = false;
-                    // With the controls panel up, Escape means "close
-                    // the panel", not "toggle the whole menu" -- the
-                    // nearest thing on screen should dismiss first.
-                    // (A pending key capture never reaches here: the
-                    // capture arm consumes Escape as its cancel.)
-                    let closed_controls_panel = self.state.menu.close_top_panel();
-                    // In the editor, Escape first releases an active embedded-play
-                    // input capture instead of toggling the menu.
-                    #[cfg(feature = "editor")]
-                    let editor_released_capture = !closed_controls_panel
-                        && self.state.workspace.is_editor()
-                        && self.state.embedded_playtest_running()
-                        && self.state.embedded_playtest_input_captured()
-                        && {
-                            self.state.release_embedded_playtest_input();
-                            true
-                        };
-                    #[cfg(not(feature = "editor"))]
-                    let editor_released_capture = false;
-                    if closed_controls_panel || editor_released_capture {
-                        // Handled above: input capture released.
-                    } else {
-                        // The PS button: pause and open the menu while playing,
-                        // resume and close it while it is open (see session.rs).
-                        #[cfg(feature = "editor")]
-                        let resumable_embedded = self.state.embedded_playtest_input_captured();
-                        #[cfg(not(feature = "editor"))]
-                        let resumable_embedded = false;
-                        let game_loaded = self.state.bus.is_some()
-                            && (self.state.current_game.is_some() || resumable_embedded);
-                        let mut transport = self.state.transport(game_loaded);
-                        transport.ps_button();
-                        self.state.set_transport(transport);
-                    }
-                }
-
-                // Back on the Library column: pick up discs added to the games
-                // folder since it was last on screen.
-                #[cfg(not(target_arch = "wasm32"))]
-                self.state.rescan_on_library_view();
-                let menu_action = self.state.menu.update(&input);
-                if menu_action.is_none() && menu_open_at_frame_start && !self.state.menu.open {
-                    // Back closed the menu: resume the game the menu paused.
-                    self.state.menu_closed_by_back();
-                }
+                let menu_action = self.state.step_menu(input);
                 if let Some(action) = menu_action {
                     match ui::apply_menu_action(&mut self.state, action) {
                         MenuOutcome::None => {}
@@ -1629,6 +1570,10 @@ impl ApplicationHandler for Shell {
                             }
                         }
                     }
+                }
+                // The quick popup opened or closed: same for the buttons held across it.
+                if std::mem::take(&mut self.state.quick_changed) {
+                    self.input.ignore_held_buttons();
                 }
                 // The menu opened or closed (Esc, Select+Start, a launch): buttons
                 // held across the change must not act on the other screen.

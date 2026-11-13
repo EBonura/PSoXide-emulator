@@ -414,3 +414,22 @@ fn sample_devices() -> Vec<crate::input::InputDeviceInfo> {
         },
     ]
 }
+
+/// Render one finished egui frame to a PNG, for the interaction tests that keep a frame at each
+/// step. `textures` is every texture change since the context was made.
+#[cfg(test)]
+pub(crate) fn write_frame_png(
+    path: &Path,
+    ctx: &egui::Context,
+    output: egui::FullOutput,
+    textures: egui::TexturesDelta,
+    size: (u32, u32),
+) -> Result<(), String> {
+    let jobs = ctx.tessellate(output.shapes, output.pixels_per_point);
+    let rgba = paint(size.0, size.1, output.pixels_per_point, &jobs, textures)?;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    image::save_buffer(path, &rgba, size.0, size.1, image::ExtendedColorType::Rgba8)
+        .map_err(|e| format!("write {}: {e}", path.display()))
+}

@@ -43,6 +43,10 @@ const METRICS_MIN_WIDTH: f32 = 90.0;
 /// Slider width used in the toolbar.
 const AUDIO_SLIDER_WIDTH: f32 = 72.0;
 
+/// Where the Controls button was drawn last (kept in egui memory), so a test can click the real
+/// button.
+pub(crate) const CONTROLS_BUTTON_RECT: &str = "toolbar_controls_button_rect";
+
 /// Text size for the left-hand frame rate.
 const METRIC_TEXT_SIZE: f32 = 12.0;
 
@@ -303,12 +307,13 @@ fn draw_toolbar_controls(ui: &mut egui::Ui, state: &mut AppState, compact: bool)
     group_break(ui, group_gap);
     draw_audio_controls(ui, state);
     group_break(ui, group_gap);
-    if ui
+    let controls_button = ui
         .add(icon_button(icons::GAMEPAD_2))
-        .on_hover_text("Controls: controller ports and keyboard keys")
-        .clicked()
-    {
-        action = Some(MenuAction::OpenControls);
+        .on_hover_text("Controls: controller ports and keyboard keys");
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(egui::Id::new(CONTROLS_BUTTON_RECT), controls_button.rect));
+    if controls_button.clicked() {
+        action = Some(MenuAction::QuickControls);
     }
     // Right to left: Load sits right of Save, so the pair reads Save, Load.
     if ui

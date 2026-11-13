@@ -1062,6 +1062,14 @@ impl Bus {
         self.sio0.port1_mut().force_analog_mode()
     }
 
+    /// Whether the game has locked the port-1 pad's analog mode.
+    pub fn port1_analog_locked(&self) -> bool {
+        self.sio0
+            .port1()
+            .pad()
+            .is_some_and(|pad| pad.analog_locked())
+    }
+
     /// Current port-1 pad mode, if a pad is attached.
     pub fn port1_pad_mode(&self) -> Option<crate::pad::PadMode> {
         self.sio0.port1().pad().map(|pad| pad.mode())
@@ -1249,6 +1257,14 @@ impl Bus {
     /// Force the port-2 DualShock into Analog mode.
     pub fn force_port2_analog_mode(&mut self) -> bool {
         self.sio0.port2_mut().force_analog_mode()
+    }
+
+    /// Whether the game has locked the port-2 pad's analog mode.
+    pub fn port2_analog_locked(&self) -> bool {
+        self.sio0
+            .port2()
+            .pad()
+            .is_some_and(|pad| pad.analog_locked())
     }
 
     /// Current port-2 pad mode, if a pad is attached.

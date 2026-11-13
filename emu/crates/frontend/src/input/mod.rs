@@ -175,6 +175,29 @@ impl Default for InputRouter {
         Self::new()
     }
 }
+#[cfg(test)]
+impl InputRouter {
+    /// Plug in a pad and pin it to port 1.
+    pub(crate) fn connect_test_pad(&mut self, id: &str, name: &str) {
+        use model::DeviceEvent;
+        let now = self.now_ms();
+        let press = |buttons| DeviceEvent::Sample {
+            id: id.to_string(),
+            snapshot: PadSnapshot {
+                buttons,
+                left: (0.0, 0.0),
+                ..PadSnapshot::default()
+            },
+        };
+        self.hub.step(
+            now,
+            vec![DeviceEvent::Connected(routing::test_identity(id, name))],
+        );
+        self.hub.step(now + 16, vec![press(0)]);
+        self.hub
+            .set_device_choice(id, PortChoice::Pinned(routing::PsxPort::One));
+    }
+}
 
 #[cfg(test)]
 mod tests {
