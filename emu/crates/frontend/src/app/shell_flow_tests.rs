@@ -63,16 +63,43 @@ impl Rig {
 
     /// The same with or without a controller plugged in.
     fn with_pad(name: &str, pad: bool) -> Self {
+        Self::launch(name, pad, false)
+    }
+
+    /// Manny's launch: the same start, but with a games folder of 155 discs set as the library
+    /// root, the welcome pages already seen, and a controller connected or not.
+    fn manny_launch(name: &str, pad: bool) -> Self {
+        Self::launch(name, pad, true)
+    }
+
+    fn launch(name: &str, pad: bool, library: bool) -> Self {
         let root = frontend_test_temp_dir(name);
         let bin = root.join("Env Game.bin");
         std::fs::write(&bin, bootable_test_bin()).unwrap();
         let mut state = AppState::with_config_dir(Some(root.join("config")));
+        if library {
+            let games = root.join("games");
+            std::fs::create_dir_all(&games).unwrap();
+            for n in 0..155 {
+                std::fs::write(games.join(format!("Game {n:03}.bin")), bootable_test_bin())
+                    .unwrap();
+            }
+            state.settings.paths.game_library = games.to_string_lossy().into_owned();
+            state.settings.emulator.welcome_seen = true;
+            state.library.scan_roots(&[games.as_path()]).unwrap();
+        }
         let disc = psoxide_settings::library::load_disc_from_bin(&bin).unwrap();
         let mut bus = Bus::new_without_bios();
         fast_boot_disc(&mut bus, &mut state.cpu, &disc).unwrap();
         state.bus = Some(bus);
         state.adopt_env_launch(&bin);
         state.enable_home_screen();
+        if library {
+            assert!(
+                state.library.entries.len() >= 155,
+                "the library root holds the discs"
+            );
+        }
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
         let game = ctx.load_texture("game", game_picture(), egui::TextureOptions::LINEAR);
@@ -483,4 +510,72 @@ fn frames_of_the_controller_flow() {
     let mut rig = Rig::with_pad("shell-flow-frames-keys", false);
     rig.controller_button();
     rig.shot("07-popup-keyboard-only");
+}
+
+/// The route table: every way to controller settings from a running game, started as Manny
+/// starts the emulator (library root present, disc from the environment, autorun), with a
+/// controller and with none. The button opens the popup, never the shell; Escape and Back from
+/// the popup or the full page give the game back as it was.
+#[test]
+fn every_route_to_controller_settings_opens_the_popup_first() {
+    for pad in [true, false] {
+        let mut rig = Rig::manny_launch(if pad { "route-pad" } else { "route-keys" }, pad);
+        assert_eq!(rig.look(), GAME, "autorun shows the game, pad: {pad}");
+        // Route 1: the toolbar icon, pointer.
+        rig.controller_button();
+        assert_eq!(rig.look(), POPUP, "pad: {pad}");
+        // Route 2: the icon again closes it; Escape and Back too.
+        rig.controller_button();
+        assert_eq!(rig.look(), GAME);
+        rig.controller_button();
+        rig.escape();
+        assert_eq!(rig.look(), GAME);
+        rig.controller_button();
+        rig.back();
+        assert_eq!(rig.look(), GAME);
+        // Route 3: the popup's full-settings button, then Escape or Back.
+        rig.controller_button();
+        rig.click_popup("full");
+        assert_eq!(rig.look(), CONTROLS);
+        rig.escape();
+        assert_eq!(rig.look(), GAME);
+        rig.controller_button();
+        rig.click_popup("full");
+        rig.back();
+        assert_eq!(rig.look(), GAME);
+        // The shell's own way (Select+Start or Escape, then its Controls tab) stays the shell.
+        rig.escape();
+        assert_eq!(rig.look(), HOME);
+        rig.state.menu.home_goto("Controls");
+        rig.settle();
+        rig.escape();
+        assert_eq!(rig.look(), HOME);
+        rig.escape();
+        assert_eq!(rig.look(), GAME);
+    }
+}
+
+/// Frames by route, from Manny's launch, for `review/after2`: run with
+/// `PSOXIDE_UI_FRAMES=<dir> cargo test -p psoxide-emulator frames_by_route`.
+#[test]
+fn frames_by_route() {
+    let mut rig = Rig::manny_launch("route-frames", true);
+    rig.shot("01-game-running");
+    rig.controller_button();
+    rig.shot("02-toolbar-icon-popup");
+    rig.escape();
+    rig.shot("03-escape-from-popup-game");
+    rig.controller_button();
+    rig.click_popup("full");
+    rig.shot("04-full-controller-settings");
+    rig.escape();
+    rig.shot("05-escape-from-full-settings-game");
+    rig.escape();
+    rig.shot("06-select-start-or-escape-shell-home");
+    rig.state.menu.home_goto("Controls");
+    rig.settle();
+    rig.shot("07-shell-controls-tab");
+    let mut rig = Rig::manny_launch("route-frames-keys", false);
+    rig.controller_button();
+    rig.shot("08-popup-keyboard-only");
 }
