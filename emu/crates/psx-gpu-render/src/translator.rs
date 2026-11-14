@@ -83,6 +83,10 @@ pub struct Translator {
     /// Ordered draw runs over `flat`. Adjacent primitives only merge
     /// when their blend kind and draw-area clip match.
     runs: Vec<DrawRun>,
+    /// The polygon triangle being lowered: its vertices wait here until the
+    /// third arrives (see `push_vertex`).
+    pending: [HwVertex; 3],
+    pending_len: usize,
 }
 
 impl Translator {
@@ -100,6 +104,8 @@ impl Translator {
             scale: 1,
             flat: Vec::with_capacity(4 * 1024),
             runs: Vec::with_capacity(1024),
+            pending: [HwVertex::default(); 3],
+            pending_len: 0,
         }
     }
 
@@ -192,7 +198,77 @@ impl Translator {
     fn push_vertex(&mut self, kind: BlendKind, clip: [u16; 4], mut vertex: HwVertex) {
         if self.polygon && !self.sprite_rect && !self.wireframe {
             vertex.flags |= fbits::CORNER_SAMPLED;
+            // Polygon emitters push their triangle's three vertices in a row;
+            // hold them until the triangle is complete.
+            self.pending[self.pending_len] = vertex;
+            self.pending_len += 1;
+            if self.pending_len < 3 {
+                return;
+            }
+            self.pending_len = 0;
+            let tri = self.pending;
+            if clipped_edge_has_tie(
+                tri.map(|v| (i32::from(v.pos[0]), i32::from(v.pos[1]))),
+                clip,
+            ) {
+                self.push_triangle_as_spans(kind, clip, tri);
+            } else {
+                for v in tri {
+                    self.push_vertex_raw(kind, clip, v);
+                }
+            }
+            return;
         }
+        self.push_vertex_raw(kind, clip, vertex);
+    }
+
+    /// Draw a polygon triangle as one exact rectangle per scanline, the
+    /// CPU rasterizer's own spans, instead of handing the host its edges.
+    ///
+    /// The host clips a triangle that reaches outside the target and rebuilds
+    /// the clipped edges in f32, so a pixel corner that lies exactly on such an
+    /// edge (the CPU's top-left tie rule decides those) can land on the wrong
+    /// side. Spans from `tri_raster_setup` are the CPU's coverage by
+    /// construction, and an axis-aligned rectangle inside the target has
+    /// nothing to clip or round. Attributes still come from the vertex's planes.
+    fn push_triangle_as_spans(&mut self, kind: BlendKind, clip: [u16; 4], tri: [HwVertex; 3]) {
+        let v = tri.map(|v| (i32::from(v.pos[0]), i32::from(v.pos[1])));
+        let attributes = tri[0].flags & (fbits::PLANE_RGB | fbits::PLANE_UV) != 0;
+        let Some(setup) =
+            emulator_core::gpu::tri_raster_setup(v, [(0, 0, 0); 3], [(0, 0); 3], attributes)
+        else {
+            return;
+        };
+        let [left, top, right, bottom] = clip.map(i32::from);
+        for (y0, y1, mut lx, ls, mut rx, rs) in setup.parts {
+            for y in y0..y1 {
+                let x0 = emulator_core::gpu::tri_span_x(lx).max(left);
+                let x1 = emulator_core::gpu::tri_span_x(rx).min(right + 1);
+                lx += ls;
+                rx += rs;
+                if y < top || y > bottom || x0 >= x1 {
+                    continue;
+                }
+                let corner = |x: i32, y: i32| {
+                    let mut vertex = tri[0];
+                    vertex.pos = [x as i16, y as i16];
+                    vertex
+                };
+                for (x, y) in [
+                    (x0, y),
+                    (x1, y),
+                    (x0, y + 1),
+                    (x1, y),
+                    (x0, y + 1),
+                    (x1, y + 1),
+                ] {
+                    self.push_vertex_raw(kind, clip, corner(x, y));
+                }
+            }
+        }
+    }
+
+    fn push_vertex_raw(&mut self, kind: BlendKind, clip: [u16; 4], vertex: HwVertex) {
         let start = self.flat.len() as u32;
         if let Some(run) = self.runs.last_mut() {
             if run.kind == kind && run.clip == clip && run.start + run.count == start {
@@ -211,6 +287,7 @@ impl Translator {
     }
 
     fn process(&mut self, entry: &GpuCmdLogEntry) {
+        self.pending_len = 0;
         let Some(event) = self.interp.interpret(entry) else {
             return;
         };
@@ -1168,6 +1245,42 @@ fn triangle_exceeds_hw_extent(a: (i32, i32), b: (i32, i32), c: (i32, i32)) -> bo
         .any(|(a, b)| (a.0 - b.0).abs() > 1023 || (a.1 - b.1).abs() > 511)
 }
 
+/// Whether a triangle the host would clip has a pixel corner exactly on one of
+/// its clipped edges, inside the draw area. The host rebuilds an edge with a
+/// vertex outside VRAM in f32, so only such a tie can land on the wrong side
+/// (any other pixel is at least 1 / 1500 of a pixel from every edge, far above
+/// the rounding); an edge with both vertices inside is exact. The corner is a
+/// lattice point on the edge strictly between its two vertices, which exists
+/// only when the edge's step reduced by the gcd is smaller than the edge.
+fn clipped_edge_has_tie(v: [(i32, i32); 3], clip: [u16; 4]) -> bool {
+    let outside = |(x, y): (i32, i32)| {
+        x < 0
+            || y < 0
+            || x >= crate::target::VRAM_WIDTH as i32
+            || y >= crate::target::VRAM_HEIGHT as i32
+    };
+    let [left, top, right, bottom] = clip.map(i32::from);
+    (0..3).any(|i| {
+        let (a, b) = (v[i], v[(i + 1) % 3]);
+        if !outside(a) && !outside(b) {
+            return false;
+        }
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let g = gcd(dx.unsigned_abs(), dy.unsigned_abs()) as i32;
+        (1..g).any(|k| {
+            let (x, y) = (a.0 + k * (dx / g), a.1 + k * (dy / g));
+            (left..=right).contains(&x) && (top..=bottom).contains(&y)
+        })
+    })
+}
+
+fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
 fn full_clip() -> [u16; 4] {
     [
         0,
@@ -1295,6 +1408,29 @@ fn uv16(uv: (u8, u8)) -> (u16, u16) {
 mod tests {
     use super::*;
     use emulator_core::gpu::GpuCmdLogEntry;
+
+    #[test]
+    fn clipped_edge_ties_need_an_outside_vertex_and_a_lattice_point() {
+        let area = [0, 0, 1023, 511];
+        // A title-screen floor ribbon: (106, 211) to (-270, 395) steps (-47, 23),
+        // so (59, 234) is a corner exactly on the edge.
+        let ribbon = [(-270, 395), (-392, 369), (106, 211)];
+        assert!(clipped_edge_has_tie(ribbon, area));
+        // The same triangle moved inside VRAM is not clipped.
+        assert!(!clipped_edge_has_tie(
+            ribbon.map(|(x, y)| (x + 400, y - 150)),
+            area
+        ));
+        // Edges whose reduced step is the whole edge have no corner between
+        // their vertices.
+        assert!(!clipped_edge_has_tie([(-5, 0), (100, 53), (51, 201)], area));
+        // A tie outside the draw area does not matter.
+        assert!(!clipped_edge_has_tie(ribbon, [200, 0, 1023, 511]));
+        // A clipped triangle whose only ties are on edges with both vertices
+        // inside VRAM keeps the host path: (-51,10) is outside, the edge
+        // (0,0)-(90,60) has the corner (45,30) but both its vertices are inside.
+        assert!(!clipped_edge_has_tie([(0, 0), (90, 60), (-51, 10)], area));
+    }
 
     fn entry(opcode: u8, fifo: Vec<u32>) -> GpuCmdLogEntry {
         GpuCmdLogEntry {

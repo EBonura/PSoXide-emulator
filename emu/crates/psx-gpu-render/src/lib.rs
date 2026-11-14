@@ -2497,6 +2497,90 @@ mod tests {
         );
     }
 
+    /// A pixel corner exactly on an edge of a polygon that reaches outside
+    /// VRAM is decided like the CPU's top-left rule, not by the host's clipper.
+    ///
+    /// The host clips such a polygon and rebuilds the clipped edges in f32, so
+    /// a tie could land on either side. This is a racing game's title floor: a
+    /// ribbon quad whose last edge runs from (-270, 395) to (106, 211) passes
+    /// exactly through the corner of pixel (59, 234) (and (12, 257)). That is a
+    /// right edge, so the CPU leaves both pixels alone; the host lit them. The
+    /// other triangles are found by sweeping random ties against the same
+    /// clipper: each has a lattice point strictly inside a long edge.
+    #[test]
+    fn corner_ties_on_clipped_polygon_edges_match_the_cpu() {
+        let cases: [[(i32, i32); 3]; 5] = [
+            [(-270, 395), (-392, 369), (106, 211)],
+            [(37, 17), (103, -148), (141, 358)],
+            [(31, 5), (-29, -145), (357, 38)],
+            [(136, 15), (64, -165), (78, 55)],
+            [(392, 45), (284, -135), (-100, 359)],
+        ];
+        // Raw-texture copies of the same triangles take the plane-UV path.
+        let mut seed = Vec::new();
+        for y in 0..64u16 {
+            for x in 0..64u16 {
+                seed.push((512 + x, y, 1 + ((x * 7 + y * 13 + (x ^ y) * 3) % 0x7ffe)));
+            }
+        }
+        let tpage = 8 | (2 << 7);
+        for (i, tri) in cases.iter().enumerate() {
+            for textured in [false, true] {
+                let Some(mut renderer) = headless_renderer() else {
+                    eprintln!("skipping: no headless wgpu adapter");
+                    return;
+                };
+                let mut words = vec![0xe300_0000, 0xe400_0000 | (511 << 10) | 1023, 0xe500_0000];
+                if textured {
+                    words.push(0xe100_0000 | tpage);
+                    words.extend([
+                        0x2500_0000,
+                        pack_xy(tri[0]),
+                        0x0000,
+                        pack_xy(tri[1]),
+                        0x3f00 | ((tpage as u32) << 16),
+                        pack_xy(tri[2]),
+                        0x003f,
+                    ]);
+                } else {
+                    words.extend([
+                        0x20ff_ffff,
+                        pack_xy(tri[0]),
+                        pack_xy(tri[1]),
+                        pack_xy(tri[2]),
+                    ]);
+                }
+                let cpu = run_both_backends(&words, &mut renderer, &seed);
+                let (_, _, rgba) = renderer.read_subrect_rgba8(0, 0, 1024, 512);
+                let bad: Vec<(usize, usize)> = (0..1024 * 512)
+                    .filter(|&p| {
+                        // The seeded texture is not part of the host's frame.
+                        if (512..576).contains(&(p % 1024)) && p / 1024 < 64 {
+                            return false;
+                        }
+                        let want = if cpu[p] == 0 && !textured {
+                            [0, 0, 0, 255]
+                        } else {
+                            bgr15_to_rgba8(cpu[p])
+                        };
+                        // Mono triangles are white where drawn; compare coverage only.
+                        let got = &rgba[p * 4..][..4];
+                        if textured {
+                            want != [got[0], got[1], got[2], got[3]]
+                        } else {
+                            (cpu[p] != 0) != (got[0] != 0)
+                        }
+                    })
+                    .map(|p| (p % 1024, p / 1024))
+                    .collect();
+                assert!(
+                    bad.is_empty(),
+                    "case {i} (textured {textured}) {tri:?}: pixels that differ from the CPU: {bad:?}"
+                );
+            }
+        }
+    }
+
     /// Random Gouraud triangles, plain and textured, with and without the
     /// dither, land on the CPU rasterizer's pixels (byte for byte with the
     /// dither, which truncates to 15bpp; on the same 5-bit level without it,
