@@ -12,6 +12,8 @@ description = "Fleet test gate: drives each game's player journey headlessly on 
 default = ["native-jit"]
 # AArch64 native tier. Identical results to the interpreter; PSOXIDE_JIT=0 turns it off at run time.
 native-jit = ["dep:psoxide-jit"]
+# Strict Expansion 2 stores (`--strict-exp2`); build with `make build-strict`.
+strict-exp2 = ["emulator-core/strict-exp2"]
 
 [dependencies]
 emulator-core    = { workspace = true }

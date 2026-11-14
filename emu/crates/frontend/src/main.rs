@@ -192,6 +192,14 @@ fn main() {
         // Before any thread exists: every GPU reads it when it is built.
         std::env::set_var(emulator_core::hardware_target::ENV_VAR, spec);
     }
+    if let Err(e) = emulator_core::check_strict_exp2(cli.strict_exp2) {
+        eprintln!("error: {e}");
+        std::process::exit(2);
+    }
+    if cli.strict_exp2 {
+        // Before any thread exists: every bus reads it when it is built.
+        std::env::set_var("PSOXIDE_STRICT_EXP2", "1");
+    }
     let target = emulator_core::HardwareTarget::from_env();
     if target.differs_from_real() {
         eprintln!("[hardware] target: {} ({target:?})", target.name());

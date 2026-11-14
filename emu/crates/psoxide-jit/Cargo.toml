@@ -19,3 +19,7 @@ psoxide-settings = { workspace = true }
 
 [lints]
 workspace = true
+
+[features]
+# Strict Expansion 2 stores in the core, for the tests that need them.
+strict-exp2 = ["emulator-core/strict-exp2"]

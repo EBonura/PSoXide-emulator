@@ -96,6 +96,14 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "SPEC")]
     pub hardware: Option<String>,
 
+    /// Treat a store to Expansion 2 beyond the size its delay/size register
+    /// configures (128 bytes after the BIOS) as a data bus error, as a console
+    /// does. Off by default because `0x1F802080` is also the emulator's debug
+    /// text port. Same as setting `PSOXIDE_STRICT_EXP2=1`. Applies to the GUI
+    /// and to every subcommand.
+    #[arg(long, global = true)]
+    pub strict_exp2: bool,
+
     /// Launch the GUI in a regular floating window instead of the
     /// default borderless-fullscreen mode. Useful when developing
     /// with the editor side-by-side with a terminal or docs. Only

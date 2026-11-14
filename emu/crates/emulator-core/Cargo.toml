@@ -38,6 +38,9 @@ toml = "1"
 
 [features]
 default = []
+# Opt-in strict Expansion 2 stores (`--strict-exp2`): a store beyond the configured
+# window is a data bus error. Compiled out by default; see docs/hardware-targets.md.
+strict-exp2 = []
 # 8 MiB development-board RAM, for dev kit builds (`.cpe` files linked for
 # it). A separate binary: the retail build is unchanged.
 devkit-ram = []

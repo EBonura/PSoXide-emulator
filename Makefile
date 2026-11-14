@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help check test fmt fmt-check build run gate material-audit refresh-sdk check-sdk pgo-profile build-pgo gate-pgo
+.PHONY: help check test fmt fmt-check build run gate material-audit refresh-sdk check-sdk pgo-profile build-pgo gate-pgo build-strict test-strict
 # The SDK crates the emulator links are vendored (committed) under crates/ and
 # sdk/, at the revision pinned in components.lock.json, so none of the targets
 # below needs a bootstrap step: `cargo run --release` works on a fresh clone.
@@ -83,6 +83,15 @@ pgo-profile:
 	mkdir -p pgo
 	"$(LLVM_PROFDATA)" merge --sparse -o "$(PGO_PROFDATA)" "$(PGO_RAW)"/*.profraw
 	gzip -9 -n -c "$(PGO_PROFDATA)" > "$(PGO_PROFGZ)"
+
+# Strict Expansion 2 stores are compiled out of the default build. `make build-strict`
+# builds the binaries that have them (`--strict-exp2`, `PSOXIDE_STRICT_EXP2=1`) into
+# target/strict/release/, for a pre-burn check; `make test-strict` runs their tests.
+build-strict:
+	cargo build --locked --release --target-dir target/strict -p psoxide-emulator -p psoxide-gate --features psoxide-emulator/strict-exp2,psoxide-gate/strict-exp2
+test-strict:
+	cargo test --locked -p emulator-core --lib --features strict-exp2 strict_exp2
+	cargo test --locked -p psoxide-jit --features strict-exp2 --test strict_exp2
 
 # The fleet gate (TESTING.md): every game's journey on the CPU and hardware
 # renderers. GATE_ARGS e.g. "run nitroxide" or "run all --jobs 2".

@@ -83,3 +83,31 @@ pub use psx_gte_core::GteProfileSnapshot;
 pub use snapshot::{EmulatorState, EmulatorStateRef};
 pub use telemetry::{GuestTelemetry, GuestTelemetryEvent, GuestTelemetryKind};
 pub use vram::{Vram, VRAM_HEIGHT, VRAM_WIDTH};
+
+/// Whether this build can model strict Expansion 2 stores (cargo feature
+/// `strict-exp2`, `make build-strict`).
+pub const STRICT_EXP2_COMPILED: bool = cfg!(feature = "strict-exp2");
+
+/// Whether the environment asks for strict Expansion 2 stores
+/// (`PSOXIDE_STRICT_EXP2` set to anything but `0` or empty).
+#[must_use]
+pub fn strict_exp2_requested() -> bool {
+    std::env::var("PSOXIDE_STRICT_EXP2").is_ok_and(|value| value != "0" && !value.is_empty())
+}
+
+/// For a binary's start-up: stop with a clear message when strict Expansion 2
+/// stores are asked for (`requested`, or `PSOXIDE_STRICT_EXP2`) in a build
+/// without the `strict-exp2` feature, so a run is never silently non-strict.
+///
+/// # Errors
+/// The message to print, when strict mode is asked for and not compiled in.
+pub fn check_strict_exp2(requested: bool) -> Result<(), String> {
+    if (requested || strict_exp2_requested()) && !STRICT_EXP2_COMPILED {
+        return Err(
+            "strict Expansion 2 stores are not compiled into this build; \
+build the strict binary with `make build-strict` (cargo build --release --features strict-exp2)"
+                .into(),
+        );
+    }
+    Ok(())
+}

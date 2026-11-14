@@ -35,3 +35,42 @@ Other core differences join the same target as further fields of
 
 Gate goldens are recorded on `real`; a difference under `mister` is a finding
 about the program on that core. `bless` refuses to run under it.
+
+## Strict Expansion 2 stores
+
+A retail console maps 128 bytes of Expansion 2 after the BIOS has run (the
+size field, bits 16 to 20, of the delay/size register at `0x1F80101C` holds
+`0x00070777`). A store to `0x1F802080`, the debug text port that PCSX-Redux and
+this emulator print, is outside that window and is a data bus error on the
+console: a disc whose program stored there stopped at boot on its fault panel
+with exception code 7, after passing every emulator run.
+
+Strict mode is a cargo feature, `strict-exp2`, compiled out of the default build
+so the default emulator carries no trace of it. `make build-strict` builds the
+binaries that have it into `target/strict/release/`; `make test-strict` runs its
+tests. In those binaries `--strict-exp2` (or `PSOXIDE_STRICT_EXP2=1`; also
+`psoxide-gate run --strict-exp2`) models it. A default build asked for strict
+mode stops at start with a message naming the build command.
+
+A store beyond the configured window, to any
+address of the 8 KiB Expansion 2 region, takes the exception: CAUSE.ExcCode 7
+(with BD in a delay slot), EPC at the store or at its branch, BadVaddr left
+alone, the store not performed. The window follows the size register. It is
+off by default because the emulator's debug text goes through the same port
+and the gates read it; run a program that is meant for a console under
+`--strict-exp2` to prove it never reaches the port.
+
+Only stores are modelled: the one console observation is a store. Whether a
+load from outside the window faults too is not known, so loads are untouched.
+The telemetry port at `0x1F802F00` is beyond the window too and faults.
+
+What a program does with the fault is up to its runtime. The SDK runtime's
+exception handler halts on a bus error only when the store sat in a branch
+delay slot (CAUSE.BD set); otherwise it skips the instruction and carries on.
+The console's first disc faulted at boot because its store was in a delay slot;
+the emulator-only build that prints through the port is not, so under
+`--strict-exp2` it takes the fault about thirty times and continues. Judge a
+strict run by the exceptions taken (`PSOXIDE_TRACE_EXC=1` prints each), not by
+whether the program stops.
+The console's CAUSE also had bit 30 set (`0xC000001C`); the emulator does not
+model that bit for any exception and leaves it clear.

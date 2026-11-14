@@ -2841,6 +2841,10 @@ impl Cpu {
         let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
+        #[cfg(feature = "strict-exp2")]
+        if self.store_bus_error(addr, bus) {
+            return Ok(());
+        }
         // SWC2 stores a GTE register, so it reads a result exactly as MFC2
         // does: it waits for a running command (psx-spx lists MFC2, CFC2 and
         // SWC2 as the reads that interlock; hwtest records 0x130-0x134 pin
@@ -3184,6 +3188,10 @@ impl Cpu {
             self.raise_address_error(ExceptionCode::AddressErrorStore, addr, bus);
             return Ok(());
         }
+        #[cfg(feature = "strict-exp2")]
+        if self.store_bus_error(addr, bus) {
+            return Ok(());
+        }
         self.write_word(addr, self.gpr(rt), bus);
         Ok(())
     }
@@ -3387,6 +3395,10 @@ impl Cpu {
         let rt = ((instr >> 16) & 0x1f) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
+        #[cfg(feature = "strict-exp2")]
+        if self.store_bus_error(addr, bus) {
+            return Ok(());
+        }
         self.write_byte(addr, self.gpr(rt), bus);
         Ok(())
     }
@@ -3398,6 +3410,10 @@ impl Cpu {
         let addr = self.gpr(rs).wrapping_add(offset);
         if addr & 1 != 0 {
             self.raise_address_error(ExceptionCode::AddressErrorStore, addr, bus);
+            return Ok(());
+        }
+        #[cfg(feature = "strict-exp2")]
+        if self.store_bus_error(addr, bus) {
             return Ok(());
         }
         self.write_half(addr, self.gpr(rt), bus);
@@ -3487,6 +3503,10 @@ impl Cpu {
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         let aligned = addr & !3;
+        #[cfg(feature = "strict-exp2")]
+        if self.store_bus_error(aligned, bus) {
+            return Ok(());
+        }
         self.charge_unaligned_store_read(bus, aligned);
         let mem = bus.read32(aligned);
         let reg = self.gpr(rt);
@@ -3508,6 +3528,10 @@ impl Cpu {
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         let aligned = addr & !3;
+        #[cfg(feature = "strict-exp2")]
+        if self.store_bus_error(aligned, bus) {
+            return Ok(());
+        }
         self.charge_unaligned_store_read(bus, aligned);
         let mem = bus.read32(aligned);
         let reg = self.gpr(rt);
@@ -3892,6 +3916,30 @@ impl Cpu {
         self.pending_exception_pc = Some(vector);
     }
 
+    #[cfg(feature = "strict-exp2")]
+    /// Strict Expansion 2 stores (`bus/exp2_strict.rs`): when the store to `addr`
+    /// is beyond the region window, raise the data bus error instead of
+    /// letting it reach the bus. The store does not happen; `true` says so.
+    #[inline(always)]
+    fn store_bus_error(&mut self, addr: u32, bus: &mut Bus) -> bool {
+        if !bus.expansion2_store_faults(addr) || self.cache_isolated() {
+            return false;
+        }
+        self.raise_data_bus_error(bus);
+        true
+    }
+
+    #[cfg(feature = "strict-exp2")]
+    /// Raise a data bus error: CAUSE.ExcCode 7, EPC at the faulting
+    /// instruction (or its branch when in a delay slot, with BD set), BadVaddr
+    /// unchanged.
+    #[cold]
+    fn raise_data_bus_error(&mut self, bus: &mut Bus) {
+        let in_delay_slot = self.executing_in_branch_delay;
+        self.enter_exception(ExceptionCode::DataBusError, self.pc, in_delay_slot);
+        self.stage_hle_unresolved_exception(bus);
+    }
+
     /// Raise an AdEL or AdES address-error exception. Stores the
     /// offending virtual address in COP0 BadVaddr (cop0[8]) and
     /// hands off to [`Cpu::enter_exception`] with the appropriate
@@ -4037,6 +4085,12 @@ enum ExceptionCode {
     /// PS1 scratchpad is data-only, so attempting to run a scratch-resident
     /// kernel enters this exception rather than reading its bytes as code.
     InstructionBusError = 6,
+    #[cfg(feature = "strict-exp2")]
+    /// DBE -- a data access the bus cannot complete. Raised by a store beyond
+    /// the Expansion 2 window when strict Expansion 2 stores are on
+    /// (`bus/exp2_strict.rs`). BadVaddr is not written: only address errors
+    /// record an address.
+    DataBusError = 7,
     Syscall = 8,
     Break = 9,
     /// CpU -- selected coprocessor is unavailable. CAUSE.CE is filled by
@@ -6368,5 +6422,163 @@ mod tests {
         assert_eq!(profile.lui, 1);
         assert_eq!(profile.jalr, 1);
         assert_eq!(profile.multiply, 1);
+    }
+
+    // -- strict Expansion 2 stores (bus/exp2_strict.rs) ------------------------
+
+    #[cfg(feature = "strict-exp2")]
+    const LUI_T0_KSEG1_EXP2: u32 = 0x3c08_bf80; // lui $t0, 0xbf80
+    #[cfg(feature = "strict-exp2")]
+    const ORI_T0_PORT: u32 = 0x3508_2080; // ori $t0, $t0, 0x2080: the debug console port
+    #[cfg(feature = "strict-exp2")]
+    const ADDIU_T1_H: u32 = 0x2409_0048; // addiu $t1, $zero, 'H'
+    #[cfg(feature = "strict-exp2")]
+    const ADDIU_T1_NL: u32 = 0x2409_000a; // addiu $t1, $zero, '\n'
+    #[cfg(feature = "strict-exp2")]
+    const SB_T1_T0: u32 = 0xa109_0000;
+    #[cfg(feature = "strict-exp2")]
+    const SH_T1_T0: u32 = 0xa509_0000;
+    #[cfg(feature = "strict-exp2")]
+    const SW_T1_T0: u32 = 0xad09_0000;
+    #[cfg(feature = "strict-exp2")]
+    const SWL_T1_T0: u32 = 0xa909_0000;
+    #[cfg(feature = "strict-exp2")]
+    const SWR_T1_T0: u32 = 0xb909_0000;
+    #[cfg(feature = "strict-exp2")]
+    const SWC2_T1_T0: u32 = 0xe909_0000;
+    #[cfg(feature = "strict-exp2")]
+    const LB_T2_T0: u32 = 0x810a_0000;
+    #[cfg(feature = "strict-exp2")]
+    const BEQ_ZERO_ZERO_PLUS1: u32 = 0x1000_0001;
+
+    /// A CPU at the reset vector that runs `words`, on a bus with strict
+    /// Expansion 2 stores `strict`.
+    #[cfg(feature = "strict-exp2")]
+    fn exp2_machine(words: &[u32], strict: bool) -> (Cpu, Bus) {
+        let mut bus = Bus::new(synthetic_bios_with_words(words)).unwrap();
+        bus.set_expansion2_strict(strict);
+        let mut cpu = Cpu::new();
+        // CU2 on, so SWC2 reaches the bus.
+        cpu.cop0[12] |= 1 << 30;
+        (cpu, bus)
+    }
+
+    #[cfg(feature = "strict-exp2")]
+    fn run_steps(cpu: &mut Cpu, bus: &mut Bus, steps: usize) {
+        for _ in 0..steps {
+            cpu.step(bus).expect("op decodes");
+        }
+    }
+
+    #[cfg(feature = "strict-exp2")]
+    fn assert_data_bus_error(cpu: &Cpu, epc: u32, delay_slot: bool) {
+        assert_eq!((cpu.cop0[13] >> 2) & 0x1f, 7, "ExcCode is DBE");
+        assert_eq!(cpu.cop0[13] >> 31, delay_slot as u32, "CAUSE.BD");
+        assert_eq!(cpu.cop0[14], epc, "EPC");
+        assert_eq!(cpu.cop0[8], 0, "a bus error leaves BadVaddr alone");
+        assert_eq!(cpu.pc(), 0x8000_0080, "vector");
+    }
+
+    #[cfg(feature = "strict-exp2")]
+    #[test]
+    fn strict_exp2_store_beyond_the_128_byte_window_raises_a_data_bus_error() {
+        for store in [
+            SB_T1_T0, SH_T1_T0, SW_T1_T0, SWL_T1_T0, SWR_T1_T0, SWC2_T1_T0,
+        ] {
+            let (mut cpu, mut bus) =
+                exp2_machine(&[LUI_T0_KSEG1_EXP2, ORI_T0_PORT, ADDIU_T1_H, store], true);
+            bus.watch_debug_console(vec![b"H".to_vec()]);
+            run_steps(&mut cpu, &mut bus, 4);
+            assert_data_bus_error(&cpu, 0xbfc0_000c, false);
+            // The store never reached the port.
+            assert!(bus.console_watch_hit().is_none(), "store {store:08x}");
+        }
+    }
+
+    #[cfg(feature = "strict-exp2")]
+    #[test]
+    fn strict_exp2_store_in_a_branch_delay_slot_reports_the_branch() {
+        let (mut cpu, mut bus) = exp2_machine(
+            &[
+                LUI_T0_KSEG1_EXP2,
+                ORI_T0_PORT,
+                BEQ_ZERO_ZERO_PLUS1,
+                SB_T1_T0,
+            ],
+            true,
+        );
+        run_steps(&mut cpu, &mut bus, 4);
+        assert_data_bus_error(&cpu, 0xbfc0_0008, true);
+    }
+
+    #[cfg(feature = "strict-exp2")]
+    #[test]
+    fn default_mode_still_prints_on_the_debug_console_port() {
+        let (mut cpu, mut bus) = exp2_machine(
+            &[
+                LUI_T0_KSEG1_EXP2,
+                ORI_T0_PORT,
+                ADDIU_T1_H,
+                SB_T1_T0,
+                ADDIU_T1_NL,
+                SB_T1_T0,
+            ],
+            false,
+        );
+        bus.watch_debug_console(vec![b"H".to_vec()]);
+        run_steps(&mut cpu, &mut bus, 6);
+        assert_eq!(cpu.cop0[13], 0, "no exception");
+        assert_eq!(bus.console_watch_hit(), Some(&b"H"[..]));
+    }
+
+    #[cfg(feature = "strict-exp2")]
+    #[test]
+    fn strict_exp2_store_inside_the_window_does_not_fault() {
+        for strict in [false, true] {
+            let (mut cpu, mut bus) = exp2_machine(
+                &[
+                    LUI_T0_KSEG1_EXP2,
+                    ORI_T0_PORT - 1, // ori $t0, $t0, 0x207f: the last byte of the window
+                    ADDIU_T1_H,
+                    SB_T1_T0,
+                ],
+                strict,
+            );
+            run_steps(&mut cpu, &mut bus, 4);
+            assert_eq!(cpu.cop0[13], 0, "strict={strict}");
+            assert_eq!(cpu.pc(), 0xbfc0_0010, "strict={strict}");
+        }
+    }
+
+    #[cfg(feature = "strict-exp2")]
+    #[test]
+    fn strict_exp2_window_follows_the_size_register() {
+        // Size field 11: a 2 KiB window, which holds the port at offset 0x80.
+        let (mut cpu, mut bus) = exp2_machine(
+            &[LUI_T0_KSEG1_EXP2, ORI_T0_PORT, ADDIU_T1_H, SB_T1_T0],
+            true,
+        );
+        bus.write32(0x1f80_101c, 0x000b_0777);
+        run_steps(&mut cpu, &mut bus, 4);
+        assert_eq!(cpu.cop0[13], 0);
+        // Back to 128 bytes: faults again.
+        let (mut cpu, mut bus) = exp2_machine(
+            &[LUI_T0_KSEG1_EXP2, ORI_T0_PORT, ADDIU_T1_H, SB_T1_T0],
+            true,
+        );
+        bus.write32(0x1f80_101c, 0x000b_0777);
+        bus.write32(0x1f80_101c, 0x0007_0777);
+        run_steps(&mut cpu, &mut bus, 4);
+        assert_data_bus_error(&cpu, 0xbfc0_000c, false);
+    }
+
+    #[cfg(feature = "strict-exp2")]
+    #[test]
+    fn strict_exp2_models_stores_only() {
+        // A load from beyond the window does not fault: no console evidence
+        // says it does.
+        let (mut cpu, mut bus) = exp2_machine(&[LUI_T0_KSEG1_EXP2, ORI_T0_PORT, LB_T2_T0, 0], true);
+        run_steps(&mut cpu, &mut bus, 4);
+        assert_eq!(cpu.cop0[13], 0);
     }
 }

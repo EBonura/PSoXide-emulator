@@ -33,6 +33,8 @@ use crate::timers::Timers;
 
 mod block_support;
 mod cc_dma;
+#[cfg(feature = "strict-exp2")]
+mod exp2_strict;
 mod idle;
 mod jit_support;
 mod mmio_fast;
@@ -503,6 +505,11 @@ pub struct Bus {
     cc_dma_mode: CcDmaMode,
     #[serde(skip)]
     cc_dma_hits: u64,
+    /// Stores beyond the Expansion 2 window are a data bus error
+    /// (`PSOXIDE_STRICT_EXP2`); see `bus/exp2_strict.rs`.
+    #[cfg(feature = "strict-exp2")]
+    #[serde(skip, default = "exp2_strict::exp2_strict_from_env")]
+    exp2_strict: bool,
     /// Derived scheduling hint, not positional save-state data. After restore,
     /// inspect CHCR and the completion event once to recover an armed wait.
     #[serde(skip, default = "check_gpu_request_after_restore")]
@@ -658,6 +665,8 @@ impl Bus {
             gpu_dma_overflow_drops: gpu_dma_overflow_drops_from_env(),
             cc_dma_mode: cc_dma::cc_dma_mode_from_env(),
             cc_dma_hits: 0,
+            #[cfg(feature = "strict-exp2")]
+            exp2_strict: exp2_strict::exp2_strict_from_env(),
             gpu_dma_waiting_for_request: false,
             gpu_dma_wait: 0,
             experimental_gpu_list: None,

@@ -27,6 +27,8 @@ native-jit = ["dep:psoxide-jit"]
 # the native tier bakes the retail 2 MiB mask into its code. Build with
 # `--no-default-features --features devkit-ram`.
 devkit-ram = ["emulator-core/devkit-ram"]
+# Strict Expansion 2 stores (`--strict-exp2`); build with `make build-strict`.
+strict-exp2 = ["emulator-core/strict-exp2"]
 # `mcp` (native-only) embeds a live MCP debug server (official `rmcp` SDK over
 # streamable HTTP) inside the running GUI, so an agent can drive the emulator:
 # screenshot, read/write RAM+VRAM, step/run frames, toggle wireframe, save/load
