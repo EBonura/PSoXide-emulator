@@ -125,6 +125,19 @@ The differences are the trace loop's read spacing, not the model: PSoXide's
 loop samples 18-25 cycles apart, so 44 and 48 are the first samples after the
 modelled 39-cycle window.
 
+Hardware tests v2.18 (two runs, same console, 2026-11-14) read the reset from
+busy differently: the first read, 13 clocks in, already showed 0x80040000 in
+both runs, with no busy word before it, while the enable-straight-behind case
+agreed with v1.26 (0x60000000 at 8 clocks, 0x80040000 at 50). The two discs
+do not agree on a reset from busy, and nothing here says why; the model now
+follows v2.18, the later and repeated one: a reset reads the idle word from the
+first read, whatever the MDEC was doing. The long window is kept for the
+swallowed control write only. The old row above reads busy at the first
+sample and is the one the model no longer reproduces. PSoXide's first read
+lands 7 to 8 clocks in where the console's lands 13 (the first sample of the
+reset from idle too), which is an access-time difference this change leaves
+alone.
+
 A control write that lands a few cycles behind the reset is swallowed: the port
 reads the written word back until the reset completes, and the DMA enables it
 carried are gone. An open-source library's order (reset and enable back to back, 2 cycles

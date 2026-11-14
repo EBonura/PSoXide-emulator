@@ -124,14 +124,17 @@ const MDEC1_OUTPUT_SIGNED: u32 = 0x0100_0000;
 const MDEC1_OUTPUT_BIT15: u32 = 0x0080_0000;
 
 /// How long a reset keeps the status port on its reset-time word, in CPU
-/// cycles from the reset write, when the MDEC was idle. SCPH-9002, hardware
-/// tests v1.26 (`mdec_reset_trace`): the first read after a reset from idle,
-/// 13 clocks in, already shows the idle word, so this is an upper bound.
+/// cycles from the reset write. SCPH-9002, hardware tests v1.26 and v2.18
+/// (`mdec_reset_trace`): the first read after a reset from idle, 13 clocks in,
+/// already shows the idle word, and so did the first read after a reset issued
+/// mid-command in both runs of v2.18, so this is an upper bound for both. (The
+/// v1.26 run read busy on that first read, idle 26 clocks later; the two do not
+/// agree, and the model follows the later, repeated one.)
 const RESET_IDLE_CYCLES: u64 = 13;
-/// The same when the MDEC was busy, or when the word a swallowed control
-/// write left in the status port reads busy: silicon reads busy until 39
-/// clocks after the reset write (41 with an enable written straight behind
-/// it).
+/// How long the status port reads the word a swallowed control write left
+/// there when that word reads busy: silicon reads it until 41 clocks after
+/// the reset write in v1.26 and 50 in v2.18 (an enable written straight behind
+/// the reset).
 const RESET_BUSY_CYCLES: u64 = 39;
 /// A control write landing this soon after the reset write is overwritten by
 /// the reset: it is lost, and the status port reads back the written word
@@ -481,14 +484,12 @@ impl Mdec {
         }
         if phys & 0x1f80_1fff == MDEC_CTRL_STAT {
             if value & MDEC1_RESET != 0 {
-                let busy = if self.resetting(now) {
-                    self.reset_status
-                } else {
-                    self.status_word()
-                } & MDEC1_BUSY;
+                // The reset word is the idle word whatever the MDEC was doing:
+                // a console read it idle at the first read after a reset
+                // issued mid-command (see [`RESET_IDLE_CYCLES`]).
                 self.control_write(value);
-                self.reset_status = status_idle() | busy;
-                self.reset_until = now + reset_cycles(busy);
+                self.reset_status = status_idle();
+                self.reset_until = now + RESET_IDLE_CYCLES;
                 self.reset_capture_until = now + RESET_CAPTURE_CYCLES;
                 return;
             }
@@ -2281,18 +2282,41 @@ mod tests {
     }
 
     #[test]
-    fn reset_from_busy_reads_busy_until_it_completes() {
+    fn reset_from_busy_reads_idle_from_the_first_read() {
+        // A command waiting for its parameter words: busy.
+        let mut m = Mdec::new();
+        m.write32_at(MDEC_CMD_DATA, 0x4000_0001, 0);
+        m.write32_at(MDEC_CMD_DATA, 0, 1);
+        assert_ne!(m.read32_at(MDEC_CTRL_STAT, 50) & MDEC1_BUSY, 0);
+        // A console read the idle word 13 clocks after a reset issued like this
+        // (hardware tests v2.18, `mdec_reset_trace`, both runs); the first read
+        // is no later than that here.
+        m.write32_at(MDEC_CTRL_STAT, 0x8000_0000, 100);
+        for cycle in [101, 107, 100 + RESET_IDLE_CYCLES, 120, 139, 200] {
+            assert_eq!(
+                m.read32_at(MDEC_CTRL_STAT, cycle),
+                0xa004_0000 & !MDEC1_BUSY,
+                "at {cycle}"
+            );
+        }
+    }
+
+    #[test]
+    fn enable_straight_behind_a_reset_from_busy_still_reads_back_busy() {
+        // The swallowed enable keeps the long window: the console read the
+        // written word 8 clocks in and idle at 50 (hardware tests v2.18).
         let mut m = Mdec::new();
         m.write32_at(MDEC_CMD_DATA, 0x4000_0001, 0);
         m.write32_at(MDEC_CMD_DATA, 0, 1);
         m.write32_at(MDEC_CTRL_STAT, 0x8000_0000, 100);
-        assert_eq!(m.read32_at(MDEC_CTRL_STAT, 113), 0xa004_0000);
+        m.write32_at(MDEC_CTRL_STAT, 0x6000_0000, 102);
+        assert_eq!(m.read32_at(MDEC_CTRL_STAT, 108), 0x6000_0000);
         assert_eq!(
-            m.read32_at(MDEC_CTRL_STAT, 100 + RESET_BUSY_CYCLES - 1),
-            0xa004_0000
+            m.read32_at(MDEC_CTRL_STAT, 102 + RESET_BUSY_CYCLES - 1),
+            0x6000_0000
         );
         assert_eq!(
-            m.read32_at(MDEC_CTRL_STAT, 100 + RESET_BUSY_CYCLES),
+            m.read32_at(MDEC_CTRL_STAT, 102 + RESET_BUSY_CYCLES),
             0x8004_0000
         );
     }
