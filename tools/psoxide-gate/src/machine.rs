@@ -167,6 +167,10 @@ pub struct Machine {
     pub irq_missed: Option<String>,
     /// Per-tick CSV, when `--tick-log` asked for one.
     pub tick_log: Option<crate::tick_log::TickLog>,
+    /// The fetch trace `--fetch-trace` asked for, and the port-1 polls `FROM..TO` it
+    /// covers. While it records, the machine runs one instruction at a time and logs the PC
+    /// of each; the stops are the ones `Cpu::run` makes, so the run is the same.
+    pub fetch_trace: Option<(crate::fetch_trace::FetchTrace, u64, u64)>,
     /// Torn-read audit of the pad polls, when `--audit-pad` asked for one.
     pub pad_audit: Option<PadAudit>,
     /// Pad changes waiting for the next port-1 poll to start (see `set_pad_at_poll`).
@@ -281,6 +285,7 @@ impl Machine {
             irq_ack_seen: None,
             irq_missed: None,
             tick_log: None,
+            fetch_trace: None,
             pad_audit: None,
             pending_pads: [None; 2],
             seen_starts: 0,
@@ -413,8 +418,38 @@ impl Machine {
             let per_poll_log = self.tick_log.as_ref().is_some_and(|l| l.per_poll);
             let watch_starts =
                 stop_at_poll || per_poll_log || self.pending_pads.iter().any(Option::is_some);
+            let tracing = self
+                .fetch_trace
+                .as_ref()
+                .is_some_and(|(_, from, to)| (*from..*to).contains(&polls));
             let (ran, result) = if fine {
+                if let Some((trace, ..)) = self.fetch_trace.as_mut().filter(|_| tracing) {
+                    trace
+                        .record(self.cpu.pc())
+                        .map_err(|e| format!("write fetch trace: {e}"))?;
+                }
                 (1, self.cpu.step(&mut self.bus))
+            } else if tracing {
+                let stop = |bus: &Bus| {
+                    (observing && crate::card::active(bus))
+                        || (watch_tape && bus.port1_completed_polls() != polls)
+                        || (watch_starts && poll_starts(bus) != starts)
+                };
+                let mut ran = 0;
+                let mut result = Ok(());
+                while ran < n {
+                    if let Some((trace, ..)) = self.fetch_trace.as_mut() {
+                        trace
+                            .record(self.cpu.pc())
+                            .map_err(|e| format!("write fetch trace: {e}"))?;
+                    }
+                    ran += 1;
+                    result = self.cpu.step(&mut self.bus);
+                    if result.is_err() || self.bus.cycles() >= self.deadline || stop(&self.bus) {
+                        break;
+                    }
+                }
+                (ran, result)
             } else {
                 self.cpu.run(&mut self.bus, n, self.deadline, |bus| {
                     (observing && crate::card::active(bus))
@@ -530,6 +565,11 @@ impl Machine {
         self.at_poll = at_poll;
         self.deadline = self.bus.cycles().saturating_add(self.period);
         self.ticks += 1;
+        if let Some((trace, from, to)) = self.fetch_trace.as_mut() {
+            if (*from..*to).contains(&self.bus.port1_completed_polls()) {
+                trace.tick().map_err(|e| format!("write fetch trace: {e}"))?;
+            }
+        }
 
         let area = self.bus.gpu.display_area();
         let start = (area.x, area.y);

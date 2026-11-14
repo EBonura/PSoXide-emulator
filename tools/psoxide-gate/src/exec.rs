@@ -176,6 +176,8 @@ pub struct RunOptions {
     pub tick_log_ram: Vec<crate::tick_log::WordSpec>,
     /// One tick-log row per pad poll instead of per tick.
     pub tick_log_polls: bool,
+    /// Write a fetch trace here over these port-1 polls (see `Machine::fetch_trace`).
+    pub fetch_trace: Option<(PathBuf, u64, u64)>,
     /// Check every pad poll for a torn read (see `Machine::pad_audit`).
     pub audit_pad: bool,
     pub journey_path: PathBuf,
@@ -577,6 +579,16 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     if opts.trace_failures {
         m.bus.gpu.enable_pixel_tracer();
     }
+    if let Some((path, from, to)) = &opts.fetch_trace {
+        match crate::fetch_trace::FetchTrace::create(path) {
+            Ok(trace) => m.fetch_trace = Some((trace, *from, *to)),
+            Err(e) => {
+                result.abort = Some(e);
+                result.wall = start.elapsed();
+                return result;
+            }
+        }
+    }
     if let Some(path) = &opts.tick_log {
         match crate::tick_log::TickLog::create(path, &opts.tick_log_ram, &syms) {
             Ok(mut log) => {
@@ -860,6 +872,7 @@ impl<'a> Run<'a> {
                 }
                 let ticks = self.m.ticks;
                 let tick_log = self.m.tick_log.take();
+                let fetch_trace = self.m.fetch_trace.take();
                 // The audit counts across the reboot; its poll count starts over with the machine.
                 let pad_audit = self.m.pad_audit.take();
                 self.m = Machine::boot(&Boot {
@@ -871,6 +884,7 @@ impl<'a> Run<'a> {
                     track_display: self.journey.uses_display_history(),
                 })?;
                 self.m.tick_log = tick_log;
+                self.m.fetch_trace = fetch_trace;
                 self.m.pad_audit = pad_audit.map(|mut audit| {
                     audit.reboot();
                     audit

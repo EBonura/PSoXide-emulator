@@ -59,6 +59,7 @@ use crate::playtest_disc::{build_embedded_playtest_disc, copy_project_disc};
 use crate::playtest_input::read_input_tape;
 
 mod debug_ui_png;
+mod fetch_trace;
 mod headless_log;
 mod iso_inspect;
 mod profile_report;
@@ -546,6 +547,15 @@ pub struct LaunchArgs {
     /// traffic to be excluded from a deterministic gameplay profile.
     #[arg(long, default_value_t = 0, requires = "icache_event_log")]
     pub icache_event_start_route_tick: u64,
+    /// Write the order in which every instruction was retired, as sequential
+    /// runs (see `cli/fetch_trace.rs` for the format). With it a tool can
+    /// replay the fetches against another placement of the same code and count
+    /// the I-cache refills that placement would take.
+    #[arg(long)]
+    pub fetch_trace_log: Option<PathBuf>,
+    /// Ignore retired instructions before this route tick.
+    #[arg(long, default_value_t = 0, requires = "fetch_trace_log")]
+    pub fetch_trace_start_route_tick: u64,
     /// Write exact dynamic MIPS instruction-class counts per route tick,
     /// including delay slots, memory widths/regions, stack-relative accesses,
     /// control flow, multiply/divide and GTE traffic.
@@ -1471,6 +1481,11 @@ fn run_headless_launch(
     let mut last_ram_load_stall_cycles = last_cpu_cycle_profile.ram_load_stall_cycles;
     let mut icache_stall_lines = args.icache_stall_line_log.as_ref().map(new_pc_histogram);
     let mut last_icache_stall_cycles = last_cpu_cycle_profile.icache_refill_stall_cycles;
+    let mut fetch_trace = args
+        .fetch_trace_log
+        .as_deref()
+        .map(fetch_trace::FetchTrace::create)
+        .transpose()?;
     cpu.set_instruction_cache_event_profile_enabled(args.icache_event_log.is_some());
     let mut icache_event_log = match args.icache_event_log.as_ref() {
         Some(path) => {
@@ -1641,7 +1656,8 @@ fn run_headless_launch(
         || mmio_stall_lines.is_some()
         || ram_load_stall_lines.is_some()
         || icache_stall_lines.is_some()
-        || icache_event_log.is_some();
+        || icache_event_log.is_some()
+        || fetch_trace.is_some();
     let mut tape_seen_polls = bus.port1_completed_polls();
     let exact_from_poll = exact_from_poll_count(
         args.stop_at_poll,
@@ -1660,6 +1676,13 @@ fn run_headless_launch(
         if route_ticks >= args.pc_line_start_route_tick {
             if let Some(histogram) = pc_line_histogram.as_mut() {
                 histogram.record(cpu.pc());
+            }
+        }
+        if route_ticks >= args.fetch_trace_start_route_tick {
+            if let Some(trace) = fetch_trace.as_mut() {
+                trace
+                    .record(cpu.pc())
+                    .map_err(|error| format!("write fetch trace: {error}"))?;
             }
         }
         if let Some(profile) = stack_high_water_profile.as_mut() {
@@ -1889,6 +1912,13 @@ fn run_headless_launch(
             route_tick_deadline = bus.cycles().saturating_add(route_vblank_period);
             route_tick_steps = 0;
             route_ticks += 1;
+            if route_ticks >= args.fetch_trace_start_route_tick {
+                if let Some(trace) = fetch_trace.as_mut() {
+                    trace
+                        .tick()
+                        .map_err(|error| format!("write fetch trace: {error}"))?;
+                }
+            }
             if let Some(stats) = debug_ui_stats.as_mut() {
                 stats.set_cpu_attribution(&mut cpu, true);
                 stats.record(&cpu, &bus);
@@ -2503,6 +2533,16 @@ fn run_headless_launch(
         if emit_summary {
             if let Some(path) = args.cpu_cycle_profile_log.as_ref() {
                 eprintln!("[cli] CPU cycle profile → {}", path.display());
+            }
+        }
+    }
+    if let Some(trace) = fetch_trace.as_mut() {
+        trace
+            .finish()
+            .map_err(|error| format!("write fetch trace: {error}"))?;
+        if emit_summary {
+            if let Some(path) = args.fetch_trace_log.as_ref() {
+                eprintln!("[cli] fetch trace → {}", path.display());
             }
         }
     }
@@ -3367,6 +3407,8 @@ fn validation_launch_args(
         pc_log_words: false,
         icache_event_log: None,
         icache_event_start_route_tick: 0,
+        fetch_trace_log: None,
+        fetch_trace_start_route_tick: 0,
         instruction_class_log: None,
         stack_profile_log: None,
         stack_profile_root_pc: None,

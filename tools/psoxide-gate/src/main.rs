@@ -18,6 +18,7 @@ mod machine;
 mod refresh;
 mod render;
 mod report;
+mod fetch_trace;
 mod symbols;
 mod tick_log;
 mod trace;
@@ -131,6 +132,12 @@ struct RunArgs {
     /// (symbols come from the journey). Read off the bus, so the run is unchanged.
     #[arg(long, requires = "tick_log", value_delimiter = ',')]
     tick_log_ram: Vec<String>,
+    /// Write the order in which every instruction retired over port-1 polls `FROM..TO`
+    /// (`--fetch-trace PATH FROM..TO`), as the frontend's `launch --fetch-trace-log` does.
+    /// One target only. The traced stretch runs one instruction at a time, which is
+    /// slower and changes nothing in the run.
+    #[arg(long, num_args = 2, value_names = ["PATH", "FROM..TO"])]
+    fetch_trace: Vec<String>,
     /// Check every port-1 pad poll for a torn read (the d-pad byte of one pad state with the
     /// face-button byte of another, which a pad written between two bytes of a poll gives) and
     /// fail the journey if there is one. Needs a single target. A step with `sync = "poll"` cannot tear.
@@ -379,6 +386,7 @@ struct Opts {
     tick_log: Option<PathBuf>,
     tick_log_ram: Vec<tick_log::WordSpec>,
     tick_log_polls: bool,
+    fetch_trace: Option<(PathBuf, u64, u64)>,
     audit_pad: bool,
     out: PathBuf,
 }
@@ -390,6 +398,17 @@ impl Opts {
             .iter()
             .map(|w| tick_log::WordSpec::parse(w))
             .collect::<Result<Vec<_>, _>>()?;
+        let fetch_trace = match a.fetch_trace.as_slice() {
+            [] => None,
+            [path, polls] => {
+                let (from, to) = polls
+                    .split_once("..")
+                    .and_then(|(from, to)| Some((from.parse().ok()?, to.parse().ok()?)))
+                    .ok_or_else(|| format!("--fetch-trace wants FROM..TO polls, not {polls}"))?;
+                Some((PathBuf::from(path), from, to))
+            }
+            _ => return Err("--fetch-trace wants PATH FROM..TO".into()),
+        };
         Ok(Opts {
             disc: a.disc.clone(),
             build: a.build,
@@ -405,6 +424,7 @@ impl Opts {
             tick_log: a.tick_log.clone(),
             tick_log_ram: words,
             tick_log_polls: a.tick_log_polls,
+            fetch_trace,
             audit_pad: a.audit_pad,
             out: a.out.clone(),
         })
@@ -454,6 +474,7 @@ fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
             tick_log: o.tick_log.clone(),
             tick_log_ram: o.tick_log_ram.clone(),
             tick_log_polls: o.tick_log_polls,
+            fetch_trace: o.fetch_trace.clone(),
             audit_pad: o.audit_pad,
             journey_path: job.journey_path.clone(),
             artifact_dir: o.out.join(&journey.name).join("cards"),
@@ -630,6 +651,7 @@ fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
         tick_log: None,
         tick_log_ram: Vec::new(),
         tick_log_polls: false,
+        fetch_trace: None,
         audit_pad: false,
         out: a.out.clone(),
     };
