@@ -444,6 +444,10 @@ pub struct Gpu {
     /// Consecutive vblanks in that mode, saturating at 2 (both fields held).
     #[serde(skip)]
     field_hold_fields: u8,
+    /// In the vertical blank that began at the last VBlank edge (see
+    /// [`Gpu::begin_vblank`]). Not saved: a restored machine is out of it.
+    #[serde(skip)]
+    vblank_active: bool,
 
     /// GPU execution backlog in CPU/bus cycles. Raster and VRAM
     /// commands add silicon-calibrated work; elapsed bus cycles drain
@@ -846,6 +850,7 @@ impl Gpu {
             current_cmd_index: 0,
             field_hold: Vec::new(),
             field_hold_fields: 0,
+            vblank_active: false,
             busy_credit: 0,
             cmd_ingest_credit: 0,
             dma_busy_credit: 0,
@@ -1077,7 +1082,7 @@ impl Gpu {
     /// parity is not `shown` come from the held field (see
     /// [`Gpu::presented_words`] with [`Deinterlace::Weave`]).
     fn held_rows(&self) -> Option<(usize, usize, i32)> {
-        let shown = self.skipped_row_parity();
+        let shown = self.displayed_field_parity();
         if shown < 0 || self.field_hold_fields < 2 {
             return None;
         }
@@ -1413,6 +1418,13 @@ impl Gpu {
                 {
                     value |= 1 << 25;
                 }
+                // Bit 31 is the even/odd field flag in the picture and 0 in the
+                // vertical blank. A console read 0 on all 36 reads of each of
+                // two runs, in 480i and in 240 lines, when the read came right
+                // behind the VBlank interrupt.
+                if self.vblank_active {
+                    value &= !(1 << 31);
+                }
                 Some(value)
             }
             _ => None,
@@ -1429,6 +1441,20 @@ impl Gpu {
         } else {
             self.gpuread_latch
         }
+    }
+
+    /// A vertical blank begins: until [`Gpu::end_vblank`] GPUSTAT bit 31 reads
+    /// 0, and the 480-line draw rule skips the even rows as that bit says.
+    /// The field flag itself still flips once per VBlank
+    /// ([`Gpu::toggle_vblank_field`]), so the field shown after the blank is
+    /// the one it always was, and the picture held and presented is unchanged.
+    pub fn begin_vblank(&mut self) {
+        self.vblank_active = true;
+    }
+
+    /// The vertical blank ends: bit 31 reads the field flag again.
+    pub fn end_vblank(&mut self) {
+        self.vblank_active = false;
     }
 
     /// Toggle GPUSTAT bit 31 (interlace / even-odd line flag). Called
@@ -1451,7 +1477,7 @@ impl Gpu {
     /// whole picture at any one instant. The held lines let
     /// [`Gpu::presented_words`] show both fields, as the eye does on a CRT.
     fn hold_displayed_field(&mut self) {
-        let shown = self.skipped_row_parity();
+        let shown = self.displayed_field_parity();
         if shown < 0 {
             self.field_hold_fields = 0;
             return;
@@ -1473,13 +1499,13 @@ impl Gpu {
     /// drawing to the display area prohibited), so a host that presents its
     /// own copy of VRAM must show [`Gpu::display_rgba8_with`] instead.
     pub fn field_rendering_active(&self) -> bool {
-        self.skipped_row_parity() >= 0 && self.field_hold_fields >= 2
+        self.displayed_field_parity() >= 0 && self.field_hold_fields >= 2
     }
 
     /// VRAM as presented: the live lines of the field on display and, while
     /// field rendering is in effect, the held lines of the other field.
     fn presented_words(&self, mode: Deinterlace) -> std::borrow::Cow<'_, [u16]> {
-        let shown = self.skipped_row_parity();
+        let shown = self.displayed_field_parity();
         if shown < 0 || self.field_hold_fields < 2 {
             return std::borrow::Cow::Borrowed(self.vram.words());
         }
@@ -4478,11 +4504,35 @@ impl Gpu {
     /// show alone).
     #[inline]
     fn skipped_row_parity(&self) -> i32 {
+        // The rule follows the bit as GPUSTAT reports it, which is 0 in the
+        // vertical blank: a fill issued right behind a VBlank in 480i drew
+        // the odd rows on a console (hwtest v2.18, records 0x83F to 0x842, flags
+        // bit 0 clear), the rows a field flag of 0 leaves alone.
+        let shown = self.displayed_field_parity();
+        if self.vblank_active && shown >= 0 {
+            0
+        } else {
+            shown
+        }
+    }
+
+    /// Whether the 480-line draw rule applies: 480 lines interlaced, drawing to
+    /// the display area prohibited.
+    fn field_rule_active(&self) -> bool {
         const INTERLACED_480: u32 = (1 << 19) | (1 << 22);
         const DRAW_TO_DISPLAY: u32 = 1 << 10;
         let raw = self.status.raw;
-        if raw & INTERLACED_480 == INTERLACED_480 && raw & DRAW_TO_DISPLAY == 0 {
-            (raw >> 31) as i32
+        raw & INTERLACED_480 == INTERLACED_480 && raw & DRAW_TO_DISPLAY == 0
+    }
+
+    /// The field on display as the flag holds it (0 = even lines, 1 = odd), or
+    /// `-1` when the 480-line rule is off. What a presented picture is built
+    /// from; unlike [`Gpu::skipped_row_parity`] it does not read 0 in the
+    /// vertical blank.
+    #[inline]
+    fn displayed_field_parity(&self) -> i32 {
+        if self.field_rule_active() {
+            (self.status.raw >> 31) as i32
         } else {
             -1
         }

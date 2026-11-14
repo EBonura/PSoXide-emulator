@@ -663,11 +663,7 @@ impl Timers {
         let hsync = hsync_period.max(1);
         let period = vblank_period.max(hsync);
         let total_lines = period / hsync;
-        let blank_lines = match total_lines {
-            263 => 20, // NTSC: line 243 through the end of the field
-            314 => 58, // PAL: line 256 through the end of the field
-            _ => 20,
-        };
+        let blank_lines = vblank_lines(total_lines);
         let blank_duration = blank_lines * hsync;
         let mut cursor = start;
         let mut fired = false;
@@ -921,6 +917,17 @@ fn dot_ticks_per_scanline(hsync_period: u64, dot_clock_divisor: u64, vblank_peri
         (false, 5) => 681,
         (false, 4) => 851,
         (_, divisor) => 3413 / divisor.max(1),
+    }
+}
+
+/// Scanlines the GPU's vertical blank lasts in a frame of `total_lines`: the
+/// VBlank line through the end of the field. Timer 1's sync modes count
+/// over it, and GPUSTAT bit 31 reads 0 for it.
+pub(crate) fn vblank_lines(total_lines: u64) -> u64 {
+    match total_lines {
+        263 => 20, // NTSC: line 243 through the end of the field
+        314 => 58, // PAL: line 256 through the end of the field
+        _ => 20,
     }
 }
 

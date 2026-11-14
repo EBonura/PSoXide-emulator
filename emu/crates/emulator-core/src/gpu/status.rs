@@ -4,7 +4,8 @@
 /// Bits 26 and 28 reflect whether the emulated command pipeline has
 /// room for more work. Bit 27 is driven separately by the active
 /// VRAM-to-CPU transfer, bit 25 (DMA request) is computed from the DMA
-/// direction bits 29:30, and bit 31 toggles at VBlank.
+/// direction bits 29:30, and bit 31 toggles at VBlank and reads 0 during it
+/// (`Gpu::begin_vblank`).
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct GpuStatus {
     pub(super) raw: u32,

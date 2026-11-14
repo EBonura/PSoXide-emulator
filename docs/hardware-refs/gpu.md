@@ -42,7 +42,7 @@ opcodes cover display configuration and DMA direction.
 | 27 | Ready to send VRAM to CPU |
 | 28 | Ready to receive DMA block |
 | 30:29 | DMA direction (0=Off / 1=FIFO / 2=CPU→GPU / 3=GPU→CPU) |
-| 31 | Interlace / even-odd line flag (toggles at VBlank) |
+| 31 | Interlace / even-odd line flag: flips at each VBlank, reads 0 during the vertical blank |
 
 Bits 26/27/28 are the "ready" flags BIOS + games spin on before
 sending commands. PSoXide drives them from its source-sensitive GPU
@@ -55,9 +55,14 @@ Bit 25 is **computed per read** from the DMA-direction bits:
 - CPU→GPU: copy of bit 28
 - GPU→CPU: copy of bit 27
 
-Bit 31 toggles on every VBlank in a real GPU; BIOS polling loops
-wait for it to flip. We'll flip it when the cycle model drives
-scan-out.
+Bit 31 flips on every VBlank in a real GPU and reads 0 for the vertical
+blank itself, so a read right behind the VBlank interrupt sees 0 in every
+mode (two console runs of hardware test v2.18: 36 reads each, all 0, in 480i
+and in 240 lines). The blank lasts the frame's last scanlines in the model
+(20 NTSC, 58 PAL, the span Timer 1's sync modes use); the hardware tests
+do not say where on a console it ends, only that a read 100,000 cycles after
+the VBlank sees the field. The 480-line draw rule follows the bit as read, so
+a fill issued in the blank draws the odd rows.
 
 ## GP0 command space (high-byte dispatch)
 

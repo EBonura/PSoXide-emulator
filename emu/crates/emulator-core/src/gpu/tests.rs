@@ -3480,3 +3480,60 @@ fn mul_div_matches_the_wide_division() {
     assert_eq!(mul_div(i64::MIN, 1, -1), wide(i64::MIN, 1, -1));
     assert_eq!(mul_div(i64::MAX, i64::MAX, 7), wide(i64::MAX, i64::MAX, 7));
 }
+
+/// GPUSTAT bit 31 reads 0 in the vertical blank, whatever the field flag
+/// holds, and the flag itself keeps flipping once per VBlank: a console read
+/// 0 on every one of 36 reads right behind the VBlank interrupt (hwtest v2.18,
+/// records 0x2D0 to 0x2D6).
+#[test]
+fn field_bit_reads_zero_in_the_vertical_blank() {
+    let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0300_0000);
+    gpu.write32(GP1_ADDR, 0x0800_0026); // 480 lines, interlaced
+    assert_eq!(gpu.read32(GP1_ADDR).unwrap() >> 31, 1, "reset flag");
+    for _ in 0..4 {
+        let before = gpu.read32(GP1_ADDR).unwrap() >> 31;
+        gpu.toggle_vblank_field();
+        gpu.begin_vblank();
+        assert_eq!(gpu.read32(GP1_ADDR).unwrap() >> 31, 0, "in the blank");
+        gpu.end_vblank();
+        assert_eq!(
+            gpu.read32(GP1_ADDR).unwrap() >> 31,
+            1 - before,
+            "flag flipped"
+        );
+    }
+    // The rest of the word does not move with the blank.
+    let outside = gpu.read32(GP1_ADDR).unwrap() & 0x7fff_ffff;
+    gpu.begin_vblank();
+    assert_eq!(gpu.read32(GP1_ADDR).unwrap() & 0x7fff_ffff, outside);
+}
+
+/// The 480-line draw rule follows the bit as GPUSTAT reports it, so a fill
+/// issued in the vertical blank draws the odd rows, whichever field the flag
+/// names (hwtest v2.18, records 0x83F to 0x842). The picture presented is
+/// built from the flag and does not change with the blank.
+#[test]
+fn interlaced_480_draws_in_the_blank_follow_the_reported_field() {
+    let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0300_0000);
+    gpu.write32(GP1_ADDR, 0x0800_0026);
+    gpu.write32(GP0_ADDR, 0xe100_0000);
+    assert_eq!(gpu.read32(GP1_ADDR).unwrap() >> 31, 1);
+    let displayed = gpu.displayed_field_parity();
+    gpu.begin_vblank();
+    assert_eq!(gpu.displayed_field_parity(), displayed);
+    gpu.write32(GP0_ADDR, 0x0200_00ff);
+    gpu.write32(GP0_ADDR, 0x0000_0000);
+    gpu.write32(GP0_ADDR, 0x0004_0010);
+    for y in 0..4u16 {
+        assert_eq!(gpu.vram.get_pixel(4, y) != 0, y & 1 == 1, "fill row {y}");
+    }
+    gpu.end_vblank();
+    gpu.write32(GP0_ADDR, 0x0200_ff00);
+    gpu.write32(GP0_ADDR, 0x0000_0020);
+    gpu.write32(GP0_ADDR, 0x0004_0010);
+    for y in 0..4u16 {
+        assert_eq!(gpu.vram.get_pixel(36, y) != 0, y & 1 == 0, "fill row {y}");
+    }
+}

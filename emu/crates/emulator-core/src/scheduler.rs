@@ -72,6 +72,9 @@ pub enum EventSlot {
     SpuMix = 13,
     /// Vertical blank.
     VBlank = 14,
+    /// End of the vertical blank that began at the last [`EventSlot::VBlank`]:
+    /// GPUSTAT bit 31 reads the field flag again.
+    VBlankEnd = 15,
 }
 
 /// Total slots in the `targets` array and pending bitmap: one more than the
@@ -99,6 +102,7 @@ impl EventSlot {
             12 => Self::CdLid,
             13 => Self::SpuMix,
             14 => Self::VBlank,
+            15 => Self::VBlankEnd,
             _ => return None,
         })
     }
@@ -420,11 +424,11 @@ mod tests {
 
     #[test]
     fn from_index_round_trips_all_defined_slots() {
-        for raw in 0..=14u32 {
+        for raw in 0..=15u32 {
             let slot = EventSlot::from_index(raw).unwrap();
             assert_eq!(slot.bit(), raw);
         }
-        assert!(EventSlot::from_index(15).is_none());
+        assert!(EventSlot::from_index(16).is_none());
         assert!(EventSlot::from_index(99).is_none());
     }
 

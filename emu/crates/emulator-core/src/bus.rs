@@ -1571,6 +1571,18 @@ impl Bus {
         self.drain_due_scheduler_events(include_cdr_dma, include_sio);
     }
 
+    /// The GPU side of a VBlank edge scheduled for cycle `edge`: the field
+    /// flag flips and the vertical blank, during which GPUSTAT bit 31 reads 0,
+    /// begins; it ends with the frame's last scanline.
+    fn vblank_field_edge(&mut self, edge: u64) {
+        use crate::scheduler::EventSlot;
+        self.gpu.toggle_vblank_field();
+        self.gpu.begin_vblank();
+        let hsync = self.hsync_cycles;
+        let blank = crate::timers::vblank_lines(self.vblank_period / hsync.max(1)) * hsync;
+        self.scheduler.schedule(EventSlot::VBlankEnd, edge, blank);
+    }
+
     #[inline(never)]
     fn drain_due_scheduler_events(&mut self, include_cdr_dma: bool, include_sio: bool) {
         self.gpu_quiet_until = 0;
@@ -1606,7 +1618,7 @@ impl Bus {
             .take_slot_due_inclusive(EventSlot::VBlank, now)
         {
             self.irq.raise(IrqSource::VBlank);
-            self.gpu.toggle_vblank_field();
+            self.vblank_field_edge(target);
             self.timers.notify_vblank();
             self.scheduler
                 .schedule(EventSlot::VBlank, target, self.vblank_period);
@@ -1694,7 +1706,7 @@ impl Bus {
                     // -- some BIOS and game code polls this instead
                     // of (or in addition to) the VBlank IRQ to detect
                     // frame boundaries.
-                    self.gpu.toggle_vblank_field();
+                    self.vblank_field_edge(target);
                     // Tell the timer bank -- Timer 1 sync-mode-1
                     // resets its counter on this pulse.
                     self.timers.notify_vblank();
@@ -1704,6 +1716,7 @@ impl Bus {
                     self.scheduler
                         .schedule(EventSlot::VBlank, target, self.vblank_period);
                 }
+                EventSlot::VBlankEnd => self.gpu.end_vblank(),
                 EventSlot::SpuMix => {
                     // No production path schedules this legacy slot. The
                     // inclusive sample deadline above owns the SPU clock.
@@ -5606,6 +5619,32 @@ mod tests {
             bus.next_vblank_cycle(),
             FIRST_VBLANK_CYCLE + VBLANK_PERIOD_CYCLES
         );
+    }
+
+    #[test]
+    fn gpustat_field_bit_reads_zero_through_the_vblank_and_returns_after_it() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.tick(FIRST_VBLANK_CYCLE as u32);
+        // The second VBlank flips the flag to 1.
+        bus.tick(VBLANK_PERIOD_CYCLES as u32);
+        assert_eq!(
+            bus.read32(crate::gpu::GP1_ADDR) >> 31,
+            0,
+            "right behind the edge"
+        );
+        let blank = crate::timers::vblank_lines(VBLANK_PERIOD_CYCLES / HSYNC_CYCLES_NTSC)
+            * HSYNC_CYCLES_NTSC;
+        bus.tick(blank as u32 - 100);
+        assert_eq!(
+            bus.read32(crate::gpu::GP1_ADDR) >> 31,
+            0,
+            "late in the blank"
+        );
+        bus.tick(200);
+        assert_eq!(bus.read32(crate::gpu::GP1_ADDR) >> 31, 1, "after the blank");
+        // And 0 again behind the next edge.
+        bus.tick((VBLANK_PERIOD_CYCLES - blank) as u32);
+        assert_eq!(bus.read32(crate::gpu::GP1_ADDR) >> 31, 0, "next edge");
     }
 
     #[test]
