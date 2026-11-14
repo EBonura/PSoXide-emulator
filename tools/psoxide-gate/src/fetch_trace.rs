@@ -123,12 +123,12 @@ mod tests {
     fn read(bytes: &[u8]) -> Vec<Option<(u32, u32)>> {
         assert_eq!(&bytes[..8], MAGIC);
         let mut at = 8;
-        let mut next = || {
+        let next = |at: &mut usize| {
             let mut value = 0u64;
             let mut shift = 0;
             loop {
-                let byte = bytes[at];
-                at += 1;
+                let byte = bytes[*at];
+                *at += 1;
                 value |= u64::from(byte & 0x7f) << shift;
                 shift += 7;
                 if byte & 0x80 == 0 {
@@ -139,7 +139,7 @@ mod tests {
         let mut out = Vec::new();
         let mut end = 0i64;
         while at < bytes.len() {
-            let head = next();
+            let head = next(&mut at);
             if head == 0 {
                 out.push(None);
                 continue;
@@ -147,7 +147,7 @@ mod tests {
             let zigzag = head - 1;
             let delta = (zigzag >> 1) as i64 ^ -((zigzag & 1) as i64);
             let start = end + delta;
-            let words = next();
+            let words = next(&mut at);
             out.push(Some(((start as u32) << 2, words as u32)));
             end = start + words as i64;
         }
@@ -158,7 +158,13 @@ mod tests {
     fn runs_and_ticks_round_trip() {
         let path = std::env::temp_dir().join(format!("fetch-trace-{}.bin", std::process::id()));
         let mut trace = FetchTrace::create(&path).unwrap();
-        for pc in [0x8001_0000u32, 0x8001_0004, 0x8001_0008, 0x8000_0080, 0x8000_0084] {
+        for pc in [
+            0x8001_0000u32,
+            0x8001_0004,
+            0x8001_0008,
+            0x8000_0080,
+            0x8000_0084,
+        ] {
             trace.record(pc).unwrap();
         }
         trace.tick().unwrap();

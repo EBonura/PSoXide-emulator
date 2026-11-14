@@ -567,7 +567,9 @@ impl Machine {
         self.ticks += 1;
         if let Some((trace, from, to)) = self.fetch_trace.as_mut() {
             if (*from..*to).contains(&self.bus.port1_completed_polls()) {
-                trace.tick().map_err(|e| format!("write fetch trace: {e}"))?;
+                trace
+                    .tick()
+                    .map_err(|e| format!("write fetch trace: {e}"))?;
             }
         }
 

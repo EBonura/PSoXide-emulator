@@ -9,6 +9,8 @@ mod card;
 mod compare;
 #[path = "../src/expr.rs"]
 mod expr;
+#[path = "../src/fetch_trace.rs"]
+mod fetch_trace;
 #[path = "../src/img.rs"]
 mod img;
 #[path = "../src/journey.rs"]
