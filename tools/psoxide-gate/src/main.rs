@@ -150,6 +150,11 @@ struct RunArgs {
     /// program on that core.
     #[arg(long, value_name = "SPEC")]
     hardware: Option<String>,
+    /// Treat a store to Expansion 2 beyond its configured window as a data bus
+    /// error, as a console does. Same as `PSOXIDE_STRICT_EXP2=1`; off by default
+    /// because `0x1F802080` is the emulator's debug text port.
+    #[arg(long)]
+    strict_exp2: bool,
     /// Print each step as it starts (the tick-log tool reads the step names from this).
     #[arg(short, long)]
     verbose: bool,
@@ -503,6 +508,10 @@ fn cmd_run(a: &RunArgs) -> Result<ExitCode, String> {
         emulator_core::HardwareTarget::from_spec(spec)?;
         // Before any journey thread starts: every GPU reads it when it is built.
         std::env::set_var(emulator_core::hardware_target::ENV_VAR, spec);
+    }
+    if a.strict_exp2 {
+        // Before any journey thread starts: every bus reads it when it is built.
+        std::env::set_var("PSOXIDE_STRICT_EXP2", "1");
     }
     if emulator_core::HardwareTarget::from_env().differs_from_real() {
         eprintln!(

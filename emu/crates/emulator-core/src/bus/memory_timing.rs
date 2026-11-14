@@ -372,6 +372,12 @@ impl MemoryControl {
         (self.regs[5] >> 24) & 0xf != 0
     }
 
+    /// Bytes the Expansion 2 window covers: `1 << n` for the size field
+    /// (bits 16 to 20) of its delay/size register.
+    pub(super) fn exp2_window_bytes(&self) -> u32 {
+        1 << ((self.regs[7] >> 16) & 0x1f)
+    }
+
     fn recalculate(&mut self) {
         let common = self.regs[8];
         self.exp1_stalls = calculate_stalls(self.regs[2], common);
