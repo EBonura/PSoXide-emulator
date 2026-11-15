@@ -3,11 +3,18 @@
 //! * `report <run-dir> [--from-tick N]` prints the stall budget of a window.
 //! * `hot-lines <datalog.csv> --bytes N [--window] [--out ranges.txt]` ranks the
 //!   data-line log and writes a `PSOXIDE_LIMIT_FAST_DATA` range file.
+//! * `stall-by-function <stall.csv> <game.map> [--cycles cycles.csv] [--from-tick N]
+//!   [--kinds a,b] [--top N]` sums a `--stall-pc-log` over the functions of a
+//!   linker map, and checks it against the cycle log.
+//! * `stall-diff <stall-A.csv> <map-A> <stall-B.csv> <map-B> [--cycles-a F --cycles-b F]
+//!   [--from-tick N] [--kinds a,b] [--top N]` ranks the functions whose cycles
+//!   of each kind differ most between two runs.
 //! * `spill-gate <image> <kernels.txt> [--max-bytes N]` fails when a registered
 //!   kernel has stack traffic or a call inside a loop, or is over budget.
 //!   `<image>` is a PSX-EXE or a 2 MB RAM dump.
 
 mod csv;
+mod functions;
 mod gate;
 mod lines;
 mod mips;
@@ -21,6 +28,38 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1))
         .map(String::as_str)
+}
+
+fn number(args: &[String], name: &str, default: u64) -> Result<usize, String> {
+    flag(args, name)
+        .map_or(Ok(default as usize), str::parse)
+        .map_err(|e| format!("{name}: {e}"))
+}
+
+fn kinds(args: &[String]) -> Vec<&str> {
+    flag(args, "--kinds").map_or_else(
+        || functions::DEFAULT_KINDS.to_vec(),
+        |list| list.split(',').collect(),
+    )
+}
+
+/// Reconcile a stall log with the cycle log named by `--flag`, when given.
+fn check(
+    args: &[String],
+    name: &str,
+    log: &functions::StallLog,
+    from: usize,
+) -> Result<bool, String> {
+    let Some(path) = flag(args, name) else {
+        return Ok(true);
+    };
+    let (text, ok) = functions::reconcile(log, Path::new(path), from as u64)?;
+    println!(
+        "reconciliation with {path}: {}",
+        if ok { "equal" } else { "DIFFER" }
+    );
+    print!("{text}");
+    Ok(ok)
 }
 
 fn run(args: &[String]) -> Result<bool, String> {
@@ -63,6 +102,48 @@ fn run(args: &[String]) -> Result<bool, String> {
             eprintln!("covers {share:.1}% of RAM-load stall cycles");
             Ok(true)
         }
+        Some("stall-by-function") => {
+            let usage = "usage: stall-by-function <stall.csv> <game.map> [--cycles F] [--from-tick N] [--kinds a,b] [--top N]";
+            let log = functions::StallLog::read(Path::new(args.get(1).ok_or(usage)?))?;
+            let map = args.get(2).ok_or(usage)?;
+            let symbols = functions::parse_map(
+                &std::fs::read_to_string(map).map_err(|e| format!("{map}: {e}"))?,
+            );
+            let kinds = kinds(args);
+            let top = number(args, "--top", 25)?;
+            print!(
+                "{}",
+                functions::by_function_report(&log, &symbols, &kinds, top)?
+            );
+            check(args, "--cycles", &log, number(args, "--from-tick", 0)?)
+        }
+        Some("stall-diff") => {
+            let usage = "usage: stall-diff <stall-A.csv> <map-A> <stall-B.csv> <map-B> [--cycles-a F --cycles-b F] [--from-tick N] [--kinds a,b] [--top N]";
+            let load =
+                |log: usize,
+                 map: usize|
+                 -> Result<(functions::StallLog, Vec<functions::Symbol>), String> {
+                    let log = functions::StallLog::read(Path::new(args.get(log).ok_or(usage)?))?;
+                    let map = args.get(map).ok_or(usage)?;
+                    let text = std::fs::read_to_string(map).map_err(|e| format!("{map}: {e}"))?;
+                    Ok((log, functions::parse_map(&text)))
+                };
+            let (a, a_map) = load(1, 2)?;
+            let (b, b_map) = load(3, 4)?;
+            print!(
+                "{}",
+                functions::diff_report(
+                    (&a, &a_map),
+                    (&b, &b_map),
+                    &kinds(args),
+                    number(args, "--top", 25)?
+                )?
+            );
+            let from = number(args, "--from-tick", 0)?;
+            let first = check(args, "--cycles-a", &a, from)?;
+            let second = check(args, "--cycles-b", &b, from)?;
+            Ok(first && second)
+        }
         Some("spill-gate") => {
             let image = args
                 .get(1)
@@ -103,7 +184,10 @@ fn run(args: &[String]) -> Result<bool, String> {
             }
             Ok(ok)
         }
-        _ => Err("usage: stall-tools report|hot-lines|spill-gate ...".into()),
+        _ => Err(
+            "usage: stall-tools report|hot-lines|stall-by-function|stall-diff|spill-gate ..."
+                .into(),
+        ),
     }
 }
 

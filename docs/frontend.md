@@ -129,6 +129,32 @@ Check a stick script by watching what the guest does with it: add
 `--route-log out.csv --route-watch-u32 ADDR` for a RAM word the guest derives
 from the stick and read the per-tick column.
 
+## Stall cycles by function
+
+`--cpu-cycle-profile-log` counts the cycles of a route tick by kind (issue, RAM-load,
+RAM-store, MMIO, I-cache refill, mul/div interlock and the rest). `--stall-pc-log` splits
+all of them by the instruction that spent them, so a link map turns them into cycles per
+function and two builds of one game can be compared:
+
+```sh
+psoxide-emulator launch --path game.cue --input-tape run.pxtape --stop-at-poll N \
+  --cpu-cycle-profile-log cycles.csv --stall-pc-log stalls.csv --pc-log-words
+stall-tools stall-by-function stalls.csv game.map --cycles cycles.csv
+stall-tools stall-diff a-stalls.csv a.map b-stalls.csv b.map --cycles-a a-cycles.csv --cycles-b b-cycles.csv
+```
+
+The window is chosen as for the other logs: the run's own stop (`--stop-at-poll`, `--steps`)
+and `--stall-pc-start-route-tick` for the start. Rows are keyed by word with
+`--pc-log-words` (use it to sum by function, a 16-byte line can hold two functions) or by
+I-cache line without it. `stack_ram_load_stall_cycles` is the part of the RAM-load stalls
+from loads addressed from `$sp`; scratchpad accesses stall nothing. The format and the
+final `open_tick` row (the route tick still open when the run stopped, which the cycle log
+has no row for yet) are described in `emu/crates/frontend/src/cli/stall_pc.rs`; with
+`--cycles` the tools check every kind against the cycle log and exit 1 on any difference.
+The option reads the profile counters after each instruction in the per-step loop the other
+per-PC logs use; the core has no hook for it and a run without it is unchanged. A 2000-poll
+Hollow Knight window is a 4 MB log by word.
+
 ## Menu mechanics
 
 Three categories (Game / Debug / System) plus infrastructure for expansion. Drawn entirely through `egui::Painter` on a middle layer -- no high-level widgets -- which keeps it snappy and position-locked.
