@@ -7,6 +7,11 @@
 //! `[VMA, VMA + Size)`. Rows whose PC no symbol covers are summed under `?`.
 //! Counts for one name are added together, so a generic function that was
 //! instantiated twice is one entry.
+//!
+//! Functions are joined by [`portable_key`], not by the printed name: the same function in two
+//! builds can differ in the hash a demangler prints (`::h<16 hex digits>` on a legacy name,
+//! `crate[<hex>]` on a v0 one), and keyed by the raw name it showed up twice, with opposite
+//! signs, in `stall-diff`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -41,6 +46,60 @@ pub const DEFAULT_KINDS: [&str; 6] = [
 ];
 
 pub type Counters = [u64; COLUMNS.len()];
+
+/// The name a function is joined under: the symbol as the map prints it, without the hashes a
+/// demangler may leave in it.
+///
+/// This is the key form of the SDK's `psoxide-pgo` (`portable_name`: the demangled path
+/// without crate disambiguators), applied to text that is already demangled, so this tool
+/// needs no demangler. The two repositories do not share code. They share a table of
+/// (printed name, key) pairs, `KEY_VECTORS`, copied into the tests of both, and the SDK's test
+/// checks the key against the mangled spelling of each, so the forms cannot drift apart
+/// unseen. Names with no hash pass through unchanged; a legacy hash is a `::h` and exactly
+/// sixteen lowercase hex digits ending a path segment, a v0 crate hash is one to sixteen
+/// lowercase hex digits in square brackets straight after an identifier.
+pub fn portable_key(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut out = String::with_capacity(name.len());
+    let mut at = 0;
+    while at < name.len() {
+        let rest = &name[at..];
+        if let Some(after) = rest.strip_prefix("::h") {
+            let digits = after
+                .bytes()
+                .take_while(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                .count();
+            let ends = after
+                .as_bytes()
+                .get(16)
+                .is_none_or(|b| !b.is_ascii_alphanumeric() && *b != b'_');
+            if digits >= 16 && ends && after.as_bytes()[..16].iter().all(u8::is_ascii_hexdigit) {
+                at += 3 + 16;
+                continue;
+            }
+        }
+        if rest.starts_with('[')
+            && at > 0
+            && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_')
+        {
+            if let Some(close) = rest.find(']') {
+                let inside = &rest[1..close];
+                if (1..=16).contains(&inside.len())
+                    && inside
+                        .bytes()
+                        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                {
+                    at += close + 1;
+                    continue;
+                }
+            }
+        }
+        let ch = rest.chars().next().expect("at is inside the string");
+        out.push(ch);
+        at += ch.len_utf8();
+    }
+    out
+}
 
 pub struct Symbol {
     pub start: u32,
@@ -149,18 +208,32 @@ impl StallLog {
         total
     }
 
-    /// Counters per function name.
+    /// Counters per function, under [`portable_key`].
     pub fn by_function(&self, symbols: &[Symbol]) -> BTreeMap<String, Counters> {
         let mut out: BTreeMap<String, Counters> = BTreeMap::new();
         for (&pc, row) in &self.rows {
-            let name = lookup(symbols, pc).map_or("?", |s| s.name.as_str());
-            let slot = out.entry(name.to_string()).or_insert([0; COLUMNS.len()]);
+            let key =
+                lookup(symbols, pc).map_or_else(|| "?".to_string(), |s| portable_key(&s.name));
+            let slot = out.entry(key).or_insert([0; COLUMNS.len()]);
             for (sum, v) in slot.iter_mut().zip(row) {
                 *sum += v;
             }
         }
         out
     }
+}
+
+/// How many keys join two or more symbols whose printed names differ, which `portable_key` only
+/// does when they differ by a hash: a distinct function is never summed with another in silence.
+fn merged_keys(symbols: &[Symbol]) -> usize {
+    let mut names: BTreeMap<String, std::collections::BTreeSet<&str>> = BTreeMap::new();
+    for symbol in symbols {
+        names
+            .entry(portable_key(&symbol.name))
+            .or_default()
+            .insert(&symbol.name);
+    }
+    names.values().filter(|raw| raw.len() > 1).count()
 }
 
 fn index(kind: &str) -> Result<usize, String> {
@@ -264,6 +337,16 @@ pub fn diff_report(
     let names: std::collections::BTreeSet<&String> = fa.keys().chain(fb.keys()).collect();
     let zero = [0u64; COLUMNS.len()];
     let mut text = String::new();
+    for (side, symbols) in [("A", a.1), ("B", b.1)] {
+        let merged = merged_keys(symbols);
+        if merged > 0 {
+            let _ = writeln!(
+                text,
+                "note: {merged} function key(s) of map {side} join symbols that print differently \
+                 (a hash differs); their counts are summed under one key"
+            );
+        }
+    }
     for kind in kinds {
         let k = index(kind)?;
         let (ta, tb): (u64, u64) = (
@@ -397,5 +480,78 @@ mod tests {
         let (_, same) = reconcile(&ok, &cycles, 1).unwrap();
         assert!(!same, "starting after tick 1 drops its row");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Shared, verbatim, with the SDK's `psoxide-pgo` tests (`one_function_has_one_key...`): a name
+    /// as a demangler prints it, and the key both tools give it.
+    const KEY_VECTORS: [(&str, &str); 7] = [
+        ("core::fmt::write::h0123456789abcdef", "core::fmt::write"),
+        (
+            "<core::fmt::Error as core::fmt::Debug>::fmt::h0123456789abcdef",
+            "<core::fmt::Error as core::fmt::Debug>::fmt",
+        ),
+        ("core[0123456789abcdef]::fmt::write", "core::fmt::write"),
+        (
+            "<psx_pad::PadMode[ab12]>::has_sticks",
+            "<psx_pad::PadMode>::has_sticks",
+        ),
+        ("<[u8]>::len", "<[u8]>::len"),
+        (
+            "psx_gpu::gpu::draw::<psx_gpu::prim::FillRect>",
+            "psx_gpu::gpu::draw::<psx_gpu::prim::FillRect>",
+        ),
+        ("<T>::beta::<closure#0, U>", "<T>::beta::<closure#0, U>"),
+    ];
+
+    #[test]
+    fn the_key_drops_hashes_and_nothing_else() {
+        for (printed, key) in KEY_VECTORS {
+            assert_eq!(portable_key(printed), key, "{printed}");
+        }
+        // A short hex-looking tail of a real name is not a hash.
+        assert_eq!(portable_key("a::hello::h0123"), "a::hello::h0123");
+        assert_eq!(
+            portable_key("a::b::h0123456789abcdefg"),
+            "a::b::h0123456789abcdefg"
+        );
+    }
+
+    #[test]
+    fn a_function_whose_hash_differs_between_builds_is_one_row_not_two() {
+        let a = "     VMA      LMA     Size Align Out     In      Symbol
+80010000 80010000       40     4 .text
+80010000 80010000       40     4         /a/b/c.o:(.text.f)
+80010000 80010000       40     1                 core::fmt::write::h0123456789abcdef
+";
+        let b = a.replace("0123456789abcdef", "fedcba9876543210");
+        let (sa, sb) = (parse_map(a), parse_map(&b));
+        let mut x = [0u64; 12];
+        x[10] = 100;
+        let mut y = [0u64; 12];
+        y[10] = 130;
+        let (la, lb) = (
+            log(&[(0x8001_0000, x)], [0; 12]),
+            log(&[(0x8001_0000, y)], [0; 12]),
+        );
+        let text = diff_report((&la, &sa), (&lb, &sb), &["other_stall_cycles"], 5).unwrap();
+        // One row, +30; before the key was shared it was -100 for A's name and +130 for B's.
+        assert_eq!(text.matches("core::fmt::write").count(), 1, "{text}");
+        assert!(text.contains("+30"), "{text}");
+        assert!(!text.contains("-100"), "{text}");
+    }
+
+    #[test]
+    fn two_printed_names_under_one_key_are_noted_never_silent() {
+        let map = "     VMA      LMA     Size Align Out     In      Symbol
+80010000 80010000       40     4 .text
+80010000 80010000       20     1                 core::fmt::write::h0123456789abcdef
+80010020 80010020       20     1                 core::fmt::write::hfedcba9876543210
+";
+        let symbols = parse_map(map);
+        assert_eq!(merged_keys(&symbols), 1);
+        let l = log(&[(0x8001_0000, [1; 12]), (0x8001_0020, [2; 12])], [0; 12]);
+        let text = diff_report((&l, &symbols), (&l, &symbols), &["other_stall_cycles"], 5).unwrap();
+        assert!(text.contains("note: 1 function key(s) of map A"), "{text}");
+        assert_eq!(l.by_function(&symbols)["core::fmt::write"][10], 3);
     }
 }
