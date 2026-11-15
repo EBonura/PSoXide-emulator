@@ -1712,3 +1712,74 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod pad_timing_tests {
+    use super::*;
+    use crate::pad::{DigitalPad, PortDevice};
+
+    const STEP: u64 = DEFAULT_TRANSFER_TICKS + 2_000;
+
+    fn pad_sio(timing: PadTiming) -> Sio0 {
+        let mut sio = Sio0::new();
+        sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
+        sio.set_pad_timing(timing);
+        sio
+    }
+
+    /// One byte clocked at `at`, the port run past the whole byte and its `/ACK`; the reply.
+    fn byte(sio: &mut Sio0, tx: u8, at: u64) -> u8 {
+        sio.write8_at(Sio0::BASE, tx, at);
+        sio.tick(at + STEP);
+        sio.read8(Sio0::BASE).unwrap()
+    }
+
+    /// Select at `at`, address byte and command byte; the ID the pad answered the command with.
+    fn poll_id(sio: &mut Sio0, at: u64) -> u8 {
+        sio.write16_at(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT, at);
+        byte(sio, 0x01, at + 100);
+        byte(sio, 0x42, at + 100 + STEP)
+    }
+
+    fn deselect(sio: &mut Sio0, at: u64) {
+        sio.write16_at(Sio0::BASE + 0xa, 0, at);
+    }
+
+    #[test]
+    fn a_select_sooner_than_the_cs_high_minimum_is_not_answered_a_later_one_is() {
+        let mut sio = pad_sio(PadTiming { min_cs_high: 450, min_after_ack: 0 });
+        assert_eq!(poll_id(&mut sio, 10_000), 0x41, "the first select");
+        let off = 10_000 + 3 * STEP;
+        deselect(&mut sio, off);
+        sio.write16_at(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT, off + 300);
+        byte(&mut sio, 0x01, off + 400);
+        assert_eq!(byte(&mut sio, 0x42, off + 400 + STEP), 0xff, "300 ticks high: missed");
+        deselect(&mut sio, off + 5 * STEP);
+        assert_eq!(poll_id(&mut sio, off + 5 * STEP + 460), 0x41, "460 ticks high: seen");
+    }
+
+    #[test]
+    fn the_cs_high_rule_is_off_by_default() {
+        let mut sio = pad_sio(PadTiming::default());
+        assert_eq!(poll_id(&mut sio, 10_000), 0x41);
+        let off = 10_000 + 3 * STEP;
+        deselect(&mut sio, off);
+        assert_eq!(poll_id(&mut sio, off + 5), 0x41);
+    }
+
+    #[test]
+    fn a_byte_sooner_than_the_after_ack_minimum_is_missed_and_the_rest_with_it() {
+        let ack_released = DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAYS[0] + PAD_ACK_PULSES[0];
+        for (gap, id) in [(100u64, 0xffu8), (400, 0x41)] {
+            let mut sio = pad_sio(PadTiming { min_cs_high: 0, min_after_ack: 250 });
+            sio.write16_at(Sio0::BASE + 0xa, ctrl_bit::JOYN_OUTPUT, 1_000);
+            sio.write8_at(Sio0::BASE, 0x01, 2_000);
+            sio.tick(2_000 + STEP);
+            let _ = sio.read8(Sio0::BASE);
+            let second = 2_000 + ack_released + gap - 100;
+            sio.write8_at(Sio0::BASE, 0x42, second);
+            sio.tick(second + STEP);
+            assert_eq!(sio.read8(Sio0::BASE).unwrap(), id, "gap {gap}");
+        }
+    }
+}
