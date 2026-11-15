@@ -16,6 +16,7 @@ mod fleet;
 mod img;
 mod journey;
 mod machine;
+mod receipt;
 mod refresh;
 mod render;
 mod report;
@@ -30,7 +31,7 @@ use std::sync::Mutex;
 
 use clap::{Args, Parser, Subcommand};
 
-use exec::{JourneyResult, RunOptions, Status};
+use exec::{Check, Group, JourneyResult, RunOptions, Status};
 use fleet::{Entry, Fleet};
 use journey::Journey;
 
@@ -47,7 +48,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Run journeys and write the HTML contact sheet. Exit code 1 on any failure.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Recompose hash-verified raw capture evidence without starting an emulator.
     RefreshReport {
         manifest: PathBuf,
@@ -165,6 +166,23 @@ struct RunArgs {
     /// Print each step as it starts (the tick-log tool reads the step names from this).
     #[arg(short, long)]
     verbose: bool,
+    /// Keep a receipt for every journey that passes, in this directory, and skip a journey
+    /// whose receipt (same disc, journey, goldens, symbols, tapes, build, hardware target,
+    /// flags and environment) already says PASS. A hit prints `RECEIPT HIT`; a failure is
+    /// never kept. See USAGE.md.
+    #[arg(long, value_name = "DIR")]
+    receipts: Option<PathBuf>,
+    /// Play every journey again even where a receipt exists and fail loudly if the fresh
+    /// verdict, tick count or GP0(1Fh) count differs from it. The second model then runs
+    /// in full instead of borrowing the first one's result. The daily full run uses this.
+    #[arg(long, requires = "receipts")]
+    receipts_verify: bool,
+    /// Also run under this hardware target (same spec as `--hardware`), after the first.
+    /// A journey whose guest issued no GP0(1Fh) behaves the same on both targets, so its
+    /// result stands for the second without playing it (`MODEL EQUIVALENT`). The second
+    /// target's report goes to `<out>-<name>`.
+    #[arg(long, value_name = "SPEC")]
+    second_hardware: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -389,6 +407,13 @@ struct Opts {
     fetch_trace: Option<(PathBuf, u64, u64)>,
     audit_pad: bool,
     out: PathBuf,
+    receipts: Option<ReceiptMode>,
+}
+
+/// Receipts in use for this run.
+struct ReceiptMode {
+    store: receipt::Store,
+    verify: bool,
 }
 
 impl Opts {
@@ -427,6 +452,10 @@ impl Opts {
             fetch_trace,
             audit_pad: a.audit_pad,
             out: a.out.clone(),
+            receipts: a.receipts.as_deref().map(|dir| ReceiptMode {
+                store: receipt::Store::new(dir),
+                verify: a.receipts_verify,
+            }),
         })
     }
 }
@@ -458,12 +487,33 @@ fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
         Ok(d) => d,
         Err(e) => return aborted(&journey.name, e),
     };
-    exec::run_journey(
+    let golden_dir = golden_dir_for(job, &journey.name, o);
+    let mut state = receipt::State::Off;
+    let mut keyed = None;
+    let mut prior = None;
+    if let Some(mode) = &o.receipts {
+        match receipt_key(o, job, &journey, &disc, &golden_dir) {
+            Err(why) => {
+                println!("RECEIPT REFUSED {}: {why}", journey.name);
+                state = receipt::State::Refused(why);
+            }
+            Ok(key) => {
+                prior = mode.store.find(&journey.name, &key);
+                if let (Some(kept), false) = (&prior, mode.verify) {
+                    println!("{}", kept.hit_line());
+                    return receipt_hit(&journey, &disc, kept);
+                }
+                state = receipt::State::Ran;
+                keyed = Some(key);
+            }
+        }
+    }
+    let mut result = exec::run_journey(
         &journey,
         &RunOptions {
             disc,
             repo_root: job.repo_root.clone(),
-            golden_dir: golden_dir_for(job, &journey.name, o),
+            golden_dir,
             use_hw: o.use_hw,
             scales: o.scales.clone(),
             verbose: o.verbose,
@@ -479,7 +529,125 @@ fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
             journey_path: job.journey_path.clone(),
             artifact_dir: o.out.join(&journey.name).join("cards"),
         },
-    )
+    );
+    result.receipt = match (&o.receipts, &keyed) {
+        (Some(mode), Some(key)) => settle_receipt(&mode.store, key, prior.as_ref(), &mut result),
+        _ => state,
+    };
+    result
+}
+
+/// The key of a journey about to run, or why no receipt can cover it.
+fn receipt_key(
+    o: &Opts,
+    job: &Job,
+    journey: &Journey,
+    disc: &Path,
+    golden_dir: &Path,
+) -> Result<receipt::Key, String> {
+    if o.tick_log.is_some() || o.fetch_trace.is_some() {
+        return Err(
+            "--tick-log and --fetch-trace write files a receipt hit would not produce".into(),
+        );
+    }
+    let scales = o
+        .scales
+        .clone()
+        .unwrap_or_else(|| journey.render.scales.clone());
+    let flag = |name: &str, value: String| (name.to_string(), value);
+    let flags = [
+        flag("hardware renderer", o.use_hw.to_string()),
+        flag("scales", format!("{scales:?}")),
+        flag("strict", o.strict.to_string()),
+        flag("trace-failures", o.trace_failures.to_string()),
+        flag("trace-state", format!("{:?}", o.trace_state)),
+        flag("trace-checkpoint", format!("{:?}", o.trace_checkpoint)),
+        flag("audit-pad", o.audit_pad.to_string()),
+        flag("entry-state", emulator_core::EntryState::from_env().spec()),
+        flag(
+            "hardware",
+            format!("{:?}", emulator_core::HardwareTarget::from_env()),
+        ),
+    ];
+    receipt::compute_key(&receipt::Context {
+        journey,
+        journey_path: &job.journey_path,
+        repo_root: &job.repo_root,
+        disc,
+        golden_dir,
+        flags: &flags,
+    })
+}
+
+/// The result of a journey a receipt answered for: the recorded counts, no frames.
+fn receipt_hit(journey: &Journey, disc: &Path, kept: &receipt::Receipt) -> JourneyResult {
+    let mut r = aborted(&journey.name, String::new());
+    r.title = journey
+        .title
+        .clone()
+        .unwrap_or_else(|| journey.name.clone());
+    r.disc = disc.to_path_buf();
+    r.disc_id = kept.disc_id.clone();
+    r.abort = None;
+    r.ticks = kept.ticks;
+    r.emu_secs = kept.emu_secs;
+    r.gp0_irq_commands = Some(kept.gp0_1f);
+    r.receipt = receipt::State::Hit;
+    r.notes.push(
+        "receipt hit: not played, so no frames, cards or traces were written for it here; \
+         delete the receipt to play it again"
+            .into(),
+    );
+    r.groups.push(Group {
+        name: "receipt".into(),
+        label: None,
+        tick: kept.ticks,
+        capture: None,
+        checks: vec![Check {
+            name: "receipt".into(),
+            status: Status::Pass,
+            detail: kept.hit_line(),
+        }],
+        wants_golden: false,
+    });
+    r
+}
+
+/// After a played journey: check it against the receipt it was asked to verify, or keep a new
+/// receipt for a PASS.
+fn settle_receipt(
+    store: &receipt::Store,
+    key: &receipt::Key,
+    prior: Option<&receipt::Receipt>,
+    result: &mut JourneyResult,
+) -> receipt::State {
+    if let Some(kept) = prior {
+        let Some(why) = kept.differs_from(result) else {
+            println!("RECEIPT VERIFIED {} {}", result.name, key.prefix());
+            return receipt::State::Verified;
+        };
+        let detail = format!("RECEIPT MISMATCH {} {}: {why}", result.name, key.prefix());
+        println!("{detail}");
+        result.groups.push(Group {
+            name: "receipt".into(),
+            label: None,
+            tick: result.ticks,
+            capture: None,
+            checks: vec![Check {
+                name: "receipt".into(),
+                status: Status::Fail,
+                detail,
+            }],
+            wants_golden: false,
+        });
+        return receipt::State::Mismatch;
+    }
+    if let Some(fresh) = receipt::Receipt::of(result, key) {
+        if let Err(e) = store.write(&fresh) {
+            eprintln!("[gate] receipt for {} not kept: {e}", result.name);
+        }
+    }
+    receipt::State::Ran
 }
 
 fn aborted(name: &str, why: String) -> JourneyResult {
@@ -496,6 +664,8 @@ fn aborted(name: &str, why: String) -> JourneyResult {
         hw_adapter: None,
         notes: Vec::new(),
         cards: Vec::new(),
+        gp0_irq_commands: None,
+        receipt: receipt::State::Off,
     }
 }
 
@@ -574,25 +744,20 @@ fn cmd_run(a: &RunArgs) -> Result<ExitCode, String> {
     if a.tick_log.is_some() && planned.len() != 1 {
         return Err("--tick-log needs a single target".into());
     }
-    let opts = Opts::from_run(a)?;
-    let slots: Vec<Mutex<Option<JourneyResult>>> = jobs.iter().map(|_| Mutex::new(None)).collect();
-    let next = AtomicUsize::new(0);
-    std::thread::scope(|s| {
-        for _ in 0..a.jobs.clamp(1, 2) {
-            s.spawn(|| loop {
-                let i = next.fetch_add(1, Ordering::SeqCst);
-                let Some(job) = jobs.get(i) else { break };
-                let r = run_planned(job, &fleet, &opts);
-                println!("{}", r.summary());
-                print_failures(&r, a.verbose);
-                *slots[i].lock().expect("slot") = Some(r);
-            });
+    if let Some(spec) = &a.second_hardware {
+        emulator_core::HardwareTarget::from_spec(spec)?;
+        if a.tick_log.is_some() || !a.fetch_trace.is_empty() {
+            return Err(
+                "--second-hardware cannot be combined with --tick-log or --fetch-trace".into(),
+            );
         }
-    });
-    let results: Vec<JourneyResult> = slots
-        .into_iter()
-        .filter_map(|m| m.into_inner().expect("slot"))
-        .collect();
+    }
+    let first_model = std::env::var(emulator_core::hardware_target::ENV_VAR)
+        .ok()
+        .filter(|spec| !spec.is_empty())
+        .unwrap_or_else(|| "real".into());
+    let opts = Opts::from_run(a)?;
+    let first = play(&jobs, &fleet, &opts, a.jobs);
     let mut missing_jobs = Vec::new();
     for p in &planned {
         if let Planned::Missing { name, why } = p {
@@ -600,21 +765,104 @@ fn cmd_run(a: &RunArgs) -> Result<ExitCode, String> {
             missing_jobs.push((name.clone(), why.clone()));
         }
     }
-    let index = report::write_report(&a.out, &results, &missing_jobs, "PSoXide fleet gate")?;
-    println!("report: {}", index.display());
-    let failed = results.iter().filter(|r| !r.passed()).count();
-    println!(
-        "gate: {} journeys, {} failed, {} without a journey",
-        results.len(),
-        failed,
-        missing_jobs.len()
-    );
+    let mut failed = finish(&a.out, &first, &missing_jobs, 0)?;
+    if let Some(second_model) = &a.second_hardware {
+        println!("[gate] second model {second_model} (first was {first_model})");
+        let mut needed = Vec::new();
+        let mut equivalent = 0;
+        for (job, result) in jobs.iter().zip(&first) {
+            if !a.receipts_verify && receipt::model_equivalent(result) {
+                println!(
+                    "MODEL EQUIVALENT {}: no GP0(1Fh), {first_model} result stands for {second_model}",
+                    job.name
+                );
+                equivalent += 1;
+            } else {
+                needed.push(*job);
+            }
+        }
+        // Before any journey thread starts: every GPU reads it when it is built.
+        std::env::set_var(emulator_core::hardware_target::ENV_VAR, second_model);
+        let mut opts = Opts::from_run(a)?;
+        opts.out = sibling_dir(&a.out, &model_slug(second_model));
+        let second = play(&needed, &fleet, &opts, a.jobs);
+        failed += finish(&opts.out, &second, &[], equivalent)?;
+    }
     let bad = failed > 0 || (!missing_jobs.is_empty() && (a.strict || a.target != "all"));
     Ok(if bad {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// Run `jobs` on up to two threads, results in job order.
+fn play(jobs: &[&Job], fleet: &Fleet, opts: &Opts, threads: usize) -> Vec<JourneyResult> {
+    let slots: Vec<Mutex<Option<JourneyResult>>> = jobs.iter().map(|_| Mutex::new(None)).collect();
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..threads.clamp(1, 2) {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::SeqCst);
+                let Some(job) = jobs.get(i) else { break };
+                let r = run_planned(job, fleet, opts);
+                println!("{}", r.summary());
+                print_failures(&r, opts.verbose);
+                *slots[i].lock().expect("slot") = Some(r);
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .filter_map(|m| m.into_inner().expect("slot"))
+        .collect()
+}
+
+/// Write the report and print the summary lines; the number of failed journeys.
+fn finish(
+    out: &Path,
+    results: &[JourneyResult],
+    missing: &[(String, String)],
+    equivalent: usize,
+) -> Result<usize, String> {
+    let index = report::write_report(out, results, missing, "PSoXide fleet gate")?;
+    println!("report: {}", index.display());
+    let failed = results.iter().filter(|r| !r.passed()).count();
+    println!(
+        "gate: {} journeys, {} failed, {} without a journey",
+        results.len(),
+        failed,
+        missing.len()
+    );
+    use receipt::State;
+    let count = |f: fn(&State) -> bool| results.iter().filter(|r| f(&r.receipt)).count();
+    if results.iter().any(|r| r.receipt != State::Off) || equivalent > 0 {
+        println!(
+            "receipts: {} hits, {} runs ({} verified, {} MISMATCHED, {} refused), {} model-equivalent",
+            count(|s| *s == State::Hit),
+            count(|s| !matches!(s, State::Hit | State::Off)),
+            count(|s| *s == State::Verified),
+            count(|s| *s == State::Mismatch),
+            count(|s| matches!(s, State::Refused(_))),
+            equivalent
+        );
+    }
+    Ok(failed)
+}
+
+/// `<dir>-<suffix>` next to `dir`.
+fn sibling_dir(dir: &Path, suffix: &str) -> PathBuf {
+    let mut name = dir.as_os_str().to_os_string();
+    name.push("-");
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// A hardware spec as a file name part: `mister,gpu-irq=never` is `mister-gpu-irq-never`.
+fn model_slug(spec: &str) -> String {
+    spec.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
@@ -654,6 +902,7 @@ fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
         fetch_trace: None,
         audit_pad: false,
         out: a.out.clone(),
+        receipts: None,
     };
     let r = run_planned(job, &fleet, &opts);
     println!("{}", r.summary());

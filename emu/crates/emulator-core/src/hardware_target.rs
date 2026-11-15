@@ -221,4 +221,97 @@ mod tests {
         assert!(HardwareTarget::from_spec("pc").is_err());
         assert!(HardwareTarget::from_spec("mister,bogus=1").is_err());
     }
+
+    // The gate (`tools/psoxide-gate`, `--second-hardware`) takes the first model's result for the
+    // second when the guest issued no GP0(1Fh) command. That holds only while the models differ
+    // in GP0(1Fh) handling alone. The next two tests fail when that stops being true, so the
+    // shortcut cannot go stale silently: change the gate's rule (`receipt::model_equivalent`)
+    // first, then update these.
+
+    #[test]
+    fn real_and_mister_differ_in_the_gp0_1f_model_alone() {
+        // Naming every field: a new field is a compile error here.
+        let HardwareTarget {
+            implementation: _,
+            gpu_irq: real_irq,
+            seed: real_seed,
+            trace: real_trace,
+        } = HardwareTarget::real();
+        let HardwareTarget {
+            implementation: _,
+            gpu_irq: mister_irq,
+            seed: mister_seed,
+            trace: mister_trace,
+        } = HardwareTarget::mister();
+        assert_eq!((real_seed, real_trace), (mister_seed, mister_trace));
+        assert_eq!(real_irq, GpuIrqModel::Reliable);
+        assert_ne!(mister_irq, GpuIrqModel::Reliable);
+        // `implementation` is a label: only `name` reads it.
+        assert_eq!(
+            HardwareTarget::mister().differs_from_real(),
+            mister_irq != real_irq
+        );
+    }
+
+    #[test]
+    fn only_the_gp0_1f_model_reads_the_target() {
+        const READERS: [&str; 5] = [
+            "emu/crates/emulator-core/src/hardware_target.rs",
+            "emu/crates/emulator-core/src/lib.rs",
+            "emu/crates/emulator-core/src/gpu/irq_quirk.rs",
+            // Parse the spec and set the variable, or print the target; read no field.
+            "emu/crates/frontend/src/main.rs",
+            "emu/crates/frontend/src/cli.rs",
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let mut users = Vec::new();
+        for dir in ["emu/crates", "sdk/crates", "crates", "tools"] {
+            sources_naming_the_target(&root.join(dir), &root, &mut users);
+        }
+        users.sort();
+        let outside: Vec<&String> = users
+            .iter()
+            .filter(|u| !READERS.contains(&u.as_str()) && !u.starts_with("tools/psoxide-gate/"))
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "another reader of the hardware target: {outside:?}; see the comment above"
+        );
+        assert!(
+            users.iter().any(|u| u.ends_with("gpu/irq_quirk.rs")),
+            "scan found no reader"
+        );
+    }
+
+    fn sources_naming_the_target(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        out: &mut Vec<String>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n != "target") {
+                    sources_naming_the_target(&path, root, out);
+                }
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let named = [
+                    "HardwareTarget",
+                    "hardware_target",
+                    "PSOXIDE_HARDWARE",
+                    "GpuIrqModel",
+                ]
+                .iter()
+                .any(|token| text.contains(token));
+                if named {
+                    let relative = path.strip_prefix(root).unwrap_or(&path);
+                    out.push(relative.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
 }

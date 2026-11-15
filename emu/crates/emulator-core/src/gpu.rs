@@ -216,6 +216,10 @@ pub struct Gpu {
     /// save states.
     #[serde(skip)]
     gp0_write_count: u64,
+    /// GP0(1Fh) commands executed since reset: the only command the hardware
+    /// target's model can change. Observation only; excluded from save states.
+    #[serde(skip)]
+    gp0_irq_commands: u64,
     /// X offset (signed 11-bit) added to every primitive vertex --
     /// set by GP0 0xE5. Usually zero on BIOS boot, non-zero once the
     /// kernel sets up a display-list origin.
@@ -810,6 +814,7 @@ impl Gpu {
             irq_quirk: IrqQuirk::from_env(),
             gp0_expected: 0,
             gp0_write_count: 0,
+            gp0_irq_commands: 0,
             draw_offset_x: 0,
             draw_offset_y: 0,
             draw_area_left: 0,
@@ -1379,6 +1384,13 @@ impl Gpu {
     /// Total GP0 writes received since reset. Diagnostic counter.
     pub fn gp0_write_count(&self) -> u64 {
         self.gp0_write_count
+    }
+
+    /// GP0(1Fh) commands executed since reset. Counted where the hardware
+    /// target's model is consulted, so zero means no target can differ.
+    #[must_use]
+    pub fn gp0_irq_command_count(&self) -> u64 {
+        self.gp0_irq_commands
     }
 
     /// Dispatch an MMIO read inside the GPU window. Returns `Some` for
@@ -3126,6 +3138,7 @@ impl Gpu {
     /// and drawing-offset because the rasterizer needs them.
     fn execute_gp0_single(&mut self, word: u32) {
         let op = (word >> 24) & 0xff;
+        self.gp0_irq_commands += u64::from(op == 0x1f);
         let timing_cost = self.gp0_packet_timing_cost(op as u8);
         // Pixel tracer also wants to see state-modifying single-word
         // packets (0xE1..=0xE6 draw-mode / tex-window / draw-area /

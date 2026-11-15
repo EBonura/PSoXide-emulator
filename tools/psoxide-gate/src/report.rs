@@ -328,10 +328,13 @@ pub fn write_report(
             "Capture refresh: execution timings not recorded here; see the original receipt.".into()
         } else {
             format!(
-                "{} ticks ({:.0} s emulated), {:.1} s wall",
+                "{} ticks ({:.0} s emulated), {:.1} s wall{}",
                 r.ticks,
                 r.emu_secs,
-                r.wall.as_secs_f64()
+                r.wall.as_secs_f64(),
+                r.gp0_irq_commands
+                    .map(|n| format!(", {n} GP0(1Fh) commands"))
+                    .unwrap_or_default()
             )
         };
         let _ = write!(
@@ -464,6 +467,8 @@ mod tests {
             hw_adapter: None,
             notes: Vec::new(),
             cards: Vec::new(),
+            gp0_irq_commands: None,
+            receipt: crate::receipt::State::Off,
         };
         let index = write_report(
             dir.path(),

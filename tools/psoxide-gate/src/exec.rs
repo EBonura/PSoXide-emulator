@@ -11,7 +11,7 @@ use crate::machine::{button_mask, tape_end, Boot, Machine};
 use crate::render::HwSet;
 use crate::symbols::Symbols;
 
-mod digest;
+pub(crate) mod digest;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -110,6 +110,11 @@ pub struct JourneyResult {
     pub hw_adapter: Option<String>,
     pub notes: Vec<String>,
     pub cards: Vec<crate::card::CardImage>,
+    /// GP0(1Fh) commands the guest issued: the one command the hardware target changes.
+    /// `None` when the journey did not run to a count (an abort before boot).
+    pub gp0_irq_commands: Option<u64>,
+    /// Where the verdict came from (see `receipt`).
+    pub receipt: crate::receipt::State,
 }
 
 impl JourneyResult {
@@ -152,6 +157,9 @@ impl JourneyResult {
             self.wall.as_secs_f64(),
             self.disc_id
         ));
+        if let Some(n) = self.gp0_irq_commands {
+            s.push_str(&format!(" | GP0(1Fh) {n}"));
+        }
         if let Some(a) = &self.abort {
             s.push_str(&format!(" | ABORTED: {a}"));
         }
@@ -489,6 +497,8 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         hw_adapter: None,
         notes: Vec::new(),
         cards: Vec::new(),
+        gp0_irq_commands: None,
+        receipt: crate::receipt::State::Off,
     };
     let scales = opts
         .scales
@@ -638,6 +648,7 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     result.cards = run.cards;
     result.ticks = run.m.ticks;
     result.emu_secs = run.m.ticks as f64 / 60.0;
+    result.gp0_irq_commands = Some(run.m.bus.gpu.gp0_irq_command_count());
     result.groups = run.groups;
     result.wall = start.elapsed();
     result
