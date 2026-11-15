@@ -1841,6 +1841,26 @@ impl<'a> Run<'a> {
                     format!("peak sample {peak}"),
                 )
             }
+            "spu_kon" => {
+                let lo = a.voice.unwrap_or(0);
+                let hi = a.voice_hi.unwrap_or(lo);
+                let window = a.window.unwrap_or(u64::MAX);
+                let from = self.m.ticks.saturating_sub(window);
+                let n = self
+                    .m
+                    .kon_events
+                    .iter()
+                    .filter(|(t, v, start, ..)| {
+                        (lo..=hi).contains(v) && *t >= from && a.addr.is_none_or(|ad| ad == *start)
+                    })
+                    .count() as u64;
+                let ok = a.min_count.is_none_or(|m| n >= m) && a.max_count.is_none_or(|m| n <= m);
+                (
+                    format!("spu voices {lo}..={hi} key-ons{}", a.addr.map(|ad| format!(" at {ad:#x}")).unwrap_or_default()),
+                    ok,
+                    format!("{n} key-on(s)"),
+                )
+            }
             other => (other.to_string(), false, "unknown assert kind".into()),
         };
         checked_assert(name, Ok((ok, detail)), a)

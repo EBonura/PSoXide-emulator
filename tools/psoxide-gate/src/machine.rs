@@ -155,6 +155,9 @@ pub struct Machine {
     pub bus: Bus,
     pub ticks: u64,
     pub history: Vec<TickRec>,
+    /// SPU key-ons as (tick, voice), in order: what the guest asked to start.
+    pub kon_events: Vec<(u64, u8, u32, i16, u16)>,
+    kon_seen: [u32; 24],
     /// Sampled code lines (pc >> 4), per tick via `TickRec`.
     pub pc_samples: Vec<u32>,
     pub card_observer: Option<crate::card::Observer>,
@@ -275,6 +278,8 @@ impl Machine {
             bus,
             ticks: 0,
             history: Vec::new(),
+            kon_events: Vec::new(),
+            kon_seen: [0; 24],
             pc_samples: Vec::new(),
             card_observer: None,
             cut: None,
@@ -496,6 +501,16 @@ impl Machine {
             open.steps += ran;
             self.pc_samples.push(self.cpu.pc() >> 4);
             self.bus.run_spu_to_current_cycle();
+            {
+                let (kon, _) = self.bus.spu.voice_debug_counts();
+                let cfg = self.bus.spu.voice_keyon_cfg();
+                for v in 0..24 {
+                    for _ in self.kon_seen[v]..kon[v] {
+                        self.kon_events.push((self.ticks, v as u8, cfg[v].0, cfg[v].4, cfg[v].3));
+                    }
+                    self.kon_seen[v] = kon[v];
+                }
+            }
             if self.bus.spu.audio_queue_len() != 0 {
                 for (l, r) in self.bus.spu.drain_audio() {
                     let peak = u32::from(l.unsigned_abs()).max(u32::from(r.unsigned_abs()));

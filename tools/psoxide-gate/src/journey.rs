@@ -314,6 +314,10 @@ pub struct Step {
 /// - `pc_not_stuck`: at least `min_distinct` distinct code lines were
 ///   executing over the last `window` ticks.
 /// - `audio`: the SPU output reached `min_peak` within the last `window` ticks.
+/// - `spu_kon`: the guest keyed on SPU voices `voice`..=`voice_hi` (`voice_hi` defaults to `voice`)
+///   at least `min_count` and/or at most `max_count` times over the last
+///   `window` ticks (default: the whole run), optionally only for the sample at SPU address `addr`:
+///   proves which sound an event starts, not just that something is audible.
 /// - `pixels`: `min_count` / `max_count` pixels of `color` (within
 ///   `color_tol`) inside `region`: a HUD heart, a menu cursor, a countdown digit.
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -343,6 +347,12 @@ pub struct Assert {
     pub min_distinct: Option<u64>,
     #[serde(default)]
     pub min_peak: Option<u32>,
+    /// `spu_kon`: the SPU voice whose key-ons are counted.
+    #[serde(default)]
+    pub voice: Option<u8>,
+    /// `spu_kon`: top of the voice range (default: just `voice`).
+    #[serde(default)]
+    pub voice_hi: Option<u8>,
 
     // ram
     #[serde(default)]
@@ -918,6 +928,7 @@ pub const ASSERT_KINDS: &[&str] = &[
     "frame_diff",
     "pc_not_stuck",
     "audio",
+    "spu_kon",
     "pixels",
 ];
 
@@ -986,6 +997,14 @@ impl Assert {
             }
             if self.min_changed.is_none() && self.max_changed.is_none() {
                 return Err("frame_diff needs `min_changed` and/or `max_changed`".into());
+            }
+        }
+        if self.kind == "spu_kon" {
+            if self.min_count.is_none() && self.max_count.is_none() {
+                return Err("spu_kon needs `min_count` and/or `max_count`".into());
+            }
+            if self.voice_hi.is_some_and(|hi| hi < self.voice.unwrap_or(0)) {
+                return Err("spu_kon `voice_hi` is below `voice`".into());
             }
         }
         if self.kind == "pixels" {
@@ -1077,6 +1096,15 @@ expect_fail = true
             "name = \"a\"\npad2 = \"analog\"\n[[step]]\nport = 3\npress = [\"start\"]\n"
         )
         .is_err());
+    }
+
+    #[test]
+    fn spu_kon_needs_a_count_and_an_ordered_voice_range() {
+        let base = "name = 'kon'\n[[step]]\n[[step.assert]]\nkind = 'spu_kon'\n";
+        assert!(parse(base).is_err());
+        assert!(parse(&format!("{base}voice = 3\nvoice_hi = 2\nmin_count = 1")).is_err());
+        parse(&format!("{base}addr = 0xdba0\nvoice = 0\nvoice_hi = 1\nmin_count = 1\nwindow = 18")).unwrap();
+        parse(&format!("{base}max_count = 0")).unwrap();
     }
 
     #[test]
