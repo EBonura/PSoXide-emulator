@@ -968,3 +968,21 @@ mod tests {
         }
     }
 }
+
+/// With `PSOXIDE_GATE_KON_LOG=<file>` set, every machine appends its SPU
+/// key-on events to that file when it is dropped, as `tick,voice,start,volume,pitch` rows under a
+/// `# machine` marker.
+impl Drop for Machine {
+    fn drop(&mut self) {
+        use std::io::Write;
+        let Some(path) = std::env::var_os("PSOXIDE_GATE_KON_LOG") else {
+            return;
+        };
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "# machine, {} ticks", self.ticks);
+            for (t, v, a, vol, pitch) in &self.kon_events {
+                let _ = writeln!(f, "{t},{v},{a:#x},{vol:#x},{pitch:#x}");
+            }
+        }
+    }
+}
