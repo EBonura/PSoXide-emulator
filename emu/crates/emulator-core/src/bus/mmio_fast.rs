@@ -115,7 +115,11 @@ impl Bus {
     #[inline(always)]
     pub(super) fn read32_sio0(&mut self, phys: u32) -> u32 {
         self.service_sio0();
-        self.sio0.read32(phys).unwrap_or(0)
+        let value = self.sio0.read32(phys).unwrap_or(0);
+        if phys == Sio0::BASE + 4 {
+            self.sio0.trace_stat_read(self.cycles, value);
+        }
+        value
     }
 
     /// `I_STAT` as a word store writes it (acknowledging the bits written

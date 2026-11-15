@@ -169,6 +169,19 @@ struct PadAckOverride {
     pulse: Option<u64>,
 }
 
+/// Minimum times a real controller needs, in CPU cycles; 0 turns a rule off. A host that
+/// breaks a rule makes the pad miss the event: it ignores the rest of the transaction
+/// (every byte reads `0xFF`, no `/ACK`) until a deselect it does see.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PadTiming {
+    /// `/CS` must stay high at least this long between a deselect and the next select,
+    /// or the pad does not see the deselect and the new address byte is not answered.
+    pub min_cs_high: u64,
+    /// After a byte's `/ACK` releases, the next byte's clock must start at least this
+    /// much later, or the pad misses it.
+    pub min_after_ack: u64,
+}
+
 /// SIO0 state. Register-level accuracy for the "nothing plugged in"
 /// path; no shift-clock simulation, but every byte-write pulses an
 /// IRQ7 so the BIOS's pad-poll handler advances its descriptors.
@@ -260,6 +273,23 @@ pub struct Sio0 {
     /// Not part of the machine state, so it is neither saved nor restored.
     #[serde(skip)]
     pad_ack_override: PadAckOverride,
+    /// Pad timing minimums (see [`PadTiming`]); off by default, not machine state.
+    #[serde(skip)]
+    pad_timing: PadTiming,
+    /// Cycle the select line last went high (deselect or reset), for `pad_timing`.
+    #[serde(skip)]
+    cs_high_at: u64,
+    /// Cycle the previous byte of this transaction released `/ACK`, for `pad_timing`.
+    #[serde(skip)]
+    ack_released_at: Option<u64>,
+    /// The pad missed a deselect or a clock, so it ignores the rest of the transaction.
+    #[serde(skip)]
+    pad_missed: bool,
+    /// `PSOXIDE_SIO_TRACE`: one line per CTRL and DATA write, with the cycle.
+    #[serde(skip)]
+    trace: Option<std::fs::File>,
+    #[serde(skip)]
+    trace_dsr: bool,
 }
 
 impl Sio0 {
@@ -306,6 +336,12 @@ impl Sio0 {
             slow_desynced: false,
             card_command: 0,
             pad_ack_override: PadAckOverride::default(),
+            pad_timing: PadTiming::default(),
+            cs_high_at: 0,
+            ack_released_at: None,
+            pad_missed: false,
+            trace: std::env::var("PSOXIDE_SIO_TRACE").ok().and_then(|p| std::fs::File::create(p).ok()),
+            trace_dsr: false,
         }
     }
 
@@ -333,6 +369,23 @@ impl Sio0 {
             delay,
             pulse: pulse.map(|p| p.max(1)),
         };
+    }
+
+    /// Trace helper: log the first STAT read that sees `/ACK` change level.
+    pub fn trace_stat_read(&mut self, now: u64, value: u32) {
+        let dsr = value & (1 << 7) != 0;
+        if dsr != self.trace_dsr {
+            self.trace_dsr = dsr;
+            if let Some(f) = self.trace.as_mut() {
+                use std::io::Write;
+                let _ = writeln!(f, "{now} S {}", u8::from(dsr));
+            }
+        }
+    }
+
+    /// Give the pad the timing minimums of [`PadTiming`].
+    pub fn set_pad_timing(&mut self, timing: PadTiming) {
+        self.pad_timing = timing;
     }
 
     /// Give both ports' pads the measured real-pad quirks (see [`crate::pad::PadQuirks`]).
@@ -637,6 +690,10 @@ impl Sio0 {
     /// selected device (if any) returns its RX byte and whether it
     /// wants another round (pulls `/DSR` low → IRQ7 armed).
     fn write_data_at(&mut self, value: u8, now: u64) {
+        if let Some(f) = self.trace.as_mut() {
+            use std::io::Write;
+            let _ = writeln!(f, "{now} D {value:02x}");
+        }
         if self.transfer_busy {
             // The shifter is full: the byte waits in the TX register (a
             // second one overwrites it, as the chip drops a byte written
@@ -669,7 +726,18 @@ impl Sio0 {
                 }
                 self.slow_ready_cycle = Some(now.saturating_add(self.transfer_ticks()));
             }
-            if self.slow_pad && self.slow_desynced {
+            // Pad minimum: a byte that starts too soon after the last `/ACK` released is missed.
+            if self.pad_timing.min_after_ack != 0
+                && self
+                    .ack_released_at
+                    .is_some_and(|at| now < at.saturating_add(self.pad_timing.min_after_ack))
+            {
+                self.pad_missed = true;
+            }
+            if self.pad_missed {
+                self.ack_released_at = None;
+                (0xff, false, true, PAD_ACK_DELAY_TICKS, PAD_ACK_PULSE_TICKS)
+            } else if self.slow_pad && self.slow_desynced {
                 // The device missed the clock; it returns idle and does not
                 // advance its state machine.
                 (0xff, false, true, PAD_ACK_DELAY_TICKS, PAD_ACK_PULSE_TICKS)
@@ -691,6 +759,11 @@ impl Sio0 {
                     ack_pulse_ticks = ack_override.pulse.unwrap_or(ack_pulse_ticks);
                 }
                 self.card_command = command;
+                self.ack_released_at = (!is_card && result.ack).then(|| {
+                    now.saturating_add(self.transfer_ticks())
+                        .saturating_add(ack_delay_ticks)
+                        .saturating_add(ack_pulse_ticks)
+                });
                 (
                     result.rx,
                     result.ack,
@@ -735,7 +808,11 @@ impl Sio0 {
         }
     }
 
-    fn write_ctrl(&mut self, value: u16) {
+    fn write_ctrl(&mut self, value: u16, now: u64) {
+        if let Some(f) = self.trace.as_mut() {
+            use std::io::Write;
+            let _ = writeln!(f, "{now} C {value:04x}");
+        }
         if value & ctrl_bit::RESET != 0 {
             self.mode = 0;
             self.ctrl = 0;
@@ -758,6 +835,9 @@ impl Sio0 {
             self.port1.deselect();
             self.port2.deselect();
             self.last_joyn = false;
+            self.cs_high_at = now;
+            self.ack_released_at = None;
+            self.pad_missed = false;
             // Keep the slow-pad opt-in, drop its per-transaction state.
             self.slow_ready_cycle = None;
             self.slow_desynced = false;
@@ -775,7 +855,15 @@ impl Sio0 {
         // device state machine resets.
         let old_joyn = self.last_joyn;
         let new_joyn = new_ctrl & ctrl_bit::JOYN_OUTPUT != 0;
+        if !old_joyn && new_joyn {
+            // A select. A pad that was not given long enough with `/CS` high did not see the
+            // deselect, so it is still part way through the last transaction.
+            self.pad_missed = self.pad_timing.min_cs_high != 0
+                && now.saturating_sub(self.cs_high_at) < self.pad_timing.min_cs_high;
+            self.ack_released_at = None;
+        }
         if old_joyn && !new_joyn {
+            self.cs_high_at = now;
             self.byte_index = 0;
             self.ack_input = false;
             self.queued_tx = None;
@@ -820,7 +908,7 @@ impl Sio0 {
             offset::DATA => self.write_data_at(value as u8, now),
             offset::STAT => {}
             offset::MODE => self.mode = value & MODE_WRITE_MASK,
-            offset::CTRL => self.write_ctrl(value),
+            offset::CTRL => self.write_ctrl(value, now),
             offset::BAUD => self.baud = value,
             _ => return false,
         }

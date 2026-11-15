@@ -1029,6 +1029,11 @@ impl Bus {
 
     /// Replace the pad's `/ACK` delay and pulse width, in CPU cycles; `None` keeps
     /// the measured per-byte value. See [`Sio0::set_pad_ack_timing`].
+    /// Give the pad the timing minimums of [`crate::sio::PadTiming`].
+    pub fn set_pad_timing(&mut self, timing: crate::sio::PadTiming) {
+        self.sio0.set_pad_timing(timing);
+    }
+
     pub fn set_pad_quirks(&mut self, quirks: crate::pad::PadQuirks) {
         self.sio0.set_pad_quirks(quirks);
     }
