@@ -506,7 +506,8 @@ impl Machine {
                 let cfg = self.bus.spu.voice_keyon_cfg();
                 for v in 0..24 {
                     for _ in self.kon_seen[v]..kon[v] {
-                        self.kon_events.push((self.ticks, v as u8, cfg[v].0, cfg[v].4, cfg[v].3));
+                        self.kon_events
+                            .push((self.ticks, v as u8, cfg[v].0, cfg[v].4, cfg[v].3));
                     }
                     self.kon_seen[v] = kon[v];
                 }
@@ -978,7 +979,11 @@ impl Drop for Machine {
         let Some(path) = std::env::var_os("PSOXIDE_GATE_KON_LOG") else {
             return;
         };
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let _ = writeln!(f, "# machine, {} ticks", self.ticks);
             for (t, v, a, vol, pitch) in &self.kon_events {
                 let _ = writeln!(f, "{t},{v},{a:#x},{vol:#x},{pitch:#x}");

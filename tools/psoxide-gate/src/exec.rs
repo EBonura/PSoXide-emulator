@@ -1856,7 +1856,10 @@ impl<'a> Run<'a> {
                     .count() as u64;
                 let ok = a.min_count.is_none_or(|m| n >= m) && a.max_count.is_none_or(|m| n <= m);
                 (
-                    format!("spu voices {lo}..={hi} key-ons{}", a.addr.map(|ad| format!(" at {ad:#x}")).unwrap_or_default()),
+                    format!(
+                        "spu voices {lo}..={hi} key-ons{}",
+                        a.addr.map(|ad| format!(" at {ad:#x}")).unwrap_or_default()
+                    ),
                     ok,
                     format!("{n} key-on(s)"),
                 )

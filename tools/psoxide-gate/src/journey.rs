@@ -1103,7 +1103,10 @@ expect_fail = true
         let base = "name = 'kon'\n[[step]]\n[[step.assert]]\nkind = 'spu_kon'\n";
         assert!(parse(base).is_err());
         assert!(parse(&format!("{base}voice = 3\nvoice_hi = 2\nmin_count = 1")).is_err());
-        parse(&format!("{base}addr = 0xdba0\nvoice = 0\nvoice_hi = 1\nmin_count = 1\nwindow = 18")).unwrap();
+        parse(&format!(
+            "{base}addr = 0xdba0\nvoice = 0\nvoice_hi = 1\nmin_count = 1\nwindow = 18"
+        ))
+        .unwrap();
         parse(&format!("{base}max_count = 0")).unwrap();
     }
 
