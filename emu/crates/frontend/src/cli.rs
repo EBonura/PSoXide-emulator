@@ -63,6 +63,7 @@ mod fetch_trace;
 mod headless_log;
 mod iso_inspect;
 mod profile_report;
+mod stall_pc;
 pub(crate) mod ui_png;
 
 use headless_log::{CounterLog, DisplayHashLog, GuestProfileLog};
@@ -556,6 +557,19 @@ pub struct LaunchArgs {
     /// Ignore retired instructions before this route tick.
     #[arg(long, default_value_t = 0, requires = "fetch_trace_log")]
     pub fetch_trace_start_route_tick: u64,
+    /// Write every kind of CPU cycle per program counter: instructions, issue,
+    /// RAM-load (and the part of it from `$sp` loads), RAM-store, MMIO, I-cache
+    /// refill, uncached-fetch, GTE-busy, mul/div-interlock and other cycles, one
+    /// row per key (format in `cli/stall_pc.rs`). Summed over a window the rows
+    /// equal `--cpu-cycle-profile-log`'s totals, so with a link map a tool can
+    /// split each kind by function. Keyed by 16-byte line, or by word with
+    /// `--pc-log-words` (use words to sum by function). Costs one counter read
+    /// per instruction, like the per-line stall logs; off by default.
+    #[arg(long)]
+    pub stall_pc_log: Option<PathBuf>,
+    /// Ignore cycles spent before this route tick in `--stall-pc-log`.
+    #[arg(long, default_value_t = 0, requires = "stall_pc_log")]
+    pub stall_pc_start_route_tick: u64,
     /// Write exact dynamic MIPS instruction-class counts per route tick,
     /// including delay slots, memory widths/regions, stack-relative accesses,
     /// control flow, multiply/divide and GTE traffic.
@@ -1440,6 +1454,7 @@ fn run_headless_launch(
             || args.mmio_stall_line_log.is_some()
             || args.ram_load_stall_line_log.is_some()
             || args.icache_stall_line_log.is_some()
+            || args.stall_pc_log.is_some()
             || args.debug_ui_png.is_some(),
     );
     let mut cpu_cycle_profile_log = match args.cpu_cycle_profile_log.as_ref() {
@@ -1481,6 +1496,10 @@ fn run_headless_launch(
     let mut last_ram_load_stall_cycles = last_cpu_cycle_profile.ram_load_stall_cycles;
     let mut icache_stall_lines = args.icache_stall_line_log.as_ref().map(new_pc_histogram);
     let mut last_icache_stall_cycles = last_cpu_cycle_profile.icache_refill_stall_cycles;
+    let mut stall_pc_log = args
+        .stall_pc_log
+        .as_ref()
+        .map(|_| stall_pc::StallPcLog::new(args.pc_log_words, last_cpu_cycle_profile));
     let mut fetch_trace = args
         .fetch_trace_log
         .as_deref()
@@ -1656,6 +1675,7 @@ fn run_headless_launch(
         || mmio_stall_lines.is_some()
         || ram_load_stall_lines.is_some()
         || icache_stall_lines.is_some()
+        || stall_pc_log.is_some()
         || icache_event_log.is_some()
         || fetch_trace.is_some();
     let mut tape_seen_polls = bus.port1_completed_polls();
@@ -1760,6 +1780,7 @@ fn run_headless_launch(
         let mmio_attribution_pc = mmio_stall_lines.as_ref().map(|_| cpu.pc());
         let ram_load_attribution_pc = ram_load_stall_lines.as_ref().map(|_| cpu.pc());
         let icache_attribution_pc = icache_stall_lines.as_ref().map(|_| cpu.pc());
+        let stall_pc = stall_pc_log.as_ref().map(|_| cpu.pc());
         // The last poll interval before a poll-count stop (stop-at-poll, or the
         // end of a poll-bound tape) runs instruction by instruction: what ends
         // the run there is a deferred device event (the display-start flip, the
@@ -1863,6 +1884,13 @@ fn run_headless_launch(
                 lines.record_n(pc, delta);
             }
         }
+        if let (Some(log), Some(pc)) = (stall_pc_log.as_mut(), stall_pc) {
+            log.record(
+                pc,
+                cpu.cpu_cycle_profile(),
+                route_ticks >= args.stall_pc_start_route_tick,
+            );
+        }
         if icache_event_log.is_some() {
             if let Some(event) = cpu.take_instruction_cache_refill_event() {
                 if route_ticks >= args.icache_event_start_route_tick {
@@ -1912,6 +1940,9 @@ fn run_headless_launch(
             route_tick_deadline = bus.cycles().saturating_add(route_vblank_period);
             route_tick_steps = 0;
             route_ticks += 1;
+            if let Some(log) = stall_pc_log.as_mut() {
+                log.close_tick();
+            }
             if route_ticks >= args.fetch_trace_start_route_tick {
                 if let Some(trace) = fetch_trace.as_mut() {
                     trace
@@ -2607,6 +2638,12 @@ fn run_headless_launch(
                 "[cli] I-cache refill stall attribution → {}",
                 path.display()
             );
+        }
+    }
+    if let (Some(path), Some(log)) = (args.stall_pc_log.as_ref(), stall_pc_log.as_ref()) {
+        log.finish(path)?;
+        if emit_summary {
+            eprintln!("[cli] stall cycles by PC → {}", path.display());
         }
     }
     if let (Some(path), Some(profile)) = (
@@ -3409,6 +3446,8 @@ fn validation_launch_args(
         icache_event_start_route_tick: 0,
         fetch_trace_log: None,
         fetch_trace_start_route_tick: 0,
+        stall_pc_log: None,
+        stall_pc_start_route_tick: 0,
         instruction_class_log: None,
         stack_profile_log: None,
         stack_profile_root_pc: None,
@@ -5222,6 +5261,10 @@ mod press_script_tests {
             "stack.csv",
             "--stack-profile-root-pc",
             "0x80012340",
+            "--stall-pc-log",
+            "stalls.csv",
+            "--stall-pc-start-route-tick",
+            "55",
         ])
         .expect("low-level profile arguments");
 
@@ -5256,6 +5299,8 @@ mod press_script_tests {
         );
         assert_eq!(args.stack_profile_log, Some(PathBuf::from("stack.csv")));
         assert_eq!(args.stack_profile_root_pc, Some(0x8001_2340));
+        assert_eq!(args.stall_pc_log, Some(PathBuf::from("stalls.csv")));
+        assert_eq!(args.stall_pc_start_route_tick, 55);
     }
 
     #[test]
