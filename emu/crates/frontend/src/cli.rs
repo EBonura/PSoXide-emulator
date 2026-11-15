@@ -360,6 +360,14 @@ pub struct LaunchArgs {
     /// (at least 1).
     #[arg(long)]
     pub pad_ack_pulse: Option<u64>,
+    /// SCPH-110 model: a configuration exit is ignored when the next transaction's
+    /// address byte follows the exit's last byte sooner than this many CPU cycles.
+    #[arg(long, default_value_t = 0)]
+    pub pad_exit_ignore_cycles: u64,
+    /// SCPH-1200 model: a transaction whose address byte follows the previous
+    /// transaction's last byte sooner than this many CPU cycles is not answered.
+    #[arg(long, default_value_t = 0)]
+    pub pad_min_gap_cycles: u64,
     /// Treat an authored disc as an embedded editor Play disc and boot it
     /// through the same no-BIOS HLE path used by the editor viewport.
     #[arg(long)]
@@ -3268,6 +3276,8 @@ fn validation_launch_args(
         pad2: false,
         pad_ack_delay: None,
         pad_ack_pulse: None,
+        pad_exit_ignore_cycles: 0,
+        pad_min_gap_cycles: 0,
         embedded_playtest: artifact.embedded_playtest,
         scph_9902: false,
         dump_hash: false,
@@ -3382,6 +3392,8 @@ struct PadOptions {
     pad2: bool,
     ack_delay: Option<u64>,
     ack_pulse: Option<u64>,
+    exit_ignore_cycles: u64,
+    min_gap_cycles: u64,
 }
 
 impl PadOptions {
@@ -3392,6 +3404,8 @@ impl PadOptions {
             pad2: args.pad2,
             ack_delay: args.pad_ack_delay,
             ack_pulse: args.pad_ack_pulse,
+            exit_ignore_cycles: args.pad_exit_ignore_cycles,
+            min_gap_cycles: args.pad_min_gap_cycles,
         }
     }
 }
@@ -3409,6 +3423,10 @@ fn attach_headless_playtest_pad(bus: &mut Bus, options: PadOptions) {
         bus.attach_digital_pad_port2();
     }
     bus.set_pad_ack_timing(options.ack_delay, options.ack_pulse);
+    bus.set_pad_quirks(emulator_core::pad::PadQuirks {
+        exit_ignore_cycles: options.exit_ignore_cycles,
+        min_gap_cycles: options.min_gap_cycles,
+    });
 }
 
 fn load_headless_disc(path: &Path) -> Result<Disc, String> {

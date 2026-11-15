@@ -335,6 +335,12 @@ impl Sio0 {
         };
     }
 
+    /// Give both ports' pads the measured real-pad quirks (see [`crate::pad::PadQuirks`]).
+    pub fn set_pad_quirks(&mut self, quirks: crate::pad::PadQuirks) {
+        self.port1.set_quirks(quirks);
+        self.port2.set_quirks(quirks);
+    }
+
     /// Immutable access to port 1. Used by the frontend to read
     /// pad state (rumble motor) without having to mutate.
     pub fn port1(&self) -> &crate::pad::PortDevice {

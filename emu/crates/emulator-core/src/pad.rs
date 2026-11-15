@@ -150,6 +150,28 @@ pub struct PortDevice {
     recent_first_head: usize,
     #[serde(skip)]
     recent_first_len: usize,
+    /// Measured real-pad quirks, off by default (see [`PadQuirks`]).
+    #[serde(skip)]
+    quirks: PadQuirks,
+    /// Cycle of the last byte a pad of this port exchanged.
+    #[serde(skip)]
+    last_pad_at: Option<u64>,
+    /// The pad left configuration mode in its last transaction.
+    #[serde(skip)]
+    exit_seen: bool,
+}
+
+/// Two behaviours measured on real controllers (hardware tests v2.21, pad survey), both
+/// off by default, in CPU cycles. Neither is a model of the pad's firmware: each is the
+/// shortest rule that reproduces one measured symptom.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PadQuirks {
+    /// SCPH-110: a configuration exit is ignored (the pad stays in configuration mode) when
+    /// the next transaction's address byte comes sooner than this after the exit's last byte.
+    pub exit_ignore_cycles: u64,
+    /// SCPH-1200: a transaction whose address byte comes sooner than this after the previous
+    /// transaction's last byte is not acknowledged (the pad does not answer it).
+    pub min_gap_cycles: u64,
 }
 
 /// `#[serde(default = ...)]` target for `[u32; 256]`-shaped diagnostic
@@ -189,7 +211,15 @@ impl PortDevice {
             recent_first_bytes: [0; 16],
             recent_first_head: 0,
             recent_first_len: 0,
+            quirks: PadQuirks { exit_ignore_cycles: 0, min_gap_cycles: 0 },
+            last_pad_at: None,
+            exit_seen: false,
         }
+    }
+
+    /// Set the measured real-pad quirks of this port.
+    pub fn set_quirks(&mut self, quirks: PadQuirks) {
+        self.quirks = quirks;
     }
 
     /// `true` when nothing is plugged in to either slot.
@@ -252,7 +282,12 @@ impl PortDevice {
         match self.selected {
             Some(Selected::Pad) => match &mut self.pad {
                 Some(pad) => {
+                    let was_config = pad.mode == PadMode::Config;
                     let (rx, ack) = pad.exchange_at(tx, now);
+                    if was_config && pad.mode != PadMode::Config {
+                        self.exit_seen = true;
+                    }
+                    self.last_pad_at = Some(now);
                     SerialExchange {
                         rx,
                         ack,
@@ -286,6 +321,24 @@ impl PortDevice {
                 match tx {
                     0x01 => {
                         if let Some(pad) = self.pad.as_mut() {
+                            let since = self.last_pad_at.map(|t| now.saturating_sub(t));
+                            let quirks = self.quirks;
+                            if quirks.min_gap_cycles != 0
+                                && since.is_some_and(|d| d < quirks.min_gap_cycles)
+                            {
+                                // Too soon after the last transaction: not answered.
+                                return SerialExchange {
+                                    rx: 0xff,
+                                    ack: false,
+                                    device_present: true,
+                                };
+                            }
+                            if std::mem::take(&mut self.exit_seen)
+                                && quirks.exit_ignore_cycles != 0
+                                && since.is_some_and(|d| d < quirks.exit_ignore_cycles)
+                            {
+                                pad.ignore_exit();
+                            }
                             self.selected = Some(Selected::Pad);
                             pad.reset();
                             // The initial select byte only chooses the
@@ -720,6 +773,13 @@ impl DigitalPad {
         self.config_param = 0;
         self.current_trace_len = 0;
         self.current_trace_cycle = 0;
+    }
+
+    /// Undo a configuration exit: the pad stays in configuration mode, and a later exit
+    /// restores the mode it had left to.
+    fn ignore_exit(&mut self) {
+        self.mode_before_config = self.mode;
+        self.mode = PadMode::Config;
     }
 
     /// Current operating mode. Diagnostic; games don't read this
@@ -2226,5 +2286,64 @@ mod tests {
             read_back.push(b);
         }
         assert_eq!(read_back, pattern, "written data should round-trip");
+    }
+
+    /// One transaction through a port at cycle `at`; the byte after the last one is 8 cycles
+    /// on, as the shifter spaces them.
+    fn port_txn(port: &mut PortDevice, at: u64, tx: &[u8]) -> Vec<(u8, bool)> {
+        let mut out = Vec::new();
+        for (i, b) in tx.iter().enumerate() {
+            let r = port.exchange_detailed_at(*b, at + i as u64 * 8);
+            out.push((r.rx, r.ack));
+        }
+        port.deselect();
+        out
+    }
+
+    fn dualshock_port() -> PortDevice {
+        PortDevice::empty().with_pad(DigitalPad::new())
+    }
+
+    const ENTER: [u8; 9] = [1, 0x43, 0, 1, 0, 0, 0, 0, 0];
+    const EXIT: [u8; 9] = [1, 0x43, 0, 0, 0, 0, 0, 0, 0];
+    const POLL: [u8; 9] = [1, 0x42, 0, 0, 0, 0, 0, 0, 0];
+
+    #[test]
+    fn a_110_ignores_an_exit_that_the_next_packet_follows_too_soon() {
+        // SHORT spacing of the console survey: 6,144 ticks from the exit to the next address
+        // byte left the pad in configuration mode (ID 0xF3); MEDIUM, 40,168 ticks, did not.
+        for (gap, id) in [(6_144u64, 0xf3u8), (40_168, 0x41)] {
+            let mut port = dualshock_port();
+            port.set_quirks(PadQuirks { exit_ignore_cycles: 20_000, min_gap_cycles: 0 });
+            port_txn(&mut port, 1_000, &ENTER);
+            port_txn(&mut port, 100_000, &EXIT);
+            let poll = port_txn(&mut port, 100_000 + 64 + gap, &POLL);
+            assert_eq!(poll[1].0, id, "gap {gap}");
+        }
+    }
+
+    #[test]
+    fn the_110_quirk_is_off_by_default_and_lifts_with_a_later_exit() {
+        let mut port = dualshock_port();
+        port_txn(&mut port, 1_000, &ENTER);
+        port_txn(&mut port, 100_000, &EXIT);
+        assert_eq!(port_txn(&mut port, 100_100, &POLL)[1].0, 0x41);
+        port.set_quirks(PadQuirks { exit_ignore_cycles: 20_000, min_gap_cycles: 0 });
+        port_txn(&mut port, 200_000, &ENTER);
+        port_txn(&mut port, 300_000, &EXIT);
+        assert_eq!(port_txn(&mut port, 300_100, &POLL)[1].0, 0xf3);
+        port_txn(&mut port, 400_000, &EXIT);
+        assert_eq!(port_txn(&mut port, 500_000, &POLL)[1].0, 0x41);
+    }
+
+    #[test]
+    fn a_1200_does_not_answer_a_transaction_that_starts_too_soon() {
+        let mut port = dualshock_port();
+        port.set_quirks(PadQuirks { exit_ignore_cycles: 0, min_gap_cycles: 10_000 });
+        port_txn(&mut port, 1_000, &POLL);
+        let early = port_txn(&mut port, 1_000 + 64 + 5_000, &POLL);
+        assert_eq!(early[0], (0xff, false));
+        let late = port_txn(&mut port, 1_000 + 64 + 20_000, &POLL);
+        assert_eq!(late[1].0, 0x41);
     }
 }
