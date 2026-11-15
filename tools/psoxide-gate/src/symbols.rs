@@ -12,6 +12,11 @@ use std::path::Path;
 pub struct Symbols {
     /// Display name (demangled where possible) to address.
     by_name: BTreeMap<String, u32>,
+    /// Names that came from a map row with an ` (.N)` suffix, or that such a row collided with.
+    from_suffixed_row: std::collections::BTreeSet<String>,
+    /// Names two or more rows give different addresses, at least one of them by way of that suffix:
+    /// never resolved, always listed.
+    ambiguous: BTreeMap<String, Vec<u32>>,
 }
 
 impl Symbols {
@@ -27,15 +32,31 @@ impl Symbols {
     /// `game::STATE` finds `nitroxide::game::STATE`). Ambiguous suffixes are
     /// an error, never a silent pick.
     pub fn resolve(&self, name: &str) -> Result<u32, String> {
+        if let Some(addrs) = self.ambiguous.get(name) {
+            return Err(ambiguous_message(name, addrs));
+        }
         if let Some(&addr) = self.by_name.get(name) {
             return Ok(addr);
         }
         let suffix = format!("::{name}");
-        let hits: Vec<(&String, &u32)> = self
+        let mut hits: Vec<(&String, &u32)> = self
             .by_name
             .iter()
             .filter(|(k, _)| k.ends_with(&suffix))
             .collect();
+        // A path-suffix match may land on a name two rows disagree about.
+        for (full, addrs) in self.ambiguous.iter().filter(|(k, _)| k.ends_with(&suffix)) {
+            if let Some(first) = addrs.first() {
+                if !hits.iter().any(|(k, _)| *k == full) {
+                    hits.push((full, first));
+                }
+            }
+        }
+        if let [(full, _)] = hits.as_slice() {
+            if let Some(addrs) = self.ambiguous.get(*full) {
+                return Err(ambiguous_message(full, addrs));
+            }
+        }
         match hits.as_slice() {
             [(_, &addr)] => Ok(addr),
             [] => Err(format!(
@@ -118,6 +139,28 @@ impl Symbols {
         Ok(())
     }
 
+    /// Add one row of a text map. A name twice with the same address is one symbol. With
+    /// different addresses the first row wins, as it always did, unless an ` (.N)` row is
+    /// involved: then the name is ambiguous and `resolve` lists every address.
+    fn add_text_row(&mut self, name: String, addr: u32, suffixed: bool) {
+        if suffixed {
+            self.from_suffixed_row.insert(name.clone());
+        }
+        match self.by_name.get(&name).copied() {
+            None => {
+                self.by_name.insert(name, addr);
+            }
+            Some(first) if first == addr => {}
+            Some(first) if self.from_suffixed_row.contains(&name) => {
+                let addrs = self.ambiguous.entry(name).or_insert_with(|| vec![first]);
+                if !addrs.contains(&addr) {
+                    addrs.push(addr);
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
     fn load_text(&mut self, text: &str) {
         for line in text.lines() {
             let toks: Vec<&str> = line.split_whitespace().collect();
@@ -131,9 +174,14 @@ impl Symbols {
                 && toks[2].chars().all(|c| c.is_ascii_hexdigit())
             {
                 if let Ok(addr) = u32::from_str_radix(toks[0], 16) {
-                    let raw = toks[toks.len() - 1];
-                    let name = demangle_legacy(raw).unwrap_or_else(|| raw.to_string());
-                    self.by_name.entry(name).or_insert(addr);
+                    // The symbol column starts after the four numeric ones.
+                    let mut rest = line.trim_start();
+                    for _ in 0..4 {
+                        rest = rest.trim_start();
+                        rest = &rest[rest.find(char::is_whitespace).unwrap_or(rest.len())..];
+                    }
+                    let (name, suffixed) = map_symbol(rest);
+                    self.add_text_row(name, addr, suffixed);
                     continue;
                 }
             }
@@ -148,6 +196,44 @@ impl Symbols {
             }
         }
     }
+}
+
+fn ambiguous_message(name: &str, addrs: &[u32]) -> String {
+    format!(
+        "symbol `{name}` is ambiguous: the map lists it at {}",
+        addrs
+            .iter()
+            .map(|a| format!("{a:#x}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// The name of an lld map row's symbol column and whether it carried an ` (.N)` suffix.
+///
+/// lld prints a Rust symbol demangled, and rustc gives a `static` with a private symbol an LLVM
+/// uniquing suffix (`..._4SIMNOW.0`): the demangler prints that suffix after the path as ` (.0)`,
+/// so the row reads `hl_psx::SIM_NOW (.0)`. The name a journey uses is the path before it.
+/// Without a suffix the name is the row's last token, as before.
+fn map_symbol(rest: &str) -> (String, bool) {
+    let rest = rest.trim();
+    if let Some(open) = rest.rfind(" (.") {
+        let tail = &rest[open + 3..];
+        if let Some(digits) = tail.strip_suffix(')') {
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                let base = rest[..open].trim_end();
+                return (
+                    demangle_legacy(base).unwrap_or_else(|| base.to_string()),
+                    true,
+                );
+            }
+        }
+    }
+    let raw = rest.rsplit(char::is_whitespace).next().unwrap_or(rest);
+    (
+        demangle_legacy(raw).unwrap_or_else(|| raw.to_string()),
+        false,
+    )
 }
 
 /// Turn a legacy Rust mangled name (`_ZN8nitroxide4game5STATE17h0123456789abcdefE`)
@@ -214,5 +300,64 @@ mod tests {
         s.load_text("80123456 D player_state\n  80200000 80200000       10     4         .bss      counter\n");
         assert_eq!(s.resolve("player_state"), Ok(0x8012_3456));
         assert_eq!(s.resolve("counter"), Ok(0x8020_0000));
+    }
+
+    const SUFFIXED_MAP: &str = "     VMA      LMA     Size Align Out     In      Symbol
+801ea4f8 801ea4f8        2     4         /x/game.o:(.bss._RNvCs1_4game7SIM_NOW.0)
+801ea4f8 801ea4f8        2     1                 game::SIM_NOW (.0)
+801ee620 801ee620        2     1                 game::MOVE_TICK (.0)
+801ee700 801ee700        4     1                 game::PLAIN
+";
+
+    #[test]
+    fn a_name_with_the_dot_n_suffix_resolves_as_the_name() {
+        let mut s = Symbols::default();
+        s.load_text(SUFFIXED_MAP);
+        assert_eq!(s.resolve("game::SIM_NOW"), Ok(0x801e_a4f8));
+        assert_eq!(s.resolve("SIM_NOW"), Ok(0x801e_a4f8));
+        assert_eq!(s.resolve("MOVE_TICK"), Ok(0x801e_e620));
+        assert_eq!(s.resolve("PLAIN"), Ok(0x801e_e700));
+        // The suffix is not a symbol of its own.
+        assert!(s.resolve("(.0)").is_err());
+    }
+
+    #[test]
+    fn two_suffixed_rows_with_one_name_and_two_addresses_are_ambiguous_not_picked() {
+        let mut s = Symbols::default();
+        s.load_text(
+            "801ea4f8 801ea4f8        2     1                 game::T (.0)\n\
+             801ea4fc 801ea4fc        2     1                 game::T (.1)\n",
+        );
+        let error = s.resolve("T").unwrap_err();
+        assert!(error.contains("ambiguous"), "{error}");
+        assert!(
+            error.contains("0x801ea4f8") && error.contains("0x801ea4fc"),
+            "{error}"
+        );
+        let error = s.resolve("game::T").unwrap_err();
+        assert!(
+            error.contains("0x801ea4f8") && error.contains("0x801ea4fc"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn suffixed_rows_at_one_address_are_one_symbol() {
+        let mut s = Symbols::default();
+        s.load_text(
+            "801ea4f8 801ea4f8        2     1                 game::T (.0)\n\
+             801ea4f8 801ea4f8        2     1                 game::T (.1)\n",
+        );
+        assert_eq!(s.resolve("T"), Ok(0x801e_a4f8));
+    }
+
+    #[test]
+    fn a_plain_row_that_collides_with_a_suffixed_one_is_ambiguous() {
+        let mut s = Symbols::default();
+        s.load_text(
+            "801ea4f8 801ea4f8        2     1                 game::T (.0)\n\
+             801ea500 801ea500        2     1                 game::T\n",
+        );
+        assert!(s.resolve("game::T").unwrap_err().contains("ambiguous"));
     }
 }
