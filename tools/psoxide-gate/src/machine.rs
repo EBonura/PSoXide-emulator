@@ -269,7 +269,7 @@ impl Machine {
     }
 
     /// A machine around a CPU and bus that are ready to run, its first tick starting now.
-    fn new(cpu: Cpu, bus: Bus, track_display: bool) -> Machine {
+    pub(crate) fn new(cpu: Cpu, bus: Bus, track_display: bool) -> Machine {
         let period = bus.vblank_period().max(1);
         let deadline = bus.cycles().saturating_add(period);
         let area = bus.gpu.display_area();

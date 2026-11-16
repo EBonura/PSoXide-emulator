@@ -19,7 +19,7 @@ fn badge(s: Status) -> String {
         Status::Fail => "fail",
         Status::XFail => "xfail",
         Status::XPass => "xpass",
-        Status::Skip => "skip",
+        Status::Skip | Status::GoldenSkipped => "skip",
     };
     format!("<span class=\"badge {class}\">{}</span>", s.label())
 }
@@ -200,6 +200,7 @@ fn group_html(out: &mut String, dir_rel: &str, group: &Group, shots: &[(String, 
             (Status::Fail, _) | (_, Status::Fail) => Status::Fail,
             (Status::XPass, _) | (_, Status::XPass) => Status::XPass,
             (Status::XFail, _) | (_, Status::XFail) => Status::XFail,
+            (Status::GoldenSkipped, _) | (_, Status::GoldenSkipped) => Status::GoldenSkipped,
             _ => Status::Pass,
         });
     let _ = write!(

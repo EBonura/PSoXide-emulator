@@ -23,6 +23,9 @@ pub enum Status {
     XPass,
     /// Could not be evaluated for a stated, benign reason.
     Skip,
+    /// A golden compare the journey excludes on the running hardware (`golden_on`). Not a
+    /// pass: it is counted and reported on its own.
+    GoldenSkipped,
 }
 
 impl Status {
@@ -33,11 +36,29 @@ impl Status {
             Status::XFail => "XFAIL",
             Status::XPass => "XPASS",
             Status::Skip => "SKIP",
+            Status::GoldenSkipped => "SKIPPED",
         }
     }
     pub fn is_failure(self) -> bool {
         matches!(self, Status::Fail | Status::XPass)
     }
+}
+
+/// A target spelled as `--hardware` takes it, for messages.
+fn hardware_spec(t: &emulator_core::HardwareTarget) -> String {
+    use emulator_core::hardware_target::{GpuIrqModel, Implementation};
+    let console = match t.implementation {
+        Implementation::Real => return "real".into(),
+        _ => "mister",
+    };
+    let irq = match t.gpu_irq {
+        GpuIrqModel::Reliable => "reliable",
+        GpuIrqModel::Never => "never",
+        GpuIrqModel::Core => "core",
+        GpuIrqModel::Parity => "parity",
+        _ => "exact",
+    };
+    format!("{console},gpu-irq={irq},seed={}", t.seed)
 }
 
 fn checked_assert(name: String, outcome: Result<(bool, String), String>, a: &Assert) -> Check {
@@ -144,6 +165,7 @@ impl JourneyResult {
             (Status::XFail, "xfail"),
             (Status::XPass, "xpass"),
             (Status::Skip, "skip"),
+            (Status::GoldenSkipped, "golden skipped (hardware)"),
         ] {
             let n = self.count(st);
             if n > 0 {
@@ -311,6 +333,8 @@ fn replay_complete(
 struct Run<'a> {
     journey: &'a Journey,
     opts: &'a RunOptions,
+    /// The hardware model this run emulates (`golden_on` is matched against it).
+    hardware: emulator_core::HardwareTarget,
     m: Machine,
     hw: Option<HwSet>,
     syms: Symbols,
@@ -619,6 +643,7 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     let mut run = Run {
         journey,
         opts,
+        hardware: emulator_core::HardwareTarget::from_env(),
         m,
         hw,
         syms,
@@ -1563,13 +1588,25 @@ impl<'a> Run<'a> {
             tick: self.m.ticks,
             capture,
             checks,
-            wants_golden: step.checkpoint.is_some() && step.golden != Some(false),
+            wants_golden: step.checkpoint.is_some()
+                && step.golden != Some(false)
+                && step.golden_applies(&self.hardware),
         });
     }
 
     fn frame_checks(&self, step: &Step, cap: &Capture, checks: &mut Vec<Check>) {
         let exact = Tolerance::EXACT;
-        if step.golden != Some(false) {
+        if step.golden != Some(false) && !step.golden_applies(&self.hardware) {
+            let listed = step.golden_on.as_deref().unwrap_or_default().join(", ");
+            checks.push(Check {
+                name: "golden".into(),
+                status: Status::GoldenSkipped,
+                detail: format!(
+                    "golden_on = [{listed}] does not include the running hardware {}",
+                    hardware_spec(&self.hardware)
+                ),
+            });
+        } else if step.golden != Some(false) {
             let tol = step.tolerance.unwrap_or(exact);
             let check = match &cap.golden {
                 None => Check {
@@ -2133,6 +2170,146 @@ mod tests {
         assert!(replay_complete(Some(2), 2, true, true, false));
         assert!(replay_complete(None, 2, true, false, true));
         assert!(!replay_complete(None, 2, true, false, false));
+    }
+
+    fn run_options(golden_dir: &Path) -> RunOptions {
+        RunOptions {
+            disc: PathBuf::new(),
+            repo_root: PathBuf::new(),
+            golden_dir: golden_dir.to_path_buf(),
+            use_hw: false,
+            scales: None,
+            verbose: false,
+            strict: false,
+            trace_failures: false,
+            trace_state: Vec::new(),
+            trace_checkpoint: Vec::new(),
+            tick_log: None,
+            tick_log_ram: Vec::new(),
+            tick_log_polls: false,
+            fetch_trace: None,
+            audit_pad: false,
+            journey_path: PathBuf::new(),
+            artifact_dir: PathBuf::new(),
+        }
+    }
+
+    /// Run the only checkpoint of `toml_text` on `hardware`, with the word 7 at RAM 0x1000
+    /// and no golden on disk, and return the checks it produced.
+    fn checkpoint_checks(toml_text: &str, hardware: &str) -> Vec<Check> {
+        use emulator_core::{Bus, Cpu};
+        let j = journey(toml_text);
+        let dir = tempfile::tempdir().unwrap();
+        let opts = run_options(dir.path());
+        let mut bus = Bus::new_without_bios();
+        bus.write32(0x1000, 7);
+        let mut run = Run {
+            journey: &j,
+            opts: &opts,
+            hardware: emulator_core::HardwareTarget::from_spec(hardware).unwrap(),
+            m: Machine::new(Cpu::new(), bus, false),
+            hw: None,
+            syms: Symbols::default(),
+            trace: None,
+            groups: Vec::new(),
+            shots: Default::default(),
+            initial_card: Vec::new(),
+            cards: Vec::new(),
+            notes: Vec::new(),
+            exprs: Default::default(),
+            deadlines: Deadlines::new(),
+            expired: None,
+            loops: Vec::new(),
+        };
+        run.checkpoint(0, &j.steps[0]);
+        run.groups.remove(0).checks
+    }
+
+    fn status_of(checks: &[Check], name: &str) -> Vec<Status> {
+        checks
+            .iter()
+            .filter(|c| c.name.starts_with(name))
+            .map(|c| c.status)
+            .collect()
+    }
+
+    const FILTERED: &str =
+        "name = 'g'\n[[step]]\ncheckpoint = 'c'\ngolden_on = ['real', 'mister']\n\
+                            [[step.assert]]\nkind = 'ram'\naddr = 0x1000\nop = 'eq'\nvalue = 7\n";
+
+    #[test]
+    fn a_filtered_golden_is_skipped_by_name_and_the_asserts_still_run() {
+        let checks = checkpoint_checks(FILTERED, "mister,gpu-irq=never");
+        assert_eq!(status_of(&checks, "golden"), [Status::GoldenSkipped]);
+        let skip = checks.iter().find(|c| c.name == "golden").unwrap();
+        assert!(
+            skip.detail.contains("mister,gpu-irq=never"),
+            "{}",
+            skip.detail
+        );
+        // The state assert ran, and passed.
+        assert_eq!(status_of(&checks, "ram"), [Status::Pass]);
+    }
+
+    #[test]
+    fn a_listed_model_still_compares_the_golden() {
+        // No golden file on disk: the compare ran and failed, it was not skipped.
+        for hardware in ["real", "mister"] {
+            let checks = checkpoint_checks(FILTERED, hardware);
+            assert_eq!(status_of(&checks, "golden"), [Status::Fail], "{hardware}");
+        }
+        // Without the field, every model compares.
+        let plain = FILTERED.replace("golden_on = ['real', 'mister']\n", "");
+        let checks = checkpoint_checks(&plain, "mister,gpu-irq=never");
+        assert_eq!(status_of(&checks, "golden"), [Status::Fail]);
+    }
+
+    #[test]
+    fn a_failing_state_assert_in_a_filtered_step_still_fails() {
+        let bad = FILTERED.replace("value = 7", "value = 8");
+        let checks = checkpoint_checks(&bad, "mister,gpu-irq=never");
+        assert_eq!(status_of(&checks, "golden"), [Status::GoldenSkipped]);
+        assert_eq!(status_of(&checks, "ram"), [Status::Fail]);
+        assert!(checks.iter().any(|c| c.status.is_failure()));
+    }
+
+    #[test]
+    fn a_skip_is_counted_apart_and_never_a_pass() {
+        let checks = checkpoint_checks(FILTERED, "mister,gpu-irq=never");
+        let result = JourneyResult {
+            name: "g".into(),
+            title: "g".into(),
+            disc: PathBuf::new(),
+            disc_id: "-".into(),
+            groups: vec![Group {
+                name: "c".into(),
+                label: None,
+                tick: 0,
+                capture: None,
+                checks,
+                wants_golden: false,
+            }],
+            abort: None,
+            ticks: 0,
+            emu_secs: 0.0,
+            wall: Duration::ZERO,
+            hw_adapter: None,
+            notes: Vec::new(),
+            cards: Vec::new(),
+            gp0_irq_commands: Some(0),
+            receipt: crate::receipt::State::Off,
+        };
+        assert!(result.passed());
+        assert_eq!(result.count(Status::Pass), 1);
+        assert!(
+            result
+                .summary()
+                .contains("2 checks: 1 pass, 0 fail, 1 golden skipped (hardware)"),
+            "{}",
+            result.summary()
+        );
+        // A result with a skipped golden stands for no other model.
+        assert!(!crate::receipt::model_equivalent(&result));
     }
 
     #[test]

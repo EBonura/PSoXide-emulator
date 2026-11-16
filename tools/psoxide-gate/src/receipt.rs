@@ -396,8 +396,13 @@ fn build_id() -> Result<String, String> {
 
 /// Whether the second hardware model can take the first one's result: it passed and the guest
 /// never issued GP0(1Fh), the only command the models treat differently.
+///
+/// A result with a golden compare skipped by `golden_on` stands for no other model: the picture
+/// was never judged here, so the second model must look at it itself.
 pub fn model_equivalent(first: &JourneyResult) -> bool {
-    first.passed() && first.gp0_irq_commands == Some(0)
+    first.passed()
+        && first.gp0_irq_commands == Some(0)
+        && first.count(crate::exec::Status::GoldenSkipped) == 0
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ` for a Unix time (proleptic Gregorian, UTC).

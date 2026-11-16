@@ -228,6 +228,24 @@ Steps are tables, run in order:
 - **Checkpoint.** `checkpoint = "name"` captures the frame and runs the step's
   asserts. `golden = false` skips the golden comparison (animated or
   timing-dependent frames still get liveness and matrix checks).
+- **Golden on some hardware only.** `golden_on = ["real", "mister"]` on a checkpoint compares
+  the golden only on those hardware models, spelled as `--hardware` spells them. Absent means
+  every model. On any other model the golden compare is skipped; the step still waits,
+  presses and runs every assert, and the render matrix still runs (it compares the renderers
+  with each other, not with the golden). Each skipped golden prints a `SKIPPED` line naming
+  the journey, the checkpoint and the reason, and the summary line counts them apart from
+  passes: `82 checks: 80 pass, 0 fail, 2 golden skipped (hardware)`. A skip is never a pass.
+  A listed name is parsed like a `--hardware` spec and the whole model is compared (console,
+  `gpu-irq`, `seed`; `trace` is ignored), so aliases match (`fpga` is `mister`) and plain
+  `mister` means `mister,gpu-irq=exact` only: it does not cover `mister,gpu-irq=never`,
+  which must be written out. An unknown name, an empty list, or `golden = false` beside it is
+  a parse error. `bless` runs on `real` and writes a golden only for a checkpoint whose list
+  includes `real`.
+
+  **When it may be used:** only when the picture is proven unreachable on that model (for
+  example a core that presents the scene at a parity the golden was not built at), never to
+  hide a difference that is a bug. Name the proof in a comment next to the field. If the
+  difference is a program fault, fix the program or leave the failure visible.
 - **Asserts.** `[[step.assert]]` tables, also usable on a step with no
   checkpoint.
 

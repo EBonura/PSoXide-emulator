@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use emulator_core::HardwareTarget;
+
 use crate::img::{Rect, Tolerance};
 
 #[derive(Debug, Deserialize)]
@@ -272,6 +274,12 @@ pub struct Step {
     /// Compare the CPU frame with the committed golden (default true).
     #[serde(default)]
     pub golden: Option<bool>,
+    /// Hardware models on which the golden is compared, spelled as `--hardware` spells them
+    /// (`["real", "mister"]`). Absent: every model. On any other model the golden compare is
+    /// skipped and reported as SKIPPED; waits, input and every assert still run. See
+    /// `Step::golden_applies` for how a model with options is matched.
+    #[serde(default)]
+    pub golden_on: Option<Vec<String>>,
     #[serde(default)]
     pub tolerance: Option<Tolerance>,
     /// Regions ignored by every frame comparison (clocks, random sparks).
@@ -698,6 +706,7 @@ impl Step {
         }
         if self.checkpoint.is_none()
             && (self.golden.is_some()
+                || self.golden_on.is_some()
                 || self.tolerance.is_some()
                 || !self.mask.is_empty()
                 || !self.strict.is_empty()
@@ -706,9 +715,11 @@ impl Step {
                 || self.no_matrix)
         {
             return Err(
-                "golden/tolerance/mask/strict/no_matrix only apply to a checkpoint step".into(),
+                "golden/golden_on/tolerance/mask/strict/no_matrix only apply to a checkpoint step"
+                    .into(),
             );
         }
+        self.validate_golden_on()?;
         if self.hold.is_some() && !self.has_input() {
             return Err("`hold` needs press, lstick or rstick".into());
         }
@@ -838,6 +849,49 @@ impl Step {
             a.validate()?;
         }
         Ok(())
+    }
+}
+
+/// Whether two targets are the same model: same console, same GP0(1Fh) model, same seed.
+/// `trace=N` only prints diagnostics, so it does not make a different model.
+fn same_model(a: &HardwareTarget, b: &HardwareTarget) -> bool {
+    (a.implementation, a.gpu_irq, a.seed) == (b.implementation, b.gpu_irq, b.seed)
+}
+
+impl Step {
+    /// `golden_on` rules: only with a golden, non-empty, every name a valid `--hardware` spec.
+    fn validate_golden_on(&self) -> Result<(), String> {
+        let Some(list) = &self.golden_on else {
+            return Ok(());
+        };
+        if self.golden == Some(false) {
+            return Err("`golden_on` contradicts `golden = false`".into());
+        }
+        if list.is_empty() {
+            return Err("`golden_on` is empty: it would skip the golden everywhere; use `golden = false` for that".into());
+        }
+        for spec in list {
+            if spec.trim().is_empty() {
+                return Err("`golden_on` names an empty hardware model".into());
+            }
+            HardwareTarget::from_spec(spec).map_err(|e| format!("golden_on: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Whether the golden compare runs on `running`. Always true without `golden_on`.
+    ///
+    /// Each listed name is parsed like a `--hardware` spec and the models are compared whole
+    /// (console, `gpu-irq`, `seed`), so aliases match (`fpga` is `mister`) and a plain
+    /// `mister` means `mister,gpu-irq=exact` only: it does NOT cover `mister,gpu-irq=never`,
+    /// which must be listed by its full spelling. A skip is therefore always written out.
+    pub fn golden_applies(&self, running: &HardwareTarget) -> bool {
+        match &self.golden_on {
+            None => true,
+            Some(list) => list.iter().any(|spec| {
+                HardwareTarget::from_spec(spec).is_ok_and(|listed| same_model(&listed, running))
+            }),
+        }
     }
 }
 
@@ -1472,5 +1526,74 @@ mod sync_tests {
         assert!(parse("name = 'p'\n[[block]]\nname = 'b'\n[[block.step]]\nwait = 1\n[[step]]\nsync = 'poll'\nblock = 'b'\n")
             .unwrap_err()
             .contains("not on a block"));
+    }
+}
+
+#[cfg(test)]
+mod golden_on_tests {
+    use super::*;
+
+    fn parse(text: &str) -> Result<Journey, String> {
+        let j: Journey = toml::from_str(text).map_err(|e| e.to_string())?;
+        j.validate()?;
+        Ok(j)
+    }
+
+    fn step(extra: &str) -> Step {
+        let j = parse(&format!(
+            "name = 'g'\n[[step]]\ncheckpoint = 'c'\n{extra}\n"
+        ))
+        .unwrap();
+        j.steps.into_iter().next().unwrap()
+    }
+
+    fn on(spec: &str) -> HardwareTarget {
+        HardwareTarget::from_spec(spec).unwrap()
+    }
+
+    #[test]
+    fn absent_means_every_model() {
+        let s = step("");
+        assert!(s.golden_on.is_none());
+        for spec in ["real", "mister", "mister,gpu-irq=never"] {
+            assert!(s.golden_applies(&on(spec)), "{spec}");
+        }
+    }
+
+    #[test]
+    fn a_listed_model_compares_and_the_others_skip() {
+        let s = step("golden_on = ['real', 'mister']");
+        assert!(s.golden_applies(&on("real")));
+        assert!(s.golden_applies(&on("mister")));
+        // Aliases and the spelled-out default are the same model.
+        assert!(s.golden_applies(&on("fpga")));
+        assert!(s.golden_applies(&on("mister,gpu-irq=exact,trace=5")));
+        // A model with options is a different model unless written out.
+        assert!(!s.golden_applies(&on("mister,gpu-irq=never")));
+        assert!(!s.golden_applies(&on("mister,seed=2")));
+        let s = step("golden_on = ['mister,gpu-irq=never']");
+        assert!(s.golden_applies(&on("mister,gpu-irq=never")));
+        assert!(!s.golden_applies(&on("mister")));
+        assert!(!s.golden_applies(&on("real")));
+    }
+
+    #[test]
+    fn bad_lists_are_parse_errors() {
+        let err = |extra: &str| {
+            parse(&format!(
+                "name = 'g'\n[[step]]\ncheckpoint = 'c'\n{extra}\n"
+            ))
+            .unwrap_err()
+        };
+        assert!(err("golden_on = ['amiga']").contains("golden_on"));
+        assert!(err("golden_on = ['mister,gpu-irq=sometimes']").contains("golden_on"));
+        assert!(err("golden_on = []").contains("empty"));
+        assert!(err("golden_on = ['']").contains("empty"));
+        assert!(err("golden = false\ngolden_on = ['real']").contains("contradicts"));
+        assert!(
+            parse("name = 'g'\n[[step]]\nwait = 1\ngolden_on = ['real']\n")
+                .unwrap_err()
+                .contains("checkpoint")
+        );
     }
 }

@@ -675,7 +675,12 @@ fn print_failures(r: &JourneyResult, all: bool) {
     }
     for g in &r.groups {
         for c in &g.checks {
-            if all || matches!(c.status, Status::Fail | Status::XPass) {
+            if all
+                || matches!(
+                    c.status,
+                    Status::Fail | Status::XPass | Status::GoldenSkipped
+                )
+            {
                 println!(
                     "  {}  {}/{}: {}: {}",
                     c.status.label(),
