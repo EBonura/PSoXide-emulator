@@ -135,8 +135,8 @@ Evidence:
   channel wait for the request (PSn00bSDK `libpsn00b/psxpress/mdec.c`:
   `DecDCTPutEnv` and `DecDCTin` write `MDEC0`, then `DecDCTinRaw` starts the
   channel; `DecDCTinSync` polls bit 29 before the next command, never bit 28).
-  With the trace below, five commercial discs that play movies read the status
-  register between such a command and its DMA0 kick 0 times.
+  Ten commercial discs that play movies read the status register between such
+  a command and its DMA0 kick 0 times (below).
 - The SDK's FMV player waited on bit 28 after each table command and, when it
   never rose, refused to play: no movie of a game built on it started on either
   emulator. The SDK now starts DMA0 straight after the command (`psx-fmv`
@@ -154,14 +154,16 @@ Crash Bandicoot, CTR, WipEout, Gran Turismo 2, Final Fantasy IX, Metal Gear
 Solid, Soul Reaver, Nightmare Creatures. Only boot, title and attract code ran;
 in-game code paths are not covered by that sample.
 
-For `mdec-status-before-feed`, 90 seconds from boot with no input, the discs
-that played a movie in that time (MDEC commands with parameters in brackets):
-Chrono Cross (853), Final Fantasy IX (742), Resident Evil 3 (234), Spider-Man
-(237), WipEout (1,546). Every one read the status register 0 times between a
-command and its DMA0 kick and wrote no parameter word from the CPU (Resident
-Evil 3 read the status register about 4.5 million times, all outside that
-span). Crash Bandicoot, Metal Gear Solid and Valkyrie Profile drove no MDEC in
-that time.
+For `mdec-status-before-feed`, with `--conformance`, 90 seconds from boot with
+no input, the discs that drove the MDEC in that time are clean (MDEC commands
+with parameters in brackets): Chrono Cross (853), Final Fantasy IX (742),
+Formula One 2001 (685), Gran Turismo 2 (1,895), Marvel vs. Capcom (145),
+Nightmare Creatures (1,283), Resident Evil 3 (234), Soul Reaver (459),
+Spider-Man (237), WipEout (1,546). A trace of every MDEC access on five of them
+also showed no parameter word written by the CPU (Resident Evil 3 read the
+status register about 4.5 million times, all outside the span). Crash
+Bandicoot, CTR, Metal Gear Solid and Valkyrie Profile drove no MDEC in that
+time.
 
 ## Considered and left out
 
