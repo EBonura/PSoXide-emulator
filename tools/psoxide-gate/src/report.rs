@@ -469,6 +469,8 @@ mod tests {
             notes: Vec::new(),
             cards: Vec::new(),
             gp0_irq_commands: None,
+            conformance: None,
+            cd_acknowledges: None,
             receipt: crate::receipt::State::Off,
         };
         let index = write_report(

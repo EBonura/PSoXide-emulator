@@ -46,9 +46,13 @@ impl Status {
 
 /// A target spelled as `--hardware` takes it, for messages.
 fn hardware_spec(t: &emulator_core::HardwareTarget) -> String {
-    use emulator_core::hardware_target::{GpuIrqModel, Implementation};
+    use emulator_core::hardware_target::{CdAckModel, GpuIrqModel, Implementation};
+    let cd_ack = match t.cd_ack {
+        CdAckModel::Any => "",
+        _ => ",cd-ack=strict",
+    };
     let console = match t.implementation {
-        Implementation::Real => return "real".into(),
+        Implementation::Real => return format!("real{cd_ack}"),
         _ => "mister",
     };
     let irq = match t.gpu_irq {
@@ -58,7 +62,7 @@ fn hardware_spec(t: &emulator_core::HardwareTarget) -> String {
         GpuIrqModel::Parity => "parity",
         _ => "exact",
     };
-    format!("{console},gpu-irq={irq},seed={}", t.seed)
+    format!("{console},gpu-irq={irq}{cd_ack},seed={}", t.seed)
 }
 
 fn checked_assert(name: String, outcome: Result<(bool, String), String>, a: &Assert) -> Check {
@@ -134,6 +138,11 @@ pub struct JourneyResult {
     /// GP0(1Fh) commands the guest issued: the one command the hardware target changes.
     /// `None` when the journey did not run to a count (an abort before boot).
     pub gp0_irq_commands: Option<u64>,
+    /// The conformance check's rules the guest broke (docs/conformance.md); empty when it
+    /// broke none, `None` when the journey did not run to a count.
+    pub conformance: Option<Vec<ConformanceHit>>,
+    /// CD-ROM acknowledges the guest wrote, broken rule or not (`None`: not counted).
+    pub cd_acknowledges: Option<u64>,
     /// Where the verdict came from (see `receipt`).
     pub receipt: crate::receipt::State,
 }
@@ -187,6 +196,107 @@ impl JourneyResult {
         }
         s
     }
+
+    /// The conformance line: `CONFORMANCE <name> clean`, or each rule broken with its count
+    /// and first guest PC. `None` when there is nothing to say (no count, or clean and not
+    /// asked for).
+    pub fn conformance_line(&self, asked: bool) -> Option<String> {
+        let hits = self.conformance.as_ref()?;
+        let context = match (self.cd_acknowledges, self.gp0_irq_commands) {
+            (Some(acks), Some(gp0)) => format!(" ({acks} CD acknowledges, {gp0} GP0(1Fh))"),
+            _ => String::new(),
+        };
+        if hits.is_empty() {
+            return asked.then(|| format!("CONFORMANCE {} clean{context}", self.name));
+        }
+        let rules: Vec<String> = hits.iter().map(ConformanceHit::describe).collect();
+        Some(format!(
+            "CONFORMANCE {} {}{context}",
+            self.name,
+            rules.join("; ")
+        ))
+    }
+
+    /// CD acknowledge conformance hits, or `None` when uncounted.
+    pub fn cd_ack_hits(&self) -> Option<u64> {
+        let hits = self.conformance.as_ref()?;
+        Some(
+            hits.iter()
+                .filter(|h| h.rule.is_cd_ack())
+                .map(|h| h.hits)
+                .sum(),
+        )
+    }
+}
+
+/// One conformance rule the guest broke in a run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConformanceHit {
+    pub rule: emulator_core::conformance::Rule,
+    pub hits: u64,
+    pub first_pc: Option<u32>,
+    /// The symbol at or below `first_pc` and the offset into it, when the map has one.
+    pub symbol: Option<(String, u32)>,
+}
+
+impl ConformanceHit {
+    /// `rule=N first at 0x80012340 (psx_io::cd::ack_irq+0x10)`.
+    pub fn describe(&self) -> String {
+        let at = match (self.first_pc, &self.symbol) {
+            (Some(pc), Some((name, 0))) => format!("{pc:#010x} ({name})"),
+            (Some(pc), Some((name, off))) => format!("{pc:#010x} ({name}+{off:#x})"),
+            (Some(pc), None) => format!("{pc:#010x}"),
+            (None, _) => "unknown pc".to_string(),
+        };
+        format!("{}={} first at {at}", self.rule.id(), self.hits)
+    }
+}
+
+/// The rules of `report` that were broken, with their first PCs looked up in `syms`.
+fn conformance_hits(
+    report: &emulator_core::conformance::Report,
+    syms: &Symbols,
+) -> Vec<ConformanceHit> {
+    report
+        .hits()
+        .map(|f| ConformanceHit {
+            rule: f.rule,
+            hits: f.hits,
+            first_pc: f.first_pc,
+            symbol: f.first_pc.and_then(|pc| syms.nearest(pc)),
+        })
+        .collect()
+}
+
+/// The `--conformance` group: one check per rule, failed when the guest broke it.
+fn conformance_group(hits: &[ConformanceHit], tick: u64) -> Group {
+    use emulator_core::conformance::Rule;
+    let checks = Rule::ALL
+        .iter()
+        .map(|&rule| {
+            let hit = hits.iter().find(|h| h.rule == rule);
+            Check {
+                name: rule.id().into(),
+                status: if hit.is_some() {
+                    Status::Fail
+                } else {
+                    Status::Pass
+                },
+                detail: hit.map_or_else(
+                    || format!("never: {}", rule.summary()),
+                    |h| format!("{}: {}", h.describe(), rule.summary()),
+                ),
+            }
+        })
+        .collect();
+    Group {
+        name: "conformance".into(),
+        label: None,
+        tick,
+        capture: None,
+        checks,
+        wants_golden: false,
+    }
 }
 
 pub struct RunOptions {
@@ -210,6 +320,8 @@ pub struct RunOptions {
     pub fetch_trace: Option<(PathBuf, u64, u64)>,
     /// Check every pad poll for a torn read (see `Machine::pad_audit`).
     pub audit_pad: bool,
+    /// Fail the journey when the guest breaks a conformance rule (`--conformance`).
+    pub conformance: bool,
     pub journey_path: PathBuf,
     pub artifact_dir: PathBuf,
 }
@@ -522,6 +634,8 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         notes: Vec::new(),
         cards: Vec::new(),
         gp0_irq_commands: None,
+        conformance: None,
+        cd_acknowledges: None,
         receipt: crate::receipt::State::Off,
     };
     let scales = opts
@@ -674,6 +788,13 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     result.ticks = run.m.ticks;
     result.emu_secs = run.m.ticks as f64 / 60.0;
     result.gp0_irq_commands = Some(run.m.bus.gpu.gp0_irq_command_count());
+    let report = run.m.bus.conformance_report();
+    result.cd_acknowledges = Some(report.cd_acknowledges);
+    let hits = conformance_hits(&report, &run.syms);
+    if opts.conformance {
+        run.groups.push(conformance_group(&hits, run.m.ticks));
+    }
+    result.conformance = Some(hits);
     result.groups = run.groups;
     result.wall = start.elapsed();
     result
@@ -2189,6 +2310,7 @@ mod tests {
             tick_log_polls: false,
             fetch_trace: None,
             audit_pad: false,
+            conformance: false,
             journey_path: PathBuf::new(),
             artifact_dir: PathBuf::new(),
         }
@@ -2297,6 +2419,8 @@ mod tests {
             notes: Vec::new(),
             cards: Vec::new(),
             gp0_irq_commands: Some(0),
+            conformance: Some(Vec::new()),
+            cd_acknowledges: None,
             receipt: crate::receipt::State::Off,
         };
         assert!(result.passed());
@@ -2310,6 +2434,84 @@ mod tests {
         );
         // A result with a skipped golden stands for no other model.
         assert!(!crate::receipt::model_equivalent(&result));
+    }
+
+    #[test]
+    fn conformance_hits_print_and_fail_only_when_asked() {
+        use emulator_core::conformance::{Finding, Report, Rule};
+        let mut syms = Symbols::default();
+        syms.insert("psx_io::cd::ack_irq", 0x8001_0000);
+        syms.insert("psx_io::cd::other", 0x8001_0100);
+        let report = Report {
+            findings: vec![
+                Finding {
+                    rule: Rule::CdAckPartial,
+                    hits: 12,
+                    first_pc: Some(0x8001_0018),
+                },
+                Finding {
+                    rule: Rule::CdAckWithParamReset,
+                    hits: 0,
+                    first_pc: None,
+                },
+                Finding {
+                    rule: Rule::GpuIrqCommand,
+                    hits: 1,
+                    first_pc: None,
+                },
+            ],
+            cd_acknowledges: 40,
+        };
+        let hits = conformance_hits(&report, &syms);
+        assert_eq!(hits.len(), 2);
+        let mut result = aborted_for_test();
+        result.conformance = Some(hits.clone());
+        let line = result.conformance_line(false).expect("hits always print");
+        assert_eq!(
+            line,
+            "CONFORMANCE fx cd-ack-partial=12 first at 0x80010018 (psx_io::cd::ack_irq+0x18); \
+             gpu-irq-command=1 first at unknown pc"
+        );
+        assert_eq!(result.cd_ack_hits(), Some(12));
+        let group = conformance_group(&hits, 5);
+        let failed: Vec<&str> = group
+            .checks
+            .iter()
+            .filter(|c| c.status == Status::Fail)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(failed, ["cd-ack-partial", "gpu-irq-command"]);
+        result.conformance = Some(Vec::new());
+        assert_eq!(result.conformance_line(false), None);
+        assert_eq!(
+            result.conformance_line(true).as_deref(),
+            Some("CONFORMANCE fx clean")
+        );
+        assert!(conformance_group(&[], 5)
+            .checks
+            .iter()
+            .all(|c| c.status == Status::Pass));
+    }
+
+    fn aborted_for_test() -> JourneyResult {
+        JourneyResult {
+            name: "fx".into(),
+            title: "fx".into(),
+            disc: PathBuf::new(),
+            disc_id: String::new(),
+            groups: Vec::new(),
+            abort: None,
+            ticks: 0,
+            emu_secs: 0.0,
+            wall: Duration::ZERO,
+            hw_adapter: None,
+            notes: Vec::new(),
+            cards: Vec::new(),
+            gp0_irq_commands: Some(0),
+            conformance: None,
+            cd_acknowledges: None,
+            receipt: crate::receipt::State::Off,
+        }
     }
 
     #[test]

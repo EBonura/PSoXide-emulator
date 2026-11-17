@@ -144,6 +144,12 @@ struct RunArgs {
     /// fail the journey if there is one. Needs a single target. A step with `sync = "poll"` cannot tear.
     #[arg(long)]
     audit_pad: bool,
+    /// Fail a journey whose guest broke a conformance rule: something commercial software
+    /// never does and another emulator or console revision does not accept (a CD interrupt
+    /// acknowledge other than 07h/1Fh, GP0(1Fh); docs/conformance.md). Without the flag the
+    /// hits are only printed (`CONFORMANCE` lines).
+    #[arg(long)]
+    conformance: bool,
     /// Entry state the boot hands each program: `default`, `openbios` or
     /// `hostile[:SEED]`, with `,skip=CATEGORY` and `,dpcr=`/`,dicr=`/`,imask=`
     /// options (docs/entry-states.md). Same as `PSOXIDE_ENTRY_STATE`. A
@@ -406,6 +412,7 @@ struct Opts {
     tick_log_polls: bool,
     fetch_trace: Option<(PathBuf, u64, u64)>,
     audit_pad: bool,
+    conformance: bool,
     out: PathBuf,
     receipts: Option<ReceiptMode>,
 }
@@ -451,6 +458,7 @@ impl Opts {
             tick_log_polls: a.tick_log_polls,
             fetch_trace,
             audit_pad: a.audit_pad,
+            conformance: a.conformance,
             out: a.out.clone(),
             receipts: a.receipts.as_deref().map(|dir| ReceiptMode {
                 store: receipt::Store::new(dir),
@@ -526,6 +534,7 @@ fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
             tick_log_polls: o.tick_log_polls,
             fetch_trace: o.fetch_trace.clone(),
             audit_pad: o.audit_pad,
+            conformance: o.conformance,
             journey_path: job.journey_path.clone(),
             artifact_dir: o.out.join(&journey.name).join("cards"),
         },
@@ -563,6 +572,7 @@ fn receipt_key(
         flag("trace-state", format!("{:?}", o.trace_state)),
         flag("trace-checkpoint", format!("{:?}", o.trace_checkpoint)),
         flag("audit-pad", o.audit_pad.to_string()),
+        flag("conformance", o.conformance.to_string()),
         flag("entry-state", emulator_core::EntryState::from_env().spec()),
         flag(
             "hardware",
@@ -592,6 +602,9 @@ fn receipt_hit(journey: &Journey, disc: &Path, kept: &receipt::Receipt) -> Journ
     r.ticks = kept.ticks;
     r.emu_secs = kept.emu_secs;
     r.gp0_irq_commands = Some(kept.gp0_1f);
+    // The receipt keeps only the CD acknowledge count; a clean one is clean of those rules,
+    // which is all `model_equivalent` asks. Anything else stays uncounted.
+    r.conformance = (kept.cd_ack == 0).then(Vec::new);
     r.receipt = receipt::State::Hit;
     r.notes.push(
         "receipt hit: not played, so no frames, cards or traces were written for it here; \
@@ -665,6 +678,8 @@ fn aborted(name: &str, why: String) -> JourneyResult {
         notes: Vec::new(),
         cards: Vec::new(),
         gp0_irq_commands: None,
+        conformance: None,
+        cd_acknowledges: None,
         receipt: receipt::State::Off,
     }
 }
@@ -812,6 +827,9 @@ fn play(jobs: &[&Job], fleet: &Fleet, opts: &Opts, threads: usize) -> Vec<Journe
                 let Some(job) = jobs.get(i) else { break };
                 let r = run_planned(job, fleet, opts);
                 println!("{}", r.summary());
+                if let Some(line) = r.conformance_line(opts.conformance) {
+                    println!("{line}");
+                }
                 print_failures(&r, opts.verbose);
                 *slots[i].lock().expect("slot") = Some(r);
             });
@@ -906,6 +924,7 @@ fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
         tick_log_polls: false,
         fetch_trace: None,
         audit_pad: false,
+        conformance: false,
         out: a.out.clone(),
         receipts: None,
     };

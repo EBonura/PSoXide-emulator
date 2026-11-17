@@ -36,6 +36,9 @@
 
 use std::collections::VecDeque;
 
+use crate::conformance::{cd_ack_rule, Tally};
+use crate::hardware_target::{CdAckModel, HardwareTarget};
+
 use psx_iso::{bcd_to_bin, msf_to_lba, Disc};
 
 mod idle;
@@ -244,6 +247,14 @@ pub struct CdRom {
     /// Drive workload counters. Diagnostic only.
     #[serde(skip)]
     work: CdWorkCounters,
+    /// Interrupt acknowledge model (`PSOXIDE_HARDWARE` `cd-ack=`); read from
+    /// the environment, never saved.
+    #[serde(skip, default = "ack_model_from_env")]
+    ack_model: CdAckModel,
+    /// Conformance hits of the CD acknowledge rules (`crate::conformance`).
+    /// Diagnostic only, excluded from save states.
+    #[serde(skip)]
+    pub(crate) conformance: Tally,
     /// Index register low 2 bits -- selects the register visible at
     /// each sub-port for the next read/write.
     index: u8,
@@ -591,6 +602,8 @@ impl CdRom {
     /// before the BIOS has had a chance to write anything.
     pub fn new() -> Self {
         Self {
+            ack_model: ack_model_from_env(),
+            conformance: Tally::default(),
             index: 0,
             limit_fast_reads: false,
             // Cold boot: on a closed shell with no disc seated, we
@@ -1210,7 +1223,21 @@ impl CdRom {
             // 0x1F80_1803 idx=1 -- acknowledge interrupts (write-1-to-
             // clear on the low 5 bits; bit 6 resets the param FIFO too).
             (3, 1) => {
-                self.irq_flag &= !(value & 0x1f);
+                if value & 0x1f != 0 {
+                    self.conformance.checked();
+                }
+                let broken = cd_ack_rule(value, self.irq_flag);
+                if let Some(rule) = broken {
+                    self.conformance.hit(rule);
+                }
+                // `cd-ack=strict`: a write commercial code never makes clears
+                // nothing (the parameter reset below still applies).
+                let ack = if broken.is_some() && self.ack_model == CdAckModel::Strict {
+                    0
+                } else {
+                    value & 0x1f
+                };
+                self.irq_flag &= !ack;
                 if self.irq_flag == 0 && self.deferred_data_ready && self.reading {
                     self.deferred_data_ready = false;
                     self.insert_pending_event(PendingEvent {
@@ -3021,6 +3048,16 @@ xa_filter=({},{}) sched_cycle={} read_lba={} now={} pending=[{}]",
         self.data_fifo_ready = ready;
         self.data_transfer_active = armed;
     }
+
+    #[cfg(test)]
+    pub(crate) fn debug_set_irq_flag(&mut self, flags: u8) {
+        self.irq_flag = flags;
+    }
+}
+
+/// The CD acknowledge model `PSOXIDE_HARDWARE` names.
+fn ack_model_from_env() -> CdAckModel {
+    HardwareTarget::from_env().cd_ack
 }
 
 impl Default for CdRom {

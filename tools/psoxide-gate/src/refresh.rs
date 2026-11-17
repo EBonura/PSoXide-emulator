@@ -186,7 +186,7 @@ pub fn run(manifest: &Path, out: &Path) -> Result<(), String> {
         let entry=results.entry(r.game.clone()).or_insert_with(||JourneyResult {
             name:r.game.clone(),title:r.title.clone(),disc:r.bin.clone(),disc_id:r.bin_sha256.clone(),
             groups:Vec::new(),abort:None,ticks:0,emu_secs:0.0,wall:std::time::Duration::ZERO,
-            hw_adapter:None,notes:vec!["Report refresh from hash-verified raw captures. Acceptance verdicts remain in the original report; this refresh makes no new gameplay or tolerance acceptance claim.".into()],cards:Vec::new(),gp0_irq_commands:None,receipt:crate::receipt::State::Off,
+            hw_adapter:None,notes:vec!["Report refresh from hash-verified raw captures. Acceptance verdicts remain in the original report; this refresh makes no new gameplay or tolerance acceptance claim.".into()],cards:Vec::new(),gp0_irq_commands:None,conformance:None,cd_acknowledges:None,receipt:crate::receipt::State::Off,
         });
         if entry.disc_id != r.bin_sha256 {
             return Err(format!("{} combines different BIN identities", r.game));

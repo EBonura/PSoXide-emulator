@@ -201,6 +201,50 @@ fn irq_ack_clears_only_written_bits() {
     assert_eq!(cd.irq_flag, 0x1b);
 }
 
+/// Write `value` to the interrupt flag register with `flags` pending and return what is left.
+fn acknowledge(cd: &mut CdRom, flags: u8, value: u8) -> u8 {
+    cd.irq_flag = flags;
+    cd.write8(BASE, 1);
+    cd.write8(BASE + 3, value);
+    cd.irq_flag
+}
+
+#[test]
+fn any_acknowledge_clears_and_counts_the_conformance_rules() {
+    use crate::conformance::Rule;
+    let mut cd = CdRom::new();
+    assert_eq!(cd.ack_model, CdAckModel::Any);
+    // The console clears what is written, whatever the value.
+    assert_eq!(acknowledge(&mut cd, 0x03, 0x03), 0);
+    assert_eq!(acknowledge(&mut cd, 0x03, 0x01), 0x02);
+    assert_eq!(acknowledge(&mut cd, 0x05, 0x5f), 0);
+    assert_eq!(acknowledge(&mut cd, 0x03, 0x07), 0);
+    assert_eq!(acknowledge(&mut cd, 0x02, 0x1f), 0);
+    assert_eq!(acknowledge(&mut cd, 0x00, 0x40), 0);
+    assert_eq!(cd.conformance.hits(Rule::CdAckPartial), 2);
+    assert_eq!(cd.conformance.hits(Rule::CdAckWithParamReset), 1);
+    assert_eq!(cd.conformance.hits(Rule::GpuIrqCommand), 0);
+    assert_eq!(cd.conformance.checked_count(), 5);
+}
+
+#[test]
+fn strict_acknowledge_ignores_what_commercial_code_never_writes() {
+    let mut cd = CdRom::new();
+    cd.ack_model = CdAckModel::Strict;
+    assert_eq!(acknowledge(&mut cd, 0x03, 0x03), 0x03);
+    assert_eq!(acknowledge(&mut cd, 0x13, 0x01), 0x13);
+    // 5Fh still resets the parameters, as on PCSX-Redux, but acknowledges nothing.
+    cd.params.push_back(9);
+    assert_eq!(acknowledge(&mut cd, 0x03, 0x5f), 0x03);
+    assert!(cd.params.is_empty());
+    // What commercial code writes works as on the console.
+    assert_eq!(acknowledge(&mut cd, 0x03, 0x07), 0);
+    assert_eq!(acknowledge(&mut cd, 0x13, 0x1f), 0);
+    assert_eq!(acknowledge(&mut cd, 0x18, 0x18), 0);
+    // With nothing pending a partial value breaks no rule and clears as written.
+    assert_eq!(acknowledge(&mut cd, 0x10, 0x13), 0);
+}
+
 #[test]
 fn cold_boot_is_closed_lid_no_disc() {
     // Cold boot state for "Please insert disc" path: lid closed

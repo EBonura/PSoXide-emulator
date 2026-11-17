@@ -8,10 +8,22 @@ fix checked here. Nothing changes under `real`.
 Select with `--hardware SPEC` on `psoxide-emulator` (GUI and every subcommand)
 and `psoxide-gate run`, or with `PSOXIDE_HARDWARE=SPEC`:
 
-    real
-    mister[,gpu-irq=never|core|parity|exact|reliable][,seed=N][,trace=N]
+    real[,cd-ack=any|strict]
+    mister[,gpu-irq=never|core|parity|exact|reliable][,cd-ack=any|strict][,seed=N][,trace=N]
 
 `mister` also answers to `mister-fpga`, `fpga` and `superstation`.
+
+## `cd-ack=strict`
+
+Not a console: the CD-ROM interrupt acknowledge as PCSX-Redux has it. A write
+to `1F801803h` index 1 that breaks a CD rule of the conformance check
+(`docs/conformance.md`: a partial acknowledge of a pending response, or an
+acknowledge combined with the parameter reset in one write) clears no response
+bit; the parameter reset still happens. The guest then waits for an interrupt
+that never goes away, as it does on Redux (which pauses there). Every other
+write behaves as on `real`. Use it to reproduce that failure headless; it
+changes nothing for a program that passes the conformance check. The default,
+`cd-ack=any`, is the console (write 1 to clear, any value).
 
 ## What `mister` changes
 

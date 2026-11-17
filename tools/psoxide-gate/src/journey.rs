@@ -852,10 +852,12 @@ impl Step {
     }
 }
 
-/// Whether two targets are the same model: same console, same GP0(1Fh) model, same seed.
-/// `trace=N` only prints diagnostics, so it does not make a different model.
+/// Whether two targets are the same model: same console, same GP0(1Fh) model, same CD
+/// acknowledge model, same seed. `trace=N` only prints diagnostics, so it does not make a
+/// different model.
 fn same_model(a: &HardwareTarget, b: &HardwareTarget) -> bool {
-    (a.implementation, a.gpu_irq, a.seed) == (b.implementation, b.gpu_irq, b.seed)
+    (a.implementation, a.gpu_irq, a.cd_ack, a.seed)
+        == (b.implementation, b.gpu_irq, b.cd_ack, b.seed)
 }
 
 impl Step {

@@ -732,6 +732,10 @@ fn quiet_memory_access(
             0x29 => bus.cpu_write16(addr, source),
             _ => bus.cpu_write32(addr, source),
         }
+        #[cfg(feature = "conformance")]
+        if bus.conformance_wants_pc() {
+            bus.attribute_conformance(cpu.pc);
+        }
     }
     run.ran += 1;
     // The load in flight lands now; a load of this op's takes its place.
@@ -980,6 +984,10 @@ fn fast_device_access(
         }
         FastAccess::CdromByte => {
             bus.cpu_cdrom_store8(phys, cpu.gpr(op.rt));
+            #[cfg(feature = "conformance")]
+            if bus.conformance_wants_pc() {
+                bus.attribute_conformance(cpu.pc);
+            }
             false
         }
         FastAccess::IoLoad32(register) => {

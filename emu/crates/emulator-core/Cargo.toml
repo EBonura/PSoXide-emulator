@@ -41,6 +41,9 @@ default = []
 # Opt-in strict Expansion 2 stores (`--strict-exp2`): a store beyond the configured
 # window is a data bus error. Compiled out by default; see docs/hardware-targets.md.
 strict-exp2 = []
+# The PC of each conformance hit (`conformance.rs`): one check per interpreted
+# instruction. The gate turns it on; the player build does not pay for it.
+conformance = []
 # 8 MiB development-board RAM, for dev kit builds (`.cpe` files linked for
 # it). A separate binary: the retail build is unchanged.
 devkit-ram = []

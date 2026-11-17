@@ -14,11 +14,13 @@
 //! `psoxide-gate run`), a spec of the form
 //!
 //! ```text
-//! real
-//! mister[,gpu-irq=MODEL][,seed=N][,trace=N]
+//! real[,cd-ack=MODEL]
+//! mister[,gpu-irq=MODEL][,cd-ack=MODEL][,seed=N][,trace=N]
 //! ```
 //!
 //! `mister` defaults to `gpu-irq=exact`.
+//! `cd-ack=strict` (any target) ignores a CD-ROM interrupt acknowledge that
+//! commercial code never writes, as PCSX-Redux does, see [`CdAckModel`].
 //!
 //! `mister` also answers to `mister-fpga`, `fpga` and `superstation`.
 //! `gpu-irq` overrides the target's GP0(1Fh) model, see [`GpuIrqModel`];
@@ -68,6 +70,21 @@ pub enum GpuIrqModel {
     Exact,
 }
 
+/// How a write to the CD-ROM interrupt flag register (`1F801803h` index 1)
+/// clears the pending response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CdAckModel {
+    /// Write 1 to clear, any value (retail console, CXD1199/CXD1815 datasheet).
+    Any,
+    /// Only what commercial code writes acknowledges: a write that breaks a
+    /// CD rule of [`crate::conformance`] (a partial acknowledge, or one
+    /// combined with the parameter reset) clears no response bit, so the
+    /// guest waits as it does on PCSX-Redux (`cdrom.cc`: 07h and 1Fh
+    /// acknowledge, bit 6 alone resets the parameters, anything else pauses).
+    Strict,
+}
+
 /// A named hardware target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -76,6 +93,8 @@ pub struct HardwareTarget {
     pub implementation: Implementation,
     /// GP0(1Fh) model.
     pub gpu_irq: GpuIrqModel,
+    /// CD-ROM interrupt acknowledge model.
+    pub cd_ack: CdAckModel,
     /// Seed of the model's coin flips.
     pub seed: u64,
     /// Number of model events to print to stderr.
@@ -89,6 +108,7 @@ impl HardwareTarget {
         Self {
             implementation: Implementation::Real,
             gpu_irq: GpuIrqModel::Reliable,
+            cd_ack: CdAckModel::Any,
             seed: 1,
             trace: 0,
         }
@@ -100,6 +120,7 @@ impl HardwareTarget {
         Self {
             implementation: Implementation::MisterFpga,
             gpu_irq: GpuIrqModel::Exact,
+            cd_ack: CdAckModel::Any,
             seed: 1,
             trace: 0,
         }
@@ -140,6 +161,17 @@ impl HardwareTarget {
                         }
                     }
                 }
+                "cd-ack" => {
+                    target.cd_ack = match value {
+                        "any" => CdAckModel::Any,
+                        "strict" => CdAckModel::Strict,
+                        _ => {
+                            return Err(format!(
+                                "hardware option cd-ack={value}: expected any or strict"
+                            ))
+                        }
+                    }
+                }
                 "seed" => {
                     target.seed = value
                         .parse()
@@ -172,7 +204,7 @@ impl HardwareTarget {
     /// Whether this target changes any behaviour from the retail console.
     #[must_use]
     pub fn differs_from_real(&self) -> bool {
-        self.gpu_irq != GpuIrqModel::Reliable
+        self.gpu_irq != GpuIrqModel::Reliable || self.cd_ack != CdAckModel::Any
     }
 
     /// Short name for logs.
@@ -220,13 +252,22 @@ mod tests {
         assert!(HardwareTarget::from_spec("mister,gpu-irq=sometimes").is_err());
         assert!(HardwareTarget::from_spec("pc").is_err());
         assert!(HardwareTarget::from_spec("mister,bogus=1").is_err());
+        let t = HardwareTarget::from_spec("real,cd-ack=strict").unwrap();
+        assert_eq!(
+            (t.implementation, t.cd_ack),
+            (Implementation::Real, CdAckModel::Strict)
+        );
+        assert!(t.differs_from_real());
+        assert!(HardwareTarget::from_spec("real,cd-ack=loose").is_err());
     }
 
     // The gate (`tools/psoxide-gate`, `--second-hardware`) takes the first model's result for the
-    // second when the guest issued no GP0(1Fh) command. That holds only while the models differ
-    // in GP0(1Fh) handling alone. The next two tests fail when that stops being true, so the
-    // shortcut cannot go stale silently: change the gate's rule (`receipt::model_equivalent`)
-    // first, then update these.
+    // second when the guest issued no GP0(1Fh) command and no CD acknowledge that breaks a
+    // conformance rule. That holds only while the models differ in GP0(1Fh) handling and the
+    // CD acknowledge model alone, and `cd-ack=strict` differs from `any` only on writes that
+    // break a CD rule. The next two tests fail when that stops being true, so the shortcut cannot
+    // go stale silently: change the gate's rule (`receipt::model_equivalent`) first, then update
+    // these.
 
     #[test]
     fn real_and_mister_differ_in_the_gp0_1f_model_alone() {
@@ -234,16 +275,22 @@ mod tests {
         let HardwareTarget {
             implementation: _,
             gpu_irq: real_irq,
+            cd_ack: real_cd_ack,
             seed: real_seed,
             trace: real_trace,
         } = HardwareTarget::real();
         let HardwareTarget {
             implementation: _,
             gpu_irq: mister_irq,
+            cd_ack: mister_cd_ack,
             seed: mister_seed,
             trace: mister_trace,
         } = HardwareTarget::mister();
         assert_eq!((real_seed, real_trace), (mister_seed, mister_trace));
+        assert_eq!(
+            (real_cd_ack, mister_cd_ack),
+            (CdAckModel::Any, CdAckModel::Any)
+        );
         assert_eq!(real_irq, GpuIrqModel::Reliable);
         assert_ne!(mister_irq, GpuIrqModel::Reliable);
         // `implementation` is a label: only `name` reads it.
@@ -255,10 +302,12 @@ mod tests {
 
     #[test]
     fn only_the_gp0_1f_model_reads_the_target() {
-        const READERS: [&str; 5] = [
+        const READERS: [&str; 6] = [
             "emu/crates/emulator-core/src/hardware_target.rs",
             "emu/crates/emulator-core/src/lib.rs",
             "emu/crates/emulator-core/src/gpu/irq_quirk.rs",
+            // The CD acknowledge model; it differs only on writes that break a CD rule.
+            "emu/crates/emulator-core/src/cdrom.rs",
             // Parse the spec and set the variable, or print the target; read no field.
             "emu/crates/frontend/src/main.rs",
             "emu/crates/frontend/src/cli.rs",

@@ -77,6 +77,9 @@ pub struct Receipt {
     pub wall_secs: f64,
     /// GP0(1Fh) commands the guest issued.
     pub gp0_1f: u64,
+    /// CD acknowledge writes that broke a conformance rule (docs/conformance.md).
+    #[serde(default)]
+    pub cd_ack: u64,
     pub disc_id: String,
     /// UTC, `YYYY-MM-DDTHH:MM:SSZ`.
     pub date: String,
@@ -90,6 +93,7 @@ impl Receipt {
     /// commands: a failure, an abort or an uncounted run is never kept.
     pub fn of(result: &JourneyResult, key: &Key) -> Option<Receipt> {
         let gp0_1f = result.gp0_irq_commands?;
+        let cd_ack = result.cd_ack_hits()?;
         if !result.passed() || result.abort.is_some() {
             return None;
         }
@@ -104,6 +108,7 @@ impl Receipt {
             emu_secs: result.emu_secs,
             wall_secs: result.wall.as_secs_f64(),
             gp0_1f,
+            cd_ack,
             disc_id: result.disc_id.clone(),
             date: utc_date_time(unix_secs),
             unix_secs,
@@ -138,6 +143,15 @@ impl Receipt {
                 self.gp0_1f,
                 fresh
                     .gp0_irq_commands
+                    .map_or("uncounted".to_string(), |n| n.to_string())
+            ));
+        }
+        if fresh.cd_ack_hits() != Some(self.cd_ack) {
+            diffs.push(format!(
+                "CD acknowledge conformance hits {} then, {} now",
+                self.cd_ack,
+                fresh
+                    .cd_ack_hits()
                     .map_or("uncounted".to_string(), |n| n.to_string())
             ));
         }
@@ -394,14 +408,16 @@ fn build_id() -> Result<String, String> {
     .clone()
 }
 
-/// Whether the second hardware model can take the first one's result: it passed and the guest
-/// never issued GP0(1Fh), the only command the models treat differently.
+/// Whether the second hardware model can take the first one's result: it passed, the guest
+/// never issued GP0(1Fh) and never wrote a CD acknowledge that breaks a conformance rule, the
+/// only things the models treat differently (`cd-ack=strict` changes nothing else).
 ///
 /// A result with a golden compare skipped by `golden_on` stands for no other model: the picture
 /// was never judged here, so the second model must look at it itself.
 pub fn model_equivalent(first: &JourneyResult) -> bool {
     first.passed()
         && first.gp0_irq_commands == Some(0)
+        && first.cd_ack_hits() == Some(0)
         && first.count(crate::exec::Status::GoldenSkipped) == 0
 }
 
@@ -585,6 +601,8 @@ mod tests {
             notes: Vec::new(),
             cards: Vec::new(),
             gp0_irq_commands: gp0,
+            conformance: Some(Vec::new()),
+            cd_acknowledges: None,
             receipt: State::Off,
         }
     }
@@ -662,6 +680,36 @@ mod tests {
         assert!(!model_equivalent(&result(true, Some(1))));
         assert!(!model_equivalent(&result(true, None)));
         assert!(!model_equivalent(&result(false, Some(0))));
+    }
+
+    #[test]
+    fn the_second_model_waits_for_a_pass_with_no_broken_cd_acknowledge() {
+        use emulator_core::conformance::Rule;
+        let hit = |rule| crate::exec::ConformanceHit {
+            rule,
+            hits: 3,
+            first_pc: Some(0x8001_0000),
+            symbol: None,
+        };
+        let mut r = result(true, Some(0));
+        r.conformance = Some(vec![hit(Rule::CdAckPartial)]);
+        assert!(!model_equivalent(&r));
+        r.conformance = Some(vec![hit(Rule::CdAckWithParamReset)]);
+        assert!(!model_equivalent(&r));
+        r.conformance = None;
+        assert!(!model_equivalent(&r));
+        // The receipt keeps the count and a fresh run that differs is caught.
+        let key = Key {
+            hex: "0".repeat(64),
+            inputs: Vec::new(),
+        };
+        r.conformance = Some(Vec::new());
+        let kept = Receipt::of(&r, &key).expect("a clean pass is kept");
+        assert_eq!(kept.cd_ack, 0);
+        r.conformance = Some(vec![hit(Rule::CdAckPartial)]);
+        assert!(kept
+            .differs_from(&r)
+            .is_some_and(|d| d.contains("CD acknowledge")));
     }
 
     #[test]

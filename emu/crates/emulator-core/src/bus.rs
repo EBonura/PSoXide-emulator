@@ -54,6 +54,10 @@ use timing::*;
 const IRQ_STAT_ADDR: u32 = 0x1f80_1070;
 /// Physical address of `I_MASK` (interrupt enable register).
 const IRQ_MASK_ADDR: u32 = 0x1f80_1074;
+/// DMA channel 2 (GPU) CHCR: the store that starts a GPU list, for the
+/// conformance report's GP0(1Fh) site.
+#[cfg(feature = "conformance")]
+const DMA2_CHCR_ADDR: u32 = 0x1f80_10a8;
 
 /// `#[serde(with = "big_bytes")]` for boxed fixed-size byte buffers
 /// (`Bus::ram`, `Bus::io`). Plain `Box<[u8; N]>: Serialize` would work
@@ -363,6 +367,10 @@ pub struct Bus {
     /// result while its pages' counts are unchanged. Host-side.
     #[serde(skip, default = "RamPages::new")]
     ram_pages: RamPages,
+    /// Where the guest fed the GPU from, for the conformance report's
+    /// GP0(1Fh) site (`crate::conformance`). Diagnostic only.
+    #[serde(skip)]
+    conformance_gpu_site: crate::conformance::GpuSite,
     /// Physical address of the next word the stream will deliver, and one
     /// past the last.
     #[serde(default)]
@@ -642,6 +650,7 @@ impl Bus {
                 s
             },
             mmio_trace: MmioTrace::new(),
+            conformance_gpu_site: Default::default(),
             limits: crate::limits::LimitOracles::from_env(),
             telemetry: GuestTelemetry::new(),
             pcdrv: None,
@@ -4440,6 +4449,51 @@ impl Bus {
         self.write32_impl(virt, phys, value);
     }
 
+    /// Whether a conformance hit (`crate::conformance`) waits for the PC of
+    /// the instruction that caused it; the CPU then calls
+    /// [`Bus::attribute_conformance`] after that instruction.
+    #[inline(always)]
+    #[must_use]
+    pub fn conformance_wants_pc(&self) -> bool {
+        self.cdrom.conformance.wants_pc() || self.conformance_gpu_site.wants_pc()
+    }
+
+    /// The PC of the instruction after which [`Bus::conformance_wants_pc`]
+    /// was true.
+    #[cold]
+    pub fn attribute_conformance(&mut self, pc: u32) {
+        self.cdrom.conformance.attribute(pc);
+        self.conformance_gpu_site
+            .attribute(pc, self.gpu.gp0_irq_command_count());
+    }
+
+    /// The conformance check's result for the run so far.
+    #[must_use]
+    pub fn conformance_report(&self) -> crate::conformance::Report {
+        use crate::conformance::{Finding, Report, Rule};
+        let findings = Rule::ALL
+            .iter()
+            .map(|&rule| {
+                let (hits, first_pc) = if rule == Rule::GpuIrqCommand {
+                    let hits = self.gpu.gp0_irq_command_count();
+                    (hits, self.conformance_gpu_site.pc().filter(|_| hits != 0))
+                } else {
+                    let tally = &self.cdrom.conformance;
+                    (tally.hits(rule), tally.first_pc(rule))
+                };
+                Finding {
+                    rule,
+                    hits,
+                    first_pc,
+                }
+            })
+            .collect();
+        Report {
+            findings,
+            cd_acknowledges: self.cdrom.conformance.checked_count(),
+        }
+    }
+
     /// CPU `SW` transaction. Unlike host-side initialization through
     /// [`Bus::write32`], an architectural store drives the data-bus latch.
     /// GP0 writes additionally stall behind queued GPU execution work: on
@@ -4452,6 +4506,11 @@ impl Bus {
         self.add_cycles(store_stall);
         if to_physical(virt) < memory::ram::MIRROR_END {
             // The write buffer's drain time was set when the store was queued.
+        }
+        #[cfg(feature = "conformance")]
+        if matches!(to_physical(virt), crate::gpu::GP0_ADDR | DMA2_CHCR_ADDR) {
+            self.conformance_gpu_site
+                .store(self.gpu.gp0_irq_command_count());
         }
         if to_physical(virt) == crate::gpu::GP0_ADDR {
             self.gpu_quiet_until = 0;

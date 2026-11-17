@@ -9,9 +9,11 @@ publish = false
 description = "Fleet test gate: drives each game's player journey headlessly on the CPU and hardware renderers and checks frames, RAM state, presentation and audio."
 
 [features]
-default = ["native-jit"]
+default = ["native-jit", "conformance"]
 # AArch64 native tier. Identical results to the interpreter; PSOXIDE_JIT=0 turns it off at run time.
 native-jit = ["dep:psoxide-jit"]
+# The guest PC of each conformance hit (`--conformance`, docs/conformance.md).
+conformance = ["emulator-core/conformance"]
 # Strict Expansion 2 stores (`--strict-exp2`); build with `make build-strict`.
 strict-exp2 = ["emulator-core/strict-exp2"]
 

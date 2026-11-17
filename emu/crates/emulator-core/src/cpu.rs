@@ -2243,6 +2243,11 @@ impl Cpu {
             .flatten();
         let execute_cycles_before = bus.cycles();
         self.execute(instr, pc_before, in_branch_delay, bus)?;
+        // The PC of a conformance hit this instruction caused (`conformance.rs`).
+        #[cfg(feature = "conformance")]
+        if bus.conformance_wants_pc() {
+            bus.attribute_conformance(pc_before);
+        }
         self.executing_in_branch_delay = false;
         self.branch_delay_next = is_branch_or_jump(instr) && self.pending_exception_pc.is_none();
         if bus.take_ram_load_from_cached_code() {
@@ -4166,6 +4171,46 @@ mod tests {
             profile.total_profiled_cycles(),
             bus.cycles().saturating_sub(cycles_before)
         );
+    }
+
+    /// The conformance report names the store that broke a rule.
+    #[cfg(feature = "conformance")]
+    #[test]
+    fn conformance_hits_carry_the_pc_of_the_store() {
+        use crate::conformance::Rule;
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        cpu.pc = 0x8000_1000;
+        cpu.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+        cpu.gprs[8] = 0x1f80_1800; // $t0: CD-ROM base
+        cpu.gprs[9] = 1; // $t1: index 1
+        cpu.gprs[10] = 3; // $t2: the INT3 number written back
+        cpu.gprs[11] = 0x1f80_1810; // $t3: GP0
+        cpu.gprs[12] = 0x1f00_0000; // $t4: GP0(1Fh)
+        let program = [
+            0xa109_0000u32, // sb $t1,0($t0)
+            0xa10a_0003,    // sb $t2,3($t0)
+            0xa10a_0003,    // sb $t2,3($t0)
+            0xad6c_0000,    // sw $t4,0($t3)
+        ];
+        for (i, word) in program.iter().enumerate() {
+            bus.write32(0x8000_1000 + 4 * i as u32, *word);
+        }
+        bus.cdrom.debug_set_irq_flag(0x03);
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        bus.cdrom.debug_set_irq_flag(0x03);
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        let report = bus.conformance_report();
+        let partial = report.findings[0];
+        assert_eq!(partial.rule, Rule::CdAckPartial);
+        assert_eq!((partial.hits, partial.first_pc), (2, Some(0x8000_1004)));
+        assert_eq!(report.count(Rule::CdAckWithParamReset), 0);
+        let gpu = report.findings[2];
+        assert_eq!(gpu.rule, Rule::GpuIrqCommand);
+        assert_eq!((gpu.hits, gpu.first_pc), (1, Some(0x8000_100c)));
+        assert!(!bus.conformance_wants_pc());
     }
 
     #[test]

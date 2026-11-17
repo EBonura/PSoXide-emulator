@@ -24,6 +24,18 @@ impl Symbols {
         self.by_name.is_empty()
     }
 
+    /// The symbol with the highest address at or below `addr`, and `addr`'s offset into it,
+    /// for naming a guest PC. Of several names at one address the shortest wins (a linker map
+    /// also lists the input section, object path and all, at the function's address). Data
+    /// symbols count too, so read the answer next to the map.
+    pub fn nearest(&self, addr: u32) -> Option<(String, u32)> {
+        self.by_name
+            .iter()
+            .filter(|(_, &a)| a <= addr)
+            .max_by_key(|(name, &a)| (a, std::cmp::Reverse((name.len(), name.as_str()))))
+            .map(|(name, &a)| (name.clone(), addr - a))
+    }
+
     pub fn insert(&mut self, name: &str, addr: u32) {
         self.by_name.insert(name.to_string(), addr);
     }
@@ -282,6 +294,23 @@ mod tests {
             Some("nitroxide::game::STATE")
         );
         assert_eq!(demangle_legacy("main"), None);
+    }
+
+    #[test]
+    fn nearest_names_a_pc_by_the_shortest_name_below_it() {
+        let mut s = Symbols::default();
+        s.insert(
+            "/build/game.o:(.text._RNvNtCs1_6psx_io2cd7ack_irq)",
+            0x8001_0000,
+        );
+        s.insert("psx_io::cd::ack_irq", 0x8001_0000);
+        s.insert("psx_io::cd::next", 0x8001_0040);
+        assert_eq!(
+            s.nearest(0x8001_0018),
+            Some(("psx_io::cd::ack_irq".to_string(), 0x18))
+        );
+        assert_eq!(s.nearest(0x8001_0040).map(|(_, off)| off), Some(0));
+        assert_eq!(s.nearest(0x8000_ffff), None);
     }
 
     #[test]
