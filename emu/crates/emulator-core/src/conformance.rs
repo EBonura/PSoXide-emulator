@@ -20,6 +20,7 @@
 
 /// One conformance rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum Rule {
     /// A CD-ROM interrupt acknowledge (`1F801803h` index 1) that clears only
     /// some of the pending response bits.
@@ -213,6 +214,7 @@ impl GpuSite {
 
 /// One rule's result for a run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Finding {
     /// The rule.
     pub rule: Rule,
@@ -224,6 +226,7 @@ pub struct Finding {
 
 /// Every rule's result for a run, in [`Rule::ALL`] order.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Report {
     /// One entry per rule, hit or not.
     pub findings: Vec<Finding>,
@@ -232,7 +235,28 @@ pub struct Report {
     pub cd_acknowledges: u64,
 }
 
+impl Finding {
+    /// A rule's result.
+    #[must_use]
+    pub const fn new(rule: Rule, hits: u64, first_pc: Option<u32>) -> Self {
+        Self {
+            rule,
+            hits,
+            first_pc,
+        }
+    }
+}
+
 impl Report {
+    /// A run's result: `findings` in [`Rule::ALL`] order, and the CD acknowledges written.
+    #[must_use]
+    pub fn new(findings: Vec<Finding>, cd_acknowledges: u64) -> Self {
+        Self {
+            findings,
+            cd_acknowledges,
+        }
+    }
+
     /// The rules that were hit.
     pub fn hits(&self) -> impl Iterator<Item = &Finding> {
         self.findings.iter().filter(|f| f.hits != 0)

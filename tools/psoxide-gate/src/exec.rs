@@ -2442,26 +2442,14 @@ mod tests {
         let mut syms = Symbols::default();
         syms.insert("psx_io::cd::ack_irq", 0x8001_0000);
         syms.insert("psx_io::cd::other", 0x8001_0100);
-        let report = Report {
-            findings: vec![
-                Finding {
-                    rule: Rule::CdAckPartial,
-                    hits: 12,
-                    first_pc: Some(0x8001_0018),
-                },
-                Finding {
-                    rule: Rule::CdAckWithParamReset,
-                    hits: 0,
-                    first_pc: None,
-                },
-                Finding {
-                    rule: Rule::GpuIrqCommand,
-                    hits: 1,
-                    first_pc: None,
-                },
+        let report = Report::new(
+            vec![
+                Finding::new(Rule::CdAckPartial, 12, Some(0x8001_0018)),
+                Finding::new(Rule::CdAckWithParamReset, 0, None),
+                Finding::new(Rule::GpuIrqCommand, 1, None),
             ],
-            cd_acknowledges: 40,
-        };
+            40,
+        );
         let hits = conformance_hits(&report, &syms);
         assert_eq!(hits.len(), 2);
         let mut result = aborted_for_test();

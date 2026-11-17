@@ -4481,17 +4481,10 @@ impl Bus {
                     let tally = &self.cdrom.conformance;
                     (tally.hits(rule), tally.first_pc(rule))
                 };
-                Finding {
-                    rule,
-                    hits,
-                    first_pc,
-                }
+                Finding::new(rule, hits, first_pc)
             })
             .collect();
-        Report {
-            findings,
-            cd_acknowledges: self.cdrom.conformance.checked_count(),
-        }
+        Report::new(findings, self.cdrom.conformance.checked_count())
     }
 
     /// CPU `SW` transaction. Unlike host-side initialization through
