@@ -10,6 +10,7 @@ use crate::journey::{Assert, Journey, Step};
 use crate::machine::{button_mask, tape_end, Boot, Machine};
 use crate::render::HwSet;
 use crate::symbols::Symbols;
+use emulator_core::conformance::Rule;
 
 pub(crate) mod digest;
 
@@ -198,9 +199,10 @@ impl JourneyResult {
     }
 
     /// The conformance line: `CONFORMANCE <name> clean`, or each rule broken with its count
-    /// and first guest PC. `None` when there is nothing to say (no count, or clean and not
-    /// asked for).
-    pub fn conformance_line(&self, asked: bool) -> Option<String> {
+    /// and first guest PC. `None` when there is nothing to say (no count, or clean and no rule
+    /// enforced). With some rules enforced, a broken rule outside them says `[not enforced]`.
+    pub fn conformance_line(&self, enforced: &[Rule]) -> Option<String> {
+        let asked = !enforced.is_empty();
         let hits = self.conformance.as_ref()?;
         let context = match (self.cd_acknowledges, self.gp0_irq_commands) {
             (Some(acks), Some(gp0)) => format!(" ({acks} CD acknowledges, {gp0} GP0(1Fh))"),
@@ -209,7 +211,16 @@ impl JourneyResult {
         if hits.is_empty() {
             return asked.then(|| format!("CONFORMANCE {} clean{context}", self.name));
         }
-        let rules: Vec<String> = hits.iter().map(ConformanceHit::describe).collect();
+        let rules: Vec<String> = hits
+            .iter()
+            .map(|h| {
+                if asked && !enforced.contains(&h.rule) {
+                    format!("{} [not enforced]", h.describe())
+                } else {
+                    h.describe()
+                }
+            })
+            .collect();
         Some(format!(
             "CONFORMANCE {} {}{context}",
             self.name,
@@ -268,24 +279,53 @@ fn conformance_hits(
         .collect()
 }
 
-/// The `--conformance` group: one check per rule, failed when the guest broke it.
-fn conformance_group(hits: &[ConformanceHit], tick: u64) -> Group {
-    use emulator_core::conformance::Rule;
+/// The rules `--conformance[=RULES]` enforces: `all`, or rule ids separated by commas.
+///
+/// # Errors
+///
+/// An unknown or empty id, naming the known ones.
+pub fn parse_conformance(spec: &str) -> Result<Vec<Rule>, String> {
+    if spec.trim() == "all" {
+        return Ok(Rule::ALL.to_vec());
+    }
+    let mut picked = Vec::new();
+    for id in spec.split(',').map(str::trim) {
+        let rule = Rule::from_id(id).ok_or_else(|| {
+            let known: Vec<&str> = Rule::ALL.iter().map(|r| r.id()).collect();
+            format!(
+                "--conformance: unknown rule `{id}`; expected `all` or some of {}",
+                known.join(", ")
+            )
+        })?;
+        if !picked.contains(&rule) {
+            picked.push(rule);
+        }
+    }
+    // Report order, so `a,b` and `b,a` are one selection (and one receipt key).
+    picked.sort_by_key(|r| Rule::ALL.iter().position(|a| a == r));
+    Ok(picked)
+}
+
+/// The `--conformance` group: one check per rule. An enforced rule the guest broke fails; one
+/// outside the selection is a skip that still names the hits.
+fn conformance_group(hits: &[ConformanceHit], enforced: &[Rule], tick: u64) -> Group {
     let checks = Rule::ALL
         .iter()
         .map(|&rule| {
             let hit = hits.iter().find(|h| h.rule == rule);
+            let on = enforced.contains(&rule);
             Check {
                 name: rule.id().into(),
-                status: if hit.is_some() {
-                    Status::Fail
-                } else {
-                    Status::Pass
+                status: match (hit, on) {
+                    (Some(_), true) => Status::Fail,
+                    (Some(_), false) => Status::Skip,
+                    (None, _) => Status::Pass,
                 },
-                detail: hit.map_or_else(
-                    || format!("never: {}", rule.summary()),
-                    |h| format!("{}: {}", h.describe(), rule.summary()),
-                ),
+                detail: match hit {
+                    None => format!("never: {}", rule.summary()),
+                    Some(h) if on => format!("{}: {}", h.describe(), rule.summary()),
+                    Some(h) => format!("not enforced: {}: {}", h.describe(), rule.summary()),
+                },
             }
         })
         .collect();
@@ -320,8 +360,9 @@ pub struct RunOptions {
     pub fetch_trace: Option<(PathBuf, u64, u64)>,
     /// Check every pad poll for a torn read (see `Machine::pad_audit`).
     pub audit_pad: bool,
-    /// Fail the journey when the guest breaks a conformance rule (`--conformance`).
-    pub conformance: bool,
+    /// Fail the journey when the guest breaks one of these conformance rules
+    /// (`--conformance[=RULES]`); empty: none enforced.
+    pub conformance: Vec<Rule>,
     pub journey_path: PathBuf,
     pub artifact_dir: PathBuf,
 }
@@ -791,8 +832,9 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     let report = run.m.bus.conformance_report();
     result.cd_acknowledges = Some(report.cd_acknowledges);
     let hits = conformance_hits(&report, &run.syms);
-    if opts.conformance {
-        run.groups.push(conformance_group(&hits, run.m.ticks));
+    if !opts.conformance.is_empty() {
+        run.groups
+            .push(conformance_group(&hits, &opts.conformance, run.m.ticks));
     }
     result.conformance = Some(hits);
     result.groups = run.groups;
@@ -2310,7 +2352,7 @@ mod tests {
             tick_log_polls: false,
             fetch_trace: None,
             audit_pad: false,
-            conformance: false,
+            conformance: Vec::new(),
             journey_path: PathBuf::new(),
             artifact_dir: PathBuf::new(),
         }
@@ -2438,7 +2480,7 @@ mod tests {
 
     #[test]
     fn conformance_hits_print_and_fail_only_when_asked() {
-        use emulator_core::conformance::{Finding, Report, Rule};
+        use emulator_core::conformance::{Finding, Report};
         let mut syms = Symbols::default();
         syms.insert("psx_io::cd::ack_irq", 0x8001_0000);
         syms.insert("psx_io::cd::other", 0x8001_0100);
@@ -2454,31 +2496,91 @@ mod tests {
         assert_eq!(hits.len(), 2);
         let mut result = aborted_for_test();
         result.conformance = Some(hits.clone());
-        let line = result.conformance_line(false).expect("hits always print");
+        let line = result.conformance_line(&[]).expect("hits always print");
         assert_eq!(
             line,
             "CONFORMANCE fx cd-ack-partial=12 first at 0x80010018 (psx_io::cd::ack_irq+0x18); \
              gpu-irq-command=1 first at unknown pc"
         );
         assert_eq!(result.cd_ack_hits(), Some(12));
-        let group = conformance_group(&hits, 5);
-        let failed: Vec<&str> = group
-            .checks
-            .iter()
-            .filter(|c| c.status == Status::Fail)
-            .map(|c| c.name.as_str())
-            .collect();
-        assert_eq!(failed, ["cd-ack-partial", "gpu-irq-command"]);
+        let failed = |group: &Group| -> Vec<String> {
+            group
+                .checks
+                .iter()
+                .filter(|c| c.status.is_failure())
+                .map(|c| c.name.clone())
+                .collect()
+        };
+        let all = conformance_group(&hits, &Rule::ALL, 5);
+        assert_eq!(failed(&all), ["cd-ack-partial", "gpu-irq-command"]);
         result.conformance = Some(Vec::new());
-        assert_eq!(result.conformance_line(false), None);
+        assert_eq!(result.conformance_line(&[]), None);
         assert_eq!(
-            result.conformance_line(true).as_deref(),
+            result.conformance_line(&Rule::ALL).as_deref(),
             Some("CONFORMANCE fx clean")
         );
-        assert!(conformance_group(&[], 5)
+        assert!(conformance_group(&[], &Rule::ALL, 5)
             .checks
             .iter()
             .all(|c| c.status == Status::Pass));
+    }
+
+    #[test]
+    fn conformance_enforces_only_the_selected_rules_and_still_reports_the_rest() {
+        let cd = parse_conformance("cd-ack-partial,cd-ack-param-reset").unwrap();
+        assert_eq!(cd, [Rule::CdAckPartial, Rule::CdAckWithParamReset]);
+        let hits = vec![
+            ConformanceHit {
+                rule: Rule::CdAckPartial,
+                hits: 2,
+                first_pc: Some(0x8001_0000),
+                symbol: None,
+            },
+            ConformanceHit {
+                rule: Rule::GpuIrqCommand,
+                hits: 7,
+                first_pc: Some(0x8002_0000),
+                symbol: None,
+            },
+        ];
+        let group = conformance_group(&hits, &cd, 5);
+        let status = |id: &str| group.checks.iter().find(|c| c.name == id).unwrap().status;
+        assert_eq!(status("cd-ack-partial"), Status::Fail);
+        assert_eq!(status("cd-ack-param-reset"), Status::Pass);
+        assert_eq!(status("gpu-irq-command"), Status::Skip);
+        let mut result = aborted_for_test();
+        result.conformance = Some(hits.clone());
+        let line = result.conformance_line(&cd).unwrap();
+        assert!(
+            line.contains("cd-ack-partial=2 first at 0x80010000;"),
+            "{line}"
+        );
+        assert!(
+            line.ends_with("gpu-irq-command=7 first at 0x80020000 [not enforced]"),
+            "{line}"
+        );
+        // Only the GPU rule broken and only CD rules enforced: the journey passes, the line says so.
+        let gpu_only = &hits[1..];
+        assert!(conformance_group(gpu_only, &cd, 5)
+            .checks
+            .iter()
+            .all(|c| !c.status.is_failure()));
+    }
+
+    #[test]
+    fn conformance_selection_parses_all_lists_and_rejects_unknown_ids() {
+        assert_eq!(parse_conformance("all").unwrap(), Rule::ALL);
+        assert_eq!(
+            parse_conformance("gpu-irq-command, cd-ack-partial,cd-ack-partial").unwrap(),
+            [Rule::CdAckPartial, Rule::GpuIrqCommand]
+        );
+        let e = parse_conformance("cd-ack-partial,cd-ack").unwrap_err();
+        assert!(
+            e.contains("unknown rule `cd-ack`") && e.contains("gpu-irq-command"),
+            "{e}"
+        );
+        assert!(parse_conformance("").is_err());
+        assert!(parse_conformance("cd-ack-partial,").is_err());
     }
 
     fn aborted_for_test() -> JourneyResult {

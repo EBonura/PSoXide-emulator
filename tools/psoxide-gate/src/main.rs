@@ -146,10 +146,17 @@ struct RunArgs {
     audit_pad: bool,
     /// Fail a journey whose guest broke a conformance rule: something commercial software
     /// never does and another emulator or console revision does not accept (a CD interrupt
-    /// acknowledge other than 07h/1Fh, GP0(1Fh); docs/conformance.md). Without the flag the
-    /// hits are only printed (`CONFORMANCE` lines).
-    #[arg(long)]
-    conformance: bool,
+    /// acknowledge other than 07h/1Fh, GP0(1Fh); docs/conformance.md). `--conformance` alone
+    /// enforces every rule; `--conformance=cd-ack-partial,cd-ack-param-reset` only those.
+    /// Broken rules are printed (`CONFORMANCE` lines) with or without the flag, enforced or not.
+    #[arg(
+        long,
+        value_name = "RULES",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "all"
+    )]
+    conformance: Option<String>,
     /// Entry state the boot hands each program: `default`, `openbios` or
     /// `hostile[:SEED]`, with `,skip=CATEGORY` and `,dpcr=`/`,dicr=`/`,imask=`
     /// options (docs/entry-states.md). Same as `PSOXIDE_ENTRY_STATE`. A
@@ -412,7 +419,8 @@ struct Opts {
     tick_log_polls: bool,
     fetch_trace: Option<(PathBuf, u64, u64)>,
     audit_pad: bool,
-    conformance: bool,
+    /// Conformance rules enforced; empty: none.
+    conformance: Vec<emulator_core::conformance::Rule>,
     out: PathBuf,
     receipts: Option<ReceiptMode>,
 }
@@ -458,7 +466,12 @@ impl Opts {
             tick_log_polls: a.tick_log_polls,
             fetch_trace,
             audit_pad: a.audit_pad,
-            conformance: a.conformance,
+            conformance: a
+                .conformance
+                .as_deref()
+                .map(exec::parse_conformance)
+                .transpose()?
+                .unwrap_or_default(),
             out: a.out.clone(),
             receipts: a.receipts.as_deref().map(|dir| ReceiptMode {
                 store: receipt::Store::new(dir),
@@ -534,7 +547,7 @@ fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
             tick_log_polls: o.tick_log_polls,
             fetch_trace: o.fetch_trace.clone(),
             audit_pad: o.audit_pad,
-            conformance: o.conformance,
+            conformance: o.conformance.clone(),
             journey_path: job.journey_path.clone(),
             artifact_dir: o.out.join(&journey.name).join("cards"),
         },
@@ -572,7 +585,14 @@ fn receipt_key(
         flag("trace-state", format!("{:?}", o.trace_state)),
         flag("trace-checkpoint", format!("{:?}", o.trace_checkpoint)),
         flag("audit-pad", o.audit_pad.to_string()),
-        flag("conformance", o.conformance.to_string()),
+        flag(
+            "conformance",
+            o.conformance
+                .iter()
+                .map(|r| r.id())
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
         flag("entry-state", emulator_core::EntryState::from_env().spec()),
         flag(
             "hardware",
@@ -827,7 +847,7 @@ fn play(jobs: &[&Job], fleet: &Fleet, opts: &Opts, threads: usize) -> Vec<Journe
                 let Some(job) = jobs.get(i) else { break };
                 let r = run_planned(job, fleet, opts);
                 println!("{}", r.summary());
-                if let Some(line) = r.conformance_line(opts.conformance) {
+                if let Some(line) = r.conformance_line(&opts.conformance) {
                     println!("{line}");
                 }
                 print_failures(&r, opts.verbose);
@@ -924,7 +944,7 @@ fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
         tick_log_polls: false,
         fetch_trace: None,
         audit_pad: false,
-        conformance: false,
+        conformance: Vec::new(),
         out: a.out.clone(),
         receipts: None,
     };
@@ -1032,6 +1052,43 @@ fn cmd_list(a: &CommonArgs) -> Result<ExitCode, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `run --conformance...` parses to: `None` without the flag.
+    fn conformance_arg(extra: &[&str]) -> Result<Option<String>, String> {
+        let mut argv = vec!["psoxide-gate", "run", "nitroxide"];
+        argv.extend_from_slice(extra);
+        match Cli::try_parse_from(argv)
+            .map_err(|e| e.to_string())?
+            .command
+        {
+            Cmd::Run(a) => Ok(a.conformance.clone()),
+            _ => Err("not run".into()),
+        }
+    }
+
+    #[test]
+    fn conformance_flag_alone_means_every_rule_and_takes_a_list_after_equals() {
+        use emulator_core::conformance::Rule;
+        assert_eq!(conformance_arg(&[]).unwrap(), None);
+        let all = conformance_arg(&["--conformance"]).unwrap().unwrap();
+        assert_eq!(exec::parse_conformance(&all).unwrap(), Rule::ALL);
+        let cd = conformance_arg(&["--conformance=cd-ack-partial,cd-ack-param-reset"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            exec::parse_conformance(&cd).unwrap(),
+            [Rule::CdAckPartial, Rule::CdAckWithParamReset]
+        );
+        // Without `=` the next word stays the next argument, not a rule list.
+        assert_eq!(
+            conformance_arg(&["--conformance", "--no-hw"])
+                .unwrap()
+                .as_deref(),
+            Some("all")
+        );
+        let bad = conformance_arg(&["--conformance=gpu"]).unwrap().unwrap();
+        assert!(exec::parse_conformance(&bad).is_err());
+    }
 
     #[test]
     fn the_list_guard_defaults_on_and_yields_to_the_caller() {

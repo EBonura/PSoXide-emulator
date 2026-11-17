@@ -50,6 +50,12 @@ impl Rule {
         }
     }
 
+    /// The rule with this [`Rule::id`].
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Rule> {
+        Rule::ALL.into_iter().find(|rule| rule.id() == id)
+    }
+
     /// One line: what it is and why it is listed.
     #[must_use]
     pub const fn summary(self) -> &'static str {
@@ -313,6 +319,14 @@ mod tests {
         assert_eq!(cd_ack_rule(0x5f, 0x00), Some(Rule::CdAckWithParamReset));
         assert_eq!(cd_ack_rule(0x47, 0x00), Some(Rule::CdAckWithParamReset));
         assert_eq!(cd_ack_rule(0x40, 0x03), None);
+    }
+
+    #[test]
+    fn ids_round_trip() {
+        for rule in Rule::ALL {
+            assert_eq!(Rule::from_id(rule.id()), Some(rule));
+        }
+        assert_eq!(Rule::from_id("cd-ack"), None);
     }
 
     #[test]

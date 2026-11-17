@@ -24,9 +24,18 @@ The symbol comes from the journey's `symbols` files (the nearest symbol at or
 below the PC). Without `--conformance` that line is all: no journey changes
 verdict. With `--conformance` every rule becomes a check of a `conformance`
 group, and a rule the guest broke fails the journey; a clean journey prints
-`CONFORMANCE <name> clean`. The flag is part of the receipt key.
+`CONFORMANCE <name> clean`.
 
-A game switches it on by adding `--conformance` to its gate command line. The
+`--conformance=cd-ack-partial,cd-ack-param-reset` enforces only the rules it
+lists. A broken rule outside the list is still counted and printed, marked
+`[not enforced]` in the line and as a skipped check in the group; it never
+fails the journey and is never dropped. An unknown rule id is an error.
+`--conformance` alone is `--conformance=all`. The selection is part of the
+receipt key.
+
+A game switches it on by adding `--conformance` (or a list) to its gate
+command line, for example the CD rules once its SDK acknowledges with 07h,
+while the GP0(1Fh) rule waits for its presenter. The
 PCs need the `conformance` cargo feature, which the gate builds by default (the
 player binary leaves it out: it costs one check per interpreted instruction).
 
