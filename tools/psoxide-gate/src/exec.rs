@@ -144,6 +144,8 @@ pub struct JourneyResult {
     pub conformance: Option<Vec<ConformanceHit>>,
     /// CD-ROM acknowledges the guest wrote, broken rule or not (`None`: not counted).
     pub cd_acknowledges: Option<u64>,
+    /// MDEC commands that took parameter words, broken rule or not (`None`: not counted).
+    pub mdec_commands: Option<u64>,
     /// Where the verdict came from (see `receipt`).
     pub receipt: crate::receipt::State,
 }
@@ -204,8 +206,12 @@ impl JourneyResult {
     pub fn conformance_line(&self, enforced: &[Rule]) -> Option<String> {
         let asked = !enforced.is_empty();
         let hits = self.conformance.as_ref()?;
+        let mdec = match self.mdec_commands {
+            Some(n) if n != 0 => format!(", {n} MDEC commands"),
+            _ => String::new(),
+        };
         let context = match (self.cd_acknowledges, self.gp0_irq_commands) {
-            (Some(acks), Some(gp0)) => format!(" ({acks} CD acknowledges, {gp0} GP0(1Fh))"),
+            (Some(acks), Some(gp0)) => format!(" ({acks} CD acknowledges, {gp0} GP0(1Fh){mdec})"),
             _ => String::new(),
         };
         if hits.is_empty() {
@@ -677,6 +683,7 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         gp0_irq_commands: None,
         conformance: None,
         cd_acknowledges: None,
+        mdec_commands: None,
         receipt: crate::receipt::State::Off,
     };
     let scales = opts
@@ -831,6 +838,7 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     result.gp0_irq_commands = Some(run.m.bus.gpu.gp0_irq_command_count());
     let report = run.m.bus.conformance_report();
     result.cd_acknowledges = Some(report.cd_acknowledges);
+    result.mdec_commands = Some(report.mdec_commands);
     let hits = conformance_hits(&report, &run.syms);
     if !opts.conformance.is_empty() {
         run.groups
@@ -2463,6 +2471,7 @@ mod tests {
             gp0_irq_commands: Some(0),
             conformance: Some(Vec::new()),
             cd_acknowledges: None,
+            mdec_commands: None,
             receipt: crate::receipt::State::Off,
         };
         assert!(result.passed());
@@ -2600,6 +2609,7 @@ mod tests {
             gp0_irq_commands: Some(0),
             conformance: None,
             cd_acknowledges: None,
+            mdec_commands: None,
             receipt: crate::receipt::State::Off,
         }
     }

@@ -471,6 +471,7 @@ mod tests {
             gp0_irq_commands: None,
             conformance: None,
             cd_acknowledges: None,
+            mdec_commands: None,
             receipt: crate::receipt::State::Off,
         };
         let index = write_report(

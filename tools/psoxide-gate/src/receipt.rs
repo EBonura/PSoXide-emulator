@@ -603,6 +603,7 @@ mod tests {
             gp0_irq_commands: gp0,
             conformance: Some(Vec::new()),
             cd_acknowledges: None,
+            mdec_commands: None,
             receipt: State::Off,
         }
     }

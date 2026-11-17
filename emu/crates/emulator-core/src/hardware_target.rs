@@ -14,13 +14,15 @@
 //! `psoxide-gate run`), a spec of the form
 //!
 //! ```text
-//! real[,cd-ack=MODEL]
-//! mister[,gpu-irq=MODEL][,cd-ack=MODEL][,seed=N][,trace=N]
+//! real[,cd-ack=MODEL][,mdec-req=MODEL]
+//! mister[,gpu-irq=MODEL][,cd-ack=MODEL][,mdec-req=MODEL][,seed=N][,trace=N]
 //! ```
 //!
 //! `mister` defaults to `gpu-irq=exact`.
 //! `cd-ack=strict` (any target) ignores a CD-ROM interrupt acknowledge that
 //! commercial code never writes, as PCSX-Redux does, see [`CdAckModel`].
+//! `mdec-req=hidden` (any target) never shows the MDEC's DMA requests in its
+//! status register, as PCSX-Redux and PCSX-ReARMed do, see [`MdecRequestModel`].
 //!
 //! `mister` also answers to `mister-fpga`, `fpga` and `superstation`.
 //! `gpu-irq` overrides the target's GP0(1Fh) model, see [`GpuIrqModel`];
@@ -85,6 +87,20 @@ pub enum CdAckModel {
     Strict,
 }
 
+/// Whether the MDEC status register shows the DMA requests (bits 27 and 28).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MdecRequestModel {
+    /// Bit 28 reads 1 while the MDEC wants data in, bit 27 while it has
+    /// data out for DMA1 (retail console).
+    Shown,
+    /// Both always read 0, as on PCSX-Redux (`mdec.cc`) and PCSX-ReARMed
+    /// (`mdec.c`), which define the request bits and never set them. The
+    /// transfers themselves still run: only a guest that reads the bits
+    /// from the CPU sees a difference.
+    Hidden,
+}
+
 /// A named hardware target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -95,6 +111,8 @@ pub struct HardwareTarget {
     pub gpu_irq: GpuIrqModel,
     /// CD-ROM interrupt acknowledge model.
     pub cd_ack: CdAckModel,
+    /// MDEC status request bits model.
+    pub mdec_req: MdecRequestModel,
     /// Seed of the model's coin flips.
     pub seed: u64,
     /// Number of model events to print to stderr.
@@ -109,6 +127,7 @@ impl HardwareTarget {
             implementation: Implementation::Real,
             gpu_irq: GpuIrqModel::Reliable,
             cd_ack: CdAckModel::Any,
+            mdec_req: MdecRequestModel::Shown,
             seed: 1,
             trace: 0,
         }
@@ -121,6 +140,7 @@ impl HardwareTarget {
             implementation: Implementation::MisterFpga,
             gpu_irq: GpuIrqModel::Exact,
             cd_ack: CdAckModel::Any,
+            mdec_req: MdecRequestModel::Shown,
             seed: 1,
             trace: 0,
         }
@@ -172,6 +192,17 @@ impl HardwareTarget {
                         }
                     }
                 }
+                "mdec-req" => {
+                    target.mdec_req = match value {
+                        "shown" => MdecRequestModel::Shown,
+                        "hidden" => MdecRequestModel::Hidden,
+                        _ => {
+                            return Err(format!(
+                                "hardware option mdec-req={value}: expected shown or hidden"
+                            ))
+                        }
+                    }
+                }
                 "seed" => {
                     target.seed = value
                         .parse()
@@ -204,7 +235,9 @@ impl HardwareTarget {
     /// Whether this target changes any behaviour from the retail console.
     #[must_use]
     pub fn differs_from_real(&self) -> bool {
-        self.gpu_irq != GpuIrqModel::Reliable || self.cd_ack != CdAckModel::Any
+        self.gpu_irq != GpuIrqModel::Reliable
+            || self.cd_ack != CdAckModel::Any
+            || self.mdec_req != MdecRequestModel::Shown
     }
 
     /// Short name for logs.
@@ -259,13 +292,19 @@ mod tests {
         );
         assert!(t.differs_from_real());
         assert!(HardwareTarget::from_spec("real,cd-ack=loose").is_err());
+        let t = HardwareTarget::from_spec("mister,mdec-req=hidden").unwrap();
+        assert_eq!(t.mdec_req, MdecRequestModel::Hidden);
+        let t = HardwareTarget::from_spec("real,mdec-req=hidden").unwrap();
+        assert!(t.differs_from_real());
+        assert!(HardwareTarget::from_spec("real,mdec-req=never").is_err());
     }
 
     // The gate (`tools/psoxide-gate`, `--second-hardware`) takes the first model's result for the
     // second when the guest issued no GP0(1Fh) command and no CD acknowledge that breaks a
     // conformance rule. That holds only while the models differ in GP0(1Fh) handling and the
     // CD acknowledge model alone, and `cd-ack=strict` differs from `any` only on writes that
-    // break a CD rule. The next two tests fail when that stops being true, so the shortcut cannot
+    // break a CD rule. The MDEC request model is the same on both targets; the gate refuses the
+    // shortcut when the two specs set it differently. The next two tests fail when that stops being true, so the shortcut cannot
     // go stale silently: change the gate's rule (`receipt::model_equivalent`) first, then update
     // these.
 
@@ -276,6 +315,7 @@ mod tests {
             implementation: _,
             gpu_irq: real_irq,
             cd_ack: real_cd_ack,
+            mdec_req: real_mdec_req,
             seed: real_seed,
             trace: real_trace,
         } = HardwareTarget::real();
@@ -283,6 +323,7 @@ mod tests {
             implementation: _,
             gpu_irq: mister_irq,
             cd_ack: mister_cd_ack,
+            mdec_req: mister_mdec_req,
             seed: mister_seed,
             trace: mister_trace,
         } = HardwareTarget::mister();
@@ -290,6 +331,10 @@ mod tests {
         assert_eq!(
             (real_cd_ack, mister_cd_ack),
             (CdAckModel::Any, CdAckModel::Any)
+        );
+        assert_eq!(
+            (real_mdec_req, mister_mdec_req),
+            (MdecRequestModel::Shown, MdecRequestModel::Shown)
         );
         assert_eq!(real_irq, GpuIrqModel::Reliable);
         assert_ne!(mister_irq, GpuIrqModel::Reliable);
@@ -302,12 +347,14 @@ mod tests {
 
     #[test]
     fn only_the_gp0_1f_model_reads_the_target() {
-        const READERS: [&str; 6] = [
+        const READERS: [&str; 7] = [
             "emu/crates/emulator-core/src/hardware_target.rs",
             "emu/crates/emulator-core/src/lib.rs",
             "emu/crates/emulator-core/src/gpu/irq_quirk.rs",
             // The CD acknowledge model; it differs only on writes that break a CD rule.
             "emu/crates/emulator-core/src/cdrom.rs",
+            // The MDEC request model; the gate compares it between the two specs.
+            "emu/crates/emulator-core/src/mdec.rs",
             // Parse the spec and set the variable, or print the target; read no field.
             "emu/crates/frontend/src/main.rs",
             "emu/crates/frontend/src/cli.rs",

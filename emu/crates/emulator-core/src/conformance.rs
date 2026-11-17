@@ -30,14 +30,18 @@ pub enum Rule {
     CdAckWithParamReset,
     /// A GP0(1Fh) command (GPU interrupt request, GPUSTAT bit 24).
     GpuIrqCommand,
+    /// A read of the MDEC status register between a command that takes
+    /// parameter words and the DMA0 transfer that feeds them.
+    MdecStatusBeforeFeed,
 }
 
 impl Rule {
     /// Every rule, in report order.
-    pub const ALL: [Rule; 3] = [
+    pub const ALL: [Rule; 4] = [
         Rule::CdAckPartial,
         Rule::CdAckWithParamReset,
         Rule::GpuIrqCommand,
+        Rule::MdecStatusBeforeFeed,
     ];
 
     /// Stable id, as printed and as named in `docs/conformance.md`.
@@ -47,6 +51,7 @@ impl Rule {
             Rule::CdAckPartial => "cd-ack-partial",
             Rule::CdAckWithParamReset => "cd-ack-param-reset",
             Rule::GpuIrqCommand => "gpu-irq-command",
+            Rule::MdecStatusBeforeFeed => "mdec-status-before-feed",
         }
     }
 
@@ -72,6 +77,11 @@ impl Rule {
                 "GP0(1Fh) GPU interrupt request; PCSX-ReARMed never raises GPUSTAT bit 24 \
                  and the MiSTer core on the SuperStation One mostly does not"
             }
+            Rule::MdecStatusBeforeFeed => {
+                "MDEC status read between a command that takes parameters and the DMA0 \
+                 transfer that feeds it; PCSX-Redux and PCSX-ReARMed never raise the data-in \
+                 request such a wait looks for"
+            }
         }
     }
 
@@ -86,6 +96,7 @@ impl Rule {
             Rule::CdAckPartial => 0,
             Rule::CdAckWithParamReset => 1,
             Rule::GpuIrqCommand => 2,
+            Rule::MdecStatusBeforeFeed => 3,
         }
     }
 }
@@ -113,8 +124,8 @@ pub const fn cd_ack_rule(value: u8, flags: u8) -> Option<Rule> {
 /// hit once the CPU has given it.
 #[derive(Clone, Debug, Default)]
 pub struct Tally {
-    hits: [u64; 3],
-    first_pc: [Option<u32>; 3],
+    hits: [u64; Rule::ALL.len()],
+    first_pc: [Option<u32>; Rule::ALL.len()],
     /// A first hit still waiting for its PC.
     unattributed: Option<Rule>,
     /// Writes checked, hit or not (context for the counts).
@@ -239,6 +250,9 @@ pub struct Report {
     /// CD-ROM interrupt flag writes that acknowledged something (bits 0-4 not zero), broken
     /// rule or not: shows a clean run did acknowledge.
     pub cd_acknowledges: u64,
+    /// MDEC commands that took parameter words (decode, quantisation table, scale table), rule
+    /// broken or not: shows a clean run did drive the MDEC.
+    pub mdec_commands: u64,
 }
 
 impl Finding {
@@ -260,6 +274,16 @@ impl Report {
         Self {
             findings,
             cd_acknowledges,
+            mdec_commands: 0,
+        }
+    }
+
+    /// The same result with the MDEC commands that took parameters.
+    #[must_use]
+    pub fn with_mdec_commands(self, mdec_commands: u64) -> Self {
+        Self {
+            mdec_commands,
+            ..self
         }
     }
 

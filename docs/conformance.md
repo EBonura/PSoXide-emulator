@@ -18,7 +18,8 @@ no behaviour and no result.
 
 (NitroXide built at SDK 3779d464513f, 60 seconds from boot.) The counts in
 brackets are every CD acknowledge and GP0(1Fh) the guest wrote, rule broken or
-not, so a clean line also shows the run reached the CD.
+not, so a clean line also shows the run reached the CD; once the guest drove
+the MDEC they also count its commands that took parameter words.
 
 The symbol comes from the journey's `symbols` files (the nearest symbol at or
 below the PC). Without `--conformance` that line is all: no journey changes
@@ -111,6 +112,40 @@ Evidence:
 The rule counts the command, not a wait on bit 24: a program that issues it and
 never waits on it also trips it. Replace the command rather than argue the case.
 
+### `mdec-status-before-feed`
+
+A CPU read of the MDEC status register (`1F801824h`) after a write to
+`1F801820h` that starts a command taking parameter words (decode, quantisation
+table, scale table) and before DMA channel 0 is started for it (CHCR written
+with the start bit). The wait ends at the DMA0 kick, at an MDEC reset, or when
+the CPU has written the command's last parameter word itself, so a status read
+between CPU-fed parameter words counts too.
+
+This is how a program waits for the data-in request (status bit 28) before it
+feeds the command. The count is of reads in that span, not of a bit test: a
+load of the status register returns every bit, and none of the commercial code
+checked reads it there at all.
+
+Evidence:
+- PCSX-Redux (`src/core/mdec.cc`) and PCSX-ReARMed (`libpcsxcore/mdec.c`)
+  define `MDEC1_DREQ` and never set it: status bits 27 and 28 always read 0.
+  Both start DMA0 on the CHCR write alone (`0x01000201`). Neither takes CPU
+  parameter words: a write to `1F801820h` replaces the command register.
+- Commercial code and PSn00bSDK write the command, start DMA0 and let the
+  channel wait for the request (PSn00bSDK `libpsn00b/psxpress/mdec.c`:
+  `DecDCTPutEnv` and `DecDCTin` write `MDEC0`, then `DecDCTinRaw` starts the
+  channel; `DecDCTinSync` polls bit 29 before the next command, never bit 28).
+  With the trace below, five commercial discs that play movies read the status
+  register between such a command and its DMA0 kick 0 times.
+- The SDK's FMV player waited on bit 28 after each table command and, when it
+  never rose, refused to play: no movie of a game built on it started on either
+  emulator. The SDK now starts DMA0 straight after the command (`psx-fmv`
+  `Mdec::upload`).
+
+`--hardware real,mdec-req=hidden` (see `docs/hardware-targets.md`) makes the
+request bits read 0, as on those two emulators, so a journey shows the failure
+headless.
+
 ## Checked against commercial discs
 
 With `--conformance`, 60 seconds from boot with no input, these are clean
@@ -118,6 +153,15 @@ With `--conformance`, 60 seconds from boot with no input, these are clean
 Crash Bandicoot, CTR, WipEout, Gran Turismo 2, Final Fantasy IX, Metal Gear
 Solid, Soul Reaver, Nightmare Creatures. Only boot, title and attract code ran;
 in-game code paths are not covered by that sample.
+
+For `mdec-status-before-feed`, 90 seconds from boot with no input, the discs
+that played a movie in that time (MDEC commands with parameters in brackets):
+Chrono Cross (853), Final Fantasy IX (742), Resident Evil 3 (234), Spider-Man
+(237), WipEout (1,546). Every one read the status register 0 times between a
+command and its DMA0 kick and wrote no parameter word from the CPU (Resident
+Evil 3 read the status register about 4.5 million times, all outside that
+span). Crash Bandicoot, Metal Gear Solid and Valkyrie Profile drove no MDEC in
+that time.
 
 ## Considered and left out
 

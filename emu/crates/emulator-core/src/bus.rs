@@ -3106,6 +3106,9 @@ impl Bus {
     /// (hardware tests v1.26, sequence E: CHCR busy, 0 words moved).
     fn start_mdec_in_dma(&mut self) {
         use crate::scheduler::EventSlot;
+        if self.dma.channels[0].channel_control & (1 << 24) != 0 {
+            self.mdec.note_dma_in_kick();
+        }
         if self.dma.is_channel_enabled(0)
             && self.dma.channels[0].channel_control & (1 << 24) != 0
             && !self.mdec.dma_in_request()
@@ -4455,7 +4458,9 @@ impl Bus {
     #[inline(always)]
     #[must_use]
     pub fn conformance_wants_pc(&self) -> bool {
-        self.cdrom.conformance.wants_pc() || self.conformance_gpu_site.wants_pc()
+        self.cdrom.conformance.wants_pc()
+            || self.mdec.conformance.wants_pc()
+            || self.conformance_gpu_site.wants_pc()
     }
 
     /// The PC of the instruction after which [`Bus::conformance_wants_pc`]
@@ -4463,6 +4468,7 @@ impl Bus {
     #[cold]
     pub fn attribute_conformance(&mut self, pc: u32) {
         self.cdrom.conformance.attribute(pc);
+        self.mdec.conformance.attribute(pc);
         self.conformance_gpu_site
             .attribute(pc, self.gpu.gp0_irq_command_count());
     }
@@ -4478,13 +4484,18 @@ impl Bus {
                     let hits = self.gpu.gp0_irq_command_count();
                     (hits, self.conformance_gpu_site.pc().filter(|_| hits != 0))
                 } else {
-                    let tally = &self.cdrom.conformance;
+                    let tally = if rule == Rule::MdecStatusBeforeFeed {
+                        &self.mdec.conformance
+                    } else {
+                        &self.cdrom.conformance
+                    };
                     (tally.hits(rule), tally.first_pc(rule))
                 };
                 Finding::new(rule, hits, first_pc)
             })
             .collect();
         Report::new(findings, self.cdrom.conformance.checked_count())
+            .with_mdec_commands(self.mdec.conformance.checked_count())
     }
 
     /// CPU `SW` transaction. Unlike host-side initialization through

@@ -700,6 +700,7 @@ fn aborted(name: &str, why: String) -> JourneyResult {
         gp0_irq_commands: None,
         conformance: None,
         cd_acknowledges: None,
+        mdec_commands: None,
         receipt: receipt::State::Off,
     }
 }
@@ -810,8 +811,15 @@ fn cmd_run(a: &RunArgs) -> Result<ExitCode, String> {
         println!("[gate] second model {second_model} (first was {first_model})");
         let mut needed = Vec::new();
         let mut equivalent = 0;
+        // The shortcut below holds only while both models read the MDEC status the same way.
+        let mdec_req = |spec: &str| {
+            emulator_core::HardwareTarget::from_spec(spec)
+                .map(|t| t.mdec_req)
+                .ok()
+        };
+        let same_mdec = mdec_req(&first_model) == mdec_req(second_model);
         for (job, result) in jobs.iter().zip(&first) {
-            if !a.receipts_verify && receipt::model_equivalent(result) {
+            if !a.receipts_verify && same_mdec && receipt::model_equivalent(result) {
                 println!(
                     "MODEL EQUIVALENT {}: no GP0(1Fh), {first_model} result stands for {second_model}",
                     job.name

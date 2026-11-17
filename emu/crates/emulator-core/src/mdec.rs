@@ -57,6 +57,9 @@
 //! This module no longer contains any code derived from another emulator.
 //! See `LICENSE` and `docs/PROVENANCE.md`.
 
+use crate::conformance::{Rule, Tally};
+use crate::hardware_target::{HardwareTarget, MdecRequestModel};
+
 // ===============================================================
 //  Register addresses + command constants.
 // ===============================================================
@@ -387,6 +390,23 @@ pub struct Mdec {
     /// parameter-count field as 0 rather than FFFFh ("none").
     #[serde(default = "default_true")]
     fresh_from_reset: bool,
+    /// Status request bits model (`PSOXIDE_HARDWARE` `mdec-req=`); read from
+    /// the environment, never saved.
+    #[serde(skip, default = "request_model_from_env")]
+    request_model: MdecRequestModel,
+    /// A command that takes parameter words was written and no DMA0 kick has
+    /// been started for it yet (`mdec-status-before-feed`, `crate::conformance`).
+    #[serde(skip)]
+    feed_pending: bool,
+    /// Conformance hits of the MDEC rule. Diagnostic only, excluded from
+    /// save states.
+    #[serde(skip)]
+    pub(crate) conformance: Tally,
+}
+
+/// The MDEC request model `PSOXIDE_HARDWARE` names.
+fn request_model_from_env() -> MdecRequestModel {
+    HardwareTarget::from_env().mdec_req
 }
 
 fn default_true() -> bool {
@@ -425,6 +445,9 @@ impl Mdec {
             reset_status: 0,
             dma_in_waiting: false,
             fresh_from_reset: true,
+            request_model: request_model_from_env(),
+            feed_pending: false,
+            conformance: Tally::default(),
         }
     }
 
@@ -461,6 +484,9 @@ impl Mdec {
     /// Register read from the bus at CPU cycle `now`. Unlike [`Mdec::read32`]
     /// this sees a reset that is still completing.
     pub fn read32_at(&mut self, phys: u32, now: u64) -> u32 {
+        if phys & 0x1f80_1fff == MDEC_CTRL_STAT && self.feed_pending {
+            self.conformance.hit(Rule::MdecStatusBeforeFeed);
+        }
         let value = if phys & 0x1f80_1fff == MDEC_CTRL_STAT && self.resetting(now) {
             self.reset_status
         } else {
@@ -514,6 +540,13 @@ impl Mdec {
     /// re-checks a parked kick after each one.
     pub fn dma_in_request(&self) -> bool {
         self.dma_in_enabled && self.reg1 & MDEC1_BUSY != 0 && self.expected_param_words != 0
+    }
+
+    /// DMA0 was started (CHCR start bit written): the command waiting for its
+    /// parameters is being fed, so a status read is no longer a wait for the
+    /// data-in request (`mdec-status-before-feed`).
+    pub fn note_dma_in_kick(&mut self) {
+        self.feed_pending = false;
     }
 
     /// See [`Mdec::dma_in_request`]: whether a DMA0 kick is parked on it.
@@ -755,10 +788,11 @@ impl Mdec {
         if self.out_queue.is_empty() {
             status |= MDEC1_EMPTY;
         }
-        if self.dma_in_enabled && self.reg1 & MDEC1_BUSY != 0 {
+        let shown = self.request_model == MdecRequestModel::Shown;
+        if shown && self.dma_in_enabled && self.reg1 & MDEC1_BUSY != 0 {
             status |= MDEC1_DMA_IN_REQ;
         }
-        if self.dma_out_enabled && !self.out_queue.is_empty() {
+        if shown && self.dma_out_enabled && !self.out_queue.is_empty() {
             status |= MDEC1_DMA_OUT_REQ;
         }
         // Parameter words still expected, minus one (FFFFh when none). The
@@ -794,6 +828,7 @@ impl Mdec {
             self.direct_param_words_received += 1;
             self.expected_param_words -= 1;
             if self.expected_param_words == 0 {
+                self.feed_pending = false;
                 if self.command_code() == 1 {
                     self.decode_until_output_words(1);
                     if self.out_queue.is_empty() && !self.can_continue_decode() {
@@ -826,7 +861,9 @@ impl Mdec {
             3 => 32,
             _ => 0,
         };
+        self.feed_pending = self.expected_param_words != 0;
         if self.expected_param_words != 0 {
+            self.conformance.checked();
             self.reg1 |= MDEC1_BUSY;
             if self.command_code() == 1 {
                 self.rl_queue.clear();
@@ -847,6 +884,7 @@ impl Mdec {
             self.expected_param_words = 0;
             self.direct_param_words_received = 0;
             self.fresh_from_reset = true;
+            self.feed_pending = false;
             self.rl_queue.clear();
             self.out_queue.clear();
             return;
@@ -2005,6 +2043,55 @@ mod tests {
         assert_eq!(stat & MDEC1_DMA_OUT_REQ, MDEC1_DMA_OUT_REQ);
         assert_eq!(stat & MDEC1_OUTPUT_DEPTH_MASK, 2 << 25);
         assert_eq!(stat & MDEC1_EMPTY, 0);
+    }
+
+    #[test]
+    fn hidden_requests_read_zero_and_dma0_still_feeds() {
+        let mut m = Mdec::new();
+        m.request_model = MdecRequestModel::Hidden;
+        m.write32(MDEC_CTRL_STAT, 0x6000_0000);
+        m.write32(MDEC_CMD_DATA, 0x3200_0006);
+        let requests = MDEC1_DMA_IN_REQ | MDEC1_DMA_OUT_REQ;
+        assert!(m.dma_in_request());
+        assert_eq!(m.read32(MDEC_CTRL_STAT) & requests, 0);
+        m.dma_write_in(&[0xfe00_0000; 6]);
+        let stat = m.read32(MDEC_CTRL_STAT);
+        assert_eq!(stat & requests, 0);
+        assert_eq!(stat & MDEC1_EMPTY, 0, "the decode still produced output");
+    }
+
+    #[test]
+    fn a_status_read_before_the_feed_breaks_the_rule() {
+        let mut m = Mdec::new();
+        m.write32(MDEC_CTRL_STAT, 0x6000_0000);
+        // Commercial order: command, DMA0 kick, status reads while it runs.
+        m.write32(MDEC_CMD_DATA, 0x4000_0001);
+        m.note_dma_in_kick();
+        let _ = m.read32_at(MDEC_CTRL_STAT, 1_000);
+        m.dma_write_in(&[0; 32]);
+        let _ = m.read32_at(MDEC_CTRL_STAT, 1_100);
+        assert_eq!(m.conformance.hits(Rule::MdecStatusBeforeFeed), 0);
+        // Waiting for the data-in request between the command and the kick.
+        m.write32(MDEC_CMD_DATA, 0x6000_0000);
+        let _ = m.read32_at(MDEC_CTRL_STAT, 2_000);
+        m.note_dma_in_kick();
+        m.dma_write_in(&[0; 32]);
+        assert_eq!(m.conformance.hits(Rule::MdecStatusBeforeFeed), 1);
+        // CPU-fed parameters with status reads between them, until the last word.
+        m.write32(MDEC_CMD_DATA, 0x6000_0000);
+        for _ in 0..32 {
+            let _ = m.read32_at(MDEC_CTRL_STAT, 3_000);
+            m.write32(MDEC_CMD_DATA, 0);
+        }
+        let _ = m.read32_at(MDEC_CTRL_STAT, 4_000);
+        assert_eq!(m.conformance.hits(Rule::MdecStatusBeforeFeed), 33);
+        // A reset ends the wait; a command without parameters starts none.
+        m.write32(MDEC_CMD_DATA, 0x4000_0001);
+        m.write32(MDEC_CTRL_STAT, 0x8000_0000);
+        m.write32(MDEC_CMD_DATA, 0x0000_0000);
+        let _ = m.read32_at(MDEC_CTRL_STAT, 5_000);
+        assert_eq!(m.conformance.hits(Rule::MdecStatusBeforeFeed), 33);
+        assert_eq!(m.conformance.checked_count(), 4);
     }
 
     #[test]
