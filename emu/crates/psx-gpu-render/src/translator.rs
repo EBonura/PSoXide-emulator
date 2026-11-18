@@ -231,6 +231,12 @@ impl Translator {
     /// side. Spans from `tri_raster_setup` are the CPU's coverage by
     /// construction, and an axis-aligned rectangle inside the target has
     /// nothing to clip or round. Attributes still come from the vertex's planes.
+    ///
+    /// On a scaled target the spans are taken at host resolution instead (see
+    /// [`host_sample_spans`]): a neighbouring triangle drawn by the host
+    /// covers the host samples of its own side of a shared edge, not whole
+    /// PSX pixels, so whole-pixel spans left the other side's samples of the
+    /// boundary pixels uncovered (a dotted seam) and covered some twice.
     fn push_triangle_as_spans(&mut self, kind: BlendKind, clip: [u16; 4], tri: [HwVertex; 3]) {
         let v = tri.map(|v| (i32::from(v.pos[0]), i32::from(v.pos[1])));
         let attributes = tri[0].flags & (fbits::PLANE_RGB | fbits::PLANE_UV) != 0;
@@ -239,6 +245,28 @@ impl Translator {
         else {
             return;
         };
+        if self.scale > 1 {
+            if let Some(spans) = host_sample_spans(v, self.scale, clip) {
+                for (y, x0, x1) in spans {
+                    let corner = |x: i32, y: i32| {
+                        let mut vertex = tri[0];
+                        vertex.planes[3][3] = host_position_word(x, y);
+                        vertex
+                    };
+                    for (x, y) in [
+                        (x0, y),
+                        (x1, y),
+                        (x0, y + 1),
+                        (x1, y),
+                        (x0, y + 1),
+                        (x1, y + 1),
+                    ] {
+                        self.push_vertex_raw(kind, clip, corner(x, y));
+                    }
+                }
+                return;
+            }
+        }
         let [left, top, right, bottom] = clip.map(i32::from);
         for (y0, y1, mut lx, ls, mut rx, rs) in setup.parts {
             for y in y0..y1 {
@@ -1252,7 +1280,7 @@ fn triangle_exceeds_hw_extent(a: (i32, i32), b: (i32, i32), c: (i32, i32)) -> bo
 /// the rounding); an edge with both vertices inside is exact. The corner is a
 /// lattice point on the edge strictly between its two vertices, which exists
 /// only when the edge's step reduced by the gcd is smaller than the edge.
-fn clipped_edge_has_tie(v: [(i32, i32); 3], clip: [u16; 4]) -> bool {
+pub(crate) fn clipped_edge_has_tie(v: [(i32, i32); 3], clip: [u16; 4]) -> bool {
     let outside = |(x, y): (i32, i32)| {
         x < 0
             || y < 0
@@ -1272,6 +1300,79 @@ fn clipped_edge_has_tie(v: [(i32, i32); 3], clip: [u16; 4]) -> bool {
             (left..=right).contains(&x) && (top..=bottom).contains(&y)
         })
     })
+}
+
+/// `HwVertex::planes[3][3]` for a vertex placed at host pixel `(x, y)` of the
+/// scaled target (see `pipeline::HOST_POSITION`).
+fn host_position_word(x: i32, y: i32) -> u32 {
+    crate::pipeline::HOST_POSITION | ((y as u32 & 0x7fff) << 16) | (x as u32 & 0x7fff)
+}
+
+/// The host samples a polygon triangle covers on a target `scale` times the
+/// PSX resolution, as rows `(y, x0, x1)`: host row `y`, host columns
+/// `x0..x1`, clipped to the draw area `clip`. `None` for a triangle with no
+/// area, which the caller draws as whole-pixel spans like the CPU.
+///
+/// A polygon is drawn shifted (see `vs_main` in `prim.wgsl`) and the host
+/// samples pixel centres, which is the same as sampling integer points
+/// against the triangle with vertices `scale * v + o`, `o` being 1 at scale
+/// 3 (half a PSX pixel, 1.5 host pixels, less the centre's 0.5) and 0 at the
+/// other scales (half a host pixel less the centre's 0.5). A sample on an
+/// edge goes by the top-left rule, the host rasterizer's own, so a triangle
+/// drawn here and its neighbour drawn by the host split the samples of a
+/// shared edge between them exactly: neither leaves one uncovered and
+/// neither covers one twice. All of it is integer arithmetic, so no clipper
+/// rounding can move a tie (the reason these triangles are not handed to the
+/// host).
+pub(crate) fn host_sample_spans(
+    v: [(i32, i32); 3],
+    scale: u32,
+    clip: [u16; 4],
+) -> Option<Vec<(i32, i32, i32)>> {
+    let s = i64::from(scale);
+    let o = i64::from(scale == 3);
+    let mut p = v.map(|(x, y)| (s * i64::from(x) + o, s * i64::from(y) + o));
+    let area = (p[1].0 - p[0].0) * (p[2].1 - p[0].1) - (p[1].1 - p[0].1) * (p[2].0 - p[0].0);
+    if area == 0 {
+        return None;
+    }
+    if area < 0 {
+        // Wind every triangle the same way: inside is where every edge
+        // function below is positive (y grows downwards).
+        p.swap(1, 2);
+    }
+    let [left, top, right, bottom] = clip.map(i64::from);
+    let (x_lo, x_hi) = (left * s, (right + 1) * s - 1);
+    let y_lo = (top * s).max(p.iter().map(|q| q.1).min()?);
+    let y_hi = ((bottom + 1) * s - 1).min(p.iter().map(|q| q.1).max()?);
+    let mut rows = Vec::new();
+    for y in y_lo..=y_hi {
+        let (mut lo, mut hi) = (x_lo, x_hi);
+        for i in 0..3 {
+            let (a, b) = (p[i], p[(i + 1) % 3]);
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            // A top edge (horizontal, inside below) or a left edge (inside
+            // to its right) owns the samples exactly on it.
+            let owns_ties = dy < 0 || (dy == 0 && dx > 0);
+            let need = i64::from(!owns_ties);
+            // Edge function at (x, y): dx * (y - a.y) - dy * (x - a.x),
+            // linear in x as k * x + c, and the sample needs it >= need.
+            let k = -dy;
+            let c = dx * (y - a.1) + dy * a.0;
+            match k.cmp(&0) {
+                std::cmp::Ordering::Greater => {
+                    lo = lo.max((need - c).div_euclid(k) + i64::from((need - c).rem_euclid(k) != 0))
+                }
+                std::cmp::Ordering::Less => hi = hi.min((c - need).div_euclid(-k)),
+                std::cmp::Ordering::Equal if c < need => hi = lo - 1,
+                std::cmp::Ordering::Equal => {}
+            }
+        }
+        if lo <= hi {
+            rows.push((y as i32, lo as i32, hi as i32 + 1));
+        }
+    }
+    Some(rows)
 }
 
 fn gcd(mut a: u32, mut b: u32) -> u32 {
@@ -2133,5 +2234,117 @@ mod tests {
         assert_eq!(frame.total(), 12);
         assert_eq!(frame.runs.len(), 1);
         assert_eq!(frame.runs[0].count, 12);
+    }
+
+    /// The CPU's pixels of a triangle (`tri_raster_setup` spans), as a set.
+    fn cpu_pixels(v: [(i32, i32); 3]) -> std::collections::BTreeSet<(i32, i32)> {
+        let mut out = std::collections::BTreeSet::new();
+        if let Some(setup) =
+            emulator_core::gpu::tri_raster_setup(v, [(0, 0, 0); 3], [(0, 0); 3], false)
+        {
+            for (y0, y1, mut lx, ls, mut rx, rs) in setup.parts {
+                for y in y0..y1 {
+                    let (x0, x1) = (
+                        emulator_core::gpu::tri_span_x(lx),
+                        emulator_core::gpu::tri_span_x(rx),
+                    );
+                    out.extend((x0..x1).map(|x| (x, y)));
+                    lx += ls;
+                    rx += rs;
+                }
+            }
+        }
+        out
+    }
+
+    fn host_samples(v: [(i32, i32); 3], scale: u32) -> std::collections::BTreeSet<(i32, i32)> {
+        host_sample_spans(v, scale, full_clip())
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|(y, x0, x1)| (x0..x1).map(move |x| (x, y)))
+            .collect()
+    }
+
+    /// At scale 3 the centre sample of each 3x3 block is the CPU's pixel
+    /// corner, so the host samples taken there are the CPU's pixels: the
+    /// exact rule decides every tie like the CPU, including on edges that
+    /// leave VRAM. Random small triangles, many with vertex ties.
+    #[test]
+    fn host_sample_spans_match_the_cpu_at_the_scale_3_centres() {
+        let mut seed = 0x2545_f491_u32;
+        let mut next = |n: i32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % n as u32) as i32 - n / 2
+        };
+        let mut checked = 0;
+        for _ in 0..4000 {
+            let v = [
+                (64 + next(80), 64 + next(80)),
+                (64 + next(80), 64 + next(80)),
+                (64 + next(80), 64 + next(80)),
+            ];
+            let area =
+                (v[1].0 - v[0].0) * (v[2].1 - v[0].1) - (v[1].1 - v[0].1) * (v[2].0 - v[0].0);
+            if area == 0 {
+                continue;
+            }
+            let centres: std::collections::BTreeSet<(i32, i32)> = host_samples(v, 3)
+                .into_iter()
+                .filter(|&(x, y)| x % 3 == 1 && y % 3 == 1)
+                .map(|(x, y)| (x / 3, y / 3))
+                .collect();
+            let cpu: std::collections::BTreeSet<(i32, i32)> = cpu_pixels(v)
+                .into_iter()
+                .filter(|&(x, y)| x >= 0 && y >= 0)
+                .collect();
+            assert_eq!(centres, cpu, "{v:?}");
+            checked += 1;
+        }
+        assert!(checked > 3000);
+    }
+
+    /// Two triangles sharing an edge split its host samples: at scales 2 to 4
+    /// no sample is covered twice and the union is the quad's coverage.
+    #[test]
+    fn host_sample_spans_of_triangles_sharing_an_edge_tile() {
+        let quads = [
+            [(160, 235), (-18, 209), (69, 148), (75, 148)],
+            [(37, 17), (103, -148), (141, 358), (10, 200)],
+            [(0, 0), (40, 3), (17, 50), (-9, 31)],
+            [(5, 5), (5, 60), (90, 60), (90, 5)],
+        ];
+        for q in quads {
+            // Triangles (a, b, c) and (a, c, d) share the edge a-c.
+            let (t1, t2) = ([q[0], q[1], q[2]], [q[0], q[2], q[3]]);
+            for scale in 2..=4 {
+                let (s1, s2) = (host_samples(t1, scale), host_samples(t2, scale));
+                assert!(s1.is_disjoint(&s2), "{q:?} scale {scale}: double samples");
+                // Along the shared edge the samples right beside it are
+                // covered, on one side or the other.
+                let union: std::collections::BTreeSet<_> = s1.union(&s2).collect();
+                let o = i64::from(scale == 3);
+                let (a, c) = (q[0], q[2]);
+                let (ay, cy) = (
+                    i64::from(scale) * i64::from(a.1) + o,
+                    i64::from(scale) * i64::from(c.1) + o,
+                );
+                // The middle half of the edge, where both triangles are wide.
+                let (lo, hi) = (ay.min(cy), ay.max(cy));
+                for y in (lo + (hi - lo) / 4).max(0)..hi - (hi - lo) / 4 {
+                    let ax = i64::from(scale) * i64::from(a.0) + o;
+                    let cx = i64::from(scale) * i64::from(c.0) + o;
+                    let x = ax + (cx - ax) * (y - ay) / (cy - ay);
+                    if x < 1 {
+                        continue;
+                    }
+                    for dx in -1..=1 {
+                        let p = ((x + dx) as i32, y as i32);
+                        assert!(union.contains(&p), "{q:?} scale {scale}: gap at {p:?}");
+                    }
+                }
+            }
+        }
     }
 }

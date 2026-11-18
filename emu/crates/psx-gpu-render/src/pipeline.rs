@@ -35,10 +35,20 @@ pub struct HwVertex {
     /// belongs to, identical on its three vertices, when
     /// `flags::PLANE_RGB` / `flags::PLANE_UV` say the fragment shader should
     /// evaluate them: channels `r, g, b, u, v`, each `(dadx, dady, base)`,
-    /// then one unused word. `attr(x, y) = (base + x * dadx + y * dady) >> 24`
-    /// in wrapping u32 arithmetic, from `emulator_core::gpu::tri_raster_setup`.
+    /// then one word the fragment shader never reads. `attr(x, y) = (base + x *
+    /// dadx + y * dady) >> 24` in wrapping u32 arithmetic, from
+    /// `emulator_core::gpu::tri_raster_setup`. The vertex shader reads that
+    /// last word, `planes[3][3]`, as a host-pixel position when it has
+    /// [`HOST_POSITION`] set.
     pub planes: [[u32; 4]; 4],
 }
+
+/// Set in `HwVertex::planes[3][3]` when the vertex sits at a host pixel of
+/// the scaled target instead of at `pos`: bits 0..=14 hold its x and bits
+/// 16..=30 its y, in host pixels, and the vertex shader neither scales nor
+/// shifts it. The translator places the row rectangles of a clipped polygon
+/// triangle this way on a scaled target (`translator::host_sample_spans`).
+pub const HOST_POSITION: u32 = 1 << 31;
 
 /// `HwVertex::flags` bit layout. Host + shader must agree --
 /// any change here needs the matching constants in

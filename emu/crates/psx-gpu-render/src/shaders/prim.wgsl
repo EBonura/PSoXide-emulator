@@ -113,6 +113,9 @@ const FLAG_CORNER_SAMPLED: u32 = 1u << 28u;
 const FLAG_PLANE_RGB:   u32 = 1u << 29u;
 const FLAG_PLANE_UV:    u32 = 1u << 30u;
 const FLAG_AXIS_UV:     u32 = 1u << 31u;
+// `planes3.w` (the plane word the fragment stage never reads) holds a host
+// pixel position when this bit is set (`pipeline::HOST_POSITION`).
+const HOST_POSITION:    u32 = 1u << 31u;
 
 // PSX-SPX signed 4x4 ordered-dither offsets, indexed by
 // `(y & 3) * 4 + (x & 3)` -- byte-for-byte the CPU rasterizer's
@@ -196,7 +199,14 @@ fn vs_main(in: VertexIn) -> VertexOut {
     // left the first S / 2 host columns and rows of every polygon edge
     // uncovered, which showed as a thin line of the previous frame along the
     // left and top of the screen when the window scale was above 3.
-    if (in.flags & FLAG_CORNER_SAMPLED) != 0u {
+    if (in.planes3.w & HOST_POSITION) != 0u {
+        // A row rectangle of a clipped polygon triangle on a scaled target,
+        // placed at a host pixel (`pipeline::HOST_POSITION`): the translator
+        // already worked out which host samples it covers.
+        let scale = f32(max(u_texfilter.y, 1u));
+        let host = vec2<u32>(in.planes3.w & 0x7FFFu, (in.planes3.w >> 16u) & 0x7FFFu);
+        pos_psx = vec2<f32>(host) / scale;
+    } else if (in.flags & FLAG_CORNER_SAMPLED) != 0u {
         let scale = max(u_texfilter.y, 1u);
         var shift = 0.5;
         if scale != 3u {

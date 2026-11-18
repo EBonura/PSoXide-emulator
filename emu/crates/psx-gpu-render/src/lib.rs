@@ -2497,6 +2497,119 @@ mod tests {
         );
     }
 
+    /// Two flat triangles sharing an edge, one drawn as spans (it reaches
+    /// outside VRAM with a corner tie, see `clipped_edge_has_tie`) and one by
+    /// the host, cover every target sample of their union exactly once at
+    /// every internal scale: no seam of background along the shared edge and,
+    /// semi-transparent, no sample blended twice. The first pair is QD Up's
+    /// green table (GP0 packets 27 and 22), which showed a dotted black seam
+    /// along (160,235)-(69,148) at scale 3 when the span triangle was drawn
+    /// in whole PSX pixels.
+    #[test]
+    fn span_and_host_triangles_sharing_an_edge_tile_at_every_scale() {
+        let pairs: [[[(i32, i32); 3]; 2]; 2] = [
+            [
+                [(160, 235), (-18, 209), (69, 148)],
+                [(160, 235), (69, 148), (75, 148)],
+            ],
+            [
+                [(37, 17), (103, -148), (141, 358)],
+                [(37, 17), (141, 358), (10, 200)],
+            ],
+        ];
+        let full = [0, 0, 1023, 511];
+        for (n, pair) in pairs.iter().enumerate() {
+            assert!(
+                translator::clipped_edge_has_tie(pair[0], full),
+                "pair {n}: span path"
+            );
+            assert!(
+                !translator::clipped_edge_has_tie(pair[1], full),
+                "pair {n}: host path"
+            );
+            let (w, h) = (208u32, 368u32);
+            for semi in [false, true] {
+                // Background, then both triangles in one colour (average blend).
+                let mut words = vec![
+                    0xe300_0000,
+                    0xe400_0000 | (511 << 10) | 1023,
+                    0xe500_0000,
+                    0xe100_0000,
+                    0x0240_4040,
+                    0,
+                    (h << 16) | w,
+                ];
+                for tri in pair {
+                    words.push(if semi { 0x2200_f0c0 } else { 0x2000_f0c0 });
+                    words.extend(tri.iter().map(|&p| pack_xy(p)));
+                }
+                for scale in 1..=4u32 {
+                    let Some(mut renderer) = headless_renderer() else {
+                        eprintln!("skipping: no headless wgpu adapter");
+                        return;
+                    };
+                    renderer.set_internal_scale(scale, None);
+                    let cpu = run_both_backends(&words, &mut renderer, &[]);
+                    let (_, _, rgba) = renderer.read_subrect_rgba8(0, 0, w * scale, h * scale);
+                    // How many triangles cover each sample: the CPU's pixels at
+                    // 1x, the exact host-sample rule above it.
+                    let (sw, sh) = (w * scale, h * scale);
+                    let mut count = vec![0u8; (sw * sh) as usize];
+                    if scale == 1 {
+                        for (i, c) in count.iter_mut().enumerate() {
+                            let (x, y) = (i as u32 % sw, i as u32 / sw);
+                            *c = u8::from(cpu[(y * 1024 + x) as usize] != 0x2108);
+                        }
+                    } else {
+                        for &tri in pair {
+                            for (y, x0, x1) in translator::host_sample_spans(tri, scale, full)
+                                .expect("non-degenerate")
+                            {
+                                if y >= sh as i32 {
+                                    continue;
+                                }
+                                for x in x0..x1.min(sw as i32) {
+                                    count[(y as u32 * sw + x as u32) as usize] += 1;
+                                }
+                            }
+                        }
+                    }
+                    let inside = |x: u32, y: u32| count[(y * sw + x) as usize];
+                    // The two colours as the target holds them (a fill keeps
+                    // its 8-bit colour there), probed outside both triangles
+                    // and inside one.
+                    let probe = |x: u32, y: u32| {
+                        let at = ((y * sw + x) * 4) as usize;
+                        rgba[at..at + 4].to_vec()
+                    };
+                    let background = probe(0, 0);
+                    let drawn = probe(100 * scale + scale / 2, 200 * scale + scale / 2);
+                    assert_eq!(inside(0, 0), 0);
+                    assert_eq!(inside(100 * scale + scale / 2, 200 * scale + scale / 2), 1);
+                    assert_ne!(drawn, background, "pair {n}: the probe pixel is drawn");
+                    let mut bad = Vec::new();
+                    for y in 0..h * scale {
+                        for x in 0..w * scale {
+                            let covered = inside(x, y);
+                            assert!(covered <= 1, "pair {n} scale {scale}: ({x},{y}) in both");
+                            let want = if covered == 1 { &drawn } else { &background };
+                            let at = ((y * w * scale + x) * 4) as usize;
+                            if rgba[at..at + 4] != want[..] {
+                                bad.push((x, y, rgba[at..at + 4].to_vec()));
+                            }
+                        }
+                    }
+                    assert!(
+                        bad.is_empty(),
+                        "pair {n} semi {semi} scale {scale}: {} samples differ, first {:?}",
+                        bad.len(),
+                        &bad[..bad.len().min(6)]
+                    );
+                }
+            }
+        }
+    }
+
     /// A pixel corner exactly on an edge of a polygon that reaches outside
     /// VRAM is decided like the CPU's top-left rule, not by the host's clipper.
     ///
