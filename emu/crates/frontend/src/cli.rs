@@ -308,12 +308,19 @@ pub struct LaunchArgs {
     /// running need this offset when replayed from a cold boot.
     #[arg(long, default_value_t = 0)]
     pub input_tape_delay_ticks: u64,
-    /// Transcribe the replayed `--input-tape` onto the guest's own input clock
-    /// and write it here as a poll-bound `PXITAPE2`. Each completed port-1 poll
-    /// records the sample the guest actually read, so the transcript reproduces
-    /// this exact playthrough while replaying identically on builds of
-    /// differing speed. Use it to convert a legacy video-frame tape into a
-    /// benchmark that cannot diverge.
+    /// After the last sample of a poll-bound `--input-tape`, keep applying that
+    /// sample on every later port-1 poll instead of ending the run there; the
+    /// run then ends at `--stop-at-poll`, `--steps` or another stop condition.
+    /// Without it the run ends when the tape does, as before.
+    #[arg(long, requires = "input_tape")]
+    pub input_tape_hold_last: bool,
+    /// Transcribe this run's port-1 input onto the guest's own input clock and
+    /// write it here as a poll-bound `PXITAPE2`. Each completed port-1 poll
+    /// records the sample the guest read, so the transcript reproduces this
+    /// exact playthrough while replaying identically on builds of differing
+    /// speed. The input is the replayed `--input-tape` (a legacy video-frame
+    /// tape converts to one that cannot diverge) or, without a tape, whatever
+    /// drove the pad: `--press`, `--pad-pulses`, `--hold-forward`/`--hold-run`.
     #[arg(long)]
     pub input_tape_transcribe: Option<PathBuf>,
     /// Stop once port 1 has completed this many controller polls. A poll is
@@ -1077,6 +1084,13 @@ fn run_headless_launch(
         }
         None => None,
     };
+    if args.input_tape_hold_last && !tape_poll_bound {
+        return Err(
+            "--input-tape-hold-last needs a poll-bound (PXITAPE2) tape: a video-frame tape \
+             already holds its last frame until --guest-frames"
+                .to_string(),
+        );
+    }
     let guest_frame_limit = args.guest_frames.or_else(|| {
         tape_samples
             .as_ref()
@@ -1378,8 +1392,11 @@ fn run_headless_launch(
     let mut transcript_live = emulator_core::input_tape::PadSample::from_buttons(0);
     let mut transcript_polls = 0u64;
     // Set once a poll-bound tape has delivered its final sample; the run ends
-    // there rather than at a wall-clock tick count.
+    // there rather than at a wall-clock tick count, unless the last sample is
+    // held (`--input-tape-hold-last`).
     let mut tape_exhausted = false;
+    // The port-1 poll count at which a poll-bound tape ran out.
+    let mut tape_exhausted_at_poll: Option<u64> = None;
     if let Some(path) = args.route_screenshot_dir.as_ref() {
         std::fs::create_dir_all(path).map_err(|e| format!("mkdir {}: {e}", path.display()))?;
     }
@@ -1610,6 +1627,9 @@ fn run_headless_launch(
             &mut current_pulsed_button_mask,
         );
     }
+    if tape_samples.is_none() {
+        transcript_live = bus.port1_pad_sample().unwrap_or_default();
+    }
     let collect_profile_events = args.dump_guest_profile || args.profile_log.is_some();
     let mut profile_summary = args
         .dump_guest_profile
@@ -1684,6 +1704,7 @@ fn run_headless_launch(
         tape_poll_bound
             .then_some(tape_samples.as_ref())
             .flatten()
+            .filter(|_| !args.input_tape_hold_last)
             .map(|samples| tape_start_poll.saturating_add(samples.len() as u64)),
     );
     let mut next_step = 0u64;
@@ -1761,7 +1782,8 @@ fn run_headless_launch(
                     if polls >= tape_start_poll {
                         let index = polls.saturating_sub(tape_start_poll);
                         if index >= samples.len() as u64 {
-                            tape_exhausted = true;
+                            tape_exhausted_at_poll.get_or_insert(polls);
+                            tape_exhausted = !args.input_tape_hold_last;
                         }
                         let cursor = index.min(samples.len().saturating_sub(1) as u64) as usize;
                         if !tape_started || cursor != tape_cursor {
@@ -2000,7 +2022,8 @@ fn run_headless_launch(
                     if polls >= tape_start_poll {
                         let index = polls.saturating_sub(tape_start_poll);
                         if index >= samples.len() as u64 {
-                            tape_exhausted = true;
+                            tape_exhausted_at_poll.get_or_insert(polls);
+                            tape_exhausted = !args.input_tape_hold_last;
                         }
                         let cursor = index.min(samples.len().saturating_sub(1) as u64) as usize;
                         if !tape_started || cursor != tape_cursor {
@@ -2045,6 +2068,11 @@ fn run_headless_launch(
                     route_ticks,
                     &mut current_pulsed_button_mask,
                 );
+            }
+            if tape_samples.is_none() {
+                // No tape: the presses, pulses and holds above set the pad for
+                // this route tick; the polls it completes read this sample.
+                transcript_live = bus.port1_pad_sample().unwrap_or_default();
             }
             if let Some(writer) = route_log.as_mut() {
                 let area = bus.gpu.display_area();
@@ -2406,8 +2434,11 @@ fn run_headless_launch(
         // poll count: zero means scripted presses and tapes alike were written
         // to a port nobody is reading.
         println!(
-            "route-ticks={route_ticks}  port1-polls={}",
-            bus.port1_completed_polls()
+            "route-ticks={route_ticks}  port1-polls={}{}",
+            bus.port1_completed_polls(),
+            tape_exhausted_at_poll.map_or(String::new(), |poll| format!(
+                "  tape-exhausted-at-poll={poll}"
+            ))
         );
         // A guest that services its CD interrupt too late loses sectors and is
         // told nothing about it, so it shows up as a stall or corrupt asset
@@ -3395,6 +3426,7 @@ fn validation_launch_args(
         input_tape,
         input_tape_delay_ticks: 0,
         input_tape_transcribe: None,
+        input_tape_hold_last: false,
         stop_at_poll: None,
         stop_on_tty: Vec::new(),
         save_state_at_tick: None,
@@ -5255,6 +5287,55 @@ mod press_script_tests {
                 assert_eq!(pixel(96, 10), [0xff, 0, 0xff, 0xff]);
             }
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `--input-tape-hold-last` needs a tape, and a poll-bound one: a
+    /// video-frame tape already holds its last frame.
+    #[test]
+    fn input_tape_hold_last_needs_a_poll_bound_tape() {
+        assert!(Cli::try_parse_from([
+            "psoxide-emulator",
+            "launch",
+            "--path",
+            "x.exe",
+            "--input-tape-hold-last"
+        ])
+        .is_err());
+        let root = std::env::temp_dir().join(format!(
+            "psoxide-cli-hold-last-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let tape = root.join("frames.pxtape");
+        emulator_core::input_tape::write_tape(
+            &tape,
+            &[emulator_core::input_tape::PadSample::from_buttons(0)],
+        )
+        .unwrap();
+        let exe = root.join("spin.exe");
+        std::fs::write(&exe, display_off_exe(false)).unwrap();
+        let cli = Cli::try_parse_from([
+            "psoxide-emulator",
+            "launch",
+            "--path",
+            exe.to_str().unwrap(),
+            "--steps",
+            "100",
+            "--input-tape",
+            tape.to_str().unwrap(),
+            "--input-tape-hold-last",
+        ])
+        .unwrap();
+        let Some(Command::Launch(args)) = cli.command else {
+            panic!("expected launch command");
+        };
+        let err = run_headless_launch(&ConfigPaths::rooted(&root), args, false).unwrap_err();
+        assert!(err.contains("poll-bound"), "{err}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

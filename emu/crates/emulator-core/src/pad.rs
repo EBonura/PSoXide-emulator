@@ -766,6 +766,19 @@ impl DigitalPad {
         true
     }
 
+    /// The buttons held and the stick positions, `(buttons, right_x,
+    /// right_y, left_x, left_y)`: what [`DigitalPad::set_sticks`] and the
+    /// button setter last stored, whatever the mode.
+    pub fn held_input(&self) -> (u16, u8, u8, u8, u8) {
+        (
+            self.buttons.bits(),
+            self.right_x,
+            self.right_y,
+            self.left_x,
+            self.left_y,
+        )
+    }
+
     /// Set the analog-stick state. `(right_x, right_y, left_x,
     /// left_y)` are each 0..=255 with `STICK_CENTER = 0x80`. Games
     /// only see these when the pad is in Analog (or Config) mode.

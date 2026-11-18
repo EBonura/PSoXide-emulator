@@ -1088,6 +1088,21 @@ impl Bus {
             .is_some_and(|pad| pad.analog_locked())
     }
 
+    /// What the port-1 controller is holding now, buttons and sticks, as an
+    /// input-tape sample; `None` with no pad attached.
+    pub fn port1_pad_sample(&self) -> Option<crate::input_tape::PadSample> {
+        self.sio0.port1().pad().map(|pad| {
+            let (buttons, right_x, right_y, left_x, left_y) = pad.held_input();
+            crate::input_tape::PadSample {
+                buttons,
+                right_x,
+                right_y,
+                left_x,
+                left_y,
+            }
+        })
+    }
+
     /// Current port-1 pad mode, if a pad is attached.
     pub fn port1_pad_mode(&self) -> Option<crate::pad::PadMode> {
         self.sio0.port1().pad().map(|pad| pad.mode())
@@ -5248,6 +5263,21 @@ fn zeroed_box<const N: usize>() -> Box<[u8; N]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `port1_pad_sample` reads back is what the setters wrote (the
+    /// transcript of a pressed run is built from it).
+    #[test]
+    fn port1_pad_sample_reads_back_buttons_and_sticks() {
+        let mut bus = Bus::new_without_bios();
+        bus.attach_digital_pad_port1();
+        bus.set_port1_buttons(crate::pad::ButtonState::from_bits(0x4008));
+        bus.set_port1_sticks(1, 2, 3, 4);
+        let s = bus.port1_pad_sample().expect("pad attached");
+        assert_eq!(
+            (s.buttons, s.right_x, s.right_y, s.left_x, s.left_y),
+            (0x4008, 1, 2, 3, 4)
+        );
+    }
     use crate::irq::IrqSource;
     use crate::scheduler::EventSlot;
 
