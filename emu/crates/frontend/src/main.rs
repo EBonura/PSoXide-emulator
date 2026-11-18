@@ -2542,8 +2542,7 @@ fn frontend_display(
     // rect if an animated-offset (screen-shake) title ever needs it.
     // GP1(03h) display off: the CPU display texture holds the black picture
     // the console shows (`prepare_display`); the HW target still holds VRAM.
-    if area.bpp24 || bus.is_some_and(|b| b.gpu.field_rendering_active() || !b.gpu.display_enabled())
-    {
+    if bus.map_or(area.bpp24, |b| gfx::presents_cpu_display(&b.gpu)) {
         return (gfx.display_texture_id(), cpu_display_uv(area));
     }
     (gfx.hw_texture_id(), hw_display_uv(area))
@@ -2968,6 +2967,33 @@ mod tests {
 
         assert!(!hw_target_needs_resync(&mut seen, &mut last_24bpp, 7, true));
         assert!(hw_target_needs_resync(&mut seen, &mut last_24bpp, 7, false));
+    }
+
+    /// The window presents the CPU display texture exactly for 24bpp scanout,
+    /// 480i field rendering and a display turned off by GP1(03h); a screen
+    /// offset stays on the HW target, so no CPU texture is built for it.
+    #[test]
+    fn cpu_display_texture_only_where_the_hw_target_cannot_show_the_frame() {
+        const GP1: u32 = 0x1f80_1814;
+        let on = || {
+            let mut gpu = emulator_core::Gpu::new();
+            gpu.write32(GP1, 0x0600_0000 | (0xc60 << 12) | 0x260);
+            gpu.write32(GP1, 0x0700_0000 | (0x100 << 10) | 0x10);
+            gpu.write32(GP1, 0x0800_0001);
+            gpu.write32(GP1, 0x0300_0000);
+            gpu
+        };
+        assert!(!gfx::presents_cpu_display(&on()));
+        let mut offset = on();
+        offset.write32(GP1, 0x0600_0000 | (0xc70 << 12) | 0x270);
+        assert_ne!(offset.horizontal_display_offset_px(), 0);
+        assert!(!gfx::presents_cpu_display(&offset));
+        let mut bpp24 = on();
+        bpp24.write32(GP1, 0x0800_0011);
+        assert!(gfx::presents_cpu_display(&bpp24));
+        let mut off = on();
+        off.write32(GP1, 0x0300_0001);
+        assert!(gfx::presents_cpu_display(&off));
     }
 
     #[test]

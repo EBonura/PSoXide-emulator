@@ -453,22 +453,15 @@ impl Graphics {
         self.hw_renderer.blit_vram_to_view(&self.vram_render_view);
     }
 
-    /// Upload the CPU-decoded visible display area for presentation cases the
-    /// HW texture path cannot express directly: 24bpp scanout, the display
-    /// turned off by GP1(03h) (black), and GP1(06h/07h) screen-position
-    /// preview. Normal 15-bit gameplay with the standard
-    /// centred display range presents the HW renderer target.
+    /// Upload the CPU-decoded visible display area when the picture on show
+    /// comes from it ([`presents_cpu_display`]); every other frame presents the
+    /// HW renderer target and needs no upload.
     pub fn prepare_display(&self, gpu: Option<&Gpu>, deinterlace: emulator_core::Deinterlace) {
         let Some(gpu) = gpu else {
             self.clear_display_texture();
             return;
         };
-        let needs_cpu_display = gpu.display_area().bpp24
-            || gpu.field_rendering_active()
-            || !gpu.display_enabled()
-            || gpu.horizontal_display_offset_px() != 0
-            || gpu.vertical_display_offset_px() != 0;
-        if !needs_cpu_display {
+        if !presents_cpu_display(gpu) {
             return;
         }
         let (rgba, width, height) = gpu.display_rgba8_with(deinterlace);
@@ -702,4 +695,13 @@ fn create_display_texture(device: &wgpu::Device) -> wgpu::Texture {
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     })
+}
+
+/// Whether the window presents the CPU-decoded display texture instead of the
+/// HW renderer target: frames the HW target cannot show (24bpp scanout, 480i
+/// drawn field by field) and the display turned off by GP1(03h), which is
+/// black. A GP1(06h/07h) screen offset stays on the HW target (see
+/// `frontend_display` in main.rs). `prepare_display` uploads exactly these.
+pub fn presents_cpu_display(gpu: &Gpu) -> bool {
+    gpu.display_area().bpp24 || gpu.field_rendering_active() || !gpu.display_enabled()
 }
