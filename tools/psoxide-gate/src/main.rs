@@ -179,6 +179,11 @@ struct RunArgs {
     /// Print each step as it starts (the tick-log tool reads the step names from this).
     #[arg(short, long)]
     verbose: bool,
+    /// Play every journey with this port-1 pad instead of the journey's own `pad`: `digital`
+    /// (original pad), `dualshock` (a DualShock that starts digital) or `analog` (analog forced
+    /// on). Port 2 is unchanged. The summary line says `pad=MODE` and the receipt key holds it.
+    #[arg(long, value_enum, value_name = "MODE")]
+    pad: Option<journey::PadMode>,
     /// Keep a receipt for every journey that passes, in this directory, and skip a journey
     /// whose receipt (same disc, journey, goldens, symbols, tapes, build, hardware target,
     /// flags and environment) already says PASS. A hit prints `RECEIPT HIT`; a failure is
@@ -423,6 +428,8 @@ struct Opts {
     conformance: Vec<emulator_core::conformance::Rule>,
     out: PathBuf,
     receipts: Option<ReceiptMode>,
+    /// Port-1 pad replacing every journey's own (`--pad`).
+    pad: Option<journey::PadMode>,
 }
 
 /// Receipts in use for this run.
@@ -477,6 +484,7 @@ impl Opts {
                 store: receipt::Store::new(dir),
                 verify: a.receipts_verify,
             }),
+            pad: a.pad,
         })
     }
 }
@@ -492,10 +500,14 @@ fn golden_dir_for(job: &Job, name: &str, o: &Opts) -> PathBuf {
 }
 
 fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
-    let journey = match Journey::load(&job.journey_path) {
+    let mut journey = match Journey::load(&job.journey_path) {
         Ok(j) => j,
         Err(e) => return aborted(&job.name, e),
     };
+    if let Some(pad) = o.pad {
+        // Both boots (the first and a journey's reboot) read the journey's pad.
+        journey.pad = pad;
+    }
     let disc = match pick_disc(
         &journey,
         job,
@@ -522,7 +534,9 @@ fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
                 prior = mode.store.find(&journey.name, &key);
                 if let (Some(kept), false) = (&prior, mode.verify) {
                     println!("{}", kept.hit_line());
-                    return receipt_hit(&journey, &disc, kept);
+                    let mut hit = receipt_hit(&journey, &disc, kept);
+                    hit.facts.pad_override = o.pad;
+                    return hit;
                 }
                 state = receipt::State::Ran;
                 keyed = Some(key);
@@ -552,6 +566,7 @@ fn run_planned(job: &Job, fleet: &Fleet, o: &Opts) -> JourneyResult {
             artifact_dir: o.out.join(&journey.name).join("cards"),
         },
     );
+    result.facts.pad_override = o.pad;
     result.receipt = match (&o.receipts, &keyed) {
         (Some(mode), Some(key)) => settle_receipt(&mode.store, key, prior.as_ref(), &mut result),
         _ => state,
@@ -572,12 +587,25 @@ fn receipt_key(
             "--tick-log and --fetch-trace write files a receipt hit would not produce".into(),
         );
     }
+    let flags = key_flags(o, journey);
+    receipt::compute_key(&receipt::Context {
+        journey,
+        journey_path: &job.journey_path,
+        repo_root: &job.repo_root,
+        disc,
+        golden_dir,
+        flags: &flags,
+    })
+}
+
+/// Every flag and setting of this run that alters a journey's behaviour, as receipt key inputs.
+fn key_flags(o: &Opts, journey: &Journey) -> Vec<(String, String)> {
     let scales = o
         .scales
         .clone()
         .unwrap_or_else(|| journey.render.scales.clone());
     let flag = |name: &str, value: String| (name.to_string(), value);
-    let flags = [
+    vec![
         flag("hardware renderer", o.use_hw.to_string()),
         flag("scales", format!("{scales:?}")),
         flag("strict", o.strict.to_string()),
@@ -585,6 +613,10 @@ fn receipt_key(
         flag("trace-state", format!("{:?}", o.trace_state)),
         flag("trace-checkpoint", format!("{:?}", o.trace_checkpoint)),
         flag("audit-pad", o.audit_pad.to_string()),
+        flag(
+            "pad",
+            o.pad.map_or("journey".into(), |p| p.name().to_string()),
+        ),
         flag(
             "conformance",
             o.conformance
@@ -598,15 +630,7 @@ fn receipt_key(
             "hardware",
             format!("{:?}", emulator_core::HardwareTarget::from_env()),
         ),
-    ];
-    receipt::compute_key(&receipt::Context {
-        journey,
-        journey_path: &job.journey_path,
-        repo_root: &job.repo_root,
-        disc,
-        golden_dir,
-        flags: &flags,
-    })
+    ]
 }
 
 /// The result of a journey a receipt answered for: the recorded counts, no frames.
@@ -702,6 +726,7 @@ fn aborted(name: &str, why: String) -> JourneyResult {
         cd_acknowledges: None,
         mdec_commands: None,
         receipt: receipt::State::Off,
+        facts: Default::default(),
     }
 }
 
@@ -955,6 +980,7 @@ fn cmd_bless(a: &BlessArgs) -> Result<ExitCode, String> {
         conformance: Vec::new(),
         out: a.out.clone(),
         receipts: None,
+        pad: None,
     };
     let r = run_planned(job, &fleet, &opts);
     println!("{}", r.summary());
@@ -1072,6 +1098,52 @@ mod tests {
             Cmd::Run(a) => Ok(a.conformance.clone()),
             _ => Err("not run".into()),
         }
+    }
+
+    fn run_args(extra: &[&str]) -> Result<RunArgs, String> {
+        let mut argv = vec!["psoxide-gate", "run", "nitroxide"];
+        argv.extend_from_slice(extra);
+        match Cli::try_parse_from(argv)
+            .map_err(|e| e.to_string())?
+            .command
+        {
+            Cmd::Run(a) => Ok(*a),
+            _ => Err("not run".into()),
+        }
+    }
+
+    /// `--pad` takes the journey file's three names, nothing else, and is absent by default.
+    #[test]
+    fn pad_flag_takes_the_journey_pad_names() {
+        use journey::PadMode;
+        assert_eq!(run_args(&[]).unwrap().pad, None);
+        for (word, mode) in [
+            ("digital", PadMode::Digital),
+            ("dualshock", PadMode::Dualshock),
+            ("analog", PadMode::Analog),
+        ] {
+            assert_eq!(run_args(&["--pad", word]).unwrap().pad, Some(mode));
+            assert_eq!(mode.name(), word);
+        }
+        assert!(run_args(&["--pad", "mouse"]).is_err());
+    }
+
+    /// The pad is a receipt key input: no pad override, and each override, key differently,
+    /// so a digital run never answers from a DualShock receipt.
+    #[test]
+    fn pad_override_is_part_of_the_receipt_key_flags() {
+        let journey: Journey = toml::from_str("name = \"j\"\ndisc = \"x.cue\"\n").expect("journey");
+        let flags = |extra: &[&str]| {
+            key_flags(
+                &Opts::from_run(&run_args(extra).unwrap()).unwrap(),
+                &journey,
+            )
+        };
+        let pad = |f: Vec<(String, String)>| f.into_iter().find(|(k, _)| k == "pad").unwrap().1;
+        assert_eq!(pad(flags(&[])), "journey");
+        assert_eq!(pad(flags(&["--pad", "digital"])), "digital");
+        assert_ne!(flags(&["--pad", "digital"]), flags(&["--pad", "dualshock"]));
+        assert_ne!(flags(&[]), flags(&["--pad", "analog"]));
     }
 
     #[test]

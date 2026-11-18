@@ -75,7 +75,7 @@ fn default_max_ticks() -> u64 {
     60 * 60 * 20
 }
 
-#[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum PadMode {
     /// Analog DualShock forced on (poll id 0x73), like the headless frontend.
@@ -85,6 +85,17 @@ pub enum PadMode {
     Digital,
     /// DualShock that starts digital and switches when the game asks.
     Dualshock,
+}
+
+impl PadMode {
+    /// The name a journey file and `--pad` use.
+    pub fn name(self) -> &'static str {
+        match self {
+            PadMode::Analog => "analog",
+            PadMode::Digital => "digital",
+            PadMode::Dualshock => "dualshock",
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]

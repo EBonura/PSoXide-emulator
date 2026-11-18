@@ -605,6 +605,7 @@ mod tests {
             cd_acknowledges: None,
             mdec_commands: None,
             receipt: State::Off,
+            facts: Default::default(),
         }
     }
 

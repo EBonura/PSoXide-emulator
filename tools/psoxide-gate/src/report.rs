@@ -473,6 +473,7 @@ mod tests {
             cd_acknowledges: None,
             mdec_commands: None,
             receipt: crate::receipt::State::Off,
+            facts: Default::default(),
         };
         let index = write_report(
             dir.path(),

@@ -148,6 +148,15 @@ pub struct JourneyResult {
     pub mdec_commands: Option<u64>,
     /// Where the verdict came from (see `receipt`).
     pub receipt: crate::receipt::State,
+    /// What the run did besides its checks.
+    pub facts: RunFacts,
+}
+
+/// What a run did besides its checks, for the summary line and the receipt.
+#[derive(Clone, Debug, Default)]
+pub struct RunFacts {
+    /// The `--pad` that replaced the journey's own pad, if one was given.
+    pub pad_override: Option<crate::journey::PadMode>,
 }
 
 impl JourneyResult {
@@ -193,6 +202,9 @@ impl JourneyResult {
         ));
         if let Some(n) = self.gp0_irq_commands {
             s.push_str(&format!(" | GP0(1Fh) {n}"));
+        }
+        if let Some(pad) = self.facts.pad_override {
+            s.push_str(&format!(" | pad={}", pad.name()));
         }
         if let Some(a) = &self.abort {
             s.push_str(&format!(" | ABORTED: {a}"));
@@ -685,6 +697,7 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         cd_acknowledges: None,
         mdec_commands: None,
         receipt: crate::receipt::State::Off,
+        facts: Default::default(),
     };
     let scales = opts
         .scales
@@ -2473,6 +2486,7 @@ mod tests {
             cd_acknowledges: None,
             mdec_commands: None,
             receipt: crate::receipt::State::Off,
+            facts: Default::default(),
         };
         assert!(result.passed());
         assert_eq!(result.count(Status::Pass), 1);
@@ -2611,6 +2625,7 @@ mod tests {
             cd_acknowledges: None,
             mdec_commands: None,
             receipt: crate::receipt::State::Off,
+            facts: Default::default(),
         }
     }
 
