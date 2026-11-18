@@ -836,6 +836,10 @@ pub struct Spu {
     /// Countdown to the next noise-level update (see [`Spu::noise_tick`]),
     /// zero at power-on.
     noise_timer: i32,
+    /// Register writes since power-on (see [`Spu::register_writes`]). Host-side
+    /// bookkeeping, not machine state: a save state does not carry it.
+    #[serde(skip)]
+    register_writes: u64,
 }
 
 impl Default for Spu {
@@ -913,6 +917,7 @@ impl Spu {
             irq_pending: false,
             noise_val: 1,
             noise_timer: 0,
+            register_writes: 0,
         }
     }
 
@@ -1116,6 +1121,13 @@ impl Spu {
     /// Release the SPU transfer engine when the scheduled DMA completes.
     pub fn end_dma(&mut self) {
         self.dma_active = false;
+    }
+
+    /// Register writes since power-on (or since a save state was loaded):
+    /// zero means nothing has programmed the SPU. Diagnostic; the gate uses it
+    /// to tell whether a run exercised the SPU.
+    pub fn register_writes(&self) -> u64 {
+        self.register_writes
     }
 
     /// Diagnostic: total samples produced since reset. One sample pair
@@ -1327,6 +1339,7 @@ impl Spu {
 
     /// 16-bit write with cycle context.
     pub fn write16_at(&mut self, phys: u32, value: u16, now: u64) {
+        self.register_writes += 1;
         let phys = phys & !1;
         if let Some((v, off)) = decode_voice(phys) {
             self.write_voice_reg(v, off, value);

@@ -6,6 +6,7 @@
 
 #![allow(missing_docs)]
 
+mod behaviour;
 mod card;
 mod compare;
 mod contact;
@@ -65,6 +66,9 @@ enum Cmd {
     Bless(BlessArgs),
     /// List the fleet: each game, its journey and whether it exists.
     List(CommonArgs),
+    /// Print this gate's behaviour versions: `VERSIONS cpu=1 gte=1 ... rules=<hex16> journey=1`
+    /// (every area, exercised or not; see `behaviour.rs`).
+    Versions,
 }
 
 #[derive(Args, Clone)]
@@ -285,6 +289,10 @@ fn main() -> ExitCode {
         }
         Cmd::Bless(a) => cmd_bless(&a),
         Cmd::List(a) => cmd_list(&a),
+        Cmd::Versions => {
+            println!("{}", versions_line());
+            Ok(ExitCode::SUCCESS)
+        }
     };
     match result {
         Ok(code) => code,
@@ -293,6 +301,15 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// `VERSIONS area=version ...` for every behaviour area.
+fn versions_line() -> String {
+    let all: Vec<String> = behaviour::table()
+        .into_iter()
+        .map(|(area, version)| format!("{area}={version}"))
+        .collect();
+    format!("VERSIONS {}", all.join(" "))
 }
 
 /// What to run for one target.
@@ -650,6 +667,10 @@ fn receipt_hit(journey: &Journey, disc: &Path, kept: &receipt::Receipt) -> Journ
     // which is all `model_equivalent` asks. Anything else stays uncounted.
     r.conformance = (kept.cd_ack == 0).then(Vec::new);
     r.receipt = receipt::State::Hit;
+    if !kept.digest.is_empty() {
+        r.facts.areas = Some(kept.areas.clone());
+        r.facts.digest = Some(kept.digest.clone());
+    }
     r.notes.push(
         "receipt hit: not played, so no frames, cards or traces were written for it here; \
          delete the receipt to play it again"
@@ -880,6 +901,11 @@ fn play(jobs: &[&Job], fleet: &Fleet, opts: &Opts, threads: usize) -> Vec<Journe
                 let Some(job) = jobs.get(i) else { break };
                 let r = run_planned(job, fleet, opts);
                 println!("{}", r.summary());
+                if let (Some(areas), Some(digest)) = (&r.facts.areas, &r.facts.digest) {
+                    for line in behaviour::lines(&r.name, &behaviour::model(), areas, digest) {
+                        println!("{line}");
+                    }
+                }
                 if let Some(line) = r.conformance_line(&opts.conformance) {
                     println!("{line}");
                 }

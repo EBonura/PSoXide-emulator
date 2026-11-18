@@ -157,6 +157,11 @@ pub struct JourneyResult {
 pub struct RunFacts {
     /// The `--pad` that replaced the journey's own pad, if one was given.
     pub pad_override: Option<crate::journey::PadMode>,
+    /// The behaviour areas the run exercised, `area=version` (see `behaviour`); `None` when
+    /// it did not boot.
+    pub areas: Option<Vec<String>>,
+    /// The run digest (see `behaviour::RunDigest`); `None` when it did not boot.
+    pub digest: Option<String>,
 }
 
 impl JourneyResult {
@@ -175,8 +180,13 @@ impl JourneyResult {
     /// One line for the fleet summary.
     pub fn summary(&self) -> String {
         let verdict = if self.passed() { "PASS" } else { "FAIL" };
+        // `pad=MODE` sits between the name and the check count when `--pad` was given.
+        let pad = self
+            .facts
+            .pad_override
+            .map_or(String::new(), |p| format!("pad={} ", p.name()));
         let mut s = format!(
-            "{verdict} {:<14} {} checks: {} pass, {} fail",
+            "{verdict} {:<14} {pad}{} checks: {} pass, {} fail",
             self.name,
             self.checks().count(),
             self.count(Status::Pass),
@@ -202,9 +212,6 @@ impl JourneyResult {
         ));
         if let Some(n) = self.gp0_irq_commands {
             s.push_str(&format!(" | GP0(1Fh) {n}"));
-        }
-        if let Some(pad) = self.facts.pad_override {
-            s.push_str(&format!(" | pad={}", pad.name()));
         }
         if let Some(a) = &self.abort {
             s.push_str(&format!(" | ABORTED: {a}"));
@@ -527,6 +534,10 @@ struct Run<'a> {
     expired: Option<usize>,
     /// One entry per loop site, for the report.
     loops: Vec<LoopStat>,
+    /// Every checkpoint so far, for the run digest.
+    digest: crate::behaviour::RunDigest,
+    /// A hardware-renderer frame was captured.
+    hw_captured: bool,
 }
 
 /// Where a step sits: its report name, how to say it in a message, and the loop site it counts
@@ -832,6 +843,8 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         deadlines: Deadlines::new(),
         expired: None,
         loops: Vec::new(),
+        digest: Default::default(),
+        hw_captured: false,
     };
     run.m.release_pads();
     result.abort = run.play().err();
@@ -858,6 +871,8 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
             .push(conformance_group(&hits, &opts.conformance, run.m.ticks));
     }
     result.conformance = Some(hits);
+    result.facts.areas = Some(crate::behaviour::Touched::of(&run.m.bus, run.hw_captured).areas());
+    result.facts.digest = Some(std::mem::take(&mut run.digest).finish(run.m.ticks));
     result.groups = run.groups;
     result.wall = start.elapsed();
     result
@@ -1699,6 +1714,8 @@ impl<'a> Run<'a> {
         let mut checks = Vec::new();
         let mut capture = None;
         if step.checkpoint.is_some() {
+            self.digest
+                .checkpoint(&name, self.m.bus.ram(), self.m.bus.gpu.vram.words());
             let cpu = self.m.display_image();
             let golden_path = self.opts.golden_dir.join(format!("{name}.png"));
             let (golden, golden_error) = if golden_path.exists() {
@@ -1719,6 +1736,7 @@ impl<'a> Run<'a> {
                 },
                 _ => (Vec::new(), None),
             };
+            self.hw_captured |= !hw.is_empty();
             let cap = Capture {
                 comparison: {
                     let mut layout = step.comparison.clone();
@@ -2405,6 +2423,8 @@ mod tests {
             deadlines: Deadlines::new(),
             expired: None,
             loops: Vec::new(),
+            digest: Default::default(),
+            hw_captured: false,
         };
         run.checkpoint(0, &j.steps[0]);
         run.groups.remove(0).checks
@@ -2627,6 +2647,29 @@ mod tests {
             receipt: crate::receipt::State::Off,
             facts: Default::default(),
         }
+    }
+
+    /// The summary line names an overriding pad between the journey name and the check count,
+    /// and stays as before without one (the harness parses both).
+    #[test]
+    fn summary_names_the_pad_override() {
+        let mut r = aborted_for_test();
+        r.name = "carousel".into();
+        let plain = r.summary();
+        assert!(
+            plain.starts_with("PASS carousel       0 checks: "),
+            "{plain}"
+        );
+        r.facts.pad_override = Some(crate::journey::PadMode::Digital);
+        let line = r.summary();
+        assert!(
+            line.starts_with("PASS carousel       pad=digital 0 checks: "),
+            "{line}"
+        );
+        assert_eq!(
+            line.split_once(" | ").unwrap().1,
+            plain.split_once(" | ").unwrap().1
+        );
     }
 
     #[test]

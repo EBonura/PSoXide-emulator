@@ -81,6 +81,13 @@ pub struct Receipt {
     #[serde(default)]
     pub cd_ack: u64,
     pub disc_id: String,
+    /// The behaviour areas the run exercised, `area=version` (see `behaviour`); empty in a
+    /// receipt from an older gate.
+    #[serde(default)]
+    pub areas: Vec<String>,
+    /// The run digest (see `behaviour::RunDigest`); empty in a receipt from an older gate.
+    #[serde(default)]
+    pub digest: String,
     /// UTC, `YYYY-MM-DDTHH:MM:SSZ`.
     pub date: String,
     pub unix_secs: u64,
@@ -110,6 +117,8 @@ impl Receipt {
             gp0_1f,
             cd_ack,
             disc_id: result.disc_id.clone(),
+            areas: result.facts.areas.clone().unwrap_or_default(),
+            digest: result.facts.digest.clone().unwrap_or_default(),
             date: utc_date_time(unix_secs),
             unix_secs,
             input: key.inputs.clone(),
@@ -153,6 +162,13 @@ impl Receipt {
                 fresh
                     .cd_ack_hits()
                     .map_or("uncounted".to_string(), |n| n.to_string())
+            ));
+        }
+        if !self.digest.is_empty() && fresh.facts.digest.as_deref() != Some(&*self.digest) {
+            diffs.push(format!(
+                "run digest {} then, {} now",
+                self.digest,
+                fresh.facts.digest.as_deref().unwrap_or("uncounted")
             ));
         }
         (!diffs.is_empty()).then(|| diffs.join("; "))
