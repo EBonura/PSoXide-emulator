@@ -116,6 +116,19 @@ impl HwSet {
         {
             return Err(HwSkip::ScreenOffset);
         }
+        if !bus.gpu.display_enabled() {
+            // GP1(03h) display off: the console and the app show black at
+            // every scale, whatever the renderer's VRAM target holds.
+            return Ok(self
+                .scales
+                .iter()
+                .map(|&(s, _)| {
+                    let (w, h) = (cpu_w * s, cpu_h * s);
+                    let black = [0u8, 0, 0, 0xff].repeat((w * h) as usize);
+                    (s, Img::from_rgba(w, h, black))
+                })
+                .collect());
+        }
         self.device.poll(wgpu::Maintain::Wait);
         let mut out = Vec::new();
         for (s, hw) in &self.scales {

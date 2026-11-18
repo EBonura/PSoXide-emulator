@@ -265,6 +265,7 @@ fn gp1_extended_hres_zero_is_368_pixels() {
 #[test]
 fn display_rgba8_pans_by_gp1_06_horizontal_offset() {
     let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0300_0000); // display on
     gpu.write32(GP1_ADDR, 0x0500_0000); // display start (0, 0)
     gpu.write32(GP1_ADDR, 0x0704_0010); // standard 240-line v-range 0x10..0x100
     gpu.write32(GP1_ADDR, 0x0800_0001); // 320-wide, 240 lines
@@ -307,6 +308,7 @@ fn display_rgba8_pans_by_gp1_06_horizontal_offset() {
 #[test]
 fn display_24bpp_start_x_is_a_halfword_address() {
     let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0300_0000); // display on
     gpu.write32(GP1_ADDR, 0x0500_0000 | 320); // display start (320, 0)
     gpu.write32(GP1_ADDR, 0x0704_0010);
     gpu.write32(GP1_ADDR, 0x0800_0011); // 320 wide, 24bpp
@@ -3394,6 +3396,7 @@ fn display_bytes_track_displayed_pixels_exactly_as_display_hash_does() {
         0x0500_0000,
         0x0600_0000 | 0x260 << 12 | 0x200,
         0x0700_0000 | 0x0f2 << 10 | 0x010,
+        0x0300_0000, // display on
     ] {
         assert!(gpu.write32(GP1_ADDR, word));
     }
@@ -3536,4 +3539,116 @@ fn interlaced_480_draws_in_the_blank_follow_the_reported_field() {
     for y in 0..4u16 {
         assert_eq!(gpu.vram.get_pixel(36, y) != 0, y & 1 == 0, "fill row {y}");
     }
+}
+
+/// Configure a 320x240 15bpp display at VRAM (0,0) with the standard centred
+/// ranges, the display switched on, as a game's display setup does.
+fn display_320x240_on(gpu: &mut Gpu) {
+    gpu.write32(GP1_ADDR, 0x0500_0000); // display start (0,0)
+    gpu.write32(GP1_ADDR, 0x0600_0000 | (0xc60 << 12) | 0x260); // H range
+    gpu.write32(GP1_ADDR, 0x0700_0000 | (0x100 << 10) | 0x10); // V range
+    gpu.write32(GP1_ADDR, 0x0800_0001); // 320 wide, 240 lines, NTSC, 15bpp
+    gpu.write32(GP1_ADDR, 0x0300_0000); // display on
+}
+
+fn fill(gpu: &mut Gpu, rgb: u32, x: u32, y: u32, w: u32, h: u32) {
+    gpu.write32(GP0_ADDR, 0x0200_0000 | rgb);
+    gpu.write32(GP0_ADDR, (y << 16) | x);
+    gpu.write32(GP0_ADDR, (h << 16) | w);
+}
+
+fn hash_of_zero_bytes(len: usize) -> u64 {
+    let mut h = psx_hw::hash::Fnv1a64::new();
+    h.update(&vec![0u8; len]);
+    h.finish()
+}
+
+/// GP1(03h) bit 0 = 1 turns the video output black (nocash PSX-SPX: "Off"
+/// shows a black picture). Every presenter shows black at the display
+/// area's size while VRAM keeps what is drawn or uploaded meanwhile.
+#[test]
+fn display_disabled_presents_black_and_keeps_vram() {
+    let mut gpu = Gpu::new();
+    assert!(!gpu.display_enabled(), "reset state is display off");
+    display_320x240_on(&mut gpu);
+    assert!(gpu.display_enabled());
+    fill(&mut gpu, 0x00_00ff, 0, 0, 320, 240); // red
+    let (rgba_on, w, h) = gpu.display_rgba8();
+    assert_eq!((w, h), (320, 240));
+    assert_eq!(&rgba_on[..4], &[0xff, 0, 0, 0xff]);
+    let (hash_on, ..) = gpu.display_hash();
+
+    gpu.write32(GP1_ADDR, 0x0300_0001); // display off
+    assert!(!gpu.display_enabled());
+    assert_ne!(
+        gpu.read32(GP1_ADDR).unwrap() & (1 << 23),
+        0,
+        "GPUSTAT bit 23"
+    );
+    let (rgba_off, w_off, h_off) = gpu.display_rgba8();
+    assert_eq!((w_off, h_off), (w, h), "the picture keeps its size");
+    assert!(rgba_off.chunks_exact(4).all(|p| p == [0, 0, 0, 0xff]));
+    let (hash_off, hw, hh, len) = gpu.display_hash();
+    assert_eq!((hw, hh, len), (320, 240, 320 * 240 * 2));
+    assert_eq!(hash_off, hash_of_zero_bytes(len));
+    assert_ne!(hash_off, hash_on);
+    let mut bytes = Vec::new();
+    assert_eq!(gpu.display_bytes_into(&mut bytes), Some((320, 240)));
+    assert_eq!(bytes.len(), len);
+    assert!(bytes.iter().all(|&b| b == 0));
+    // VRAM is unchanged by the blanking.
+    assert_eq!(gpu.vram.get_pixel(5, 5), 0x001f);
+
+    gpu.write32(GP1_ADDR, 0x0300_0000); // display on again
+    assert_eq!(gpu.display_rgba8().0, rgba_on);
+    assert_eq!(gpu.display_hash().0, hash_on);
+}
+
+/// 360X's screen change (1996 code): SetDispMask(0) as a screen ends, the
+/// next screen's textures are uploaded into VRAM, some of them inside the
+/// display area, then its Cls clears the picture and SetDispMask(1) turns
+/// the display back on. A console shows black until then and never the
+/// uploads; the presenters must too.
+#[test]
+fn display_off_hides_texture_uploads_across_a_screen_change() {
+    let mut gpu = Gpu::new();
+    display_320x240_on(&mut gpu);
+    fill(&mut gpu, 0x00_ff00, 0, 0, 320, 240); // the old screen, green
+
+    gpu.write32(GP1_ADDR, 0x0300_0001); // SetDispMask(0)
+                                        // Upload a 16x2 texture at (96,10), inside the display area.
+    gpu.write32(GP0_ADDR, 0xa000_0000);
+    gpu.write32(GP0_ADDR, (10 << 16) | 96);
+    gpu.write32(GP0_ADDR, (2 << 16) | 16);
+    for _ in 0..16 {
+        gpu.write32(GP0_ADDR, 0x7c00_7c1f); // magenta, blue
+    }
+    assert_eq!(gpu.vram.get_pixel(96, 10), 0x7c1f, "the upload landed");
+    let mut bytes = Vec::new();
+    for _ in 0..3 {
+        let (rgba, ..) = gpu.display_rgba8();
+        assert!(rgba.chunks_exact(4).all(|p| p == [0, 0, 0, 0xff]));
+        gpu.display_bytes_into(&mut bytes);
+        assert!(bytes.iter().all(|&b| b == 0));
+    }
+
+    fill(&mut gpu, 0x40_0000, 0, 0, 320, 240); // Cls: dark blue
+    gpu.write32(GP1_ADDR, 0x0300_0000); // SetDispMask(1)
+    let (rgba, ..) = gpu.display_rgba8();
+    let at = |x: usize, y: usize| &rgba[(y * 320 + x) * 4..(y * 320 + x) * 4 + 4];
+    assert_eq!(at(96, 10), at(0, 0), "the clear covers the upload");
+    assert_ne!(at(0, 0), [0, 0, 0, 0xff], "the new screen shows");
+}
+
+/// GP1(00h) resets the display to off (GPUSTAT bit 23 set), so the picture
+/// is black until the display is enabled again.
+#[test]
+fn gp1_reset_blanks_the_display() {
+    let mut gpu = Gpu::new();
+    display_320x240_on(&mut gpu);
+    fill(&mut gpu, 0x00_00ff, 0, 0, 320, 240);
+    gpu.write32(GP1_ADDR, 0x0000_0000);
+    assert!(!gpu.display_enabled());
+    let (rgba, ..) = gpu.display_rgba8();
+    assert!(rgba.chunks_exact(4).all(|p| p == [0, 0, 0, 0xff]));
 }

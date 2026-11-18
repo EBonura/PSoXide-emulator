@@ -973,6 +973,17 @@ impl Gpu {
         self.gp1_opcode_hist
     }
 
+    /// Whether the video output shows the display area: GP1(03h) bit 0
+    /// clear, read back as GPUSTAT bit 23 clear. With the display disabled
+    /// the console still sends sync but the picture is black (nocash
+    /// PSX-SPX, GP1(03h)), so every presenter here ([`Gpu::display_rgba8`],
+    /// [`Gpu::display_hash`], [`Gpu::display_bytes_into`]) shows black at the
+    /// display area's size. VRAM itself, and with it any raw VRAM dump, is
+    /// untouched. The reset state is disabled; the BIOS turns it on.
+    pub fn display_enabled(&self) -> bool {
+        self.status.raw & (1 << 23) == 0
+    }
+
     /// Snapshot of the currently-configured display area, for the
     /// frontend's framebuffer panel. Cheap to call each frame. The
     /// `height` is derived from the V-range + 480-mode flag (see
@@ -985,7 +996,10 @@ impl Gpu {
         // disc's chain-loader screen is visible on a console. This used to
         // return 0x0 until reconfiguration, which hid that whole phase from
         // --dump-hw and the GUI panel; the gating now lives in
-        // [`Gpu::display_hash`], the only consumer that needs it.
+        // [`Gpu::display_hash`], the only consumer that needs it. The area
+        // is also reported while GP1 0x03 has the display off: the
+        // presenters black it out (see [`Gpu::display_enabled`]), and a host
+        // that draws its own copy of VRAM must check that flag.
         DisplayArea {
             x: self.display_start_x,
             y: self.display_start_y,
@@ -1097,8 +1111,13 @@ impl Gpu {
     }
 
     /// One whole VRAM row (1024 halfwords) as `presented_words(Weave)`
-    /// would show it, without building the whole frame.
+    /// would show it, without building the whole frame: black while the
+    /// display is disabled (see [`Gpu::display_enabled`]).
     fn presented_row(&self, y: usize, hold: Option<(usize, usize, i32)>) -> &[u16] {
+        const BLACK_ROW: [u16; VRAM_WIDTH] = [0; VRAM_WIDTH];
+        if !self.display_enabled() {
+            return &BLACK_ROW;
+        }
         let row = y * VRAM_WIDTH..(y + 1) * VRAM_WIDTH;
         match hold {
             Some((first, last, shown)) if (first..last).contains(&y) && (y & 1) as i32 != shown => {
@@ -1333,6 +1352,11 @@ impl Gpu {
         // row `dy - off_y` when that lies inside the display area.
         let (w, h) = (i32::from(eff_w), i32::from(eff_h));
         let mut out = [0u8, 0, 0, 0xff].repeat(w as usize * h as usize);
+        if !self.display_enabled() {
+            // GP1(03h) display off: the output is black (see
+            // `display_enabled`), whatever VRAM holds.
+            return (out, eff_w as u32, eff_h as u32);
+        }
         let presented = self.presented_words(deinterlace);
         let words = &*presented;
         for dy in 0..h {

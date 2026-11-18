@@ -2540,7 +2540,10 @@ fn frontend_display(
     // ponytail: the fine display offset (a few px of CRT-window pan) is dropped in
     // the HW path -- imperceptible in a scale-to-fit window. Apply it at the paint
     // rect if an animated-offset (screen-shake) title ever needs it.
-    if area.bpp24 || bus.is_some_and(|b| b.gpu.field_rendering_active()) {
+    // GP1(03h) display off: the CPU display texture holds the black picture
+    // the console shows (`prepare_display`); the HW target still holds VRAM.
+    if area.bpp24 || bus.is_some_and(|b| b.gpu.field_rendering_active() || !b.gpu.display_enabled())
+    {
         return (gfx.display_texture_id(), cpu_display_uv(area));
     }
     (gfx.hw_texture_id(), hw_display_uv(area))

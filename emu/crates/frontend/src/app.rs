@@ -967,6 +967,9 @@ impl AppState {
         let slots = self.menu.slots.probe_json();
         // How many sampled pixels of the picture on show are not black (diagnostic).
         let display_lit = self.bus.as_ref().map_or(0, |bus| {
+            if !bus.gpu.display_enabled() {
+                return 0; // GP1(03h) display off: the picture is black.
+            }
             let a = bus.gpu.display_area();
             let words = bus.gpu.vram.words();
             let mut lit = 0;

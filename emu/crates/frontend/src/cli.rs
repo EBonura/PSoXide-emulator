@@ -4419,10 +4419,12 @@ fn dump_hw_ppm(
     let display = bus.gpu.display_area();
     let has_screen_offset =
         bus.gpu.horizontal_display_offset_px() != 0 || bus.gpu.vertical_display_offset_px() != 0;
-    if display.bpp24 || has_screen_offset {
+    if display.bpp24 || has_screen_offset || !bus.gpu.display_enabled() {
         let (rgba, w, h) = bus.gpu.display_rgba8();
         write_rgb_ppm_from_rgba(path, w, h, &rgba)?;
-        return Ok(Some(if display.bpp24 {
+        return Ok(Some(if !bus.gpu.display_enabled() {
+            "display off (GP1 03h): black"
+        } else if display.bpp24 {
             "24bpp display fallback"
         } else {
             "screen-offset display fallback"
@@ -5135,6 +5137,124 @@ mod press_script_tests {
         let expected_samples = result.cycles / emulator_core::spu::SAMPLE_CYCLES;
         assert!(expected_samples > 0);
         assert_eq!(wav.len(), 44 + expected_samples as usize * 4);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A side-loaded EXE that sets up a 320x240 display, clears it red,
+    /// optionally turns the display off with GP1(03h) (360X's
+    /// SetDispMask(0) at a screen change), uploads a texture inside the
+    /// display area and spins.
+    fn display_off_exe(display_off: bool) -> Vec<u8> {
+        let mut code = vec![0x3c08_1f80u32]; // lui t0, 0x1f80
+        let mut store = |offset: u32, value: u32| {
+            code.push(0x3c09_0000 | (value >> 16)); // lui t1, hi
+            code.push(0x3529_0000 | (value & 0xffff)); // ori t1, t1, lo
+            code.push(0xad09_0000 | offset); // sw t1, offset(t0)
+        };
+        let (gp0, gp1) = (0x1810, 0x1814);
+        for word in [
+            0x0500_0000,                         // display start (0,0)
+            0x0600_0000 | (0xc60 << 12) | 0x260, // H range
+            0x0700_0000 | (0x100 << 10) | 0x10,  // V range
+            0x0800_0001,                         // 320x240 15bpp
+            0x0300_0000,                         // display on
+        ] {
+            store(gp1, word);
+        }
+        for word in [0x0200_00ff, 0, (240 << 16) | 320] {
+            store(gp0, word); // fill red
+        }
+        if display_off {
+            store(gp1, 0x0300_0001);
+        }
+        for word in [0xa000_0000, (10 << 16) | 96, (2 << 16) | 16] {
+            store(gp0, word);
+        }
+        for _ in 0..16 {
+            store(gp0, 0x7c00_7c1f); // magenta, blue
+        }
+        let spin = 0x8001_0000 + 4 * code.len() as u32;
+        code.push(0x0800_0000 | ((spin >> 2) & 0x03ff_ffff)); // j spin
+        code.push(0); // nop
+        let text: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let text_len = text.len().next_multiple_of(2048);
+        let mut exe = vec![0u8; 2048 + text_len];
+        exe[..8].copy_from_slice(b"PS-X EXE");
+        for (offset, word) in [
+            (0x10, 0x8001_0000u32),
+            (0x18, 0x8001_0000),
+            (0x1c, text_len as u32),
+            (0x30, 0x801f_ff00),
+        ] {
+            exe[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        exe[2048..2048 + text.len()].copy_from_slice(&text);
+        exe
+    }
+
+    /// The 360X screen change on a synthetic GP1 stream: with the display
+    /// off the CPU display dump, the hardware dump and the display hash show
+    /// black while VRAM holds the upload; with it on the upload is visible.
+    #[test]
+    fn display_off_dumps_black_while_vram_keeps_the_upload() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "psoxide-cli-display-off-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        for display_off in [true, false] {
+            let exe_path = root.join(format!("dispoff-{display_off}.exe"));
+            std::fs::write(&exe_path, display_off_exe(display_off)).unwrap();
+            let display_ppm = root.join(format!("display-{display_off}.ppm"));
+            let hw_ppm = root.join(format!("hw-{display_off}.ppm"));
+            let mut argv = vec![
+                "psoxide-emulator".to_string(),
+                "launch".into(),
+                "--path".into(),
+                exe_path.to_str().unwrap().into(),
+                "--steps".into(),
+                "200000".into(),
+                "--dump-display".into(),
+                display_ppm.to_str().unwrap().into(),
+            ];
+            if display_off {
+                // The display-off dump never needs a wgpu device.
+                argv.extend(["--dump-hw".into(), hw_ppm.to_str().unwrap().into()]);
+            }
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let Some(Command::Launch(args)) = cli.command else {
+                panic!("expected launch command");
+            };
+            let result = run_headless_launch(&ConfigPaths::rooted(&root), args, false).unwrap();
+            assert_eq!(result.vram_words[10 * 1024 + 96], 0x7c1f, "upload in VRAM");
+            assert_eq!((result.display_width, result.display_height), (320, 240));
+            let pixel = |x: usize, y: usize| {
+                let at = (y * 320 + x) * 4;
+                result.display_rgba[at..at + 4].to_vec()
+            };
+            let header = b"P6\n320 240\n255\n".len();
+            if display_off {
+                assert!(result
+                    .display_rgba
+                    .chunks_exact(4)
+                    .all(|p| p == [0, 0, 0, 0xff]));
+                let mut zero = psx_hw::hash::Fnv1a64::new();
+                zero.update(&vec![0u8; 320 * 240 * 2]);
+                assert_eq!(result.display_hash, zero.finish());
+                for ppm in [&display_ppm, &hw_ppm] {
+                    let bytes = std::fs::read(ppm).unwrap();
+                    assert_eq!(bytes.len(), header + 320 * 240 * 3, "{}", ppm.display());
+                    assert!(bytes[header..].iter().all(|&b| b == 0), "{}", ppm.display());
+                }
+            } else {
+                assert_eq!(pixel(0, 0), [0xff, 0, 0, 0xff]);
+                assert_eq!(pixel(96, 10), [0xff, 0, 0xff, 0xff]);
+            }
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

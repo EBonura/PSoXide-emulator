@@ -366,12 +366,13 @@ impl AppState {
     /// A small picture of what the game is showing, from the emulated frame buffer. The part of
     /// VRAM on show is read straight from the CPU copy, which the CPU rasterizer keeps exact in
     /// the browser and on the desktop alike; the modes that image cannot show as plain 15-bit
-    /// pixels (24-bit colour, interlaced fields, screen offsets) use the machine's own display
-    /// image.
+    /// pixels (24-bit colour, interlaced fields, screen offsets, the display turned off) use the
+    /// machine's own display image.
     fn capture_thumb(&self) -> Option<Thumb> {
         let gpu = &self.bus.as_ref()?.gpu;
         let area = gpu.display_area();
-        let plain = !area.bpp24
+        let plain = gpu.display_enabled()
+            && !area.bpp24
             && !gpu.field_rendering_active()
             && gpu.horizontal_display_offset_px() == 0
             && gpu.vertical_display_offset_px() == 0;

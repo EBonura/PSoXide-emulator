@@ -657,8 +657,10 @@ type DisplayHash = (u64, u32, u32, usize);
 type DisplayRgba = (Vec<u8>, u32, u32);
 
 /// The display hash and RGBA conversion before they worked a row at a
-/// time: a pixel at a time through `get_pixel` / `reference_rgb24`.
+/// time: a pixel at a time through `get_pixel` / `reference_rgb24`. With the
+/// display off (GP1(03h)) every pixel reads as black.
 fn reference_display(gpu: &Gpu) -> (DisplayHash, DisplayRgba) {
+    let on = gpu.display_enabled();
     let hash = if !gpu.display_configured {
         (psx_hw::hash::Fnv1a64::new().finish(), 0, 0, 0)
     } else {
@@ -675,10 +677,11 @@ fn reference_display(gpu: &Gpu) -> (DisplayHash, DisplayRgba) {
             for dx in 0..effective_w {
                 if da.bpp24 {
                     let (r, g, b) = reference_rgb24(gpu, da.x, dx, da.y + dy);
-                    h.update(&[r, g, b]);
+                    h.update(&if on { [r, g, b] } else { [0; 3] });
                     byte_len += 3;
                 } else {
-                    h.update(&gpu.vram.get_pixel(da.x + dx, da.y + dy).to_le_bytes());
+                    let pixel = gpu.vram.get_pixel(da.x + dx, da.y + dy);
+                    h.update(&if on { pixel } else { 0 }.to_le_bytes());
                     byte_len += 2;
                 }
             }
@@ -703,7 +706,7 @@ fn reference_display(gpu: &Gpu) -> (DisplayHash, DisplayRgba) {
         let src_y = dy as i32 - off_y;
         for dx in 0..eff_w {
             let src_x = dx as i32 - off_x;
-            if src_x < 0 || src_x >= eff_w as i32 || src_y < 0 || src_y >= eff_h as i32 {
+            if !on || src_x < 0 || src_x >= eff_w as i32 || src_y < 0 || src_y >= eff_h as i32 {
                 out.extend_from_slice(&[0, 0, 0, 0xff]);
                 continue;
             }
@@ -750,6 +753,9 @@ fn display_hash_and_rgba_match_the_per_pixel_reference() {
         s.gp1(0x0600_0000 | hrange);
         s.gp1(0x0700_0000 | vrange);
         s.gp1(0x0800_0000 | mode);
+        // GP1(03h): the display off a quarter of the time.
+        let off = s.rng.chance(25);
+        s.gp1(0x0300_0000 | u32::from(off));
         let (hash, rgba) = reference_display(&s.gpu);
         assert_eq!(s.gpu.display_hash(), hash, "display_hash");
         assert!(s.gpu.display_rgba8() == rgba, "display_rgba8");
@@ -792,6 +798,7 @@ fn presented_frame_display_hash(gpu: &Gpu) -> DisplayHash {
 #[test]
 fn display_hash_and_bytes_match_the_presented_frame_with_field_rendering() {
     let mut s = Stress::new(0x5eed_0006);
+    s.gp1(0x0300_0000); // display on: the reference reads VRAM as presented
     let mut with_hold = 0;
     for round in 0..500 {
         let rng = &mut s.rng;
