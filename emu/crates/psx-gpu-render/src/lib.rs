@@ -2610,6 +2610,60 @@ mod tests {
         }
     }
 
+    /// Under the edge texture filter a span-drawn textured triangle takes its
+    /// coordinates from its UV plane, not from its first vertex: before, every
+    /// row rectangle carried vertex 0's UV and the whole triangle showed one
+    /// filtered texel. The triangle reaches outside VRAM with a corner tie (span
+    /// path) and maps a horizontal ramp, so its pixels must vary along x.
+    #[test]
+    fn span_drawn_textured_triangle_is_textured_under_the_edge_filter() {
+        // A 64x64 15bpp ramp at (512, 0): red grows with u.
+        let mut seed = Vec::new();
+        for y in 0..64u16 {
+            for x in 0..64u16 {
+                seed.push((512 + x, y, 1 + (x / 2)));
+            }
+        }
+        let tpage = 8 | (2 << 7);
+        let tri = [(37, 17), (103, -148), (141, 358)];
+        let full = [0, 0, 1023, 511];
+        assert!(translator::clipped_edge_has_tie(tri, full));
+        let words = vec![
+            0xe300_0000,
+            0xe400_0000 | (511 << 10) | 1023,
+            0xe500_0000,
+            0xe100_0000 | tpage,
+            0x2580_8080,
+            pack_xy(tri[0]),
+            0x0000,
+            pack_xy(tri[1]),
+            0x3f00 | ((tpage as u32) << 16),
+            pack_xy(tri[2]),
+            0x003f,
+        ];
+        for scale in [2u32, 3, 4] {
+            let Some(mut renderer) = headless_renderer() else {
+                eprintln!("skipping: no headless wgpu adapter");
+                return;
+            };
+            renderer.set_texture_filter(1);
+            renderer.set_internal_scale(scale, None);
+            run_both_backends(&words, &mut renderer, &seed);
+            // A row through the middle of the triangle, inside it.
+            let (x0, x1, y) = (100 * scale, 125 * scale, 200 * scale);
+            let (_, _, rgba) = renderer.read_subrect_rgba8(x0, y, x1 - x0, 1);
+            let distinct: std::collections::BTreeSet<[u8; 4]> = rgba
+                .chunks_exact(4)
+                .map(|p| [p[0], p[1], p[2], p[3]])
+                .collect();
+            assert!(
+                distinct.len() > 8,
+                "scale {scale}: {} distinct colours along a row of a ramp-mapped triangle",
+                distinct.len()
+            );
+        }
+    }
+
     /// A pixel corner exactly on an edge of a polygon that reaches outside
     /// VRAM is decided like the CPU's top-left rule, not by the host's clipper.
     ///

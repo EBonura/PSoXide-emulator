@@ -505,6 +505,30 @@ fn plane_delta(in: VertexOut, ch: u32, sub: vec2<f32>) -> f32 {
     return clamp((sub.x * gx + sub.y * gy) / 16777216.0, -128.0, 128.0);
 }
 
+// A plane channel at the PSX pixel with its full fraction (the value, not its
+// truncated integer): what the edge filter needs where it cannot use the host's
+// own interpolation. `value >> 8` has 24 bits, exact in an f32.
+fn plane_full(in: VertexOut, ch: u32, px: vec2<i32>) -> f32 {
+    let dadx = plane_word(in, ch * 3u);
+    let dady = plane_word(in, ch * 3u + 1u);
+    let base = plane_word(in, ch * 3u + 2u);
+    let v = base + bitcast<u32>(px.x) * dadx + bitcast<u32>(px.y) * dady;
+    return f32(v >> 8u) / 65536.0;
+}
+
+// Where a host-drawn polygon would sample this fragment, from its PSX pixel's
+// corner: `vs_main` shifts polygons by half a PSX pixel at scale 3 and half a
+// host pixel at the others, and the host samples host pixel centres.
+fn polygon_subpixel(frag: vec2<f32>) -> vec2<f32> {
+    let s = max(u_texfilter.y, 1u);
+    let r = vec2<f32>(vec2<u32>(floor(frag)) % vec2<u32>(s, s));
+    var shift = 0.5 / f32(s);
+    if s == 3u {
+        shift = 0.5;
+    }
+    return (r + vec2<f32>(0.5, 0.5)) / f32(s) - vec2<f32>(shift, shift);
+}
+
 fn plane_pixel(frag: vec2<f32>) -> vec2<i32> {
     let s = max(u_texfilter.y, 1u);
     return vec2<i32>(vec2<u32>(floor(frag)) / vec2<u32>(s, s));
@@ -543,7 +567,39 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Rectangles are not shifted and their centre-sampled coordinate
     // already carries that 0.5.
     var suv = in.uv;
-    if (in.flags & FLAG_AXIS_UV) != 0u && u_texfilter.x == 0u {
+    // A row rectangle of a span-drawn triangle (`pipeline::HOST_POSITION`)
+    // carries its first vertex's UV at every corner, so the host's
+    // interpolation of `in.uv` is a constant there. Under the edge filter,
+    // which needs fractional coordinates, take them from the triangle's own
+    // UV plane or axis walk at full precision instead.
+    let span_drawn = (in.planes3.w & HOST_POSITION) != 0u;
+    if span_drawn && u_texfilter.x != 0u && (in.flags & FLAG_PLANE_UV) != 0u {
+        let px = plane_pixel(in.position.xy);
+        let sub = polygon_subpixel(in.position.xy);
+        suv = vec2<f32>(
+            plane_full(in, 3u, px) + plane_delta(in, 3u, sub),
+            plane_full(in, 4u, px) + plane_delta(in, 4u, sub),
+        );
+    } else if span_drawn && u_texfilter.x != 0u && (in.flags & FLAG_AXIS_UV) != 0u {
+        let px = plane_pixel(in.position.xy);
+        let sub = polygon_subpixel(in.position.xy);
+        let left = bitcast<i32>(plane_word(in, 0u));
+        let top = bitcast<i32>(plane_word(in, 1u));
+        let width = max(bitcast<i32>(plane_word(in, 2u)), 1);
+        let row = px.y - top;
+        let xoff = px.x - left;
+        for (var c = 0u; c < 2u; c = c + 1u) {
+            let l0 = bitcast<i32>(plane_word(in, 3u + c));
+            let r0 = bitcast<i32>(plane_word(in, 5u + c));
+            let dl = bitcast<i32>(plane_word(in, 7u + c));
+            let dr = bitcast<i32>(plane_word(in, 9u + c));
+            let lpos = l0 + row * dl;
+            let rpos = r0 + row * dr;
+            let dx = (rpos - lpos) / width;
+            let step = (sub.x * f32(dx) + sub.y * f32(dl)) / 4096.0;
+            suv[c] = f32(lpos + xoff * dx) / 4096.0 + 0.5 + clamp(step, -128.0, 128.0);
+        }
+    } else if (in.flags & FLAG_AXIS_UV) != 0u && u_texfilter.x == 0u {
         // Half of a sprite-shaped quad: the CPU's four-edge walk, Q12 per row
         // (see `translator::axis_quad_words` for the word layout).
         let px = plane_pixel(in.position.xy);
