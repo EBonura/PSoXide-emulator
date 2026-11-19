@@ -663,6 +663,9 @@ fn receipt_hit(journey: &Journey, disc: &Path, kept: &receipt::Receipt) -> Journ
     r.ticks = kept.ticks;
     r.emu_secs = kept.emu_secs;
     r.gp0_irq_commands = Some(kept.gp0_1f);
+    r.facts.gp0_irq_writes = kept.gp0_1f_written;
+    r.facts.mdec_command_writes = kept.mdec_command_writes;
+    r.facts.golden_on = journey.golden_on_anywhere();
     // The receipt keeps only the CD acknowledge count; a clean one is clean of those rules,
     // which is all `model_equivalent` asks. Anything else stays uncounted.
     r.conformance = (kept.cd_ack == 0).then(Vec::new);
@@ -857,7 +860,8 @@ fn cmd_run(a: &RunArgs) -> Result<ExitCode, String> {
         println!("[gate] second model {second_model} (first was {first_model})");
         let mut needed = Vec::new();
         let mut equivalent = 0;
-        // The shortcut below holds only while both models read the MDEC status the same way.
+        // The shortcut below holds only while both models read the MDEC status the same way, or
+        // the guest never wrote an MDEC command (the request bits then never rise).
         let mdec_req = |spec: &str| {
             emulator_core::HardwareTarget::from_spec(spec)
                 .map(|t| t.mdec_req)
@@ -865,7 +869,8 @@ fn cmd_run(a: &RunArgs) -> Result<ExitCode, String> {
         };
         let same_mdec = mdec_req(&first_model) == mdec_req(second_model);
         for (job, result) in jobs.iter().zip(&first) {
-            if !a.receipts_verify && same_mdec && receipt::model_equivalent(result) {
+            let mdec_alike = same_mdec || result.facts.mdec_command_writes == Some(0);
+            if !a.receipts_verify && mdec_alike && receipt::model_equivalent(result) {
                 println!(
                     "MODEL EQUIVALENT {}: no GP0(1Fh), {first_model} result stands for {second_model}",
                     job.name
@@ -905,6 +910,9 @@ fn play(jobs: &[&Job], fleet: &Fleet, opts: &Opts, threads: usize) -> Vec<Journe
                     for line in behaviour::lines(&r.name, &behaviour::model(), areas, digest) {
                         println!("{line}");
                     }
+                }
+                if let Some(line) = behaviour::signals_line(&r, &behaviour::model()) {
+                    println!("{line}");
                 }
                 if let Some(line) = r.conformance_line(&opts.conformance) {
                     println!("{line}");

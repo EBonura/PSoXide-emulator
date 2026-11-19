@@ -241,6 +241,24 @@ pub fn lines(journey: &str, model: &str, areas: &[String], digest: &str) -> [Str
     ]
 }
 
+/// `SIGNALS <journey> <model> gp0-1f=N gp0-1f-written=N cd-ack-broken=N mdec-commands=N
+/// golden-on=yes|no`: everything the hardware models treat differently, as this run met it
+/// (docs/conformance.md, "Model equivalence"). A model that differs from this one only in knobs whose
+/// trigger reads 0 here would have run this very run. `None` while any count is unknown (no
+/// boot, or a receipt from a gate that did not keep one).
+pub fn signals_line(r: &crate::exec::JourneyResult, model: &str) -> Option<String> {
+    let executed = r.gp0_irq_commands?;
+    let written = r.facts.gp0_irq_writes?;
+    let cd_ack = r.cd_ack_hits()?;
+    let mdec = r.facts.mdec_command_writes?;
+    let golden_on = if r.facts.golden_on { "yes" } else { "no" };
+    Some(format!(
+        "SIGNALS {} {model} gp0-1f={executed} gp0-1f-written={written} cd-ack-broken={cd_ack} \
+         mdec-commands={mdec} golden-on={golden_on}",
+        r.name
+    ))
+}
+
 /// The model a run emulates, as the lines name it: the `--hardware` spec, `real` when unset.
 pub fn model() -> String {
     std::env::var(emulator_core::hardware_target::ENV_VAR)

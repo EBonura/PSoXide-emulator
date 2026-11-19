@@ -77,6 +77,13 @@ pub struct Receipt {
     pub wall_secs: f64,
     /// GP0(1Fh) commands the guest issued.
     pub gp0_1f: u64,
+    /// GP0(1Fh) words the CPU wrote in command position, executed or not; `None` in a receipt
+    /// from a gate that did not count them.
+    #[serde(default)]
+    pub gp0_1f_written: Option<u64>,
+    /// MDEC command words the guest wrote; `None` in a receipt from a gate that did not count them.
+    #[serde(default)]
+    pub mdec_command_writes: Option<u64>,
     /// CD acknowledge writes that broke a conformance rule (docs/conformance.md).
     #[serde(default)]
     pub cd_ack: u64,
@@ -115,6 +122,8 @@ impl Receipt {
             emu_secs: result.emu_secs,
             wall_secs: result.wall.as_secs_f64(),
             gp0_1f,
+            gp0_1f_written: result.facts.gp0_irq_writes,
+            mdec_command_writes: result.facts.mdec_command_writes,
             cd_ack,
             disc_id: result.disc_id.clone(),
             areas: result.facts.areas.clone().unwrap_or_default(),
@@ -429,12 +438,17 @@ fn build_id() -> Result<String, String> {
 /// only things the models treat differently (`cd-ack=strict` changes nothing else).
 ///
 /// A result with a golden compare skipped by `golden_on` stands for no other model: the picture
-/// was never judged here, so the second model must look at it itself.
+/// was never judged here, so the second model must look at it itself. Nor does a journey that
+/// names `golden_on` at all: the second model may skip a golden this one compared. And a
+/// GP0(1Fh) word the CPU wrote that never executed still counts: the models post its GPUSTAT
+/// latch differently at the write.
 pub fn model_equivalent(first: &JourneyResult) -> bool {
     first.passed()
         && first.gp0_irq_commands == Some(0)
+        && first.facts.gp0_irq_writes == Some(0)
         && first.cd_ack_hits() == Some(0)
         && first.count(crate::exec::Status::GoldenSkipped) == 0
+        && !first.facts.golden_on
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ` for a Unix time (proleptic Gregorian, UTC).
@@ -621,7 +635,10 @@ mod tests {
             cd_acknowledges: None,
             mdec_commands: None,
             receipt: State::Off,
-            facts: Default::default(),
+            facts: crate::exec::RunFacts {
+                gp0_irq_writes: gp0,
+                ..Default::default()
+            },
         }
     }
 
@@ -698,6 +715,20 @@ mod tests {
         assert!(!model_equivalent(&result(true, Some(1))));
         assert!(!model_equivalent(&result(true, None)));
         assert!(!model_equivalent(&result(false, Some(0))));
+    }
+
+    #[test]
+    fn the_second_model_waits_for_no_gp0_1f_written_and_no_golden_on() {
+        // A GP0(1Fh) the CPU wrote that a GPU reset dropped before it executed.
+        let mut r = result(true, Some(0));
+        r.facts.gp0_irq_writes = Some(1);
+        assert!(!model_equivalent(&r));
+        // A receipt from a gate that did not count the writes.
+        r.facts.gp0_irq_writes = None;
+        assert!(!model_equivalent(&r));
+        let mut r = result(true, Some(0));
+        r.facts.golden_on = true;
+        assert!(!model_equivalent(&r));
     }
 
     #[test]

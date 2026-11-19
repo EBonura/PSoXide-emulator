@@ -162,6 +162,16 @@ pub struct RunFacts {
     pub areas: Option<Vec<String>>,
     /// The run digest (see `behaviour::RunDigest`); `None` when it did not boot.
     pub digest: Option<String>,
+    /// GP0(1Fh) words the CPU wrote in command position (`Gpu::gp0_irq_write_count`), executed
+    /// or not; `None` when not counted (no boot, or a receipt from a gate that did not keep it).
+    pub gp0_irq_writes: Option<u64>,
+    /// The journey names `golden_on` at some checkpoint: which goldens it compares depends on
+    /// the model, so no other model can take this run's check list.
+    pub golden_on: bool,
+    /// MDEC command words the guest wrote (`Mdec::commands_seen`): with none, the MDEC status
+    /// request bits never rise, so `mdec-req=hidden` reads the same status; `None` when not
+    /// counted.
+    pub mdec_command_writes: Option<u64>,
 }
 
 impl JourneyResult {
@@ -679,6 +689,7 @@ pub fn run_journey(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     let disc = opts.disc.clone();
     let fingerprint = std::thread::spawn(move || disc_id(&disc));
     let mut result = run_journey_inner(journey, opts);
+    result.facts.golden_on = journey.golden_on_anywhere();
     result.disc_id = fingerprint
         .join()
         .unwrap_or_else(|_| "unreadable".to_string());
@@ -862,6 +873,8 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
     result.ticks = run.m.ticks;
     result.emu_secs = run.m.ticks as f64 / 60.0;
     result.gp0_irq_commands = Some(run.m.bus.gpu.gp0_irq_command_count());
+    result.facts.gp0_irq_writes = Some(run.m.bus.gpu.gp0_irq_write_count());
+    result.facts.mdec_command_writes = Some(run.m.bus.mdec.commands_seen());
     let report = run.m.bus.conformance_report();
     result.cd_acknowledges = Some(report.cd_acknowledges);
     result.mdec_commands = Some(report.mdec_commands);

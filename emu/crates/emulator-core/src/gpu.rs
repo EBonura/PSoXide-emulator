@@ -220,6 +220,13 @@ pub struct Gpu {
     /// target's model can change. Observation only; excluded from save states.
     #[serde(skip)]
     gp0_irq_commands: u64,
+    /// GP0(1Fh) words the CPU wrote in command position since reset. The hardware target's
+    /// model decides at that write whether the word posts its GPUSTAT latch event, so a word
+    /// that never executes (a GPU reset clears it first) can still change the run: zero here
+    /// and in `gp0_irq_commands` means no target can differ. Observation only; excluded from
+    /// save states.
+    #[serde(skip)]
+    gp0_irq_writes: u64,
     /// X offset (signed 11-bit) added to every primitive vertex --
     /// set by GP0 0xE5. Usually zero on BIOS boot, non-zero once the
     /// kernel sets up a display-list origin.
@@ -815,6 +822,7 @@ impl Gpu {
             gp0_expected: 0,
             gp0_write_count: 0,
             gp0_irq_commands: 0,
+            gp0_irq_writes: 0,
             draw_offset_x: 0,
             draw_offset_y: 0,
             draw_area_left: 0,
@@ -1410,11 +1418,19 @@ impl Gpu {
         self.gp0_write_count
     }
 
-    /// GP0(1Fh) commands executed since reset. Counted where the hardware
-    /// target's model is consulted, so zero means no target can differ.
+    /// GP0(1Fh) commands executed since reset. Counted where the hardware target's model
+    /// decides whether the request rises; see also [`Gpu::gp0_irq_write_count`].
     #[must_use]
     pub fn gp0_irq_command_count(&self) -> u64 {
         self.gp0_irq_commands
+    }
+
+    /// GP0(1Fh) words the CPU wrote in command position since reset, executed or not: the
+    /// other place the hardware target's model is consulted (the posted GPUSTAT latch). Zero
+    /// here and in [`Gpu::gp0_irq_command_count`] means no hardware target can differ.
+    #[must_use]
+    pub fn gp0_irq_write_count(&self) -> u64 {
+        self.gp0_irq_writes
     }
 
     /// Dispatch an MMIO read inside the GPU window. Returns `Some` for
@@ -2637,6 +2653,7 @@ impl Gpu {
                 // byte in a packet parameter, VRAM upload pixel data or a
                 // polyline vertex is data and requests nothing.
                 let irq_command = value >> 24 == 0x1f && self.next_gp0_word_is_command();
+                self.gp0_irq_writes += u64::from(irq_command);
                 let fast_irq = irq_command && self.irq_after_canceled_set_is_immediate;
                 if fast_irq {
                     self.irq_after_canceled_set_is_immediate = false;

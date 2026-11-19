@@ -196,6 +196,26 @@ fn gp0_irq_request_and_gp1_ack_toggle_gpustat_bit() {
 }
 
 #[test]
+fn gp0_1f_writes_count_command_position_words_only() {
+    let mut gpu = Gpu::new();
+    assert_eq!(
+        (gpu.gp0_irq_write_count(), gpu.gp0_irq_command_count()),
+        (0, 0)
+    );
+    gpu.write32(GP0_ADDR, 0x1f00_0000);
+    assert_eq!(
+        (gpu.gp0_irq_write_count(), gpu.gp0_irq_command_count()),
+        (1, 1)
+    );
+    // A monochrome triangle's parameter words that happen to start with 1Fh are data.
+    gpu.write32(GP0_ADDR, 0x2000_0000);
+    gpu.write32(GP0_ADDR, 0x1f00_0000);
+    gpu.write32(GP0_ADDR, 0x1f00_0010);
+    gpu.write32(GP0_ADDR, 0x1f10_0000);
+    assert_eq!(gpu.gp0_irq_write_count(), 1);
+}
+
+#[test]
 fn gp1_status_changes_land_between_first_and_second_reads() {
     let mut gpu = Gpu::new();
     gpu.write32_at(GP1_ADDR, 0x0400_0001, 100);

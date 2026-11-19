@@ -622,6 +622,12 @@ impl Journey {
         self.steps.iter().filter(|s| s.checkpoint.is_some())
     }
 
+    /// Whether any checkpoint limits its golden to some models (`golden_on`): the check list
+    /// then depends on the model the journey runs on.
+    pub fn golden_on_anywhere(&self) -> bool {
+        self.checkpoints().any(|s| s.golden_on.is_some())
+    }
+
     /// Whether any check reads the per-tick display history (`presenting`), the only
     /// consumer of `TickRec::changed`. Without one the machine skips hashing the display
     /// every tick, which was about 6% of a gate run.

@@ -40,9 +40,27 @@ while the GP0(1Fh) rule waits for its presenter. The
 PCs need the `conformance` cargo feature, which the gate builds by default (the
 player binary leaves it out: it costs one check per interpreted instruction).
 
-`--second-hardware` treats a journey as the same on both models only when the
-guest issued no GP0(1Fh) and broke no CD acknowledge rule (`cd-ack=strict`
-differs from the console on exactly those writes).
+## Model equivalence (`SIGNALS`)
+
+The hardware models change emulated behaviour in three places only: the GP0(1Fh)
+model (`gpu-irq`, which is also all that `mister` changes, with its `seed` and
+`trace`) when a GP0(1Fh) executes and when the CPU writes one in command position;
+`cd-ack=strict` on a CD acknowledge that breaks a CD rule; `mdec-req=hidden` on
+the MDEC status request bits, which rise only after an MDEC command. Two runs on
+different models are the same run until the first such event, so a run that met
+none of the events a pair of models differs on is the other model's run too.
+
+Every run prints what it met, after `AREAS` and `DIGEST`:
+
+    SIGNALS <journey> <model> gp0-1f=N gp0-1f-written=N cd-ack-broken=N mdec-commands=N golden-on=yes|no
+
+`gp0-1f` counts executed GP0(1Fh), `gp0-1f-written` the words the CPU wrote in
+command position (a word a GPU reset drops before it runs still posts its status
+latch differently), `golden-on` says the journey limits goldens to some models
+(its check list then depends on the model). `--second-hardware` lets the second
+model take the first one's result only when the first passed, both GP0(1Fh)
+counts are zero, no CD rule broke, the journey names no `golden_on`, and either
+both models read the MDEC status alike or no MDEC command was written.
 
 ## Adding a rule
 
