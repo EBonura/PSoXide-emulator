@@ -534,6 +534,13 @@ pub struct Bus {
     gpu_list_ram_next: u64,
     /// In-flight sync-mode-1 transfers: channel 2, channel 4.
     dma_block_runs: [Option<DmaBlockRun>; 2],
+    /// While a block-sync RAM-to-SPU transfer runs: where it started in SPU
+    /// RAM and what that range held before the kick wrote it, so an abort
+    /// can leave only the part the console would have moved by then
+    /// ([`Bus::cut_spu_dma_on_abort`]). Not in save states: a save taken
+    /// mid-transfer resumes with the transfer whole, as before.
+    #[serde(skip)]
+    spu_dma_undo: Option<(u32, Vec<u16>)>,
     /// While a linked-list walk is active: the bus cycle up to which every
     /// clock advance is a quiet batch of `advance_cycles_slow` (the walk
     /// only counts down its setup delay or waits, the GPU FIFO only decays
@@ -681,6 +688,7 @@ impl Bus {
             experimental_gpu_list: None,
             gpu_list_ram_next: 0,
             dma_block_runs: [None; 2],
+            spu_dma_undo: None,
             gpu_quiet_until: 0,
             console_watch: None,
             gpu_quiet_zero_at: 0,
@@ -1716,6 +1724,7 @@ impl Bus {
                     }
                 }
                 EventSlot::SpuDma => {
+                    self.spu_dma_undo = None;
                     self.spu.end_dma();
                     if self.complete_dma_channel(4) {
                         dma_edge = true;
@@ -1863,6 +1872,34 @@ impl Bus {
         if let Some(slot) = Self::dma_block_run_slot(channel) {
             self.dma_block_runs[slot] = None;
         }
+    }
+
+    /// A word store of `value` to `phys`: when it clears channel 4's start bit
+    /// while a block-sync RAM-to-SPU transfer is still running, the transfer
+    /// ends there. The blocks the console would have moved by now (the same
+    /// clock-proportional count [`Bus::settle_dma_block_runs`] gives MADR)
+    /// stay in SPU RAM; the rest gets back what it held before the kick.
+    /// Without this the bus, which writes a transfer whole at its kick, let an
+    /// SPU upload that software gave up on land anyway, which no console does.
+    fn cut_spu_dma_on_abort(&mut self, phys: u32, value: u32) {
+        const SPU_CHCR: u32 = Dma::BASE + 4 * Dma::STRIDE + 8;
+        if phys != SPU_CHCR || value & (1 << 24) != 0 {
+            return;
+        }
+        let Some((addr, before)) = self.spu_dma_undo.take() else {
+            return;
+        };
+        let Some(run) = self.dma_block_runs[1] else {
+            return;
+        };
+        if self.dma.channels[4].channel_control & (1 << 24) == 0 || self.cycles >= run.end {
+            return;
+        }
+        let span = (run.end - run.start).max(1);
+        let done = self.cycles.saturating_sub(run.start) * u64::from(run.blocks) / span;
+        let landed = (done as usize).saturating_mul(run.block_words as usize * 2);
+        self.spu
+            .cut_dma_write(addr, landed.min(before.len()), &before);
     }
 
     fn apply_dma_block_progress(
@@ -3333,6 +3370,7 @@ impl Bus {
             // hangs forever.
             return Some(0);
         }
+        self.spu_dma_undo = None;
         self.spu.begin_dma(self.cycles);
         let sync_mode = (ch.channel_control >> 9) & 0x3;
         let bcr = ch.block_control;
@@ -3377,6 +3415,12 @@ impl Bus {
                 addr = addr.wrapping_add(step);
             }
             if !self.scph_9902_spu_dma_aperture || self.spu.dma_write_ready_at(self.cycles) {
+                // Keep what a block-sync write covers, for an abort that comes
+                // before the console would have finished it.
+                self.spu_dma_undo = (sync_mode == 1).then(|| {
+                    let start = self.spu.transfer_addr();
+                    (start, self.spu.ram_range(start, words.len()))
+                });
                 self.spu.dma_write(&words);
             } else {
                 // SCPH-9902 accepts the first 32-bit DMA word while the
@@ -4576,6 +4620,7 @@ impl Bus {
             return;
         }
         if Dma::contains(phys) {
+            self.cut_spu_dma_on_abort(phys, value);
             self.settle_dma_block_runs_for_write(phys);
             if self.dma.write32(phys, value) {
                 self.irq.raise(IrqSource::Dma);
@@ -7471,6 +7516,66 @@ mod tests {
         assert_eq!(copied[0], 0x2000);
         assert_eq!(copied[31], 0x201f);
         assert_eq!(copied[63], 0x203f);
+    }
+
+    /// Software that clears channel 4's start bit a quarter of the way through
+    /// a block-sync upload keeps only the quarter the console had moved (32
+    /// clocks a halfword); the rest of SPU RAM keeps what it held. WipEout's
+    /// boot bank lost its tail this way on a console behind a spin budget that
+    /// the emulator, landing the whole transfer at its kick, never exposed.
+    #[test]
+    fn an_spu_dma_aborted_mid_run_lands_only_the_blocks_moved_so_far() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.cycles = crate::spu::SAMPLE_CYCLES;
+        bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
+        bus.spu.write16(crate::spu::SPUCNT, 2 << 4);
+        bus.dma.dpcr = 1 << (4 * 4 + 3);
+        // 16 blocks of 16 words: 512 halfwords over the old contents 0xAAAA.
+        bus.spu.dma_write(&[0xaaaa; 512]);
+        bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
+        for i in 0..512u32 {
+            write_ram_u16(&mut bus.ram[..], 0x1000 + i * 2, 0x4000 + i as u16);
+        }
+        bus.dma.channels[4].base = 0x1000;
+        bus.dma.channels[4].block_control = (16 << 16) | 16;
+        bus.dma.channels[4].channel_control = 0x0100_0201;
+        let start = bus.cycles;
+        bus.run_dma_channel(4);
+        let end = bus.scheduler.target(EventSlot::SpuDma).unwrap();
+        assert_eq!(end - start, 16_656);
+
+        // A quarter of the way: 4 of the 16 blocks are in.
+        bus.cycles = start + (end - start) / 4 + 1;
+        bus.write32(Dma::BASE + 4 * Dma::STRIDE + 8, 0);
+        bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
+        let mut ram = [0u16; 512];
+        bus.spu.dma_read(&mut ram);
+        assert!(ram[..128]
+            .iter()
+            .enumerate()
+            .all(|(i, &w)| w == 0x4000 + i as u16));
+        assert!(ram[128..].iter().all(|&w| w == 0xaaaa));
+    }
+
+    /// Without the abort the same transfer lands whole.
+    #[test]
+    fn an_spu_dma_left_to_finish_lands_whole() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.cycles = crate::spu::SAMPLE_CYCLES;
+        bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
+        bus.spu.write16(crate::spu::SPUCNT, 2 << 4);
+        bus.dma.dpcr = 1 << (4 * 4 + 3);
+        for i in 0..512u32 {
+            write_ram_u16(&mut bus.ram[..], 0x1000 + i * 2, 0x4000 + i as u16);
+        }
+        bus.dma.channels[4].base = 0x1000;
+        bus.dma.channels[4].block_control = (16 << 16) | 16;
+        bus.dma.channels[4].channel_control = 0x0100_0201;
+        bus.run_dma_channel(4);
+        bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
+        let mut ram = [0u16; 512];
+        bus.spu.dma_read(&mut ram);
+        assert!(ram.iter().enumerate().all(|(i, &w)| w == 0x4000 + i as u16));
     }
 
     #[test]

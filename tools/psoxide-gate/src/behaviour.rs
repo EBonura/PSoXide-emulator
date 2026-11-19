@@ -24,7 +24,9 @@ pub const AREAS: [(&str, u32); 15] = [
     ("gte", 1),
     ("muldiv", 1),
     ("cd", 1),
-    ("spu", 1),
+    // 2: channel-4 (RAM to SPU) DMA moves a halfword every 32 clocks at every COMMON_DELAY
+    // (silicon record 0x65), and an abort mid-transfer keeps only the blocks moved so far.
+    ("spu", 2),
     ("pad", 1),
     ("mdec", 1),
     // 2: GP1(03h) display off presents black (display_rgba8, display_hash, the gate's frames).
