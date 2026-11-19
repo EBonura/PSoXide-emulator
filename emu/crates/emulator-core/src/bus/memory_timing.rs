@@ -337,32 +337,28 @@ impl MemoryControl {
         words.saturating_mul(2).saturating_add(1)
     }
 
-    /// SPU DMA FIFO service cadence for the active memory-controller profile.
-    /// Earlier COMMON0=5 silicon measurements expose the familiar 16 clocks
-    /// per halfword. The late PAL COMMON0=12 capture takes 16,688 clocks for
-    /// 512 halfwords, identifying a 32-clock cadence plus fixed polling cost.
+    /// SPU DMA FIFO service cadence: 32 clocks per halfword whatever the
+    /// memory controller's COMMON_DELAY holds. Hardware-test record 0x65 (1 KiB
+    /// RAM to SPU, 512 halfwords) reads 16,589 to 16,891 clocks on every console
+    /// capture, with COMMON_DELAY 0x132C (v1.17, v1.22, v1.24) and 0x1325 (both
+    /// v2.18 runs, the SDK's entry value): sdk/docs/hardware-refs/px8-silicon-*.
+    /// The earlier model gave 16 when COMMON0 was 5 or less, which no capture
+    /// of ours shows; it ran SDK programs' SPU uploads twice as fast as the
+    /// console and hid an upload wait that ran out only on silicon.
     pub(super) fn spu_dma_halfword_cycles(&self) -> u32 {
-        if self.regs[8] & 0xf <= 5 {
-            16
-        } else {
-            32
-        }
+        32
     }
 
-    /// Total channel-4 completion time for `word_count` 32-bit RAM words.
-    /// The late profile exposes both the 32-clock SPU halfword cadence and
-    /// the source-side DRAM hyper-page transfer (17 clocks per 16 words).
+    /// Total channel-4 completion time for `word_count` 32-bit RAM words: the
+    /// 32-clock SPU halfword cadence plus the source-side DRAM hyper-page
+    /// transfer (17 clocks per 16 words). 256 words: 16,656 clocks, inside the
+    /// silicon range of record 0x65.
     pub(super) fn spu_dma_cycles(&self, word_count: u32) -> u32 {
-        let fifo_cycles = word_count
+        word_count
             .saturating_mul(2)
-            .saturating_mul(self.spu_dma_halfword_cycles());
-        if self.regs[8] & 0xf <= 5 {
-            fifo_cycles
-        } else {
-            fifo_cycles
-                .saturating_add(word_count)
-                .saturating_add(word_count.div_ceil(16))
-        }
+            .saturating_mul(self.spu_dma_halfword_cycles())
+            .saturating_add(word_count)
+            .saturating_add(word_count.div_ceil(16))
     }
 
     /// SPU RAM reads are stable only when the delay register's DMA timing
@@ -544,14 +540,18 @@ mod tests {
     }
 
     #[test]
-    fn spu_dma_cadence_tracks_the_common_delay_profile() {
+    fn spu_dma_cadence_is_32_clocks_a_halfword_at_every_common_delay() {
         let mut control = MemoryControl::default();
         assert_eq!(control.spu_dma_halfword_cycles(), 32);
         assert_eq!(control.spu_dma_cycles(256), 16_656);
 
-        control.write(BASE + 8 * 4, AccessWidth::Word, 0x0003_1125);
-        assert_eq!(control.spu_dma_halfword_cycles(), 16);
-        assert_eq!(control.spu_dma_cycles(256), 8_192);
+        // The SDK's entry value and the retail one: silicon still takes 32
+        // clocks a halfword (record 0x65, v2.18 runs at COMMON_DELAY 0x1325).
+        for common in [0x0000_1325, 0x0003_1125] {
+            control.write(BASE + 8 * 4, AccessWidth::Word, common);
+            assert_eq!(control.spu_dma_halfword_cycles(), 32);
+            assert_eq!(control.spu_dma_cycles(256), 16_656);
+        }
     }
 
     #[test]

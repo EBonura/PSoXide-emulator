@@ -1664,6 +1664,31 @@ impl Spu {
         self.transfer_addr_raw = (self.transfer_addr >> 3) as u16;
     }
 
+    /// `count` halfwords of SPU RAM from byte address `addr` (wrapping), as
+    /// they are now: what a channel-4 write about to start will cover, kept so
+    /// an abort can put back the part the console would not have written yet.
+    pub fn ram_range(&self, addr: u32, count: usize) -> Vec<u16> {
+        (0..count)
+            .map(|i| self.ram[((addr >> 1) as usize + i) % SPU_RAM_HALFWORDS])
+            .collect()
+    }
+
+    /// Cut a channel-4 write that started at byte address `addr` short after
+    /// its first `landed` halfwords: the rest of the range gets back what
+    /// `before` (from [`Spu::ram_range`] at the kick) held, and the
+    /// transfer cursor stops where the landed part ended. The bus writes a
+    /// whole transfer at its kick; a console moves it at 32 clocks a halfword,
+    /// so software that aborts the channel early leaves only a head in SPU RAM.
+    pub fn cut_dma_write(&mut self, addr: u32, landed: usize, before: &[u16]) {
+        let first = (addr >> 1) as usize;
+        for (i, &old) in before.iter().enumerate().skip(landed) {
+            self.ram[(first + i) % SPU_RAM_HALFWORDS] = old;
+        }
+        self.transfer_addr =
+            addr.wrapping_add((landed as u32).wrapping_mul(2)) & (SPU_RAM_BYTES as u32 - 1);
+        self.transfer_addr_raw = (self.transfer_addr >> 3) as u16;
+    }
+
     /// Stream halfwords from SPU RAM back to main RAM at the current
     /// transfer address. Called on SPU→RAM DMA (rare; some games use
     /// it for live audio capture).
