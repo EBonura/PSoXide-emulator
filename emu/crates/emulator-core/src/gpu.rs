@@ -456,8 +456,9 @@ pub struct Gpu {
     #[serde(skip)]
     field_hold_fields: u8,
     /// In the vertical blank that began at the last VBlank edge (see
-    /// [`Gpu::begin_vblank`]). Not saved: a restored machine is out of it.
-    #[serde(skip)]
+    /// [`Gpu::begin_vblank`]); `Gpu::end_vblank` clears it. Saved: GPUSTAT bit 31 reads 0
+    /// and the 480-line draw rule changes while it is set, so a state taken in the
+    /// blank must come back in it.
     vblank_active: bool,
 
     /// GPU execution backlog in CPU/bus cycles. Raster and VRAM
@@ -556,12 +557,10 @@ pub struct Gpu {
     work: GpuWorkCounters,
     /// Texture state of the last textured primitive costed, for the timing
     /// model's cache charges (see [`Gpu::texture_timing_surcharge`]): the
-    /// texture page with its colour depth, and the CLUT word.
-    #[serde(skip)]
+    /// texture page with its colour depth, and the CLUT word. Saved: the next textured
+    /// primitive's cost depends on them.
     timing_tex_key: u16,
-    #[serde(skip)]
     timing_tex_clut: u16,
-    #[serde(skip)]
     timing_tex_valid: bool,
     /// Pixel area of the packet being costed, handed from the timing model
     /// (which only borrows `self`) to `execute_gp0_packet`. An atomic only

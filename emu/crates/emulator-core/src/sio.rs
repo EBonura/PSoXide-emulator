@@ -252,8 +252,8 @@ pub struct Sio0 {
     /// While `slow_pad`: set once a byte was clocked before the device was
     /// ready; the rest of the packet then returns `0xFF` until deselect.
     slow_desynced: bool,
-    /// The second byte of the card transaction under way (its command).
-    #[serde(skip)]
+    /// The second byte of the card transaction under way (its command). Saved: a
+    /// state taken between its bytes would otherwise answer the rest wrongly.
     card_command: u8,
     /// Host-side override of the pad's `/ACK` delay and pulse width, in CPU cycles
     /// (see [`Sio0::set_pad_ack_timing`]). `None` keeps the measured per-byte table.

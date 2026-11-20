@@ -3189,6 +3189,7 @@ dependencies = [
  "postcard",
  "psoxide-settings",
  "psx-iso",
+ "serde",
 ]
 
 [[package]]

@@ -44,7 +44,7 @@ pub const SAVESTATE_MAGIC: &[u8; 8] = b"PSOX001\0";
 /// On-disk format version, independent of the PSoXide crate
 /// version. Bumped when the payload layout changes in a way that
 /// can't round-trip through the current deserializer.
-pub const SAVESTATE_FORMAT_VERSION: u32 = 17;
+pub const SAVESTATE_FORMAT_VERSION: u32 = 18;
 /// Oldest payload schema this build can deserialize. Version 2 added
 /// architectural instruction-cache state; version 3 adds the SPU transfer
 /// FIFO; version 4 adds the CPU data-bus hold latch and HLE exception-return
@@ -64,13 +64,19 @@ pub const SAVESTATE_FORMAT_VERSION: u32 = 17;
 /// root counters' deferred read-hold state; version 14 adds the in-flight GPU
 /// and SPU block transfers; version 15 adds the controller port's pending
 /// receive and ACK pulse width; version 16 drops the root counters' write/read
-/// overlap state; version 17 adds the controller port's byte count since select.
+/// overlap state; version 17 adds the controller port's byte count since select; version 18
+/// adds the timing and in-flight state a restore used to drop: the GPU DMA's waiting-for-request
+/// latch (a restore restarted a linked-list walk from its first node), the main-RAM spacing
+/// deadline of a walk and its transfer id, the cycle the lazy root counters settle to and their
+/// advance horizon, the GPU's in-vertical-blank flag and last costed texture, the CPU's armed
+/// GTE interrupt watch, the controller port's poll count and memory card command, and the
+/// memory cards themselves with the protocol state of a transaction under way.
 /// Postcard encodes
 /// fields positionally, so serde defaults cannot make older MDEC, CD or SPU
 /// payloads safe to decode.
 /// Older states cannot resume faithfully because one of those pieces of
 /// in-flight hardware state was never serialized.
-pub const SAVESTATE_MIN_SUPPORTED_VERSION: u32 = 17;
+pub const SAVESTATE_MIN_SUPPORTED_VERSION: u32 = 18;
 
 /// Errors from save-state load / save.
 #[derive(Debug, Error)]

@@ -155,3 +155,55 @@ fn save_state_preserves_stale_instruction_cache_contents() {
         "restored CPU must execute the cached +1, not RAM's replacement +2"
     );
 }
+
+#[test]
+fn save_state_carries_the_memory_card_and_a_file_can_overwrite_it_in_place() {
+    let mut bus = Bus::new_without_bios();
+    bus.attach_digital_pad_port1();
+    let mut card = vec![0u8; emulator_core::pad::MEMCARD_SIZE];
+    card[0] = b'M';
+    card[1] = b'C';
+    card[4242] = 0x5a;
+    bus.attach_memcard_port1(card);
+    let cpu = Cpu::new();
+
+    let bytes = SaveStateV1::new(
+        EmulatorStateRef {
+            cpu: &cpu,
+            bus: &bus,
+        },
+        "card-test",
+        0,
+    )
+    .to_bytes()
+    .expect("encode");
+    let loaded: SaveStateV1<EmulatorState> = SaveStateV1::from_bytes(&bytes).expect("decode");
+    let mut restored = loaded.payload.bus;
+
+    let saved = restored
+        .sio0()
+        .port1()
+        .memcard()
+        .expect("the state carries the card");
+    assert_eq!(saved.as_bytes()[4242], 0x5a);
+    assert!(
+        restored.sio0().port1().pad().is_some(),
+        "the pad survives too"
+    );
+
+    // The player's .mcd file wins over what the state carried, without replacing the port.
+    let mut file = vec![0u8; emulator_core::pad::MEMCARD_SIZE];
+    file[4242] = 0x77;
+    restored.replace_memcard_port1_contents(&file);
+    assert_eq!(
+        restored.sio0().port1().memcard().unwrap().as_bytes()[4242],
+        0x77
+    );
+    assert!(restored.sio0().port1().pad().is_some());
+    // A file of the wrong size leaves the card alone.
+    restored.replace_memcard_port1_contents(&file[..100]);
+    assert_eq!(
+        restored.sio0().port1().memcard().unwrap().as_bytes()[4242],
+        0x77
+    );
+}

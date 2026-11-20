@@ -69,7 +69,7 @@ const DMA2_CHCR_ADDR: u32 = 0x1f80_10a8;
 /// megabytes (`Bus::ram` is 2 MiB). `N` is inferred at each call site
 /// from the field's declared array length, so one generic module
 /// covers every boxed byte-array field on `Bus`.
-mod big_bytes {
+pub(crate) mod big_bytes {
     use serde::{Deserialize as _, Deserializer, Serializer};
 
     pub fn serialize<S, const N: usize>(bytes: &[u8; N], serializer: S) -> Result<S::Ok, S::Error>
@@ -103,10 +103,6 @@ mod big_bytes {
 /// BIOS bytes.
 fn default_bios() -> Box<[u8; memory::bios::SIZE]> {
     Box::new([0; memory::bios::SIZE])
-}
-
-fn check_gpu_request_after_restore() -> bool {
-    true
 }
 
 fn gpu_linked_list_fifo_guard_from_env() -> bool {
@@ -144,7 +140,7 @@ pub enum BusError {
 /// State for the cycle-stepped linked-list transport (the FIFO DMA model,
 /// default since hwtest v1.24). Serialized so a save taken mid-walk resumes
 /// the walk.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct ExperimentalGpuList {
     address: u32,
     next: u32,
@@ -160,7 +156,7 @@ struct ExperimentalGpuList {
 /// (channel 4). The data moves when the channel is kicked; this lets MADR and
 /// the block count in BCR follow the clock the way the controller's do, so a
 /// read mid-transfer, or after software stops it, sees how far it got.
-#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct DmaBlockRun {
     start: u64,
     end: u64,
@@ -357,9 +353,9 @@ pub struct Bus {
     #[serde(default)]
     code_stream_active: bool,
     /// Bus cycle of the last branch-boundary drain (`drain_scheduler_events_post_op`),
-    /// where timers would have been advanced before they went lazy. A cache
-    /// for `settle_lazy_timers`; excluded from save states.
-    #[serde(skip)]
+    /// where timers would have been advanced before they went lazy. Saved:
+    /// `settle_lazy_timers` advances the timers to it before a video timing change, so
+    /// a restore that lost it would drop the time since the timers last ran.
     last_post_op_cycle: u64,
     /// Per 4 KiB page of main RAM, a count of writes (CPU stores, DMA,
     /// host loads), and an id for this RAM's lifetime. A decoded block
@@ -518,9 +514,10 @@ pub struct Bus {
     #[cfg(feature = "strict-exp2")]
     #[serde(skip, default = "exp2_strict::exp2_strict_from_env")]
     exp2_strict: bool,
-    /// Derived scheduling hint, not positional save-state data. After restore,
-    /// inspect CHCR and the completion event once to recover an armed wait.
-    #[serde(skip, default = "check_gpu_request_after_restore")]
+    /// Channel 2 is armed and waiting for the GPU's DMA request. Saved as it is: a
+    /// transfer already running (a linked-list walk, a block awaiting its completion
+    /// event) has it clear, and a restore that assumed it set would start that
+    /// transfer again from its first word.
     gpu_dma_waiting_for_request: bool,
     /// Cycles the block transfer just started waited on the GPU's FIFO; read
     /// once by `run_dma_channel` to place the streaming window.
@@ -528,9 +525,9 @@ pub struct Bus {
     gpu_dma_wait: u32,
     experimental_gpu_list: Option<ExperimentalGpuList>,
     /// Earliest cycle the next CPU access to main RAM may start while a list
-    /// walk moves (see [`GPU_LIST_RAM_ACCESS_SPACING`]). A timing hint, so it
-    /// is not part of save states.
-    #[serde(skip)]
+    /// walk moves (see [`GPU_LIST_RAM_ACCESS_SPACING`]). Emulated bus timing: a
+    /// walk in flight at the save would otherwise let the first access after the
+    /// restore start up to a spacing early.
     gpu_list_ram_next: u64,
     /// In-flight sync-mode-1 transfers: channel 2, channel 4.
     dma_block_runs: [Option<DmaBlockRun>; 2],
@@ -560,7 +557,8 @@ pub struct Bus {
     gpu_moving_until: u64,
     #[serde(skip)]
     gpu_moving: bool,
-    #[serde(skip)]
+    /// Id of the next linked-list transfer; stamped into the walk in flight (and the
+    /// optional node log), so saved with it to keep a restored state byte-identical.
     gpu_linked_list_transfer: u32,
     #[serde(skip)]
     gpu_linked_list_log: Vec<(u32, u32, u32)>,
@@ -1019,6 +1017,20 @@ impl Bus {
             .restore_disc_for_savestate(donor.cdrom.take_disc());
     }
 
+    /// Overwrite the contents of the card on port 1 with `bytes` (the player's `.mcd` file, 128
+    /// KiB) without disturbing a transaction under way, or attach one holding them when there
+    /// is none. Any other length leaves the port alone. Use after restoring a save state when
+    /// the file, not the state, is the truth for the card.
+    pub fn replace_memcard_port1_contents(&mut self, bytes: &[u8]) {
+        let Ok(contents) = <&[u8; crate::pad::MEMCARD_SIZE]>::try_from(bytes) else {
+            return;
+        };
+        match self.sio0.port1_mut().memcard_mut() {
+            Some(card) => card.replace_contents(contents),
+            None => self.attach_memcard_port1(bytes.to_vec()),
+        }
+    }
+
     /// Remove any memory card from port 1 while preserving the pad.
     pub fn detach_memcard_port1(&mut self) {
         let device = std::mem::take(self.sio0.port1_mut()).without_memcard();
@@ -1424,6 +1436,84 @@ impl Bus {
     /// Whether unimplemented HLE BIOS calls stop the CPU.
     pub fn hle_strict(&self) -> bool {
         self.hle_strict
+    }
+
+    /// The bus's own scalar timing state, named, for state-comparison tests.
+    #[doc(hidden)]
+    pub fn debug_state_scalars(&self) -> Vec<(&'static str, u64)> {
+        let [q0, q1, q2, q3] = self.write_queue;
+        vec![
+            ("data_bus_latch", u64::from(self.data_bus_latch)),
+            ("cycles", self.cycles),
+            ("spu_sample_deadline", self.spu_sample_deadline),
+            (
+                "ram_write_buffer_ready_cycle",
+                self.ram_write_buffer_ready_cycle,
+            ),
+            ("dram_refresh_deadline", self.dram_refresh_deadline),
+            ("last_cpu_ram_access_cycle", self.last_cpu_ram_access_cycle),
+            ("code_fill_busy_until", self.code_fill_busy_until),
+            ("code_stream_active", u64::from(self.code_stream_active)),
+            ("code_stream_next", u64::from(self.code_stream_next)),
+            ("code_stream_end", u64::from(self.code_stream_end)),
+            ("code_stream_next_ready", self.code_stream_next_ready),
+            (
+                "code_fetch_on_ram_bus",
+                u64::from(self.code_fetch_on_ram_bus),
+            ),
+            ("last_fetch_hit", u64::from(self.last_fetch_hit)),
+            (
+                "ram_load_from_cached_code",
+                u64::from(self.ram_load_from_cached_code),
+            ),
+            ("write_queue0", q0),
+            ("write_queue1", q1),
+            ("write_queue2", q2),
+            ("write_queue3", q3),
+            ("last_post_op_cycle", self.last_post_op_cycle),
+            ("cc_dma_hits", self.cc_dma_hits),
+            (
+                "gpu_dma_waiting_for_request",
+                u64::from(self.gpu_dma_waiting_for_request),
+            ),
+            ("gpu_list_ram_next", self.gpu_list_ram_next),
+            (
+                "list_walk_active",
+                u64::from(self.experimental_gpu_list.is_some()),
+            ),
+            ("block_run_gpu", u64::from(self.dma_block_runs[0].is_some())),
+            ("block_run_spu", u64::from(self.dma_block_runs[1].is_some())),
+            (
+                "scratchpad",
+                self.scratchpad
+                    .iter()
+                    .fold(0u64, |h, b| h.wrapping_mul(0x100_0000_01b3) ^ u64::from(*b)),
+            ),
+            (
+                "io",
+                self.io
+                    .iter()
+                    .fold(0u64, |h, b| h.wrapping_mul(0x100_0000_01b3) ^ u64::from(*b)),
+            ),
+        ]
+    }
+
+    /// The transfers in flight on the bus, for state-comparison tests.
+    #[doc(hidden)]
+    pub fn debug_transfers(&self) -> String {
+        format!("{:?} {:?}", self.experimental_gpu_list, self.dma_block_runs)
+    }
+
+    /// The DMA controller, for state-comparison tests.
+    #[doc(hidden)]
+    pub fn debug_dma(&self) -> &Dma {
+        &self.dma
+    }
+
+    /// The second serial port, for state-comparison tests.
+    #[doc(hidden)]
+    pub fn debug_sio1(&self) -> &Sio1 {
+        &self.sio1
     }
 
     /// Side-effect-free DMA register read (DPCR/DICR/channel regs).

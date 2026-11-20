@@ -125,13 +125,10 @@ pub mod button {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct PortDevice {
     pad: Option<DigitalPad>,
-    /// Excluded from save states: memory cards are independently
-    /// persisted as `.mcd` files (see `psoxide_settings::paths`), so
-    /// embedding the full 128 KiB card here on every save would
-    /// duplicate data that already round-trips through its own file.
-    /// Reset to `None` on load; the frontend re-attaches the card from
-    /// its `.mcd` file the same way it does on a fresh boot.
-    #[serde(skip)]
+    /// The card, with its protocol state: a state taken mid-transaction must resume it.
+    /// Cards are also persisted as `.mcd` files (see `psoxide_settings::paths`); a
+    /// frontend that keeps the player's file authoritative overwrites the contents after a
+    /// restore with [`crate::Bus::replace_memcard_port1_contents`].
     memcard: Option<MemoryCard>,
     /// Which slot is driving the current transaction. `None` on
     /// the first byte (we haven't decoded the address yet); set
@@ -591,9 +588,9 @@ pub struct DigitalPad {
     /// Monotonic count of *completed* `0x42` poll transactions. This is the
     /// guest's own input clock: a game reads the pad once per simulation tick
     /// regardless of how long its rendering took, so binding an input tape to
-    /// this counter makes a replay independent of frame rate. Diagnostic and
-    /// deliberately excluded from save states, like the other poll telemetry.
-    #[serde(skip)]
+    /// this counter makes a replay independent of frame rate. Saved, so a restored
+    /// machine goes on counting where the saved one stopped and a poll-bound tape
+    /// stays aligned with it.
     completed_polls: u64,
 }
 
@@ -1178,10 +1175,12 @@ pub enum MemcardEventKind {
 /// Game-specific persistence lives one level up (frontend side) --
 /// this struct just holds the live bytes and the "NEW" (never
 /// written) flag.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MemoryCard {
     /// Live contents. 128 KiB. Fresh cards carry the layout PSX-SPX
     /// describes for a freshly formatted card (see `formatted_bytes`),
     /// starting with the `MC` signature in frame 0.
+    #[serde(with = "crate::bus::big_bytes")]
     bytes: Box<[u8; MEMCARD_SIZE]>,
     /// "New card" sticky flag. Hardware sets bit 3 of the flag
     /// byte after power-on until the first successful Write, then
@@ -1197,6 +1196,7 @@ pub struct MemoryCard {
     frame_msb: u8,
     frame_lsb: u8,
     write_checksum: u8,
+    #[serde(with = "crate::serde_big_array::array")]
     write_buffer: [u8; MEMCARD_FRAME_SIZE],
     write_buffer_len: usize,
     /// Byte counter within the current command stream. Resets on
@@ -1214,18 +1214,31 @@ pub struct MemoryCard {
     /// `flag_new` transition and lets the frontend know whether to
     /// persist the card on shutdown.
     dirty: bool,
+    /// Diagnostics: not part of a save state.
+    #[serde(skip, default = "default_command_histogram")]
     command_histogram: [u32; 256],
+    #[serde(skip, default = "default_recent_events")]
     recent_events: [MemcardEvent; MEMCARD_RECENT_EVENTS],
+    #[serde(skip)]
     recent_event_head: usize,
+    #[serde(skip)]
     recent_event_len: usize,
     current_command: u8,
+}
+
+fn default_command_histogram() -> [u32; 256] {
+    [0; 256]
+}
+
+fn default_recent_events() -> [MemcardEvent; MEMCARD_RECENT_EVENTS] {
+    [MemcardEvent::default(); MEMCARD_RECENT_EVENTS]
 }
 
 /// Top-level state of the memory-card protocol. Each transaction
 /// starts at `Idle`; the first received byte (`0x81`) moves it to
 /// `GotAddr`, then the second byte (`R`/`W`/`S`) routes to a
 /// command-specific substate.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum MemcardState {
     Idle,
     GotAddr,
@@ -1235,7 +1248,7 @@ enum MemcardState {
 }
 
 /// Sub-state for Read (command 0x52, "R").
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum MemcardReadState {
     /// Just got the `R`. Next byte the host clocks is a dummy,
     /// the byte we return is `0x5A` (Memory Card ID 1).
@@ -1264,7 +1277,7 @@ enum MemcardReadState {
 }
 
 /// Sub-state for Write (command 0x57, "W").
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum MemcardWriteState {
     SendId1,
     SendId2,
@@ -1281,7 +1294,7 @@ enum MemcardWriteState {
 }
 
 /// Sub-state for GetID (command 0x53, "S").
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum MemcardGetIdState {
     SendId1,
     SendId2,
@@ -1380,6 +1393,15 @@ impl MemoryCard {
             recent_event_len: 0,
             current_command: 0,
         }
+    }
+
+    /// Replace the card's contents with `bytes` (128 KiB) and mark it clean, leaving a
+    /// transaction in progress where it is. For a frontend that keeps the player's `.mcd`
+    /// file authoritative over what a restored state carried.
+    pub fn replace_contents(&mut self, bytes: &[u8; MEMCARD_SIZE]) {
+        self.bytes.copy_from_slice(bytes);
+        self.flag_new = false;
+        self.dirty = false;
     }
 
     /// Has the card been written since construction / load?

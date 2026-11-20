@@ -451,17 +451,19 @@ impl AppState {
         payload.bus.restore_excluded_from(donor);
         #[cfg(not(target_arch = "wasm32"))]
         {
-            // A memory card is the game's own file, not part of a state: loading a state must
-            // never roll back what the player saved to the card since.
+            // A memory card is the game's own file: loading a state must never roll back what
+            // the player saved to the card since. The state carries the card as it was (with a
+            // transaction in progress), so only its contents are overwritten from the file.
             if let Err(error) = self.flush_memcard_port1() {
                 eprintln!("[frontend] memcard flush before a load: {error}");
             }
-            let card = self
+            if let Some(card) = self
                 .memcard_port1_path
                 .as_ref()
                 .and_then(|path| std::fs::read(path).ok())
-                .unwrap_or_default();
-            payload.bus.attach_memcard_port1(card);
+            {
+                payload.bus.replace_memcard_port1_contents(&card);
+            }
         }
         self.cpu = payload.cpu;
         crate::install_native_tier(&mut self.cpu);

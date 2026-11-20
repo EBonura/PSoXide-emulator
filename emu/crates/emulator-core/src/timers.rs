@@ -147,8 +147,8 @@ pub struct Timers {
     /// covering the interval in a later one gives exactly the same state,
     /// because every per-timer step is additive while nothing crosses (see
     /// [`Timers::quiet_until`]). Zero means "advance at the next chance".
-    /// A cache: excluded from save states.
-    #[serde(skip)]
+    /// Saved although it is a cache: the counters it lets lag then read the same
+    /// after a restore as in the run that was saved.
     quiet_until: u64,
 }
 

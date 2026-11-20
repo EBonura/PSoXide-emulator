@@ -628,9 +628,9 @@ pub struct Cpu {
     /// the instruction before it when no interrupt was pending then. An
     /// interrupt found pending when that command starts was raised during
     /// the instruction before it, the case where silicon runs the command
-    /// and takes the interrupt with EPC still on it. Transient: a save
-    /// state lands between instructions, where the next step re-arms it.
-    #[serde(skip)]
+    /// and takes the interrupt with EPC still on it. Saved: a state taken right
+    /// after the instruction before the command (where it was armed) must still
+    /// have it when the command runs.
     gte_irq_watch: Option<u32>,
     /// The last instruction was a branch or jump, taken or not, so the next
     /// one sits in its delay slot. `pending_pc` only records a taken

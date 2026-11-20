@@ -16,6 +16,7 @@ postcard      = { workspace = true }
 [dev-dependencies]
 psx-iso   = { workspace = true }
 psoxide-settings = { workspace = true }
+serde     = { workspace = true }
 
 [lints]
 workspace = true
