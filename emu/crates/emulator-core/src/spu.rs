@@ -1141,6 +1141,7 @@ impl Spu {
     /// loaded). The console lands none of them (see `transfer_fifo_write`), so
     /// a non-zero count is a program whose manual upload loses data on
     /// hardware. Diagnostic.
+    #[must_use]
     pub fn manual_write_pushes_dropped(&self) -> u64 {
         self.manual_write_pushes_dropped
     }
@@ -1702,6 +1703,7 @@ impl Spu {
     /// `count` halfwords of SPU RAM from byte address `addr` (wrapping), as
     /// they are now: what a channel-4 write about to start will cover, kept so
     /// an abort can put back the part the console would not have written yet.
+    #[must_use]
     pub fn ram_range(&self, addr: u32, count: usize) -> Vec<u16> {
         (0..count)
             .map(|i| self.ram[((addr >> 1) as usize + i) % SPU_RAM_HALFWORDS])
