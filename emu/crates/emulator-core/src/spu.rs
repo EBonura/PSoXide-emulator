@@ -840,6 +840,11 @@ pub struct Spu {
     /// bookkeeping, not machine state: a save state does not carry it.
     #[serde(skip)]
     register_writes: u64,
+    /// Halfwords written to the data port while SPUCNT held Manual Write,
+    /// which a console does not land (see [`Spu::manual_write_pushes_dropped`]).
+    /// Host-side bookkeeping, not machine state.
+    #[serde(skip)]
+    manual_write_pushes_dropped: u64,
 }
 
 impl Default for Spu {
@@ -918,6 +923,7 @@ impl Spu {
             noise_val: 1,
             noise_timer: 0,
             register_writes: 0,
+            manual_write_pushes_dropped: 0,
         }
     }
 
@@ -1128,6 +1134,15 @@ impl Spu {
     /// to tell whether a run exercised the SPU.
     pub fn register_writes(&self) -> u64 {
         self.register_writes
+    }
+
+    /// Halfwords written to the data port (1F801DA8h) while SPUCNT's transfer
+    /// mode was Manual Write, since power-on (or since a save state was
+    /// loaded). The console lands none of them (see `transfer_fifo_write`), so
+    /// a non-zero count is a program whose manual upload loses data on
+    /// hardware. Diagnostic.
+    pub fn manual_write_pushes_dropped(&self) -> u64 {
+        self.manual_write_pushes_dropped
     }
 
     /// Diagnostic: total samples produced since reset. One sample pair
@@ -1567,8 +1582,36 @@ impl Spu {
     //  Data transfer FIFO -- software-driven SPU RAM access.
     // ============================================================
 
-    fn transfer_fifo_write(&mut self, value: u16, now: u64) {
+    /// A halfword at the data port. Data reaches SPU RAM only by being queued
+    /// while the transfer mode is not Manual Write and drained when Manual
+    /// Write is selected (`write_spucnt`, `tick_sample`), which is the order
+    /// PSX-SPX documents and the public ps1-tests memory-transfer case uses.
+    ///
+    /// A halfword written while SPUCNT already holds Manual Write lands
+    /// nowhere the program can find: hardware-test record 0xA7 (Manual Write
+    /// selected, its SPUSTAT mirror waited for, eight halfwords pushed, the
+    /// busy flag waited out, read back over DMA) reads 0x9BE17165 on both
+    /// v2.18 consoles (2026-11-14, SCPH-1200 and SCPH-110,
+    /// `px8-silicon-2026-11-14-v2.18-run*`), the FNV-1a of eight zero
+    /// halfwords: none of the eight arrived. It failed on every capture from
+    /// v1.17 on. Precision values 039-042 (eight halfwords pushed straight
+    /// after selecting Manual Write, then Stop) read zero on both v2.18 runs
+    /// too. Whether such a halfword is dropped, held, or written somewhere
+    /// else is not established (no record searches SPU RAM for it), so it is
+    /// dropped here and counted in [`Spu::manual_write_pushes_dropped`].
+    ///
+    /// Also unknown, and kept as before: what a 33rd halfword pushed while
+    /// stopped does (hardware-test v2.25 records 0xA20-0xA23 measure it; this
+    /// model keeps the first 32 and ignores the rest), whether the transfer
+    /// address carries from one burst to the next (0xA24; it does here), and
+    /// how long SPUSTAT bit 10 reports the drain (never set here; 0x9BB gives
+    /// the cost of the SDK's paced bursts).
+    fn transfer_fifo_write(&mut self, value: u16, _now: u64) {
         const FIFO_HALFWORDS: usize = 32;
+        if (self.spucnt >> 4) & 0x3 == 1 {
+            self.manual_write_pushes_dropped = self.manual_write_pushes_dropped.saturating_add(1);
+            return;
+        }
         if self.transfer_fifo.len() == FIFO_HALFWORDS {
             // A full hardware FIFO cannot accept another halfword. CPU-side
             // bus stalling is not yet represented, so preserve the existing
@@ -1576,14 +1619,6 @@ impl Spu {
             return;
         }
         self.transfer_fifo.push_back(value);
-        let manual_write_active = if self.scph_9902_timing {
-            (self.spustat_at(now) >> 4) & 0x3 == 1
-        } else {
-            (self.spucnt >> 4) & 0x3 == 1
-        };
-        if manual_write_active {
-            self.drain_transfer_fifo_to_ram();
-        }
     }
 
     fn drain_transfer_fifo_to_ram(&mut self) {

@@ -2465,8 +2465,32 @@ impl Gpu {
     /// only part thrashed at 2 KB (8-bit span 64). A texture window changes
     /// the pattern (only the 15-bit 64-texel window paid, 11k a row) and is
     /// not modelled: those triangles are charged nothing here.
+    ///
+    /// A textured rectangle pays by the same law. It steps one texel a pixel,
+    /// and its footprint is its width times its height in texels. Hardware
+    /// test record 0x9E0 (v2.24, 2026-11-19 console run B1F2) times forty raw
+    /// 15-bit 64 x 64 rectangles (8 KB each) over a 320 x 480 screen with the
+    /// 480i rule on: 113 HBlanks on the console every time, 24 here while
+    /// rectangles paid nothing; at 2.4 clocks a drawn pixel they read 115.
     fn texture_cliff_cost(&self, op: u8, depth: usize, pixels: u64, area: u64) -> u64 {
-        if area == 0 || pixels == 0 || self.tex_window_mask_x | self.tex_window_mask_y != 0 {
+        if pixels == 0 || self.tex_window_mask_x | self.tex_window_mask_y != 0 {
+            return 0;
+        }
+        let rect = match op {
+            0x64..=0x67 => {
+                let size = self.gp0_fifo[3];
+                Some((u64::from(size & 0x3ff), u64::from((size >> 16) & 0x1ff)))
+            }
+            0x6c..=0x6f => Some((1, 1)),
+            0x74..=0x77 => Some((8, 8)),
+            0x7c..=0x7f => Some((16, 16)),
+            _ => None,
+        };
+        if let Some((w, h)) = rect {
+            // One texel a pixel: the step is 1.0 (Q8 256) in each direction.
+            return Self::cliff_charge(depth, pixels, 2 * w * h, 256);
+        }
+        if area == 0 {
             return 0;
         }
         let uv = |index: usize| {
@@ -2495,7 +2519,13 @@ impl Gpu {
         // Texels a pixel (Q16), its square root the step in each direction
         // (Q8), then the bytes the step advances.
         let ratio_q16 = (texels_x2 << 15) / area.max(1);
-        let step_q8 = isqrt_u64(ratio_q16);
+        Self::cliff_charge(depth, pixels, texels_x2, isqrt_u64(ratio_q16))
+    }
+
+    /// The cliff law of [`Gpu::texture_cliff_cost`] for `pixels` drawn from a
+    /// footprint of `texels_x2 / 2` texels, stepping `step_q8` texels a pixel
+    /// in each direction.
+    fn cliff_charge(depth: usize, pixels: u64, texels_x2: u64, step_q8: u64) -> u64 {
         let advance_q8 = match depth {
             0 => step_q8 / 2,
             1 => step_q8,

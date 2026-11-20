@@ -565,6 +565,14 @@ fn run_hle(
     } else {
         eprintln!("[card] {} no card", result.id);
     }
+    // Halfwords a game pushed at the SPU data port in Manual Write mode, which
+    // a console never lands (hardware-test record 0xA7). Commercial code
+    // queues them with the transfer stopped, so this reads 0 for every disc.
+    eprintln!(
+        "[spu] {} manual-write pushes dropped {}",
+        result.id,
+        bus.spu.manual_write_pushes_dropped()
+    );
     if !sbi_listed.is_empty() {
         let hits = bus
             .cdrom

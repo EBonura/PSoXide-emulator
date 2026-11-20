@@ -216,11 +216,13 @@ pub(super) const AUDIO_TO_DATA_SETTLE_CYCLES: u64 = 597 * MS;
 pub(super) const DATA_TO_AUDIO_SETTLE_CYCLES: u64 = 675 * MS;
 
 /// Stop complete, counted from the Stop command: the motor-off flag in the
-/// status byte clears at the same moment (records `0x314`, 606 ms for both;
-/// one sample). Stopping an already stopped drive keeps
-/// [`STOP_SECOND_RESPONSE_CYCLES`]. Exactly 606 ms in CPU cycles; the
-/// harness reads 572 ms (Timer 1 reading low, see above).
-pub(super) const STOP_FROM_SPINNING_CYCLES: u64 = 606 * MS;
+/// status byte clears at the same moment (record `0x314`: 606 ms for both
+/// on the v1.28 capture, 624 and 625 ms on the v2.24 console run B1F2 of
+/// 2026-11-19). Stopping an already stopped drive keeps
+/// [`STOP_SECOND_RESPONSE_CYCLES`]. Fitted to the median of the two
+/// samples, 615 ms: at 606 ms the harness read 601 ms (v2.24 emulator
+/// run), below both, so 620 ms of cycles reads 615.
+pub(super) const STOP_FROM_SPINNING_CYCLES: u64 = 620 * MS;
 
 /// Extra first-sector time of a data read on a drive whose motor is off.
 /// The console's settled read (record `0x314`, 4 sectors in 1978 ms; the
@@ -231,17 +233,17 @@ pub(super) const STOP_FROM_SPINNING_CYCLES: u64 = 606 * MS;
 /// 1749 ms.
 pub(super) const SPIN_UP_CYCLES: u64 = 1749 * MS;
 
-/// A read issued while the Stop is still spinning the motor down (record
-/// `0x315`, first sector 2721 ms after the read command, `0x313`: 2748 ms
-/// for 4). The read waits out the rest of the spin-down, then pays the
-/// spin-up, then a further 2721 - 605 - 1951 = 165 ms the console does not
-/// explain (about one more read latency: the aborted spin-down seems to
-/// leave the head needing a fresh seek). One sample. The harness reads
-/// 2651 ms with these terms, 2.6% under the console and inside the
-/// single-sample tolerance; the shortfall is the Timer 1 effect on the
-/// spin-down part of the wait, so the term stays at the console-derived
-/// figure rather than being fitted to the biased reading.
-pub(super) const STOP_ABORT_RESTART_CYCLES: u64 = 165 * MS;
+/// A read issued while the Stop is still spinning the motor down. The read
+/// waits out the rest of the spin-down, then pays the spin-up, then this
+/// further term the console does not explain (about one more read latency:
+/// the aborted spin-down seems to leave the head needing a fresh seek).
+/// Record `0x315`, first sector after the read command: 2721 ms on the v1.28
+/// capture (`0x313`: 2748 ms for 4) and 2837 ms on the v2.24 console run
+/// B1F2 of 2026-11-19. The first fit, 2721 - 605 - 1951 = 165 ms, made the
+/// harness read 2666 ms, below both samples; fitted now to their median,
+/// 2779 ms, by the method above: 165 ms plus the 113 ms the harness read
+/// short, less the 14 ms that [`STOP_FROM_SPINNING_CYCLES`] gained.
+pub(super) const STOP_ABORT_RESTART_CYCLES: u64 = 264 * MS;
 
 /// Extra first-response latency for a command issued *while CD-DA audio is
 /// playing*, added on top of the applicable first-response delay.

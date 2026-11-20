@@ -869,6 +869,18 @@ fn run_journey_inner(journey: &Journey, opts: &RunOptions) -> JourneyResult {
         run.groups.push(audit.group(run.m.ticks));
     }
     result.notes.extend(run.notes);
+    let dropped = run.m.bus.spu.manual_write_pushes_dropped();
+    if dropped > 0 {
+        // A program bug the console shows as missing or garbled sound: say so where the
+        // contact sheet and the log will show it.
+        let note = format!(
+            "SPU: {dropped} halfwords written to the data port in Manual Write mode; a console \
+             lands none of them (hardware-test record 0xA7), so this program's manual uploads \
+             lose data on hardware"
+        );
+        eprintln!("[gate] {}: {note}", result.name);
+        result.notes.push(note);
+    }
     result.cards = run.cards;
     result.ticks = run.m.ticks;
     result.emu_secs = run.m.ticks as f64 / 60.0;

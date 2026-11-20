@@ -204,15 +204,79 @@ fn kon_clears_endx_for_started_voices() {
 #[test]
 fn transfer_fifo_writes_into_spu_ram_and_advances() {
     let mut s = Spu::new();
-    s.write16(SPUCNT, 1 << 4); // arm Manual-Write transfer mode
-    s.tick_sample(SAMPLE_CYCLES);
     s.write16(TRANSFER_ADDR, 0x0010); // 0x10 * 8 = 0x80 bytes
     s.write16(TRANSFER_FIFO, 0xbeef);
     s.write16(TRANSFER_FIFO, 0xcafe);
+    s.write16(SPUCNT, 1 << 4); // Manual Write drains the queued halfwords
+    s.tick_sample(SAMPLE_CYCLES);
     assert_eq!(s.ram[0x80 >> 1], 0xbeef);
     assert_eq!(s.ram[(0x80 >> 1) + 1], 0xcafe);
     // Transfer addr advanced by 4 bytes.
     assert_eq!(s.transfer_addr, 0x84);
+}
+
+/// FNV-1a over halfwords, as the hardware-test suite hashes record 0xA7.
+fn fnv16_halfwords(halfwords: &[u16]) -> u32 {
+    halfwords.iter().fold(0x811c_9dc5u32, |hash, &h| {
+        (hash ^ u32::from(h)).wrapping_mul(0x0100_0193)
+    })
+}
+
+#[test]
+fn manual_write_pushes_land_nothing_as_record_0xa7_on_silicon() {
+    // Record 0xA7 exactly: address, transfer control, Manual Write, its
+    // SPUSTAT mirror waited for, eight halfwords pushed, then Stop. Both v2.18
+    // consoles read 0x9BE17165 back, the hash of eight zero halfwords.
+    for scph_9902 in [false, true] {
+        let mut s = Spu::new();
+        if scph_9902 {
+            s.apply_scph_9902_profile();
+        }
+        s.write16(TRANSFER_ADDR, (0x3400 / 8) as u16);
+        s.write16(TRANSFER_CTRL, 0x0004);
+        s.write16_at(SPUCNT, 0x0010, 0);
+        s.tick_sample(SAMPLE_CYCLES);
+        assert_eq!(s.spustat_at(SAMPLE_CYCLES) & 0x3f, 0x10);
+        for i in 0..8u16 {
+            s.write16_at(
+                TRANSFER_FIFO,
+                0xbeef_u16.wrapping_add(i * 0x101),
+                SAMPLE_CYCLES,
+            );
+        }
+        s.write16_at(SPUCNT, 0, SAMPLE_CYCLES);
+        s.tick_sample(SAMPLE_CYCLES * 4);
+        let landed: Vec<u16> = (0..8).map(|i| s.ram[0x3400 / 2 + i]).collect();
+        assert_eq!(
+            fnv16_halfwords(&landed),
+            0x9be1_7165,
+            "9902 profile {scph_9902}"
+        );
+        assert_eq!(s.manual_write_pushes_dropped(), 8);
+    }
+}
+
+#[test]
+fn halfwords_queued_in_stop_still_land_burst_after_burst() {
+    // The order the SDK's paced upload and Psy-Q's manual transfer use: at
+    // most 32 halfwords queued with the mode at Stop, then Manual Write, then
+    // Stop again for the next burst. Nothing is dropped and the address
+    // carries (what record 0xA24 will check on a console).
+    let mut s = Spu::new();
+    s.write16(TRANSFER_ADDR, (0x2000 / 8) as u16);
+    for burst in 0..2u16 {
+        for i in 0..32u16 {
+            s.write16(TRANSFER_FIFO, burst * 32 + i);
+        }
+        s.write16(SPUCNT, 0x0010);
+        s.tick_sample(SAMPLE_CYCLES * (u64::from(burst) * 2 + 1));
+        s.write16(SPUCNT, 0);
+        s.tick_sample(SAMPLE_CYCLES * (u64::from(burst) * 2 + 2));
+    }
+    for i in 0..64usize {
+        assert_eq!(s.ram[0x2000 / 2 + i], i as u16);
+    }
+    assert_eq!(s.manual_write_pushes_dropped(), 0);
 }
 
 #[test]
@@ -267,11 +331,11 @@ fn dma_write_fills_spu_ram_contiguously() {
 #[test]
 fn irq_fires_when_transfer_hits_irq_addr_with_enable() {
     let mut s = Spu::new();
-    s.write16(SPUCNT, (1 << 6) | (1 << 4)); // IRQ enable + Manual-Write transfer mode
-    s.tick_sample(SAMPLE_CYCLES);
+    s.write16(SPUCNT, 1 << 6); // IRQ enable, transfer stopped
     s.write16(IRQ_ADDR, 0x0010); // 0x10 * 8 = 0x80 bytes
     s.write16(TRANSFER_ADDR, 0x0010);
     s.write16(TRANSFER_FIFO, 0xaaaa);
+    s.write16(SPUCNT, (1 << 6) | (1 << 4)); // Manual Write drains it
     assert!(s.take_irq_pending());
     // Subsequent read clears the pending flag.
     assert!(!s.take_irq_pending());
@@ -319,11 +383,11 @@ fn decoded_buffer_irq_fires_at_zero_irq_address() {
 #[test]
 fn clearing_spucnt_irq_enable_acks_status_bit() {
     let mut s = Spu::new();
-    s.write16(SPUCNT, (1 << 6) | (1 << 4)); // IRQ enable + Manual-Write transfer mode
-    s.tick_sample(SAMPLE_CYCLES);
+    s.write16(SPUCNT, 1 << 6); // IRQ enable, transfer stopped
     s.write16(IRQ_ADDR, 0x0010);
     s.write16(TRANSFER_ADDR, 0x0010);
     s.write16(TRANSFER_FIFO, 0x1234);
+    s.write16(SPUCNT, (1 << 6) | (1 << 4)); // Manual Write drains it
     assert_ne!(s.spustat & (1 << 6), 0);
     s.write16(SPUCNT, 0); // drop IRQ enable
     assert_eq!(s.spustat & (1 << 6), 0);
@@ -1974,13 +2038,20 @@ fn spu_irq_does_not_relatch_until_acknowledged() {
     // PSX-SPX is_irq_triggerable / PSX-SPX IsRAMIRQTriggerable and the
     // nocash PSX-SPX sticky-IRQ9 semantics.
     let mut s = Spu::new();
-    s.write16(SPUCNT, (1 << 6) | (1 << 4)); // IRQ enable + Manual-Write transfer mode
-    s.tick_sample(SAMPLE_CYCLES);
+    // Halfwords are queued with the transfer stopped and land when Manual
+    // Write is selected (a push in Manual Write lands nothing, record 0xA7).
+    let manual_write = |s: &mut Spu, words: &[u16]| {
+        s.write16(SPUCNT, 1 << 6);
+        for &word in words {
+            s.write16(TRANSFER_FIFO, word);
+        }
+        s.write16(SPUCNT, (1 << 6) | (1 << 4));
+    };
     s.write16(IRQ_ADDR, 0x0010); // byte addr 0x80
     s.write16(TRANSFER_ADDR, 0x0010); // start the transfer pointer at byte 0x80
 
     // First halfword write hits the IRQ address: latch fires once.
-    s.write16(TRANSFER_FIFO, 0x1111);
+    manual_write(&mut s, &[0x1111]);
     assert!(s.take_irq_pending(), "first IRQ-addr match must latch");
     assert_ne!(
         s.spustat() & (1 << 6),
@@ -1992,8 +2063,7 @@ fn spu_irq_does_not_relatch_until_acknowledged() {
     // re-arm gate, the already-latched (unacknowledged) IRQ9 flag blocks any
     // further latch, so irq_pending stays false. Before the fix these would
     // re-raise irq_pending every match (the interrupt-storm bug).
-    s.write16(TRANSFER_FIFO, 0x2222);
-    s.write16(TRANSFER_FIFO, 0x3333);
+    manual_write(&mut s, &[0x2222, 0x3333]);
     assert!(
         !s.take_irq_pending(),
         "subsequent matches must NOT re-latch while IRQ9 is unacknowledged"
@@ -2002,12 +2072,11 @@ fn spu_irq_does_not_relatch_until_acknowledged() {
     // Acknowledge: clear SPUCNT bit 6 (clears the SPUSTAT flag), then re-enable.
     s.write16(SPUCNT, 0);
     assert_eq!(s.spustat() & (1 << 6), 0, "clearing SPUCNT.6 acks the flag");
-    s.write16(SPUCNT, (1 << 6) | (1 << 4)); // re-enable IRQ + Manual-Write mode
     s.tick_sample(SAMPLE_CYCLES * 2);
 
     // A fresh match after acknowledge latches again.
     s.write16(TRANSFER_ADDR, 0x0010);
-    s.write16(TRANSFER_FIFO, 0x4444);
+    manual_write(&mut s, &[0x4444]);
     assert!(
         s.take_irq_pending(),
         "after acknowledge, a new IRQ-addr match must latch again"
@@ -2412,16 +2481,20 @@ fn cancelled_manual_mode_leaves_queued_fifo_data_uncommitted() {
 }
 
 #[test]
-fn default_manual_mode_accepts_fifo_before_sample_boundary() {
+fn default_manual_mode_drops_fifo_pushes_before_sample_boundary() {
+    // Precision values 039-042 on both v2.18 consoles: halfwords pushed
+    // straight after selecting Manual Write read back as zero.
     let mut s = Spu::new();
     s.write16_at(TRANSFER_ADDR, 0, 100);
     s.write16_at(SPUCNT, 0x0010, 100);
     s.write16_at(TRANSFER_FIFO, 0xcafe, 110);
+    s.write16_at(SPUCNT, 0, 120);
 
     s.write16(TRANSFER_ADDR, 0);
     let mut readback = [0u16; 1];
     s.dma_read(&mut readback);
-    assert_eq!(readback, [0xcafe]);
+    assert_eq!(readback, [0]);
+    assert_eq!(s.manual_write_pushes_dropped(), 1);
 }
 
 #[test]

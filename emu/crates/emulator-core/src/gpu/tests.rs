@@ -3323,6 +3323,63 @@ fn textured_triangles_pay_when_their_texels_outgrow_the_cache() {
     }
 }
 
+/// Hardware-test record 0x9E0 (v2.24, console run B1F2 on 2026-11-19): forty
+/// raw 15-bit 64 x 64 textured rectangles (GP0 65h) over 320 x 512 of a 480i
+/// screen with GP0(E1h) bit 10 clear, timed from the first word to the drain:
+/// 113 HBlanks (2,153 clocks each) on the console, every one of eight runs.
+/// About one HBlank of that is the CPU sending the forty packets (the
+/// emulator read 24 HBlanks while it charged 49,240 clocks for the draws).
+/// The rectangles now pay the texture-cache cliff the triangles do.
+#[test]
+fn large_15_bit_rectangles_pay_the_cache_cliff_as_record_0x9e0() {
+    let xy = |x: u32, y: u32| (y << 16) | x;
+    let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0300_0000);
+    gpu.write32(GP1_ADDR, 0x0800_0026); // 640 x 480 interlaced
+    for word in [
+        0xe100_0000 | 9 | (2 << 7), // texture page x 576, 15-bit, bit 10 clear
+        0xe200_0000,
+        0xe300_0000,
+        0xe400_0000 | 1023 | (511 << 10),
+        0xe500_0000,
+        0xe600_0000,
+    ] {
+        gpu.write32(GP0_ADDR, word);
+    }
+    let before = gpu.gp0_timing_histogram()[0x65];
+    for ty in 0..8 {
+        for tx in 0..5 {
+            for word in [0x6580_8080, xy(tx * 64, ty * 64), 0, xy(64, 64)] {
+                gpu.write32(GP0_ADDR, word);
+            }
+        }
+    }
+    let draws = gpu.gp0_timing_histogram()[0x65] - before;
+    let console = (113 - 1) * 2_153u64;
+    assert!(
+        (console * 95 / 100..=console * 105 / 100).contains(&draws),
+        "{draws} clocks against the console's {console}"
+    );
+
+    // A rectangle whose footprint fits the cache pays nothing extra: the
+    // same forty at 16 x 16 cost what the rate alone gives.
+    let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0300_0000);
+    gpu.write32(GP1_ADDR, 0x0800_0026);
+    for word in [0xe100_0000 | 9 | (2 << 7), 0xe400_0000 | 1023 | (511 << 10)] {
+        gpu.write32(GP0_ADDR, word);
+    }
+    let before = gpu.gp0_timing_histogram()[0x65];
+    for word in [0x6580_8080, xy(0, 0), 0, xy(16, 16)] {
+        gpu.write32(GP0_ADDR, word);
+    }
+    let small = gpu.gp0_timing_histogram()[0x65] - before;
+    assert_eq!(
+        small,
+        DRAW_TEXTURED_SETUP.max((8 * 16 * DRAW_FLAT_Q8 + 16 * DRAW_SCANLINE_Q8).div_ceil(256))
+    );
+}
+
 #[test]
 fn a_texture_page_change_costs_in_proportion_to_the_pixels_drawn() {
     // hwtest v2.1: 15-bit 32x32 triangles alternating between two pages cost

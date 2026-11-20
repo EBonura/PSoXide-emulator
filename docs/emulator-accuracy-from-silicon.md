@@ -450,6 +450,75 @@ to name the guilty glyph; alignment alone does not explain it, since 'r'
 shares 'f''s atlas row and its `u&3==3` start and renders correctly on
 screen.
 
+## The 2026-11-19 console session (v2.24, run B1F2)
+
+Hardware Tests v2.24 ran on a console on 2026-11-19 (decoded report kept with
+the SDK lane notes); with the two v2.18 captures of 2026-11-14 (SCPH-1200 and
+SCPH-110, `px8-silicon-2026-11-14-v2.18-run*` in the SDK's
+`docs/hardware-refs`) it showed four places where SDK defects passed the
+emulator and failed on the console. Each is now modelled from those records
+only; figures marked "harness" are the v2.25 emulator twin's own readings of
+the same records.
+
+**SPU DMA rate.** Record `0x65` (512 halfwords, RAM to SPU) reads 16,589 to
+16,891 clocks on every console capture, at COMMON_DELAY `0x132C` and `0x1325`;
+`0x9B0` reads 16,918. The emulator gave 16 clocks a halfword at `0x1325`
+(8,212); it now gives 32 at every setting (harness 16,675 and 16,759). A CHCR
+store that clears channel 4's start bit mid-transfer keeps only the blocks
+moved by then (`0x9B6`/`0x9B7`: the abort stops it). The installed WipEout,
+whose SDK aborted its 470,544-byte upload after 500,000 polls, loses its bank
+from SPU `0x53920` up, as on the console.
+
+**SPU manual write.** Record `0xA7` selects Manual Write, waits for the
+SPUSTAT mirror, pushes eight halfwords, waits out bit 10, stops and reads back
+over DMA. Both v2.18 consoles read `0x9BE17165`, the FNV-1a of eight zero
+halfwords: none arrived (it failed on every capture from v1.17). Precision
+values 039-042 (eight pushed straight after selecting Manual Write) read zero
+on both. A halfword written to the data port while SPUCNT holds Manual Write
+now lands nowhere; halfwords queued with the transfer stopped still drain when
+Manual Write is selected. The harness now reads `0x9BE17165` at `0xA7` and
+`0x0B2AE445` at `0xBD` (DMA against FIFO write), both exactly what the two
+consoles read. The SDK's old unpaced PIO path (NitroXide's sample bodies,
+Quake's silence block) now loses its data in the emulator: `0x9B9` finds the
+first wrong byte at 0 and `0x9BA` 41,964 of the 73,136 bytes wrong (the rest
+are zero bytes of the sample over zeroed RAM), and the paced path
+(`0x9BB`/`0x9BC`) lands all of it.
+The gate notes the halfwords a journey dropped. Not established, so not
+modelled: whether such a halfword is dropped, held or written elsewhere (no
+record looks for it; a row that pushes in Manual Write, selects Manual Write
+again with nothing queued, then searches SPU RAM would say), what a 33rd
+halfword queued while stopped does (`0xA20`-`0xA23`; kept: the first 32 land),
+whether the address carries between bursts (`0xA24`; it does here), and how
+long SPUSTAT bit 10 reports a drain (never set here; `0x9BB` times the paced
+bursts).
+
+**Textured rectangles.** Record `0x9E0` times forty raw 15-bit 64 x 64
+textured rectangles over a 480i screen with the draw rule on: 113 HBlanks on
+the console every run, 24 in the emulator. Triangles already paid the texture
+cache cliff fitted on v2.4 (`0x8E0`-`0x92B`); rectangles paid nothing. The same
+law applied to a rectangle (one texel a pixel, footprint width x height) gives
+2.4 clocks a drawn pixel at 15 bits and the harness reads 114. This is the
+"textures 4.7 times slower" figure: it is this one rectangle case, not
+textured drawing in general, which the triangle fit already covered. The
+law at 4 and 8 bits for rectangles is the triangle fit, unmeasured on
+rectangles; a `0x9E0` variant at those depths, and one with the rule off,
+would check it. Channel 2 already stays busy until the GPU has drawn what it
+was fed (the DMA busy credit); `HEAVY FRAME WALK` `0xA60`-`0xA65` (v2.25) gives
+the console's walk length for textured quad lists, unmeasured until it burns.
+
+**CD read after Stop.** A read issued while a Stop spins the motor down
+(`0x315`) took 2,721 ms on v1.28 and 2,837 ms on v2.24; the Stop itself
+(`0x314`) 606 and 624 ms. The harness read 2,666 and 601, below both samples.
+Refitted to the medians: Stop 620 ms, restart term 264 ms; the harness reads
+2,778 and 615. A read after a Stop and 5 s idle (`0x9C8`) was already
+calibrated: 1,911 ms on the console, 1,906 here. The 4.4 s once seen (v2.7,
+a read after a Pause and 15 s idle) did not repeat on 11-03 (187 ms) or 11-19
+(`0x9C4`, 143 ms) and is not modelled. Still open: a read after a Pause and 5
+to 30 s idle takes 108 to 149 ms on the console (`0x9C0`-`0x9C6`) and 170 ms
+here; `0xA50`-`0xA52` (v2.25) will give the reader's read at once after Stop
+(2.79 s here); `0xA53` will say whether a Pause during SeekL is refused, as it
+was 6 of 6 on v2.7 (all accepted here).
+
 ## How these get found
 
 The hardware-test disc is the instrument: `make hwtest-silicon SILICON=<pages>`

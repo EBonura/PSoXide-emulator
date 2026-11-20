@@ -23,14 +23,19 @@ pub const AREAS: [(&str, u32); 15] = [
     ("cpu", 1),
     ("gte", 1),
     ("muldiv", 1),
-    ("cd", 1),
+    // 2: a Stop takes 620 ms to complete and a read issued during its spin-down 264 ms more
+    // after the spin-up (records 0x314, 0x315: v1.28 and the v2.24 console run, median of two).
+    ("cd", 2),
     // 2: channel-4 (RAM to SPU) DMA moves a halfword every 32 clocks at every COMMON_DELAY
     // (silicon record 0x65), and an abort mid-transfer keeps only the blocks moved so far.
-    ("spu", 2),
+    // 3: a halfword written to the data port while SPUCNT holds Manual Write lands nowhere
+    // (silicon record 0xA7: none of eight arrive on both v2.18 consoles).
+    ("spu", 3),
     ("pad", 1),
     ("mdec", 1),
     // 2: GP1(03h) display off presents black (display_rgba8, display_hash, the gate's frames).
-    ("gpu", 2),
+    // 3: textured rectangles pay the texture-cache cliff triangles pay (silicon record 0x9E0).
+    ("gpu", 3),
     ("dma", 1),
     ("timers", 1),
     ("irq", 1),
@@ -423,7 +428,7 @@ mod tests {
             ..Touched::default()
         }
         .areas();
-        assert!(busy.contains(&"cd=1".to_string()));
+        assert!(busy.contains(&"cd=2".to_string()));
         assert!(busy.contains(&"mdec=1".to_string()));
         assert!(busy.contains(&"hw=2".to_string()));
         assert!(!busy.iter().any(|a| a.starts_with("spu=")));

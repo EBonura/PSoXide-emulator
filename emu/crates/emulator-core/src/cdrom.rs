@@ -304,7 +304,7 @@ pub struct CdRom {
     motor_on: bool,
     /// Cycle at which a Stop finishes spinning the motor down. Until then
     /// the status byte still reports the motor on (console: motor-off shows
-    /// at the Stop completion, 606 ms after the command) while `motor_on`
+    /// at the Stop completion, 606 to 625 ms after the command) while `motor_on`
     /// already says the drive is stopping. `None` when no Stop is in flight.
     /// Saved with the state, so a restore mid spin-down finishes it on time.
     spindown_until: Option<u64>,
@@ -1804,7 +1804,7 @@ impl CdRom {
 
     fn cmd_stop(&mut self) {
         // A spinning drive (or one already braking) takes the console's
-        // 606 ms to stop and shows the motor until then; the acknowledge
+        // 606 to 625 ms to stop and shows the motor until then; the acknowledge
         // still carries the motor bit and the completion clears it. A drive
         // that is already stopped answers with the older pinned delay.
         let braking_until = self.spindown_until;
