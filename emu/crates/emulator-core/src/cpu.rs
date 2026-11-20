@@ -1681,6 +1681,7 @@ impl Cpu {
 
     #[inline]
     fn charge_read(&self, bus: &mut Bus, addr: u32, width: AccessWidth) {
+        bus.limits.note_load(addr);
         if !self.cache_isolated() || Self::cache_control_lane(addr).is_some() {
             if Self::limit_free_read(bus, addr) {
                 return;
@@ -1944,11 +1945,23 @@ impl Cpu {
         // the instruction; wait and profile ranges count what it charged.
         let pc = self.pc;
         bus.limits.begin_instruction(pc);
+        let study = bus.limits.studies_dma();
+        let study_before = if study { bus.dma_study_state() } else { 0 };
         let cycles_before = bus.cycles();
         let skipped_before = bus.limits.skipped_cycles;
         let profile_before = self.cpu_cycle_profile;
         let outcome = self.execute_one_outlined(bus);
         let charged = bus.cycles().saturating_sub(cycles_before);
+        if bus.limits.on(crate::limits::DMASPEED) {
+            bus.limits.speed_note(pc, charged);
+        }
+        if study {
+            let after = bus.dma_study_state();
+            let start = bus.gpu.study_display_start();
+            let vblanks = bus.vblank_count;
+            bus.limits
+                .dma_account(pc, self.pc, study_before, after, charged, start, vblanks);
+        }
         let skipped = bus.limits.skipped_cycles - skipped_before;
         if bus.limits.end_instruction(pc, charged, skipped) && self.cpu_cycle_profile_enabled {
             let d = self.cpu_cycle_profile.delta_since(profile_before);
@@ -2204,7 +2217,12 @@ impl Cpu {
         } else if self.hides_in_load_shadow(instr, bus) {
             0
         } else {
-            cycle_cost(instr)
+            let cost = cycle_cost(instr);
+            if bus.limits.on(crate::limits::DMASPEED) {
+                cost - bus.limits.speed_refund(cost)
+            } else {
+                cost
+            }
         };
         bus.tick(issue_cycles);
         if self.cpu_cycle_profile_enabled {

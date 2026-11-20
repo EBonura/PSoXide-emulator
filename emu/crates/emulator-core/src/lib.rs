@@ -44,6 +44,7 @@ mod hle_testkit;
 pub mod input_tape;
 pub mod irq;
 pub mod limits;
+pub mod dma_study;
 pub mod shadow_census;
 pub mod shadow_sched;
 pub mod mdec;

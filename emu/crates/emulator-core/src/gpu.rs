@@ -1835,6 +1835,18 @@ impl Gpu {
         self.cmd_ingest_credit > 0 || self.is_dma_busy() || self.deferred_irq_command.is_some()
     }
 
+    /// Lane ps1-dma: the display start (x, y) the last GP1(05h) set.
+    #[inline]
+    pub(crate) fn study_display_start(&self) -> (u16, u16) {
+        (self.display_start_x, self.display_start_y)
+    }
+
+    /// Lane ps1-dma: the GPU still has drawing queued or a word waiting in the input FIFO.
+    #[inline]
+    pub(crate) fn study_busy(&self) -> bool {
+        self.busy_credit > 0 || !self.dma_input_fifo.is_empty()
+    }
+
     /// Is the GPU currently "busy"? Used to gate GPUSTAT ready
     /// bits 26 + 28.
     pub fn is_busy(&self) -> bool {

@@ -2446,6 +2446,8 @@ fn run_headless_launch(
         }
         let end_cycle = bus.cycles();
         bus.limits.write_census(end_cycle);
+        let period = bus.vblank_period();
+        bus.limits.write_dma_study(end_cycle, period);
     }
     if let Some(writer) = cpu_cycle_profile_log.as_mut() {
         writer.flush().map_err(|error| error.to_string())?;

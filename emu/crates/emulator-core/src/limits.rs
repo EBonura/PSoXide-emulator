@@ -85,13 +85,19 @@ pub const SHADOWDEP: u32 = 1 << 9;
 pub const SHADOWMAX: u32 = 1 << 10;
 /// Internal: the shadow census is on (`PSOXIDE_SHADOW_CENSUS`). Not an oracle name.
 pub const CENSUS: u32 = 1 << 11;
+/// Lane ps1-dma oracle (not part of `all`): CPU RAM accesses under a GPU list walk cost what they cost on an idle bus.
+pub const DMATAX: u32 = 1 << 12;
+/// Internal: the DMA time-split study is on (`PSOXIDE_DMA_STUDY`). Not an oracle name.
+pub const DMASTUDY: u32 = 1 << 13;
+/// Internal: lane ps1-dma uniform CPU speed-up (`PSOXIDE_DMA_SPEEDUP=P`, P percent of the work cycles outside the wait ranges).
+pub const DMASPEED: u32 = 1 << 14;
 /// Any load-shadow study switch.
 pub const SHADOW_STUDY: u32 = SHADOWNONE | SHADOWDEP | SHADOWMAX | CENSUS;
 
 /// Consecutive free instructions after which a free range is charged again.
 pub const FREE_GUARD: u64 = 1 << 24;
 
-const NAMES: [(&str, u32); 11] = [
+const NAMES: [(&str, u32); 12] = [
     ("icache", ICACHE),
     ("ram", RAM),
     ("muldiv", MULDIV),
@@ -103,6 +109,7 @@ const NAMES: [(&str, u32); 11] = [
     ("shadownone", SHADOWNONE),
     ("shadowdep", SHADOWDEP),
     ("shadowmax", SHADOWMAX),
+    ("dmatax", DMATAX),
 ];
 
 /// One named code range, `start..end`.
@@ -242,6 +249,17 @@ pub struct LimitOracles {
     gl_until: Option<u32>,
     gl_reached: bool,
     gl_line: Vec<u8>,
+    /// Lane ps1-dma: the time-split study, when `PSOXIDE_DMA_STUDY` names a file.
+    pub dma_study: Option<Box<crate::dma_study::DmaStudy>>,
+    /// Bus VBlank period, remembered for the report (set by the bus when a GL line closes the window).
+    pub dma_study_period: u64,
+    speed_permille: u64,
+    speed_acc: u64,
+    speed_work: u64,
+    speed_refunded: u64,
+    study_stores: u64,
+    study_loads: u64,
+    study_last_load: u32,
 }
 
 impl LimitOracles {
@@ -278,6 +296,20 @@ impl LimitOracles {
                     .map(Path::new),
                 std::env::var("PSOXIDE_LIMIT_FROM_GL").ok().as_deref(),
                 std::env::var("PSOXIDE_LIMIT_UNTIL_GL").ok().as_deref(),
+            )
+        })
+        .and_then(|limits| limits.with_dma_speedup(std::env::var("PSOXIDE_DMA_SPEEDUP").ok().as_deref()))
+        .and_then(|limits| {
+            limits.with_dma_study(
+                std::env::var_os("PSOXIDE_DMA_STUDY")
+                    .as_deref()
+                    .map(Path::new),
+                std::env::var_os("PSOXIDE_DMA_CLASSES")
+                    .as_deref()
+                    .map(Path::new),
+                std::env::var_os("PSOXIDE_DMA_POLLMAP")
+                    .as_deref()
+                    .map(Path::new),
             )
         })
         .and_then(|limits| {
@@ -359,6 +391,193 @@ impl LimitOracles {
         Ok(self)
     }
 
+    /// Lane ps1-dma: the DMA time-split study (`PSOXIDE_DMA_STUDY=FILE`, class ranges in
+    /// `PSOXIDE_DMA_CLASSES=FILE`). Window control is the same as the census (`FROM_POLL`,
+    /// `FROM_GL`, `UNTIL_GL`, or the end of the run).
+    ///
+    /// # Errors
+    ///
+    /// When the class file does not parse.
+    pub fn with_dma_study(
+        mut self,
+        file: Option<&Path>,
+        classes: Option<&Path>,
+        pollmap: Option<&Path>,
+    ) -> Result<Self, String> {
+        let Some(path) = file else {
+            return Ok(self);
+        };
+        let classes = classes.map(RangeSet::load).transpose()?.unwrap_or_default();
+        let pollmap = pollmap.map(RangeSet::load).transpose()?.unwrap_or_default();
+        let funcs = self.profile.ranges().iter().map(|r| r.name.clone()).collect();
+        self.dma_study = Some(Box::new(crate::dma_study::DmaStudy::new(
+            path.to_path_buf(),
+            funcs,
+            classes,
+            pollmap,
+        )));
+        self.configured |= DMASTUDY;
+        self.track_pc = true;
+        self.pending = true;
+        Ok(self)
+    }
+
+    /// Study: one CPU store retired its bus access.
+    #[inline]
+    pub(crate) fn note_store(&mut self) {
+        self.study_stores += 1;
+    }
+
+    /// Study: one CPU data load at `addr`.
+    #[inline]
+    pub(crate) fn note_load(&mut self, addr: u32) {
+        self.study_loads += 1;
+        self.study_last_load = addr;
+    }
+
+    /// Lane ps1-dma: refund `P` percent of the cycles CPU code outside the wait ranges is charged
+    /// (`PSOXIDE_DMA_SPEEDUP=P`). It takes issue cycles back one at a time, so P is limited to what
+    /// the instructions' issue cycles can give; the report says how much was refunded.
+    ///
+    /// # Errors
+    ///
+    /// When P does not parse.
+    pub fn with_dma_speedup(mut self, percent: Option<&str>) -> Result<Self, String> {
+        let Some(text) = percent else {
+            return Ok(self);
+        };
+        let p: f64 = text.trim().parse().map_err(|e| format!("DMA_SPEEDUP {text}: {e}"))?;
+        self.speed_permille = (p * 10.0).round() as u64;
+        self.configured |= DMASPEED;
+        self.track_pc = true;
+        self.pending = true;
+        Ok(self)
+    }
+
+    /// Speed-up oracle: one issue cycle back, if the pool holds one.
+    #[inline]
+    pub(crate) fn speed_refund(&mut self, cost: u32) -> u32 {
+        if cost > 0 && self.speed_acc >= 1000 {
+            self.speed_acc -= 1000;
+            self.speed_refunded += 1;
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Speed-up oracle: an instruction at `pc` was charged `charged` cycles.
+    #[inline]
+    pub(crate) fn speed_note(&mut self, pc: u32, charged: u64) {
+        if self.wait.is_empty() || self.wait.find(pc).is_none() {
+            self.speed_work += charged;
+            self.speed_acc = (self.speed_acc + charged * self.speed_permille).min(1000 * 64);
+        }
+    }
+
+    /// Whether the DMA study is counting right now.
+    #[inline]
+    pub(crate) fn studies_dma(&self) -> bool {
+        self.active & DMASTUDY != 0
+    }
+
+    /// One CPU main-RAM access (study only).
+    #[inline]
+    pub(crate) fn dma_ram_access(&mut self, store: bool, moving: bool, wait: u32) {
+        if self.active & DMASTUDY == 0 {
+            return;
+        }
+        let f = self.profile.find(self.cur_pc);
+        let pc = self.cur_pc;
+        if let Some(study) = self.dma_study.as_mut() {
+            study.ram_access(pc, f, store, moving, wait);
+        }
+    }
+
+    /// One CPU load that paid the GPU block-DMA read wait (study only).
+    #[inline]
+    pub(crate) fn dma_block_access(&mut self, wait: u32) {
+        if self.active & DMASTUDY == 0 {
+            return;
+        }
+        if let Some(study) = self.dma_study.as_mut() {
+            study.block_access(wait);
+        }
+    }
+
+    /// A poll read of GPUSTAT (0) or DMA2 CHCR (1) (study only).
+    #[inline]
+    pub(crate) fn dma_poll(&mut self, kind: usize) {
+        if self.active & DMASTUDY == 0 {
+            return;
+        }
+        let f = self.profile.find(self.cur_pc);
+        if let Some(study) = self.dma_study.as_mut() {
+            study.poll(f, kind);
+        }
+    }
+
+    /// One retired instruction (study only).
+    #[inline]
+    pub(crate) fn dma_account(
+        &mut self,
+        pc: u32,
+        next_pc: u32,
+        before: u8,
+        after: u8,
+        charged: u64,
+        start: (u16, u16),
+        vblanks: u64,
+    ) {
+        let f = self.profile.find(pc);
+        if let Some(study) = self.dma_study.as_mut() {
+            study.account(
+                pc,
+                next_pc,
+                f,
+                before,
+                after,
+                charged,
+                start,
+                vblanks,
+                self.study_stores,
+                self.study_loads,
+                self.study_last_load,
+            );
+        }
+    }
+
+    /// Write the DMA study report if it has not been written yet. `cycle` is the bus cycle now.
+    pub fn write_dma_study(&mut self, cycle: u64, vblank_period: u64) {
+        if self.active & DMASPEED != 0 {
+            eprintln!(
+                "[dma] speedup {:.1}%: refunded {} cycles of {} charged to work code ({:.3}%)",
+                self.speed_permille as f64 / 10.0,
+                self.speed_refunded,
+                self.speed_work,
+                100.0 * self.speed_refunded as f64 / self.speed_work.max(1) as f64
+            );
+        }
+        let window = match self.activated_at_cycle {
+            Some(start) => cycle.saturating_sub(start),
+            None => return,
+        };
+        let Some(study) = self.dma_study.as_mut() else {
+            return;
+        };
+        if study.written {
+            return;
+        }
+        study.written = true;
+        let text = study.render(window, vblank_period);
+        if let Some(path) = study.path() {
+            match std::fs::write(path, text) {
+                Ok(()) => eprintln!("[dma] study -> {}", path.display()),
+                Err(error) => eprintln!("[dma] study write {}: {error}", path.display()),
+            }
+        }
+    }
+
     /// Lane ps1-sched: collect the window's straight-line blocks into `file`
     /// (`PSOXIDE_SHADOW_SCHED=FILE`). Needs the census machinery; makes it if absent.
     pub fn with_shadow_sched(mut self, file: Option<&Path>) -> Self {
@@ -411,6 +630,10 @@ impl LimitOracles {
         }
         if Some(frame) == self.gl_until {
             self.active &= !CENSUS;
+            if self.active & (DMASTUDY | DMASPEED) != 0 {
+                self.write_dma_study(cycle, self.dma_study_period);
+                self.active &= !DMASTUDY;
+            }
             self.write_census(cycle);
             if self.configured & SHADOWMAX != 0 {
                 eprintln!(
@@ -764,7 +987,7 @@ fn parse_oracles(list: &str) -> Result<u32, String> {
         .filter(|name| !name.is_empty())
     {
         if name == "all" {
-            mask |= NAMES.iter().map(|(_, bit)| bit).fold(0, |a, b| a | b) & !(SPRAM | SHADOWNONE | SHADOWDEP | SHADOWMAX);
+            mask |= NAMES.iter().map(|(_, bit)| bit).fold(0, |a, b| a | b) & !(SPRAM | SHADOWNONE | SHADOWDEP | SHADOWMAX | DMATAX);
             continue;
         }
         let bit = NAMES

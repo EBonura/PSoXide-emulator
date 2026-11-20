@@ -410,6 +410,9 @@ pub struct Bus {
     /// states (a restored bus re-reads the environment).
     #[serde(skip, default = "crate::limits::LimitOracles::from_env")]
     pub limits: crate::limits::LimitOracles,
+    /// Lane ps1-dma: VBlank interrupts raised so far (measurement only, not saved).
+    #[serde(skip)]
+    pub vblank_count: u64,
     /// Out-of-band profiler/debug telemetry emitted by instrumented
     /// homebrew through the Expansion 2 debug port. Debug tooling --
     /// excluded from save states.
@@ -631,6 +634,7 @@ impl Bus {
             },
             mmio_trace: MmioTrace::new(),
             limits: crate::limits::LimitOracles::from_env(),
+            vblank_count: 0,
             telemetry: GuestTelemetry::new(),
             hle_bios_enabled: false,
             hle_bios_calls: [[0; 256]; 3],
@@ -1578,6 +1582,7 @@ impl Bus {
             .take_slot_due_inclusive(EventSlot::VBlank, now)
         {
             self.irq.raise(IrqSource::VBlank);
+            self.vblank_count += 1;
             self.gpu.toggle_vblank_field();
             self.timers.notify_vblank();
             self.scheduler
@@ -1662,6 +1667,7 @@ impl Bus {
                 }
                 EventSlot::VBlank => {
                     self.irq.raise(IrqSource::VBlank);
+                    self.vblank_count += 1;
                     // Toggle GPUSTAT bit 31 (interlace / field flag)
                     // -- some BIOS and game code polls this instead
                     // of (or in addition to) the VBlank IRQ to detect
@@ -1905,6 +1911,10 @@ impl Bus {
     /// [`GPU_LIST_RAM_ACCESS_SPACING`].
     #[inline(always)]
     fn gpu_list_ram_spacing_wait(&mut self) -> u32 {
+        if self.limits.on(crate::limits::DMATAX) {
+            // Lane ps1-dma oracle: a RAM access under a walk costs what it costs on an idle bus.
+            return 0;
+        }
         let wait = self.gpu_list_ram_next.saturating_sub(self.cycles);
         self.gpu_list_ram_next = self.cycles + wait + GPU_LIST_RAM_ACCESS_SPACING;
         wait as u32
@@ -1985,6 +1995,34 @@ impl Bus {
         }
     }
 
+    /// Lane ps1-dma: what the DMA and the GPU are doing right now, for the time-split study.
+    /// 0 idle, 1 list walk moving nodes, 2 list walk stalled on a full FIFO, 3 GPU drawing with
+    /// no DMA, 4 GPU block transfer, 5 MDEC DMA, 6 CD DMA, 7 SPU DMA, 8 OTC or PIO DMA.
+    pub(crate) fn dma_study_state(&mut self) -> u8 {
+        if self.experimental_gpu_list.is_some() {
+            return if self.gpu_list_walk_is_moving() { 1 } else { 2 };
+        }
+        let on = |bus: &Self, ch: usize| {
+            bus.dma.channels[ch].channel_control & (1 << 24) != 0 && bus.dma.is_channel_enabled(ch)
+        };
+        if on(self, 2) {
+            return 4;
+        }
+        if on(self, 0) || on(self, 1) {
+            return 5;
+        }
+        if on(self, 3) {
+            return 6;
+        }
+        if on(self, 4) {
+            return 7;
+        }
+        if on(self, 5) || on(self, 6) {
+            return 8;
+        }
+        u8::from(self.gpu.study_busy()) * 3
+    }
+
     /// [`Bus::cpu_read_stalls`] for a main-RAM address: the six-cycle
     /// access (`MemoryControl::read_stalls` answers six for every RAM
     /// width), code-fetch contention and the DRAM refresh wait.
@@ -1994,9 +2032,14 @@ impl Bus {
             !self.code_fetch_on_ram_bus && self.cycles >= self.code_fill_busy_until;
         let mut stalls = self.ram_load_stalls_with_code_contention(6);
         if self.gpu_list_walk_is_moving() {
-            stalls += self.gpu_list_ram_spacing_wait();
+            let wait = self.gpu_list_ram_spacing_wait();
+            stalls += wait;
+            self.limits.dma_ram_access(false, true, wait);
         } else if self.gpu_block_dma_is_moving() {
             stalls += GPU_BLOCK_RAM_READ_WAIT;
+            self.limits.dma_block_access(GPU_BLOCK_RAM_READ_WAIT);
+        } else {
+            self.limits.dma_ram_access(false, false, 0);
         }
         let access_gap = self.cycles.saturating_sub(self.last_cpu_ram_access_cycle);
         self.last_cpu_ram_access_cycle = self.cycles;
@@ -2048,11 +2091,13 @@ impl Bus {
         } else {
             memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES
         };
-        let walk_wait = if self.gpu_list_walk_is_moving() {
+        let moving = self.gpu_list_walk_is_moving();
+        let walk_wait = if moving {
             self.gpu_list_ram_spacing_wait()
         } else {
             0
         };
+        self.limits.dma_ram_access(true, moving, walk_wait);
         self.queue_store().saturating_add(walk_wait).saturating_add(
             memory_timing::dram_refresh_wait(
                 self.cycles,
@@ -4294,9 +4339,15 @@ impl Bus {
             return self.read32_timers(phys);
         }
         if Dma::contains(phys) {
+            if phys == 0x1f80_10a8 {
+                self.limits.dma_poll(1);
+            }
             return self.read32_dma(phys);
         }
         if let Some(v) = self.gpu.read32_at(phys, self.cycles) {
+            if phys == crate::gpu::GP1_ADDR {
+                self.limits.dma_poll(0);
+            }
             self.service_gpu_irq();
             return v;
         }
@@ -4377,6 +4428,7 @@ impl Bus {
     /// though DMA-ready GPUSTAT.28 can remain high for CPU-fed rendering.
     pub(crate) fn cpu_write32(&mut self, virt: u32, value: u32) {
         self.thaw_limits_for_io(virt);
+        self.limits.note_store();
         self.data_bus_latch = value;
         let store_stall = self.cpu_write_stalls(virt, AccessWidth::Word);
         self.add_cycles(store_stall);
@@ -4568,6 +4620,7 @@ impl Bus {
     /// word; direct bus clients keep using [`Bus::write8`] for an actual byte.
     pub(crate) fn cpu_write8(&mut self, virt: u32, source: u32) {
         self.thaw_limits_for_io(virt);
+        self.limits.note_store();
         self.data_bus_latch = source;
         let store_stall = self.cpu_write_stalls(virt, AccessWidth::Byte);
         self.add_cycles(store_stall);
@@ -4585,6 +4638,7 @@ impl Bus {
     /// the complete GPR value even though RAM consumes only its low halfword.
     pub(crate) fn cpu_write16(&mut self, virt: u32, source: u32) {
         self.thaw_limits_for_io(virt);
+        self.limits.note_store();
         self.data_bus_latch = source;
         let store_stall = self.cpu_write_stalls(virt, AccessWidth::Half);
         self.add_cycles(store_stall);
@@ -4737,6 +4791,7 @@ impl Bus {
             }
             if self.limits.watches_console() {
                 let cycle = self.cycles;
+                self.limits.dma_study_period = self.vblank_period;
                 self.limits.console_byte(value, cycle);
             }
             let mut out = std::io::stdout().lock();
