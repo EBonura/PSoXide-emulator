@@ -56,9 +56,9 @@ pub struct UiPngArgs {
     /// With `--home`: filter the shelf with this search, the box open for typing.
     #[arg(long)]
     pub search: Option<String>,
-    /// With `--search`: a controller is typing (the letter strip shows), this letter in focus.
+    /// With `--search`: the on-screen keyboard is up, this key in focus (`ROW,KEY`, from 0).
     #[arg(long, requires = "search")]
-    pub search_strip: Option<usize>,
+    pub search_keys: Option<String>,
     /// With `--search`: the box closed, its filter kept.
     #[arg(long, requires = "search")]
     pub search_done: bool,
@@ -110,6 +110,18 @@ pub struct UiPngArgs {
     /// Texture filter to show: none or edge.
     #[arg(long, default_value = "none")]
     pub filter: String,
+}
+
+fn search_keys(args: &UiPngArgs) -> Result<Option<(usize, usize)>, String> {
+    let Some(spec) = args.search_keys.as_deref() else {
+        return Ok(None);
+    };
+    let bad = || format!("--search-keys wants ROW,KEY, got {spec}");
+    let (r, c) = spec.split_once(',').ok_or_else(bad)?;
+    Ok(Some((
+        r.trim().parse().map_err(|_| bad())?,
+        c.trim().parse().map_err(|_| bad())?,
+    )))
 }
 
 pub(super) fn render(args: UiPngArgs) -> Result<(), String> {
@@ -217,7 +229,7 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
             if let Some(query) = args.search.as_deref() {
                 state
                     .menu
-                    .home_preview_search(query, args.search_strip, args.search_done);
+                    .home_preview_search(query, search_keys(args)?, args.search_done);
             }
         }
         View::Window => {

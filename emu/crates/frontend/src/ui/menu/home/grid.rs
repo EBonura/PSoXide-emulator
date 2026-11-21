@@ -120,7 +120,8 @@ impl HomeState {
             LayoutKind::Portrait => (
                 3,
                 (lay.safe.width() - 56.0 * u) / 3.0,
-                lay.safe.top() + 70.0 * u,
+                // Room for the search box's own row under the header.
+                lay.safe.top() + 118.0 * u,
             ),
             LayoutKind::Landscape => (
                 6,

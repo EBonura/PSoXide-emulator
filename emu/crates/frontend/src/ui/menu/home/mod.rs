@@ -204,8 +204,10 @@ enum Click {
     Search,
     /// The search box's clear button.
     SearchClear,
-    /// A letter of the controller's strip under the search box.
-    SearchChar(usize),
+    /// A key of the on-screen keyboard: row, then key along the row.
+    SearchKey(usize, usize),
+    /// The on-screen keyboard's panel between its keys: does nothing.
+    SearchPanel,
 }
 
 pub(crate) struct HomeState {
@@ -343,6 +345,10 @@ pub(crate) struct HomeState {
     press_t: f32,
     /// The shelf's search box and what it filters.
     search: search::Search,
+    /// Where the desktop tab row ends (the search box sits after it).
+    nav_end: f32,
+    /// The pad's focus on the tab row is on the search box.
+    nav_on_search: bool,
 }
 
 /// The animation of one case: how focused it is (a spring, so it settles with
@@ -542,6 +548,8 @@ impl HomeState {
             press_rect: None,
             press_t: 0.0,
             search: search::Search::default(),
+            nav_end: 0.0,
+            nav_on_search: false,
         }
     }
 
@@ -921,7 +929,8 @@ impl MenuState {
                     Click::Dismiss => "dismiss".into(),
                     Click::Search => "search".into(),
                     Click::SearchClear => "search-clear".into(),
-                    Click::SearchChar(i) => format!("search-char:{i}"),
+                    Click::SearchKey(r, c) => format!("search-key:{r},{c}"),
+                    Click::SearchPanel => "search-panel".into(),
                 };
                 format!(
                     "[\"{}\",{:.0},{:.0},{:.0},{:.0}]",
@@ -1072,7 +1081,7 @@ impl MenuState {
 
     /// Put the search box in a given state, for headless previews.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub fn home_preview_search(&mut self, query: &str, strip: Option<usize>, done: bool) {
+    pub fn home_preview_search(&mut self, query: &str, strip: Option<(usize, usize)>, done: bool) {
         let Some(mut h) = self.home.take() else {
             return;
         };
@@ -1081,7 +1090,7 @@ impl MenuState {
             h.search_key(self, SearchKey::Type(c));
         }
         if let Some(i) = strip {
-            h.search_preview_cursor(i);
+            h.search_preview_cursor(i.0, i.1);
         }
         if done {
             h.search_done();
@@ -1692,18 +1701,30 @@ impl HomeState {
     /// Left, right and confirm on the nav row.
     fn update_nav(&mut self, ms: &mut MenuState, input: &MenuInput) {
         let items = nav_items(self.pausing(ms));
-        self.nav = self.nav.min(items.len() - 1);
+        // On Home the search box is the row's last stop, after the tabs.
+        let last = if self.page == Page::Home {
+            items.len()
+        } else {
+            items.len() - 1
+        };
+        self.nav = self.nav.min(last);
         if input.left && self.nav > 0 {
             self.nav -= 1;
         }
-        if input.right && self.nav + 1 < items.len() {
+        if input.right && self.nav < last {
             self.nav += 1;
         }
         if input.down || input.back {
             self.zone = Zone::Body;
         }
         if input.confirm {
-            self.open_nav(ms, items[self.nav]);
+            match items.get(self.nav) {
+                Some(item) => self.open_nav(ms, *item),
+                None => {
+                    let keys = self.wants_screen_keys();
+                    self.begin_search(ms, keys);
+                }
+            }
         }
     }
 
@@ -1961,7 +1982,6 @@ impl HomeState {
                     if found == 0 && self.search.active() {
                         self.draw_no_match(&pc);
                     }
-                    self.draw_search(&pc, found);
                 }
                 Page::Welcome => self.draw_welcome(ms, &mut pc),
                 Page::Controls => controls::draw(self, ms, ctx, &mut pc),
@@ -3277,23 +3297,13 @@ impl HomeState {
                         FontId::proportional(13.0 * u),
                         dim,
                     );
-                    x = r.right() + 22.0 * u;
-                }
-                // Start (or /) searches the shelf.
-                let w = hints::btn_width(p, u, style, Btn::Start);
-                let g = hints::draw_btn(p, Pos2::new(x + w / 2.0, y), u, a, style, Btn::Start, 0.0);
-                let r = p.text(
-                    Pos2::new(g.right() + 8.0 * u, y),
-                    Align2::LEFT_CENTER,
-                    "Search",
-                    FontId::proportional(13.0 * u),
-                    dim,
-                );
-                self.hits.push((g.union(r).expand(6.0), Click::Search));
-                // The links after the hints are desktop-only.
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    x = r.right() + 22.0 * u;
+                    // The links after the hints are desktop-only.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        x = r.right() + 22.0 * u;
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = r;
                 }
             }
             // Desktop only: a disc that is not in the games folder, and a rescan.
@@ -3335,7 +3345,8 @@ impl HomeState {
         } else {
             ease(self.nav_vis, f32::from(active.is_some()))
         };
-        let focused = self.zone == Zone::Nav;
+        // The search box at the row's end draws its own focus.
+        let focused = self.zone == Zone::Nav && self.nav < items.len();
         let ring_at = if focused {
             self.nav.min(items.len().saturating_sub(1)) as f32
         } else {
@@ -3436,7 +3447,9 @@ impl HomeState {
                 Rect::from_center_size(c, Vec2::new(w + 10.0, 30.0 * u)),
                 Click::TabStep(1),
             ));
+            x = c.x + w / 2.0;
         }
+        self.nav_end = x;
     }
 
     /// The phone nav: a floating pill at the bottom, clear of the touch
@@ -3684,6 +3697,15 @@ impl HomeState {
             let c = Pos2::new(ix - 12.0 * u, iy);
             draw_device_icon(p, c, 11.0 * u, which, fade(col, a));
             ix -= 32.0 * u;
+        }
+        // The search box, in the header beside the tabs. Drawn after the page so the on-screen
+        // keyboard lies over the cases.
+        if self.page == Page::Home && self.launch.is_none() {
+            let icons_left = ix + 32.0 * u - 12.0 * u - 14.0 * u;
+            let bar = self.search_rect(lay, logo_rect, icons_left);
+            self.nav_on_search = self.nav >= items.len();
+            let found = self.cases(ms).len();
+            self.draw_search(pc, bar, found);
         }
         if let Some(text) = warning {
             let (anchor, align) = if desktop {
@@ -3949,7 +3971,7 @@ impl HomeState {
         if self.search.editing
             && !matches!(
                 click,
-                Click::Search | Click::SearchClear | Click::SearchChar(_)
+                Click::Search | Click::SearchClear | Click::SearchKey(..) | Click::SearchPanel
             )
         {
             self.search_done();
@@ -3962,10 +3984,8 @@ impl HomeState {
                 let keep = !self.search.editing;
                 self.clear_search(ms, keep);
             }
-            Click::SearchChar(i) => {
-                self.search.strip = true;
-                self.update_search_char(i);
-            }
+            Click::SearchKey(r, c) => self.tap_screen_key(ms, r, c),
+            Click::SearchPanel => {}
             Click::Nav(item) => {
                 self.open_nav(ms, item);
             }
@@ -4484,16 +4504,19 @@ mod tests {
             },
         );
         assert!(ms.home_search_editing());
-        assert!(ms.home.as_ref().expect("home").search.strip);
-        // W is the 23rd letter: left from A wraps through the space and the digits.
-        for _ in 0..22 {
-            press(
-                &mut ms,
-                MenuInput {
-                    right: true,
-                    ..MenuInput::default()
-                },
-            );
+        assert!(ms.home.as_ref().expect("home").search.keys);
+        // The keyboard starts on 1: down to Q, right to W.
+        for input in [
+            MenuInput {
+                down: true,
+                ..MenuInput::default()
+            },
+            MenuInput {
+                right: true,
+                ..MenuInput::default()
+            },
+        ] {
+            press(&mut ms, input);
         }
         press(
             &mut ms,
@@ -4519,6 +4542,28 @@ mod tests {
         }
         assert!(!ms.home_search_editing());
         assert_eq!(shelf_titles(&mut ms).len(), 5);
+    }
+
+    #[test]
+    fn the_search_box_is_the_last_stop_of_the_tab_row() {
+        let mut ms = searchable_home();
+        let mv = |up: bool, right: bool, confirm: bool| MenuInput {
+            up,
+            right,
+            confirm,
+            ..MenuInput::default()
+        };
+        press(&mut ms, mv(true, false, false));
+        // Home, Settings, Controls, then the box.
+        for _ in 0..5 {
+            press(&mut ms, mv(false, true, false));
+        }
+        let h = ms.home.as_ref().expect("home");
+        assert_eq!(h.zone, Zone::Nav);
+        assert_eq!(h.nav, 3, "stops on the box, never past it");
+        press(&mut ms, mv(false, false, true));
+        assert!(ms.home_search_editing());
+        assert_eq!(ms.home.as_ref().expect("home").page, Page::Home);
     }
 
     #[test]
