@@ -2256,6 +2256,7 @@ impl ApplicationHandler for Shell {
             }
             let (query, target) = self.state.menu.home_search_target();
             web_text::sync(self.state.menu.home_search_editing(), &query, target);
+            self.state.menu.set_system_keys(web_text::focused());
             // Embed mode: host commands in, run-state changes out.
             web_embed::tick(&mut self.state);
             // winit on web does not auto-size the canvas to the page, so the
@@ -2267,8 +2268,16 @@ impl ApplicationHandler for Shell {
                 if let Some(desired) = web_window_logical_size() {
                     let sf = gfx.window.scale_factor();
                     let current = gfx.window.inner_size().to_logical::<f64>(sf);
-                    if (current.width - desired.width).abs() > 0.5
-                        || (current.height - desired.height).abs() > 0.5
+                    // The phone's keyboard, up for the search box, shortens the page: keep the
+                    // canvas as it was and let the keyboard cover its bottom, rather than
+                    // squeeze the whole shell into what is left (a turn of the phone still
+                    // resizes).
+                    let keyboard_up = web_text::focused()
+                        && (current.width - desired.width).abs() <= 0.5
+                        && desired.height < current.height;
+                    if !keyboard_up
+                        && ((current.width - desired.width).abs() > 0.5
+                            || (current.height - desired.height).abs() > 0.5)
                     {
                         let _ = gfx.window.request_inner_size(desired);
                     }

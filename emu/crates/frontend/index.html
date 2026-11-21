@@ -411,6 +411,8 @@
       }
       @media (prefers-reduced-motion: reduce) { .psoxide-silent { animation: none; } }
       .psoxide-silent.is-on { display: flex; }
+      /* The phone's keyboard is up for the search box: results first. */
+      .psoxide-typing .psoxide-silent.is-on { display: none; }
       .psoxide-silent svg { flex: none; width: 20px; height: 20px; fill: #22c8e5; }
       .psoxide-silent button {
         flex: none; border: 0; border-radius: 8px; padding: 0 14px; min-height: 36px;

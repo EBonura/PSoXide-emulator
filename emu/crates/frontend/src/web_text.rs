@@ -103,7 +103,10 @@ mod imp {
                     }
                 }
             });
-        let on_blur = Closure::<dyn FnMut(web_sys::Event)>::new(|_| push(TextEvent::Done));
+        let on_blur = Closure::<dyn FnMut(web_sys::Event)>::new(|_| {
+            typing(false);
+            push(TextEvent::Done);
+        });
         let _ = input.add_event_listener_with_callback("input", on_input.as_ref().unchecked_ref());
         let _ = input.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
         let _ = input.add_event_listener_with_callback("blur", on_blur.as_ref().unchecked_ref());
@@ -113,25 +116,45 @@ mod imp {
         Some(input)
     }
 
+    /// Mark the page while the phone's keyboard types into the box: the page's notices step
+    /// aside, so they never sit over the results above the keyboard.
+    fn typing(on: bool) {
+        if let Some(body) = document().and_then(|d| d.body()) {
+            let _ = body.class_list().toggle_with_force("psoxide-typing", on);
+        }
+    }
+
     /// A touch that ends on the search box focuses the field, inside the touch's handler.
     fn on_touch_end(event: web_sys::TouchEvent) {
+        if let Some(touch) = event.changed_touches().get(0) {
+            focus_at(f64::from(touch.client_x()), f64::from(touch.client_y()));
+        }
+    }
+
+    /// The finger's pointer-up comes before its touchend; either may be the first the shell
+    /// sees, so both focus (the second finds the field focused already).
+    fn on_pointer_up(event: web_sys::PointerEvent) {
+        if matches!(event.pointer_type().as_str(), "touch" | "pen") {
+            focus_at(f64::from(event.client_x()), f64::from(event.client_y()));
+        }
+    }
+
+    fn focus_at(client_x: f64, client_y: f64) {
         let Some([x, y, w, h]) = TARGET.with(Cell::get) else {
             return;
         };
-        let Some(touch) = event.changed_touches().get(0) else {
-            return;
-        };
         let (ox, oy) = canvas_origin();
-        let (tx, ty) = (
-            (f64::from(touch.client_x()) - ox) as f32,
-            (f64::from(touch.client_y()) - oy) as f32,
-        );
+        let (tx, ty) = ((client_x - ox) as f32, (client_y - oy) as f32);
         if tx < x || tx > x + w || ty < y || ty > y + h {
+            return;
+        }
+        if focused() {
             return;
         }
         if let Some(f) = field() {
             QUERY.with(|q| f.set_value(&q.borrow()));
             FOCUSED_AT.with(|t| t.set(js_sys::Date::now()));
+            typing(true);
             let _ = f.focus();
         }
     }
@@ -151,6 +174,13 @@ mod imp {
             &opts,
         );
         touch.forget();
+        let pointer = Closure::<dyn FnMut(web_sys::PointerEvent)>::new(on_pointer_up);
+        let _ = doc.add_event_listener_with_callback_and_add_event_listener_options(
+            "pointerup",
+            pointer.as_ref().unchecked_ref(),
+            &opts,
+        );
+        pointer.forget();
     }
 
     pub(super) fn take() -> Vec<TextEvent> {

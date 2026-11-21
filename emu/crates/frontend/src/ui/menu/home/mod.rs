@@ -1201,6 +1201,17 @@ impl MenuState {
         })
     }
 
+    /// The phone's keyboard is typing into the box (web): the on-screen keyboard stays down,
+    /// whichever the tap's events reached first.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn set_system_keys(&mut self, up: bool) {
+        if let Some(h) = self.home.as_mut() {
+            if up && h.search.editing {
+                h.search.keys = false;
+            }
+        }
+    }
+
     /// The whole text of the box, from the phone's keyboard. Typing opens the box if the tap
     /// that raised the keyboard did not.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -1560,6 +1571,12 @@ impl HomeState {
         out
     }
 
+    /// The grid shows: chosen, or while the phone's keyboard is up for the search (the results
+    /// then sit in a grid right under the box, above the keyboard, not behind it).
+    fn compact_now(&self) -> bool {
+        self.compact || (self.search.editing && crate::web_text::focused())
+    }
+
     /// Run a case's action: a disc plays the launch sequence first.
     fn activate(
         &mut self,
@@ -1793,18 +1810,15 @@ impl HomeState {
             self.jump_letter(&cases, if input.letter_next { 1 } else { -1 });
             return None;
         }
-        let cols = if self.compact {
-            self.grid_cols.max(1)
-        } else {
-            1
-        };
+        let compact = self.compact_now();
+        let cols = if compact { self.grid_cols.max(1) } else { 1 };
         if input.left && self.case_focus > 0 {
             self.case_focus -= 1;
         }
         if input.right && self.case_focus < last {
             self.case_focus += 1;
         }
-        if self.compact {
+        if compact {
             if input.down && self.case_focus + cols <= last {
                 self.case_focus += cols;
             }
@@ -2554,7 +2568,7 @@ impl HomeState {
         self.case_focus = self.case_focus.min(cases.len().saturating_sub(1));
         self.letters = grid::letter_groups(&cases).len();
         let f = self.case_focus;
-        if self.compact {
+        if self.compact_now() {
             self.draw_compact(ms, ctx, pc, &cases);
             return;
         }
@@ -3883,7 +3897,7 @@ impl HomeState {
                         self.kin
                             .drag(&mut self.list_scroll, -delta.y, now, max, bottom - top);
                     }
-                    Page::Home if self.compact => {
+                    Page::Home if self.compact_now() => {
                         let [_, max, top, bottom] = self.grid_view;
                         self.grid_target = None;
                         self.kin
@@ -3989,7 +4003,7 @@ impl HomeState {
     fn scrolls_by_finger(&self) -> bool {
         match self.page {
             Page::Game | Page::Settings | Page::Controls => true,
-            Page::Home => self.compact,
+            Page::Home => self.compact_now(),
             _ => false,
         }
     }
