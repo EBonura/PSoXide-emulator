@@ -14,6 +14,7 @@ mod motion;
 mod pages;
 pub(crate) mod quick;
 mod scene;
+mod search;
 mod slots;
 pub(crate) mod tokens;
 
@@ -28,6 +29,7 @@ use scene::{fade, CoverKind, CYAN};
 
 pub(crate) use controls::Command as DeviceCommand;
 pub(crate) use covers::CoverState;
+pub(crate) use search::SearchKey;
 
 /// Seconds of countdown before the demo disc starts on a first visit.
 const COUNTDOWN_SECS: f32 = 3.0;
@@ -198,6 +200,12 @@ enum Click {
     /// A control of the Controls page.
     Ctl(controls::Item),
     Dismiss,
+    /// The search box or its hint: open it for typing.
+    Search,
+    /// The search box's clear button.
+    SearchClear,
+    /// A letter of the controller's strip under the search box.
+    SearchChar(usize),
 }
 
 pub(crate) struct HomeState {
@@ -333,6 +341,8 @@ pub(crate) struct HomeState {
     /// A control being pressed: where it is and how far the press feedback has risen.
     press_rect: Option<Rect>,
     press_t: f32,
+    /// The shelf's search box and what it filters.
+    search: search::Search,
 }
 
 /// The animation of one case: how focused it is (a spring, so it settles with
@@ -531,6 +541,7 @@ impl HomeState {
             pager_probe: [0.0; 3],
             press_rect: None,
             press_t: 0.0,
+            search: search::Search::default(),
         }
     }
 
@@ -908,6 +919,9 @@ impl MenuState {
                     }
                     Click::Ctl(item) => item.probe_name(),
                     Click::Dismiss => "dismiss".into(),
+                    Click::Search => "search".into(),
+                    Click::SearchClear => "search-clear".into(),
+                    Click::SearchChar(i) => format!("search-char:{i}"),
                 };
                 format!(
                     "[\"{}\",{:.0},{:.0},{:.0},{:.0}]",
@@ -949,7 +963,7 @@ impl MenuState {
             _ => -1.0,
         };
         format!(
-            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"nav_hl\":{:.3},\"nav_vis\":{:.2},\"page_age\":{:.2},\"keyboard\":{},\"framed\":{},\"press\":{:.2},\"controls\":{},\"list\":[{:.1},{:.1},{:.1},{:.1},{}],\"grid\":[{:.1},{:.1},{:.1},{:.1}],\"contents\":{},\"explainer\":{},\"welcome\":{},\"welcome_pos\":{:.3},\"welcome_drag\":{},\"welcome_vel\":{:.0},\"welcome_rows\":[{:.1},{:.1},{:.1}],\"cases\":[{}],\"hits\":[{}]}}",
+            "{{\"page\":\"{}\",\"zone\":\"{}\",\"countdown\":\"{}\",\"left\":{:.2},\"case\":{},\"nav\":{},\"started\":{},\"in_game\":{},\"launch\":{:.2},\"cover\":{:.2},\"nav_items\":{},\"first_visit\":{},\"covers\":{},\"calm\":{},\"compact\":{},\"nav_hl\":{:.3},\"nav_vis\":{:.2},\"page_age\":{:.2},\"keyboard\":{},\"framed\":{},\"press\":{:.2},\"controls\":{},\"list\":[{:.1},{:.1},{:.1},{:.1},{}],\"grid\":[{:.1},{:.1},{:.1},{:.1}],\"contents\":{},\"explainer\":{},\"welcome\":{},\"welcome_pos\":{:.3},\"welcome_drag\":{},\"welcome_vel\":{:.0},\"welcome_rows\":[{:.1},{:.1},{:.1}],\"search\":\"{}\",\"search_editing\":{},\"cases\":[{}],\"hits\":[{}]}}",
             h.page.name(),
             if h.zone == Zone::Nav { "nav" } else { "body" },
             self.home_probe().1,
@@ -993,6 +1007,8 @@ impl MenuState {
             h.pager_probe[0],
             h.pager_probe[1],
             h.pager_probe[2],
+            escape(&h.search.query),
+            h.search.editing,
             cases.join(","),
             hits.join(",")
         )
@@ -1054,6 +1070,25 @@ impl MenuState {
         }
     }
 
+    /// Put the search box in a given state, for headless previews.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn home_preview_search(&mut self, query: &str, strip: Option<usize>, done: bool) {
+        let Some(mut h) = self.home.take() else {
+            return;
+        };
+        h.begin_search(self, strip.is_some());
+        for c in query.chars() {
+            h.search_key(self, SearchKey::Type(c));
+        }
+        if let Some(i) = strip {
+            h.search_preview_cursor(i);
+        }
+        if done {
+            h.search_done();
+        }
+        self.home = Some(h);
+    }
+
     /// Show a section of the shell by name; false when it does not exist.
     pub fn home_goto(&mut self, page: &str) -> bool {
         if self.home.is_none() {
@@ -1112,10 +1147,42 @@ impl MenuState {
     /// shell from there).
     pub fn home_blocks_ps_button(&self) -> bool {
         self.open
+            && self.home.as_ref().is_some_and(|h| {
+                !h.started || h.page != Page::Home || h.search.active() || h.search.editing
+            })
+    }
+
+    /// The home shelf's search box has the keyboard: the window hands it every key.
+    pub fn home_search_editing(&self) -> bool {
+        self.open
             && self
                 .home
                 .as_ref()
-                .is_some_and(|h| !h.started || h.page != Page::Home)
+                .is_some_and(|h| h.page == Page::Home && h.launch.is_none() && h.search.editing)
+    }
+
+    /// Open the search box from the keyboard (`/`, Ctrl/Cmd+F). False when the home shell is not
+    /// up to take it (a game is in front, or the launch sequence is playing).
+    pub fn home_search_begin(&mut self) -> bool {
+        let Some(mut h) = self.home.take() else {
+            return false;
+        };
+        let ok = self.open && h.launch.is_none() && h.page != Page::Welcome;
+        if ok {
+            h.cancel_countdown();
+            h.begin_search(self, false);
+        }
+        self.home = Some(h);
+        ok
+    }
+
+    /// A key typed into the open search box.
+    pub fn home_search_key(&mut self, key: SearchKey) {
+        let Some(mut h) = self.home.take() else {
+            return;
+        };
+        h.search_key(self, key);
+        self.home = Some(h);
     }
 
     /// Whether the Controls page is showing.
@@ -1272,8 +1339,13 @@ impl HomeState {
         }
     }
 
-    /// The shelf: the game you left, the demo disc, your own discs.
+    /// The shelf as it shows: every case, or the ones the search keeps.
     fn cases(&self, ms: &MenuState) -> Vec<CaseItem> {
+        search::filter(self.all_cases(ms), &self.search.query)
+    }
+
+    /// The shelf: the game you left, the demo disc, your own discs.
+    fn all_cases(&self, ms: &MenuState) -> Vec<CaseItem> {
         let mut out = Vec::new();
         let current = self.feed.current.as_ref().filter(|_| self.pausing(ms));
         let demo_id = crate::app::DEMO_DISC_ID;
@@ -1510,7 +1582,8 @@ impl HomeState {
             || input.options
             || input.secondary
             || input.letter_prev
-            || input.letter_next;
+            || input.letter_next
+            || input.search;
         self.snd_confirm |= input.confirm;
         self.snd_back |= input.back;
         for (i, pressed) in [
@@ -1560,6 +1633,16 @@ impl HomeState {
                 self.launch_sent = false;
                 self.launch_done = false;
             }
+            return None;
+        }
+        // The search box has every input while it is open (a controller types on its strip).
+        if self.page == Page::Home && self.search.editing {
+            self.update_search(ms, input);
+            return None;
+        }
+        // Start opens the search from anywhere in the shell: it is the library's.
+        if input.search && self.page != Page::Welcome {
+            self.begin_search(ms, true);
             return None;
         }
         if (input.tab_prev || input.tab_next) && self.page != Page::Welcome {
@@ -1627,6 +1710,11 @@ impl HomeState {
     fn update_home(&mut self, ms: &mut MenuState, input: &MenuInput) -> Option<MenuAction> {
         if self.zone == Zone::Nav {
             self.update_nav(ms, input);
+            return None;
+        }
+        // With a search up, Back gives the whole shelf back before it does anything else.
+        if input.back && self.search.active() {
+            self.clear_search(ms, true);
             return None;
         }
         let cases = self.cases(ms);
@@ -1867,7 +1955,14 @@ impl HomeState {
             self.draw_launch(ms, ctx, &mut pc);
         } else {
             match self.page {
-                Page::Home => self.draw_home(ms, ctx, &mut pc),
+                Page::Home => {
+                    self.draw_home(ms, ctx, &mut pc);
+                    let found = self.cases(ms).len();
+                    if found == 0 && self.search.active() {
+                        self.draw_no_match(&pc);
+                    }
+                    self.draw_search(&pc, found);
+                }
                 Page::Welcome => self.draw_welcome(ms, &mut pc),
                 Page::Controls => controls::draw(self, ms, ctx, &mut pc),
                 Page::Slots => self.draw_section_frame(ms, &mut pc),
@@ -2486,6 +2581,8 @@ impl HomeState {
             }
         }
         let Some(item) = cases.get(f) else {
+            // An empty shelf (a search that matches nothing) still has its hints.
+            self.draw_footer(pc);
             return;
         };
         // The page's own words arrive in turn: title and line, then the button, then the
@@ -3180,13 +3277,23 @@ impl HomeState {
                         FontId::proportional(13.0 * u),
                         dim,
                     );
-                    // The links after the hints are desktop-only.
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        x = r.right() + 22.0 * u;
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    let _ = r;
+                    x = r.right() + 22.0 * u;
+                }
+                // Start (or /) searches the shelf.
+                let w = hints::btn_width(p, u, style, Btn::Start);
+                let g = hints::draw_btn(p, Pos2::new(x + w / 2.0, y), u, a, style, Btn::Start, 0.0);
+                let r = p.text(
+                    Pos2::new(g.right() + 8.0 * u, y),
+                    Align2::LEFT_CENTER,
+                    "Search",
+                    FontId::proportional(13.0 * u),
+                    dim,
+                );
+                self.hits.push((g.union(r).expand(6.0), Click::Search));
+                // The links after the hints are desktop-only.
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    x = r.right() + 22.0 * u;
                 }
             }
             // Desktop only: a disc that is not in the games folder, and a rescan.
@@ -3838,7 +3945,27 @@ impl HomeState {
             Click::Nav(_) | Click::TabStep(_) | Click::Slider(..) | Click::Rail | Click::Logo => {}
             _ => self.snd_confirm = true,
         }
+        // A click anywhere but the box closes it, keeping what it filters.
+        if self.search.editing
+            && !matches!(
+                click,
+                Click::Search | Click::SearchClear | Click::SearchChar(_)
+            )
+        {
+            self.search_done();
+        }
         match click {
+            // A touch screen has no keys to type with: the letter strip comes up.
+            Click::Search => self.begin_search(ms, self.feed.touch),
+            // While typing it undoes the search; after, the case picked from it stays.
+            Click::SearchClear => {
+                let keep = !self.search.editing;
+                self.clear_search(ms, keep);
+            }
+            Click::SearchChar(i) => {
+                self.search.strip = true;
+                self.update_search_char(i);
+            }
             Click::Nav(item) => {
                 self.open_nav(ms, item);
             }
@@ -4259,6 +4386,154 @@ mod tests {
                 "Quake (quake-psx)"
             ]
         );
+    }
+
+    fn shelf_titles(ms: &mut MenuState) -> Vec<String> {
+        let h = ms.home.take().expect("home");
+        let titles = h.cases(ms).into_iter().map(|c| c.title).collect();
+        ms.home = Some(h);
+        titles
+    }
+
+    fn focused_title(ms: &mut MenuState) -> String {
+        let h = ms.home.take().expect("home");
+        let title = h.cases(ms)[h.case_focus].title.clone();
+        ms.home = Some(h);
+        title
+    }
+
+    fn searchable_home() -> MenuState {
+        let mut ms = home(false, DemoStatus::Absent);
+        ms.open = true;
+        ms.set_library(
+            &[
+                item("Crash Bandicoot (USA)"),
+                item("CTR - Crash Team Racing (USA)"),
+                item("Half-Life (hl-psx)"),
+                item("WipEout (USA)"),
+            ],
+            &[],
+            &[],
+        );
+        ms
+    }
+
+    #[test]
+    fn typing_narrows_the_shelf_and_escape_gives_it_all_back() {
+        let mut ms = searchable_home();
+        let all = shelf_titles(&mut ms);
+        // Focus on WipEout before searching: clearing comes back to it.
+        let wipeout = all
+            .iter()
+            .position(|t| t == "WipEout (USA)")
+            .expect("wipeout");
+        ms.home.as_mut().expect("home").case_focus = wipeout;
+        assert!(ms.home_search_begin());
+        assert!(ms.home_search_editing());
+        for c in "CRASH".chars() {
+            ms.home_search_key(SearchKey::Type(c));
+        }
+        assert_eq!(
+            shelf_titles(&mut ms),
+            ["Crash Bandicoot (USA)", "CTR - Crash Team Racing (USA)"],
+            "only the matches, never the folder case"
+        );
+        assert_eq!(focused_title(&mut ms), "Crash Bandicoot (USA)");
+        ms.home_search_key(SearchKey::Cancel);
+        assert!(!ms.home_search_editing());
+        assert_eq!(shelf_titles(&mut ms), all);
+        assert_eq!(focused_title(&mut ms), "WipEout (USA)");
+    }
+
+    #[test]
+    fn enter_keeps_the_filter_and_back_clears_it_before_anything_else() {
+        let mut ms = searchable_home();
+        ms.home_search_begin();
+        for c in "half".chars() {
+            ms.home_search_key(SearchKey::Type(c));
+        }
+        ms.home_search_key(SearchKey::Done);
+        assert!(!ms.home_search_editing());
+        assert_eq!(shelf_titles(&mut ms), ["Half-Life (hl-psx)"]);
+        // The PS button is Back while a filter is up, and Back clears it: the shell stays.
+        assert!(ms.home_blocks_ps_button());
+        press(
+            &mut ms,
+            MenuInput {
+                back: true,
+                ..MenuInput::default()
+            },
+        );
+        assert!(ms.open);
+        assert_eq!(shelf_titles(&mut ms).len(), 5);
+        assert_eq!(
+            focused_title(&mut ms),
+            "Half-Life (hl-psx)",
+            "the pick stays in focus"
+        );
+    }
+
+    #[test]
+    fn a_controller_types_on_the_strip() {
+        let mut ms = searchable_home();
+        press(
+            &mut ms,
+            MenuInput {
+                search: true,
+                ..MenuInput::default()
+            },
+        );
+        assert!(ms.home_search_editing());
+        assert!(ms.home.as_ref().expect("home").search.strip);
+        // W is the 23rd letter: left from A wraps through the space and the digits.
+        for _ in 0..22 {
+            press(
+                &mut ms,
+                MenuInput {
+                    right: true,
+                    ..MenuInput::default()
+                },
+            );
+        }
+        press(
+            &mut ms,
+            MenuInput {
+                confirm: true,
+                ..MenuInput::default()
+            },
+        );
+        assert_eq!(ms.home.as_ref().expect("home").search.query, "w");
+        assert_eq!(shelf_titles(&mut ms), ["WipEout (USA)"]);
+        // Square erases, Circle closes the box; with nothing typed the shelf is whole again.
+        for input in [
+            MenuInput {
+                secondary: true,
+                ..MenuInput::default()
+            },
+            MenuInput {
+                back: true,
+                ..MenuInput::default()
+            },
+        ] {
+            press(&mut ms, input);
+        }
+        assert!(!ms.home_search_editing());
+        assert_eq!(shelf_titles(&mut ms).len(), 5);
+    }
+
+    #[test]
+    fn start_searches_from_another_page() {
+        let mut ms = searchable_home();
+        ms.home_goto("Settings");
+        press(
+            &mut ms,
+            MenuInput {
+                search: true,
+                ..MenuInput::default()
+            },
+        );
+        assert_eq!(ms.home.as_ref().expect("home").page, Page::Home);
+        assert!(ms.home_search_editing());
     }
 
     /// Run the clocks the way a drawn frame does, without drawing.

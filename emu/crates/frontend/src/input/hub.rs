@@ -193,6 +193,8 @@ pub(crate) struct InputFrame {
     pub(crate) menu_options: bool,
     /// Menu: Square went down, the second action of the focused case.
     pub(crate) menu_secondary: bool,
+    /// Menu: Start went down on a gamepad without Select held, the shelf's search.
+    pub(crate) menu_search: bool,
     /// First non-neutral left stick, for freecam.
     pub(crate) left_stick: (f32, f32),
     /// First non-neutral right stick, for freecam.
@@ -255,6 +257,8 @@ pub(crate) struct InputHub {
     previous_mask: u16,
     previous_chord: bool,
     previous_shortcut: u16,
+    /// Whether a gamepad held Start last frame (the search's edge).
+    previous_pad_start: bool,
     pending_notices: Vec<InputNotice>,
 }
 
@@ -287,6 +291,7 @@ impl InputHub {
             previous_mask: 0,
             previous_chord: false,
             previous_shortcut: 0,
+            previous_pad_start: false,
             pending_notices: Vec::new(),
         }
     }
@@ -433,6 +438,12 @@ impl InputHub {
             frame.port2.mask &= !CHORD_MASK;
             frame.port2.mask_with_stick_dpad &= !CHORD_MASK;
         }
+
+        // Start alone on a gamepad searches the shelf. Not the keyboard's Start: that is Enter,
+        // which already confirms. Select held makes it the menu chord instead.
+        let pad_start = pad_held & button::START != 0;
+        frame.menu_search = pad_start && !self.previous_pad_start && pad_held & button::SELECT == 0;
+        self.previous_pad_start = pad_start;
 
         // Select held with L1, R1 or R3 on a gamepad is a shortcut, not guest input.
         let armed = if pad_held & button::SELECT != 0 {
@@ -954,6 +965,33 @@ mod tests {
                     .toggle_menu
             );
         }
+    }
+
+    #[test]
+    fn start_alone_on_a_gamepad_searches_and_the_chord_does_not() {
+        let mut hub = hub_with_pad();
+        assert!(
+            hub.step(100, vec![sample("pad", button::START)])
+                .menu_search
+        );
+        assert!(
+            !hub.step(116, vec![sample("pad", button::START)])
+                .menu_search,
+            "once per press"
+        );
+        hub.step(132, vec![sample("pad", 0)]);
+        hub.step(148, vec![sample("pad", button::SELECT)]);
+        assert!(
+            !hub.step(164, vec![sample("pad", button::SELECT | button::START)])
+                .menu_search,
+            "Select+Start is the menu chord"
+        );
+        hub.step(180, vec![sample("pad", 0)]);
+        assert!(
+            !hub.step(196, vec![sample(KEYBOARD_DEVICE_ID, button::START)])
+                .menu_search,
+            "the keyboard's Start is Enter, which confirms"
+        );
     }
 
     #[test]

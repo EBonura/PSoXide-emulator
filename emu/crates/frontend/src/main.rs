@@ -1227,6 +1227,27 @@ impl ApplicationHandler for Shell {
                     }
                     return;
                 }
+                // The home shelf's search box owns the keyboard while it is open: letters
+                // type (even ones bound to pad buttons), Backspace erases, Enter and the
+                // arrows close it keeping the filter, Escape clears it. Held keys are
+                // dropped like the capture above, so none stays wedged in the pad mask.
+                if self.state.menu.home_search_editing() {
+                    self.host_input.clear();
+                    if state == ElementState::Pressed {
+                        if let Some(key) = search_key(&logical_key, self.modifiers) {
+                            self.state.menu.home_search_key(key);
+                        }
+                    }
+                    return;
+                }
+                if state == ElementState::Pressed
+                    && !repeat
+                    && is_search_shortcut(&logical_key, self.modifiers)
+                    && self.state.menu.home_search_begin()
+                {
+                    self.host_input.clear();
+                    return;
+                }
                 // Pad state tracks both press AND release continuously
                 // so held buttons keep polling as "pressed". Auto-repeat
                 // events are ignored -- the key is already down, and the
@@ -1547,6 +1568,7 @@ impl ApplicationHandler for Shell {
                 input.letter_next |= pad_frame.menu_letter_next;
                 input.options |= pad_frame.menu_options;
                 input.secondary |= pad_frame.menu_secondary;
+                input.search |= pad_frame.menu_search;
 
                 // Escape is the "PS button" -- it toggles between
                 // "game running" and "game paused + menu open".
@@ -2469,6 +2491,42 @@ fn web_window_logical_size() -> Option<winit::dpi::LogicalSize<f64>> {
 #[cfg(feature = "editor")]
 fn editor_owns_escape(editor_workspace: bool, play_captured: bool, menu_open: bool) -> bool {
     editor_workspace && !play_captured && !menu_open
+}
+
+/// `/`, or Ctrl+F (Cmd+F on a Mac): search the home shelf.
+fn is_search_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
+    let Key::Character(text) = key else {
+        return false;
+    };
+    let command = if cfg!(target_os = "macos") {
+        modifiers.super_key()
+    } else {
+        modifiers.control_key()
+    };
+    (text.as_str() == "/" && !command && !modifiers.alt_key())
+        || (command && text.eq_ignore_ascii_case("f"))
+}
+
+/// What a key does to the open search box, if anything.
+fn search_key(key: &Key, modifiers: ModifiersState) -> Option<ui::menu::SearchKey> {
+    use ui::menu::SearchKey;
+    match key {
+        Key::Named(NamedKey::Escape) => Some(SearchKey::Cancel),
+        Key::Named(
+            NamedKey::Enter
+            | NamedKey::Tab
+            | NamedKey::ArrowUp
+            | NamedKey::ArrowDown
+            | NamedKey::ArrowLeft
+            | NamedKey::ArrowRight,
+        ) => Some(SearchKey::Done),
+        Key::Named(NamedKey::Backspace | NamedKey::Delete) => Some(SearchKey::Erase),
+        Key::Named(NamedKey::Space) => Some(SearchKey::Type(' ')),
+        // Shortcuts (Cmd+Q, Ctrl+C) are not text.
+        Key::Character(_) if modifiers.control_key() || modifiers.super_key() => None,
+        Key::Character(text) => text.chars().next().map(SearchKey::Type),
+        _ => None,
+    }
 }
 
 /// OR a keypress into the next-frame Menu input. `Escape` both toggles

@@ -53,6 +53,15 @@ pub struct UiPngArgs {
     /// With `--home`: pretend a controller is connected (button glyphs instead of key caps).
     #[arg(long)]
     pub pad: bool,
+    /// With `--home`: filter the shelf with this search, the box open for typing.
+    #[arg(long)]
+    pub search: Option<String>,
+    /// With `--search`: a controller is typing (the letter strip shows), this letter in focus.
+    #[arg(long, requires = "search")]
+    pub search_strip: Option<usize>,
+    /// With `--search`: the box closed, its filter kept.
+    #[arg(long, requires = "search")]
+    pub search_done: bool,
     /// With `--home`: the focused case.
     #[arg(long, default_value_t = 0)]
     pub case: usize,
@@ -205,6 +214,11 @@ fn render_in(args: &UiPngArgs, root: &Path) -> Result<(), String> {
                 args.countdown,
                 args.launch,
             );
+            if let Some(query) = args.search.as_deref() {
+                state
+                    .menu
+                    .home_preview_search(query, args.search_strip, args.search_done);
+            }
         }
         View::Window => {
             state.menu.open = false;

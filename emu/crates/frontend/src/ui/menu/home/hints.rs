@@ -23,6 +23,7 @@ pub(super) enum Btn {
     R1,
     L2,
     R2,
+    Start,
 }
 
 impl Btn {
@@ -37,12 +38,14 @@ impl Btn {
             Self::R1 => "E",
             Self::L2 => "1",
             Self::R2 => "3",
+            Self::Start => "/",
         }
     }
 
-    /// The pill label of a shoulder button.
+    /// The pill label of a shoulder button (and of Start, drawn the same way).
     const fn shoulder(self) -> Option<&'static str> {
         match self {
+            Self::Start => Some("START"),
             Self::L1 => Some("L1"),
             Self::R1 => Some("R1"),
             Self::L2 => Some("L2"),

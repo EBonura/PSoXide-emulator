@@ -25,7 +25,7 @@ pub(crate) use slots::{SlotCard, SlotsMode, SlotsState};
 
 #[allow(unused_imports)]
 pub(crate) use home::{
-    explainer_unseen, is_first_visit as first_visit, DemoStatus, DeviceCommand, HomeFeed,
+    explainer_unseen, is_first_visit as first_visit, DemoStatus, DeviceCommand, HomeFeed, SearchKey,
 };
 
 const CATEGORY_SPACING: f32 = 100.0;
@@ -284,6 +284,9 @@ pub struct MenuInput {
     pub options: bool,
     /// Square: the focused case's second action (What's on it, Start over, Burn).
     pub secondary: bool,
+    /// Start on a controller: search the shelf. (The keyboard's `/` opens it through
+    /// `MenuState::home_search_begin`, since typing needs the keys themselves.)
+    pub search: bool,
     pub toggle_open: bool,
 }
 
