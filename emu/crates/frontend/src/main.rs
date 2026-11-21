@@ -68,6 +68,8 @@ mod session;
 mod theme;
 mod ui;
 mod ui_sound;
+// The phone's keyboard for the search box (no-ops on native).
+mod web_text;
 // Browser glue for the touch controller (no-ops on native).
 mod web_touch;
 
@@ -468,6 +470,7 @@ impl Shell {
         eprintln!("{audio_status}");
         let mut input = input::InputRouter::new();
         web_touch::install_listeners();
+        web_text::install();
         input
             .touch_mut()
             .set_coarse_pointer(web_touch::coarse_pointer());
@@ -2240,6 +2243,19 @@ impl ApplicationHandler for Shell {
             }
             // Apply any game file the user picked since the last frame.
             self.state.poll_web_uploads();
+            // The phone's keyboard and the search box.
+            for event in web_text::take() {
+                match event {
+                    web_text::TextEvent::Value(text) => self.state.menu.home_search_set(&text),
+                    web_text::TextEvent::Done => {
+                        if self.state.menu.home_search_editing() {
+                            self.state.menu.home_search_key(ui::menu::SearchKey::Done);
+                        }
+                    }
+                }
+            }
+            let (query, target) = self.state.menu.home_search_target();
+            web_text::sync(self.state.menu.home_search_editing(), &query, target);
             // Embed mode: host commands in, run-state changes out.
             web_embed::tick(&mut self.state);
             // winit on web does not auto-size the canvas to the page, so the

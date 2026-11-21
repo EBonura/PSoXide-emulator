@@ -349,6 +349,8 @@ pub(crate) struct HomeState {
     nav_end: f32,
     /// The pad's focus on the tab row is on the search box.
     nav_on_search: bool,
+    /// Where the search box was drawn this frame.
+    search_bar: Option<Rect>,
 }
 
 /// The animation of one case: how focused it is (a spring, so it settles with
@@ -550,6 +552,7 @@ impl HomeState {
             search: search::Search::default(),
             nav_end: 0.0,
             nav_on_search: false,
+            search_bar: None,
         }
     }
 
@@ -1183,6 +1186,35 @@ impl MenuState {
         }
         self.home = Some(h);
         ok
+    }
+
+    /// The search box's text and where it is drawn (`[x, y, w, h]` in points), for the web's
+    /// hidden text field.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn home_search_target(&self) -> (String, Option<[f32; 4]>) {
+        self.home.as_ref().map_or((String::new(), None), |h| {
+            (
+                h.search.query.clone(),
+                h.search_bar
+                    .map(|r| [r.left(), r.top(), r.width(), r.height()]),
+            )
+        })
+    }
+
+    /// The whole text of the box, from the phone's keyboard. Typing opens the box if the tap
+    /// that raised the keyboard did not.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn home_search_set(&mut self, text: &str) {
+        let Some(mut h) = self.home.take() else {
+            return;
+        };
+        if !h.search.editing && self.open && h.launch.is_none() {
+            h.begin_search(self, false);
+        }
+        if h.search.editing {
+            h.search_set(text);
+        }
+        self.home = Some(h);
     }
 
     /// A key typed into the open search box.
@@ -1968,6 +2000,7 @@ impl HomeState {
             appear,
         };
         self.section = None;
+        self.search_bar = None;
         if self.label_tex.is_none() {
             self.label_tex = decode_label(ctx);
         }
@@ -3705,6 +3738,7 @@ impl HomeState {
             let bar = self.search_rect(lay, logo_rect, icons_left);
             self.nav_on_search = self.nav >= items.len();
             let found = self.cases(ms).len();
+            self.search_bar = Some(bar);
             self.draw_search(pc, bar, found);
         }
         if let Some(text) = warning {
@@ -3978,7 +4012,11 @@ impl HomeState {
         }
         match click {
             // A touch screen has no keys to type with: the letter strip comes up.
-            Click::Search => self.begin_search(ms, self.feed.touch),
+            Click::Search => {
+                // The phone's own keyboard came up for the tap (web): ours stays down.
+                let keys = self.feed.touch && !crate::web_text::focused();
+                self.begin_search(ms, keys);
+            }
             // While typing it undoes the search; after, the case picked from it stays.
             Click::SearchClear => {
                 let keep = !self.search.editing;

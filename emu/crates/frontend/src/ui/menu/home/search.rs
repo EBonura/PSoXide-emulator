@@ -204,6 +204,25 @@ impl HomeState {
         self.refocus_first();
     }
 
+    /// Replace the whole text (the phone's keyboard reports the field, not keys).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(super) fn search_set(&mut self, text: &str) {
+        let mut next = String::new();
+        for c in text.chars().filter(|c| !c.is_control()) {
+            if next.chars().count() >= MAX_QUERY {
+                break;
+            }
+            if c == ' ' && (next.is_empty() || next.ends_with(' ')) {
+                continue;
+            }
+            next.push(c);
+        }
+        if next != self.search.query {
+            self.search.query = next;
+            self.refocus_first();
+        }
+    }
+
     fn search_erase(&mut self) {
         if self.search.query.pop().is_some() {
             self.refocus_first();
