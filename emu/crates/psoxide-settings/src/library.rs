@@ -253,7 +253,7 @@ impl Library {
 
         let mut fresh: Vec<LibraryEntry> = Vec::new();
         let mut changed = 0usize;
-        for path in walk(root) {
+        for path in hide_cue_covered_bins(walk(root)) {
             let Some(kind) = classify(&path) else {
                 continue;
             };
@@ -327,7 +327,7 @@ impl Library {
                 });
             }
 
-            for path in walk(root) {
+            for path in hide_cue_covered_bins(walk(root)) {
                 let Some(kind) = classify(&path) else {
                     continue;
                 };
@@ -397,6 +397,25 @@ const SKIP_DIRS: &[&str] = &["deps", "incremental", "build"];
 /// [`SKIP_DIRS`] and anything starting with `.`, so cargo's
 /// per-target build siblings don't show up as library entries
 /// when the scanner is pointed at an SDK-build output tree.
+/// Drop every `.bin` that a `.cue` in the same walk already
+/// references, so one disc shows up once (as its cue) instead of
+/// twice. Bins no cue mentions stay listed.
+fn hide_cue_covered_bins(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let key = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let mut covered = std::collections::HashSet::new();
+    for p in &paths {
+        if classify(p) == Some(GameKind::DiscCue) {
+            if let Ok(files) = cue_referenced_files(p) {
+                covered.extend(files.iter().map(|f| key(f)));
+            }
+        }
+    }
+    paths
+        .into_iter()
+        .filter(|p| classify(p) != Some(GameKind::DiscBin) || !covered.contains(&key(p)))
+        .collect()
+}
+
 fn walk(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -1944,6 +1963,27 @@ mod tests {
         lib.scan(tmp.path()).unwrap();
         assert_eq!(lib.entries.len(), 2);
         assert_ne!(lib.entries[0].id, lib.entries[1].id);
+    }
+
+    #[test]
+    fn scan_hides_bin_covered_by_a_cue() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("g.bin"), vec![0u8; 2352]).unwrap();
+        std::fs::write(
+            tmp.path().join("g.cue"),
+            "FILE \"g.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("lone.bin"), vec![0u8; 2352]).unwrap();
+        let mut lib = Library::default();
+        lib.scan(tmp.path()).unwrap();
+        let mut names: Vec<_> = lib
+            .entries
+            .iter()
+            .map(|e| e.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["g.cue", "lone.bin"]);
     }
 
     #[test]
