@@ -32,6 +32,7 @@ mod irq_quirk;
 mod raster;
 mod span;
 mod status;
+mod tex_cache;
 
 pub use blend::BlendMode;
 use blend::{
@@ -44,6 +45,8 @@ use raster::triangle_exceeds_hw_extent;
 pub use raster::{tri_plane_eval, tri_raster_setup, tri_span_x, TriRasterSetup};
 use span::{Clip, Plotter, TexFetch, TexTri};
 use status::GpuStatus;
+use tex_cache::TexCache;
+pub use tex_cache::TextureLaw;
 
 use crate::vram::{Vram, VRAM_HEIGHT, VRAM_WIDTH};
 use commands::gp0_packet_size;
@@ -571,6 +574,20 @@ pub struct Gpu {
     /// rows off, for the texture density of [`Gpu::texture_cliff_cost`].
     #[serde(skip)]
     timing_area: std::sync::atomic::AtomicU64,
+    /// Which texture cost law the timing model charges (`PSOXIDE_TEXTURE_LAW`,
+    /// read when the GPU is created). Not saved: a loaded state follows the
+    /// environment.
+    #[serde(skip, default = "TextureLaw::from_env")]
+    texture_law: TextureLaw,
+    /// The texel law's texture cache. Not saved: a loaded state starts it
+    /// empty, which costs the first primitives a refill.
+    #[serde(skip)]
+    tex_cache: Box<TexCache>,
+    /// Clocks of the packet's setup its fill left idle, summed over its
+    /// triangles, for the texel law (a miss stalls the fill, which the setup
+    /// hides). Handed over like `timing_pixels`.
+    #[serde(skip)]
+    timing_slack: std::sync::atomic::AtomicU64,
     /// Count of GP1 writes by opcode byte. Same diagnostic role as
     /// gp0_opcode_hist but for the display / control port. Excluded
     /// from save states.
@@ -901,6 +918,9 @@ impl Gpu {
             timing_tex_valid: false,
             timing_pixels: std::sync::atomic::AtomicU64::new(0),
             timing_area: std::sync::atomic::AtomicU64::new(0),
+            texture_law: TextureLaw::from_env(),
+            tex_cache: Box::default(),
+            timing_slack: std::sync::atomic::AtomicU64::new(0),
             gp1_opcode_hist: [0; 256],
             display_start_history: std::collections::BTreeSet::new(),
             display_mode_history: std::collections::BTreeSet::new(),
@@ -2406,7 +2426,17 @@ impl Gpu {
     /// A moving UV window within one page, which the console also charges for
     /// (15-bit 16x32: 227), is not modelled. Returns 0 for anything that does
     /// not sample a texture.
+    ///
+    /// All of this is the default law, [`TextureLaw::Pixels`]. Under
+    /// [`TextureLaw::Texels`] the page refill and the cliff give way to a
+    /// texture cache (see [`Gpu::texel_law_surcharge`]).
     fn texture_timing_surcharge(&mut self, op: u8, pixels: u64, area: u64) -> u64 {
+        let texels = self.texture_law == TextureLaw::Texels;
+        let slack = if texels {
+            std::mem::take(self.timing_slack.get_mut())
+        } else {
+            0
+        };
         let (clut, key) = match op {
             0x24..=0x27 | 0x2c..=0x2f => (self.gp0_fifo[2] >> 16, self.gp0_fifo[4] >> 16),
             0x34..=0x37 | 0x3c..=0x3f => (self.gp0_fifo[2] >> 16, self.gp0_fifo[5] >> 16),
@@ -2426,7 +2456,6 @@ impl Gpu {
         const READ_Q8: [u64; 3] = [0, 31, 38];
         const REFILL_Q8: [u64; 3] = [256, 397, 717];
         const REFILL_START: u64 = 24;
-        const CLUT_RELOAD: [u64; 3] = [25, 270, 0];
         // With the 480i rule skipping rows the read costs nothing a pixel:
         // 4, 8 and 15-bit triangles that fit the cache took the same 5.4k
         // clocks for sixteen (hwtest v2.4, records 0x8E0 to 0x8F8).
@@ -2435,6 +2464,9 @@ impl Gpu {
         } else {
             READ_Q8[depth]
         };
+        if texels {
+            return self.texel_law_surcharge(op, key, clut, pixels * read / 256, slack);
+        }
         let mut cost = pixels * read / 256 + self.texture_cliff_cost(op, depth, pixels, area);
         if self.timing_tex_valid {
             if key != self.timing_tex_key {
@@ -2448,6 +2480,105 @@ impl Gpu {
         self.timing_tex_key = key;
         self.timing_tex_clut = clut;
         cost
+    }
+
+    /// [`Gpu::texture_timing_surcharge`] under [`TextureLaw::Texels`]: the
+    /// per-pixel read and the CLUT reload as the default law charges them,
+    /// no page refill and no cliff, and instead the texture cache's misses
+    /// (see `gpu/tex_cache.rs`), less the clocks the setup left idle.
+    fn texel_law_surcharge(&mut self, op: u8, key: u16, clut: u16, read: u64, slack: u64) -> u64 {
+        let depth = usize::from((key >> 7) & 3).min(2);
+        let mut cost = read;
+        if self.timing_tex_valid && clut != self.timing_tex_clut {
+            cost += CLUT_RELOAD[depth];
+        }
+        self.timing_tex_valid = true;
+        self.timing_tex_key = key;
+        self.timing_tex_clut = clut;
+        self.walk_texels(op, key);
+        let misses = self.tex_cache.take_misses();
+        cost + (misses * tex_cache::MISS_Q8 / 256).saturating_sub(slack)
+    }
+
+    /// Run the packet's texel fetches through the texture cache, in the
+    /// order the rasteriser draws: a quad's second triangle `(1, 3, 2)` first.
+    fn walk_texels(&mut self, op: u8, key: u16) {
+        let depth = ((key >> 7) & 3).min(2) as u8;
+        let mut fetch = self.tex_fetch();
+        fetch.page_x = u32::from(key & 0xf) * 64;
+        fetch.page_y = if key & 0x10 != 0 { 256 } else { 0 };
+        let clip = self.clip();
+        let (vertices, uvs): (&[usize], &[usize]) = match op {
+            0x24..=0x27 => (&[1, 3, 5], &[2, 4, 6]),
+            0x2c..=0x2f => (&[1, 3, 5, 7], &[2, 4, 6, 8]),
+            0x34..=0x37 => (&[1, 4, 7], &[2, 5, 8]),
+            0x3c..=0x3f => (&[1, 4, 7, 10], &[2, 5, 8, 11]),
+            _ => {
+                self.walk_rect_texels(op, &fetch, depth, clip.skip_parity);
+                return;
+            }
+        };
+        let mut points = [((0, 0), (0, 0)); 4];
+        for (point, (&vertex, &uv)) in points.iter_mut().zip(vertices.iter().zip(uvs)) {
+            let word = self.gp0_fifo[uv];
+            *point = (
+                self.decode_vertex(self.gp0_fifo[vertex]),
+                ((word & 0xff) as i32, ((word >> 8) & 0xff) as i32),
+            );
+        }
+        let order: &[[usize; 3]] = if vertices.len() == 4 {
+            &[[1, 3, 2], [0, 1, 2]]
+        } else {
+            &[[0, 1, 2]]
+        };
+        for triangle in order {
+            let corner = triangle.map(|i| points[i]);
+            let xy = corner.map(|(xy, _)| xy);
+            if triangle_exceeds_hw_extent(xy[0], xy[1], xy[2]) {
+                continue;
+            }
+            if let Some(setup) =
+                tri_raster_setup(xy, [(0, 0, 0); 3], corner.map(|(_, uv)| uv), true)
+            {
+                self.tex_cache.walk_triangle(&setup, clip, &fetch, depth);
+            }
+        }
+    }
+
+    /// [`Gpu::walk_texels`] for a textured rectangle.
+    fn walk_rect_texels(&mut self, op: u8, fetch: &TexFetch, depth: u8, skip_parity: i32) {
+        let (w, h) = match op {
+            0x64..=0x67 => {
+                let size = self.gp0_fifo[3];
+                ((size & 0xffff) as i32, (size >> 16) as i32)
+            }
+            0x6c..=0x6f => (1, 1),
+            0x74..=0x77 => (8, 8),
+            0x7c..=0x7f => (16, 16),
+            _ => return,
+        };
+        let pos = self.gp0_fifo[1];
+        let x = sign_extend_11((pos & 0x7ff) as i32) + self.draw_offset_x;
+        let y = sign_extend_11(((pos >> 16) & 0x7ff) as i32) + self.draw_offset_y;
+        let left = x.max(self.draw_area_left as i32);
+        let top = y.max(self.draw_area_top as i32);
+        let right = (x + w - 1).min(self.draw_area_right as i32);
+        let bottom = (y + h - 1).min(self.draw_area_bottom as i32);
+        if w <= 0 || h <= 0 || left > right || top > bottom {
+            return;
+        }
+        let word = self.gp0_fifo[2];
+        let rows = (top..=bottom)
+            .filter(|row| row & 1 != skip_parity)
+            .map(|row| (row - y) as u32);
+        self.tex_cache.walk_rect(
+            fetch,
+            depth,
+            (word & 0xff, (word >> 8) & 0xff),
+            (self.tex_rect_flip_x, self.tex_rect_flip_y),
+            rows,
+            (left - x) as u32..(right - x + 1) as u32,
+        );
     }
 
     /// What a textured triangle pays when the texels it reads outgrow the
@@ -2534,7 +2665,13 @@ impl Gpu {
         let lines = (bottom.min(clip_bottom) - first).max(0) as u64;
         let pixels = self.field_rule_pixels(pixels, first, lines);
         self.note_timing_pixels(pixels);
-        setup.max((pixels * pixel_q8 + lines * line_q8).div_ceil(256))
+        let fill = (pixels * pixel_q8 + lines * line_q8).div_ceil(256);
+        if self.texture_law == TextureLaw::Texels {
+            use std::sync::atomic::Ordering::Relaxed;
+            let slack = self.timing_slack.load(Relaxed) + setup.saturating_sub(fill);
+            self.timing_slack.store(slack, Relaxed);
+        }
+        setup.max(fill)
     }
 
     fn timing_rect_cost(
@@ -3201,6 +3338,9 @@ impl Gpu {
             0x01 => {
                 self.clut_line_a_reg = u32::MAX;
                 self.clut_line_b_reg = u32::MAX;
+                if self.texture_law == TextureLaw::Texels {
+                    self.tex_cache.clear();
+                }
             }
             // GP0 0x1F -- request GPU IRQ1. Rare in games, but BIOS and
             // hardware test suites can observe both GPUSTAT.24 and I_STAT.1.
@@ -5221,6 +5361,8 @@ impl Gpu {
 // Draw-cost model (see `Gpu::gp0_packet_timing_cost`). Rates are CPU clocks
 // per pixel or per scanline in 1/256 units; setups are CPU clocks.
 /// Setup of a flat primitive (records 112, 10E).
+/// Clocks a CLUT change reloads, by texture depth (hwtest v2.1).
+const CLUT_RELOAD: [u64; 3] = [25, 270, 0];
 const DRAW_FLAT_SETUP: u64 = 44;
 /// Setup of a Gouraud triangle (v1.24 cheap list, case 216).
 const DRAW_GOURAUD_SETUP: u64 = 195;
@@ -5612,6 +5754,8 @@ impl Default for Gpu {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tex_law_tests;
 
 #[cfg(test)]
 mod stress_tests;
