@@ -28,7 +28,9 @@ pub const AREAS: [(&str, u32); 15] = [
     ("pad", 1),
     ("mdec", 1),
     // 2: GP1(03h) display off presents black (display_rgba8, display_hash, the gate's frames).
-    ("gpu", 2),
+    // 3: 480i is presented from both fields whatever the draw-to-display bit says, and the
+    // held field starts again when the display start moves (display_rgba8, display_hash).
+    ("gpu", 3),
     ("dma", 1),
     ("timers", 1),
     ("irq", 1),
