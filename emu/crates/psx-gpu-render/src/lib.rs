@@ -76,7 +76,7 @@ pub use replay::ComputeBackend;
 pub use target::{VRAM_HEIGHT, VRAM_WIDTH};
 pub use translator::Translator;
 
-use pipeline::HwPipeline;
+use pipeline::{HwPipeline, HwVertex};
 use target::{RenderTarget, MAX_SCALE};
 use translator::DrawRun;
 
@@ -286,18 +286,26 @@ impl HwRenderer {
         self.translator.set_internal_scale(self.target.scale());
         let frame = self.translator.translate_with_wireframe(cmd_log, wireframe);
         if frame.total() > 0 {
-            self.pipeline.upload_vertices(
-                &self.device,
-                &self.queue,
-                bytemuck::cast_slice(frame.vertices),
-            );
-            Self::draw_runs(
-                &self.device,
-                &self.queue,
-                &self.pipeline,
-                &self.target,
-                frame.runs,
-            );
+            // The entry cap above bounds a segment's commands, not its vertex bytes: a chunk of
+            // vertex-heavy entries could still need a buffer past the device's limit (a 512 MiB
+            // request against 256 MiB in long headless runs, 2026-11-21). Draw it through
+            // windows that each fit; they run in order into the persistent target.
+            let max_bytes = self.device.limits().max_buffer_size;
+            let max_vertices = vertex_window(max_bytes, std::mem::size_of::<HwVertex>() as u64);
+            for (range, runs) in vertex_windows(frame.runs, frame.vertices.len(), max_vertices) {
+                self.pipeline.upload_vertices(
+                    &self.device,
+                    &self.queue,
+                    bytemuck::cast_slice(&frame.vertices[range]),
+                );
+                Self::draw_runs(
+                    &self.device,
+                    &self.queue,
+                    &self.pipeline,
+                    &self.target,
+                    &runs,
+                );
+            }
         }
     }
 
@@ -859,9 +867,137 @@ fn bgr15_to_rgba8(pixel: u16) -> [u8; 4] {
     ]
 }
 
+/// The most vertices one upload may hold: what fits in `max_bytes` of `vertex_bytes`-sized
+/// vertices, rounded down to a multiple of 6 so a cut inside a run falls on a primitive boundary
+/// for both triangle lists (3) and line lists (2).
+fn vertex_window(max_bytes: u64, vertex_bytes: u64) -> usize {
+    let count = max_bytes / vertex_bytes.max(1);
+    usize::try_from(count - count % 6)
+        .unwrap_or(usize::MAX)
+        .max(6)
+}
+
+/// Split a translated segment into upload windows of at most `max_vertices` vertices. Each window
+/// is the vertex range to upload and its runs, rebased to that range; drawn in order they draw
+/// exactly `runs`. A run is cut only when it alone is larger than a window, and then at a
+/// multiple of 6 vertices from its start. One window, unchanged, when everything fits.
+fn vertex_windows(
+    runs: &[DrawRun],
+    total: usize,
+    max_vertices: usize,
+) -> Vec<(std::ops::Range<usize>, Vec<DrawRun>)> {
+    if total <= max_vertices {
+        return vec![(0..total, runs.to_vec())];
+    }
+    let mut windows = Vec::new();
+    let mut start = 0usize;
+    let mut end = 0usize;
+    let mut pending: Vec<DrawRun> = Vec::new();
+    for run in runs {
+        let mut from = run.start as usize;
+        let to = from + run.count as usize;
+        while from < to {
+            if from + (to - from).min(max_vertices) > start + max_vertices || from < start {
+                if !pending.is_empty() {
+                    windows.push((start..end, std::mem::take(&mut pending)));
+                }
+                start = from;
+            }
+            let take = (to - from).min(start + max_vertices - from);
+            pending.push(DrawRun {
+                start: (from - start) as u32,
+                count: take as u32,
+                ..*run
+            });
+            from += take;
+            end = from;
+        }
+    }
+    if !pending.is_empty() {
+        windows.push((start..end, pending));
+    }
+    windows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run(kind: pipeline::BlendKind, start: u32, count: u32) -> DrawRun {
+        DrawRun {
+            kind,
+            start,
+            count,
+            clip: [0, 0, 1023, 511],
+        }
+    }
+
+    /// Draw every window's runs back into absolute vertex indices, in order.
+    fn drawn(windows: &[(std::ops::Range<usize>, Vec<DrawRun>)]) -> Vec<(u8, usize)> {
+        let mut out = Vec::new();
+        for (range, runs) in windows {
+            for r in runs {
+                for v in 0..r.count as usize {
+                    out.push((r.kind as u8, range.start + r.start as usize + v));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_segment_that_fits_is_one_window_unchanged() {
+        let runs = [
+            run(pipeline::BlendKind::Opaque, 0, 9),
+            run(pipeline::BlendKind::Add, 9, 3),
+        ];
+        let windows = vertex_windows(&runs, 12, 12);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].0, 0..12);
+        assert_eq!(windows[0].1, runs.to_vec());
+    }
+
+    #[test]
+    fn windows_fit_the_cap_and_draw_every_vertex_once_in_order() {
+        use pipeline::BlendKind::{Add, Opaque};
+        let runs = [
+            run(Opaque, 0, 9),
+            run(Add, 9, 30),
+            run(Opaque, 39, 6),
+            run(Add, 45, 3),
+        ];
+        let all = drawn(&[(0..48, runs.to_vec())]);
+        for cap in [6, 12, 18, 24, 30, 36, 42] {
+            let windows = vertex_windows(&runs, 48, cap);
+            assert!(
+                windows.iter().all(|(range, _)| range.len() <= cap),
+                "cap {cap}"
+            );
+            assert_eq!(drawn(&windows), all, "cap {cap}");
+            // A cut inside a run lands on a multiple of 6 from its start.
+            for (range, rs) in &windows {
+                for r in rs {
+                    let abs = range.start + r.start as usize;
+                    let orig = runs
+                        .iter()
+                        .find(|o| (o.start as usize..(o.start + o.count) as usize).contains(&abs))
+                        .unwrap();
+                    assert_eq!((abs - orig.start as usize) % 6, 0, "cap {cap}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_window_is_a_multiple_of_six_vertices() {
+        assert_eq!(vertex_window(256 << 20, 7) % 6, 0);
+        assert!(vertex_window(256 << 20, 7) as u64 * 7 <= 256 << 20);
+        assert_eq!(
+            vertex_window(10, 100),
+            6,
+            "never below one primitive of each kind"
+        );
+    }
 
     fn headless_renderer() -> Option<HwRenderer> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {

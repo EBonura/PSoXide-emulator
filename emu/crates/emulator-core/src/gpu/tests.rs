@@ -3244,6 +3244,65 @@ fn interlaced_480_presents_both_fields() {
     }
 }
 
+/// The same with the draw-to-display bit left set at every blank, as QD Up's
+/// option screen leaves it (its icons are drawn with dfe 1 after the field):
+/// the picture is still put together from both fields, so the field being
+/// redrawn never shows half done.
+#[test]
+fn interlaced_480_presents_both_fields_with_dfe_left_set_at_the_blank() {
+    let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0300_0000);
+    gpu.write32(GP1_ADDR, 0x0704_4c23);
+    gpu.write32(GP1_ADDR, 0x0800_0026);
+    let shown = |gpu: &Gpu, y: usize| {
+        let (rgba, w, _) = gpu.display_rgba8();
+        rgba[(y * w as usize + 250) * 4]
+    };
+    let draw_field = |gpu: &mut Gpu, colour: u16| {
+        gpu.write32(GP0_ADDR, 0xe100_0000);
+        for y in 0..4u16 {
+            if i32::from(y & 1) != gpu.skipped_row_parity() {
+                for x in 0..400 {
+                    gpu.vram.set_pixel(x, y, colour);
+                }
+            }
+        }
+        gpu.write32(GP0_ADDR, 0xe100_0400);
+    };
+    for _ in 0..2 {
+        draw_field(&mut gpu, 0x001f);
+        gpu.toggle_vblank_field();
+    }
+    assert!(gpu.field_rendering_active());
+    draw_field(&mut gpu, 0);
+    for y in 0..4 {
+        assert_ne!(shown(&gpu, y), 0, "row {y} presented");
+    }
+}
+
+/// Moving the display start in 480i drops the held field: a double-buffered
+/// game shows VRAM as it is until both fields of the new buffer have been on
+/// display.
+#[test]
+fn interlaced_480_hold_begins_again_when_the_display_start_moves() {
+    let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0300_0000);
+    gpu.write32(GP1_ADDR, 0x0704_4c23);
+    gpu.write32(GP1_ADDR, 0x0800_0026);
+    gpu.write32(GP0_ADDR, 0xe100_0400);
+    gpu.toggle_vblank_field();
+    gpu.toggle_vblank_field();
+    assert!(gpu.field_rendering_active());
+    gpu.write32(GP1_ADDR, 0x0500_0200); // display start x 512
+    gpu.toggle_vblank_field();
+    assert!(!gpu.field_rendering_active(), "one field of the new buffer");
+    gpu.toggle_vblank_field();
+    assert!(
+        gpu.field_rendering_active(),
+        "both fields of the new buffer"
+    );
+}
+
 fn open_draw_area(gpu: &mut Gpu) {
     gpu.write32(GP0_ADDR, 0xe300_0000);
     gpu.write32(GP0_ADDR, 0xe400_0000 | 639 | (479 << 10));
@@ -3543,9 +3602,9 @@ fn interlaced_480_draws_in_the_blank_follow_the_reported_field() {
     gpu.write32(GP1_ADDR, 0x0800_0026);
     gpu.write32(GP0_ADDR, 0xe100_0000);
     assert_eq!(gpu.read32(GP1_ADDR).unwrap() >> 31, 1);
-    let displayed = gpu.displayed_field_parity();
+    let displayed = gpu.presented_field_parity();
     gpu.begin_vblank();
-    assert_eq!(gpu.displayed_field_parity(), displayed);
+    assert_eq!(gpu.presented_field_parity(), displayed);
     gpu.write32(GP0_ADDR, 0x0200_00ff);
     gpu.write32(GP0_ADDR, 0x0000_0000);
     gpu.write32(GP0_ADDR, 0x0004_0010);

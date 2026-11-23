@@ -446,15 +446,18 @@ pub struct Gpu {
     /// Tracer bookkeeping -- excluded from save states.
     #[serde(skip)]
     current_cmd_index: u32,
-    /// Presentation memory for field-rendered 480i frames: the lines of
-    /// each field as it was last on display, kept while the GPU is barred
-    /// from the displayed field (see [`Gpu::skipped_row_parity`]). Output
-    /// only; excluded from save states.
+    /// Presentation memory for 480i frames: the lines of each field as it
+    /// was last on display (see [`Gpu::hold_displayed_field`]). Output only;
+    /// excluded from save states.
     #[serde(skip)]
     field_hold: Vec<u16>,
-    /// Consecutive vblanks in that mode, saturating at 2 (both fields held).
+    /// Consecutive vblanks in 480i with the display start where it is now,
+    /// saturating at 2 (both fields held).
     #[serde(skip)]
     field_hold_fields: u8,
+    /// The display start `field_hold` was taken at.
+    #[serde(skip)]
+    field_hold_origin: (u16, u16),
     /// In the vertical blank that began at the last VBlank edge (see
     /// [`Gpu::begin_vblank`]); `Gpu::end_vblank` clears it. Saved: GPUSTAT bit 31 reads 0
     /// and the 480-line draw rule changes while it is set, so a state taken in the
@@ -862,6 +865,7 @@ impl Gpu {
             current_cmd_index: 0,
             field_hold: Vec::new(),
             field_hold_fields: 0,
+            field_hold_origin: (0, 0),
             vblank_active: false,
             busy_credit: 0,
             cmd_ingest_credit: 0,
@@ -1108,7 +1112,7 @@ impl Gpu {
     /// parity is not `shown` come from the held field (see
     /// [`Gpu::presented_words`] with [`Deinterlace::Weave`]).
     fn held_rows(&self) -> Option<(usize, usize, i32)> {
-        let shown = self.displayed_field_parity();
+        let shown = self.presented_field_parity();
         if shown < 0 || self.field_hold_fields < 2 {
             return None;
         }
@@ -1527,10 +1531,22 @@ impl Gpu {
     /// the other field while one is shown, so VRAM alone never holds a
     /// whole picture at any one instant. The held lines let
     /// [`Gpu::presented_words`] show both fields, as the eye does on a CRT.
+    ///
+    /// This follows the 480-line mode alone, not the draw-to-display bit: a
+    /// television shows each field as it was scanned whatever the game drew
+    /// with, and a game can leave the bit set at the blank (QD Up's option
+    /// screen draws its field with dfe 0, then its icons with dfe 1), which
+    /// left VRAM shown raw with the other field half redrawn. Moving the
+    /// display start begins again, so a double-buffered 480i game is held
+    /// only once both fields come from the buffer on show.
     fn hold_displayed_field(&mut self) {
-        let shown = self.displayed_field_parity();
-        if shown < 0 {
+        let shown = self.presented_field_parity();
+        let origin = (self.display_start_x, self.display_start_y);
+        if shown < 0 || origin != self.field_hold_origin {
             self.field_hold_fields = 0;
+            self.field_hold_origin = origin;
+        }
+        if shown < 0 {
             return;
         }
         if self.field_hold.is_empty() {
@@ -1546,17 +1562,17 @@ impl Gpu {
         self.field_hold_fields = (self.field_hold_fields + 1).min(2);
     }
 
-    /// Whether the picture is being put together from two fields (480i with
-    /// drawing to the display area prohibited), so a host that presents its
-    /// own copy of VRAM must show [`Gpu::display_rgba8_with`] instead.
+    /// Whether the picture is being put together from two fields (480i, both
+    /// fields held), so a host that presents its own copy of VRAM must show
+    /// [`Gpu::display_rgba8_with`] instead.
     pub fn field_rendering_active(&self) -> bool {
-        self.displayed_field_parity() >= 0 && self.field_hold_fields >= 2
+        self.presented_field_parity() >= 0 && self.field_hold_fields >= 2
     }
 
     /// VRAM as presented: the live lines of the field on display and, while
     /// field rendering is in effect, the held lines of the other field.
     fn presented_words(&self, mode: Deinterlace) -> std::borrow::Cow<'_, [u16]> {
-        let shown = self.displayed_field_parity();
+        let shown = self.presented_field_parity();
         if shown < 0 || self.field_hold_fields < 2 {
             return std::borrow::Cow::Borrowed(self.vram.words());
         }
@@ -4579,13 +4595,15 @@ impl Gpu {
         raw & INTERLACED_480 == INTERLACED_480 && raw & DRAW_TO_DISPLAY == 0
     }
 
-    /// The field on display as the flag holds it (0 = even lines, 1 = odd), or
-    /// `-1` when the 480-line rule is off. What a presented picture is built
-    /// from; unlike [`Gpu::skipped_row_parity`] it does not read 0 in the
-    /// vertical blank.
+    /// The field on display in 480-line interlace (0 = even lines, 1 = odd),
+    /// whatever the draw-to-display bit says, or `-1` in any other mode: what
+    /// a presented picture is put together from (see
+    /// [`Gpu::hold_displayed_field`]). Unlike [`Gpu::skipped_row_parity`] it
+    /// does not read 0 in the vertical blank.
     #[inline]
-    fn displayed_field_parity(&self) -> i32 {
-        if self.field_rule_active() {
+    fn presented_field_parity(&self) -> i32 {
+        const INTERLACED_480: u32 = (1 << 19) | (1 << 22);
+        if self.status.raw & INTERLACED_480 == INTERLACED_480 {
             (self.status.raw >> 31) as i32
         } else {
             -1
