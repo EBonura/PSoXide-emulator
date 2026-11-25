@@ -1116,6 +1116,11 @@ impl MenuState {
         let mut shell = self.home.take().expect("home");
         // Asked for by name: this is where the shell opens, not the top.
         shell.closed = false;
+        // A launch sequence the game ran under is over: the page asked for is what shows, not the
+        // spinning disc the sequence holds until the shell reopens.
+        shell.launch = None;
+        shell.launch_sent = false;
+        shell.launch_done = false;
         shell.open_nav(self, item);
         self.home = Some(shell);
         true
@@ -4896,6 +4901,24 @@ mod tests {
             },
         );
         assert_eq!(press(&mut ms, confirm), Some(MenuAction::ChooseGamesPath));
+    }
+
+    #[test]
+    fn asking_for_a_page_by_name_ends_a_launch_sequence_that_is_holding_the_disc() {
+        let mut ms = home(false, DemoStatus::Ready);
+        press(
+            &mut ms,
+            MenuInput {
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert!(ms.home.as_ref().expect("home").launch.is_some());
+        assert!(ms.home_goto("Controls"));
+        assert!(
+            ms.home.as_ref().expect("home").launch.is_none(),
+            "the Controls page shows, not the spinning disc"
+        );
     }
 
     #[test]
