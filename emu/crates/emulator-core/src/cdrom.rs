@@ -2257,16 +2257,15 @@ impl CdRom {
 
     /// `cd-marginal`: the extra time sector `lba` takes to arrive.
     fn marginal_delay(&self, lba: u32) -> u64 {
-        match self.drive_model.marginal {
-            Some(area) if area.contains(lba) => u64::from(area.delay_ms) * MS,
-            _ => 0,
-        }
+        self.drive_model
+            .marginal_area(lba)
+            .map_or(0, |area| u64::from(area.delay_ms) * MS)
     }
 
     /// `cd-marginal`: whether this read never delivers sector `lba`.
     fn marginal_fails(&self, lba: u32) -> bool {
         self.drive_model
-            .marginal
+            .marginal_area(lba)
             .is_some_and(|area| area.fails(lba, self.read_commands))
     }
 
@@ -3200,8 +3199,11 @@ fn ack_model_from_env() -> CdAckModel {
 fn drive_model_from_env() -> CdDriveModel {
     let mut model = HardwareTarget::from_env().cd_drive;
     if let Ok(text) = std::env::var(MARGINAL_ENV_VAR) {
-        model.marginal =
-            Some(MarginalArea::parse(&text).unwrap_or_else(|e| panic!("{MARGINAL_ENV_VAR}: {e}")));
+        for part in text.split('+') {
+            MarginalArea::parse(part)
+                .and_then(|area| model.add_marginal(area))
+                .unwrap_or_else(|e| panic!("{MARGINAL_ENV_VAR}: {e}"));
+        }
     }
     model
 }

@@ -20,7 +20,8 @@
 //!
 //! CD drive options (any target, all off by default, see [`CdDriveModel`]):
 //! `cd-pause-seek=read|any`, `cd-pause-refuse=MS`, `cd-speed-change=MS` and
-//! `cd-marginal=FIRST-LAST:DELAY_MS:FAIL_FRACTION[:SEED]`. They make the drive
+//! `cd-marginal=FIRST-LAST:DELAY_MS:FAIL_FRACTION[:SEED]` (up to four areas,
+//! one option each). They make the drive
 //! harsher than the calibrated default where the console has failed and the
 //! mechanism is unmeasured, so a fix can be checked before a disc is burned.
 //!
@@ -227,8 +228,9 @@ pub struct CdDriveModel {
     /// milliseconds (`cd-speed-change`): GetStat shows seeking, Pause is
     /// refused, and sectors still come at the old speed. Not measured.
     pub speed_change_ms: u32,
-    /// A weak disc area (`cd-marginal`, or `PSOXIDE_CD_MARGINAL`).
-    pub marginal: Option<MarginalArea>,
+    /// Weak disc areas (`cd-marginal`, once per area, or `PSOXIDE_CD_MARGINAL`
+    /// with areas joined by `+`). The first area holding an LBA applies.
+    pub marginal: [Option<MarginalArea>; MARGINAL_AREAS],
 }
 
 impl CdDriveModel {
@@ -239,8 +241,32 @@ impl CdDriveModel {
             pause_seek: PauseSeekModel::Read,
             pause_refuse_ms: 0,
             speed_change_ms: 0,
-            marginal: None,
+            marginal: [None; MARGINAL_AREAS],
         }
+    }
+
+    /// Add a weak area.
+    ///
+    /// # Errors
+    ///
+    /// When [`MARGINAL_AREAS`] are already set.
+    pub fn add_marginal(&mut self, area: MarginalArea) -> Result<(), String> {
+        let slot = self
+            .marginal
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or_else(|| format!("cd-marginal: at most {MARGINAL_AREAS} areas"))?;
+        *slot = Some(area);
+        Ok(())
+    }
+
+    /// The weak area holding `lba`, if any.
+    #[must_use]
+    pub fn marginal_area(&self, lba: u32) -> Option<&MarginalArea> {
+        self.marginal
+            .iter()
+            .flatten()
+            .find(|area| area.contains(lba))
     }
 
     /// Whether any option is set.
@@ -249,6 +275,9 @@ impl CdDriveModel {
         *self != Self::calibrated()
     }
 }
+
+/// Most weak areas one drive model holds.
+pub const MARGINAL_AREAS: usize = 4;
 
 /// Environment variable that sets [`CdDriveModel::marginal`] for any target.
 pub const MARGINAL_ENV_VAR: &str = "PSOXIDE_CD_MARGINAL";
@@ -381,7 +410,7 @@ impl HardwareTarget {
                     })?;
                 }
                 "cd-marginal" => {
-                    target.cd_drive.marginal = Some(MarginalArea::parse(value)?);
+                    target.cd_drive.add_marginal(MarginalArea::parse(value)?)?;
                 }
                 "seed" => {
                     target.seed = value
@@ -490,7 +519,7 @@ mod tests {
         assert_eq!(t.cd_drive.pause_refuse_ms, 500);
         assert_eq!(t.cd_drive.speed_change_ms, 300);
         assert_eq!(
-            t.cd_drive.marginal,
+            t.cd_drive.marginal[0],
             Some(MarginalArea {
                 first: 335_881,
                 last: 341_440,
@@ -507,6 +536,13 @@ mod tests {
         assert!(HardwareTarget::from_spec("real,cd-speed-change=fast").is_err());
         assert!(HardwareTarget::from_spec("real,cd-marginal=9-1:0:0").is_err());
         assert!(HardwareTarget::from_spec("real,cd-marginal=1-9:0:2").is_err());
+        let t =
+            HardwareTarget::from_spec("real,cd-marginal=1-9:5:0,cd-marginal=20-29:7:0").unwrap();
+        assert_eq!(t.cd_drive.marginal_area(25).map(|a| a.delay_ms), Some(7));
+        assert_eq!(t.cd_drive.marginal_area(5).map(|a| a.delay_ms), Some(5));
+        assert!(t.cd_drive.marginal_area(15).is_none());
+        let five = "real,cd-marginal=1-1:0:0,cd-marginal=2-2:0:0,cd-marginal=3-3:0:0,cd-marginal=4-4:0:0,cd-marginal=5-5:0:0";
+        assert!(HardwareTarget::from_spec(five).is_err());
     }
 
     #[test]

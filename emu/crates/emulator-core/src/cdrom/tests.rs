@@ -2637,7 +2637,7 @@ fn cd_marginal_slows_sectors_in_its_area_only() {
         deliveries_until(&mut cd, now, now + 200 * MS)
     };
     let mut cd = CdRom::new();
-    cd.drive_model = model(|m| m.marginal = Some(MarginalArea::parse("500-599:20:0").unwrap()));
+    cd.drive_model = model(|m| m.marginal[0] = Some(MarginalArea::parse("500-599:20:0").unwrap()));
     cd.insert_disc(Some(long_data_disc()));
     let now = start_read_at(&mut cd, 500);
     let slow = deliveries_until(&mut cd, now, now + 200 * MS);
@@ -2656,7 +2656,7 @@ fn cd_marginal_slows_sectors_in_its_area_only() {
 #[test]
 fn cd_marginal_failing_sector_is_silence_and_a_new_read_rolls_again() {
     let mut cd = CdRom::new();
-    cd.drive_model = model(|m| m.marginal = Some(MarginalArea::parse("500-599:0:1").unwrap()));
+    cd.drive_model = model(|m| m.marginal[0] = Some(MarginalArea::parse("500-599:0:1").unwrap()));
     cd.insert_disc(Some(long_data_disc()));
     let now = start_read_at(&mut cd, 500);
     let got = deliveries_until(&mut cd, now, now + 2_000 * MS);
@@ -2666,7 +2666,7 @@ fn cd_marginal_failing_sector_is_silence_and_a_new_read_rolls_again() {
     assert_ne!(cd.stat_byte() & drive_status_bit::READING, 0);
     // Outside the area the read works.
     let mut cd = CdRom::new();
-    cd.drive_model = model(|m| m.marginal = Some(MarginalArea::parse("500-599:0:1").unwrap()));
+    cd.drive_model = model(|m| m.marginal[0] = Some(MarginalArea::parse("500-599:0:1").unwrap()));
     cd.insert_disc(Some(long_data_disc()));
     let now = start_read_at(&mut cd, 400);
     let got = deliveries_until(&mut cd, now, now + 300 * MS);
@@ -2697,7 +2697,7 @@ fn drive_option_state_stays_out_of_save_states() {
 #[test]
 fn cd_marginal_seekl_to_an_unreadable_header_never_lands_and_refuses_pause() {
     let mut cd = CdRom::new();
-    cd.drive_model = model(|m| m.marginal = Some(MarginalArea::parse("900-999:0:1").unwrap()));
+    cd.drive_model = model(|m| m.marginal[0] = Some(MarginalArea::parse("900-999:0:1").unwrap()));
     cd.insert_disc(Some(long_data_disc()));
     let now = setmode_setloc_seek(&mut cd, 0x80, 950);
     assert!(cd.seek_stuck);
