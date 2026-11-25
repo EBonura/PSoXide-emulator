@@ -868,9 +868,21 @@ fn cmd_run(a: &RunArgs) -> Result<ExitCode, String> {
                 .ok()
         };
         let same_mdec = mdec_req(&first_model) == mdec_req(second_model);
+        // The CD drive options change what every disc read does, so a result under one drive
+        // model never stands for another.
+        let cd_drive = |spec: &str| {
+            emulator_core::HardwareTarget::from_spec(spec)
+                .map(|t| t.cd_drive)
+                .ok()
+        };
+        let same_cd_drive = cd_drive(&first_model) == cd_drive(second_model);
         for (job, result) in jobs.iter().zip(&first) {
             let mdec_alike = same_mdec || result.facts.mdec_command_writes == Some(0);
-            if !a.receipts_verify && mdec_alike && receipt::model_equivalent(result) {
+            if !a.receipts_verify
+                && mdec_alike
+                && same_cd_drive
+                && receipt::model_equivalent(result)
+            {
                 println!(
                     "MODEL EQUIVALENT {}: no GP0(1Fh), {first_model} result stands for {second_model}",
                     job.name

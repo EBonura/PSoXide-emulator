@@ -2462,3 +2462,261 @@ fn a_restored_drive_ticks_once_to_learn_its_idle_bound() {
     assert_eq!(restored.idle_until(), restored.compute_idle_until());
     assert_eq!(restored.idle_until(), cd.idle_until());
 }
+
+// --- Drive options for console failures (the hardware spec's `cd-*` options) ---
+
+fn model(edit: impl FnOnce(&mut CdDriveModel)) -> CdDriveModel {
+    let mut m = CdDriveModel::calibrated();
+    edit(&mut m);
+    m
+}
+
+/// SetMode, SetLoc `lba`, SeekL, each answered; returns the cycle after.
+fn setmode_setloc_seek(cd: &mut CdRom, mode: u8, lba: u32) -> u64 {
+    let mut now = 1_000;
+    cd.push_param(mode);
+    cd.queue_command(0x0e, now);
+    now += 100_000;
+    cd.tick(now);
+    cd.irq_flag = 0;
+    let (m, s, f) = lba_to_msf(lba);
+    cd.push_param(bin_to_bcd(m));
+    cd.push_param(bin_to_bcd(s));
+    cd.push_param(bin_to_bcd(f));
+    cd.queue_command(0x02, now);
+    now += 100_000;
+    cd.tick(now);
+    cd.irq_flag = 0;
+    cd.queue_command(0x15, now);
+    now += FIRST_RESPONSE_WITH_MEDIA_CYCLES + 2;
+    assert!(cd.tick(now));
+    cd.irq_flag = 0;
+    now
+}
+
+fn pause_refused(cd: &CdRom) -> bool {
+    cd.pending
+        .iter()
+        .any(|ev| ev.irq == IrqType::Error && ev.command == 0x09)
+}
+
+#[test]
+fn by_default_a_pause_during_a_plain_seek_is_accepted() {
+    let mut cd = CdRom::new();
+    cd.drive_model = CdDriveModel::calibrated();
+    cd.insert_disc(Some(long_data_disc()));
+    let now = setmode_setloc_seek(&mut cd, 0x80, 1_000);
+    cd.queue_command(0x09, now);
+    assert!(
+        !pause_refused(&cd),
+        "unmeasured on a console: stays accepted"
+    );
+}
+
+#[test]
+fn cd_pause_seek_any_refuses_a_pause_during_a_plain_seek_until_it_lands() {
+    let mut cd = CdRom::new();
+    cd.drive_model = model(|m| m.pause_seek = PauseSeekModel::Any);
+    cd.insert_disc(Some(long_data_disc()));
+    let now = setmode_setloc_seek(&mut cd, 0x80, 1_000);
+    cd.queue_command(0x09, now);
+    assert!(pause_refused(&cd));
+    let landed = cd.plain_seek_until;
+    assert!(landed > now);
+    cd.pending.clear();
+    cd.irq_flag = 0;
+    cd.queue_command(0x09, landed + 1);
+    assert!(!pause_refused(&cd), "accepted once the head is there");
+}
+
+#[test]
+fn cd_pause_refuse_keeps_refusing_after_the_seek_until_its_time_or_a_read() {
+    let mut cd = CdRom::new();
+    cd.drive_model = model(|m| {
+        m.pause_seek = PauseSeekModel::Any;
+        m.pause_refuse_ms = 500;
+    });
+    cd.insert_disc(Some(long_data_disc()));
+    let now = setmode_setloc_seek(&mut cd, 0x80, 1_000);
+    cd.queue_command(0x09, now);
+    assert!(pause_refused(&cd));
+    let until = cd.pause_refused_until;
+    assert_eq!(until, now + 500 * MS);
+    // A later refusal does not push the end out.
+    cd.pending.clear();
+    cd.queue_command(0x09, now + 100 * MS);
+    assert!(pause_refused(&cd));
+    assert_eq!(cd.pause_refused_until, until);
+    cd.pending.clear();
+    cd.queue_command(0x09, until + 1);
+    assert!(!pause_refused(&cd));
+    // A ReadN ends it early (console: the next trial set up with no failure).
+    cd.pause_refused_until = u64::MAX;
+    cd.queue_command(0x06, until + 10 * MS);
+    assert_eq!(cd.pause_refused_until, 0);
+}
+
+#[test]
+fn cd_speed_change_shows_seeking_refuses_pause_and_reads_at_the_old_speed() {
+    let mut cd = CdRom::new();
+    cd.drive_model = CdDriveModel::calibrated();
+    cd.insert_disc(Some(long_data_disc()));
+    // Spinning at 1x after a short read; the option goes on only now, so the
+    // read's own SetMode 0x00 opened no window.
+    let mut now = read_and_deliver(&mut cd, 0x00, 100, 2) + 4_000;
+    cd.drive_model = model(|m| m.speed_change_ms = 300);
+    cd.queue_command(0x09, now);
+    now += 10 * MS;
+    cd.tick(now);
+    cd.irq_flag = 0;
+    cd.pending.clear();
+    cd.push_param(0x80);
+    cd.queue_command(0x0e, now);
+    let start = now;
+    assert_eq!(cd.speed_change_until, start + 300 * MS);
+    assert_ne!(cd.stat_byte() & drive_status_bit::SEEKING, 0);
+    assert_eq!(cd.sector_read_cycles(), CD_READ_TIME, "still 1x");
+    cd.scheduling_cycle = start + 301 * MS;
+    assert_eq!(cd.stat_byte() & drive_status_bit::SEEKING, 0);
+    assert_eq!(cd.sector_read_cycles(), CD_READ_TIME / 2, "2x after");
+    // Pause in the window is refused.
+    cd.pending.clear();
+    cd.queue_command(0x09, start + 100 * MS);
+    assert!(pause_refused(&cd));
+    cd.pending.clear();
+    cd.queue_command(0x09, start + 301 * MS);
+    assert!(!pause_refused(&cd));
+    // Same speed again: no window.
+    cd.push_param(0x80);
+    cd.queue_command(0x0e, start + 400 * MS);
+    assert_eq!(cd.speed_change_until, start + 300 * MS);
+}
+
+#[test]
+fn without_the_option_a_speed_change_takes_no_time() {
+    let mut cd = CdRom::new();
+    cd.drive_model = CdDriveModel::calibrated();
+    cd.insert_disc(Some(long_data_disc()));
+    let now = read_and_deliver(&mut cd, 0x00, 100, 2) + 4_000;
+    cd.push_param(0x80);
+    cd.queue_command(0x0e, now);
+    assert_eq!(cd.speed_change_until, 0);
+    assert_eq!(cd.stat_byte() & drive_status_bit::SEEKING, 0);
+}
+
+/// Deliver sectors from a read already started until `limit`; returns them.
+fn deliveries_until(cd: &mut CdRom, mut now: u64, limit: u64) -> Vec<u64> {
+    let mut at = Vec::new();
+    while now < limit {
+        now += 1_000;
+        if cd.tick(now) {
+            if cd.irq_flag == IrqType::DataReady as u8 {
+                at.push(now);
+            }
+            cd.irq_flag = 0;
+        }
+    }
+    at
+}
+
+fn start_read_at(cd: &mut CdRom, lba: u32) -> u64 {
+    let now = setmode_setloc_seek(cd, 0x80, lba) + 200 * MS;
+    cd.tick(now);
+    cd.irq_flag = 0;
+    cd.queue_command(0x06, now);
+    now
+}
+
+#[test]
+fn cd_marginal_slows_sectors_in_its_area_only() {
+    let clean = {
+        let mut cd = CdRom::new();
+        cd.drive_model = CdDriveModel::calibrated();
+        cd.insert_disc(Some(long_data_disc()));
+        let now = start_read_at(&mut cd, 500);
+        deliveries_until(&mut cd, now, now + 200 * MS)
+    };
+    let mut cd = CdRom::new();
+    cd.drive_model = model(|m| m.marginal = Some(MarginalArea::parse("500-599:20:0").unwrap()));
+    cd.insert_disc(Some(long_data_disc()));
+    let now = start_read_at(&mut cd, 500);
+    let slow = deliveries_until(&mut cd, now, now + 200 * MS);
+    assert!(clean.len() > 20);
+    assert!(
+        slow.len() < clean.len() / 2,
+        "{} vs {}",
+        slow.len(),
+        clean.len()
+    );
+    let gap = slow[2] - slow[1];
+    // The test ticks every 1,000 cycles.
+    assert!(gap.abs_diff(CD_READ_TIME / 2 + 20 * MS) <= 1_000, "{gap}");
+}
+
+#[test]
+fn cd_marginal_failing_sector_is_silence_and_a_new_read_rolls_again() {
+    let mut cd = CdRom::new();
+    cd.drive_model = model(|m| m.marginal = Some(MarginalArea::parse("500-599:0:1").unwrap()));
+    cd.insert_disc(Some(long_data_disc()));
+    let now = start_read_at(&mut cd, 500);
+    let got = deliveries_until(&mut cd, now, now + 2_000 * MS);
+    assert!(got.is_empty(), "nothing delivered");
+    assert_eq!(cd.irq_type_counts[IrqType::Error as usize], 0, "no INT5");
+    assert!(cd.reading, "the read stays on");
+    assert_ne!(cd.stat_byte() & drive_status_bit::READING, 0);
+    // Outside the area the read works.
+    let mut cd = CdRom::new();
+    cd.drive_model = model(|m| m.marginal = Some(MarginalArea::parse("500-599:0:1").unwrap()));
+    cd.insert_disc(Some(long_data_disc()));
+    let now = start_read_at(&mut cd, 400);
+    let got = deliveries_until(&mut cd, now, now + 300 * MS);
+    assert!(
+        !got.is_empty() && got.len() < 120,
+        "stops at the area: {}",
+        got.len()
+    );
+    // A half-failing area: a retry of the same sector rolls again.
+    let area = MarginalArea::parse("500-599:0:0.5:3").unwrap();
+    assert!((0..64).any(|attempt| area.fails(500, attempt)));
+    assert!((0..64).any(|attempt| !area.fails(500, attempt)));
+}
+
+#[test]
+fn drive_option_state_stays_out_of_save_states() {
+    let mut cd = CdRom::new();
+    let plain = postcard::to_allocvec(&cd).expect("serialise");
+    cd.plain_seek_until = 11;
+    cd.pause_refused_until = 22;
+    cd.speed_change_until = 33;
+    cd.speed_change_from = 0x80;
+    cd.read_commands = 44;
+    let with = postcard::to_allocvec(&cd).expect("serialise");
+    assert_eq!(plain, with, "no save-state format change");
+}
+
+#[test]
+fn cd_marginal_seekl_to_an_unreadable_header_never_lands_and_refuses_pause() {
+    let mut cd = CdRom::new();
+    cd.drive_model = model(|m| m.marginal = Some(MarginalArea::parse("900-999:0:1").unwrap()));
+    cd.insert_disc(Some(long_data_disc()));
+    let now = setmode_setloc_seek(&mut cd, 0x80, 950);
+    assert!(cd.seek_stuck);
+    assert!(
+        !cd.pending.iter().any(|ev| ev.irq == IrqType::Complete),
+        "no INT2 for the seek"
+    );
+    cd.scheduling_cycle = now + 5_000 * MS;
+    assert_ne!(cd.stat_byte() & drive_status_bit::SEEKING, 0);
+    cd.queue_command(0x09, now + 5_000 * MS);
+    assert!(pause_refused(&cd));
+    // A seek elsewhere lands.
+    cd.pending.clear();
+    cd.irq_flag = 0;
+    let (m, s, f) = lba_to_msf(100);
+    cd.push_param(bin_to_bcd(m));
+    cd.push_param(bin_to_bcd(s));
+    cd.push_param(bin_to_bcd(f));
+    cd.queue_command(0x02, now + 5_100 * MS);
+    cd.queue_command(0x15, now + 5_200 * MS);
+    assert!(!cd.seek_stuck);
+}

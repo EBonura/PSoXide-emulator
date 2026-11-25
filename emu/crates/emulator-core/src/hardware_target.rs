@@ -14,9 +14,15 @@
 //! `psoxide-gate run`), a spec of the form
 //!
 //! ```text
-//! real[,cd-ack=MODEL][,mdec-req=MODEL]
+//! real[,cd-ack=MODEL][,mdec-req=MODEL][,CD DRIVE OPTIONS]
 //! mister[,gpu-irq=MODEL][,cd-ack=MODEL][,mdec-req=MODEL][,seed=N][,trace=N]
 //! ```
+//!
+//! CD drive options (any target, all off by default, see [`CdDriveModel`]):
+//! `cd-pause-seek=read|any`, `cd-pause-refuse=MS`, `cd-speed-change=MS` and
+//! `cd-marginal=FIRST-LAST:DELAY_MS:FAIL_FRACTION[:SEED]`. They make the drive
+//! harsher than the calibrated default where the console has failed and the
+//! mechanism is unmeasured, so a fix can be checked before a disc is burned.
 //!
 //! `mister` defaults to `gpu-irq=exact`.
 //! `cd-ack=strict` (any target) ignores a CD-ROM interrupt acknowledge that
@@ -101,6 +107,152 @@ pub enum MdecRequestModel {
     Hidden,
 }
 
+/// Which drive activity refuses a Pause with INT5.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PauseSeekModel {
+    /// Only the head travel ahead of a read's first sector (measured: hwtest
+    /// v2.7 run FB89 and both v2.18 runs of 2026-11-14, records 0x35C-0x35E
+    /// and 0x370-0x372, six of six each).
+    Read,
+    /// Also the travel of a plain SeekL/SeekP. Not measured on a console.
+    Any,
+}
+
+/// Sectors of a disc area that read slowly or not at all, as on a weak burn.
+///
+/// A failing sector is silence: no INT1 and no INT5, the drive keeps the read
+/// going and never delivers it. That is what the radius sweep saw on this
+/// console (hwtest v2.8 run F8BB: INT5 zero at every radius, the raw 2x read
+/// timed out at 77:48). The fail roll is seeded by LBA and by the count of
+/// read commands, so a retry rolls again and a run repeats exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarginalArea {
+    /// First LBA of the area.
+    pub first: u32,
+    /// Last LBA of the area, inclusive.
+    pub last: u32,
+    /// Extra time each sector of the area takes to arrive, in milliseconds.
+    pub delay_ms: u32,
+    /// Chance that a sector read is never delivered, in millionths.
+    pub fail_ppm: u32,
+    /// Seed of the fail rolls.
+    pub seed: u64,
+}
+
+impl MarginalArea {
+    /// Parse `FIRST-LAST:DELAY_MS:FAIL_FRACTION[:SEED]` (fraction 0 to 1).
+    ///
+    /// # Errors
+    ///
+    /// Names the part that does not parse.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let bad = |what: &str| format!("cd-marginal `{text}`: {what}");
+        let mut parts = text.split(':');
+        let range = parts.next().ok_or_else(|| bad("expected FIRST-LAST"))?;
+        let (first, last) = range
+            .split_once('-')
+            .ok_or_else(|| bad("expected FIRST-LAST"))?;
+        let first: u32 = first.trim().parse().map_err(|_| bad("bad first LBA"))?;
+        let last: u32 = last.trim().parse().map_err(|_| bad("bad last LBA"))?;
+        if last < first {
+            return Err(bad("last LBA before first"));
+        }
+        let delay_ms: u32 = parts
+            .next()
+            .ok_or_else(|| bad("expected DELAY_MS"))?
+            .trim()
+            .parse()
+            .map_err(|_| bad("bad delay"))?;
+        let fraction: f64 = parts
+            .next()
+            .ok_or_else(|| bad("expected FAIL_FRACTION"))?
+            .trim()
+            .parse()
+            .map_err(|_| bad("bad fail fraction"))?;
+        if !(0.0..=1.0).contains(&fraction) {
+            return Err(bad("fail fraction outside 0 to 1"));
+        }
+        let seed = match parts.next() {
+            Some(seed) => seed.trim().parse().map_err(|_| bad("bad seed"))?,
+            None => 1,
+        };
+        if parts.next().is_some() {
+            return Err(bad("too many fields"));
+        }
+        Ok(Self {
+            first,
+            last,
+            delay_ms,
+            fail_ppm: (fraction * 1_000_000.0).round() as u32,
+            seed,
+        })
+    }
+
+    /// Whether `lba` lies in the area.
+    #[must_use]
+    pub fn contains(&self, lba: u32) -> bool {
+        (self.first..=self.last).contains(&lba)
+    }
+
+    /// Whether the read of `lba` by read command number `attempt` fails.
+    #[must_use]
+    pub fn fails(&self, lba: u32, attempt: u32) -> bool {
+        if self.fail_ppm == 0 || !self.contains(lba) {
+            return false;
+        }
+        let mut x = self.seed ^ (u64::from(lba) << 32) ^ u64::from(attempt);
+        // splitmix64 finaliser.
+        x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        x ^= x >> 31;
+        (x % 1_000_000) < u64::from(self.fail_ppm)
+    }
+}
+
+/// CD drive behaviours beyond the calibrated default. Every field off means
+/// the retail console as measured; each one is an unmeasured or extrapolated
+/// harshness for reproducing a console failure headless.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CdDriveModel {
+    /// Which seeks refuse a Pause (`cd-pause-seek`).
+    pub pause_seek: PauseSeekModel,
+    /// After a refused Pause, every Pause in the next this-many milliseconds is
+    /// refused too (`cd-pause-refuse`). The next ReadN ends it: on the console
+    /// the trial after each refusal set up and paused with no failure (record
+    /// 0x342 setup failures 0). How long it lasts otherwise is not measured.
+    pub pause_refuse_ms: u32,
+    /// A SetMode that changes the speed bit keeps the drive busy this many
+    /// milliseconds (`cd-speed-change`): GetStat shows seeking, Pause is
+    /// refused, and sectors still come at the old speed. Not measured.
+    pub speed_change_ms: u32,
+    /// A weak disc area (`cd-marginal`, or `PSOXIDE_CD_MARGINAL`).
+    pub marginal: Option<MarginalArea>,
+}
+
+impl CdDriveModel {
+    /// The calibrated drive.
+    #[must_use]
+    pub const fn calibrated() -> Self {
+        Self {
+            pause_seek: PauseSeekModel::Read,
+            pause_refuse_ms: 0,
+            speed_change_ms: 0,
+            marginal: None,
+        }
+    }
+
+    /// Whether any option is set.
+    #[must_use]
+    pub fn differs_from_calibrated(&self) -> bool {
+        *self != Self::calibrated()
+    }
+}
+
+/// Environment variable that sets [`CdDriveModel::marginal`] for any target.
+pub const MARGINAL_ENV_VAR: &str = "PSOXIDE_CD_MARGINAL";
+
 /// A named hardware target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -113,6 +265,8 @@ pub struct HardwareTarget {
     pub cd_ack: CdAckModel,
     /// MDEC status request bits model.
     pub mdec_req: MdecRequestModel,
+    /// CD drive options.
+    pub cd_drive: CdDriveModel,
     /// Seed of the model's coin flips.
     pub seed: u64,
     /// Number of model events to print to stderr.
@@ -128,6 +282,7 @@ impl HardwareTarget {
             gpu_irq: GpuIrqModel::Reliable,
             cd_ack: CdAckModel::Any,
             mdec_req: MdecRequestModel::Shown,
+            cd_drive: CdDriveModel::calibrated(),
             seed: 1,
             trace: 0,
         }
@@ -141,6 +296,7 @@ impl HardwareTarget {
             gpu_irq: GpuIrqModel::Exact,
             cd_ack: CdAckModel::Any,
             mdec_req: MdecRequestModel::Shown,
+            cd_drive: CdDriveModel::calibrated(),
             seed: 1,
             trace: 0,
         }
@@ -203,6 +359,30 @@ impl HardwareTarget {
                         }
                     }
                 }
+                "cd-pause-seek" => {
+                    target.cd_drive.pause_seek = match value {
+                        "read" => PauseSeekModel::Read,
+                        "any" => PauseSeekModel::Any,
+                        _ => {
+                            return Err(format!(
+                                "hardware option cd-pause-seek={value}: expected read or any"
+                            ))
+                        }
+                    }
+                }
+                "cd-pause-refuse" => {
+                    target.cd_drive.pause_refuse_ms = value.parse().map_err(|_| {
+                        format!("hardware option cd-pause-refuse={value}: not a number of ms")
+                    })?;
+                }
+                "cd-speed-change" => {
+                    target.cd_drive.speed_change_ms = value.parse().map_err(|_| {
+                        format!("hardware option cd-speed-change={value}: not a number of ms")
+                    })?;
+                }
+                "cd-marginal" => {
+                    target.cd_drive.marginal = Some(MarginalArea::parse(value)?);
+                }
                 "seed" => {
                     target.seed = value
                         .parse()
@@ -238,6 +418,7 @@ impl HardwareTarget {
         self.gpu_irq != GpuIrqModel::Reliable
             || self.cd_ack != CdAckModel::Any
             || self.mdec_req != MdecRequestModel::Shown
+            || self.cd_drive.differs_from_calibrated()
     }
 
     /// Short name for logs.
@@ -299,6 +480,49 @@ mod tests {
         assert!(HardwareTarget::from_spec("real,mdec-req=never").is_err());
     }
 
+    #[test]
+    fn cd_drive_options_parse_and_default_off() {
+        let t = HardwareTarget::from_spec(
+            "real,cd-pause-seek=any,cd-pause-refuse=500,cd-speed-change=300,cd-marginal=335881-341440:20:0.5:7",
+        )
+        .unwrap();
+        assert_eq!(t.cd_drive.pause_seek, PauseSeekModel::Any);
+        assert_eq!(t.cd_drive.pause_refuse_ms, 500);
+        assert_eq!(t.cd_drive.speed_change_ms, 300);
+        assert_eq!(
+            t.cd_drive.marginal,
+            Some(MarginalArea {
+                first: 335_881,
+                last: 341_440,
+                delay_ms: 20,
+                fail_ppm: 500_000,
+                seed: 7
+            })
+        );
+        assert!(t.differs_from_real());
+        assert!(!HardwareTarget::from_spec("real,cd-pause-seek=read")
+            .unwrap()
+            .differs_from_real());
+        assert!(HardwareTarget::from_spec("real,cd-pause-seek=never").is_err());
+        assert!(HardwareTarget::from_spec("real,cd-speed-change=fast").is_err());
+        assert!(HardwareTarget::from_spec("real,cd-marginal=9-1:0:0").is_err());
+        assert!(HardwareTarget::from_spec("real,cd-marginal=1-9:0:2").is_err());
+    }
+
+    #[test]
+    fn marginal_rolls_are_seeded_and_bounded() {
+        let area = MarginalArea::parse("100-199:0:0.25").unwrap();
+        let fails = (100..200).filter(|&lba| area.fails(lba, 0)).count();
+        assert!((10..=45).contains(&fails), "{fails}");
+        assert_eq!(
+            (100..200).map(|l| area.fails(l, 3)).collect::<Vec<_>>(),
+            (100..200).map(|l| area.fails(l, 3)).collect::<Vec<_>>()
+        );
+        assert!(!area.fails(99, 0) && !area.fails(200, 0));
+        let all = MarginalArea::parse("100-199:0:1").unwrap();
+        assert!((100..200).all(|l| all.fails(l, 9)));
+    }
+
     // The gate (`tools/psoxide-gate`, `--second-hardware`) takes the first model's result for the
     // second when the guest issued no GP0(1Fh) command and no CD acknowledge that breaks a
     // conformance rule. That holds only while the models differ in GP0(1Fh) handling and the
@@ -316,6 +540,7 @@ mod tests {
             gpu_irq: real_irq,
             cd_ack: real_cd_ack,
             mdec_req: real_mdec_req,
+            cd_drive: real_cd_drive,
             seed: real_seed,
             trace: real_trace,
         } = HardwareTarget::real();
@@ -324,6 +549,7 @@ mod tests {
             gpu_irq: mister_irq,
             cd_ack: mister_cd_ack,
             mdec_req: mister_mdec_req,
+            cd_drive: mister_cd_drive,
             seed: mister_seed,
             trace: mister_trace,
         } = HardwareTarget::mister();
@@ -336,6 +562,8 @@ mod tests {
             (real_mdec_req, mister_mdec_req),
             (MdecRequestModel::Shown, MdecRequestModel::Shown)
         );
+        assert_eq!(real_cd_drive, CdDriveModel::calibrated());
+        assert_eq!(mister_cd_drive, CdDriveModel::calibrated());
         assert_eq!(real_irq, GpuIrqModel::Reliable);
         assert_ne!(mister_irq, GpuIrqModel::Reliable);
         // `implementation` is a label: only `name` reads it.

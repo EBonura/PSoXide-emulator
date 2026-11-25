@@ -37,7 +37,9 @@
 use std::collections::VecDeque;
 
 use crate::conformance::{cd_ack_rule, Tally};
-use crate::hardware_target::{CdAckModel, HardwareTarget};
+use crate::hardware_target::{
+    CdAckModel, CdDriveModel, HardwareTarget, MarginalArea, PauseSeekModel, MARGINAL_ENV_VAR,
+};
 
 use psx_iso::{bcd_to_bin, msf_to_lba, Disc};
 
@@ -251,6 +253,35 @@ pub struct CdRom {
     /// the environment, never saved.
     #[serde(skip, default = "ack_model_from_env")]
     ack_model: CdAckModel,
+    /// Drive options beyond the calibrated default (`PSOXIDE_HARDWARE`
+    /// `cd-*` options, `PSOXIDE_CD_MARGINAL`); read from the environment,
+    /// never saved.
+    #[serde(skip, default = "drive_model_from_env")]
+    drive_model: CdDriveModel,
+    /// State of the `cd-*` options below. Not saved: the options are a
+    /// diagnostic, and postcard's positional encoding would otherwise need a
+    /// save-state format bump for them. A restore drops a window in flight.
+    ///
+    /// `cd-pause-seek=any`: cycle a SeekL's head travel ends. 0 when none.
+    #[serde(skip)]
+    plain_seek_until: u64,
+    /// `cd-pause-refuse`: cycle until which every Pause is refused. 0 when none.
+    #[serde(skip)]
+    pause_refused_until: u64,
+    /// `cd-speed-change`: cycle the speed change a SetMode started ends, and
+    /// the speed bit (0x80 or 0) the drive still turns at until then.
+    #[serde(skip)]
+    speed_change_until: u64,
+    #[serde(skip)]
+    speed_change_from: u8,
+    /// Read and seek commands seen, the attempt number of the `cd-marginal` rolls.
+    #[serde(skip)]
+    read_commands: u32,
+    /// `cd-marginal`: a SeekL whose target sector cannot be read never lands.
+    /// Inferred, not measured: SeekL finds its target by the sector header
+    /// (PSX-SPX), so an unreadable header leaves the drive seeking.
+    #[serde(skip)]
+    seek_stuck: bool,
     /// Conformance hits of the CD acknowledge rules (`crate::conformance`).
     /// Diagnostic only, excluded from save states.
     #[serde(skip)]
@@ -603,6 +634,13 @@ impl CdRom {
     pub fn new() -> Self {
         Self {
             ack_model: ack_model_from_env(),
+            drive_model: drive_model_from_env(),
+            plain_seek_until: 0,
+            pause_refused_until: 0,
+            speed_change_until: 0,
+            speed_change_from: 0,
+            read_commands: 0,
+            seek_stuck: false,
             conformance: Tally::default(),
             index: 0,
             limit_fast_reads: false,
@@ -1091,6 +1129,7 @@ impl CdRom {
         self.spindown_until = None;
         self.refresh_idle();
         self.pause_reading_until = 0;
+        self.clear_drive_option_state();
         self.head_on_audio = false;
         self.drive_state = if self.disc_present {
             DriveState::Standby
@@ -1677,7 +1716,21 @@ impl CdRom {
         if self.reading || self.scheduling_cycle < self.pause_reading_until {
             s |= drive_status_bit::READING;
         }
+        if self.scheduling_cycle < self.speed_change_until || self.seek_stuck {
+            s |= drive_status_bit::SEEKING;
+        }
         s
+    }
+
+    /// Whether the drive turns at double speed at `cycle`: the mode's speed
+    /// bit, or during a `cd-speed-change` window the speed it is leaving.
+    fn double_speed_at(&self, cycle: u64) -> bool {
+        let bit = if cycle < self.speed_change_until {
+            self.speed_change_from
+        } else {
+            self.mode
+        };
+        bit & 0x80 != 0
     }
 
     fn cmd_getstat(&mut self) {
@@ -1723,6 +1776,16 @@ impl CdRom {
                 self.xa_right.reset();
                 self.xa_resampler.reset();
             }
+            // `cd-speed-change`: the spindle takes time to change speed. Not
+            // measured on a console; off unless the option sets a duration.
+            let ms = u64::from(self.drive_model.speed_change_ms);
+            if ms != 0 && (self.mode ^ m) & 0x80 != 0 && self.motor_on && self.disc_present {
+                let now = self.scheduling_cycle;
+                if now >= self.speed_change_until {
+                    self.speed_change_from = self.mode & 0x80;
+                }
+                self.speed_change_until = now.saturating_add(ms * MS);
+            }
             self.mode = m;
         }
         let stat = self.stat_byte();
@@ -1759,7 +1822,7 @@ impl CdRom {
         if self.limit_fast_data() {
             return self.sector_read_cycles();
         }
-        if self.mode & 0x80 != 0 {
+        if self.double_speed_at(self.scheduling_cycle) {
             CD_READ_TIME * 3 / 2
         } else {
             CD_READ_TIME * 3
@@ -1772,10 +1835,15 @@ impl CdRom {
     /// double-speed value of a full frame fed XA audio at half rate and made
     /// long music streams underrun.
     fn sector_read_cycles(&self) -> u64 {
+        self.sector_read_cycles_at(self.scheduling_cycle)
+    }
+
+    /// [`Self::sector_read_cycles`] for a sector due at `cycle`.
+    fn sector_read_cycles_at(&self, cycle: u64) -> u64 {
         if self.limit_fast_data() {
             return CD_READ_TIME / 16;
         }
-        if self.mode & 0x80 != 0 {
+        if self.double_speed_at(cycle) {
             CD_READ_TIME / 2
         } else {
             CD_READ_TIME
@@ -1816,6 +1884,7 @@ impl CdRom {
         self.lid_bootstrap_pending = false;
         self.reading = false;
         self.pause_reading_until = 0;
+        self.clear_drive_option_state();
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
         self.halt_cdda();
@@ -1853,7 +1922,19 @@ impl CdRom {
         // ahead of it, and the drive was still busy when the cleanup Pause
         // went out). The error code in the second byte was not recorded; 0x80
         // is the one the other refused commands here use.
-        if was_reading && self.location_changed {
+        let now = self.scheduling_cycle;
+        let refused = (was_reading && self.location_changed)
+            || (self.drive_model.pause_seek == PauseSeekModel::Any && now < self.plain_seek_until)
+            || now < self.speed_change_until
+            || now < self.pause_refused_until
+            || self.seek_stuck;
+        if refused {
+            // `cd-pause-refuse`: the refusal outlasts the seek, counted from the
+            // first refused Pause (unmeasured beyond the bound in its docs).
+            let ms = u64::from(self.drive_model.pause_refuse_ms);
+            if ms != 0 && now >= self.pause_refused_until {
+                self.pause_refused_until = now.saturating_add(ms * MS);
+            }
             let stat = (self.stat_byte() & !drive_status_bit::READING) | drive_status_bit::ERROR;
             self.insert_pending_event(PendingEvent {
                 command: self.last_command,
@@ -1942,6 +2023,7 @@ impl CdRom {
         // across the reset boundary.
         self.reading = false;
         self.pause_reading_until = 0;
+        self.clear_drive_option_state();
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
         self.halt_cdda();
@@ -1985,6 +2067,7 @@ impl CdRom {
         self.responses.clear();
         self.reading = false;
         self.pause_reading_until = 0;
+        self.clear_drive_option_state();
         self.cancel_pending_data_ready_events();
         self.seek_done = true;
         self.setloc_pending = false;
@@ -2032,6 +2115,7 @@ impl CdRom {
         // succeeds immediately on the real drive -- BIOS rarely calls
         // SeekL without a disc.
         self.reading = false;
+        self.seek_stuck = false;
         self.pause_reading_until = 0;
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
@@ -2076,6 +2160,17 @@ impl CdRom {
         }
         self.read_lba = target_lba;
         self.setloc_pending = false;
+        if self.drive_model.pause_seek == PauseSeekModel::Any {
+            self.plain_seek_until = self.first_response_deadline().saturating_add(delay);
+        }
+        self.read_commands = self.read_commands.wrapping_add(1);
+        self.seek_stuck = self.marginal_fails(target_lba);
+        if self.seek_stuck {
+            // `cd-marginal`: no completion; the drive keeps looking for the header.
+            self.seek_header_valid_at = None;
+            self.seek_done = true;
+            return;
+        }
         self.schedule_second_response(vec![stat], delay);
         self.seek_done = true;
     }
@@ -2095,6 +2190,10 @@ impl CdRom {
         }
         self.cancel_pending_data_ready_events();
         self.pause_reading_until = 0;
+        self.plain_seek_until = 0;
+        self.pause_refused_until = 0;
+        self.seek_stuck = false;
+        self.read_commands = self.read_commands.wrapping_add(1);
         self.sectors_since_read = 0;
         self.read_began_far = false;
         // Starting a read resets the sector buffers. Anything the previous
@@ -2140,11 +2239,35 @@ impl CdRom {
         // from the command write. Chaining it off the ACK anchors the first
         // DataReady deadline on the actual ACK cycle; anchoring on the write
         // lands the first sector ~0x800 cycles early (gate-pinned).
-        self.chain_followup(
-            IrqType::DataReady,
-            vec![self.stat_byte()],
-            self.initial_sector_read_cycles().saturating_add(travel),
-        );
+        let first_delay = self
+            .initial_sector_read_cycles()
+            .saturating_add(travel)
+            .saturating_add(self.marginal_delay(self.read_lba));
+        self.chain_followup(IrqType::DataReady, vec![self.stat_byte()], first_delay);
+    }
+
+    /// Forget the `cd-*` option windows: a Stop, Init, Reset or disc change
+    /// ends any seek, refusal or speed change in flight.
+    fn clear_drive_option_state(&mut self) {
+        self.plain_seek_until = 0;
+        self.pause_refused_until = 0;
+        self.speed_change_until = 0;
+        self.seek_stuck = false;
+    }
+
+    /// `cd-marginal`: the extra time sector `lba` takes to arrive.
+    fn marginal_delay(&self, lba: u32) -> u64 {
+        match self.drive_model.marginal {
+            Some(area) if area.contains(lba) => u64::from(area.delay_ms) * MS,
+            _ => 0,
+        }
+    }
+
+    /// `cd-marginal`: whether this read never delivers sector `lba`.
+    fn marginal_fails(&self, lba: u32) -> bool {
+        self.drive_model
+            .marginal
+            .is_some_and(|area| area.fails(lba, self.read_commands))
     }
 
     fn schedule_sector_event_at(&mut self, base_cycle: u64, delay: u64) {
@@ -2430,6 +2553,7 @@ impl CdRom {
     /// track number (BCD); when absent, playback continues from
     /// the last SetLoc position.
     fn cmd_play(&mut self, params: &[u8]) {
+        self.seek_stuck = false;
         // Where the head is now, before any of the branches below move it to
         // the requested track. The distance between the two is what the seek
         // costs.
@@ -2694,6 +2818,12 @@ impl CdRom {
                     continue;
                 }
             } else if ev.irq == IrqType::DataReady {
+                if self.marginal_fails(self.read_lba) {
+                    // `cd-marginal`: the drive never gets this sector. No
+                    // interrupt, no error, no next sector: the read stays on
+                    // until software gives up and sends a command.
+                    continue;
+                }
                 should_raise_irq = self.load_next_sector();
                 self.sectors_since_read = self.sectors_since_read.saturating_add(1);
                 // The sector has landed either way. Whether the CPU is told
@@ -2726,13 +2856,14 @@ impl CdRom {
                     // audio it fed starved the SPU about twice a second. A
                     // tick more than a period late has nothing to catch up
                     // to and restarts from `cycles_now`.
-                    let period = self.sector_read_cycles();
+                    let period = self.sector_read_cycles_at(ev.deadline);
                     let base = if ev.deadline.saturating_add(period) > cycles_now {
                         ev.deadline
                     } else {
                         cycles_now
                     };
-                    self.schedule_sector_event_at(base, period);
+                    let late = self.marginal_delay(self.read_lba);
+                    self.schedule_sector_event_at(base, period.saturating_add(late));
                 }
             }
             if !should_raise_irq {
@@ -3058,6 +3189,21 @@ xa_filter=({},{}) sched_cycle={} read_lba={} now={} pending=[{}]",
 /// The CD acknowledge model `PSOXIDE_HARDWARE` names.
 fn ack_model_from_env() -> CdAckModel {
     HardwareTarget::from_env().cd_ack
+}
+
+/// The CD drive options `PSOXIDE_HARDWARE` names, with `PSOXIDE_CD_MARGINAL`
+/// setting the weak area for any target.
+///
+/// # Panics
+///
+/// On a malformed `PSOXIDE_CD_MARGINAL`: a typo must not run a clean disc.
+fn drive_model_from_env() -> CdDriveModel {
+    let mut model = HardwareTarget::from_env().cd_drive;
+    if let Ok(text) = std::env::var(MARGINAL_ENV_VAR) {
+        model.marginal =
+            Some(MarginalArea::parse(&text).unwrap_or_else(|e| panic!("{MARGINAL_ENV_VAR}: {e}")));
+    }
+    model
 }
 
 impl Default for CdRom {
